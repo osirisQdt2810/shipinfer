@@ -1,0 +1,269 @@
+# PR pipeline: tests + lint -> Claude review -> gated auto-merge.
+#
+# Merge gate — a PR auto-merges ONLY when ALL of these hold:
+#   1. tests + lint are green on the PR's head commit,
+#   2. the PR description carries every section of the template,
+#   3. the Claude review job produced an explicit APPROVE verdict for this run
+#      (a missing or garbled verdict counts as BLOCKING — the gate fails closed),
+#   4. the PR carries the `automerge` label at merge time (the intent switch: omit it and
+#      the pipeline is review-only),
+#   5. the head commit at merge time is exactly the one this run reviewed
+#      (--match-head-commit blocks a TOCTOU push mid-run).
+#
+# Fork PRs cannot read the review secret, so the review job fails closed and `needs` blocks
+# the merge.
+#
+# One-time repo setup:
+#   - install the Claude GitHub App,
+#   - add the CLAUDE_CODE_OAUTH_TOKEN actions secret (`claude setup-token`),
+#   - create the `automerge` label.
+#
+# Known limitation (by design): a PR that MODIFIES any .github/workflows file cannot pass
+# the review job — the GitHub App refuses to mint a token when workflow content differs
+# from the default branch. Such PRs always need a manual merge.
+
+name: PR Pipeline
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+    branches: [main]
+
+concurrency:
+  group: pr-pipeline-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so pre-commit can diff against the PR base commit.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install torch (CPU build)
+        # If a change makes CI need a CUDA wheel, that change has broken ADR-001.
+        run: pip install --index-url https://download.pytorch.org/whl/cpu torch
+      - name: Install the package and its dev tooling
+        run: pip install -e ".[dev,cli]"
+      - name: Lint (pre-commit on the PR's changes, pinned hooks)
+        # Changed files only — mirrors the local staged-files behaviour. One lint leg is
+        # enough; it runs on the newest interpreter.
+        if: matrix.python-version == '3.12'
+        run: >-
+          pre-commit run --show-diff-on-failure
+          --from-ref ${{ github.event.pull_request.base.sha }}
+          --to-ref HEAD
+      - name: Run the offline test suite
+        run: bash scripts/run_tests.sh
+
+  pr-body:
+    name: PR description
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      # A template only PRE-FILLS the web UI — `gh pr create --body` bypasses it entirely,
+      # and that is how most of this repo's PRs are opened. So the format is checked here
+      # rather than hoped for. Headings only: what goes UNDER them is a judgement a grep
+      # cannot make, but a missing section is unambiguous.
+      - name: Require the template's sections
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          # Normalise first: the web editor stores CRLF and readily leaves a trailing space
+          # on a heading. Neither changes what the heading says, and a format check that
+          # fails on invisible characters teaches people to ignore it.
+          normalised=$(printf '%s' "$BODY" | tr -d '\r' | sed 's/[[:space:]]*$//')
+          missing=()
+          while IFS= read -r heading; do
+            [ -z "$heading" ] && continue
+            grep -qxF "$heading" <<< "$normalised" || missing+=("$heading")
+          done <<'HEADINGS'
+          ## Context
+          ## Content / Changes
+          ## Test Plan
+          ### Test Details
+          ### Test Output / Feature Demonstration
+          HEADINGS
+          if [ ${#missing[@]} -gt 0 ]; then
+            printf 'PR description is missing required section(s):\n'
+            printf '  %s\n' "${missing[@]}"
+            printf '\nStart from .github/pull_request_template.md and keep every heading.\n'
+            printf 'A section that does not apply gets "N/A — <reason>", not a deletion.\n'
+            printf '\nAfter fixing the description, re-run by toggling the automerge label —\n'
+            printf '`edited` is deliberately not a trigger, so a typo fix does not restart\n'
+            printf 'the test legs and a Claude review.\n'
+            exit 1
+          fi
+          echo "All required sections present."
+
+  review:
+    name: Claude review
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event.pull_request.draft == false
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    env:
+      HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' || secrets.ANTHROPIC_API_KEY != '' }}
+    outputs:
+      verdict: ${{ steps.verdict.outputs.value }}
+    steps:
+      - name: Fail closed when the review credential is missing
+        if: env.HAS_TOKEN != 'true'
+        run: |
+          echo "::error::Neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY is available (unset, or this is a fork PR). Refusing to skip review while auto-merge is possible."
+          exit 1
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Review the PR
+        uses: anthropics/claude-code-action@c3d45e8e941e1b2ad7b278c57482d9c5bf1f35b3 # v1.0.99
+        env:
+          # Explicit gh auth: comments post as github-actions[bot], whose events can never
+          # retrigger workflows — no self-trigger loops.
+          GH_TOKEN: ${{ github.token }}
+        with:
+          # ONE credential, not two. An unset secret renders as an EMPTY STRING, and the SDK
+          # treats a present-but-blank api key as the credential to use rather than falling
+          # back to the OAuth token — failing to resolve auth before making any request.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # OFF because the classifier constructs `new Anthropic({ apiKey })` directly, which
+          # has no OAuth path: with only CLAUDE_CODE_OAUTH_TOKEN set it throws and fails the
+          # whole job. It defaults to true, so it must be switched off explicitly.
+          classify_inline_comments: false
+          prompt: |
+            Review pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+
+            This is ShipInfer: a Triton-shaped multi-GPU inference server. Read
+            .claude/CONVENTIONS.md (Part 2) and .claude/DECISIONS.md in the checkout for the
+            full rubric, and cite ADR numbers when a change contradicts one.
+
+            House rules to enforce:
+
+            - LAYERS, one-way only (ADR-001). `core/`, `scheduling/` and `repository/` must
+              import NO torch, tensorrt, onnxruntime, cv2 or fastapi. `core/` must not import
+              any sibling layer. `runtime/` must not import `server/`. `import shipinfer`
+              must not pull in a backend. Breaking this silently makes the offline test suite
+              require a GPU, which nobody notices for weeks.
+            - REUSE, do not reimplement (ADR-003, the "ponytail principle"). Torch already
+              provides the caching device allocator, the caching pinned-host allocator,
+              streams, events, CUDA graph capture, interpolation and (via torchvision) NMS.
+              A hand-rolled version of any of those is BLOCKING unless the PR explains why
+              the library was insufficient. Custom code is justified only in the scheduling
+              layer and in fused kernels with no library equivalent.
+            - SEAMS AND REGISTRIES. Anything extensible is a package of one-class-per-file
+              modules plus a `Registry`. A new policy/queue/batcher/backend/sink/exporter
+              added as a branch in an `if/elif` rather than a `@REGISTRY.register` decorator
+              is a design defect.
+            - THREADING (ADR-002). One worker thread, one CUDA context, one GPU, bound once
+              at start-up. No cross-device memory access. No `set_device` per request. The
+              `(camera_id, frame_id)` tag must survive every path INCLUDING error paths —
+              losing it silently misattributes results between cameras.
+            - FAILURE PATHS ARE TYPED. Raise from `shipinfer.core.errors`. Returning an
+              empty list/dict/None to mean "something went wrong" is BLOCKING: a dropped
+              frame, a saturated queue and a dead GPU are three different operational events.
+            - BACKPRESSURE (ADR-005). A full queue raises `QueueFullError` carrying depth and
+              capacity. Any eviction must penalise the greediest camera, never the oldest
+              request — evicting the oldest is the exact inherited bug this project fixes.
+            - CUDA GRAPHS (ADR-008). A captured graph records addresses. Any code path that
+              frees or reallocates an I/O buffer used by a captured graph is BLOCKING.
+            - PERFORMANCE. Flag per-request allocation on the dispatch path, an
+              O(cameras)/O(instances) scan where O(1) was available, a per-image Python loop
+              around a device call, and a host round trip that could have stayed on device.
+            - NATIVE CODE. Must use the `gpu*` aliases from `platform.hpp` (a raw `cudaMalloc`
+              breaks the ROCm build), release the GIL around launches, check the async error
+              slot after a launch, keep scratch on the object rather than per call, and expose
+              a `_into` device-pointer entry point.
+            - TESTS. New behaviour needs tests; changed behaviour needs updated tests. A test
+              that could run in the OFFLINE tier must not be marked `gpu`. A fused kernel
+              without a parity test against the readable implementation is not done.
+            - EVIDENCE. A performance claim without a measurement in the PR body is not a
+              claim. For changes under `runtime/`, `backends/` or `native/`, the body should
+              contain real `pytest -m gpu` output and a `shipinfer bench` table; flag its
+              absence.
+            - SECRETS. No token, key or credential anywhere, including tests.
+
+            Inspect the change with `gh pr diff` and `gh pr view`, and read the surrounding
+            code in the checkout for context. Judge correctness (state a concrete failing
+            scenario for every defect you claim), architectural fit, test coverage, and the
+            house rules above.
+
+            Post your findings as a single `gh pr comment`: for a clean PR, a short summary
+            of what you checked; for a defective PR, each blocking issue with file:line, the
+            concrete failure scenario, and a suggested fix.
+
+            MANDATORY: the comment's LAST line must be exactly one of
+              VERDICT: APPROVE
+              VERDICT: BLOCKING
+            (the merge gate machine-reads it). Additionally write the same word to the
+            verdict file: `echo APPROVE > "$RUNNER_TEMP/verdict"` or
+            `echo BLOCKING > "$RUNNER_TEMP/verdict"`.
+            If neither the marker nor the file exists, the pipeline treats it as BLOCKING.
+          # Opus 5 explicitly: the reviewer is the only thing standing between a bad diff and
+          # an automatic merge, so it does not get the action's weaker default tier.
+          claude_args: '--model claude-opus-5 --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(echo:*)"'
+      - name: Publish verdict
+        id: verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          v=$(cat "$RUNNER_TEMP/verdict" 2>/dev/null || true)
+          if [ -z "$v" ]; then
+            echo "No verdict file — falling back to the VERDICT marker in claude[bot]'s comments."
+            v=$(gh api "repos/$REPO/issues/$PR/comments" \
+                  --jq '[.[] | select(.user.login == "claude[bot]" or .user.login == "claude") | .body] | join("\n")' \
+                | grep -oE 'VERDICT: (APPROVE|BLOCKING)' | tail -1 | awk '{print $2}' || true)
+          fi
+          if [ "$v" != "APPROVE" ]; then v=BLOCKING; fi
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+          echo "Review verdict: $v"
+
+  merge:
+    name: Auto-merge
+    needs: [test, pr-body, review]
+    if: needs.review.outputs.verdict == 'APPROVE' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Merge when the automerge label is present
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          # Pin the merge to the exact commit this run tested and reviewed.
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Re-read labels NOW — the event payload is stale by the time review finishes.
+          labels=$(gh pr view "$PR" --repo "$REPO" --json labels --jq '.labels[].name')
+          if printf '%s\n' "$labels" | grep -qx automerge; then
+            gh pr merge "$PR" --repo "$REPO" --squash --match-head-commit "$HEAD_SHA"
+            echo "PR #$PR merged at $HEAD_SHA."
+          else
+            echo "No automerge label — review is APPROVE but merging is left to a human."
+          fi

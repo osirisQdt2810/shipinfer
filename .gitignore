@@ -1,0 +1,60 @@
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# --- Native build ---------------------------------------------------------
+native/build/
+*.so
+*.o
+compile_commands.json
+.cache/
+
+# --- Model artefacts ------------------------------------------------------
+# Engines are host-specific (GPU arch + TensorRT version) and weights are large:
+# both live in the model repository on disk / object storage, never in git.
+*.engine
+*.plan
+*.onnx
+*.pth
+*.pt
+*.trt
+
+# --- Local config & secrets ----------------------------------------------
+.env
+.env.*
+config/*.local.yaml
+config/secrets.yaml
+
+# --- Run artefacts --------------------------------------------------------
+.artifacts/
+logs/
+*.log
+profile_*.nsys-rep
+*.qdrep
+*.sqlite
+
+# --- Vendored reference checkouts ----------------------------------------
+# `references/` holds read-only clones of the upstream ShipControlPrj services. They are
+# fetched by scripts/sync_references.sh, not tracked here (each has its own git history).
+references/
+
+# --- Editors --------------------------------------------------------------
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+.DS_Store
+.claude/settings.local.json

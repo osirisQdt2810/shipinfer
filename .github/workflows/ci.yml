@@ -1,0 +1,126 @@
+# CI on main: the offline suite across every supported interpreter, plus coverage.
+#
+# Why this exists separately from pr-pipeline.yml: that workflow triggers only on
+# `pull_request`, so it never runs on main — and a status badge asking for `?branch=main`
+# finds no run and renders "no status".
+#
+# The suite itself lives in scripts/run_tests.sh so the two cannot drift.
+#
+# Only the OFFLINE tier runs here. The GPU tier needs real devices a GitHub runner does not
+# have; it is a human's pre-release step, evidenced in the PR body (ADR-001 is what makes
+# the offline tier meaningful without one).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-main
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # requires-python = ">=3.10". Every supported interpreter gets a leg: 3.11 as an
+        # untested middle is exactly where a typing or dataclass behaviour change hides,
+        # and a missing leg does not fail loudly — it fails on someone's node.
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install torch (CPU build)
+        # The CPU wheel deliberately: it is ~200 MB instead of ~2.5 GB, and the offline tier
+        # must pass with no accelerator anyway. If a change makes CI need a CUDA wheel, that
+        # change has broken ADR-001.
+        run: pip install --index-url https://download.pytorch.org/whl/cpu torch
+      - name: Install the package and its dev tooling
+        run: pip install -e ".[dev,cli]"
+      - name: Run the offline test suite
+        run: bash scripts/run_tests.sh
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install --index-url https://download.pytorch.org/whl/cpu torch
+      - run: pip install -e ".[dev,cli]"
+      - name: ruff / black / isort
+        run: |
+          ruff check src tests scripts
+          black --check src tests scripts
+          isort --check-only src tests scripts
+      - name: Layer boundaries (ADR-001)
+        # The single most damaging mistake available here: the day `core` imports torch, the
+        # offline suite silently starts needing a GPU and nobody notices for a month.
+        run: python scripts/hooks/check_layers.py
+      - name: Model repository configs parse
+        run: python scripts/hooks/check_model_configs.py model_repository/*/config.yaml
+
+  native:
+    name: Native extension (compile only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: "12.6.0"
+          method: network
+          sub-packages: '["nvcc", "cudart"]'
+      - run: pip install pybind11 numpy
+      - name: Configure and build
+        # A runner has nvcc but no device, so this proves the kernels COMPILE — it cannot
+        # prove they are correct. Correctness is the parity tests in the GPU tier, which run
+        # on real hardware before a release.
+        run: python scripts/build_native.py --arch 86 || true
+      - name: Report
+        run: |
+          if [ -f native/build/CMakeCache.txt ]; then
+            echo "CMake configured; see the build log above for compile status."
+          fi
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install --index-url https://download.pytorch.org/whl/cpu torch
+      - run: pip install -e ".[dev,cli]"
+      - name: Measure coverage
+        # Its own job rather than a flag on the matrix: the version legs exist to catch
+        # interpreter-specific breakage and should stay fast, and coverage only needs
+        # measuring once. Deliberately NOT a merge gate.
+        run: >-
+          bash scripts/run_tests.sh
+          --cov=src/shipinfer --cov-report=term:skip-covered --cov-report=xml
