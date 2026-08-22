@@ -10,4 +10,5 @@ machine the project is developed on.
 - [git-remotes-ssh.md](git-remotes-ssh.md) — all git remotes use SSH, never HTTPS
 - [pr-workflow-automerge.md](pr-workflow-automerge.md) — every PR follows the template and carries `automerge`
 - [design-references.md](design-references.md) — Triton and vLLM are the design references
+- [workspace-rename.md](workspace-rename.md) — shipproj was renamed to shipinfer; the old path is a symlink
 - [reference-repos.md](reference-repos.md) — what each checkout under `references/` is
