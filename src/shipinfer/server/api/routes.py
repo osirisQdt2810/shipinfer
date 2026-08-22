@@ -1,0 +1,150 @@
+"""KServe v2 routes."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from shipinfer.core.errors import (
+    ModelNotFoundError,
+    QueueFullError,
+    ServerStateError,
+    ShipInferError,
+    ValidationError,
+)
+from shipinfer.core.logging import get_logger
+from shipinfer.core.request import InferenceRequest, RequestContext
+from shipinfer.server.api.schemas import (
+    InferenceRequestBody,
+    InferenceResponseBody,
+    ModelMetadata,
+    ServerMetadata,
+    TensorMetadata,
+    tensor_from_wire,
+    tensor_to_wire,
+)
+from shipinfer.server.engine import InferenceServer
+from shipinfer.server.health import check_health
+
+__all__ = ["build_router"]
+
+_LOG = get_logger("server.api")
+
+
+def build_router(server: InferenceServer) -> Any:
+    """Build the router for one server instance.
+
+    A factory rather than a module-level ``APIRouter`` with a global: the server is an
+    argument, so two of them can be mounted in one process and a test can spin one up
+    without touching module state.
+    """
+    from fastapi import APIRouter, HTTPException, Response
+
+    router = APIRouter()
+
+    def _fail(exc: ShipInferError) -> HTTPException:
+        """Map a domain error onto the status code that tells the client what to do.
+
+        The distinction matters operationally: 503 on a saturated pool is retryable and a
+        load balancer will back off; 400 on a malformed tensor is not, and retrying it
+        forever is how a client turns its own bug into an outage.
+        """
+        if isinstance(exc, ModelNotFoundError):
+            return HTTPException(404, str(exc))
+        if isinstance(exc, ValidationError):
+            return HTTPException(400, str(exc))
+        if isinstance(exc, (QueueFullError, ServerStateError)):
+            return HTTPException(503, str(exc))
+        return HTTPException(500, str(exc))
+
+    # -- health -------------------------------------------------------------------------
+
+    @router.get("/v2/health/live")
+    def live() -> Response:
+        return Response(status_code=200 if check_health(server).live else 503)
+
+    @router.get("/v2/health/ready")
+    def ready() -> Response:
+        return Response(status_code=200 if check_health(server).ready else 503)
+
+    @router.get("/v2/health")
+    def health() -> dict[str, object]:
+        return check_health(server).as_dict()
+
+    # -- metadata ------------------------------------------------------------------------
+
+    @router.get("/v2", response_model=ServerMetadata)
+    def server_metadata() -> ServerMetadata:
+        from shipinfer import __version__
+
+        return ServerMetadata(
+            version=__version__,
+            extensions=["health", "statistics", "model_repository", "metrics"],
+        )
+
+    @router.get("/v2/models/{name}", response_model=ModelMetadata)
+    def model_metadata(name: str) -> ModelMetadata:
+        try:
+            entry = server.repository.entry(name)
+        except ShipInferError as exc:
+            raise _fail(exc) from exc
+        return ModelMetadata(
+            name=entry.name,
+            versions=[str(v) for v in entry.versions],
+            platform=entry.config.platform,
+            inputs=[
+                TensorMetadata(name=s.name, datatype=s.dtype, shape=list(s.shape))
+                for s in entry.config.input_specs
+            ],
+            outputs=[
+                TensorMetadata(name=s.name, datatype=s.dtype, shape=list(s.shape))
+                for s in entry.config.output_specs
+            ],
+        )
+
+    # -- inference -----------------------------------------------------------------------
+
+    @router.post("/v2/models/{name}/infer", response_model=InferenceResponseBody)
+    def infer(name: str, body: InferenceRequestBody) -> InferenceResponseBody:
+        try:
+            inputs = {spec.name: tensor_from_wire(spec) for spec in body.inputs}
+            request = InferenceRequest(
+                model_name=name,
+                inputs=inputs,
+                parameters=body.parameters,
+                context=RequestContext(trace_id=body.id or ""),
+            )
+            response = server.infer(request).result()
+        except ShipInferError as exc:
+            raise _fail(exc) from exc
+        except Exception as exc:  # a backend failure surfaced through the future
+            _LOG.exception("inference failed for %s", name)
+            raise HTTPException(500, str(exc)) from exc
+
+        return InferenceResponseBody(
+            id=body.id,
+            model_name=response.model_name,
+            model_version=str(response.model_version),
+            outputs=[tensor_to_wire(k, v) for k, v in response.outputs.items()],
+            parameters={
+                "executed_on": str(response.executed_on),
+                "queue_us": round(response.timings.queue_us, 1),
+                "compute_us": round(response.timings.compute_us, 1),
+            },
+        )
+
+    # -- statistics ----------------------------------------------------------------------
+
+    @router.get("/v2/statistics")
+    def statistics() -> dict[str, object]:
+        return server.stats()
+
+    @router.get(server.settings.http.metrics_path)
+    def metrics() -> Response:
+        from shipinfer.core.metrics import EXPORTERS
+
+        exporter = EXPORTERS.create(server.settings.observability.metrics_exporter)
+        return Response(
+            exporter.render(server.metrics.registry), media_type=exporter.content_type
+        )
+
+    return router

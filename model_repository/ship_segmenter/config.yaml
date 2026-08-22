@@ -1,0 +1,37 @@
+# Stage 2, conditional: segment only the crops the detector called `ship`.
+#
+# The heaviest model per call, and the reason it is affordable is that it is *conditional*.
+# Running it on every frame would cost more than the rest of the DAG combined; running it
+# on ship crops only makes it a minority of the load.
+name: ship_segmenter
+platform: mock
+max_batch_size: 8
+
+inputs:
+  - name: crops
+    data_type: FP32
+    dims: [3, 512, 512]
+
+outputs:
+  - name: masks
+    data_type: FP32
+    dims: [1, 512, 512]
+
+instance_groups:
+  # One per GPU, not two: a heavy model gains little from a second concurrent context and
+  # doubles its working set, which competes with the detector for the same memory.
+  - kind: KIND_AUTO
+    count: 1
+    streams: 2
+
+dynamic_batching:
+  enabled: true
+  # A longer window than the detector's: ship crops arrive in bursts of a few per frame, so
+  # waiting 10 ms is what turns four batches of 2 into one batch of 8.
+  max_queue_delay_us: 10000
+  preferred_batch_sizes: [2, 4, 8]
+
+parameters:
+  engine_file: model.plan
+  latency_ms: 8.0
+  per_item_latency_ms: 1.2

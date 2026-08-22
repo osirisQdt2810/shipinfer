@@ -1,0 +1,208 @@
+# ShipInfer — a customizable, Triton-shaped multi-GPU inference server for the ship /
+# person perception pipeline (detect -> segment -> embed -> recognize -> track).
+#
+# It is a LIBRARY + a SERVER, not a desktop app and not a notebook. Install for
+# development with:  pip install -e ".[dev]"
+#
+# Hard rules encoded below:
+#   * the pure core (`shipinfer.core`, `shipinfer.scheduling`, `shipinfer.repository`)
+#     imports NOTHING heavier than numpy/pydantic, so the offline suite runs on a laptop
+#     with no GPU, no TensorRT and no network;
+#   * every GPU/runtime dependency is an OPTIONAL extra behind a backend seam;
+#   * a plain `pytest` must never need a GPU (`-m "not gpu"`).
+
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shipinfer"
+version = "0.1.0"
+description = "Triton-shaped, hackable multi-GPU inference server for ship/person perception"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "phucnp", email = "phuc.nguyen@moreh.com.vn" }]
+keywords = [
+    "inference-server", "triton", "tensorrt", "cuda", "multi-gpu",
+    "dynamic-batching", "object-detection", "reid", "multi-object-tracking",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# The base install is deliberately tiny: the scheduler, the model repository and the
+# request/response types are pure Python. Everything that touches a GPU is an extra.
+dependencies = [
+    # torch is a HARD dependency, not an extra. It is the runtime substrate: the caching
+    # device allocator, the caching pinned-host allocator, streams, events and CUDA graph
+    # capture all come from it, and on ROCm the same API covers HIP. Re-implementing any of
+    # that against raw driver bindings would be slower and platform-specific (ADR-003).
+    # The CPU wheel is enough to install, import and run the whole offline test suite.
+    "torch>=2.2",
+    "numpy>=1.24,<3",           # the tensor interchange format across every seam
+    "pydantic>=2.7,<3",         # model config + settings validation
+    "pydantic-settings>=2.2,<3",# env/file layering for ServerSettings
+    "PyYAML>=6.0",              # model repository config files (config.yaml)
+    "typing-extensions>=4.9",   # Self / override / assert_never on Python 3.10
+]
+
+[project.optional-dependencies]
+# --- runtime backends (pick what the deployment actually needs) -------------------
+cuda = ["cuda-python>=12.0"]                       # device enumeration, streams, pinned mem
+tensorrt = ["tensorrt>=8.6", "cuda-python>=12.0"]  # the production backend
+vision = ["torchvision>=0.17"]                     # tuned NMS / roi ops
+onnx = ["onnxruntime-gpu>=1.17"]                   # portable fallback backend
+
+# --- edges of the system ----------------------------------------------------------
+server = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]   # KServe v2 HTTP facade
+video = ["opencv-python-headless>=4.9", "av>=12.0"]      # RTSP/file ingest + decode
+kafka = ["confluent-kafka>=2.3"]                         # result publishing (Plane 3 feed)
+cli = ["typer>=0.12", "rich>=13.7"]                      # `shipinfer ...`
+
+# Everything a developer needs, and nothing that needs a GPU to install.
+dev = [
+    "pytest>=8.2",
+    "pytest-cov>=5.0",
+    "pytest-asyncio>=0.23",
+    "pytest-timeout>=2.3",       # a deadlocked scheduler test must fail, not hang CI
+    "hypothesis>=6.100",         # property tests for the batcher/queue invariants
+    "black>=24.4",
+    "ruff>=0.4",
+    "isort>=5.13",
+    "mypy>=1.10",
+    "types-PyYAML>=6.0",
+    "pre-commit>=3.7",
+    "typer>=0.12",
+    "rich>=13.7",
+    "httpx>=0.27",               # TestClient transport for the HTTP facade
+]
+
+[project.scripts]
+shipinfer = "shipinfer.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/osirisQdt2810/shipproj"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+shipinfer = ["py.typed", "resources/**/*"]
+
+# ---------------------------------------------------------------------------
+# Formatting / linting / typing
+# ---------------------------------------------------------------------------
+[tool.black]
+line-length = 96
+target-version = ["py310"]
+extend-exclude = '''
+/(
+    \.venv
+  | build
+  | dist
+  | references
+  | 3rdparty
+  | native/build
+)/
+'''
+
+[tool.ruff]
+line-length = 96
+target-version = "py310"
+extend-exclude = [".venv", "build", "dist", "references", "3rdparty", "native/build"]
+
+[tool.ruff.lint]
+# Import sorting (I) is delegated to standalone isort, not ruff, so pre-commit has one
+# owner per concern. PERF/C4 matter here: this is a hot path, a list comprehension in the
+# dispatch loop is not a style preference.
+select = [
+    "E", "F", "W",      # pycodestyle + pyflakes
+    "N",                # pep8-naming
+    "UP",               # pyupgrade
+    "B",                # bugbear
+    "SIM",              # simplify
+    "RUF",
+    "TID",              # banned imports (the layering rule)
+    "C4",               # comprehensions
+    "PERF",             # obvious inefficiencies in loops
+    "PTH",              # pathlib over os.path
+    "DTZ",              # timezone-aware datetimes only
+    "RET", "ARG", "ANN",
+]
+ignore = [
+    "E501",    # line length is black's job
+    "ANN401",  # `Any` is legitimate at the backend seam (opaque engine handles)
+    "UP007",   # tolerate Optional[X] beside X | None
+    "UP045",
+    "B008",    # typer/fastapi dependency defaults are calls by design
+    "RET504",  # a named result before `return` is often the clearer read
+    "PERF203", # try/except in a loop is how a worker survives one bad request
+    # An implementation of an ABC must accept the whole signature whether or not it uses
+    # every parameter — a null provider that ignores `nbytes` is correct, not sloppy.
+    "ARG002",
+    # An empty method on an ABC is an intentional optional hook (`close`, `_do_finalize`).
+    # Marking it abstract would force every subclass to write `pass`.
+    "B027",
+]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# The layering rule, enforced where it is cheapest to enforce. `shipinfer.core` and
+# `shipinfer.scheduling` must stay importable with numpy alone (ADR-001).
+"pycuda".msg = "use shipinfer.runtime.cuda — one CUDA facade, not three (ADR-003)"
+"tensorflow".msg = "not a dependency of this project"
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]                       # re-exports and registry side-effects
+"tests/**" = ["ANN", "ARG", "N802", "N803", "N806", "RUF012", "DTZ", "PERF"]
+"benchmarks/**" = ["ANN", "T201", "PERF"]
+"scripts/**" = ["ANN", "T201"]
+
+[tool.isort]
+profile = "black"
+line_length = 96
+src_paths = ["src", "tests", "scripts", "benchmarks"]
+skip_glob = [".venv/*", "build/*", "dist/*", "references/*", "3rdparty/*"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+# tensorrt / cuda-python / torch are optional extras that are simply absent in CI.
+ignore_missing_imports = true
+exclude = '(^|/)(\.venv|build|dist|references|3rdparty|native)/'
+# Do NOT set `files = [...]` — run mypy on changed paths (touch-it-fix-it).
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+strict = false
+disallow_untyped_defs = false
+
+# ---------------------------------------------------------------------------
+# Tests — two tiers. The default run needs no GPU; `gpu` is opt-in.
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# `-m "not gpu"`: a plain `pytest` must pass on a machine with zero NVIDIA devices, so the
+# scheduler's invariants stay verifiable anywhere. `pytest -m gpu` opts into real hardware.
+addopts = "-ra --strict-markers --strict-config -m 'not gpu'"
+asyncio_mode = "auto"
+timeout = 120
+markers = [
+    "gpu: needs a real NVIDIA device (and often TensorRT). Excluded from the default run; run with `pytest -m gpu`.",
+    "multigpu: needs at least 2 visible NVIDIA devices — the load-balancing evidence.",
+    "slow: takes more than ~2s.",
+    "bench: a throughput/latency measurement, not a pass/fail assertion.",
+]
+filterwarnings = ["error::DeprecationWarning:shipinfer.*"]
+
+[tool.coverage.run]
+branch = true
+source = ["src/shipinfer"]
+omit = ["*/backends/tensorrt.py", "*/backends/torch_backend.py", "*/backends/onnx.py"]

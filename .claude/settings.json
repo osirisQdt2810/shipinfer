@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Edit",
+      "Write",
+      "Read",
+      "Bash(git:*)",
+      "Bash(gh:*)",
+      "Bash(pytest:*)",
+      "Bash(python:*)",
+      "Bash(python3:*)",
+      "Bash(pip:*)",
+      "Bash(cmake:*)",
+      "Bash(nvidia-smi:*)",
+      "Bash(shipinfer:*)",
+      "Bash(pre-commit:*)",
+      "Bash(ruff:*)",
+      "Bash(black:*)",
+      "Bash(isort:*)",
+      "Bash(mypy:*)",
+      "Bash(clang-format:*)"
+    ],
+    "deny": [
+      "Read(./config/secrets.yaml)",
+      "Read(./.env)"
+    ]
+  }
+}
