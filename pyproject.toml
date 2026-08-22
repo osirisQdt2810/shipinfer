@@ -89,7 +89,7 @@ dev = [
 shipinfer = "shipinfer.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/osirisQdt2810/shipproj"
+Homepage = "https://github.com/osirisQdt2810/shipinfer"
 
 [tool.setuptools.packages.find]
 where = ["src"]
