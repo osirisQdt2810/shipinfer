@@ -37,7 +37,7 @@ class MemoryPool:
         self._device_allocators: dict[Device, Allocator] = {}
         self._host: Allocator = ALLOCATORS.create("host")
         self._pinned: Allocator | None = None
-        self._staging = PinnedStagingPool()
+        self._staging_pools: dict[str, PinnedStagingPool] = {}
 
     # -- allocators ---------------------------------------------------------------------
 
@@ -46,10 +46,25 @@ class MemoryPool:
         """Pageable host memory. Never the source of an async copy."""
         return self._host
 
-    @property
-    def staging(self) -> PinnedStagingPool:
-        """Pinned buffers with stable addresses — the CUDA-graph precondition."""
-        return self._staging
+    def staging_for(self, owner: str) -> PinnedStagingPool:
+        """This owner's private pinned staging pool, created on first use.
+
+        Per owner, not shared, and deliberately not exposed as a single ``.staging``
+        property. One worker thread runs per model instance; a shared pool hands two of
+        them the same buffer for the same shape, and the second one's copy overwrites the
+        first's while its DMA is still reading — GPU 0 then infers on GPU 1's frames and
+        returns them under the wrong camera's tag, with no error anywhere.
+
+        Callers pass something stable and unique: an instance name, not a shape.
+        """
+        pool = self._staging_pools.get(owner)
+        if pool is None:
+            with self._lock:
+                pool = self._staging_pools.get(owner)
+                if pool is None:
+                    pool = PinnedStagingPool(owner=owner)
+                    self._staging_pools[owner] = pool
+        return pool
 
     @property
     def pinned(self) -> Allocator:
@@ -132,7 +147,7 @@ class MemoryPool:
     def stats(self) -> dict[str, dict[str, int]]:
         out: dict[str, dict[str, int]] = {
             "host": self._host.stats(),
-            "staging": self._staging.stats(),
+            **{f"staging[{o}]": p.stats() for o, p in self._staging_pools.items()},
         }
         if self._pinned is not None:
             out["pinned"] = self._pinned.stats()
@@ -149,7 +164,9 @@ class MemoryPool:
             allocator.close()
         if pinned is not None and pinned is not self._host:
             pinned.close()
-        self._staging.clear()
+        for pool in self._staging_pools.values():
+            pool.clear()
+        self._staging_pools.clear()
         self._host.close()
 
     def __repr__(self) -> str:

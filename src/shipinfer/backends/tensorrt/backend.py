@@ -107,7 +107,9 @@ class TensorRTBackend(ModelBackend):
         assert self._loaded is not None
         context = self.context
         batch = context.config.effective_max_batch_size
-        self._bindings = BindingSet(device=self.device, staging=context.memory.staging)
+        self._bindings = BindingSet(
+            device=self.device, staging=context.memory.staging_for(context.instance_name)
+        )
         for tensor in self._loaded.io:
             self._bindings.add(
                 tensor.name,

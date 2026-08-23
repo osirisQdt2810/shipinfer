@@ -128,7 +128,9 @@ class BindingSet:
             )
         source = self._torch.from_numpy(np.ascontiguousarray(array))
         if async_copy:
-            source = self._staging.stage(source)
+            # Keyed on the binding name, so a model with two same-shaped inputs does
+            # not stage the second over the first while the first's DMA is in flight.
+            source = self._staging.stage(f"in:{name}", source)
         binding.device_tensor[:rows].copy_(source, non_blocking=async_copy)
 
     def fetch_output(
@@ -142,10 +144,18 @@ class BindingSet:
         """
         binding = self[name]
         rows = min(batch_size, binding.shape[0])
-        host = binding.device_tensor[:rows].to("cpu", non_blocking=async_copy)
         if async_copy:
+            # Into pinned memory, then out to numpy. `.to("cpu", non_blocking=True)` on a
+            # freshly allocated pageable destination is not actually asynchronous — the
+            # driver stages it through a bounce buffer — so the flag reads as an
+            # optimisation while delivering none.
+            staged = self._staging.get(
+                f"out:{name}", binding.shape, binding.device_tensor.dtype
+            )
+            staged[:rows].copy_(binding.device_tensor[:rows], non_blocking=True)
             stream.synchronize()
-        return np.ascontiguousarray(host.numpy())
+            return np.ascontiguousarray(staged[:rows].numpy().copy())
+        return np.ascontiguousarray(binding.device_tensor[:rows].to("cpu").numpy())
 
     # -- lifecycle -----------------------------------------------------------------------
 

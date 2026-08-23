@@ -93,11 +93,12 @@ class TestGpu:
         import torch
 
         pool = MemoryPool(MemorySettings())
-        first = pool.staging.get((4, 8), torch.float32)
-        second = pool.staging.get((4, 8), torch.float32)
+        staging = pool.staging_for("instance-0")
+        first = staging.get("images", (4, 8), torch.float32)
+        second = staging.get("images", (4, 8), torch.float32)
         assert first is second
         assert first.is_pinned()
-        assert pool.staging.stats()["hits"] >= 1
+        assert staging.stats()["hits"] >= 1
         pool.close()
 
     def test_streams_are_distinct_and_synchronise(self) -> None:
