@@ -217,3 +217,28 @@ class TestResolveEngine:
 
         assert not list(tmp_path.glob("*.partial")), "a partial plan survived"
         assert not list(tmp_path.glob("*.building")), "the lock survived the failure"
+
+
+class TestTheBatchIsPartOfTheKey:
+    """A plan built for one `max_batch_size` cannot serve a larger one."""
+
+    def _name(self, onnx: Path, **overrides) -> str:
+        kwargs = {"trt_version": "10.14.1", "capability": "86", "fp16": False}
+        kwargs.update(overrides)
+        return autobuild.cache_name(onnx, **kwargs)
+
+    def test_a_different_batch_is_a_different_plan(self, tmp_path: Path) -> None:
+        """Without this the cached plan kept being loaded after the config changed, and the
+        scheduler assembled batches the engine could not hold."""
+        onnx = onnx_at(tmp_path)
+        assert self._name(onnx, max_batch=8) != self._name(onnx, max_batch=16)
+
+    def test_the_batch_appears_in_the_name(self, tmp_path: Path) -> None:
+        assert ".b8." in self._name(onnx_at(tmp_path), max_batch=8)
+
+    def test_an_unset_batch_leaves_the_name_unchanged(self, tmp_path: Path) -> None:
+        """So plans cached before this existed are still found rather than silently
+        rebuilt on the next start-up."""
+        onnx = onnx_at(tmp_path)
+        assert self._name(onnx) == self._name(onnx, max_batch=0)
+        assert ".b" not in self._name(onnx).replace(onnx.stem, "")

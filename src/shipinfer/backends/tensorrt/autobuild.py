@@ -52,7 +52,9 @@ _BUILD_TIMEOUT_S = 900.0
 _POLL_S = 0.5
 
 
-def cache_name(onnx: Path, *, trt_version: str, capability: str, fp16: bool) -> str:
+def cache_name(
+    onnx: Path, *, trt_version: str, capability: str, fp16: bool, max_batch: int = 0
+) -> str:
     """A plan filename that changes when anything invalidating it changes.
 
     Everything that makes a plan valid or not is in the name: the ONNX's content, the
@@ -66,7 +68,12 @@ def cache_name(onnx: Path, *, trt_version: str, capability: str, fp16: bool) -> 
     """
     digest = hashlib.sha256(onnx.read_bytes()).hexdigest()[:16]
     precision = "fp16" if fp16 else "fp32"
-    return f"{onnx.stem}.{digest}.trt{trt_version}.sm{capability}.{precision}.plan"
+    # The batch is part of what makes a plan valid, and it was not in the name. A model's
+    # `max_batch_size` could change in config while the cached plan — built for the old one —
+    # kept being loaded, so the scheduler assembled batches the engine could not hold.
+    # Omitted entirely when unset, so existing plan names are unchanged.
+    batch = f".b{max_batch}" if max_batch else ""
+    return f"{onnx.stem}.{digest}.trt{trt_version}.sm{capability}.{precision}{batch}.plan"
 
 
 def resolve_engine(
@@ -78,6 +85,7 @@ def resolve_engine(
     fp16: bool = False,
     onnx_file: str | None = None,
     builder: Any = None,
+    max_batch: int = 0,
 ) -> Path:
     """The path to a loadable plan, building it from an ONNX if one is needed.
 
@@ -107,7 +115,9 @@ def resolve_engine(
     onnx = _find_onnx(directory, onnx_file)
     version = str(getattr(trt, "__version__", "unknown"))
     capability = _capability(device_index)
-    target = directory / cache_name(onnx, trt_version=version, capability=capability, fp16=fp16)
+    target = directory / cache_name(
+        onnx, trt_version=version, capability=capability, fp16=fp16, max_batch=max_batch
+    )
     if target.is_file():
         _LOG.info("reusing cached plan %s", target.name)
         return target
