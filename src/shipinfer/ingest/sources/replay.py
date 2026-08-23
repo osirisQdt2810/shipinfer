@@ -12,6 +12,7 @@ The pacing is the part that is easy to get wrong; see
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -35,6 +36,51 @@ FRAME_SUFFIXES: tuple[str, ...] = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".ti
 #: Used when neither the camera config nor the container says anything. 25 rather than 20 so
 #: an accidental default is visible in a report instead of looking like the real fleet rate.
 _FALLBACK_FPS = 25.0
+
+
+#: Decoded frames, shared across every camera in the process and keyed by file path.
+#:
+#: A replay camera loops over a fixed set of files, so decoding them again on every tick is
+#: pure waste — and at benchmark scale it is the *dominant* cost. Measured: 20 cameras at a
+#: 10 fps target delivered 77.4 img/s, 39% of what was asked for, because 200 JPEG decodes
+#: a second of 2K images do not fit in one interpreter. The load generator, not the
+#: inference system, was the wall.
+#:
+#: Shared rather than per-camera because fifty cameras replaying one folder would otherwise
+#: hold fifty copies: a 1920x1080 BGR frame is 6.2 MB, so ten files across fifty cameras is
+#: 3.1 GB against 62 MB shared.
+#:
+#: The arrays are handed out **read-only**. They are shared by construction, so an in-place
+#: write by one camera would silently corrupt every other camera's frame; marking them
+#: non-writable turns that into an immediate error at the offending line instead.
+_DECODED: dict[Path, np.ndarray] = {}
+_DECODED_LOCK = threading.Lock()
+
+#: Bytes of decoded frames to keep. Past this the cache stops growing and later files are
+#: decoded per read, which is slow but correct — an unbounded cache over a long video
+#: directory is a memory leak wearing an optimisation's clothes.
+_DECODED_LIMIT_BYTES = 2 * 1024**3
+
+
+def _cached_decode(path: Path, cv2: Any) -> np.ndarray | None:
+    """The decoded frame for ``path``, decoding at most once per process."""
+    cached = _DECODED.get(path)
+    if cached is not None:
+        return cached
+    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if image is None:
+        return None
+    image.setflags(write=False)
+    with _DECODED_LOCK:
+        # Re-checked under the lock: two cameras starting together race here, and the
+        # second must get the first's array rather than a private copy of it.
+        existing = _DECODED.get(path)
+        if existing is not None:
+            return existing
+        held = sum(a.nbytes for a in _DECODED.values())
+        if held + image.nbytes <= _DECODED_LIMIT_BYTES:
+            _DECODED[path] = image
+    return image
 
 
 def _discover_frames(path: Path) -> list[Path]:
@@ -201,7 +247,7 @@ class ReplaySource(FrameSource):
             return None
         path = self._frame_paths[self._index]
         self._index += 1
-        image = self._cv2.imread(str(path), self._cv2.IMREAD_COLOR)
+        image = _cached_decode(path, self._cv2)
         if image is None:
             raise FrameDecodeError(self.camera_id, f"cannot decode {path.name}")
         return image

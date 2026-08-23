@@ -361,8 +361,15 @@ def check_offer(
         raise RuntimeError(
             f"the load generator delivered {achieved:.1f} img/s against a target of "
             f"{target:.0f} — {achieved / target:.0%} of it. A throughput measured against a "
-            f"load that was never offered is not a measurement. Lower --cameras/--fps to a "
-            f"rate this host can generate, or run more generator processes."
+            f"load that was never offered is not a measurement.\n\n"
+            f"Measured on this host: 20 replay cameras at a 10 fps target deliver ~87 img/s. "
+            f"Caching the decoded frames moved that only from 77 to 87, so the wall is not "
+            f"decoding — it is one interpreter running the camera threads and the pipeline "
+            f"workers together. The architecture document puts ingest in separate *processes* "
+            f"for exactly this reason (new-system-architecture.md section 9, '[Decode "
+            f"procs]'), and this driver runs it in-process.\n\n"
+            f"So: lower --cameras/--fps to a rate this host can generate, or run the "
+            f"generator as several processes. Do not raise the tolerance."
         )
 
 
