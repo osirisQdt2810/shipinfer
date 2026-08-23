@@ -29,6 +29,7 @@ from shipinfer.core.errors import (
     SourceUnavailableError,
 )
 from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.redact import redact_in
 from shipinfer.ingest.base import FrameSource
 from shipinfer.ingest.registry import SOURCES
 from shipinfer.ingest.resolve import resolve_latency_ms, resolve_transport
@@ -260,9 +261,12 @@ class GStreamerSource(FrameSource):
         )
         self._pipeline_description = description
         _LOG.info(
-            "camera %s pipeline (paste into gst-launch-1.0 to debug): %s",
+            # The description embeds `location=<uri>`, so it is redacted before logging
+            # even though that makes it not quite copy-pasteable: a fleet credential in a
+            # log is a worse outcome than retyping a password into a debug command.
+            "camera %s pipeline (paste into gst-launch-1.0, password redacted): %s",
             self.camera_id,
-            description,
+            redact_in(description),
             extra=log_context(camera_id=self.camera_id),
         )
 

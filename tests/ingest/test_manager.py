@@ -251,7 +251,7 @@ class TestCameraDatabase:
                 {
                     "contents": [
                         {
-                            "camIP": "172.21.104.100",
+                            "camIP": "10.0.0.100",
                             "cameraHeight": 2160,
                             "cameraID": "104100",
                             "cameraWidth": 3840,
@@ -259,7 +259,9 @@ class TestCameraDatabase:
                             "configFile": "gstconfig.ini",
                             "sourceType": "RTSP_SOURCE",
                             "streamType": "MAIN_STREAM",
-                            "videoSource": "rtsp://admin:123456a%40@172.21.104.100",
+                            # Shape-faithful, credential invented. The reference `cameradb.json` ships a real
+# fleet password inline; copying it here would have put it in git history.
+                            "videoSource": "rtsp://operator:REDACTED%40@10.0.0.100",
                         },
                         {
                             "cameraID": "clip1",
@@ -276,7 +278,7 @@ class TestCameraDatabase:
         assert [c.camera_id for c in cameras] == ["104100", "clip1"]
 
         rtsp = cameras[0]
-        assert rtsp.uri == "rtsp://admin:123456a%40@172.21.104.100"
+        assert rtsp.uri == "rtsp://operator:REDACTED%40@10.0.0.100"
         assert rtsp.source is None, "which RTSP backend to use is a deployment decision"
         assert (rtsp.width, rtsp.height) == (3840, 2160)
         assert rtsp.hwaccel is True, "GST_NVV4l2 means the hardware decoder"

@@ -34,6 +34,7 @@ from shipinfer.core.errors import (
     SourceUnavailableError,
 )
 from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.redact import redact
 from shipinfer.core.settings.ingest import CameraConfig, IngestSettings
 from shipinfer.ingest.base import FrameSource
 from shipinfer.ingest.camera.health import CameraHealth, CameraState
@@ -216,7 +217,7 @@ class CameraActor:
         _LOG.info(
             "camera %s: ingest actor started (%s)",
             self.camera_id,
-            self.config.uri,
+            redact(self.config.uri),
             extra=log_context(camera_id=self.camera_id),
         )
         try:

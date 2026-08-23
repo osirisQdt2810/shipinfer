@@ -20,7 +20,7 @@ from shipinfer.ingest.sources.gstreamer import (
     select_decoder,
 )
 
-URI = "rtsp://admin:pass@172.21.104.100/stream"
+URI = "rtsp://operator:REDACTED@10.0.0.100/stream"
 APPSINK = f"appsink name={APPSINK_NAME} emit-signals=false sync=false drop=true max-buffers=2"
 
 

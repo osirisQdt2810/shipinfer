@@ -83,6 +83,12 @@ class ShipInferResult:
     elapsed_s: float
     frames_accepted: int
     events_emitted: int
+    #: What ingest actually read and dropped over the run. The offered rate is a *claim*
+    #: until these are checked against it: 50 Python replay threads doing per-frame OpenCV
+    #: decode in one interpreter can fall short of the target, and `timing/pacing.py`
+    #: absorbs lateness rather than catching up, so the shortfall is silent.
+    frames_read: int = 0
+    frames_dropped: int = 0
     #: model -> requests accepted, from ``ServerMetrics.requests_total``. The delta over the
     #: steady window is what the analysis uses as each downstream model's *offered* rate,
     #: since the crop count is data-dependent and cannot be derived from the config.
@@ -202,11 +208,18 @@ def run_shipinfer(
     server.start(timeout_s=startup_timeout_s) if _accepts_timeout(server) else server.start()
     startup_s = time.monotonic() - started_at
 
-    runner = PipelineRunner(
-        server,
-        settings=settings,
-        frames=lambda sink: IngestManager(sink, settings=settings.ingest),
-    )
+    # The manager is captured rather than left anonymous inside the factory: its
+    # `frames_read`/`frames_dropped` are the only measurement of what load was actually
+    # delivered, and the reported throughput is derived from that rather than from the
+    # configured target.
+    created: dict[str, Any] = {}
+
+    def make_manager(sink: Any) -> Any:
+        manager = IngestManager(sink, settings=settings.ingest)
+        created["manager"] = manager
+        return manager
+
+    runner = PipelineRunner(server, settings=settings, frames=make_manager)
     try:
         runner.start()
         handles = {name: server.model(name) for name in GRAPH_MODELS if name in server.models()}
@@ -242,6 +255,8 @@ def run_shipinfer(
                 time.sleep(0.2)
         elapsed = time.monotonic() - window_started
 
+        manager = created.get("manager")
+        ingest_stats = manager.stats() if manager is not None else None
         metrics = server.metrics
         requests = {n: metrics.requests_total.value(model=n) for n in handles}
         rejected = {n: metrics.requests_rejected.value(model=n) for n in handles}
@@ -258,6 +273,8 @@ def run_shipinfer(
             log=log,
             startup_s=startup_s,
             elapsed_s=elapsed,
+            frames_read=getattr(ingest_stats, "frames_read", 0),
+            frames_dropped=getattr(ingest_stats, "frames_dropped", 0),
             frames_accepted=runner.frames_accepted,
             events_emitted=runner.sink.emitted,
             requests_total=requests,
@@ -307,6 +324,48 @@ def _release_cuda() -> None:
         pass
 
 
+def achieved_offer(config: BenchConfig, result: ShipInferResult) -> float:
+    """Images per second the generator actually delivered into the pipeline.
+
+    Read from ingest's own counters rather than from the configuration. `frames_read` counts
+    what the cameras produced and `frames_dropped` what backpressure refused; their sum over
+    the elapsed window is the load the system was really offered, and it is the only figure
+    a throughput may be derived from.
+
+    Falls back to the accepted count when ingest reported nothing, and to the configured
+    target only when there is no measurement at all — a case :func:`check_offer` refuses
+    rather than papers over.
+    """
+    if result.elapsed_s <= 0:
+        return float(config.offered_total)
+    delivered = result.frames_read or (result.frames_accepted + result.frames_dropped)
+    if not delivered:
+        return float(config.offered_total)
+    return delivered / result.elapsed_s
+
+
+def check_offer(
+    config: BenchConfig, result: ShipInferResult, *, tolerance: float = 0.98
+) -> None:
+    """Refuse a run whose generator never delivered the load being reported on.
+
+    Raises:
+        RuntimeError: the achieved offer is below ``tolerance`` of the target. This is not a
+            warning because the number it protects is the headline: a run offered 400 img/s
+            and reported against 1000 prints a sustained rate it never sustained, in the
+            direction that flatters us.
+    """
+    achieved = achieved_offer(config, result)
+    target = float(config.offered_total)
+    if target > 0 and achieved < tolerance * target:
+        raise RuntimeError(
+            f"the load generator delivered {achieved:.1f} img/s against a target of "
+            f"{target:.0f} — {achieved / target:.0%} of it. A throughput measured against a "
+            f"load that was never offered is not a measurement. Lower --cameras/--fps to a "
+            f"rate this host can generate, or run more generator processes."
+        )
+
+
 def offered_rates(config: BenchConfig, result: ShipInferResult) -> dict[str, float | None]:
     """Offered images per second per module, for :func:`analysis.analyse`.
 
@@ -317,7 +376,10 @@ def offered_rates(config: BenchConfig, result: ShipInferResult) -> dict[str, flo
     asserted. A model that never received a request gets ``None``: reporting 0 offered would
     make its sustained throughput look like a perfect 0 - 0.
     """
-    frame_rate = config.offered_total
+    # Measured, not configured. `config.offered_total` is what we *asked* for; a starved
+    # generator makes the queue flat for the wrong reason and the analysis would then read
+    # `offered - 0` and publish the target as though it were a throughput.
+    frame_rate = achieved_offer(config, result)
     rates: dict[str, float | None] = {
         PIPELINE_MODULE: frame_rate,
         "ship_detector": frame_rate,

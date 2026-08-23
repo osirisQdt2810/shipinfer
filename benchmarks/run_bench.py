@@ -194,13 +194,14 @@ def compare(base: SystemThroughput, ours: SystemThroughput, *, target: float) ->
     return "\n".join(lines)
 
 
-def _analyse(system: str, log: Path, cfg: BenchConfig, offered) -> RunAnalysis:
+def _analyse(system: str, log: Path, cfg: BenchConfig, offered, entries) -> RunAnalysis:
     return analysis.analyse(
         analysis.read_log(log, sample_interval_s=cfg.sample_interval_s),
         system=system,
         warmup_s=cfg.warmup_s,
         offered=offered,
         capacity=cfg.buffer_capacity,
+        entry_modules=entries,
     )
 
 
@@ -281,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
             result.log,
             cfg,
             offered=dict.fromkeys(BASELINE_ENTRY_MODULES, cfg.offered_per_module),
+            entries=BASELINE_ENTRY_MODULES,
         )
         runs.append(run)
         throughputs["baseline"] = system_throughput(run)
@@ -288,8 +290,21 @@ def main(argv: list[str] | None = None) -> int:
     if "shipinfer" in systems:
         print("\n=== shipinfer (ingest -> scheduler -> engines -> reassembly) ===", flush=True)
         result = shipinfer.run_shipinfer(cfg, out_dir / "shipinfer")
+        # Refuse before analysing. A run whose generator never delivered the load is not a
+        # slower measurement, it is a different experiment, and reporting it against the
+        # configured target publishes a rate that was never sustained.
+        shipinfer.check_offer(cfg, result)
+        achieved = shipinfer.achieved_offer(cfg, result)
+        print(
+            f"offered: {achieved:.1f} img/s achieved of {cfg.offered_total:g} target "
+            f"({achieved / cfg.offered_total:.0%})"
+        )
         run = _analyse(
-            "shipinfer", result.log, cfg, offered=shipinfer.offered_rates(cfg, result)
+            "shipinfer",
+            result.log,
+            cfg,
+            offered=shipinfer.offered_rates(cfg, result),
+            entries=(shipinfer.PIPELINE_MODULE,),
         )
         runs.append(run)
         throughputs["shipinfer"] = system_throughput(run)

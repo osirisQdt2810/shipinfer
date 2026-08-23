@@ -89,6 +89,7 @@ __all__ = [
     "DRAINING",
     "SATURATED",
     "SUSTAINED",
+    "UNMEASURED",
     "GrowthFit",
     "ModuleResult",
     "RunAnalysis",
@@ -107,6 +108,13 @@ BUFFER_SUFFIX = "_buffer_size"
 SATURATED = "SATURATED"
 SUSTAINED = "SUSTAINED"
 DRAINING = "DRAINING"
+#: Too few samples to bound the growth rate at all. Distinct from SUSTAINED, which is a
+#: *finding* that the buffer is flat; this is the absence of one.
+UNMEASURED = "UNMEASURED"
+
+#: Samples required in the steady window. Ten differences is where the t-interval stops
+#: being wide enough to call anything flat; two samples give one difference and no interval.
+MIN_STEADY_SAMPLES = 11
 
 #: Two-sided 95 % Student-t critical values, by degrees of freedom. Tabulated rather than
 #: pulled from scipy so the analysis has the same answer with and without scipy installed --
@@ -292,7 +300,11 @@ class GrowthFit:
     @property
     def verdict(self) -> str:
         if not math.isfinite(self.half_width):
-            return SUSTAINED
+            # One first difference gives a point estimate and no interval, and an infinite
+            # half-width compares as "not significantly positive" — so a queue growing at
+            # 890/s used to come back SUSTAINED and its number was published as a rate.
+            # An unbounded estimate is the absence of a measurement, not a flat buffer.
+            return UNMEASURED
         if self.low > 0.0:
             return SATURATED
         if self.high < 0.0:
@@ -384,18 +396,26 @@ class ModuleResult:
     last: float
     peak: float
     capacity: int | None = None
+    #: Whether an image *enters the system* at this module. Only entry modules may be summed
+    #: into a system total: the baseline's two queues are disjoint image streams, while
+    #: ShipInfer's detector sees the same frame the pipeline queue already counted and its
+    #: crop-fed models are measured in crops. Set by the caller, which is the only place that
+    #: knows a system's topology — see ``run_bench.system_throughput``.
+    entry: bool = False
 
     @property
     def sustained(self) -> float | None:
         """``offered - growth``, or ``None`` when offered is unknown.
 
-        Clamped at zero: a growth rate larger than the offered rate is arithmetically
-        possible from noise on a short window and physically is not, and a negative
-        throughput in a report is a bug that looks like a result.
+        Clamped to ``[0, offered]``. Both ends are real: a growth rate larger than the
+        offered rate would print a negative throughput, and a *draining* queue would print
+        more than was ever offered — 1150 img/s against a 1000 img/s offer, and a 1.35x
+        speed-up out of a queue that was merely emptying. Spare capacity is reported as
+        :attr:`headroom`, which is what it is.
         """
         if self.offered is None:
             return None
-        return max(0.0, self.offered - self.fit.slope)
+        return min(self.offered, max(0.0, self.offered - self.fit.slope))
 
     @property
     def headroom(self) -> float | None:
@@ -446,6 +466,10 @@ class RunAnalysis:
     def verdict(self) -> str:
         """SATURATED if any module is. One saturated module bounds the whole pipeline."""
         verdicts = {m.fit.verdict for m in self.modules}
+        if UNMEASURED in verdicts:
+            # Fail closed: one module we could not bound means the run does not support a
+            # claim about the system, whatever the others say.
+            return UNMEASURED
         if SATURATED in verdicts:
             return SATURATED
         if verdicts == {DRAINING}:
@@ -461,17 +485,21 @@ class RunAnalysis:
 
     @property
     def total_sustained(self) -> float | None:
-        """Sum of the modules whose offered rate is known.
+        """Sum over the **entry** modules only — where an image enters exactly once.
 
-        A sum, not a mean, and only over modules fed independently: for the baseline that is
-        det + seg and it is the number the two systems are compared on. It is ``None`` when
-        any contributing module's offered rate was unmeasurable, because a partial sum
-        reported as a total is worse than no total.
+        Summing every module with a known offered rate is the trap this whole harness was
+        built to avoid, and this property used to be it: for ShipInfer that summed the
+        pipeline queue *and* the detector, both offered 1000, plus three crop-fed models
+        measured in crops per second. A normal run printed a five-figure TOTAL directly
+        above the comparison block, inviting exactly the division `compare()` refuses.
+
+        ``None`` when no module is marked as an entry, or when a contributing one has no
+        known offered rate: a partial sum reported as a total is worse than no total.
         """
-        known = [m for m in self.modules if m.offered is not None]
-        if not known:
+        entries = [m for m in self.modules if m.entry]
+        if not entries or any(m.offered is None for m in entries):
             return None
-        return sum(m.sustained or 0.0 for m in known)
+        return sum(m.sustained or 0.0 for m in entries)
 
     def as_dict(self) -> dict[str, Any]:
         binding = self.binding_module
@@ -497,6 +525,7 @@ def analyse(
     warmup_s: float = 10.0,
     offered: Mapping[str, float | None] | None = None,
     capacity: int | None = None,
+    entry_modules: Sequence[str] = (),
 ) -> RunAnalysis:
     """Fit every module in one log and decide the run's verdict.
 
@@ -517,11 +546,14 @@ def analyse(
             sample is how a 3-second run gets reported as a throughput measurement.
     """
     offered = offered or {}
+    entries = set(entry_modules)
     keep = [i for i, t in enumerate(log.times) if t >= warmup_s]
-    if len(keep) < 2:
+    if len(keep) < MIN_STEADY_SAMPLES:
         raise ValueError(
-            f"warmup_s={warmup_s} leaves {len(keep)} of {len(log)} sample(s); the run was "
-            f"too short to fit a growth rate. Lengthen the run or lower warmup_s"
+            f"warmup_s={warmup_s} leaves {len(keep)} of {len(log)} sample(s), fewer than "
+            f"the {MIN_STEADY_SAMPLES} needed to bound a growth rate. Two samples give one "
+            f"difference and no interval, which reads as SUSTAINED whatever the slope. "
+            f"Lengthen the run or lower warmup_s"
         )
     times = [log.times[i] for i in keep]
 
@@ -538,6 +570,7 @@ def analyse(
                 last=values[-1],
                 peak=max(values),
                 capacity=capacity,
+                entry=module in entries,
             )
         )
 
@@ -570,10 +603,17 @@ def render(analyses: Sequence[RunAnalysis]) -> str:
                 f"{module.fit.verdict:<10}{flag}"
             )
         total = run.total_sustained
-        lines.append(
-            f"{run.system:<10} {'TOTAL':<18} {'':>9} {'':>10} {'':>18} "
-            f"{'-' if total is None else f'{total:.1f}':>10} {run.verdict:<10}"
-        )
+        if total is None:
+            # No TOTAL row rather than a dash. A total is only meaningful over modules where
+            # an image enters exactly once; printing one for a system whose entry set was
+            # never declared is how a double-counted five-figure number ended up sitting
+            # directly above the comparison block.
+            lines.append(f"{run.system:<10} {'(no system total — see COMPARISON)':<18}")
+        else:
+            lines.append(
+                f"{run.system:<10} {'TOTAL':<18} {'':>9} {'':>10} {'':>18} "
+                f"{total:>10.1f} {run.verdict:<10}"
+            )
         lines.append("")
     if any(not m.fit.linear for run in analyses for m in run.modules):
         lines.append("* endpoint and least-squares slopes disagree: the series is curved,")

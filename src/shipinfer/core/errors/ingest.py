@@ -8,6 +8,7 @@ four is why the previous generation logged "Can not read frame" and nothing else
 from __future__ import annotations
 
 from shipinfer.core.errors.base import ShipInferError
+from shipinfer.core.redact import redact
 
 __all__ = [
     "CameraUnavailableError",
@@ -44,7 +45,10 @@ class SourceOpenError(IngestError):
     """
 
     def __init__(self, camera_id: str, uri: str, reason: str) -> None:
-        super().__init__(f"camera {camera_id!r}: cannot open {uri!r}: {reason}")
+        # Redacted in the *message*, kept intact on the attribute. The message is what gets
+        # logged and what becomes `CameraHealth.last_error` in the health API, so a fleet
+        # password would otherwise be served to every reader of that payload on every retry.
+        super().__init__(f"camera {camera_id!r}: cannot open {redact(uri)!r}: {reason}")
         self.camera_id = camera_id
         self.uri = uri
         self.reason = reason
