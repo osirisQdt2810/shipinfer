@@ -26,16 +26,23 @@ is about what they cost at fifty cameras.
 
 ### Results, on 8 × RTX A5000
 
-**Preprocessing — measured, not simulated.** 8 × 1080p → 640×640:
+**Preprocessing — measured, not simulated.** 8 × 1080p → 640×640, median of 5 samples:
 
-| | ms | img/s |
+| | ms (min–max) | img/s |
 |---|---:|---:|
-| `cv2.resize` + `cvtColor` per image (their path) | 438–548 | 15–18 |
-| fused CUDA kernel into a torch tensor (ours) | 16–18 | 448–499 |
+| `cv2` loop, all 48 cores | 505–704 (447–950) | 11–16 |
+| `cv2` loop, one core | 469–496 (234–611) | 16–17 |
+| fused CUDA kernel into a torch tensor | **8.8–9.3** (9–26) | 858–907 |
 
-**~28×.** The whole batch in one pass over the pixels instead of four passes per image on
-the CPU. This is the single largest difference between the two systems and the one with no
-caveats.
+**Roughly 50×**, and the caveats are part of the result. The CPU path's variance is large
+on a shared machine — a first attempt at this measurement swung by 4× between runs, which
+is why OpenCV's thread count is now pinned and the median of five samples is reported
+rather than a single timing. The GPU path is stable to within a millisecond.
+
+Note that `cv2` with all 48 cores is *not* faster than with one: for operations this small
+the thread contention costs more than the parallelism buys on a loaded box. The one-core
+figure is also the more representative one, because in their pipeline every worker thread
+calls `cv2` concurrently, so under load each gets about one core anyway.
 
 **Serving, at the design point** — 50 cameras × 20 fps = 1000 req/s over 8 GPUs, camera 0
 at 8× traffic, a launch-bound cost model (1.2 ms/batch + 0.03 ms/row):

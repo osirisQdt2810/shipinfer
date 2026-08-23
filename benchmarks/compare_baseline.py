@@ -457,13 +457,26 @@ def run_shipinfer(
 # =============================================================================================
 
 
-def compare_preprocessing(count: int = 8) -> str:
+def compare_preprocessing(count: int = 8, repeats: int = 5) -> str:
     """cv2 letterbox in a Python loop against the fused device kernel.
 
-    This half is not simulated at all. `counting-simulation` letterboxes every frame with
-    `cv2.resize` + `cv2.cvtColor` on the CPU, one image at a time; ShipInfer does the
-    resize, colour convert, normalise and NHWC->NCHW as a single CUDA kernel over the whole
-    batch. Same inputs, same output convention, real timings.
+    Not simulated. `counting-simulation` letterboxes every frame with `cv2.resize` +
+    `cv2.cvtColor` on the CPU, one image at a time; ShipInfer does the resize, colour
+    convert, normalise and NHWC->NCHW as a single CUDA kernel over the whole batch.
+
+    OpenCV's thread count is pinned rather than left at its default, because leaving it
+    free made this measurement swing by 4x between runs on a shared box — and an unstable
+    number is not evidence. Both settings are reported, and the honest one to quote depends
+    on the deployment:
+
+      * ALL CORES flatters the CPU path relative to how it actually runs. In their
+        pipeline every worker thread calls cv2 concurrently, so under load each gets
+        roughly one core, not all of them.
+      * ONE CORE is what a worker actually gets when the others are busy, which at
+        50 cameras is all of the time.
+
+    The median of `repeats` runs is reported, with the spread, so a single lucky or unlucky
+    run cannot be mistaken for a result.
     """
     try:
         import cv2
@@ -484,8 +497,8 @@ def compare_preprocessing(count: int = 8) -> str:
         for i, image in enumerate(frames):
             h, w = image.shape[:2]
             r = min(dst[0] / h, dst[1] / w)
-            # Transcribed verbatim from sim_pipeline_v2.py, redundant int() included:
-            # a 'tidied' baseline is not the baseline.
+            # Transcribed verbatim, redundant int() included: a "tidied" baseline is not
+            # the baseline.
             nh, nw = int(round(h * r)), int(round(w * r))  # noqa: RUF046
             resized = cv2.resize(image, (nw, nh), interpolation=cv2.INTER_LINEAR)
             top, left = (dst[0] - nh) // 2, (dst[1] - nw) // 2
@@ -502,21 +515,32 @@ def compare_preprocessing(count: int = 8) -> str:
             out[i] = rgb.transpose(2, 0, 1).astype(np.float32) / 255.0
         return out
 
-    def timed(fn, reps: int = 10) -> float:
+    def timed(fn, reps: int = 5) -> tuple[float, float, float]:
+        """(median, min, max) milliseconds over `repeats` samples of `reps` calls each."""
         fn()
-        start = time.perf_counter()
-        for _ in range(reps):
-            fn()
-        return (time.perf_counter() - start) / reps * 1000.0
+        samples = []
+        for _ in range(repeats):
+            start = time.perf_counter()
+            for _ in range(reps):
+                fn()
+            samples.append((time.perf_counter() - start) / reps * 1000.0)
+        samples.sort()
+        return (samples[len(samples) // 2], samples[0], samples[-1])
 
-    lines = [f"  {count} x 1080p -> 640x640, mean of 10 runs"]
-    cpu_ms = timed(cv2_letterbox)
-    lines.append(
-        f"    cv2 loop on the CPU (their path) : {cpu_ms:7.2f} ms   {count / cpu_ms * 1000:6.0f} img/s"
-    )
+    lines = [f"  {count} x 1080p -> 640x640, median of {repeats} samples (min-max shown)"]
+
+    available = cv2.getNumberOfCPUs()
+    for threads, note in ((0, f"all {available} cores"), (1, "one core")):
+        cv2.setNumThreads(threads if threads else available)
+        median, lo, hi = timed(cv2_letterbox)
+        lines.append(
+            f"    cv2 loop, {note:<16}: {median:7.1f} ms  ({lo:.0f}-{hi:.0f})"
+            f"  {count / median * 1000:6.0f} img/s"
+        )
+    cv2.setNumThreads(available)
 
     if not is_available():
-        lines.append("    fused device kernel              :  (no accelerator on this host)")
+        lines.append("    fused device kernel             :  (no accelerator on this host)")
         return "\n".join(lines)
 
     import torch
@@ -528,10 +552,10 @@ def compare_preprocessing(count: int = 8) -> str:
         ops.letterbox_to_device(frames, out, params)
         torch.cuda.synchronize()
 
-    gpu_ms = timed(fused)
+    median, lo, hi = timed(fused)
     lines.append(
-        f"    fused kernel -> device tensor    : {gpu_ms:7.2f} ms   {count / gpu_ms * 1000:6.0f} img/s"
-        f"   ({cpu_ms / gpu_ms:.1f}x)"
+        f"    fused kernel -> device tensor   : {median:7.1f} ms  ({lo:.0f}-{hi:.0f})"
+        f"  {count / median * 1000:6.0f} img/s"
     )
     lines.append(f"    (implementation: {ops.describe()})")
     return "\n".join(lines)
