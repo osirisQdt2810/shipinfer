@@ -275,9 +275,9 @@ def command_line(config: BenchConfig, log: Path) -> list[str]:
         "--num-seg-source-workers",
         str(config.sources_per_module),
         "--num-det-workers",
-        str(config.workers_per_module),
+        str(config.workers_for("det")),
         "--num-seg-workers",
-        str(config.workers_per_module),
+        str(config.workers_for("seg")),
         # Physical ordinals, but CUDA_VISIBLE_DEVICES has already narrowed the world to
         # `config.gpus`, so the binary must be told 0..n-1. Passing physical ids *and*
         # restricting visibility would put every worker on the wrong device or none.
@@ -328,11 +328,12 @@ def run_baseline(config: BenchConfig, out_dir: Path | None = None) -> BaselineRe
     env = dict(os.environ)
     env["LD_LIBRARY_PATH"] = library_path()
     env["CUDA_VISIBLE_DEVICES"] = config.cuda_visible_devices()
-    # The baseline letterboxes on the CPU inside every inference thread. Left unpinned,
-    # OpenCV spawns a pool per thread and the threads fight over the whole box, which
-    # changes the answer run to run. One thread each is also what each worker gets in
-    # practice once the machine is busy.
-    env["OMP_NUM_THREADS"] = "1"
+    # Applied to both systems or to neither — `run_bench` sets the same value for ours.
+    # Pinning only the baseline handed us the whole box for torch pre-processing while it
+    # letterboxed on the CPU inside its own single-threaded workers, which is plausibly the
+    # wall the first 854.7 img/s measurement hit.
+    if config.omp_threads is not None:
+        env["OMP_NUM_THREADS"] = str(config.omp_threads)
 
     argv = command_line(config, log)
     started = time.monotonic()

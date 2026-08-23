@@ -222,6 +222,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="which to run; run one at a time to keep the GPUs uncontended",
     )
     p.add_argument("--target", type=float, default=5.0, help="required speed-up")
+    p.add_argument(
+        "--omp-threads",
+        type=int,
+        default=None,
+        help="OMP_NUM_THREADS, applied to both systems; unset leaves both unpinned",
+    )
     p.add_argument("--out-dir", type=Path, default=None)
     p.add_argument("--label", default=None, help="names the output directory")
     return p.parse_args(argv)
@@ -249,6 +255,7 @@ def main(argv: list[str] | None = None) -> int:
         seconds=args.seconds,
         warmup_s=args.warmup_s,
         resolution=args.resolution,
+        omp_threads=args.omp_threads,
         out_dir=base_out,
     ).resolved()
     out_dir = cfg.out_dir
@@ -258,11 +265,17 @@ def main(argv: list[str] | None = None) -> int:
     # only place that both knows the config and runs before anything imports torch -- the
     # harness modules import shipinfer lazily for exactly this reason.
     os.environ["CUDA_VISIBLE_DEVICES"] = cfg.cuda_visible_devices()
+    # The same OpenMP policy for both systems, or neither. Pinning only the baseline gave
+    # our torch pre-processing the whole box while the baseline letterboxed on the CPU
+    # inside its own single-threaded workers.
+    if cfg.omp_threads is not None:
+        os.environ["OMP_NUM_THREADS"] = str(cfg.omp_threads)
 
     print(
         f"load: {cfg.cameras} cameras x {cfg.fps:g} fps = {cfg.offered_total:g} img/s offered"
     )
     print(f"gpus: {list(cfg.gpus)}   seconds: {cfg.seconds:g} (warmup {cfg.warmup_s:g})")
+    print(cfg.concurrency_note)
     print(f"out:  {out_dir}")
 
     runs: list[RunAnalysis] = []
