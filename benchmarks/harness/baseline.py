@@ -121,6 +121,19 @@ def build_binary(*, force: bool = False) -> Path:
         RuntimeError: the compile failed, with the compiler's own diagnostics attached —
             they are the actionable part and swallowing them would leave "build failed".
     """
+    # Reuse first, and check the toolchain only if a build is actually needed. Reusing a
+    # binary does not require a compiler, and the container this runs in deliberately has
+    # neither g++ nor the TensorRT headers -- the binary is built on the host precisely
+    # because the container cannot build it. Demanding headers before noticing the binary
+    # already exists turns a working configuration into a hard failure, and reports the
+    # missing headers as the problem when nothing needed them.
+    if (
+        not force
+        and BINARY.is_file()
+        and (not SOURCE.is_file() or BINARY.stat().st_mtime >= SOURCE.stat().st_mtime)
+    ):
+        return BINARY
+
     if not SOURCE.is_file():
         raise FileNotFoundError(
             f"{SOURCE} is missing. Check the submodule out with "
@@ -128,10 +141,10 @@ def build_binary(*, force: bool = False) -> Path:
         )
     if not (TENSORRT_ROOT / "include" / "NvInfer.h").is_file():
         raise FileNotFoundError(
-            f"no TensorRT headers under {TENSORRT_ROOT}. Set TRT_ROOT to the install root"
+            f"no TensorRT headers under {TENSORRT_ROOT}. Set TRT_ROOT to the install root. "
+            f"If you are inside the benchmark container, the binary should already have "
+            f"been built on the host -- {BINARY} is missing or older than the source."
         )
-    if not force and BINARY.is_file() and BINARY.stat().st_mtime >= SOURCE.stat().st_mtime:
-        return BINARY
 
     opencv = subprocess.run(
         ["pkg-config", "--cflags", "--libs", "opencv4"],

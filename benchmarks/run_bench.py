@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -251,6 +252,12 @@ def main(argv: list[str] | None = None) -> int:
     ).resolved()
     out_dir = cfg.out_dir
 
+    # torch reads CUDA_VISIBLE_DEVICES once, when it first initialises, so it has to be set
+    # before either system starts rather than inside the driver that needs it. Here is the
+    # only place that both knows the config and runs before anything imports torch -- the
+    # harness modules import shipinfer lazily for exactly this reason.
+    os.environ["CUDA_VISIBLE_DEVICES"] = cfg.cuda_visible_devices()
+
     print(
         f"load: {cfg.cameras} cameras x {cfg.fps:g} fps = {cfg.offered_total:g} img/s offered"
     )
@@ -266,7 +273,15 @@ def main(argv: list[str] | None = None) -> int:
         if not result.ok:
             print("baseline produced no samples; aborting", file=sys.stderr)
             return 1
-        run = _analyse("baseline", result.log, cfg, offered=None)
+        # Each of the baseline's two queues is fed by its own half of the source
+        # workers, so both offered rates are known exactly from the configuration --
+        # unlike ShipInfer's crop-fed models, which have to be measured.
+        run = _analyse(
+            "baseline",
+            result.log,
+            cfg,
+            offered=dict.fromkeys(BASELINE_ENTRY_MODULES, cfg.offered_per_module),
+        )
         runs.append(run)
         throughputs["baseline"] = system_throughput(run)
 
