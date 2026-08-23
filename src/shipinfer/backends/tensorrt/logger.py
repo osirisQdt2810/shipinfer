@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from shipinfer.core.logging import get_logger
@@ -9,6 +10,14 @@ from shipinfer.core.logging import get_logger
 __all__ = ["build_trt_logger"]
 
 _LOG = get_logger("backends.tensorrt")
+
+#: One ILogger for the process. TensorRT keeps a global logger and warns that it is
+#: *ignoring* every later one, so building a fresh subclass per backend created N Python
+#: objects that TensorRT would never call, and N chances for a callback to cross a thread
+#: boundary during a concurrent load. Cached on (verbose,) because that is the only thing
+#: that changes behaviour.
+_LOGGERS: dict[bool, Any] = {}
+_LOGGER_LOCK = threading.Lock()
 
 
 def build_trt_logger(trt: Any, verbose: bool = False) -> Any:
@@ -40,4 +49,9 @@ def build_trt_logger(trt: Any, verbose: bool = False) -> Any:
             else:
                 _LOG.debug("TensorRT: %s", msg)
 
-    return _Logger()
+    with _LOGGER_LOCK:
+        existing = _LOGGERS.get(verbose)
+        if existing is None:
+            existing = _Logger()
+            _LOGGERS[verbose] = existing
+        return existing

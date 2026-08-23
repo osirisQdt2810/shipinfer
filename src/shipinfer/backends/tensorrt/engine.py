@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -76,6 +77,11 @@ class LoadedEngine:
         return any(DYNAMIC in t.shape for t in self.io)
 
 
+#: Guards TensorRT runtime creation and engine deserialisation across every instance
+#: thread in the process. See the comment inside :func:`load_engine`.
+_LOAD_LOCK = threading.Lock()
+
+
 def load_engine(trt: Any, logger: Any, path: Path) -> LoadedEngine:
     """Deserialise ``path`` and read back what the engine actually expects.
 
@@ -97,8 +103,22 @@ def load_engine(trt: Any, logger: Any, path: Path) -> LoadedEngine:
     except OSError as exc:
         raise BackendLoadError(f"cannot read TensorRT engine {path}: {exc}") from exc
 
-    runtime = trt.Runtime(logger)
-    engine = runtime.deserialize_cuda_engine(blob)
+    # Serialised process-wide, and the reason is a deadlock rather than a preference.
+    # `trt.Runtime` and `deserialize_cuda_engine` take a TensorRT-internal global lock and
+    # emit through the `ILogger` we hand them -- which is implemented in Python, so the
+    # callback needs the GIL. Two instance threads loading at once invert the lock order:
+    # thread A holds the GIL inside a TensorRT call that wants TensorRT's lock, thread B
+    # holds TensorRT's lock inside a logger callback that wants the GIL. Neither yields.
+    #
+    # Observed on a four-GPU bench start-up: all six instance threads parked inside
+    # `load_engine` with the GPUs at 0% and no progress after 150 s, one of them sitting in
+    # `logging.emit` -- see the faulthandler dump in the PR.
+    #
+    # The cost is start-up parallelism on a one-time, largely I/O-bound step. Deserialising
+    # six plans in sequence takes seconds; deadlocking takes forever.
+    with _LOAD_LOCK:
+        runtime = trt.Runtime(logger)
+        engine = runtime.deserialize_cuda_engine(blob)
     if engine is None:
         raise BackendLoadError(
             f"TensorRT refused to deserialise {path}. An engine is specific to the "
