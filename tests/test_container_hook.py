@@ -330,3 +330,18 @@ class TestTheBypassFixesDidNotCostTooMuch:
         """Matching the bare word refused a heredoc whose body quoted a device call as
         test data — and, on its first outing, refused the edit that was fixing that."""
         assert refused(f"python3 - <<'XX'\nprint('{self.DEVICE_CALL}')\nXX") is None
+
+    def test_a_backslash_continuation_is_one_command(self) -> None:
+        """Line-by-line lexing closed the multi-line bypass and opened this: a `\\`
+        continuation is the same command wrapped, not a new one, and splitting there
+        refused a real `docker run` whose argv sat on the last line."""
+        command = (
+            "docker run --rm --pid=host \\\n"
+            '  -v "$PWD:/work:ro" -w /work img \\\n'
+            "  python3 scripts/build_engines.py --check"
+        )
+        assert refused(command) is None
+
+    def test_a_real_newline_still_starts_a_new_command(self) -> None:
+        """The other half: folding continuations must not fold genuine line breaks."""
+        assert refused("echo start\npytest tests/ -m gpu") is not None
