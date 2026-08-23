@@ -7,13 +7,13 @@ the point is that two independent observations have to agree.
 
 from __future__ import annotations
 
-import time as _time
 import os
 import pathlib
 import socket
 import subprocess
 import sys
 import time
+import time as _time
 
 #: MiB per step. Uneven and announced in advance: a flat allocation could be anything, whereas
 #: 1536/3072/4608/6144 rising in a stated order is a shape a shared box does not produce by
