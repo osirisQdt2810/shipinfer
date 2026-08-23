@@ -534,13 +534,30 @@ class RunAnalysis:
         }
 
 
+def _capacity_for(capacity: int | Mapping[str, int] | None, module: str) -> int | None:
+    """This module's bound, from a mapping or a single value.
+
+    A mapping because one capacity for every module was wrong in the dangerous direction:
+    `buffer_capacity` is the pipeline queue's bound, while a model instance's queue is two
+    orders of magnitude smaller, so the plateau guard could never trip for the queues that
+    saturate first. ``None`` for a module the mapping does not name — better no guard than a
+    guard against the wrong number.
+    """
+    if capacity is None:
+        return None
+    if isinstance(capacity, Mapping):
+        value = capacity.get(module)
+        return int(value) if value else None
+    return int(capacity)
+
+
 def analyse(
     log: SampleLog,
     *,
     system: str,
     warmup_s: float = 10.0,
     offered: Mapping[str, float | None] | None = None,
-    capacity: int | None = None,
+    capacity: int | Mapping[str, int] | None = None,
     entry_modules: Sequence[str] = (),
 ) -> RunAnalysis:
     """Fit every module in one log and decide the run's verdict.
@@ -585,7 +602,7 @@ def analyse(
                 first=values[0],
                 last=values[-1],
                 peak=max(values),
-                capacity=capacity,
+                capacity=_capacity_for(capacity, module),
                 entry=module in entries,
             )
         )

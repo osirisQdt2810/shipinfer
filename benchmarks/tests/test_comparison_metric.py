@@ -383,3 +383,111 @@ class TestACappedBufferIsNotAMeasurement:
 
         assert not run.modules[0].capped
         assert run.verdict == analysis.SUSTAINED
+
+
+class TestRefusedWorkCannotBecomeThroughput:
+    """The failure a reviewer reproduced end to end: a fabricated 5x out of refusals.
+
+    When the scheduler rejects work rather than queueing it, nothing accumulates. The
+    pipeline queue stays flat because frames are being refused; a model's queue plateaus at
+    its own bound rather than growing. Both slopes read zero, so `offered - growth` publishes
+    the entire offered rate as sustained throughput — and the bias runs toward us, because
+    the baseline is a separate binary that is not measured this way.
+
+    Three independent guards, because each catches a different shape of it.
+    """
+
+    def _result(self, **overrides):
+        base = {
+            "log": Path("/dev/null"),
+            "startup_s": 1.0,
+            "elapsed_s": 30.0,
+            "frames_accepted": 30000,
+            "events_emitted": 30000,
+            "frames_read": 30000,
+            "frames_dropped": 0,
+            "requests_total": {},
+            "requests_rejected": {},
+        }
+        base.update(overrides)
+        return shipinfer_harness.ShipInferResult(**base)
+
+    def test_heavy_scheduler_rejection_refuses_the_run(self):
+        config = BenchConfig(cameras=50, fps=20.0, seconds=30.0)
+        result = self._result(requests_rejected={"ship_detector": 20000.0})
+
+        with pytest.raises(RuntimeError, match="refused"):
+            shipinfer_harness.check_offer(config, result)
+
+    def test_a_trickle_of_rejection_is_still_a_measurement(self):
+        config = BenchConfig(cameras=50, fps=20.0, seconds=30.0)
+        shipinfer_harness.check_offer(
+            config, self._result(requests_rejected={"ship_detector": 100.0})
+        )
+
+    def test_a_claim_far_above_the_emitted_rate_is_refused(self):
+        """The decisive check: an event either came out of the pipeline or it did not."""
+        result = self._result(events_emitted=7500)  # 250/s out, 1000/s claimed
+
+        with pytest.raises(RuntimeError, match="came out of the pipeline"):
+            shipinfer_harness.reconcile(result, claimed=1000.0)
+
+    def test_a_claim_matching_the_emitted_rate_passes(self):
+        shipinfer_harness.reconcile(self._result(), claimed=1000.0)
+
+    def test_a_small_gap_is_tolerated(self):
+        """Reassembly holds a frame briefly, so the two counts never match exactly."""
+        shipinfer_harness.reconcile(self._result(events_emitted=28000), claimed=1000.0)
+
+    def test_the_claim_is_not_silently_clamped(self):
+        """Substituting the emitted rate would hide that the two estimates disagreed."""
+        with pytest.raises(RuntimeError) as caught:
+            shipinfer_harness.reconcile(self._result(events_emitted=1500), claimed=1000.0)
+
+        assert "1000.0" in str(caught.value) and "50.0" in str(caught.value)
+
+
+class TestTheCapacityGuardUsesTheRightBound:
+    """One capacity for every module could never trip for the queues that saturate first."""
+
+    def test_a_model_queue_bound_is_its_instances_times_the_per_instance_size(self):
+        config = BenchConfig(gpus=(2, 3, 4, 5), instances_per_gpu={"det": 2, "seg": 1})
+
+        capacities = shipinfer_harness.per_module_capacity(config)
+
+        assert capacities["det"] == 64 * 2 * 4, "8 instances x the 64-deep default"
+        assert capacities["seg"] == 64 * 1 * 4
+
+    def test_the_pipeline_queue_keeps_its_own_much_larger_bound(self):
+        config = BenchConfig(buffer_capacity=65536)
+
+        capacities = shipinfer_harness.per_module_capacity(config)
+
+        assert capacities[shipinfer_harness.PIPELINE_MODULE] == 65536
+
+    def test_the_two_bounds_differ_by_orders_of_magnitude(self):
+        """Which is why using one for both made the plateau guard unreachable."""
+        capacities = shipinfer_harness.per_module_capacity(
+            BenchConfig(gpus=(2, 3, 4, 5), instances_per_gpu={"det": 2})
+        )
+
+        assert capacities["det"] * 100 < capacities[shipinfer_harness.PIPELINE_MODULE]
+
+    def test_an_unnamed_module_gets_no_guard_rather_than_the_wrong_one(self, tmp_path: Path):
+        run = analysis.analyse(
+            analysis.read_log(
+                write_log(
+                    tmp_path / "l.jsonl",
+                    [{"t": float(t), "mystery_buffer_size": 10.0} for t in range(30)],
+                ),
+                sample_interval_s=1.0,
+            ),
+            system="shipinfer",
+            warmup_s=5.0,
+            offered={"mystery": 100.0},
+            capacity={"pipeline": 65536},
+            entry_modules=("mystery",),
+        )
+
+        assert run.modules[0].capacity is None
+        assert not run.modules[0].capped

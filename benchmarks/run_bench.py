@@ -194,13 +194,15 @@ def compare(base: SystemThroughput, ours: SystemThroughput, *, target: float) ->
     return "\n".join(lines)
 
 
-def _analyse(system: str, log: Path, cfg: BenchConfig, offered, entries) -> RunAnalysis:
+def _analyse(
+    system: str, log: Path, cfg: BenchConfig, offered, entries, capacity=None
+) -> RunAnalysis:
     return analysis.analyse(
         analysis.read_log(log, sample_interval_s=cfg.sample_interval_s),
         system=system,
         warmup_s=cfg.warmup_s,
         offered=offered,
-        capacity=cfg.buffer_capacity,
+        capacity=cfg.buffer_capacity if capacity is None else capacity,
         entry_modules=entries,
     )
 
@@ -318,9 +320,15 @@ def main(argv: list[str] | None = None) -> int:
             cfg,
             offered=shipinfer.offered_rates(cfg, result),
             entries=(shipinfer.PIPELINE_MODULE,),
+            capacity=shipinfer.per_module_capacity(cfg),
         )
+        ours = system_throughput(run)
+        if ours.images_per_s is not None:
+            # Cross-checked against what came out of the far end. The buffer-growth method
+            # cannot tell a flat queue from a refused one, and an emitted-event count can.
+            shipinfer.reconcile(result, ours.images_per_s)
         runs.append(run)
-        throughputs["shipinfer"] = system_throughput(run)
+        throughputs["shipinfer"] = ours
         if result.per_device:
             print("\nper-device execution (the balancing evidence):")
             for model, devices in sorted(result.per_device.items()):

@@ -62,7 +62,14 @@ from benchmarks.harness.analysis import BUFFER_SUFFIX
 from benchmarks.harness.config import BenchConfig
 from benchmarks.harness.sampler import OccupancySampler
 
-__all__ = ["PIPELINE_MODULE", "ShipInferResult", "run_shipinfer"]
+__all__ = [
+    "PIPELINE_MODULE",
+    "ShipInferResult",
+    "check_offer",
+    "per_module_capacity",
+    "reconcile",
+    "run_shipinfer",
+]
 
 #: The module name used for the ingest queue in the JSONL. It is the direct analogue of the
 #: baseline's ``det_buffer_size``: decoded frames waiting for a worker.
@@ -72,6 +79,19 @@ PIPELINE_MODULE = "pipeline"
 #: measurement. Small on purpose: a little shedding is the system working as designed, and a
 #: lot of it means the offered rate and the served rate are different experiments.
 MAX_DROP_FRACTION = 0.02
+
+#: Fraction of offered work the *scheduler* may refuse before the run stops being a
+#: throughput measurement. Separate from `MAX_DROP_FRACTION`, which is ingest-side: a
+#: rejected inference request is the more dangerous vanish-path, because it makes the buffers
+#: look flat for the worst possible reason. Nothing accumulates when work is being refused,
+#: so both slopes read zero and the whole offered rate publishes as sustained.
+MAX_REJECT_FRACTION = 0.02
+
+#: How far the analysed rate may sit above what actually came out of the pipeline. The
+#: buffer-growth method and the emitted-event count are independent estimates of the same
+#: quantity; a large gap means one of them is wrong, and the honest response is to refuse
+#: rather than to pick the flattering one.
+MAX_RECONCILE_GAP = 0.15
 
 #: Models the graph drives, in stage order. Their queue depths are the second-level buffer
 #: the baseline has no equivalent of, and they are sampled because a model that is the wall
@@ -357,6 +377,56 @@ def achieved_offer(config: BenchConfig, result: ShipInferResult) -> float:
     return entered / result.elapsed_s
 
 
+def per_module_capacity(config: BenchConfig, settings: Any = None) -> dict[str, int]:
+    """The bound each module's buffer actually has.
+
+    One capacity for every module was wrong, and wrong in the dangerous direction. The
+    analysis uses it to spot a *plateau* -- a buffer sitting at its bound stops growing, so
+    its slope stops meaning anything -- and ``buffer_capacity`` (65536) is the pipeline
+    queue's bound. A model instance's queue is ``scheduler.max_queue_size``, 64 by default,
+    so an eight-instance detector plateaus at 512: two orders of magnitude below the number
+    the guard compared against, which is why it could never trip for the queues that
+    saturate first.
+    """
+    from shipinfer.core.settings import ServerSettings
+
+    resolved = settings or ServerSettings()
+    per_instance = int(getattr(resolved.scheduler, "max_queue_size", 64))
+    capacities = {PIPELINE_MODULE: int(config.buffer_capacity)}
+    for name, instances in (getattr(config, "instances_per_gpu", None) or {}).items():
+        capacities[name] = per_instance * int(instances) * len(config.gpus)
+    return capacities
+
+
+def reconcile(result: ShipInferResult, claimed: float) -> None:
+    """Refuse a claimed rate that far exceeds what came out of the pipeline.
+
+    Two independent estimates of one quantity: ``offered - growth`` from the buffer log, and
+    ``events_emitted / elapsed`` from the far end. The first can be fooled -- a scheduler
+    that *refuses* work rather than queueing it leaves every buffer flat, so growth reads
+    zero and the entire offered rate publishes as sustained. The second cannot be: an event
+    either came out or it did not.
+
+    Raises:
+        RuntimeError: the claim exceeds the emitted rate by more than
+            ``MAX_RECONCILE_GAP``. Deliberately not clamped to the emitted rate -- silently
+            substituting one number for the other would hide that they disagreed, which is
+            the fact worth surfacing.
+    """
+    if result.elapsed_s <= 0 or not result.events_emitted:
+        return
+    emitted = result.events_emitted / result.elapsed_s
+    if emitted <= 0 or claimed <= emitted * (1.0 + MAX_RECONCILE_GAP):
+        return
+    raise RuntimeError(
+        f"the buffer log implies {claimed:.1f} img/s sustained but only {emitted:.1f} img/s "
+        f"of events came out of the pipeline ({result.events_emitted} events in "
+        f"{result.elapsed_s:.1f}s). Work that is refused rather than queued leaves every "
+        f"buffer flat, so growth reads zero and the offered rate publishes as throughput. "
+        f"One of these two numbers is wrong; the run does not support a throughput claim."
+    )
+
+
 def check_offer(
     config: BenchConfig, result: ShipInferResult, *, tolerance: float = 0.98
 ) -> None:
@@ -370,6 +440,15 @@ def check_offer(
     """
     achieved = achieved_offer(config, result)
     target = float(config.offered_total)
+    rejected = sum(result.requests_rejected.values())
+    offered_requests = max(1.0, target * max(result.elapsed_s, 1.0))
+    if rejected / offered_requests > MAX_REJECT_FRACTION:
+        raise RuntimeError(
+            f"the scheduler refused {rejected:.0f} request(s) against roughly "
+            f"{offered_requests:.0f} offered. A rejected request never enters a queue, so it "
+            f"cannot grow one — every buffer stays flat and the offered rate would publish "
+            f"as sustained throughput. Lower the offered rate to what the GPUs retire."
+        )
     read = result.frames_read
     if read and result.frames_dropped / read > MAX_DROP_FRACTION:
         raise RuntimeError(
