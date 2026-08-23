@@ -1,3 +1,6 @@
 [submodule "3rdparty/shipinfer-imgproc"]
 	path = 3rdparty/shipinfer-imgproc
 	url = git@github.com:osirisQdt2810/shipinfer-imgproc.git
+[submodule "3rdparty/shipinfer-mot"]
+	path = 3rdparty/shipinfer-mot
+	url = git@github.com:osirisQdt2810/shipinfer-mot.git
