@@ -61,6 +61,15 @@ class ModelInstance:
         self._alpha = scheduler.latency_ewma_alpha
 
         self._thread: threading.Thread | None = None
+        # stop() may be called from the server's shutdown thread while the worker is still
+        # running, and twice if a caller retries; the lock makes it idempotent rather than
+        # merely usually-idempotent.
+        self._stop_lock = threading.Lock()
+        self._stopped = False
+        self._abandoned = False
+        #: Whether this instance's readiness was counted, so shutdown cannot decrement a
+        #: gauge it never incremented and drive it negative.
+        self._counted_ready = False
         self._running = threading.Event()
         self._ready = threading.Event()
         self._ewma_latency_us = 0.0
@@ -107,17 +116,55 @@ class ModelInstance:
         return self._ready.wait(timeout)
 
     def stop(self, grace_s: float = 10.0) -> None:
-        """Stop accepting work, drain, and join. Safe to call twice."""
-        self._running.clear()
-        self._ready.clear()
+        """Stop accepting work, drain, and join.
+
+        Idempotent and callable from any thread.
+
+        The one thing this must never do is tear down a backend that is still in use. A
+        worker stuck inside ``execute_async_v3`` still holds the TensorRT execution context
+        and every binding tensor; finalising underneath it frees memory the GPU is actively
+        reading, which is a use-after-free that presents as corrupted output or a driver
+        fault somewhere unrelated. So a join that times out means the backend is
+        **abandoned, not finalised** — leaking it is strictly better, and the leak is
+        recorded rather than hidden.
+
+        Queued work is failed by :meth:`RequestQueue.close`. Work already in flight belongs
+        to the worker thread and is resolved by it; racing to complete those futures from
+        here would double-resolve them the moment the thread finished.
+        """
+        with self._stop_lock:
+            if self._stopped:
+                return
+            self._stopped = True
+            self._running.clear()
+            self._ready.clear()
+            thread, self._thread = self._thread, None
+
         self._queue.close()
-        if self._thread is not None:
-            self._thread.join(timeout=grace_s)
-            if self._thread.is_alive():
-                _LOG.warning("instance %s did not stop within %.1fs", self.name, grace_s)
-            self._thread = None
-        self._backend.finalize()
-        self._metrics.instances_ready.dec(model=self._model_label())
+
+        if thread is not None:
+            thread.join(timeout=grace_s)
+            if thread.is_alive():
+                self._abandoned = True
+                _LOG.error(
+                    "instance %s did not stop within %.1fs; abandoning its backend rather "
+                    "than finalising it underneath a running batch (the memory is leaked "
+                    "for the life of the process)",
+                    self.name,
+                    grace_s,
+                )
+
+        if not self._abandoned:
+            self._backend.finalize()
+
+        if self._counted_ready:
+            self._counted_ready = False
+            self._metrics.instances_ready.dec(model=self._model_label())
+
+    @property
+    def is_abandoned(self) -> bool:
+        """True when :meth:`stop` gave up on the worker and left its backend alive."""
+        return self._abandoned
 
     # -- producer side -------------------------------------------------------------------
 
@@ -147,6 +194,7 @@ class ModelInstance:
             return
 
         self._ready.set()
+        self._counted_ready = True
         self._metrics.instances_ready.inc(model=label)
         _LOG.info(
             "instance %s ready",
@@ -265,6 +313,7 @@ class ModelInstance:
             "name": self.name,
             "device": str(self.device),
             "ready": self.is_ready,
+            "abandoned": self._abandoned,
             "queue": self._queue.stats().as_dict(),
             "batches": self._executed_batches,
             "requests": self._executed_requests,
