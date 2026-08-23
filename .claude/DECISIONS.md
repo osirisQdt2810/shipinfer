@@ -253,3 +253,46 @@ that installs a CUDA toolkit only where one is needed, and a release cadence of 
 The parent's CI deliberately does **not** check the submodule out for the offline tier.
 That is not an oversight: the server must run without the kernels, and a test suite that
 always has them would never prove it.
+
+---
+
+## ADR-011 — Ingest depends on a sink protocol it owns, not on the scheduler
+
+**Status:** Accepted · 2026-08-23
+
+**Context.** The ingest plane produces tagged frames; the inference pool consumes them. The
+obvious wiring is for a camera actor to build the `WorkItem` and push it into
+`scheduling.queues.RequestQueue` directly — one fewer indirection, and `scheduling` is a pure
+layer, so the import breaks nothing ADR-001 was protecting. The first implementation of
+`ingest/` did exactly that, and it required adding an `ingest → scheduling` edge to the
+layering DAG.
+
+**Decision.** `ingest` depends on a one-method `FrameSink` protocol that it defines
+(`ingest/sink.py`), and `pipeline` supplies the `RequestQueue`-backed implementation.
+`ingest` imports `core` and `runtime` and nothing else.
+
+Deciding that a frame becomes a request for a particular model, in a particular queue, at a
+particular priority, is **dispatch policy**. It belongs beside the DAG that consumes it,
+because the code that performs that mapping is the same code that must undo it when it
+reassembles per-frame results — and one decision split across two packages is one that
+drifts. `ingest`'s job ends at "here is a tagged frame".
+
+The protocol signals refusal by **raising**, not by returning a bool. An RTSP camera cannot
+be backpressured: it sends the next frame whether or not anyone is ready. So something must
+drop, and the camera actor is the only component in the system that knows which camera a
+frame came from and can therefore charge the drop to the camera that caused it — which is the
+whole substance of ADR-005. The two errors are `QueueFullError` (drop this frame, continue)
+and `RequestCancelledError` (the consumer is gone, stop); both already live in `core.errors`
+and are already what `RequestQueue.put` raises, so the adapter needs no translation layer.
+
+**Consequences.** The layering DAG in ADR-001 is unchanged, which matters more than one edge:
+the moment a layer rule is loosened to accommodate code, the next loosening is easier to
+argue for. `pipeline` owns both halves of the frame-to-request mapping. And the component
+that has to scale — 50 cameras at 20 fps, 1000 frames a second — is measurable against
+`CountingSink` with no scheduler in the process at all, which is how ingest throughput gets a
+number that is about ingest.
+
+The cost is one indirection and two shipped sinks that are not the production path
+(`CountingSink`, `BoundedSink`). Their docstrings say so, and `BoundedSink` says explicitly
+that it is *not* camera-fair: fairness is the scheduler's job, and a second, subtly different
+implementation of it inside `ingest` is exactly what ADR-005 warns against.

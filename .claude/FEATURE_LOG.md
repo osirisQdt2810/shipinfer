@@ -5,6 +5,46 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-23 — The ingest plane: one stateful actor per camera
+
+**Why.** `src/shipinfer/ingest/` was empty, so the server could not read a camera at all.
+PLANE 1 of `references/bitbucket-subfaceid/docs/new-system-architecture.md`: 50 cameras in,
+tagged frames out, no inference in the path.
+
+**Seams introduced.**
+
+| Seam | Where | Extension point |
+|---|---|---|
+| Video sources | `ingest/sources/` | `@SOURCES.register` (gstreamer / pyav / replay) |
+| Frame consumers | `ingest/sink.py` | the `FrameSink` protocol — `pipeline` supplies the production one |
+| Environment contract | `src/shipinfer/envs.py` | one `EnvVar` per variable, typed, with `describe()` |
+| Ingest errors | `core/errors/ingest.py` | four types, one per operator action |
+
+**Decisions recorded.** ADR-011 — ingest depends on a sink protocol it owns, not on the
+scheduler.
+
+**Notable.** Two bugs found by the tests, both in code that only runs when something is
+already wrong: `ExponentialBackoff.peek()` overflowed a float at ~attempt 1000 (a camera at
+the 30 s cap reaches that in under nine hours — a guaranteed actor-thread death on a
+long-running deployment), and the `frame_id` counter had to live on the actor rather than the
+source, or a reconnect reissues frame 0 and hands a tracker a duplicate `(camera_id,
+frame_id)`. Reconnect is exponential + jittered + capped, and a *frame* resets it, not a
+successful connect — an RTSP source that opens and delivers nothing is the common real
+failure and must not read as healthy.
+
+Two tightenings to `scripts/hooks/check_layers.py` fell out of the work: `from shipinfer
+import x` is now checked identically to `import shipinfer.x` (the two spellings had different
+rules and the lax one was winning by accident), and `core` may not import the non-layer
+top-level modules that every other layer can.
+
+**Evidence.** 163 offline tests, no GPU, no GStreamer, no PyAV, no camera — the `replay`
+source over a generated frame directory is what makes that possible and is what the
+50-camera stress test will use. Reconnect tests assert the *sequence* of delays
+(`[0.1, 0.2, 0.4, 0.8, 0.8, 0.8]`), not that a retry happened. No throughput measurement was
+taken; `shipinfer bench` against `CountingSink` is the next step and is not claimed here.
+
+---
+
 ## 2026-08-22 — Initial system: scheduler, runtime, backends, server, native kernels
 
 **Why.** The previous generation (`references/bitbucket-subfaceid`) ran every model on GPU 0
