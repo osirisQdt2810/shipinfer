@@ -14,6 +14,7 @@ from shipinfer.core.settings.http import HttpSettings
 from shipinfer.core.settings.ingest import CameraConfig, IngestSettings
 from shipinfer.core.settings.memory import MemorySettings
 from shipinfer.core.settings.observability import ObservabilitySettings
+from shipinfer.core.settings.pipeline import PipelineSettings, ReassemblySettings
 from shipinfer.core.settings.scheduler import SchedulerSettings
 from shipinfer.core.settings.server import ServerSettings
 
@@ -27,6 +28,8 @@ __all__ = [
     "MemorySettings",
     "ObservabilitySettings",
     "OverflowPolicy",
+    "PipelineSettings",
+    "ReassemblySettings",
     "SchedulerSettings",
     "ServerSettings",
 ]
