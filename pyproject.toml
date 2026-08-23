@@ -196,7 +196,11 @@ disallow_untyped_defs = false
 # Tests — two tiers. The default run needs no GPU; `gpu` is opt-in.
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# The benchmark harness ships its own offline tests: the arithmetic that turns a buffer
+# log into a speed-up is the most consequential code in the repository and needs no
+# hardware to verify. Running it on real GPUs without testing it first would only make a
+# wrong number more convincing.
+testpaths = ["tests", "benchmarks/tests"]
 # `-m "not gpu"`: a plain `pytest` must pass on a machine with zero NVIDIA devices, so the
 # scheduler's invariants stay verifiable anywhere. `pytest -m gpu` opts into real hardware.
 addopts = "-ra --strict-markers --strict-config -m 'not gpu'"
