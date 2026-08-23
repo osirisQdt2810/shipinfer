@@ -31,8 +31,15 @@ DATA = Path(__file__).parent / "data"
 # -- markers ------------------------------------------------------------------------------
 
 
+@pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items) -> None:
     """Gate the GPU tiers on a container, then skip them when there is no device.
+
+    ``trylast`` is load-bearing. pytest applies ``-m`` deselection in its *own*
+    ``pytest_collection_modifyitems``, so running before it means ``items`` still holds
+    every GPU test even for a plain offline run — and the gate below then refused the
+    offline tier on any host, which broke CI on a plain runner. Running last means the list
+    is what will actually execute.
 
     Two separate concerns, and the order matters.
 

@@ -124,7 +124,17 @@ class TestAnAbandonedLockIsTakenOver:
 
 
 class TestResolveEngine:
-    """Resolution order, and the failures it has to name."""
+    """Resolution order, and the failures it has to name.
+
+    The capability is supplied rather than introspected. These tests are about filesystem
+    and naming logic, and on a machine with no driver `_capability` now *refuses* — rightly,
+    because a plan cannot be keyed to an architecture nobody can name. Letting that refusal
+    reach these tests would mean asserting on the wrong failure.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fixed_capability(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(autobuild, "_capability", lambda _index: "86")
 
     def test_a_configured_plan_is_used_as_is(self, tmp_path: Path) -> None:
         """An operator who supplied a plan gets that plan, with no build and no ONNX."""
