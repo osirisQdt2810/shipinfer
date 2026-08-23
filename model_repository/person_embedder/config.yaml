@@ -1,0 +1,33 @@
+# Stage 3b: person ReID embedding. The highest *crop* volume in the system —
+# ~15 person crops per frame x 1000 frames/s = ~15 000 crops/s.
+#
+# Crops are a few KB each, so unlike a full frame they are cheap to route anywhere: this is
+# the model where locality matters least and pure load balancing matters most.
+name: person_embedder
+platform: mock
+max_batch_size: 128
+
+inputs:
+  - name: crops
+    data_type: FP32
+    dims: [3, 256, 128]
+
+outputs:
+  - name: embedding
+    data_type: FP32
+    dims: [512]
+
+instance_groups:
+  - kind: KIND_AUTO
+    count: 2
+    streams: 2
+
+dynamic_batching:
+  enabled: true
+  max_queue_delay_us: 4000
+  preferred_batch_sizes: [32, 64, 128]
+
+parameters:
+  engine_file: model.plan
+  latency_ms: 1.2
+  per_item_latency_ms: 0.03

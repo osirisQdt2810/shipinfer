@@ -1,0 +1,44 @@
+# Stage 1 of the perception DAG: one detector over every frame, classes {ship, person}.
+#
+# Runs on EVERY frame from every camera, so at 50 cameras x 20 fps it sees 1000 req/s —
+# the highest-volume model in the repository and the one whose instance count matters most.
+#
+# `platform: mock` ships in git so the repository is runnable and testable anywhere. On a
+# real node: set `platform: tensorrt`, drop `1/model.plan` in place, and delete the
+# latency parameters.
+name: ship_detector
+platform: mock
+max_batch_size: 32
+
+inputs:
+  - name: images
+    data_type: FP32
+    dims: [3, 640, 640]          # batch dim is owned by max_batch_size, as in Triton
+
+outputs:
+  - name: boxes                  # [x1, y1, x2, y2, score, class]
+    data_type: FP32
+    dims: [100, 6]
+  - name: num_detections
+    data_type: INT32
+    dims: [1]
+
+instance_groups:
+  # Empty `gpus` means "every visible device", so this file is unchanged between a 2-GPU
+  # dev box and a 16-GPU node. Two instances per GPU because the detector is the hot path;
+  # two streams each so H2D of the next batch overlaps compute of the current one.
+  - kind: KIND_AUTO
+    count: 2
+    streams: 2
+
+dynamic_batching:
+  enabled: true
+  # 5 ms is well inside a 50 ms frame budget at 20 fps, and it is enough to fill a batch of
+  # 32 when 50 cameras are feeding one pool.
+  max_queue_delay_us: 5000
+  preferred_batch_sizes: [8, 16, 32]
+
+parameters:
+  engine_file: model.plan
+  latency_ms: 2.0                # mock only
+  per_item_latency_ms: 0.15      # mock only: makes batching show a real win

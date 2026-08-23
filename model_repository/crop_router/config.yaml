@@ -1,0 +1,54 @@
+# The step between detection and everything downstream: turn boxes into crops.
+#
+# It exists as its own model rather than as logic inside the ensemble for the reason the
+# whole system is shaped this way — cropping is GPU work, and GPU work belongs to a model
+# instance that the scheduler can place, batch and balance like any other. Hiding it in the
+# orchestration layer would put a kernel launch on the ensemble's Python thread.
+#
+# It also emits the two condition flags the DAG branches on, which is what makes
+# "segment only where a ship was detected" a declarative statement rather than a callback.
+name: crop_router
+platform: mock
+max_batch_size: 32
+
+inputs:
+  - name: images
+    data_type: FP32
+    dims: [3, 640, 640]
+  - name: boxes                  # [x1, y1, x2, y2, score, class] from the detector
+    data_type: FP32
+    dims: [100, 6]
+
+outputs:
+  # Two ship crops, not one. Each consumer wants its own resolution, and resizing once on
+  # the GPU while the frame is still resident is far cheaper than resizing twice later —
+  # or than sending a 512x512 crop to a model that will squash it to 256x128 anyway.
+  - name: ship_seg_crops         # for the segmenter
+    data_type: FP32
+    dims: [3, 512, 512]
+  - name: ship_reid_crops        # for the embedder
+    data_type: FP32
+    dims: [3, 256, 128]
+  - name: person_crops
+    data_type: FP32
+    dims: [3, 256, 128]
+  - name: has_ship               # non-zero -> run the ship branch
+    data_type: INT32
+    dims: [1]
+  - name: has_person
+    data_type: INT32
+    dims: [1]
+
+instance_groups:
+  - kind: KIND_AUTO
+    count: 1
+    streams: 2
+
+dynamic_batching:
+  enabled: true
+  max_queue_delay_us: 3000
+  preferred_batch_sizes: [8, 16, 32]
+
+parameters:
+  latency_ms: 0.6
+  per_item_latency_ms: 0.08

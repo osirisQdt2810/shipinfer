@@ -1,0 +1,101 @@
+# ShipInfer services.
+#
+#   dev      the container you work in. The repository is bind-mounted, so you edit on the
+#            host with your own editor and every command runs inside the image.
+#   server   the shipping image, serving KServe v2 on :8000.
+#
+# GPUs are requested through the `deploy.resources.reservations.devices` form rather than
+# the older `runtime: nvidia`, because the latter is deprecated and silently does nothing on
+# a Compose v2 installation — the container starts, `torch.cuda.is_available()` is False,
+# and nothing tells you why.
+#
+#   docker compose -f deploy/compose/docker-compose.yml up -d dev
+#   docker compose -f deploy/compose/docker-compose.yml exec dev bash
+# or, from the repository root, just `make shell`.
+
+name: shipinfer
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            # `count: all` takes every visible GPU. Pin a subset with
+            # SHIPINFER_DEVICES__VISIBLE_GPUS, not by editing this file — the process-per-GPU
+            # deployment in ADR-006 wants several containers each holding one device.
+            count: all
+            capabilities: [gpu]
+
+x-build: &build
+  context: ../..
+  dockerfile: deploy/docker/Dockerfile
+  args:
+    CUDA_VERSION: ${CUDA_VERSION:-12.6.3}
+    TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cu126}
+    TORCH_VERSION: ${TORCH_VERSION:-2.7.1}
+    TORCHVISION_VERSION: ${TORCHVISION_VERSION:-0.22.1}
+    CUDA_ARCHITECTURES: ${CUDA_ARCHITECTURES:-70;75;80;86;89}
+
+services:
+  dev:
+    build:
+      <<: *build
+      target: dev
+    image: shipinfer:dev
+    container_name: shipinfer-dev
+    <<: *gpu
+    working_dir: /workspace
+    volumes:
+      # The source tree, live. Everything COPYed into the image at /workspace is shadowed
+      # by this mount, which is the point: build once, edit continuously.
+      - ../..:/workspace
+      # Keep pip's cache and the CMake build tree out of the bind mount, so a host-side
+      # `git status` stays clean and a rebuild does not re-download the world.
+      - shipinfer-pip:/root/.cache/pip
+      - shipinfer-build:/workspace/native/build
+    environment:
+      SHIPINFER_MODEL_REPOSITORY: /workspace/model_repository
+      SHIPINFER_LOG_LEVEL: ${SHIPINFER_LOG_LEVEL:-INFO}
+      # The editable install lives in the image's venv but points at /workspace/src, which
+      # the bind mount supplies — so the container always runs the code you are editing.
+      PYTHONPATH: /workspace/src
+    # Stay up so `exec` works; the container is a workbench, not a job.
+    command: ["sleep", "infinity"]
+    stdin_open: true
+    tty: true
+
+  server:
+    build:
+      <<: *build
+      target: runtime
+    image: shipinfer:runtime
+    container_name: shipinfer-server
+    <<: *gpu
+    ports:
+      - "${SHIPINFER_PORT:-8000}:8000"
+    volumes:
+      # Read-only, and mounted rather than baked in: an engine is specific to the GPU
+      # architecture and TensorRT version of the machine that built it, so an image
+      # carrying one only works on one node.
+      - ${MODEL_REPOSITORY:-../../model_repository}:/workspace/model_repository:ro
+    environment:
+      SHIPINFER_HTTP__ENABLED: "true"
+      SHIPINFER_HTTP__PORT: "8000"
+      SHIPINFER_OBSERVABILITY__LOG_SINK: async
+      SHIPINFER_SCHEDULER__PLACEMENT_POLICY: ${PLACEMENT_POLICY:-locality_spillover}
+      SHIPINFER_DEVICES__VISIBLE_GPUS: ${VISIBLE_GPUS:-[]}
+    command: ["serve", "--http"]
+    restart: unless-stopped
+    # A model repository with real engines takes minutes to load; the start period has to
+    # cover that or the orchestrator kills the container while it is still warming up.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/v2/health/ready"]
+      interval: 30s
+      timeout: 5s
+      start_period: 180s
+      retries: 3
+
+volumes:
+  shipinfer-pip:
+  shipinfer-build:

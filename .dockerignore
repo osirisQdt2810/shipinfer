@@ -1,0 +1,33 @@
+# The build context is the repository root. Everything that is large, host-specific or
+# regenerated inside the image is excluded — a 3 GB context makes every build slow and
+# every layer cache miss expensive.
+
+.git
+.github
+.venv
+venv
+references
+native/build
+**/__pycache__
+**/*.py[cod]
+**/*.so
+**/*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+htmlcov
+.coverage*
+coverage.xml
+.artifacts
+logs
+*.log
+
+# Model artefacts are mounted at run time, never baked in: an engine is specific to the
+# GPU architecture and TensorRT version of the machine that built it, so an image carrying
+# one is an image that only works on one node.
+**/*.engine
+**/*.plan
+**/*.onnx
+**/*.pth
+**/*.pt
+**/*.trt

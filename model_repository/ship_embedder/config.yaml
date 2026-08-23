@@ -1,0 +1,32 @@
+# Stage 3a: a 512-d appearance embedding per ship crop, for re-identification.
+name: ship_embedder
+platform: mock
+max_batch_size: 64
+
+inputs:
+  - name: crops
+    data_type: FP32
+    dims: [3, 256, 128]
+
+outputs:
+  - name: embedding
+    data_type: FP32
+    dims: [512]
+
+instance_groups:
+  - kind: KIND_AUTO
+    count: 1
+    streams: 2
+
+dynamic_batching:
+  enabled: true
+  max_queue_delay_us: 5000
+  preferred_batch_sizes: [16, 32, 64]
+
+parameters:
+  engine_file: model.plan
+  latency_ms: 1.0
+  per_item_latency_ms: 0.05
+  # A small, launch-bound model: this is exactly the shape where CUDA graph replay is worth
+  # the most, because the kernel launches cost as much as the kernels.
+  cuda_graphs: true
