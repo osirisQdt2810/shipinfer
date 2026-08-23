@@ -32,12 +32,40 @@ DATA = Path(__file__).parent / "data"
 
 
 def pytest_collection_modifyitems(config, items) -> None:
-    """Skip GPU-marked tests when there is no device, instead of failing them.
+    """Gate the GPU tiers on a container, then skip them when there is no device.
 
-    ``-m gpu`` on a GPU-less host should report "skipped", not "failed": the tests are fine,
-    the hardware is absent, and conflating the two makes a red CI run meaningless.
+    Two separate concerns, and the order matters.
+
+    **The container gate comes first.** The rule that measurements run in a container was
+    enforced by a hook reading the *text* of a shell command, and review showed a deny-list
+    over text cannot be made sound: ``( pytest tests/ )``, ``eval "pytest tests/"``,
+    ``coverage run -m pytest`` and six other ordinary spellings all walked through it. This
+    check is inside the process that would do the work, so no spelling avoids it — and it
+    has to run before the skip logic below, which returns early on a host that *has* GPUs
+    and would therefore let the whole device tier run there.
+
+    Only the device tiers are gated. The offline tier must keep running anywhere: that is
+    ADR-001, it is what CI does on a plain runner, and it is the promise that makes the pure
+    layers verifiable without a driver.
+
+    **Then the skip.** ``-m gpu`` on a GPU-less host should report "skipped", not "failed":
+    the tests are fine, the hardware is absent, and conflating the two makes a red CI run
+    meaningless.
     """
+    from shipinfer.runtime import containment
     from shipinfer.runtime.platform import device_count
+
+    device_markers = {"gpu", "multigpu"}
+    selected = [i for i in items if device_markers & set(i.keywords)]
+    if selected:
+        try:
+            containment.require_container(f"{len(selected)} GPU-tier test(s)")
+        except RuntimeError as exc:
+            # `pytest.exit` rather than letting the raise escape: an exception out of a
+            # collection hook is reported as INTERNALERROR with a traceback, which reads
+            # like a broken suite rather than a refused run. The operator needs the reason,
+            # not our stack.
+            pytest.exit(str(exc), returncode=pytest.ExitCode.USAGE_ERROR)
 
     count = device_count()
     if count >= 2:

@@ -21,6 +21,40 @@ import time as _time
 STEPS_MIB = (1536, 3072, 4608, 6144)
 
 
+def _cgroup_says_container() -> bool:
+    """Pid 1's cgroup naming a container runtime. Pid 1 rather than self, because these
+    containers run with --pid=host and `self` then sits in the host's cgroup."""
+    try:
+        text = pathlib.Path("/proc/1/cgroup").read_text(errors="replace")
+    except OSError:
+        return False
+    return any(n in text for n in ("docker", "containerd", "kubepods", "libpod", "podman"))
+
+
+def _root_is_overlay() -> bool:
+    """The root filesystem being an overlay, which an image is and a host is not."""
+    try:
+        for line in (
+            pathlib.Path("/proc/self/mountinfo").read_text(errors="replace").splitlines()
+        ):
+            parts = line.split(" - ")
+            if len(parts) >= 2 and parts[0].split()[4] == "/":
+                return parts[1].split()[0] in {"overlay", "overlayfs"}
+    except OSError:
+        return False
+    return False
+
+
+def _containment_signals() -> int:
+    return sum(
+        (
+            pathlib.Path("/.dockerenv").exists(),
+            _cgroup_says_container(),
+            _root_is_overlay(),
+        )
+    )
+
+
 def _local_stamp() -> str:
     """`HH:MM:SS.mmm` in local time, matching the operator's recorder byte for byte.
 
@@ -48,7 +82,12 @@ def main() -> int:
         lines.append(text)
 
     say("--- observed from INSIDE ---")
-    say(f"/.dockerenv present   : {pathlib.Path('/.dockerenv').exists()}")
+    marker = pathlib.Path("/.dockerenv").exists()
+    cgroup = _cgroup_says_container()
+    overlay = _root_is_overlay()
+    say(f"/.dockerenv present   : {marker}")
+    say(f"pid 1 cgroup          : {'container runtime' if cgroup else 'host'}")
+    say(f"root filesystem       : {'overlay' if overlay else 'not overlay'}")
     say(f"hostname              : {socket.gethostname()}")
     say(f"PID 1 comm            : {_read('/proc/1/comm')}")
     say(f"our PID              : {os.getpid()}")
@@ -115,7 +154,13 @@ def main() -> int:
 
     say()
     say(
-        f"VERDICT: ran inside a container ({pathlib.Path('/.dockerenv').exists()}), "
+        # Agreement between independent signals, not one file. `/.dockerenv` is a file
+        # anyone can `touch`, and resting the whole verdict on it meant a host run could
+        # self-certify — in an attestation whose entire purpose is being falsifiable.
+        # Two of three, because a rootless container with --pid=host legitimately shows the
+        # host's cgroup and demanding all three would refuse the real configuration.
+        f"VERDICT: ran inside a container ({_containment_signals() >= 2} on "
+        f"{_containment_signals()}/3 signals), "
         f"on {count} GPUs, holding {sum(STEPS_MIB)} MiB between {start} and {end}"
     )
 

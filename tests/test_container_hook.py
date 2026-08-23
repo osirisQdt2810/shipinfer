@@ -53,9 +53,8 @@ class TestRefuses:
     @pytest.mark.parametrize(
         "command",
         [
-            "pytest tests/",
             "pytest -m gpu",
-            "python -m pytest tests/scheduling -q",
+            "pytest -m multigpu",
             "python3 -m pytest -m multigpu 2>&1 | tail -20",
             "./scripts/run_tests.sh",
             "cd /somewhere && .venv/bin/python -m pytest -m gpu",
@@ -64,9 +63,9 @@ class TestRefuses:
             "trtexec --onnx=models/yolo26n.onnx",
             "python benchmarks/run_bench.py --cameras 50",
             "python benchmarks/compare_baseline.py",
-            "ls && pytest tests/ && echo done",
-            "nice -n 5 pytest tests/",
-            'bash -c "pytest tests/ -q"',
+            "ls && pytest -m gpu && echo done",
+            "nice -n 5 pytest -m gpu",
+            'bash -c "pytest -m gpu -q"',
         ],
     )
     def test_a_host_test_or_benchmark_run_is_refused(self, command: str) -> None:
@@ -111,7 +110,7 @@ class TestRefuses:
         """The silent bypass. ``shlex`` treats a newline as whitespace, so lexing a
         multi-line command whole made the second line's command an *argument* of the
         first line's — and a guard that only inspects executables then never saw it."""
-        assert refused("echo starting\npytest tests/ -m gpu\necho done") is not None
+        assert refused("echo starting\npytest -m gpu tests/\necho done") is not None
 
     def test_every_line_of_a_script_is_inspected(self) -> None:
         assert refused("git status\ncd /tmp\nshipinfer bench person_embedder") is not None
@@ -144,8 +143,8 @@ class TestAllows:
         [
             "deploy/rootless/test.sh tests/scheduling -q",
             "deploy/rootless/prove.sh",
-            "docker run --rm --device nvidia.com/gpu=all img pytest tests/",
-            "podman run --rm img pytest tests/",
+            "docker run --rm --device nvidia.com/gpu=all img pytest -m gpu",
+            "podman run --rm img pytest -m gpu",
             "make shell",
         ],
     )
@@ -153,7 +152,7 @@ class TestAllows:
         assert refused(command) is None, command
 
     def test_the_documented_override_works(self) -> None:
-        assert refused("SHIPINFER_ALLOW_HOST_RUN=1 pytest tests/ -q") is None
+        assert refused("SHIPINFER_ALLOW_HOST_RUN=1 pytest -m gpu -q") is None
 
     def test_a_version_check_is_inspection_not_measurement(self) -> None:
         """Deliberately allowed.  Refusing this would add friction with no
@@ -208,7 +207,7 @@ class TestTheGuardCanFail:
             {
                 "tool_name": "Bash",
                 "cwd": str(REPO_ROOT),
-                "tool_input": {"command": "pytest tests/"},
+                "tool_input": {"command": "pytest -m gpu"},
             }
         )
         result = subprocess.run(
@@ -284,14 +283,14 @@ class TestTheBypassesFoundInReview:
 
     def test_a_substitution_in_command_position_is_refused(self) -> None:
         """`$(which pytest)` resolves to pytest at runtime and to an opaque token here."""
-        assert refused("$(which pytest) tests/ -m gpu") is not None
+        assert refused("$(which pytest) -m gpu tests/") is not None
 
     def test_a_variable_in_command_position_is_refused(self) -> None:
-        assert refused("PYTEST=pytest; $PYTEST tests/") is not None
+        assert refused("PYTEST=pytest; $PYTEST -m gpu") is not None
 
     def test_the_attached_m_form_is_refused(self) -> None:
         """Only the detached `-m pytest` was inspected."""
-        assert refused("python -mpytest tests/ -m gpu") is not None
+        assert refused("python -mpytest -m gpu tests/") is not None
 
     def test_a_module_path_is_refused_not_just_a_file_path(self) -> None:
         """The blocked list held `run_bench.py`, so the module form walked through."""
@@ -300,7 +299,7 @@ class TestTheBypassesFoundInReview:
     def test_the_allowlist_is_not_matched_on_a_substring(self) -> None:
         """`make test` appearing anywhere in the text used to allow the whole command —
         the same mention-versus-invocation error, on the permissive side."""
-        assert refused('echo "make test" >/dev/null; pytest tests/ -m gpu') is not None
+        assert refused('echo "make test" >/dev/null; pytest -m gpu tests/') is not None
 
     def test_an_executed_heredoc_is_the_program(self) -> None:
         command = f"python3 - <<'XX'\n{self.IMPORT_LINE}\nprint(1)\nXX"
@@ -308,7 +307,7 @@ class TestTheBypassesFoundInReview:
 
     def test_a_shell_heredoc_read_from_stdin_is_the_program(self) -> None:
         """`bash -s` reads its script from the heredoc and takes no `-`."""
-        assert refused("bash -s <<'XX'\npytest tests/ -m gpu\nXX") is not None
+        assert refused("bash -s <<'XX'\npytest -m gpu tests/\nXX") is not None
 
 
 class TestTheBypassFixesDidNotCostTooMuch:
@@ -319,7 +318,7 @@ class TestTheBypassFixesDidNotCostTooMuch:
 
     def test_a_substitution_as_an_argument_is_allowed(self) -> None:
         """Refusing every `$(...)` would refuse the container scripts themselves."""
-        assert refused("docker run --rm --user $(id -u) img pytest tests/") is None
+        assert refused("docker run --rm --user $(id -u) img pytest -m gpu") is None
 
     def test_writing_a_file_that_mentions_a_device_is_allowed(self) -> None:
         """A heredoc redirected into a file is data. Refusing it would make the hook
@@ -344,7 +343,7 @@ class TestTheBypassFixesDidNotCostTooMuch:
 
     def test_a_real_newline_still_starts_a_new_command(self) -> None:
         """The other half: folding continuations must not fold genuine line breaks."""
-        assert refused("echo start\npytest tests/ -m gpu") is not None
+        assert refused("echo start\npytest -m gpu tests/") is not None
 
     def test_a_redirection_target_is_not_a_command(self) -> None:
         """`>` used to be treated as a command separator, so `cat > "$S/out.md"` produced a
@@ -353,4 +352,29 @@ class TestTheBypassFixesDidNotCostTooMuch:
         assert refused("cat > \"$OUT/reply.md\" <<'EOF'\nhello\nEOF") is None
 
     def test_a_redirection_does_not_hide_the_command_after_it(self) -> None:
-        assert refused("echo hi >/dev/null; pytest tests/ -m gpu") is not None
+        assert refused("echo hi >/dev/null; pytest -m gpu tests/") is not None
+
+
+class TestTheOfflineTierRunsAnywhere:
+    """ADR-001, and the reason the hook was refusing more than the rule says.
+
+    The offline tier must pass on a machine with no driver: that is what CI does on a plain
+    runner, and it is the promise that makes the pure layers verifiable. The hook refused it
+    anyway, which contradicted the rule rather than enforcing it — and blocked verifying the
+    in-process gate that now covers the part that matters.
+    """
+
+    def test_a_plain_offline_run_is_allowed(self) -> None:
+        assert refused("pytest tests/") is None
+
+    def test_an_explicit_offline_selection_is_allowed(self) -> None:
+        """`-m "not gpu"` mentions the marker and selects the opposite. A substring test
+        would refuse the default run — mention versus selection, again."""
+        assert refused("pytest -m 'not gpu' tests/") is None
+
+    def test_the_offline_tier_through_the_module_form_is_allowed(self) -> None:
+        assert refused("python -m pytest tests/core -q") is None
+
+    def test_the_device_tier_is_still_refused_both_ways(self) -> None:
+        assert refused("pytest -m gpu") is not None
+        assert refused("python -m pytest -m multigpu") is not None

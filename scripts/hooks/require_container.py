@@ -23,6 +23,7 @@ lost the first time.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -139,6 +140,55 @@ BLOCKED_MODULES = frozenset({"pytest", "py.test"})
 #: Whole package roots whose modules do the same — `python -m benchmarks.run_bench` is the
 #: bench runner however deeply the module path is nested, so the root is what is matched.
 BLOCKED_MODULE_ROOTS = frozenset({"benchmarks"})
+
+
+#: Runners whose *offline* use is allowed on a host, per ADR-001. Their device tiers are not.
+_TEST_RUNNERS = frozenset({"pytest", "py.test"})
+
+#: Marker expressions that select work needing an accelerator.
+_DEVICE_MARKERS = ("multigpu", "gpu")
+
+
+def _device_marker(args: list[str]) -> str:
+    marker = _marker_expression(args)
+    return f"-m {marker!r}" if marker else ""
+
+
+def _marker_expressions(args: list[str]) -> list[str]:
+    """Every ``-m`` value in the argv, in either spelling.
+
+    All of them, not the first. ``python -m pytest -m gpu`` carries two: the interpreter's
+    module and pytest's marker expression. Reading only the first found ``pytest`` and
+    concluded the run was offline, so the device tier walked through.
+    """
+    found: list[str] = []
+    for index, token in enumerate(args):
+        if token == "-m":
+            found.append(args[index + 1] if index + 1 < len(args) else "")
+        elif token.startswith("-m") and len(token) > 2 and not token.startswith("--"):
+            found.append(token[2:])
+    return found
+
+
+def _marker_expression(args: list[str]) -> str | None:
+    """The last ``-m`` value, which for a pytest run is the marker expression."""
+    values = _marker_expressions(args)
+    return values[-1] if values else None
+
+
+def _selects_device_tier(args: list[str]) -> bool:
+    """Whether this pytest invocation asks for the GPU tiers.
+
+    Read off ``-m`` rather than guessed. ``-m "not gpu"`` mentions the marker and selects
+    the opposite, so a substring test would refuse the default offline run — the same
+    mention-versus-selection error this file keeps having to relearn.
+    """
+    for expression in _marker_expressions(args):
+        if "not gpu" in expression or "not multigpu" in expression:
+            continue
+        if any(marker in expression for marker in _DEVICE_MARKERS):
+            return True
+    return False
 
 
 def _module_argument(args: list[str]) -> str | None:
@@ -276,6 +326,40 @@ def _reads_program_from_stdin(opening_line: str) -> bool:
     return False
 
 
+#: Module roots whose import means device work.
+_DEVICE_ROOTS = frozenset(
+    {"torch", "tensorrt", "cupy", "pycuda", "pynvml", "shipinfer.runtime"}
+)
+
+
+def _imports_device_stack(source: str) -> bool:
+    """Whether ``source`` really imports a device stack, by parsing it.
+
+    Falls back to the line-anchored regex when the body is not Python — a `bash -s` heredoc
+    has no AST — and returns False when it is Python that does not parse, because refusing
+    a half-typed script is the hook blocking on its own inability to read it.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return bool(DEVICE_IMPORT.search(source))
+    except ValueError:
+        return False
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = [node.module or ""]
+        else:
+            continue
+        for name in names:
+            root = name.split(".")[0]
+            if root in _DEVICE_ROOTS or name.startswith("shipinfer.runtime"):
+                return True
+    return False
+
+
 def _heredoc_runs_device(command: str) -> str | None:
     """A refusal when a heredoc body that will be *executed* reaches for an accelerator.
 
@@ -286,12 +370,11 @@ def _heredoc_runs_device(command: str) -> str | None:
     for opener, body in _split_heredocs(command)[1]:
         if not _reads_program_from_stdin(opener):
             continue
-        # `DEVICE_IMPORT`, not `DEVICE_TOKENS`: an import statement at line start is an
-        # execution; a bare mention of the word is not. Matching the word refused a heredoc
-        # whose body merely *quoted* a device call as test data — and, on its first outing,
-        # refused the very edit that was fixing this line. Same mention-versus-invocation
-        # distinction the rest of this file turns on.
-        if DEVICE_IMPORT.search(body):
+        # Parsed, not pattern-matched. The line-anchored regex fired on an import that
+        # appeared inside a *string literal* — a heredoc whose python writes another file
+        # containing that line — and refused the edit that was fixing this very check. An
+        # AST cannot make that mistake: a string is not an import statement.
+        if _imports_device_stack(body):
             return (
                 "a heredoc executed by an interpreter imports a device stack. The body is "
                 "the program, not a file being written."
@@ -478,7 +561,16 @@ def verdict(command: str, cwd: str | None = None) -> str | None:
         base = exe.rsplit("/", 1)[-1]
 
         if base in BLOCKED_COMMANDS:
-            return f"`{base}` runs the suite or the data plane on the host."
+            if base in _TEST_RUNNERS and not _selects_device_tier(args):
+                # The offline tier may run anywhere. That is ADR-001, it is what CI does on
+                # a plain runner, and it is the promise that makes the pure layers
+                # verifiable without a driver — so refusing it here contradicted the rule
+                # rather than enforcing it, and it blocked verifying the in-process gate.
+                # The device tiers are gated inside the pytest session, where no spelling
+                # avoids them (`shipinfer.runtime.containment`).
+                pass
+            else:
+                return f"`{base}` runs the data plane on the host."
 
         if any(script in exe for script in BLOCKED_SCRIPTS):
             return f"`{base}` is a test or benchmark runner."
@@ -493,8 +585,10 @@ def verdict(command: str, cwd: str | None = None) -> str | None:
             module = _module_argument(args)
             if module is not None:
                 root = module.split(".")[0]
-                if module in BLOCKED_MODULES or root in BLOCKED_MODULE_ROOTS:
-                    return f"`python -m {module}` runs the suite or a benchmark on the host."
+                if module in BLOCKED_MODULES and _selects_device_tier(args):
+                    return f"`python -m {module} {_device_marker(args)}` runs the device tier."
+                if root in BLOCKED_MODULE_ROOTS:
+                    return f"`python -m {module}` runs a benchmark on the host."
             if any(script in joined for script in BLOCKED_SCRIPTS):
                 return "this invokes a test or benchmark runner."
             if DEVICE_TOKENS.search(joined):

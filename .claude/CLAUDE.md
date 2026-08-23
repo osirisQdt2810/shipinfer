@@ -46,24 +46,41 @@ ever called `cudaSetDevice`.
 - **Distribution:** a wheel plus a container. There is no installer and no GUI.
 
 ### Where commands run (RULE — enforced, not advisory)
-**Every test, benchmark and measurement runs inside a container.** `deploy/` holds the
-recipes: `deploy/rootless/test.sh` runs the suite in the dev image with the repository
-bind-mounted, `deploy/rootless/prove.sh` produces the container+GPU attestation, and
-`make shell` drops you into an interactive shell there.
+**Anything that touches an accelerator runs inside a container.** That means the GPU test
+tiers (`-m gpu`, `-m multigpu`), every benchmark, `shipinfer bench|serve`, and any engine
+build. `deploy/` holds the recipes: `deploy/rootless/test.sh` for the suite,
+`deploy/rootless/bench.sh` for the benchmark, `deploy/rootless/prove.sh` for the
+container+GPU attestation, `make shell` for an interactive shell.
 
-This is enforced by `scripts/hooks/require_container.py`, wired as a `PreToolUse` hook on
-`Bash` in `.claude/settings.json`: a command that runs pytest, touches an accelerator, or
-builds a TensorRT engine is **denied** unless it is already containerised. The hook exists
-because the rule was written down first and then quietly broken — the host is faster to
-iterate on, which is a reason, not a permission. Set `SHIPINFER_ALLOW_HOST_RUN=1` in the
-command itself only when the operator has said so, and say in the report that you did.
+**The offline tier is exempt, deliberately.** `pytest` with no marker must pass on a machine
+with no driver — that is ADR-001, it is what CI does on a plain runner, and it is the promise
+that makes the pure layers verifiable anywhere. The rule is about *measurements*, and the
+offline tier produces none.
+
+Enforced in two places, and the split matters:
+
+- **`src/shipinfer/runtime/containment.py`** is the gate. It runs inside the process that
+  would do the work — `tests/conftest.py` for the device tiers, the `serve` and `bench`
+  commands for the CLI — so there is no spelling that avoids it. A container is established
+  by *agreement* between the marker file, pid 1's cgroup and an overlay root: `/.dockerenv`
+  alone is a file anyone can `touch`, and resting on it let a host run self-certify.
+- **`scripts/hooks/require_container.py`** is a `PreToolUse` hook on `Bash`, and is now an
+  advisory fast path rather than the enforcement point. It catches the common case before a
+  command runs at all, which is useful. It is *not* sound: a deny-list over command text
+  cannot be, and review found nine ordinary spellings past it — `( pytest -m gpu )`,
+  `eval "..."`, `coverage run -m pytest`, `echo pytest | sh`. Fix bypasses when you find
+  them, but do not add a rule that only the hook enforces.
+
+Per-command override `SHIPINFER_ALLOW_HOST_RUN=1`, only when the operator has said so, and
+say in the report that you used it. There is no session-wide switch: "I turned it off an hour
+ago and forgot" is how the rule was lost the first time.
 
 Two consequences worth stating plainly:
 - **A host number is not a production number.** Host `nvcc` here is 11.5 against a 12.6
   driver, so `sm_89` will not build and host timings are not the deployment's timings.
-- **The offline tier is CPU-only by design, which is not the same as "the GPU path is
-  covered".** `pytest` with no accelerator proves the pure-logic tier; only `-m gpu` inside
-  the container says anything about the data plane.
+- **The offline tier being CPU-only by design is not the same as "the GPU path is covered".**
+  `pytest` with no accelerator proves the pure-logic tier; only `-m gpu` inside the container
+  says anything about the data plane.
 
 ## Architecture (layered; one-way imports)
 
