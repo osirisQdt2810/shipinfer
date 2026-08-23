@@ -52,7 +52,13 @@ from shipinfer.pipeline.graph.stage import (
     StageOutcome,
     StageStatus,
 )
-from shipinfer.pipeline.graph.state import DETECTIONS, FRAME_INPUT, FrameState, field_map_names
+from shipinfer.pipeline.graph.state import (
+    DETECTIONS,
+    FRAME_INPUT,
+    RECORD_CONVERTERS,
+    FrameState,
+    field_map_names,
+)
 from shipinfer.pipeline.schema import ObjectRecord
 from shipinfer.runtime.ops import ImageOps
 
@@ -119,6 +125,19 @@ class PipelineGraph:
         self.name = name
         self._stages = tuple(stages)
         self._field_map = dict(field_map if field_map is not None else DEFAULT_RECORD_FIELDS)
+        # Checked here because `state.py` claims it is, and it was not: `validate()` only
+        # checks that the *batch names* a field maps from are produced, never that the
+        # field itself exists on the record. A typo therefore constructed, validated and
+        # started cleanly, and then raised inside `_build_event` on every single frame —
+        # where the runner charged it to the Kafka sink, so the operator saw a failing sink
+        # with an innocent broker and an empty topic.
+        unknown = sorted(set(self._field_map) - set(RECORD_CONVERTERS))
+        if unknown:
+            raise ConfigurationError(
+                f"graph {self.name!r}: field map names {unknown}, which "
+                f"{'is not a field' if len(unknown) == 1 else 'are not fields'} of "
+                f"ObjectRecord. Known: {sorted(RECORD_CONVERTERS)}"
+            )
         duplicates = sorted(
             {
                 s.name

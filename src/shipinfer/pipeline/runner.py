@@ -490,13 +490,28 @@ class PipelineRunner:
                     )
                 return
             event = self._build_event(result)
+        except Exception:
+            # Building the event is ours; the sink has not been touched yet. Counting this
+            # as a sink failure sent operators to an innocent broker while the real fault
+            # was a field-map typo raising once per frame.
+            self._metrics.build_failures.inc(camera=result.state.camera_id)
+            _LOG.exception("failed to build the event for %s", result.key)
+            return
+        try:
             self._sink.emit(event)
+        except Exception:  # pragma: no cover - emission must not kill the caller's thread
+            self._metrics.sink_failures.inc(sink=self._sink.name)
+            _LOG.exception("sink %r rejected %s", self._sink.name, result.key)
+            return
+        try:
             self._record(result, event)
             if future is not None and future.set_running_or_notify_cancel():
                 future.set_result(event)
-        except Exception:  # pragma: no cover - emission must not kill the caller's thread
-            self._metrics.sink_failures.inc(sink=self._sink.name)
-            _LOG.exception("failed to publish %s", result.key)
+        except Exception:  # pragma: no cover
+            # After a successful emit. Also not the sink's fault, and the distinction
+            # matters: the event *was* published.
+            self._metrics.build_failures.inc(camera=result.state.camera_id)
+            _LOG.exception("post-emit bookkeeping failed for %s", result.key)
 
     def _build_event(self, result: FrameResult) -> PerceptionEvent:
         state = result.state

@@ -58,6 +58,7 @@ class PipelineMetrics:
     objects_total: Counter = field(init=False)
     crops_total: Counter = field(init=False)
     sink_failures: Counter = field(init=False)
+    build_failures: Counter = field(init=False)
 
     frame_latency_us: Histogram = field(init=False)
     stage_latency_us: Histogram = field(init=False)
@@ -121,6 +122,13 @@ class PipelineMetrics:
         self.sink_failures = r.counter(
             "shipinfer_pipeline_sink_failures_total",
             "Emissions the result sink refused, per sink.",
+        )
+        self.build_failures = r.counter(
+            "shipinfer_pipeline_build_failures_total",
+            # Separate from `sink_failures` because they point at different people. A
+            # field-map typo used to raise inside `_build_event` once per frame and be
+            # counted against the sink, sending operators to an innocent broker.
+            "Events this pipeline could not build or record, per camera. Not the sink.",
         )
 
         self.frame_latency_us = r.histogram(

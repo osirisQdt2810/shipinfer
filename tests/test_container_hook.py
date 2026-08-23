@@ -243,6 +243,27 @@ class TestTheGuardCanFail:
         assert result.returncode == 0
         assert result.stdout.strip() == ""
 
+    def test_inside_a_container_the_hook_stands_down(self) -> None:
+        """The hook gates the host, not the container. If it refused inside one too,
+        `deploy/rootless/test.sh` could never run the suite."""
+        payload = json.dumps(
+            {
+                "tool_name": "Bash",
+                "cwd": str(REPO_ROOT),
+                "tool_input": {"command": "pytest tests/"},
+            }
+        )
+        result = subprocess.run(
+            [sys.executable, str(HOOK)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={**os.environ, "SHIPINFER_IN_CONTAINER": "1"},
+        )
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+
     # Deliberately no assertion that `.claude/settings.json` wires the hook up. The
     # offline tier must not depend on the agent harness's own configuration: a review
     # environment that rewrites that file made this the tier's only failure, and the
