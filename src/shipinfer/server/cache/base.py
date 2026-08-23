@@ -22,7 +22,7 @@ from typing import ClassVar
 
 from shipinfer.core.types import Tensor
 
-__all__ = ["ResponseCache", "cache_key"]
+__all__ = ["ResponseCache", "cache_key", "freeze_outputs"]
 
 
 def cache_key(model: str, version: int, inputs: Mapping[str, Tensor]) -> str:
@@ -52,11 +52,40 @@ class ResponseCache(abc.ABC):
 
     name: ClassVar[str] = "abstract"
 
-    @abc.abstractmethod
-    def get(self, key: str) -> dict[str, Tensor] | None: ...
+    def key_for(self, model: str, version: int, inputs: Mapping[str, Tensor]) -> str | None:
+        """The key these inputs would be stored under, or ``None`` if they cannot be.
+
+        Hashing lives behind the cache object rather than at the call site so the disabled
+        case costs one virtual call instead of a BLAKE2b pass over every input byte. That
+        pass is by far the expensive half of a lookup, and a model with caching off must
+        not pay it — see :class:`~shipinfer.server.cache.null.NullResponseCache`.
+        """
+        try:
+            return cache_key(model, version, inputs)
+        except RuntimeError:
+            # Device-resident inputs: the D2H copy needed to hash them would cost more
+            # than the hit could ever save.
+            return None
 
     @abc.abstractmethod
-    def put(self, key: str, outputs: Mapping[str, Tensor]) -> None: ...
+    def get(self, key: str) -> dict[str, Tensor] | None:
+        """The stored outputs, or ``None`` on a miss.
+
+        The returned mapping is fresh but the tensors inside it are shared with every
+        other hit on this key and sealed against writes by :func:`freeze_outputs`. Callers
+        treat a cached response as read-only; one that needs to mutate makes its own copy.
+        """
+
+    @abc.abstractmethod
+    def put(self, key: str, outputs: Mapping[str, Tensor]) -> None:
+        """Store the outputs of a completed request.
+
+        Implementations must run the outputs through :func:`freeze_outputs` — that is what
+        makes the read-only contract on :meth:`get` true rather than merely documented.
+
+        Only ever called for a request that succeeded, with host-resident outputs. A
+        cached exception would be served forever, and device memory is not cacheable.
+        """
 
     @abc.abstractmethod
     def stats(self) -> dict[str, int]: ...
@@ -70,3 +99,31 @@ class ResponseCache(abc.ABC):
         stats = self.stats()
         total = stats.get("hits", 0) + stats.get("misses", 0)
         return stats.get("hits", 0) / total if total else 0.0
+
+
+def freeze_outputs(outputs: Mapping[str, Tensor]) -> dict[str, Tensor]:
+    """Detach outputs from the batch they were scattered out of, then seal them.
+
+    Two failure modes, one fix. A scattered output is a *view* into the whole batch's
+    array (:meth:`~shipinfer.core.types.Tensor.slice_batch`), so storing it as-is would
+    pin an entire batch in memory behind one small entry and make the cache's byte
+    accounting a fiction. And a hit hands the same object to every later caller, so one
+    caller writing into it silently corrupts every subsequent hit.
+
+    So the bytes are copied once on the way in and the copy is marked non-writeable: a
+    caller that mutates a cached response gets a ``ValueError`` from numpy at the line
+    with the bug, instead of a wrong answer somewhere else an hour later.
+
+    Args:
+        outputs: host-resident tensors. Filtering device-resident ones out is the caller's
+            job — reading one here would mean a D2H copy inside the cache.
+
+    Raises:
+        RuntimeError: if a tensor is device-resident, from ``Tensor.numpy()``.
+    """
+    sealed: dict[str, Tensor] = {}
+    for name, tensor in outputs.items():
+        array = tensor.numpy().copy()
+        array.flags.writeable = False
+        sealed[name] = Tensor.from_numpy(array)
+    return sealed

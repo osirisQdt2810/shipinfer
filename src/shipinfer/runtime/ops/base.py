@@ -104,14 +104,28 @@ class ImageOps(abc.ABC):
         and on a busy host the round trip can cost several times the kernel itself.
 
         Args:
-            out: a pre-allocated ``(N, 3, H, W)`` float32 CUDA tensor. Its shape defines the
-                destination size, and its address must be stable if a CUDA graph will
-                capture the consumer.
+            out: a pre-allocated output tensor, which an implementation writes into
+                directly and therefore must be able to trust. It must be
+
+                * **on the device this ``ImageOps`` is bound to** — a tensor from another
+                  GPU is a cross-device write, which ADR-002 says never happens here;
+                * **float32**, because that is what the kernels write. A wider dtype has
+                  enough bytes to pass a size check and still receives garbage;
+                * **contiguous** and rank 4 with shape ``(N, 3, H, W)``, ``N`` at least
+                  ``len(images)``. A channels-last or sliced tensor has the same element
+                  count and would be filled as though it were contiguous NCHW: scrambled
+                  channels, and no error to say so;
+                * **stable in address**, if a CUDA graph will capture the consumer.
+
+                ``H`` and ``W`` define the destination size. Implementations must *check*
+                these and raise, never write on the assumption that the caller got them
+                right — every violation above is silent at the pixel level.
 
         Returns:
             ``(scales, pads)`` — the geometry needed to invert the letterbox exactly.
 
         Raises:
+            ValidationError: if ``out`` violates any of the requirements above.
             NotImplementedError: for host-only implementations, which have no device to
                 write to. Callers should branch on :attr:`on_device` rather than catching.
         """

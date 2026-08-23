@@ -7,7 +7,7 @@ from collections import OrderedDict
 from collections.abc import Mapping
 
 from shipinfer.core.types import Tensor
-from shipinfer.server.cache.base import ResponseCache
+from shipinfer.server.cache.base import ResponseCache, freeze_outputs
 from shipinfer.server.cache.registry import RESPONSE_CACHES
 
 __all__ = ["LruResponseCache"]
@@ -22,7 +22,8 @@ class LruResponseCache(ResponseCache):
     the dict overhead. Both are cheap to maintain on insert.
 
     The lock is held only for the ``OrderedDict`` operations, never across a copy, so a
-    lookup costs a hash and a move-to-end.
+    lookup costs a hash and a move-to-end. What :meth:`get` returns is read-only, sealed
+    once on the way in by :func:`~shipinfer.server.cache.base.freeze_outputs`.
     """
 
     name = "lru"
@@ -46,10 +47,12 @@ class LruResponseCache(ResponseCache):
                 return None
             self._entries.move_to_end(key)
             self._hits += 1
-            return entry
+            # A fresh mapping so a caller adding or dropping a key cannot reshape the
+            # stored entry; the tensors inside it are non-writeable and safely shared.
+            return dict(entry)
 
     def put(self, key: str, outputs: Mapping[str, Tensor]) -> None:
-        payload = dict(outputs)
+        payload = freeze_outputs(outputs)
         nbytes = sum(t.nbytes for t in payload.values())
         if nbytes > self._max_bytes:
             return  # one entry may not evict the entire cache
