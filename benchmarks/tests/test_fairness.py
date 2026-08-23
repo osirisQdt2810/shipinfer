@@ -136,3 +136,27 @@ class TestTheHarnessCallsTheApiThatExists:
         # Narrow on purpose: `instance.stats()` in the same function is correct and is a
         # different object's API. A guard that matched the bare word would fail on it.
         assert "manager.stats()" not in source, "IngestManager has no stats()"
+
+
+class TestTheReimplementedBaselineIsGone:
+    """`compare_baseline.py` drove a *re-implementation* of the baseline against a synthetic
+    backend, on the premise — stated in its own docstring — that counting-simulation could
+    not be run here. `harness/baseline.py` compiles and runs the submodule's own binary, so
+    the premise is false and the file was a second, wrong answer to the same question.
+
+    Asserted rather than assumed because deleting it did not stick: a later merge from main
+    resurrected it, exactly as it resurrected three model configs, and the PR body claimed
+    a deletion that had been undone. A test is the only thing a merge cannot quietly revert.
+    """
+
+    def test_the_file_is_absent(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        assert not (repo / "benchmarks" / "compare_baseline.py").exists(), (
+            "compare_baseline.py is back. It measures a re-implementation against a "
+            "synthetic backend; `benchmarks/run_bench.py` runs the real binary."
+        )
+
+    def test_the_real_entry_point_is_present(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        assert (repo / "benchmarks" / "run_bench.py").is_file()
+        assert (repo / "benchmarks" / "harness" / "baseline.py").is_file()

@@ -21,10 +21,12 @@ on the pages being locked.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 
 import pytest
 
+from shipinfer.core.errors import DeviceError
 from shipinfer.core.settings import MemorySettings
 from shipinfer.runtime.memory import MemoryPool, PinnedStagingPool
 from shipinfer.runtime.platform import is_available
@@ -141,3 +143,80 @@ class TestPoolLifecycle:
 
         pool.close()
         assert not any(k.startswith("staging[") for k in pool.stats())
+
+
+@contextlib.contextmanager
+def _forced_capture(active: bool):
+    """Make `torch.cuda.is_current_stream_capturing` report ``active``.
+
+    The pool probes for that function with `getattr`, so this is the seam. Restored on the
+    way out, and tolerant of a build that has no such attribute at all.
+    """
+    sentinel = object()
+    previous = getattr(torch.cuda, "is_current_stream_capturing", sentinel)
+    torch.cuda.is_current_stream_capturing = lambda: active
+    try:
+        yield
+    finally:
+        if previous is sentinel:
+            del torch.cuda.is_current_stream_capturing
+        else:
+            torch.cuda.is_current_stream_capturing = previous
+
+
+class TestItRefusesToAllocateMidCapture:
+    """The guard that stopped a graph-capture failure from bricking an instance.
+
+    A pinned host allocation calls into the driver, which CUDA forbids while a stream is
+    capturing. Letting `torch.empty` discover that is not equivalent to refusing here: the
+    failed allocation left the caching allocator with a capture still marked underway, so the
+    next two capture attempts died with an internal assert and the instance never became
+    ready. Observed on a four-GPU bench run — a graph-capture optimisation took the server
+    down.
+
+    Offline, because `_capturing` is a `getattr` probe a monkeypatch can force. Without these
+    tests, dropping the `self.pinned and` guard or the exception suppression in `_capturing`
+    leaves the suite green while every capture on a real box resumes bricking instances.
+    """
+
+    def test_a_cached_buffer_is_still_served_mid_capture(self) -> None:
+        """Reuse is the whole point: a warmed pool must keep working inside a capture."""
+        pool = PinnedStagingPool(owner="test")
+        first = pool.get("in:images", (2, 3), torch.float32)
+
+        with _forced_capture(True):
+            again = pool.get("in:images", (2, 3), torch.float32)
+
+        assert again is first
+
+    def test_a_new_buffer_is_refused_mid_capture(self, monkeypatch) -> None:
+        pool = PinnedStagingPool(owner="test")
+        monkeypatch.setattr(pool, "pinned", True)
+
+        with _forced_capture(True), pytest.raises(DeviceError, match="before capture began"):
+            pool.get("out:embedding", (8, 512), torch.float32)
+
+    def test_the_refusal_names_the_buffer_and_the_remedy(self, monkeypatch) -> None:
+        pool = PinnedStagingPool(owner="person_embedder_0")
+        monkeypatch.setattr(pool, "pinned", True)
+
+        with _forced_capture(True), pytest.raises(DeviceError) as caught:
+            pool.get("out:embedding", (8, 512), torch.float32)
+
+        message = str(caught.value)
+        assert "person_embedder_0" in message and "out:embedding" in message
+        assert "warm the pool" in message, "it has to say what to do about it"
+
+    def test_a_pageable_pool_is_unaffected(self, monkeypatch) -> None:
+        """With no accelerator the buffers are ordinary memory and there is no capture to
+        protect, so refusing would break the offline tier for nothing."""
+        pool = PinnedStagingPool(owner="test")
+        monkeypatch.setattr(pool, "pinned", False)
+
+        with _forced_capture(True):
+            assert pool.get("in:images", (2, 3), torch.float32) is not None
+
+    def test_allocation_outside_a_capture_is_normal(self) -> None:
+        pool = PinnedStagingPool(owner="test")
+        with _forced_capture(False):
+            assert pool.get("in:images", (4, 4), torch.float32) is not None
