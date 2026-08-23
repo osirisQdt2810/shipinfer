@@ -14,3 +14,4 @@ machine the project is developed on.
 - [workspace-rename.md](workspace-rename.md) — shipproj was renamed to shipinfer; the old path is a symlink
 - [reference-repos.md](reference-repos.md) — what each checkout under `references/` is
 - [two-repo-split.md](two-repo-split.md) — shipinfer = system, shipvision = algorithms; one-way dependency
+- [parallel-lane-git-hygiene.md](parallel-lane-git-hygiene.md) — parallel agents in one checkout: stage own paths only, never create branches

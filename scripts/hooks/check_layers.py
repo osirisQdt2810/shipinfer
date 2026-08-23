@@ -36,6 +36,11 @@ FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
     "backends": {"fastapi", "uvicorn", "confluent_kafka"},
 }
 
+#: Top-level modules that are not layers and may therefore be imported from anywhere.
+#: ``_C`` is the compiled extension; ``envs`` is the single place the process environment is
+#: read, which is only useful if every layer can reach it.
+NON_LAYER_MODULES = frozenset({"_C", "envs"})
+
 #: Which sibling packages a layer may import. A layer may always import itself.
 ALLOWED_INTERNAL: dict[str, set[str]] = {
     "core": set(),
@@ -45,7 +50,10 @@ ALLOWED_INTERNAL: dict[str, set[str]] = {
     "backends": {"core", "repository", "runtime"},
     "server": {"core", "repository", "runtime", "backends", "scheduling"},
     "pipeline": {"core", "repository", "runtime", "backends", "scheduling", "server"},
-    "ingest": {"core", "runtime"},
+    # ingest publishes frames straight into the fair, bounded queue from `scheduling`
+    # rather than owning a buffer of its own — that shared evict-oldest buffer is the
+    # inherited bug ADR-005 exists to remove, so the dependency is deliberate.
+    "ingest": {"core", "runtime", "scheduling"},
     "observability": {"core"},
 }
 
@@ -91,7 +99,7 @@ def check(path: Path) -> list[str]:
             )
         if allowed is not None and module.startswith("shipinfer."):
             target = module.split(".")[1]
-            if target != layer and target not in allowed and target != "_C":
+            if target != layer and target not in allowed and target not in NON_LAYER_MODULES:
                 problems.append(
                     f"{rel}:{lineno}: layer {layer!r} must not import shipinfer.{target} "
                     f"(allowed: {sorted(allowed) or 'nothing'})"

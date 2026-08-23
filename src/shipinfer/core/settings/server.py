@@ -10,6 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from shipinfer.core.settings.device import DeviceSettings
 from shipinfer.core.settings.execution import ExecutionSettings
 from shipinfer.core.settings.http import HttpSettings
+from shipinfer.core.settings.ingest import IngestSettings
 from shipinfer.core.settings.memory import MemorySettings
 from shipinfer.core.settings.observability import ObservabilitySettings
 from shipinfer.core.settings.scheduler import SchedulerSettings
@@ -47,6 +48,7 @@ class ServerSettings(BaseSettings):
     memory: MemorySettings = Field(default_factory=MemorySettings)
     scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
     execution: ExecutionSettings = Field(default_factory=ExecutionSettings)
+    ingest: IngestSettings = Field(default_factory=IngestSettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     http: HttpSettings = Field(default_factory=HttpSettings)
 

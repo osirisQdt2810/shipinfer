@@ -58,3 +58,7 @@ references/
 !.vscode/settings.json.example
 .DS_Store
 .claude/settings.local.json
+
+# Third-party evaluation datasets, fetched by scripts/fetch_datasets.py.
+# Never committed: they carry their own licences (MOT17 is CC BY-NC-SA) and are large.
+/data/
