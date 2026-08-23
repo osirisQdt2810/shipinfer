@@ -25,7 +25,7 @@ from shipinfer.ingest.camera.actor import CameraActor, SourceFactory
 from shipinfer.ingest.camera.db import load_camera_db
 from shipinfer.ingest.camera.health import CameraHealth, CameraState, IngestSummary
 from shipinfer.ingest.metrics import IngestMetrics
-from shipinfer.scheduling.queues import RequestQueue
+from shipinfer.ingest.sink import FrameSink
 
 __all__ = ["IngestManager"]
 
@@ -36,9 +36,10 @@ class IngestManager:
     """Owns every camera actor, and the fleet's health.
 
     Args:
-        queue: the queue every camera publishes into. One queue, with per-camera lanes
-            inside it — not one queue per camera, and not one shared eviction buffer
-            (ADR-005).
+        sink: where every camera publishes. One sink for the fleet, because the fairness
+            that matters is *between* cameras and can only be arbitrated somewhere they
+            meet — but see :mod:`shipinfer.ingest.sink` for why that arbitration is the
+            consumer's job and not this package's (ADR-005).
         settings: the fleet configuration, including the camera list.
         metrics: shared metric handles, labelled by camera.
         source_factory: overrides source construction for every actor. The seam a test uses
@@ -47,7 +48,7 @@ class IngestManager:
 
     def __init__(
         self,
-        queue: RequestQueue,
+        sink: FrameSink,
         *,
         settings: IngestSettings | None = None,
         metrics: IngestMetrics | None = None,
@@ -55,7 +56,7 @@ class IngestManager:
     ) -> None:
         self.settings = settings or IngestSettings()
         self.metrics = metrics or IngestMetrics()
-        self._queue = queue
+        self._sink = sink
         self._source_factory = source_factory
         self._actors: dict[str, CameraActor] = {}
         self._lock = threading.Lock()
@@ -135,7 +136,7 @@ class IngestManager:
                 )
             actor = CameraActor(
                 config,
-                self._queue,
+                self._sink,
                 settings=self.settings,
                 metrics=self.metrics,
                 source_factory=self._source_factory,

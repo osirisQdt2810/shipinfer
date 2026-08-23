@@ -24,7 +24,7 @@ import pytest
 from shipinfer.core.settings.ingest import CameraConfig, IngestSettings
 from shipinfer.ingest.base import FrameSource
 from shipinfer.ingest.frame import FrameCounter
-from shipinfer.scheduling.queues import BatchWindow, FairPriorityQueue
+from shipinfer.ingest.sink import BoundedSink
 
 FRAME_COUNT = 6
 FRAME_HEIGHT = 6
@@ -32,9 +32,13 @@ FRAME_WIDTH = 8
 
 
 def synthetic_image(index: int, *, height: int = FRAME_HEIGHT, width: int = FRAME_WIDTH):
-    """A tiny BGR image whose content encodes its index, so a reorder is visible."""
+    """A tiny BGR image whose content encodes its index, so a reorder is visible.
+
+    The index wraps at 255 because the channel is ``uint8``; every caller that asserts on
+    the content uses fewer frames than that, and the ones that do not only need an image.
+    """
     image = np.zeros((height, width, 3), dtype=np.uint8)
-    image[:, :, 0] = index + 1
+    image[:, :, 0] = (index + 1) % 256
     return image
 
 
@@ -240,22 +244,13 @@ def scripted_factory():
 
 
 @pytest.fixture()
-def queue():
-    """A small fair queue, so overflow behaviour is reachable in a test."""
-    return FairPriorityQueue("ingest", capacity=8)
+def sink():
+    """A small bounded sink, so a refusal is reachable in a test.
 
-
-@pytest.fixture()
-def drain():
-    """Pop everything currently queued, without blocking on an empty queue."""
-
-    def _drain(target: FairPriorityQueue, limit: int = 512) -> list:
-        items: list = []
-        while target.depth and len(items) < limit:
-            items.extend(target.get_batch(BatchWindow(max_batch_size=min(32, limit))))
-        return items
-
-    return _drain
+    Small on purpose: a sink big enough never to refuse would let a bug in the actor's drop
+    accounting pass unnoticed.
+    """
+    return BoundedSink(capacity=8, name="ingest")
 
 
 @pytest.fixture()

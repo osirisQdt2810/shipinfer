@@ -64,9 +64,11 @@ class CameraConfig(BaseModel):
     hwaccel: bool | None = None
     #: A camera watching a restricted area can outrank the rest of the fleet in the
     #: scheduler's priority lanes. This is the customisation a generic server has no word
-    #: for (ADR-005).
+    #: for (ADR-005). Read by the `FrameSink` adapter, not by `shipinfer.ingest`: a frame is
+    #: data, a priority is policy, and the decode path should not know about lanes.
     priority: Priority = Priority.NORMAL
-    #: Override the model these frames are submitted to; ``None`` inherits.
+    #: Override the model these frames are submitted to; ``None`` inherits. Also read by the
+    #: sink adapter rather than by this package.
     model: str | None = None
     #: Where this camera's ``frame_id`` sequence starts. Non-zero when a restarted process
     #: must not reuse tags a downstream tracker has already seen.
@@ -124,6 +126,13 @@ class IngestSettings(BaseModel):
     hwaccel: bool | None = None
     transport: RtspTransport | None = None
     latency_ms: int | None = Field(default=None, ge=0)
+
+    # The three fields below are ingest *configuration* but not ingest *behaviour*: they
+    # describe how a frame becomes an inference request, which is dispatch policy and is
+    # therefore read by the `FrameSink` adapter in `pipeline`, never by `shipinfer.ingest`
+    # itself (see `shipinfer.ingest.sink`). They live here because an operator configuring
+    # the video path expects to find them in one place, and because they are per-fleet
+    # rather than per-model.
 
     #: Where decoded frames are submitted. The first stage of the perception DAG.
     target_model: str = "ship_detector"

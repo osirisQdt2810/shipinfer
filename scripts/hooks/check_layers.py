@@ -53,10 +53,10 @@ ALLOWED_INTERNAL: dict[str, set[str]] = {
     "backends": {"core", "repository", "runtime"},
     "server": {"core", "repository", "runtime", "backends", "scheduling"},
     "pipeline": {"core", "repository", "runtime", "backends", "scheduling", "server"},
-    # ingest publishes frames straight into the fair, bounded queue from `scheduling`
-    # rather than owning a buffer of its own — that shared evict-oldest buffer is the
-    # inherited bug ADR-005 exists to remove, so the dependency is deliberate.
-    "ingest": {"core", "runtime", "scheduling"},
+    # `ingest` does NOT depend on `scheduling`: it publishes into the `FrameSink` protocol
+    # it owns, and `pipeline` supplies the queue-backed implementation. Mapping a frame onto
+    # a request is dispatch policy, and it belongs next to the code that undoes the mapping.
+    "ingest": {"core", "runtime"},
     "observability": {"core"},
 }
 

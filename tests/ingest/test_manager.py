@@ -10,7 +10,13 @@ import pytest
 
 from shipinfer.core.errors import CameraUnavailableError, ConfigurationError
 from shipinfer.core.settings.ingest import CameraConfig, IngestSettings
-from shipinfer.ingest import CameraState, IngestManager, IngestMetrics, load_camera_db
+from shipinfer.ingest import (
+    BoundedSink,
+    CameraState,
+    IngestManager,
+    IngestMetrics,
+    load_camera_db,
+)
 
 from .conftest import FRAME_COUNT, synthetic_image
 
@@ -38,7 +44,7 @@ class TestFleetLifecycle:
     """One actor per enabled camera, started and stopped exactly once."""
 
     def test_start_runs_one_actor_per_enabled_camera(
-        self, queue, fast_settings, scripted_factory, make_camera
+        self, sink, fast_settings, scripted_factory, make_camera
     ):
         factory, created = scripted_factory(script=[synthetic_image(0)])
         settings = fast_settings(
@@ -48,19 +54,19 @@ class TestFleetLifecycle:
                 make_camera("cam2", enabled=False),
             ]
         )
-        with IngestManager(queue, settings=settings, source_factory=factory) as manager:
+        with IngestManager(sink, settings=settings, source_factory=factory) as manager:
             assert manager.camera_ids == ["cam0", "cam1"]
             assert "cam2" not in manager
-            assert _wait_for(lambda: queue.depth >= 2)
+            assert _wait_for(lambda: sink.depth >= 2)
         assert len(manager) == 0
         assert all(source.closes >= 1 for source in created)
 
     def test_start_and_stop_are_idempotent(
-        self, queue, fast_settings, scripted_factory, make_camera
+        self, sink, fast_settings, scripted_factory, make_camera
     ):
         factory, _ = scripted_factory(script=[synthetic_image(0)])
         settings = fast_settings(cameras=[make_camera("cam0")])
-        manager = IngestManager(queue, settings=settings, source_factory=factory)
+        manager = IngestManager(sink, settings=settings, source_factory=factory)
         manager.stop()  # before start
         manager.start()
         manager.start()
@@ -74,11 +80,11 @@ class TestRuntimeMembership:
     """Cameras are added and removed while the server runs."""
 
     def test_add_and_remove_a_camera_at_runtime(
-        self, queue, fast_settings, scripted_factory, make_camera
+        self, sink, fast_settings, scripted_factory, make_camera
     ):
         """The reference service exposed this over REST, and a fleet genuinely needs it."""
         factory, _ = scripted_factory(script=[synthetic_image(0)])
-        manager = IngestManager(queue, settings=fast_settings(), source_factory=factory)
+        manager = IngestManager(sink, settings=fast_settings(), source_factory=factory)
         manager.start()
         try:
             assert manager.camera_ids == []
@@ -94,10 +100,10 @@ class TestRuntimeMembership:
             manager.stop()
 
     def test_adding_a_camera_twice_is_refused(
-        self, queue, fast_settings, scripted_factory, make_camera
+        self, sink, fast_settings, scripted_factory, make_camera
     ):
         factory, _ = scripted_factory(script=[None])
-        manager = IngestManager(queue, settings=fast_settings(), source_factory=factory)
+        manager = IngestManager(sink, settings=fast_settings(), source_factory=factory)
         try:
             manager.add_camera(make_camera("cam0"))
             with pytest.raises(ConfigurationError, match="already running"):
@@ -106,10 +112,10 @@ class TestRuntimeMembership:
             manager.stop()
 
     def test_removing_an_unknown_camera_names_what_is_running(
-        self, queue, fast_settings, scripted_factory, make_camera
+        self, sink, fast_settings, scripted_factory, make_camera
     ):
         factory, _ = scripted_factory(script=[None])
-        manager = IngestManager(queue, settings=fast_settings(), source_factory=factory)
+        manager = IngestManager(sink, settings=fast_settings(), source_factory=factory)
         try:
             manager.add_camera(make_camera("cam0"))
             with pytest.raises(ConfigurationError) as excinfo:
@@ -121,13 +127,13 @@ class TestRuntimeMembership:
             manager.stop()
 
     def test_re_adding_a_camera_can_continue_the_tag_sequence(
-        self, queue, fast_settings, scripted_factory, make_camera, drain
+        self, sink, fast_settings, scripted_factory, make_camera
     ):
         """A camera that comes back must not reissue frame ids a tracker has already seen."""
         factory, _ = scripted_factory(
             script=[synthetic_image(i) for i in range(2)], finite=True
         )
-        manager = IngestManager(queue, settings=fast_settings(), source_factory=factory)
+        manager = IngestManager(sink, settings=fast_settings(), source_factory=factory)
         try:
             first = manager.add_camera(make_camera("cam0"))
             assert _wait_for(lambda: not first.is_running)
@@ -140,20 +146,20 @@ class TestRuntimeMembership:
         finally:
             manager.stop()
 
-        assert [i.request.context.frame_id for i in drain(queue)] == [0, 1, 2, 3]
+        assert [f.frame_id for f in sink.drain()] == [0, 1, 2, 3]
 
 
 class TestFleetHealth:
     """The fleet reports per-camera state, and start-up fails on a dead camera."""
 
     def test_health_and_summary_report_the_fleet(
-        self, queue, fast_settings, scripted_factory, make_camera
+        self, sink, fast_settings, scripted_factory, make_camera
     ):
         factory, _ = scripted_factory(script=[synthetic_image(0)])
         metrics = IngestMetrics()
         settings = fast_settings(cameras=[make_camera("cam0"), make_camera("cam1")])
         with IngestManager(
-            queue, settings=settings, metrics=metrics, source_factory=factory
+            sink, settings=settings, metrics=metrics, source_factory=factory
         ) as manager:
             assert _wait_for(lambda: manager.summary().streaming == 2)
             health = manager.health()
@@ -168,13 +174,13 @@ class TestFleetHealth:
             assert metrics.cameras_streaming.value() == 2
 
     def test_an_unhealthy_camera_shows_up_in_the_summary(
-        self, queue, fast_settings, scripted_factory, make_camera
+        self, sink, fast_settings, scripted_factory, make_camera
     ):
         factory, _ = scripted_factory(open_failures=1_000)
         metrics = IngestMetrics()
         settings = fast_settings(cameras=[make_camera("cam0")], failures_before_unhealthy=2)
         manager = IngestManager(
-            queue, settings=settings, metrics=metrics, source_factory=factory
+            sink, settings=settings, metrics=metrics, source_factory=factory
         )
         # A real sleep would make this test slow; the manager's own actors use time.sleep, so
         # keep the backoff tiny instead of injecting a clock through two layers.
@@ -189,21 +195,21 @@ class TestFleetHealth:
             manager.stop()
 
     def test_wait_ready_returns_once_every_camera_has_delivered(
-        self, queue, fast_settings, scripted_factory, make_camera
+        self, sink, fast_settings, scripted_factory, make_camera
     ):
         factory, _ = scripted_factory(script=[synthetic_image(0)])
         settings = fast_settings(cameras=[make_camera("cam0"), make_camera("cam1")])
-        with IngestManager(queue, settings=settings, source_factory=factory) as manager:
+        with IngestManager(sink, settings=settings, source_factory=factory) as manager:
             manager.wait_ready(timeout_s=5.0)
             assert all(h.frames_read >= 1 for h in manager.health().values())
 
     def test_wait_ready_names_the_cameras_that_never_started(
-        self, queue, fast_settings, scripted_factory, make_camera
+        self, sink, fast_settings, scripted_factory, make_camera
     ):
         """A mistyped camera database must fail the deploy, not look healthy and detect nothing."""
         factory, _ = scripted_factory(script=[None])
         settings = fast_settings(cameras=[make_camera("cam_dead")])
-        with IngestManager(queue, settings=settings, source_factory=factory) as manager:
+        with IngestManager(sink, settings=settings, source_factory=factory) as manager:
             with pytest.raises(CameraUnavailableError) as excinfo:
                 manager.wait_ready(timeout_s=0.05)
             assert excinfo.value.camera_ids == ["cam_dead"]
@@ -214,24 +220,24 @@ class TestCameraDatabase:
     """The existing fleet database loads, in the reference shape and in ours."""
 
     def test_configured_cameras_merges_inline_and_file(
-        self, tmp_path, queue, fast_settings, make_camera
+        self, tmp_path, sink, fast_settings, make_camera
     ):
         database = tmp_path / "cameras.json"
         database.write_text(
             json.dumps({"cameras": [{"camera_id": "cam_file", "uri": "rtsp://b/stream"}]})
         )
         settings = fast_settings(cameras=[make_camera("cam_inline")], camera_db=database)
-        manager = IngestManager(queue, settings=settings)
+        manager = IngestManager(sink, settings=settings)
         assert [c.camera_id for c in manager.configured_cameras()] == ["cam_inline", "cam_file"]
 
     def test_a_camera_declared_twice_across_sources_is_refused(
-        self, tmp_path, queue, fast_settings, make_camera
+        self, tmp_path, sink, fast_settings, make_camera
     ):
         database = tmp_path / "cameras.json"
         database.write_text(json.dumps([{"camera_id": "cam0", "uri": "rtsp://b/stream"}]))
         settings = fast_settings(cameras=[make_camera("cam0")], camera_db=database)
         with pytest.raises(ConfigurationError, match="declared both inline"):
-            IngestManager(queue, settings=settings).configured_cameras()
+            IngestManager(sink, settings=settings).configured_cameras()
 
     def test_the_reference_camera_database_shape_translates(self, tmp_path):
         """`cameradb.json` plus `gstconfig.ini`, exactly as the previous generation shipped them."""
@@ -345,7 +351,7 @@ class TestIngestPlaneEndToEnd:
     """The whole plane, real threads and real sources, with no hardware present."""
 
     def test_the_manager_runs_replay_cameras_with_no_camera_present(
-        self, queue, fast_settings, frame_dir, drain
+        self, sink, fast_settings, frame_dir
     ):
         """The 50-camera stress test in miniature: real sources, real threads, no hardware."""
         cameras = [
@@ -359,8 +365,8 @@ class TestIngestPlaneEndToEnd:
             for index in range(4)
         ]
         settings = IngestSettings(cameras=cameras, empty_read_sleep_ms=0)
-        queue = type(queue)("ingest", capacity=FRAME_COUNT * len(cameras))
-        with IngestManager(queue, settings=settings) as manager:
+        sink = BoundedSink(capacity=FRAME_COUNT * len(cameras), name="ingest")
+        with IngestManager(sink, settings=settings) as manager:
             assert _wait_for(
                 lambda: all(
                     h.state is CameraState.EXHAUSTED for h in manager.health().values()
@@ -371,8 +377,4 @@ class TestIngestPlaneEndToEnd:
 
         assert summary.frames_read == FRAME_COUNT * len(cameras)
         assert summary.frames_dropped == 0
-        counts: dict[str, int] = {}
-        for item in drain(queue):
-            key = item.request.context.camera_id
-            counts[key] = counts.get(key, 0) + 1
-        assert counts == {f"cam{i}": FRAME_COUNT for i in range(4)}
+        assert sink.counts() == {f"cam{i}": FRAME_COUNT for i in range(4)}

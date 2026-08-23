@@ -14,6 +14,7 @@ Layout — each directory has one reason to exist::
     registry.py   SOURCES, and the factory that picks a backend for a camera
     resolve.py    camera -> settings -> environment precedence, in one place
     metrics.py    the fleet's metric handles, labelled by camera
+    sink.py       the FrameSink protocol — where a frame goes, and who decides
     manager.py    IngestManager: start/stop/add/remove, and fleet health
     frame/        what flows: the Frame value and the FrameCounter that stamps it
     timing/       when: the reconnect backoff and the fps pacer, as testable policies
@@ -22,12 +23,14 @@ Layout — each directory has one reason to exist::
 
 Three properties are worth knowing before changing anything here:
 
-**Nothing in this package owns a queue.** Frames are published into
-:mod:`shipinfer.scheduling.queues`, which already implements per-camera lanes and, when it
-must shed load, drops the oldest request of the *greediest* camera. The system this replaces
-funnelled every camera into one 1000-slot buffer that evicted the globally oldest entry, so
-a crowded camera silently starved a quiet one (ADR-005). A queue written here would bring
-that back.
+**Nothing in this package owns a queue, and nothing in it knows a scheduler exists.**
+Frames go into a :class:`~shipinfer.ingest.sink.FrameSink`, a protocol this package owns;
+``pipeline`` supplies the production one, backed by the fair, bounded queue in
+:mod:`shipinfer.scheduling.queues` that has per-camera lanes and sheds the *greediest*
+camera. The system this replaces funnelled every camera into one 1000-slot buffer that
+evicted the globally oldest entry, so a crowded camera silently starved a quiet one
+(ADR-005). Writing a queue here would bring that back; importing the scheduler here would
+put dispatch policy in the decode path, which is the same mistake from the other side.
 
 **Every frame is tagged at the moment of decode** and the tag is never rewritten. Batching,
 spillover between GPUs and out-of-order completion are all safe because reassembly keys on
@@ -62,18 +65,22 @@ from shipinfer.ingest.resolve import (
 # Importing the backends is what registers them. Each is import-safe by design: none of
 # them imports a decode runtime at module level, so this costs nothing on a host that has
 # none of them.
+from shipinfer.ingest.sink import BoundedSink, CountingSink, FrameSink
 from shipinfer.ingest.sources import GStreamerSource, PyAvSource, ReplaySource
 from shipinfer.ingest.timing import DeadlinePacer, ExponentialBackoff
 
 __all__ = [
     "SOURCES",
+    "BoundedSink",
     "CameraActor",
     "CameraHealth",
     "CameraState",
+    "CountingSink",
     "DeadlinePacer",
     "ExponentialBackoff",
     "Frame",
     "FrameCounter",
+    "FrameSink",
     "FrameSource",
     "GStreamerSource",
     "IngestManager",

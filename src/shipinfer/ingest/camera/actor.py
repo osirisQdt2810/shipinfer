@@ -2,16 +2,18 @@
 
 This is the ingest half of ADR-002. A camera actor is **stateful** — it owns the RTSP
 connection, the decoder, the ``frame_id`` counter and the reconnect schedule — and it does
-**no** inference. Everything it produces goes into a queue and is picked up by the
+**no** inference. Everything it produces goes into a sink and is picked up by the
 stateless, GPU-pooled half of the system, which is what lets fifty uneven cameras share
 sixteen GPUs instead of being pinned three-to-a-device.
 
 What it deliberately does **not** own is a queue. The reference system gave every camera a
 share of one 1000-slot buffer that evicted the *oldest* entry when full, so a crowded camera
-starved a quiet one and nothing logged it. The queue this actor pushes into is
-:mod:`shipinfer.scheduling.queues` — per-camera lanes, round-robin drain, and an overflow
-policy that penalises the loudest camera rather than its victim (ADR-005). Writing another
-queue here would reintroduce exactly the bug the project exists to fix.
+starved a quiet one and nothing logged it. This actor publishes into a
+:class:`~shipinfer.ingest.sink.FrameSink` — in production one backed by the fair, bounded
+queue in :mod:`shipinfer.scheduling.queues`, which has per-camera lanes and sheds the
+loudest camera rather than its victim (ADR-005). Writing another queue *here* would
+reintroduce exactly the bug the project exists to fix; depending on the scheduler directly
+would put dispatch policy in the decode path, which is the other half of the same mistake.
 
 One policy decision is worth calling out because it is not the obvious one: **a successful
 connection does not reset the failure count — a successful frame does.** An RTSP source that
@@ -32,18 +34,15 @@ from shipinfer.core.errors import (
     SourceUnavailableError,
 )
 from shipinfer.core.logging import get_logger, log_context
-from shipinfer.core.request import InferenceRequest, ResponseFuture
 from shipinfer.core.settings.ingest import CameraConfig, IngestSettings
-from shipinfer.core.types import Tensor
 from shipinfer.ingest.base import FrameSource
 from shipinfer.ingest.camera.health import CameraHealth, CameraState
 from shipinfer.ingest.frame.frame import Frame
 from shipinfer.ingest.frame.tag import FrameCounter
 from shipinfer.ingest.metrics import IngestMetrics
 from shipinfer.ingest.registry import create_source
+from shipinfer.ingest.sink import FrameSink
 from shipinfer.ingest.timing.backoff import ExponentialBackoff
-from shipinfer.scheduling.queues import RequestQueue
-from shipinfer.scheduling.work import WorkItem
 
 __all__ = ["CameraActor", "SourceFactory"]
 
@@ -62,12 +61,13 @@ _FPS_MIN_WINDOW_S = 0.25
 
 
 class CameraActor:
-    """Pulls one camera and publishes tagged frames into a queue.
+    """Pulls one camera and publishes tagged frames into a sink.
 
     Args:
         config: the camera to run.
-        queue: where frames go. Any :class:`~shipinfer.scheduling.queues.RequestQueue`; the
-            fair, bounded one is the point (ADR-005).
+        sink: where frames go. Any :class:`~shipinfer.ingest.sink.FrameSink`; in production
+            one backed by the fair, bounded queue (ADR-005), in a benchmark a
+            :class:`~shipinfer.ingest.sink.CountingSink`.
         settings: fleet-wide ingest defaults.
         metrics: shared handles. One :class:`IngestMetrics` for the whole fleet, labelled by
             camera, so an operator gets per-camera numbers without per-camera objects.
@@ -81,7 +81,7 @@ class CameraActor:
     def __init__(
         self,
         config: CameraConfig,
-        queue: RequestQueue,
+        sink: FrameSink,
         *,
         settings: IngestSettings | None = None,
         metrics: IngestMetrics | None = None,
@@ -91,7 +91,7 @@ class CameraActor:
         self.config = config
         self.settings = settings or IngestSettings()
         self.metrics = metrics or IngestMetrics()
-        self._queue = queue
+        self._sink = sink
         self._sleep = sleep
         self._factory: SourceFactory = source_factory or self._default_factory
         self._counter = FrameCounter(config.camera_id, config.first_frame_id)
@@ -227,7 +227,7 @@ class CameraActor:
                     if not self._pump():
                         break
                 except Exception as exc:  # a camera must outlive one bad frame
-                    # The safety net. A bug in a decoder or a queue must degrade one camera,
+                    # The safety net. A bug in a decoder or a sink must degrade one camera,
                     # not kill its thread and leave the fleet quietly 49 cameras wide. The
                     # backoff means a *persistent* bug does not become a hot loop either.
                     self._record_failure(exc)
@@ -378,29 +378,20 @@ class CameraActor:
     # -- publishing --------------------------------------------------------------------
 
     def _publish(self, frame: Frame) -> None:
-        """Hand one frame to the scheduler, or count the drop.
+        """Hand one frame to the sink, or count the drop.
 
-        Backpressure is honest here on purpose. A full queue means the inference pool cannot
-        keep up; dropping the frame at the edge, with a counter behind it, is a signal an
-        operator can act on. The alternative is what the previous system did: accept
-        everything and silently evict somebody else's work three stages later.
+        Backpressure is honest here on purpose, and this is the only place in the system that
+        can be. An RTSP camera cannot be told to slow down, so *something* must drop a frame
+        when the consumer falls behind — and this is the one component that knows which
+        camera a frame came from, so it is the only one that can count the drop against the
+        camera that caused it. The alternative is what the previous system did: accept
+        everything and silently evict somebody else's work three stages later (ADR-005).
         """
-        request = InferenceRequest(
-            model_name=self.config.model or self.settings.target_model,
-            inputs={self.settings.input_name: Tensor.from_numpy(frame.as_batch())},
-            context=frame.context,
-            priority=self.config.priority,
-            deadline_ns=(
-                frame.captured_ns + self.settings.frame_deadline_ms * 1_000_000
-                if self.settings.frame_deadline_ms
-                else 0
-            ),
-        )
         self._record_frame(frame)
         try:
-            self._queue.put(WorkItem(request, ResponseFuture(request)))
+            self._sink.put(frame)
         except QueueFullError as exc:
-            self._record_drop("queue_full")
+            self._record_drop("sink_full")
             _LOG.debug(
                 "camera %s: frame %d dropped, %s",
                 self.camera_id,
@@ -410,11 +401,11 @@ class CameraActor:
             )
             return
         except RequestCancelledError:
-            # The queue is closing: the server is shutting down, so finish cleanly rather
+            # The consumer is gone: the server is shutting down, so finish cleanly rather
             # than logging one line per frame for as long as the process lives.
-            self._record_drop("queue_closed")
+            self._record_drop("sink_closed")
             _LOG.info(
-                "camera %s: queue closed; actor finishing",
+                "camera %s: sink closed; actor finishing",
                 self.camera_id,
                 extra=log_context(camera_id=self.camera_id),
             )
