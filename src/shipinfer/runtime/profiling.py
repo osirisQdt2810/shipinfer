@@ -40,9 +40,9 @@ from __future__ import annotations
 
 import contextlib
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
-from collections.abc import Iterator
 
 from shipinfer.core.logging import get_logger
 from shipinfer.envs import PROFILE_DIR, PROFILE_PHASES, PROFILE_STEPS

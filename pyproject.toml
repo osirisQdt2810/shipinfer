@@ -115,13 +115,17 @@ extend-exclude = '''
   | dist
   | references
   | 3rdparty
+  | benchmarks/baseline
 )/
 '''
 
 [tool.ruff]
 line-length = 96
 target-version = "py310"
-extend-exclude = [".venv", "build", "dist", "references", "3rdparty"]
+# `benchmarks/baseline` is the counting-simulation submodule — the system we are measured
+# against. Linting or reformatting it would rewrite the baseline, and a baseline we edited
+# is not a baseline.
+extend-exclude = [".venv", "build", "dist", "references", "3rdparty", "benchmarks/baseline"]
 
 [tool.ruff.lint]
 # Import sorting (I) is delegated to standalone isort, not ruff, so pre-commit has one
@@ -173,7 +177,7 @@ ignore = [
 profile = "black"
 line_length = 96
 src_paths = ["src", "tests", "scripts", "benchmarks"]
-skip_glob = [".venv/*", "build/*", "dist/*", "references/*", "3rdparty/*"]
+skip_glob = [".venv/*", "build/*", "dist/*", "references/*", "3rdparty/*", "benchmarks/baseline/*"]
 
 [tool.mypy]
 python_version = "3.10"
