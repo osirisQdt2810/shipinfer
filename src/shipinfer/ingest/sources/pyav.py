@@ -24,6 +24,7 @@ import numpy as np
 
 from shipinfer.core.errors import FrameDecodeError, SourceOpenError, SourceUnavailableError
 from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.redact import redact_in
 from shipinfer.core.settings.ingest import CameraConfig
 from shipinfer.ingest.base import FrameSource
 from shipinfer.ingest.registry import SOURCES
@@ -89,7 +90,7 @@ def _load_av() -> Any:
     except ImportError as exc:
         raise SourceUnavailableError(
             "pyav",
-            f"PyAV is not importable ({exc}). Install it with `pip install 'shipinfer[video]'`",
+            f"PyAV is not importable ({redact_in(str(exc))}). Install it with `pip install 'shipinfer[video]'`",
         ) from exc
     return av
 
@@ -183,7 +184,7 @@ class PyAvSource(FrameSource):
                 _LOG.warning(
                     "camera %s: hardware decode unavailable (%s); falling back to software",
                     self.camera_id,
-                    exc,
+                    redact_in(str(exc)),
                     extra=log_context(camera_id=self.camera_id),
                 )
                 return None
@@ -197,7 +198,7 @@ class PyAvSource(FrameSource):
             _LOG.debug(
                 "camera %s: no PyAV hwaccel support (%s)",
                 self.camera_id,
-                exc,
+                redact_in(str(exc)),
                 extra=log_context(camera_id=self.camera_id),
             )
             return None
@@ -219,5 +220,9 @@ class PyAvSource(FrameSource):
             try:
                 self._container.close()
             except Exception as exc:  # closing a dead socket can raise
-                _LOG.debug("camera %s: error closing container: %s", self.camera_id, exc)
+                _LOG.debug(
+                    "camera %s: error closing container: %s",
+                    self.camera_id,
+                    redact_in(str(exc)),
+                )
         self._container = None

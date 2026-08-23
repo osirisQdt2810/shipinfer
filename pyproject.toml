@@ -203,7 +203,11 @@ disallow_untyped_defs = false
 testpaths = ["tests", "benchmarks/tests"]
 # `-m "not gpu"`: a plain `pytest` must pass on a machine with zero NVIDIA devices, so the
 # scheduler's invariants stay verifiable anywhere. `pytest -m gpu` opts into real hardware.
-addopts = "-ra --strict-markers --strict-config -m 'not gpu'"
+# `not gpu and not multigpu`, not just `not gpu`: `multigpu` is its own marker and some
+# tests carry only that one, so `-m "not gpu"` left them selected. A bare `pytest` on a
+# laptop then hit the container gate and aborted the whole session — breaking the exact
+# promise this line exists to keep, and leaving it kept only by scripts/run_tests.sh.
+addopts = "-ra --strict-markers --strict-config -m 'not gpu and not multigpu'"
 asyncio_mode = "auto"
 timeout = 120
 markers = [

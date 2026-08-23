@@ -34,7 +34,7 @@ from shipinfer.core.errors import (
     SourceUnavailableError,
 )
 from shipinfer.core.logging import get_logger, log_context
-from shipinfer.core.redact import redact
+from shipinfer.core.redact import redact, redact_in
 from shipinfer.core.settings.ingest import CameraConfig, IngestSettings
 from shipinfer.ingest.base import FrameSource
 from shipinfer.ingest.camera.health import CameraHealth, CameraState
@@ -269,7 +269,7 @@ class CameraActor:
             _LOG.error(
                 "camera %s: %s — giving up; retrying cannot fix this",
                 self.camera_id,
-                exc,
+                redact_in(str(exc)),
                 extra=log_context(camera_id=self.camera_id),
             )
             self._stop.set()
@@ -281,7 +281,7 @@ class CameraActor:
                 "camera %s: connect attempt %d failed (%s); retrying in %.2fs",
                 self.camera_id,
                 self._backoff.attempts,
-                exc,
+                redact_in(str(exc)),
                 delay,
                 extra=log_context(camera_id=self.camera_id),
             )
@@ -315,7 +315,7 @@ class CameraActor:
             _LOG.warning(
                 "camera %s: read failed (%s); reconnecting in %.2fs",
                 self.camera_id,
-                exc,
+                redact_in(str(exc)),
                 delay,
                 extra=log_context(camera_id=self.camera_id),
             )
@@ -397,7 +397,7 @@ class CameraActor:
                 "camera %s: frame %d dropped, %s",
                 self.camera_id,
                 frame.frame_id,
-                exc,
+                redact_in(str(exc)),
                 extra=log_context(camera_id=self.camera_id, frame_id=frame.frame_id),
             )
             return
@@ -505,7 +505,7 @@ class CameraActor:
             _LOG.debug(
                 "camera %s: error closing source: %s",
                 self.camera_id,
-                exc,
+                redact_in(str(exc)),
                 extra=log_context(camera_id=self.camera_id),
             )
 

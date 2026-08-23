@@ -198,7 +198,7 @@ def _load_gst() -> tuple[Any, Any]:
         raise SourceUnavailableError(
             "gstreamer",
             "PyGObject with GStreamer 1.0 typelibs is not importable "
-            f"({exc}). Install python3-gi and gstreamer1.0-plugins-{{base,good,bad}}, "
+            f"({redact_in(str(exc))}). Install python3-gi and gstreamer1.0-plugins-{{base,good,bad}}, "
             "or select the 'pyav' backend with SHIPINFER_INGEST_BACKEND=pyav",
         ) from exc
     if not Gst.is_initialized():
@@ -274,7 +274,9 @@ class GStreamerSource(FrameSource):
             self._pipeline = gst.parse_launch(description)
         except glib.Error as exc:
             raise SourceOpenError(
-                self.camera_id, self.config.uri, f"pipeline would not parse: {exc}"
+                self.camera_id,
+                self.config.uri,
+                f"pipeline would not parse: {redact_in(str(exc))}",
             ) from exc
 
         self._appsink = self._pipeline.get_by_name(APPSINK_NAME)

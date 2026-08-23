@@ -81,7 +81,7 @@ def _read_gst_ini(path: Path) -> dict[str, Any]:
         if not parser.read(path):
             return {}
     except configparser.Error as exc:
-        _LOG.warning("ignoring unreadable gst config %s: %s", path, exc)
+        _LOG.warning("ignoring unreadable gst config %s: %s", path, redact_in(str(exc)))
         return {}
 
     extracted: dict[str, Any] = {}
@@ -175,7 +175,7 @@ def load_camera_db(path: str | Path) -> list[CameraConfig]:
         raise ConfigurationError(f"camera database {file_path} does not exist") from exc
     except json.JSONDecodeError as exc:
         raise ConfigurationError(
-            f"camera database {file_path} is not valid JSON: {exc}"
+            f"camera database {file_path} is not valid JSON: {redact_in(str(exc))}"
         ) from exc
 
     records = raw.get("contents", raw.get("cameras")) if isinstance(raw, dict) else raw

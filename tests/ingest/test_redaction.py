@@ -102,15 +102,22 @@ class TestNoLogCallFormatsARawUri:
     )
     #: Errors that redact inside their own constructor, so handing them a raw URI is
     #: correct. Anything else that formats one into a message is not.
-    REDACTING_ERRORS = frozenset({"SourceOpenError"})
+    REDACTING_ERRORS = frozenset({"SourceOpenError", "FrameDecodeError"})
     LOG_LEVELS = {"debug", "info", "warning", "error", "exception", "critical"}
 
-    @staticmethod
-    def _mentions_uri(node: ast.AST) -> bool:
+    #: Names that may carry a URI. `exc` and `reason` are here because that is where the
+    #: credential actually travelled: `av.FFmpegError.__str__` embeds the container name,
+    #: which is the whole RTSP URI, and the actor logs that on every reconnect. Matching only
+    #: the identifier `uri` tested the *argument name* rather than the invariant, so
+    #: `str(exc)` was invisible and `FrameDecodeError`'s leak read as covered.
+    CARRIERS = frozenset({"uri", "exc", "reason", "error", "record"})
+
+    @classmethod
+    def _mentions_uri(cls, node: ast.AST) -> bool:
         for child in ast.walk(node):
-            if isinstance(child, ast.Name) and child.id == "uri":
+            if isinstance(child, ast.Name) and child.id in cls.CARRIERS:
                 return True
-            if isinstance(child, ast.Attribute) and child.attr == "uri":
+            if isinstance(child, ast.Attribute) and child.attr in cls.CARRIERS:
                 return True
         return False
 

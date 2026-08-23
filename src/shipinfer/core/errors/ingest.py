@@ -71,7 +71,11 @@ class FrameDecodeError(IngestError):
     """
 
     def __init__(self, camera_id: str, reason: str) -> None:
-        super().__init__(f"camera {camera_id!r}: decode failed: {reason}")
+        # Redacted for the same reason `SourceOpenError` redacts its own reason: the
+        # decoders put the URI inside it. `av.FFmpegError.__str__` embeds the container
+        # name, which is the full RTSP URI — and the actor logs this on every reconnect and
+        # stores it as `CameraHealth.last_error`, which the health endpoint serves.
+        super().__init__(f"camera {camera_id!r}: decode failed: {redact_in(str(reason))}")
         self.camera_id = camera_id
         self.reason = reason
 

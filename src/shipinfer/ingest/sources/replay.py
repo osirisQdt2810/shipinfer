@@ -20,6 +20,7 @@ import numpy as np
 
 from shipinfer.core.errors import FrameDecodeError, SourceOpenError, SourceUnavailableError
 from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.redact import redact_in
 from shipinfer.ingest.base import FrameSource
 from shipinfer.ingest.registry import SOURCES
 from shipinfer.ingest.timing.pacing import DeadlinePacer
@@ -100,7 +101,7 @@ def _load_cv2() -> Any:
     except ImportError as exc:
         raise SourceUnavailableError(
             "replay",
-            f"OpenCV is not importable ({exc}). "
+            f"OpenCV is not importable ({redact_in(str(exc))}). "
             "Install it with `pip install 'shipinfer[video]'`",
         ) from exc
     return cv2

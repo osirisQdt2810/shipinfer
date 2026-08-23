@@ -67,7 +67,10 @@ BLOCKED_COMMANDS = {
 
 # Scripts that run the suite or a benchmark, wherever they are invoked from.
 BLOCKED_SCRIPTS = (
-    "run_tests.sh",
+    # `run_tests.sh` is deliberately absent. It adds `-m "not gpu and not multigpu"` and
+    # exports empty `CUDA_VISIBLE_DEVICES`, so it is *strictly more* offline than the bare
+    # `pytest` this hook allows. Refusing it while permitting `pytest` taught the developer
+    # to reach for SHIPINFER_ALLOW_HOST_RUN, which is how the rule was lost the first time.
     "run_bench.py",
     "compare_baseline.py",
     "bench_baseline.py",

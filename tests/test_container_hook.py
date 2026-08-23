@@ -56,7 +56,6 @@ class TestRefuses:
             "pytest -m gpu",
             "pytest -m multigpu",
             "python3 -m pytest -m multigpu 2>&1 | tail -20",
-            "./scripts/run_tests.sh",
             "cd /somewhere && .venv/bin/python -m pytest -m gpu",
             "shipinfer bench person_embedder --cameras 50",
             "shipinfer serve --port 8000",
@@ -150,6 +149,14 @@ class TestAllows:
     )
     def test_an_already_containerised_command_passes(self, command: str) -> None:
         assert refused(command) is None, command
+
+    def test_the_offline_runner_script_is_allowed(self) -> None:
+        """`run_tests.sh` adds `-m "not gpu and not multigpu"` and exports empty
+        `CUDA_VISIBLE_DEVICES`, so it is *strictly more* offline than the bare `pytest` this
+        hook allows. Refusing it while permitting `pytest` taught the developer to reach for
+        the override — which is how the rule was lost the first time."""
+        assert refused("./scripts/run_tests.sh") is None
+        assert refused("scripts/run_tests.sh -q") is None
 
     def test_the_documented_override_works(self) -> None:
         assert refused("SHIPINFER_ALLOW_HOST_RUN=1 pytest -m gpu -q") is None
