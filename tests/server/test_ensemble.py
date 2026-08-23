@@ -47,7 +47,6 @@ dynamic_batching: {enabled: false}
 parameters: {latency_ms: 0.05}
 """
 
-
 _HEAD = """
 platform: mock
 max_batch_size: 4
@@ -114,56 +113,64 @@ def _request() -> InferenceRequest:
     )
 
 
-def test_every_declared_output_is_present_even_when_a_branch_skips(tmp_path: Path) -> None:
-    """The regression test. A skipped branch yields zero rows, not a missing key."""
-    with _server(_repo(tmp_path)) as server:
-        response = server.infer_sync(_request(), timeout=20)
+class TestConditionalBranches:
 
-    assert set(response.outputs) == {"crops", "embedding"}
-    embedding = response.outputs["embedding"]
-    # Either the branch ran (one row) or it did not (zero rows) — but the key is there and
-    # the row shape is the declared one either way.
-    assert embedding.shape[1:] == (3,)
-    assert embedding.shape[0] in (0, 1)
-
-
-def test_a_skipped_branch_is_distinguishable_from_a_failure(tmp_path: Path) -> None:
-    """Zero rows says "no things in this frame"; a missing key said nothing at all."""
-    root = _repo(tmp_path)
-    # Force the router's flag to zero so the branch always skips.
-    config = (root / "router" / "config.yaml").read_text().replace("seed: 0", "seed: 0")
-    (root / "router" / "config.yaml").write_text(config)
-
-    with _server(root) as server:
-        for _ in range(6):
+    def test_every_declared_output_is_present_even_when_a_branch_skips(
+        self, tmp_path: Path
+    ) -> None:
+        """The regression test. A skipped branch yields zero rows, not a missing key."""
+        with _server(_repo(tmp_path)) as server:
             response = server.infer_sync(_request(), timeout=20)
-            assert "embedding" in response.outputs
+
+        assert set(response.outputs) == {"crops", "embedding"}
+        embedding = response.outputs["embedding"]
+        # Either the branch ran (one row) or it did not (zero rows) — but the key is there and
+        # the row shape is the declared one either way.
+        assert embedding.shape[1:] == (3,)
+        assert embedding.shape[0] in (0, 1)
+
+    def test_a_skipped_branch_is_distinguishable_from_a_failure(self, tmp_path: Path) -> None:
+        """Zero rows says "no things in this frame"; a missing key said nothing at all."""
+        root = _repo(tmp_path)
+        # Force the router's flag to zero so the branch always skips.
+        config = (root / "router" / "config.yaml").read_text().replace("seed: 0", "seed: 0")
+        (root / "router" / "config.yaml").write_text(config)
+
+        with _server(root) as server:
+            for _ in range(6):
+                response = server.infer_sync(_request(), timeout=20)
+                assert "embedding" in response.outputs
 
 
-def test_the_context_tag_survives_the_whole_dag(tmp_path: Path) -> None:
-    with _server(_repo(tmp_path)) as server:
-        response = server.infer_sync(_request(), timeout=20)
-    assert response.context.camera_id == "cam7"
-    assert response.context.frame_id == 3
+class TestContextTag:
+
+    def test_the_context_tag_survives_the_whole_dag(self, tmp_path: Path) -> None:
+        with _server(_repo(tmp_path)) as server:
+            response = server.infer_sync(_request(), timeout=20)
+        assert response.context.camera_id == "cam7"
+        assert response.context.frame_id == 3
 
 
-def test_consuming_a_conditional_tensor_unconditionally_fails_at_startup(
-    tmp_path: Path,
-) -> None:
-    """CONVENTIONS 2.6: a mis-wired ensemble stops the deploy.
+class TestWiringValidation:
 
-    Here the branch reads `crops`, which is unconditional, so instead we make the *branch*
-    unconditional while an earlier conditional step produces what it reads. The graph is
-    only valid for the frames that take that branch, and start-up must say so.
-    """
-    root = tmp_path / "repo"
-    _write(root, "router", _ROUTER.format(always=0))
-    _write(root, "branch", _BRANCH)
-    _write(root, "head", _HEAD)
-    _write(
-        root,
-        "pipe",
+    def test_consuming_a_conditional_tensor_unconditionally_fails_at_startup(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """CONVENTIONS 2.6: a mis-wired ensemble stops the deploy.
+
+        Here the branch reads `crops`, which is unconditional, so instead we make the *branch*
+        unconditional while an earlier conditional step produces what it reads. The graph is
+        only valid for the frames that take that branch, and start-up must say so.
         """
+        root = tmp_path / "repo"
+        _write(root, "router", _ROUTER.format(always=0))
+        _write(root, "branch", _BRANCH)
+        _write(root, "head", _HEAD)
+        _write(
+            root,
+            "pipe",
+            """
 platform: ensemble
 max_batch_size: 0
 inputs: [{name: images, data_type: FP32, dims: [4]}]
@@ -185,20 +192,19 @@ ensemble:
       input_map: {embedding: embedding}
       output_map: {score: score}
 """,
-        versioned=False,
-    )
+            versioned=False,
+        )
 
-    with pytest.raises(ConfigurationError, match="only exists when an earlier conditional"):
-        _server(root).start()
+        with pytest.raises(ConfigurationError, match="only exists when an earlier conditional"):
+            _server(root).start()
 
-
-def test_an_output_no_step_produces_fails_at_startup(tmp_path: Path) -> None:
-    root = tmp_path / "repo"
-    _write(root, "router", _ROUTER.format(always=0))
-    _write(
-        root,
-        "pipe",
-        """
+    def test_an_output_no_step_produces_fails_at_startup(self, tmp_path: Path) -> None:
+        root = tmp_path / "repo"
+        _write(root, "router", _ROUTER.format(always=0))
+        _write(
+            root,
+            "pipe",
+            """
 platform: ensemble
 max_batch_size: 0
 inputs: [{name: images, data_type: FP32, dims: [4]}]
@@ -210,52 +216,53 @@ ensemble:
       input_map: {images: images}
       output_map: {crops: crops, has_thing: has_thing}
 """,
-        versioned=False,
-    )
+            versioned=False,
+        )
 
-    with pytest.raises(ConfigurationError, match="no step produces"):
-        _server(root).start()
-
-
-def test_shutdown_resolves_queued_requests(tmp_path: Path) -> None:
-    """cancel_futures=True dropped the caller's futures on the floor, so every waiter
-    blocked forever. They must resolve — with an error, but they must resolve."""
-    from concurrent.futures import wait
-
-    server = _server(_repo(tmp_path)).start()
-    futures = [server.model("pipe").infer(_request()) for _ in range(6)]
-    server.stop()
-
-    done, not_done = wait(futures, timeout=20)
-    assert not not_done, f"{len(not_done)} future(s) never resolved"
-    # Whatever ran before the stop succeeded; the rest carry a typed error.
-    assert all(f.done() for f in done)
+        with pytest.raises(ConfigurationError, match="no step produces"):
+            _server(root).start()
 
 
-def test_the_pool_applies_backpressure(tmp_path: Path) -> None:
-    """A ThreadPoolExecutor's queue is unbounded; every other path in this system refuses
-    work when saturated, and so must this one."""
-    from shipinfer.core.errors import QueueFullError
+class TestPoolLifecycle:
 
-    root = _repo(tmp_path)
-    slow = (
-        (root / "router" / "config.yaml")
-        .read_text()
-        .replace("latency_ms: 0.05", "latency_ms: 200")
-    )
-    (root / "router" / "config.yaml").write_text(slow)
+    def test_shutdown_resolves_queued_requests(self, tmp_path: Path) -> None:
+        """cancel_futures=True dropped the caller's futures on the floor, so every waiter
+        blocked forever. They must resolve — with an error, but they must resolve."""
+        from concurrent.futures import wait
 
-    rejected = 0
-    accepted = []
-    with _server(root) as server:
-        model = server.model("pipe")
-        for _ in range(200):
-            try:
-                accepted.append(model.infer(_request()))
-            except QueueFullError:
-                rejected += 1
-                break
+        server = _server(_repo(tmp_path)).start()
+        futures = [server.model("pipe").infer(_request()) for _ in range(6)]
+        server.stop()
 
-    assert (
-        rejected > 0
-    ), "an unbounded ensemble queue accepted 200 requests behind a 200ms model"
+        done, not_done = wait(futures, timeout=20)
+        assert not not_done, f"{len(not_done)} future(s) never resolved"
+        # Whatever ran before the stop succeeded; the rest carry a typed error.
+        assert all(f.done() for f in done)
+
+    def test_the_pool_applies_backpressure(self, tmp_path: Path) -> None:
+        """A ThreadPoolExecutor's queue is unbounded; every other path in this system refuses
+        work when saturated, and so must this one."""
+        from shipinfer.core.errors import QueueFullError
+
+        root = _repo(tmp_path)
+        slow = (
+            (root / "router" / "config.yaml")
+            .read_text()
+            .replace("latency_ms: 0.05", "latency_ms: 200")
+        )
+        (root / "router" / "config.yaml").write_text(slow)
+
+        rejected = 0
+        accepted = []
+        with _server(root) as server:
+            model = server.model("pipe")
+            for _ in range(200):
+                try:
+                    accepted.append(model.infer(_request()))
+                except QueueFullError:
+                    rejected += 1
+                    break
+
+        assert (
+            rejected > 0
+        ), "an unbounded ensemble queue accepted 200 requests behind a 200ms model"
