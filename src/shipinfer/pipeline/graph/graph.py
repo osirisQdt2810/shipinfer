@@ -43,7 +43,8 @@ from shipinfer.core.settings.pipeline import PipelineSettings
 from shipinfer.pipeline.graph.crop import CropSpec, CropStage
 from shipinfer.pipeline.graph.detect import DetectStage
 from shipinfer.pipeline.graph.detections import DecodeParams
-from shipinfer.pipeline.graph.objects import ObjectStage, mask_area
+from shipinfer.pipeline.graph.masks import InstanceMaskArea
+from shipinfer.pipeline.graph.objects import ObjectStage
 from shipinfer.pipeline.graph.stage import (
     ModelStage,
     PipelineStage,
@@ -67,10 +68,15 @@ __all__ = [
 #: person's from the person embedder, and a batch only ever holds rows of its own class, so
 #: they cannot collide. This table is also the *retain set*: a name mentioned here is never
 #: freed early, because the emitted event reads it.
+#:
+#: :attr:`~shipinfer.pipeline.schema.ObjectRecord.ship_id` and ``similarity`` are deliberately
+#: absent while no stage produces them. The record still carries both fields, and they still
+#: serialise as ``null``, because a gallery query over the ship embedding is what fills them
+#: and that query is stateful (see this module's docstring). A field mapped here that nothing
+#: produces is refused by :meth:`PipelineGraph.validate`, which is the check that would have
+#: caught the ``ship_recognizer`` stage leaving without taking its fields with it.
 DEFAULT_RECORD_FIELDS: Mapping[str, tuple[str, ...]] = {
     "embedding": ("ship_embedding", "person_embedding"),
-    "ship_id": ("ship_id",),
-    "similarity": ("ship_similarity",),
     "mask_area_px": ("ship_mask_area",),
 }
 
@@ -356,12 +362,13 @@ def build_perception_graph(
 ) -> PipelineGraph:
     """The ship + person DAG from ``references/.../new-system-architecture.md``::
 
-        frame -> detect -+- ship   -> segment -> embed -> recognise
+        frame -> detect -+- ship   -> segment -> embed
                          +- person -> embed
 
-    The shape is the specification's, not an invention: detect, segment, embed and recognise
-    are stateless and therefore poolable across all 16 GPUs, while tracking is stateful and
-    lives in another service behind the message bus. Segmentation is conditional because it
+    The shape is the specification's, not an invention: detect, segment and embed are
+    stateless and therefore poolable across all 16 GPUs, while tracking — and the gallery
+    query that turns a ship embedding into an identity — is stateful and lives in another
+    service behind the message bus. Segmentation is conditional because it
     is the heaviest model in the DAG — running it on every frame would cost more than
     everything else combined, and running it only where a ship was detected makes it a
     minority of the load.
@@ -407,10 +414,14 @@ def build_perception_graph(
             model("ship_segmenter"),
             resolve=resolve,
             source=ship_mask_crops,
-            outputs={"masks": "ship_mask_area"},
-            # Reduced where it is produced: fifteen 512x512 float masks are 15 MB, and
-            # reassembly would hold every one of them until the frame completed.
-            reducers={"masks": mask_area},
+            # A segmentation engine emits detections *and* mask prototypes, never a mask, so
+            # the two are folded into one number per crop here — and reduced where they are
+            # produced, because reassembly would otherwise hold 100 KB of mask plane per
+            # object until the frame completed.
+            combine=InstanceMaskArea(
+                crop_hw=settings.ship_mask_crop, score_threshold=settings.score_threshold
+            ),
+            outputs={"mask_area_px": "ship_mask_area"},
             row_shape=(3, *settings.ship_mask_crop),
             timeout_s=timeout_s,
         ),

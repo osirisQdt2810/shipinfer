@@ -292,6 +292,18 @@ class ModelStage(PipelineStage):
 
     def _declared_inputs(self) -> dict[str, Any] | None:
         """The model's declared input specs by name, or None if it cannot be resolved."""
+        return self._declared("input_specs")
+
+    def _declared_outputs(self) -> dict[str, Any] | None:
+        """The model's declared output specs by name, or None if it cannot be resolved.
+
+        The mirror of :meth:`_declared_inputs`, and there for the same reason: an output's
+        name belongs to the artefact too, so a stage that has to name one asks the model
+        rather than assuming an export convention.
+        """
+        return self._declared("output_specs")
+
+    def _declared(self, attribute: str) -> dict[str, Any] | None:
         try:
             model = self._resolve(self._model)
         except Exception:  # a model that is not loaded yet is not an error here
@@ -299,7 +311,7 @@ class ModelStage(PipelineStage):
         artifact = getattr(model, "artifact", None)
         if artifact is None:
             return None
-        return {spec.name: spec for spec in artifact.config.input_specs}
+        return {spec.name: spec for spec in getattr(artifact.config, attribute)}
 
     @property
     def timeout_s(self) -> float:

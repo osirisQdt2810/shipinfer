@@ -92,7 +92,16 @@ class PipelineSettings(BaseModel):
     max_detections: int = Field(default=100, ge=1)
     #: Detector class id -> label. The graph branches on the *label*, so a fleet that adds a
     #: third class configures it here and the branch declarations keep reading in English.
-    class_labels: dict[int, str] = Field(default_factory=lambda: {0: "ship", 1: "person"})
+    #:
+    #: The default is the *shipped* detector's own numbering, not a house convention: the
+    #: repository's ``ship_detector`` is yolo26n on COCO, where 0 is ``person`` and 8 is
+    #: ``boat``. It read ``{0: ship, 1: person}`` while the detector was a stand-in, which
+    #: against the real engine labels every person "ship" and every boat "unknown" — so people
+    #: would be cropped into the ship branch and handed to the segmenter, with every shape
+    #: check passing. A retrained two-class detector overrides this; an id this map does not
+    #: mention is labelled ``unknown`` and feeds no branch, deliberately, so a model/config
+    #: mismatch is visible in the event rather than silent.
+    class_labels: dict[int, str] = Field(default_factory=lambda: {0: "person", 8: "ship"})
     #: Crop size fed to the ship segmenter, ``(height, width)``.
     #:
     #: Dictated by the artefact, not chosen here: yolo26n-seg takes 640x640, and the graph

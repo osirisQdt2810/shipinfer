@@ -31,23 +31,7 @@ from shipinfer.pipeline.graph.stage import Cardinality, ModelStage, Servable
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from shipinfer.pipeline.graph.state import FrameState
 
-__all__ = ["ObjectBatch", "ObjectStage", "mask_area"]
-
-
-def mask_area(masks: np.ndarray) -> np.ndarray:
-    """Reduce ``(N, 1, H, W)`` masks to ``(N, 1)`` foreground pixel counts.
-
-    A stage's output is held by reassembly until the frame is complete, so a stage that
-    stores pixels turns a 1024-frame bound into tens of gigabytes: fifteen 512x512 float
-    masks are 15 MB per frame. The mask is also not publishable — the architecture doc is
-    explicit that this bus carries small results and frames stay in shared memory — so it is
-    reduced at the seam where it is produced rather than carried to the seam where it would
-    be dropped.
-    """
-    array = np.asarray(masks)
-    axes = tuple(range(1, array.ndim))
-    counts = np.count_nonzero(array > 0.5, axis=axes) if axes else np.zeros(1)
-    return np.asarray(counts, dtype=np.float32).reshape(-1, 1)
+__all__ = ["ObjectBatch", "ObjectStage"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,12 +139,19 @@ class ObjectStage(ModelStage):
 
     Args:
         source: the batch this stage reads — a crop set, or another stage's output.
-        outputs: model output name -> the batch name to store it under. A stage may forward
-            several (the recogniser produces an id *and* a similarity), and each becomes its
-            own per-object batch so the event builder can pick them up by name.
+        outputs: output name -> the batch name to store it under. A stage may forward
+            several, and each becomes its own per-object batch so the event builder can pick
+            them up by name. The keys are the *model's* output names unless ``combine`` is
+            given, in which case they are the names it produces.
         row_shape: the per-row shape this stage feeds, when it is fixed by configuration (a
             crop size). ``None`` for a stage fed by another stage's output, whose shape the
             graph checks against the producing model's declared output instead.
+        combine: fold the engine's raw outputs into the quantities this stage forwards, for
+            an artefact whose outputs are not already those quantities. The standing example
+            is segmentation: a YOLO segmentation engine emits detections *and* a bank of mask
+            prototypes, and one mask per crop is the two multiplied together — which a
+            per-output reducer cannot express, because it never sees both. See
+            :class:`~shipinfer.pipeline.graph.masks.InstanceMaskArea`.
     """
 
     cardinality: ClassVar[Cardinality] = Cardinality.PER_OBJECT
@@ -176,7 +167,7 @@ class ObjectStage(ModelStage):
         outputs: Mapping[str, str],
         timeout_s: float = 5.0,
         row_shape: tuple[int, ...] | None = None,
-        reducers: Mapping[str, Callable[[np.ndarray], np.ndarray]] | None = None,
+        combine: Callable[[Mapping[str, np.ndarray]], Mapping[str, np.ndarray]] | None = None,
     ) -> None:
         if not outputs:
             raise ValidationError(f"stage {name!r} must forward at least one model output")
@@ -193,13 +184,7 @@ class ObjectStage(ModelStage):
         self._source = source
         self._outputs = dict(outputs)
         self._row_shape = row_shape
-        self._reducers = dict(reducers or {})
-        unknown = set(self._reducers) - set(self._outputs)
-        if unknown:
-            raise ValidationError(
-                f"stage {name!r}: reducer(s) {sorted(unknown)} name outputs this stage does "
-                f"not forward ({sorted(self._outputs)})"
-            )
+        self._combine = combine
 
     @property
     def source(self) -> str:
@@ -225,23 +210,35 @@ class ObjectStage(ModelStage):
     def _do_run(self, state: FrameState) -> int:
         batch = state.batch(self._source)
         response = self._infer(state, {self.input_name: Tensor.from_numpy(batch.data)})
+        arrays = self._quantities(response.outputs)
         for output_name, batch_name in self._outputs.items():
-            tensor = response.outputs.get(output_name)
-            if tensor is None:
+            array = arrays.get(output_name)
+            if array is None:
                 raise InferenceError(
                     f"stage {self.name!r}: model {self.model_name!r} returned no output "
-                    f"{output_name!r} (got: {sorted(response.outputs)})"
+                    f"{output_name!r} (got: {sorted(arrays)})"
                 )
-            array = tensor.numpy()
-            reduce = self._reducers.get(output_name)
-            if reduce is not None:
-                array = reduce(array)
             state.attach(
                 ObjectBatch(
                     name=batch_name,
                     class_name=batch.class_name,
                     object_indices=batch.object_indices,
-                    data=array,
+                    data=np.asarray(array),
                 )
             )
         return batch.count
+
+    def _quantities(self, outputs: Mapping[str, Tensor]) -> Mapping[str, np.ndarray]:
+        """The arrays this stage forwards, raw or combined.
+
+        Without a combiner only the forwarded outputs are materialised: a segmentation engine
+        emits 3 MB of prototypes per row, and converting an output nothing reads would pay for
+        it on every frame.
+        """
+        if self._combine is None:
+            return {
+                name: tensor.numpy()
+                for name, tensor in outputs.items()
+                if name in self._outputs
+            }
+        return self._combine({name: tensor.numpy() for name, tensor in outputs.items()})

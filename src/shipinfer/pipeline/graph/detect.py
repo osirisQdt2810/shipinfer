@@ -28,11 +28,21 @@ from shipinfer.runtime.ops import ImageOps, NormalizeParams
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from shipinfer.pipeline.graph.state import FrameState
 
-__all__ = ["DEFAULT_PAD_VALUE", "DetectStage"]
+__all__ = [
+    "DEFAULT_BOXES_OUTPUT",
+    "DEFAULT_COUNT_OUTPUT",
+    "DEFAULT_PAD_VALUE",
+    "DetectStage",
+]
 
 #: The YOLO letterbox grey. Kept as the default because a detector config that omits it was
 #: trained with it, and a different bar colour is a silent accuracy loss.
 DEFAULT_PAD_VALUE = 114
+
+#: Fallback names, used only when the model cannot be resolved. A loaded model's own declared
+#: outputs always win — see :attr:`DetectStage.boxes_output`.
+DEFAULT_BOXES_OUTPUT = "boxes"
+DEFAULT_COUNT_OUTPUT = "num_detections"
 
 
 class DetectStage(ModelStage):
@@ -44,10 +54,11 @@ class DetectStage(ModelStage):
             ``ImageOps`` instance is per-thread by contract, not shared.
         dst_size: the model's input extent, ``(height, width)``.
         decode: score threshold, per-frame cap and the class-id table.
-        boxes_output / count_output: the detector's output tensor names. ``count_output`` is
-            optional because not every export reports how many rows of its fixed-size output
-            it filled — when it does, trusting it matters: the trailing rows of a padded
-            output are undefined, not zero.
+        boxes_output / count_output: the detector's output tensor names. ``None`` for either
+            means "ask the model", which is the same rule :attr:`ModelStage.input_name`
+            follows and for the same reason: a tensor's name belongs to the artefact, and
+            hard-coding one here refuses a valid engine over a naming preference — ultralytics
+            calls its single output ``output0``, other exports call it ``boxes``.
     """
 
     cardinality: ClassVar[Cardinality] = Cardinality.PER_FRAME
@@ -63,8 +74,8 @@ class DetectStage(ModelStage):
         dst_size: tuple[int, int] = (640, 640),
         decode: DecodeParams | None = None,
         normalize: NormalizeParams | None = None,
-        boxes_output: str = "boxes",
-        count_output: str | None = "num_detections",
+        boxes_output: str | None = None,
+        count_output: str | None = None,
         pad_value: int = DEFAULT_PAD_VALUE,
         timeout_s: float = 5.0,
     ) -> None:
@@ -92,6 +103,42 @@ class DetectStage(ModelStage):
         return (3, self._dst_size[0], self._dst_size[1])
 
     @property
+    def boxes_output(self) -> str:
+        """The output holding the decoded rows, taken from the model when not given.
+
+        Resolution order: what the caller said, then the model's *single* declared output —
+        an end-to-end detector has exactly one, and ``yolo26n`` calls it ``output0`` — then
+        ``"boxes"`` if a multi-output model declares it, then that model's first output. It
+        never raises: a name that cannot be determined is not a useful failure on a property
+        read once per frame, and :meth:`_do_run` already names the wrong one against what the
+        response actually carried.
+        """
+        if self._boxes_output is None:
+            specs = self._declared_outputs() or {}
+            if len(specs) == 1:
+                self._boxes_output = next(iter(specs))
+            elif DEFAULT_BOXES_OUTPUT in specs or not specs:
+                self._boxes_output = DEFAULT_BOXES_OUTPUT
+            else:
+                self._boxes_output = next(iter(specs))
+        return self._boxes_output
+
+    @property
+    def count_output(self) -> str | None:
+        """The output reporting how many rows were filled, or ``None`` if there is not one.
+
+        Only trusted when the model *declares* it. Guessing the name and finding nothing is
+        indistinguishable from a model that does not report a count, and the difference
+        matters: the trailing rows of a padded output are undefined, not zero, so reading
+        them produces plausible boxes out of nothing.
+        """
+        if self._count_output is None and DEFAULT_COUNT_OUTPUT in (
+            self._declared_outputs() or {}
+        ):
+            self._count_output = DEFAULT_COUNT_OUTPUT
+        return self._count_output
+
+    @property
     def dst_size(self) -> tuple[int, int]:
         return self._dst_size
 
@@ -105,15 +152,17 @@ class DetectStage(ModelStage):
         state.pad = (float(letterboxed.pads[0][0]), float(letterboxed.pads[0][1]))
 
         response = self._infer(state, {self.input_name: Tensor.from_numpy(letterboxed.tensor)})
-        rows = response.outputs.get(self._boxes_output)
+        boxes_output = self.boxes_output
+        rows = response.outputs.get(boxes_output)
         if rows is None:
             raise InferenceError(
                 f"stage {self.name!r}: detector {self.model_name!r} returned no output "
-                f"{self._boxes_output!r} (got: {sorted(response.outputs)})"
+                f"{boxes_output!r} (got: {sorted(response.outputs)})"
             )
         count: int | None = None
-        if self._count_output is not None:
-            reported = response.outputs.get(self._count_output)
+        count_output = self.count_output
+        if count_output is not None:
+            reported = response.outputs.get(count_output)
             if reported is not None:
                 count = int(reported.numpy().reshape(-1)[0])
 

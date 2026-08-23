@@ -165,25 +165,42 @@ def embedder_response(dim: int = EMBEDDING_DIM) -> Callable[[Any], dict[str, Ten
     return respond
 
 
-def recognizer_response() -> Callable[[Any], dict[str, Tensor]]:
+#: Prototype planes per segmentation row, and the extent of one plane in these tests. The
+#: engine's real bank is 32 planes at a quarter of the input; 32 is kept because
+#: :class:`~shipinfer.pipeline.graph.masks.InstanceMaskArea` refuses a coefficient count that
+#: disagrees with the plane count, and that refusal is worth exercising.
+SEG_COEFFICIENTS = 32
+SEG_PROTO_HW = (2, 2)
+
+
+def segmenter_response(
+    coefficients: int = SEG_COEFFICIENTS,
+) -> Callable[[Any], dict[str, Tensor]]:
+    """The two outputs a YOLO segmentation engine actually emits.
+
+    Not a mask — that is the point. ``output0`` carries ``(N, rows, 6 + M)`` detections whose
+    last M columns are mask coefficients, and ``output1`` carries the ``(N, M, h, w)``
+    prototype bank; a mask is the two multiplied through a sigmoid. Emitting a ready-made
+    ``masks`` tensor here would have let the pipeline pass tests against a contract no engine
+    honours, which is the mismatch this fixture now cannot hide.
+
+    One coefficient is set against a saturated first plane, so every cell is foreground and
+    the folded area is the crop's full pixel count. The arithmetic in ``InstanceMaskArea``
+    runs for real; only the expected answer is closed-form.
+    """
+
     def respond(request: InferenceRequest) -> dict[str, Tensor]:
         rows = next(iter(request.inputs.values())).batch_size
+        detections = np.zeros((rows, 1, 6 + coefficients), dtype=np.float32)
+        detections[:, 0, 4] = 0.9  # score, above the stage's threshold
+        detections[:, 0, 5] = 8.0  # the detector's boat class
+        detections[:, 0, 6] = 1.0  # all the weight on prototype plane 0
+        protos = np.zeros((rows, coefficients, *SEG_PROTO_HW), dtype=np.float32)
+        protos[:, 0] = 10.0  # sigmoid(10) ~ 1, so every cell lands inside the instance
         return {
-            "ship_id": Tensor.from_numpy(
-                (np.arange(rows, dtype=np.int64) + 100).reshape(rows, 1)
-            ),
-            "similarity": Tensor.from_numpy(np.full((rows, 1), 0.75, dtype=np.float32)),
+            "output0": Tensor.from_numpy(detections),
+            "output1": Tensor.from_numpy(protos),
         }
-
-    return respond
-
-
-def segmenter_response(size: tuple[int, int] = CROP_SIZE) -> Callable[[Any], dict[str, Tensor]]:
-    """A mask that is entirely foreground, so the reduced area is the pixel count."""
-
-    def respond(request: InferenceRequest) -> dict[str, Tensor]:
-        rows = next(iter(request.inputs.values())).batch_size
-        return {"masks": Tensor.from_numpy(np.ones((rows, 1, *size), dtype=np.float32))}
 
     return respond
 
@@ -262,10 +279,9 @@ def make_request(frame_image: np.ndarray):
 def models() -> dict[str, StubModel]:
     """The five models the perception DAG drives, each answering plausibly."""
     return {
-        "ship_detector": StubModel("ship_detector", detector_response([[0, 0, 8, 8, 0.9, 0]])),
+        "ship_detector": StubModel("ship_detector", detector_response([[0, 0, 8, 8, 0.9, 8]])),
         "ship_segmenter": StubModel("ship_segmenter", segmenter_response()),
         "ship_embedder": StubModel("ship_embedder", embedder_response()),
-        "ship_recognizer": StubModel("ship_recognizer", recognizer_response()),
         "person_embedder": StubModel("person_embedder", embedder_response()),
     }
 

@@ -140,7 +140,9 @@ class DecodeParams:
     one of them should not have to restate the rest.
     """
 
-    class_labels: Mapping[int, str] = field(default_factory=lambda: {0: "ship", 1: "person"})
+    #: Kept in step with :attr:`~shipinfer.core.settings.pipeline.PipelineSettings.class_labels`
+    #: — the shipped detector's COCO numbering, where 0 is a person and 8 is a boat.
+    class_labels: Mapping[int, str] = field(default_factory=lambda: {0: "person", 8: "ship"})
     score_threshold: float = 0.25
     max_detections: int = 100
 

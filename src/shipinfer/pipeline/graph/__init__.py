@@ -11,6 +11,7 @@ Layout, one reason each::
     detections.py   what a detector said, in source-frame pixels
     detect.py       stage 1: letterbox, infer, decode
     objects.py      the per-object tensor, and the model stage that consumes one
+    masks.py        a segmentation engine's two outputs -> one area per object
     crop.py         the fan-out: one frame -> N crops, the only cardinality change
     state.py        one frame's working state, and how it becomes event records
     graph.py        the DAG itself: planning, liveness, execution, validation
@@ -31,7 +32,8 @@ from shipinfer.pipeline.graph.graph import (
     StageObserver,
     build_perception_graph,
 )
-from shipinfer.pipeline.graph.objects import ObjectBatch, ObjectStage, mask_area
+from shipinfer.pipeline.graph.masks import InstanceMaskArea
+from shipinfer.pipeline.graph.objects import ObjectBatch, ObjectStage
 from shipinfer.pipeline.graph.ops import ThreadLocalImageOps
 from shipinfer.pipeline.graph.stage import (
     Cardinality,
@@ -55,6 +57,7 @@ __all__ = [
     "Detection",
     "Detections",
     "FrameState",
+    "InstanceMaskArea",
     "ModelStage",
     "ObjectBatch",
     "ObjectStage",
@@ -67,5 +70,4 @@ __all__ = [
     "ThreadLocalImageOps",
     "build_perception_graph",
     "decode_detections",
-    "mask_area",
 ]

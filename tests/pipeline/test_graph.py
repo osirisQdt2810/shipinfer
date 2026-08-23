@@ -39,9 +39,15 @@ pytestmark = pytest.mark.timeout(30)
 # Detections come back in **descending score** order, so the scores here are distinct and
 # the order they impose is stated in every assertion that depends on it. A test that assumed
 # input order would be asserting on an ordering the decoder does not promise.
-SHIP = [0.0, 0.0, 8.0, 8.0, 0.9, 0.0]
-PERSON = [1.0, 1.0, 5.0, 7.0, 0.8, 1.0]
-PERSON_WEAKER = [2.0, 2.0, 6.0, 7.0, 0.7, 1.0]
+# The trailing column is a class id, and the ids are the *shipped* detector's own COCO
+# numbering (0 person, 8 boat) — the same table as
+# ``PipelineSettings.class_labels``. They read 0=ship, 1=person while the detector was a
+# stand-in; against the real engine that labelled every person "ship" and every boat
+# "unknown", with every shape check still passing. Encoding the real numbering here is what
+# makes these tests able to fail on that mismatch.
+SHIP = [0.0, 0.0, 8.0, 8.0, 0.9, 8.0]
+PERSON = [1.0, 1.0, 5.0, 7.0, 0.8, 0.0]
+PERSON_WEAKER = [2.0, 2.0, 6.0, 7.0, 0.7, 0.0]
 
 
 class Recorder:
@@ -86,7 +92,6 @@ class TestConditionalExecution:
 
         assert models["ship_segmenter"].calls == [], "the heaviest model in the DAG ran"
         assert models["ship_embedder"].calls == []
-        assert models["ship_recognizer"].calls == []
         assert len(models["person_embedder"].calls) == 1
         assert recorder.status("ship_segmenter") is StageStatus.SKIPPED
         assert recorder.status("person_embedder") is StageStatus.RAN
@@ -101,7 +106,7 @@ class TestConditionalExecution:
 
         assert models["person_embedder"].calls == []
         assert len(models["ship_segmenter"].calls) == 1
-        assert len(models["ship_recognizer"].calls) == 1
+        assert len(models["ship_embedder"].calls) == 1
 
     def test_a_frame_with_no_detections_runs_nothing_downstream(
         self, build_graph, models, make_state, recorder
@@ -165,11 +170,12 @@ class TestTheFanOut:
         assert [r.class_name for r in records] == ["ship", "person", "person"]
         # The stub embeds row i as the constant i, so a shifted scatter is visible.
         assert records[0].embedding == (0.0,) * EMBEDDING_DIM  # ship batch, row 0
-        assert records[0].ship_id == 100
-        assert records[0].similarity == pytest.approx(0.75)
         assert records[1].embedding == (0.0,) * EMBEDDING_DIM  # person batch, row 0
         assert records[2].embedding == (1.0,) * EMBEDDING_DIM  # person batch, row 1
-        assert records[1].ship_id is None, "a person has no gallery identity"
+        # No stage fills identity any more: the gallery query that turns a ship embedding
+        # into an id is stateful and left the graph. The field survives on the record and
+        # serialises as null, so a consumer's schema does not change when it comes back.
+        assert all(r.ship_id is None for r in records)
 
     def test_a_model_returning_the_wrong_row_count_fails_the_stage(
         self, build_graph, make_state, recorder
@@ -246,9 +252,9 @@ class TestOneFailedBranchDoesNotCostTheOther:
         graph.execute(state, recorder)
 
         assert recorder.status("person_embedder") is StageStatus.FAILED
-        assert recorder.status("ship_recognizer") is StageStatus.RAN
+        assert recorder.status("ship_embedder") is StageStatus.RAN
         records = graph.objects(state)
-        assert records[0].ship_id == 100
+        assert records[0].embedding != (), "the ship branch lost its embedding"
         assert records[1].embedding == (), "a failed stage leaves the field unset, not zeroed"
 
     def test_a_failed_detector_skips_everything_and_keeps_the_tag(
@@ -302,8 +308,6 @@ class TestLiveness:
         assert set(state.batches) == {
             "ship_mask_area",
             "ship_embedding",
-            "ship_id",
-            "ship_similarity",
             "person_embedding",
         }
 
@@ -422,10 +426,15 @@ class TestValidationRefusesABrokenGraph:
         with pytest.raises(ConfigurationError, match="feeds rows of"):
             graph.validate(models.__getitem__)
 
-    def test_an_edge_between_two_models_must_agree_on_shape(
-        self, ops, models, pipeline_settings
-    ):
-        """The recogniser wants 512 and the embedder emits 8 — checked at start-up."""
+    def test_an_edge_between_two_models_must_agree_on_shape(self, ops, models):
+        """One model emits 8 floats into another that declares 512 — refused at start-up.
+
+        The edge is built explicitly instead of through ``build_perception_graph`` because
+        the production DAG no longer has a model-to-model edge: vessel identity is a gallery
+        query, which is stateful, so it left the graph together with the ``ship_recognizer``
+        stage. The guard that edge exercised is still real and still worth a test, so the
+        test now supplies its own edge rather than asserting through a stage that is gone.
+        """
         models["ship_embedder"] = StubModel(
             "ship_embedder",
             artifact=FakeArtifact(
@@ -439,8 +448,8 @@ class TestValidationRefusesABrokenGraph:
                 )
             ),
         )
-        models["ship_recognizer"] = StubModel(
-            "ship_recognizer",
+        models["ship_matcher"] = StubModel(
+            "ship_matcher",
             artifact=FakeArtifact(
                 FakeConfig(
                     input_specs=(
@@ -449,9 +458,36 @@ class TestValidationRefusesABrokenGraph:
                 )
             ),
         )
-        from shipinfer.pipeline.graph import build_perception_graph
-
-        graph = build_perception_graph(pipeline_settings, resolve=models.__getitem__, ops=ops)
+        graph = PipelineGraph(
+            [
+                DetectStage(
+                    "detect",
+                    "ship_detector",
+                    resolve=models.__getitem__,
+                    ops=ops,
+                    dst_size=DETECTOR_INPUT,
+                ),
+                CropStage("crop", ops=ops, crops=[CropSpec("ship_crops", "ship", CROP_SIZE)]),
+                ObjectStage(
+                    "ship_embedder",
+                    "ship_embedder",
+                    resolve=models.__getitem__,
+                    source="ship_crops",
+                    input_name="crops",
+                    outputs={"embedding": "ship_embedding"},
+                    row_shape=(3, *CROP_SIZE),
+                ),
+                ObjectStage(
+                    "ship_matcher",
+                    "ship_matcher",
+                    resolve=models.__getitem__,
+                    source="ship_embedding",
+                    input_name="embedding",
+                    outputs={"score": "ship_score"},
+                ),
+            ],
+            field_map={},
+        )
         with pytest.raises(ConfigurationError, match="does not accept"):
             graph.validate(models.__getitem__)
 
@@ -517,7 +553,6 @@ class TestValidationRefusesABrokenGraph:
             "ship_detector",
             "ship_segmenter",
             "ship_embedder",
-            "ship_recognizer",
             "person_embedder",
         )
 

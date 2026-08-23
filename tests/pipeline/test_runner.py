@@ -36,8 +36,10 @@ from .conftest import CROP_SIZE, DETECTOR_INPUT, FakeServer, StubModel
 
 pytestmark = pytest.mark.timeout(90)
 
-SHIP = [0.0, 0.0, 8.0, 8.0, 0.9, 0.0]
-PERSON = [1.0, 1.0, 5.0, 7.0, 0.8, 1.0]
+# Class ids are the shipped detector's COCO numbering (0 person, 8 boat) — see the same
+# constants in test_graph.py for why encoding the real numbering matters.
+SHIP = [0.0, 0.0, 8.0, 8.0, 0.9, 8.0]
+PERSON = [1.0, 1.0, 5.0, 7.0, 0.8, 0.0]
 
 
 def wait_for(predicate, timeout_s: float = 10.0, poll_s: float = 0.01) -> bool:
@@ -191,7 +193,7 @@ class TestEveryFrameProducesExactlyOneEvent:
         (event,) = runner.sink.events()
         assert not event.is_partial
         assert [o.class_name for o in event.objects] == ["ship", "person"]
-        assert event.objects_of("ship")[0].ship_id == 100
+        assert event.objects_of("ship")[0].mask_area_px is not None
         assert event.objects_of("person")[0].embedding != ()
 
 
@@ -433,9 +435,18 @@ class TestEndToEndWithReplayAndJsonLines:
             assert cv2.imwrite(str(directory / f"{index:04d}.png"), image)
         return directory
 
+    @pytest.mark.gpu
     def test_six_frames_in_six_events_out_with_every_tag_accounted_for(
         self, frame_dir: Path, demo_repository_path: Path, tmp_path: Path
     ):
+        """GPU tier, because it stands up the real repository.
+
+        Every model in ``model_repository/`` is ``platform: tensorrt`` against a real engine,
+        so this exercises the production backend rather than a double. That is the whole
+        value of the test and also why it cannot run in the offline tier: the offline
+        container has no TensorRT, by design. Substituting a fake backend here would leave
+        the assertion intact while deleting what it proves.
+        """
         from shipinfer.ingest import IngestManager
         from shipinfer.server import InferenceServer
 
@@ -447,7 +458,6 @@ class TestEndToEndWithReplayAndJsonLines:
                 "ship_detector",
                 "ship_segmenter",
                 "ship_embedder",
-                "ship_recognizer",
                 "person_embedder",
             ],
             ingest=IngestSettings(
