@@ -140,14 +140,27 @@ def _find_onnx(directory: Path, onnx_file: str | None) -> Path:
 
 
 def _capability(device_index: int) -> str:
-    """``"86"`` for an RTX A5000. Part of the cache key — a plan is architecture-specific."""
+    """``"86"`` for an RTX A5000. Part of the cache key — a plan is architecture-specific.
+
+    Raises rather than falling back. It used to return ``"unknown"`` so that a missing
+    capability "must not stop a build" — but the cache key exists precisely to stop a plan
+    built for one architecture being loaded on another, and a key of ``smunknown`` matches
+    every machine that also failed to introspect. An sm_86 plan would then be handed to an
+    sm_89 device, which is the exact landmine this filename was designed to defuse. If we
+    cannot name the architecture we cannot name the file, so we do not build.
+    """
     try:
         import torch
 
         major, minor = torch.cuda.get_device_capability(device_index)
-        return f"{major}{minor}"
-    except Exception:  # a missing capability must not stop a build
-        return "unknown"
+    except Exception as exc:
+        raise BackendLoadError(
+            f"cannot determine the compute capability of device {device_index} ({exc}), so "
+            f"a built plan could not be keyed to this architecture. A plan is only valid "
+            f"for the architecture it was built on, so caching one under an unknown key "
+            f"would let it be reused on a different GPU. Supply a prebuilt plan instead."
+        ) from exc
+    return f"{major}{minor}"
 
 
 def _build_once(onnx: Path, target: Path, *, fp16: bool, builder: Any) -> Path:
@@ -170,6 +183,14 @@ def _build_once(onnx: Path, target: Path, *, fp16: bool, builder: Any) -> Path:
     try:
         handle = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
+        if _lock_is_abandoned(lock):
+            # A SIGKILLed builder never reaches the `finally` below, so its lock outlives
+            # it. Every later start-up then waited the full 900 s and failed, needing manual
+            # cleanup — the docstring claimed the lock's age was "visible" and nothing ever
+            # looked at it. Now it is read, and an abandoned lock is taken over.
+            _LOG.warning("taking over an abandoned build lock %s", lock.name)
+            lock.unlink(missing_ok=True)
+            return _build_once(onnx, target, fp16=fp16, builder=builder)
         return _wait_for(target, lock)
 
     try:
@@ -189,6 +210,36 @@ def _build_once(onnx: Path, target: Path, *, fp16: bool, builder: Any) -> Path:
         raise
     finally:
         lock.unlink(missing_ok=True)
+
+
+def _lock_is_abandoned(lock: Path) -> bool:
+    """Whether the process that wrote this lock is gone.
+
+    Two independent signals, because either alone is wrong. The pid in the file is checked
+    first and is decisive when it is readable: a build that died leaves no live process, and
+    a *live* pid means someone really is building. Age is the fallback for a lock whose pid
+    cannot be read or was recycled — a build that has run longer than the timeout has
+    already failed by this function's own definition.
+    """
+    try:
+        recorded = int(lock.read_text().strip().splitlines()[0])
+    except (OSError, ValueError, IndexError):
+        recorded = 0
+    if recorded > 0:
+        try:
+            os.kill(recorded, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            # Alive and owned by someone else; that still counts as a live builder.
+            return False
+        else:
+            return False
+    try:
+        age = time.time() - lock.stat().st_mtime
+    except OSError:
+        return True
+    return age > _BUILD_TIMEOUT_S
 
 
 def _wait_for(target: Path, lock: Path) -> Path:

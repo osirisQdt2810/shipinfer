@@ -76,6 +76,13 @@ class ModelInstance:
         self._ewma_latency_us = 0.0
         self._executed_batches = 0
         self._executed_requests = 0
+        # One timer for the life of the instance, not one per batch. `PhaseTimer` documents
+        # that its CUDA events are reused *because* allocating a pair per phase per batch
+        # would be ~5000 allocations a second at the design point and would make the
+        # instrument part of what it measures — and then `_execute` rebuilt it every batch,
+        # so the cache was empty every time. One instance is one thread, so there is no
+        # sharing to worry about.
+        self._phase_timer = phase_timer()
         self._failed_batches = 0
 
     # -- Placeable -----------------------------------------------------------------------
@@ -217,7 +224,7 @@ class ModelInstance:
         label = self._model_label()
         device = str(self.device)
         batched_ns = time.monotonic_ns()
-        timer = phase_timer()
+        timer = self._phase_timer
 
         try:
             # Triton counts batch assembly and the host-to-device copy together as
