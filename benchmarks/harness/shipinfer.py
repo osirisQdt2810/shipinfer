@@ -256,7 +256,7 @@ def run_shipinfer(
         elapsed = time.monotonic() - window_started
 
         manager = created.get("manager")
-        ingest_stats = manager.stats() if manager is not None else None
+        ingest_stats = manager.summary() if manager is not None else None
         metrics = server.metrics
         requests = {n: metrics.requests_total.value(model=n) for n in handles}
         rejected = {n: metrics.requests_rejected.value(model=n) for n in handles}

@@ -97,3 +97,31 @@ class TestBothSidesLoadTheSameEngine:
         BenchConfig(
             det_engine=engine, seg_engine=engine, model_repository=empty
         ).require_same_engines()
+
+
+class TestTheHarnessCallsTheApiThatExists:
+    """The offered-rate check reads ingest's counters, and read them off the wrong method.
+
+    `IngestManager` has `summary()`, not `stats()`. The mistake only surfaced at the *end*
+    of a 30-second GPU run, after the measurement was already spent — which is exactly the
+    kind of failure an offline test should take instead.
+    """
+
+    def test_the_manager_exposes_the_counters_the_harness_reads(self) -> None:
+        from shipinfer.ingest import IngestManager
+        from shipinfer.ingest.camera.health import IngestSummary
+
+        assert hasattr(IngestManager, "summary")
+        for field in ("frames_read", "frames_dropped"):
+            assert field in IngestSummary.__dataclass_fields__, field
+
+    def test_the_harness_calls_summary(self) -> None:
+        import inspect
+
+        from benchmarks.harness import shipinfer as harness
+
+        source = inspect.getsource(harness.run_shipinfer)
+        assert "manager.summary()" in source
+        # Narrow on purpose: `instance.stats()` in the same function is correct and is a
+        # different object's API. A guard that matched the bare word would fail on it.
+        assert "manager.stats()" not in source, "IngestManager has no stats()"
