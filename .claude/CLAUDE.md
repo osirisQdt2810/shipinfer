@@ -45,11 +45,25 @@ ever called `cudaSetDevice`.
   the submodule out, which is how that promise stays true.
 - **Distribution:** a wheel plus a container. There is no installer and no GUI.
 
-### Where commands run
-**In a container.** `deploy/` holds the recipes: `make shell` drops you into the dev image
-with the repository bind-mounted, so you edit on the host and every command runs inside.
-A host `.venv` still works for the offline tier and is what CI uses, which is exactly why
-that tier must never need a GPU.
+### Where commands run (RULE — enforced, not advisory)
+**Every test, benchmark and measurement runs inside a container.** `deploy/` holds the
+recipes: `deploy/rootless/test.sh` runs the suite in the dev image with the repository
+bind-mounted, `deploy/rootless/prove.sh` produces the container+GPU attestation, and
+`make shell` drops you into an interactive shell there.
+
+This is enforced by `scripts/hooks/require_container.py`, wired as a `PreToolUse` hook on
+`Bash` in `.claude/settings.json`: a command that runs pytest, touches an accelerator, or
+builds a TensorRT engine is **denied** unless it is already containerised. The hook exists
+because the rule was written down first and then quietly broken — the host is faster to
+iterate on, which is a reason, not a permission. Set `SHIPINFER_ALLOW_HOST_RUN=1` in the
+command itself only when the operator has said so, and say in the report that you did.
+
+Two consequences worth stating plainly:
+- **A host number is not a production number.** Host `nvcc` here is 11.5 against a 12.6
+  driver, so `sm_89` will not build and host timings are not the deployment's timings.
+- **The offline tier is CPU-only by design, which is not the same as "the GPU path is
+  covered".** `pytest` with no accelerator proves the pure-logic tier; only `-m gpu` inside
+  the container says anything about the data plane.
 
 ## Architecture (layered; one-way imports)
 
@@ -164,6 +178,23 @@ Then, in this repository:
 3. Bump the submodule pointer in its own commit, so a kernel change and a server change are
    never entangled in one revert.
 
+## GPU hygiene (RULE)
+**Free the GPU the moment the task no longer needs it.** This box is shared; a
+finished-but-alive process keeps its CUDA context (~220-480 MiB per device) and starves the
+next person. Bound every GPU run with `timeout`, prefer `docker run --rm`, and drop tensors
+plus `torch.cuda.empty_cache()` in a `finally` — a crash must not be what frees the device.
+Then **verify instead of assuming**:
+
+```bash
+nvidia-smi --query-compute-apps=pid,used_memory --format=csv   # want: empty
+nvidia-smi --query-gpu=index,memory.used --format=csv,noheader # want: ~15-20 MiB idle
+```
+
+Before killing anything, tell a leak from live work: a background agent's probe inside its
+own `timeout` is working, not leaking — check elapsed time and parent first. The operator
+watches VRAM continuously via `~/workspaces/tools/vram_log.sh`, so a leak is visible whether
+or not it gets mentioned.
+
 ## Testing: two tiers, both mandatory
 - **Offline (default, must stay green):** `pytest` — pure logic, config validation,
   scheduling invariants, architecture rules, ops on numpy. **Needs no GPU**, by design.
@@ -225,6 +256,10 @@ principle*, registries, threading, the two test tiers, native code). Part 3 = Ag
 Principles.
 
 ## Project State Files (DYNAMIC — read at session start)
+- **`docs/qa/user.md`** — every request the operator has made, verbatim. **RULE: append each
+  new request here as it arrives**, exactly as written, before acting on it. A rule stated
+  once in passing is otherwise lost to the next compaction; Section 3 of that file is the
+  standing-rules index and is the fastest way to reload the constraints.
 - **`.claude/memory/MEMORY.md`** — durable facts about how this project is worked on.
 - **`.claude/JOURNAL.md`** — daily work log; newest on top. Read first for recent context.
 - **`.claude/FEATURE_LOG.md`** — one entry per large feature (append-only, newest on top).

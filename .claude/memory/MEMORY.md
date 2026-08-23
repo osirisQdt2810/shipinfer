@@ -15,3 +15,6 @@ machine the project is developed on.
 - [reference-repos.md](reference-repos.md) — what each checkout under `references/` is
 - [two-repo-split.md](two-repo-split.md) — shipinfer = system, shipvision = algorithms; one-way dependency
 - [parallel-lane-git-hygiene.md](parallel-lane-git-hygiene.md) — parallel agents in one checkout: stage own paths only, never create branches
+- [run-in-container.md](run-in-container.md) — every test/benchmark/measurement runs in the container; enforced by a PreToolUse hook
+- [release-gpu-when-done.md](release-gpu-when-done.md) — free the GPU as soon as the task ends; the box is shared and VRAM is watched
+- [operator-request-log.md](operator-request-log.md) — log every operator request verbatim in docs/qa/user.md
