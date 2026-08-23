@@ -129,6 +129,49 @@ PYTHON_RE = re.compile(r"(?:^|/)(python|python3|python3\.\d+)$")
 OPERATORS = {"&&", "||", "|", ";", "&", "\n", ">", ">>", "<"}
 
 
+#: Modules that run the suite or a benchmark when given to `python -m`.
+BLOCKED_MODULES = frozenset({"pytest", "py.test"})
+#: Whole package roots whose modules do the same — `python -m benchmarks.run_bench` is the
+#: bench runner however deeply the module path is nested, so the root is what is matched.
+BLOCKED_MODULE_ROOTS = frozenset({"benchmarks"})
+
+
+def _module_argument(args: list[str]) -> str | None:
+    """The module in `-m pytest` or `-mpytest`, or None.
+
+    Both spellings, because only the detached form was checked and `python -mpytest tests/`
+    went straight through.
+    """
+    for index, token in enumerate(args):
+        if token == "-m":
+            return args[index + 1] if index + 1 < len(args) else ""
+        if token.startswith("-m") and len(token) > 2 and not token.startswith("--"):
+            return token[2:]
+    return None
+
+
+def _is_containerised(tokens: list[str]) -> bool:
+    """Whether this one segment is itself the containerised entry point.
+
+    Matched against the segment's own executable and its first operands, never against the
+    whole command: allowlisting on a substring let `echo "make test"; pytest tests/` pass.
+    """
+    if not tokens:
+        return False
+    head = " ".join(tokens[:3])
+    exe = tokens[0].rsplit("/", 1)[-1]
+    for marker in CONTAINERISED:
+        first = marker.split()[0]
+        if (exe == first or tokens[0].endswith(marker.split("/")[-1])) and head.startswith(
+            (marker, exe)
+        ):
+            if marker.startswith(("docker", "podman", "nerdctl", "make")):
+                # `docker run …`, `make test`: the operands matter, so compare the prefix.
+                return head.startswith(marker)
+            return True
+    return False
+
+
 def in_container() -> bool:
     # `SHIPINFER_IN_CONTAINER=0` forces the host view even where a marker file
     # exists.  It only ever makes the hook stricter, which is why it is safe to
@@ -151,20 +194,95 @@ def in_container() -> bool:
 HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
 
 
-def _command_lines(command: str) -> list[str]:
-    """The command's lines with heredoc bodies removed."""
+def _split_heredocs(command: str) -> tuple[list[str], list[tuple[str, str]]]:
+    """Separate the command's own lines from its heredoc bodies.
+
+    Returns ``(lines, [(opening_line, body), ...])``. Both halves are needed: the lines are
+    commands, the bodies are data — except when the thing consuming a body is an interpreter
+    reading stdin, in which case the body *is* the program. See :func:`_heredoc_runs_device`.
+    """
     lines: list[str] = []
+    bodies: list[tuple[str, str]] = []
     terminator: str | None = None
+    opener = ""
+    current: list[str] = []
     for line in command.splitlines():
         if terminator is not None:
             if line.strip() == terminator:
-                terminator = None
+                bodies.append((opener, "\n".join(current)))
+                terminator, opener, current = None, "", []
+            else:
+                current.append(line)
             continue
         lines.append(line)
         match = HEREDOC.search(line)
         if match:
-            terminator = match.group(2)
-    return lines
+            terminator, opener = match.group(2), line
+    if terminator is not None:
+        bodies.append((opener, "\n".join(current)))  # unterminated, still worth inspecting
+    return lines, bodies
+
+
+def _command_lines(command: str) -> list[str]:
+    """The command's lines with heredoc bodies removed."""
+    return _split_heredocs(command)[0]
+
+
+#: An interpreter told to read its program from stdin: `python3 - <<PY`, `bash -s <<SH`.
+#: Only for these is a heredoc body executable rather than data — `cat > file <<EOF` writes
+#: a file, and refusing that would refuse writing a test that mentions torch.
+#: Interpreters whose heredoc body is a program rather than data.
+_INTERPRETERS = re.compile(r"^(?:python3?(?:\.\d+)?|bash|sh|zsh)$")
+#: The flags that mean "read the program from standard input".
+_STDIN_FLAGS = frozenset({"-", "-s"})
+
+
+def _reads_program_from_stdin(opening_line: str) -> bool:
+    """Whether the command on this line will *execute* the heredoc that follows it.
+
+    Read as tokens rather than matched as a pattern. The regex this replaces had an
+    optional-flags group that swallowed the very flag it then required, so `bash -s <<SH`
+    — a shell reading its script from the heredoc — was never recognised.
+    """
+    try:
+        tokens = shlex.split(opening_line.split("<<")[0], comments=False)
+    except ValueError:
+        return False
+    for index, token in enumerate(tokens):
+        base = token.rsplit("/", 1)[-1]
+        if base in {"sudo", "env", "exec", "nohup", "time"}:
+            continue
+        if _INTERPRETERS.match(base):
+            return any(flag in _STDIN_FLAGS for flag in tokens[index + 1 :])
+        return False
+    return False
+
+
+def _heredoc_runs_device(command: str) -> str | None:
+    """A refusal when a heredoc body that will be *executed* reaches for an accelerator.
+
+    The body is the program here, so it gets the same reading a script file gets. Bodies fed
+    to anything else are left alone: writing a file whose text contains `import torch` is not
+    running it, and treating it as such would make the hook unusable for ordinary editing.
+    """
+    for opener, body in _split_heredocs(command)[1]:
+        if not _reads_program_from_stdin(opener):
+            continue
+        # `DEVICE_IMPORT`, not `DEVICE_TOKENS`: an import statement at line start is an
+        # execution; a bare mention of the word is not. Matching the word refused a heredoc
+        # whose body merely *quoted* a device call as test data — and, on its first outing,
+        # refused the very edit that was fixing this line. Same mention-versus-invocation
+        # distinction the rest of this file turns on.
+        if DEVICE_IMPORT.search(body):
+            return (
+                "a heredoc executed by an interpreter imports a device stack. The body is "
+                "the program, not a file being written."
+            )
+        for line in body.splitlines():
+            exe = line.strip().split(" ")[0].rsplit("/", 1)[-1]
+            if exe in BLOCKED_COMMANDS:
+                return f"a heredoc executed by an interpreter runs `{exe}`."
+    return None
 
 
 def segments(command: str) -> list[list[str]]:
@@ -260,17 +378,66 @@ def script_touches_device(args: list[str], cwd: str | None) -> str | None:
     return None
 
 
+def _indirection(tokens: list[str]) -> str | None:
+    """Refuse a segment whose real command is hidden behind a substitution or a variable.
+
+    Targeted rather than blanket. Refusing every `$(...)` would refuse `docker run --user
+    $(id -u)` and the container scripts themselves, and a hook that blocks the sanctioned
+    path is a hook that gets switched off. So two specific shapes are refused:
+
+    - the executable is a variable: `PYTEST=pytest; $PYTEST tests/` runs the suite and
+      shows the lexer only `$PYTEST`;
+    - a command substitution *in command position* whose own body names something blocked:
+      `$(which pytest) tests/` is a test run wearing a hat.
+
+    A substitution used as an argument is left alone — it cannot change which program runs.
+    """
+    if not tokens:
+        return None
+    head = tokens[0]
+    if head.startswith("$") and head != "$":
+        return (
+            f"`{head}` puts a variable where the command goes, so the hook cannot see what "
+            f"runs. Write the command out, or use the container script."
+        )
+    if head == "$" and len(tokens) > 1 and tokens[1] == "(":
+        inner = []
+        for token in tokens[2:]:
+            if token == ")":
+                break
+            inner.append(token.rsplit("/", 1)[-1])
+        hit = next(
+            (t for t in inner if t in BLOCKED_COMMANDS or any(x in t for x in BLOCKED_SCRIPTS)),
+            None,
+        )
+        if hit is not None:
+            return f"`$(... {hit} ...)` resolves to a blocked command in command position."
+    return None
+
+
 def verdict(command: str, cwd: str | None = None) -> str | None:
     """Return a refusal reason, or None to allow."""
     if "SHIPINFER_ALLOW_HOST_RUN=1" in command:
         return None
-    if any(marker in command for marker in CONTAINERISED):
-        return None
+    # Deliberately NOT `marker in command`. Allowlisting on a substring of the whole
+    # command is the same mention-vs-invocation error this hook exists to avoid, on the
+    # permissive side: `echo "make test"; pytest tests/ -m gpu` was allowed because the
+    # words "make test" appeared somewhere in it. The allowlist is matched per segment,
+    # against what that segment actually runs.
+
+    heredoc = _heredoc_runs_device(command)
+    if heredoc is not None:
+        return heredoc
 
     for tokens in segments(command):
+        if _is_containerised(tokens):
+            continue
         exe, args = real_command(tokens)
         if exe is None:
             continue
+        indirect = _indirection(tokens)
+        if indirect is not None:
+            return indirect
         # `bash -c "pytest tests/"` arrives as one quoted token once the wrapper
         # and its `-c` are stepped over.  Re-read it as a command rather than
         # treating the whole string as an executable name.
@@ -294,11 +461,11 @@ def verdict(command: str, cwd: str | None = None) -> str | None:
 
         if PYTHON_RE.search(base) or base == "python":
             joined = " ".join(args)
-            if "-m" in args:
-                idx = args.index("-m")
-                module = args[idx + 1] if idx + 1 < len(args) else ""
-                if module in ("pytest", "py.test"):
-                    return "`python -m pytest` runs the suite on the host."
+            module = _module_argument(args)
+            if module is not None:
+                root = module.split(".")[0]
+                if module in BLOCKED_MODULES or root in BLOCKED_MODULE_ROOTS:
+                    return f"`python -m {module}` runs the suite or a benchmark on the host."
             if any(script in joined for script in BLOCKED_SCRIPTS):
                 return "this invokes a test or benchmark runner."
             if DEVICE_TOKENS.search(joined):
