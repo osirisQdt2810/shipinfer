@@ -289,6 +289,13 @@ ALL: tuple[EnvVar[object], ...] = (
     INGEST_READ_TIMEOUT_S,
     GST_DECODER_OVERRIDE,
     GST_APPSINK_MAX_BUFFERS,
+    # Omitted until now, so `describe()` and `shipinfer doctor` hid four variables the
+    # comment above claims they list — including the CUDA-graph switch, the one an operator
+    # is most likely to go looking for.
+    CUDA_GRAPHS,
+    PROFILE_DIR,
+    PROFILE_STEPS,
+    PROFILE_PHASES,
 )
 
 

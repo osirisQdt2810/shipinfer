@@ -96,10 +96,22 @@ def imported_modules(tree: ast.AST) -> list[tuple[str, int]]:
     return found
 
 
+#: Top-level modules that every layer may import, and the strictest rule that must hold
+#: for each. `envs` is importable from `core` upwards, so it inherits `core`'s ban: one
+#: `import torch` there would put torch behind `shipinfer.scheduling` while this checker
+#: still exited 0, because a top-level file has no layer and was skipped outright.
+NON_LAYER_RULES: dict[str, str] = {"envs": "core"}
+
+
 def check(path: Path) -> list[str]:
     layer = layer_of(path)
     if layer is None:
-        return []
+        name = path.stem
+        if name not in NON_LAYER_RULES:
+            return []
+        # Checked against the strictest layer that may import it, because that is the
+        # constraint it actually has to satisfy.
+        layer = NON_LAYER_RULES[name]
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except SyntaxError as exc:
@@ -108,7 +120,13 @@ def check(path: Path) -> list[str]:
     problems: list[str] = []
     forbidden = FORBIDDEN_EXTERNAL.get(layer, set())
     allowed = ALLOWED_INTERNAL.get(layer)
-    rel = path.relative_to(ROOT)
+    # `relative_to` raises for anything outside the repository, which made the checker
+    # crash rather than report when handed a path from elsewhere — including a test's own
+    # fixture. A report is not worth failing over.
+    try:
+        rel: Path | str = path.relative_to(ROOT)
+    except ValueError:
+        rel = path
 
     for module, lineno in imported_modules(tree):
         root = module.split(".")[0]

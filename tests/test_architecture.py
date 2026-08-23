@@ -95,3 +95,48 @@ class TestImportIsCheap:
         )
         result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+class TestTheLayerCheckerCoversSharedModules:
+    """`envs.py` sits above every layer, and the checker used to skip it entirely.
+
+    `layer_of` returns None for any top-level file, and `check` returned an empty list on
+    None — so one `import torch` in `envs.py` would have put torch behind
+    `shipinfer.scheduling` with the hook still exiting 0. Every layer from `core` up may
+    import `envs`, so it inherits `core`'s ban.
+    """
+
+    def _checker(self):
+        import importlib.util
+
+        root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(
+            "check_layers", root / "scripts" / "hooks" / "check_layers.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module, root
+
+    def test_envs_is_checked_rather_than_skipped(self) -> None:
+        checker, root = self._checker()
+        assert checker.check(root / "src" / "shipinfer" / "envs.py") == []
+
+    def test_a_device_import_in_envs_would_be_caught(self, tmp_path: Path) -> None:
+        """Without this the previous test passes on a checker that inspects nothing."""
+        checker, _ = self._checker()
+        offender = tmp_path / "envs.py"
+        offender.write_text("import torch\n")
+
+        problems = checker.check(offender)
+
+        assert problems, "the checker skipped a top-level module again"
+        assert "torch" in problems[0]
+
+    def test_an_unlisted_top_level_module_is_still_skipped(self, tmp_path: Path) -> None:
+        """The rule is a named allowance, not a blanket one: `__main__.py` may import
+        whatever the CLI needs."""
+        checker, _ = self._checker()
+        other = tmp_path / "__main__.py"
+        other.write_text("import torch\n")
+
+        assert checker.check(other) == []
