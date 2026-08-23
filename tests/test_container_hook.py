@@ -107,6 +107,15 @@ class TestRefuses:
         script.write_text("import tensorrt\n")
         assert refused(f"python {script}") is not None
 
+    def test_a_later_line_cannot_hide_behind_an_earlier_one(self) -> None:
+        """The silent bypass. ``shlex`` treats a newline as whitespace, so lexing a
+        multi-line command whole made the second line's command an *argument* of the
+        first line's — and a guard that only inspects executables then never saw it."""
+        assert refused("echo starting\npytest tests/ -m gpu\necho done") is not None
+
+    def test_every_line_of_a_script_is_inspected(self) -> None:
+        assert refused("git status\ncd /tmp\nshipinfer bench person_embedder") is not None
+
 
 class TestAllows:
     """Commands that must not be refused, or the hook gets switched off."""
@@ -166,6 +175,22 @@ class TestAllows:
         """A half-typed command with an unbalanced quote must not become a
         refusal -- that would be the hook blocking on its own parse bug."""
         assert refused('python -c "unterminated') is None
+
+    def test_a_later_lines_argument_is_not_charged_to_an_earlier_command(self) -> None:
+        """The false positive the same bug caused, and the one that would have got this
+        hook switched off: a `wc -l` of the benchmark sources on a later line was read as
+        an argument to an earlier `python3`, and refused as "invokes a benchmark runner"."""
+        command = (
+            'gh pr view 1 --json labels | python3 -c "import sys; print(sys.stdin.read())"\n'
+            "wc -l benchmarks/harness/*.py benchmarks/compare_baseline.py"
+        )
+        assert refused(command) is None
+
+    def test_a_heredoc_body_is_data_not_commands(self) -> None:
+        """`python3 - <<'PY'` is one python invocation. Reading its script's lines as
+        commands would refuse a block for merely containing the word pytest."""
+        command = "python3 - <<'PY'\nprint('pytest tests/ would be a lie here')\nPY"
+        assert refused(command) is None
 
 
 class TestTheGuardCanFail:

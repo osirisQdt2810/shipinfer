@@ -144,31 +144,71 @@ def in_container() -> bool:
     return any(Path(m).exists() for m in CONTAINER_MARKERS)
 
 
+#: The start of a heredoc, and the word that ends it.  Its body is data, not
+#: commands: a `python3 - <<'PY'` block whose script says `import torch` is one
+#: python invocation, and reading its lines as commands would refuse it for
+#: containing the word.
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
+
+
+def _command_lines(command: str) -> list[str]:
+    """The command's lines with heredoc bodies removed."""
+    lines: list[str] = []
+    terminator: str | None = None
+    for line in command.splitlines():
+        if terminator is not None:
+            if line.strip() == terminator:
+                terminator = None
+            continue
+        lines.append(line)
+        match = HEREDOC.search(line)
+        if match:
+            terminator = match.group(2)
+    return lines
+
+
 def segments(command: str) -> list[list[str]]:
     """Split a shell command into segments and tokenise each one.
 
-    Unparseable input (unbalanced quotes, mid-edit heredocs) yields nothing:
-    the hook then allows the command.  Failing open is the right call here --
-    guessing at a command we cannot read would block real work on a parse bug.
-    """
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
-    lexer.whitespace_split = True
-    try:
-        tokens = list(lexer)
-    except ValueError:
-        return []
+    Lexed **line by line**, which is the whole point.  ``shlex`` treats a newline
+    as ordinary whitespace, so lexing the command whole collapses a multi-line
+    script into one token run and the second line's command becomes the first
+    line's argument.  That is not a cosmetic bug in both directions:
 
+        echo starting
+        pytest tests/ -m gpu
+
+    lexed whole yields a single segment whose executable is ``echo`` and whose
+    arguments merely *contain* the word ``pytest`` -- a silent bypass of the
+    guard.  The same collapse also refuses innocent commands, by attributing a
+    later line's file argument to an earlier ``python3``.
+
+    A line that will not lex (an unbalanced quote, a half-typed command) is
+    skipped rather than guessed at, and skipping only costs that one line.
+    Failing open is right here: blocking real work over the hook's own parse bug
+    is how a guard gets switched off.
+    """
     out: list[list[str]] = []
-    current: list[str] = []
-    for token in tokens:
-        if token in OPERATORS:
-            if current:
-                out.append(current)
-                current = []
+    for line in _command_lines(command):
+        if not line.strip():
             continue
-        current.append(token)
-    if current:
-        out.append(current)
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        try:
+            tokens = list(lexer)
+        except ValueError:
+            continue
+
+        current: list[str] = []
+        for token in tokens:
+            if token in OPERATORS:
+                if current:
+                    out.append(current)
+                    current = []
+                continue
+            current.append(token)
+        if current:
+            out.append(current)
     return out
 
 
