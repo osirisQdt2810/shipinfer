@@ -40,7 +40,7 @@ ever called `cudaSetDevice`.
   one GPU for its whole life. The GIL is not the problem because every thread spends its
   time inside TensorRT or a CUDA memcpy, both of which release it.
 - **The fused kernels are optional and live in their own repository.**
-  `3rdparty/shipinfer-imgproc` is a submodule; every native component has a Python
+  `3rdparty/shipvision` is a submodule; every native component has a Python
   counterpart, so a machine with no build still runs — and CI deliberately does not check
   the submodule out, which is how that promise stays true.
 - **Distribution:** a wheel plus a container. There is no installer and no GUI.
@@ -117,8 +117,8 @@ src/shipinfer/
 └── pipeline/, ingest/     # the ship+person application on top of the server
 
 3rdparty/                  # first-party libraries with their own repos, as submodules
-  shipinfer-imgproc/       #   C++17 + CUDA/HIP fused kernels -> shipinfer_imgproc._C
-model_repository/          # the demo repository: the real DAG, on the mock backend
+  shipvision/              #   algorithms + C++17/CUDA/HIP fused kernels -> shipvision._C
+model_repository/          # the demo repository: the real DAG, on real TensorRT engines
 benchmarks/                # the head-to-head against the counting-simulation architecture
 deploy/                    # Dockerfile + compose; everything runs in a container
 tests/                     # offline tier (default) + `-m gpu` tier
@@ -136,7 +136,7 @@ tests/                     # offline tier (default) + `-m gpu` tier
    Everything above it works unchanged with no driver installed.
 4. **The backend contract** (`backends/base.py`). A backend receives an assembled batch and
    returns one. It does not decide what to batch, where to run, or when.
-5. **The kernel boundary** (`3rdparty/shipinfer-imgproc` ↔ `runtime/ops/`). Fused kernels
+5. **The kernel boundary** (`3rdparty/shipvision` ↔ `runtime/ops/`). Fused kernels
    only, numpy in and device-pointer out. Nothing torch already does well lives there, and
    the parent depends on it the way it depends on any library — a pinned commit (ADR-010).
 
@@ -170,7 +170,7 @@ import **no torch, no tensorrt, no onnxruntime, no fastapi**. `runtime` may not 
 3. Put it in an ensemble only after the DAG validates — mismatched shapes fail at start-up.
 
 ### A fused kernel
-It belongs in the **`shipinfer-imgproc` repository**, not here — see its own `CLAUDE.md`.
+It belongs in the **`shipvision` repository**, not here — see its own `CLAUDE.md`.
 Then, in this repository:
 1. Extend the `ImageOps` ABC in `runtime/ops/base.py` and both implementations.
 2. Add it to `tests/runtime/test_ops_parity.py`. **A fused kernel is only trustworthy if a

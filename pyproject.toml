@@ -58,10 +58,10 @@ dependencies = [
 # --- runtime backends (pick what the deployment actually needs) -------------------
 cuda = ["cuda-python>=12.0"]                       # raw driver access, `custom` variants only
 # The fused kernels. Not on PyPI: it is vendored as a submodule, so install it from there
-#   git submodule update --init 3rdparty/shipinfer-imgproc
-#   pip install -e 3rdparty/shipinfer-imgproc
+#   git submodule update --init 3rdparty/shipvision
+#   pip install -e 3rdparty/shipvision
 # Listing it here as a hard dependency would make `pip install shipinfer` fail everywhere.
-imgproc = ["shipinfer-imgproc"]
+imgproc = ["shipvision"]
 tensorrt = ["tensorrt>=8.6", "cuda-python>=12.0"]  # the production backend
 vision = ["torchvision>=0.17"]                     # tuned NMS / roi ops
 onnx = ["onnxruntime-gpu>=1.17"]                   # portable fallback backend

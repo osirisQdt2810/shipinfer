@@ -13,16 +13,16 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SUBMODULE = ROOT / "3rdparty" / "shipinfer-imgproc"
+SUBMODULE = ROOT / "3rdparty" / "shipvision"
 
 
 def main(argv: list[str]) -> int:
     driver = SUBMODULE / "build.py"
     if not driver.is_file():
         print(
-            "the fused kernels live in the shipinfer-imgproc submodule, which is not "
+            "the fused kernels live in the shipvision submodule, which is not "
             "checked out. Fetch it with:\n"
-            "    git submodule update --init 3rdparty/shipinfer-imgproc",
+            "    git submodule update --init 3rdparty/shipvision",
             file=sys.stderr,
         )
         return 2
@@ -39,7 +39,7 @@ def main(argv: list[str]) -> int:
         [
             sys.executable,
             "-c",
-            "import shipinfer_imgproc; assert shipinfer_imgproc.is_available()",
+            "import shipvision._C; assert shipvision._C.is_available()",
         ],
         cwd=ROOT,
     )
@@ -47,7 +47,7 @@ def main(argv: list[str]) -> int:
         print(
             "\nthe kernels built, but this interpreter cannot import them. Install the "
             "submodule in editable mode:\n"
-            "    pip install -e 3rdparty/shipinfer-imgproc",
+            "    pip install -e 3rdparty/shipvision",
             file=sys.stderr,
         )
     return check.returncode

@@ -47,11 +47,11 @@ at all. A bare `pytest` on this box has eight A5000s in view, so a test that qui
 a CUDA path still passes — and then fails on the runner. `torch.empty(pin_memory=True)` is
 the worked example: it succeeds here and raises on a GPU-less host.
 
-## Fused kernels (the `shipinfer-imgproc` submodule)
+## Fused kernels (the `shipvision` submodule)
 
 ```bash
-git submodule update --init 3rdparty/shipinfer-imgproc
-pip install -e 3rdparty/shipinfer-imgproc      # the Python surface; no toolkit needed
+git submodule update --init 3rdparty/shipvision
+pip install -e 3rdparty/shipvision      # the Python surface; no toolkit needed
 python scripts/build_native.py --arch 86       # delegates to the submodule's build.py
 python scripts/build_native.py --hip           # ROCm
 ```

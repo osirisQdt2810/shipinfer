@@ -1,4 +1,4 @@
-"""Image operations backed by the fused kernels in ``shipinfer-imgproc``."""
+"""Image operations backed by the fused kernels in ``shipvision``."""
 
 from __future__ import annotations
 
@@ -82,8 +82,8 @@ class NativeImageOps(ImageOps):
     result — the same technique the reference ``*-trt`` services use in
     ``src/tools/imgproc/*.cu``, generalised over a batch.
 
-    The kernels live in the ``shipinfer-imgproc`` repository, pinned here as the submodule
-    ``3rdparty/shipinfer-imgproc``. This class is the adapter between that library's raw
+    The kernels live in the ``shipvision`` repository, pinned here as the submodule
+    ``3rdparty/shipvision``. This class is the adapter between that library's raw
     binding and the :class:`~shipinfer.runtime.ops.base.ImageOps` contract.
 
     :meth:`nms` runs on the device for the same reason: 25 000 candidate boxes is ~800 KB
@@ -97,8 +97,8 @@ class NativeImageOps(ImageOps):
         self._native: Any = require_native()
         if not self._native.is_available():
             raise RuntimeError(
-                "shipinfer-imgproc is installed but has no usable kernels; build them "
-                "with `python 3rdparty/shipinfer-imgproc/build.py`"
+                "shipvision is installed but has no usable kernels; build them "
+                "with `python 3rdparty/shipvision/build.py`"
             )
         self._device_index = device_index
         self._stream = stream

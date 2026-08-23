@@ -208,13 +208,15 @@ the moving one. Triton has a response cache; vLLM's prefix cache is the same ide
 **Consequences.** It is only sound for a deterministic, stateless model. Enabling it on a
 stateful or stochastic one returns a stale answer with full confidence, which is far worse
 than being slow. Defaulting it off means the failure mode requires someone to have decided.
-In the demo repository only `ship_recognizer` enables it — a pure gallery lookup.
+No model in the demo repository enables it. `ship_recognizer` used to — a pure gallery
+lookup, the one shape a cache is safe for — and it was removed when vessel identity
+moved to the stateful tier, so the example went with it. The default is unchanged.
 
 ---
 
 ## ADR-010 — Libraries with their own lifecycle get their own repository
 
-**Status:** Accepted · 2026-08-23
+**Status:** Superseded by [ADR-012](#adr-012--one-algorithms-repository-not-four) · 2026-08-23
 
 **Context.** The fused CUDA/HIP kernels started life as `native/` inside this repository.
 They are not part of the server, though: a kernel that turns a batch of frames into a
@@ -296,3 +298,40 @@ The cost is one indirection and two shipped sinks that are not the production pa
 (`CountingSink`, `BoundedSink`). Their docstrings say so, and `BoundedSink` says explicitly
 that it is *not* camera-fair: fairness is the scheduler's job, and a second, subtly different
 implementation of it inside `ingest` is exactly what ADR-005 warns against.
+
+---
+
+## ADR-012 — One algorithms repository, not four
+
+**Status:** Accepted · 2026-08-23 · supersedes [ADR-010](#adr-010--libraries-with-their-own-lifecycle-get-their-own-repository)
+
+**Context.** ADR-010 gave each library its own repository under the `shipinfer-` prefix:
+`shipinfer-imgproc`, and `-mot`, `-reid`, `-mtmc` as they arrived. The reasoning was sound
+— a Python control plane and a set of GPU kernels want different reviewers — and the
+practice did not survive contact with the work.
+
+Three things went wrong. The libraries were not independent: a tracker needs the
+re-identification distance metrics, multi-camera association needs both, and the evaluation
+harness needs all three, so a change to a shared type meant a coordinated bump across four
+repositories in one afternoon. Their *lifecycle* turned out to be identical — they are
+released together because they are used together. And the split cost correctness here: this
+repository's kernel loader still imported `shipinfer_imgproc` after the merge, so
+`provider: native` could never resolve and the fused-kernel seam was dead code that no test
+noticed, because every test either uses the numpy backend or skips without a device.
+
+**Decision.** One repository, `shipvision`, holding imgproc, detection, reid, tracking, mtmc,
+eval and tune, vendored here as `3rdparty/shipvision`. The boundary ADR-010 actually cared
+about — algorithms are not the server, and the dependency runs one way — is unchanged and is
+now enforced by a test in that repository that fails if it imports `shipinfer`.
+
+What is kept from ADR-010: it is still a separate repository with its own CI and its own
+reviewer, the parent still pins a commit, and a submodule bump is still its own commit so a
+kernel change and a server change are never entangled in one revert.
+
+**Consequences.** One reviewer sees Python and CUDA in the same pull request, which ADR-010
+wanted to avoid; the mitigation is that repository's own review configuration rather than a
+repository boundary. Four remotes were deleted, so their history lives only in `shipvision`.
+And the rename has to be complete to mean anything — `runtime/native.py`, `runtime/ops/`,
+`pyproject.toml`, the CI workflow and the documentation all named the old module, and a
+half-applied rename is what turned this from a packaging decision into a silent capability
+loss.

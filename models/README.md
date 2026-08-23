@@ -7,9 +7,22 @@ that built it, so committing one would ship something that fails on any other ma
 Fetch and build them with:
 
 ```bash
-scripts/fetch_models.py            # downloads the weights, exports ONNX
-scripts/build_engines.py           # builds TensorRT engines for THIS machine
+# 1. Checkpoints and ONNX. The .pt files come from the ultralytics assets release named
+#    in the table below; the ONNX is exported from them:
+python -c "from ultralytics import YOLO; YOLO('models/yolo26n.pt').export(format='onnx')"
+
+# 2. Engines for THIS machine's GPU and TensorRT version. Runs in the container, because
+#    a plan built anywhere else will not load here:
+deploy/rootless/bench.sh --help    # the image this needs
+python scripts/build_engines.py --check   # what is present
+python scripts/build_engines.py           # build what is not
 ```
+
+There is no `scripts/fetch_models.py`. This file used to name one, and three other places
+pointed at `scripts/build_engines.py` before it existed — so anyone reproducing the
+benchmark hit `No such file or directory`. The build half now exists; the fetch half is two
+lines of ultralytics and is written out above rather than wrapped in a script that would
+need a network the container does not have.
 
 | file | what | provenance |
 |---|---|---|

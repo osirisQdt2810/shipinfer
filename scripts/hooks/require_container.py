@@ -194,6 +194,19 @@ def in_container() -> bool:
 HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
 
 
+def _join_continuations(command: str) -> str:
+    """Fold ``\\``-continued lines back into one line before anything else looks at them.
+
+    Lexing line by line is what closed the multi-line bypass, but a backslash continuation
+    is not a new command -- it is the *same* command wrapped for readability. Splitting
+    there refused a perfectly good `docker run ... \\` whose image and argv sat on the last
+    line: the hook saw a bare `python3 scripts/build_engines.py` with the `docker run` that
+    contained it three lines earlier, and blocked the sanctioned path. It caught me within
+    minutes of writing it.
+    """
+    return re.sub(r"\\\n[ \t]*", " ", command)
+
+
 def _split_heredocs(command: str) -> tuple[list[str], list[tuple[str, str]]]:
     """Separate the command's own lines from its heredoc bodies.
 
@@ -206,7 +219,7 @@ def _split_heredocs(command: str) -> tuple[list[str], list[tuple[str, str]]]:
     terminator: str | None = None
     opener = ""
     current: list[str] = []
-    for line in command.splitlines():
+    for line in _join_continuations(command).splitlines():
         if terminator is not None:
             if line.strip() == terminator:
                 bodies.append((opener, "\n".join(current)))

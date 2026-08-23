@@ -23,7 +23,7 @@ get run, and whichever algorithm shipped first wins by default instead of by evi
 **How to apply:** a new algorithm goes in `shipvision` behind its family's registry, with
 both a `native` and a `python` backend and a parity test between them. Anything about
 cameras, queues, GPUs, HTTP or Kafka goes in `shipinfer`. The four earlier per-module repos
-(`shipinfer-imgproc`, `-mot`, `-reid`, `-mtmc`) are being folded into `shipvision` and then
+(`shipvision`, `-mot`, `-reid`, `-mtmc`) are being folded into `shipvision` and then
 deleted — the user chose "Gộp hết, xoá repo cũ".
 
 Related: [[ponytail-principle]], [[package-per-extension-point]], [[reference-repos]]
