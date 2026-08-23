@@ -55,53 +55,55 @@ using gpuStream_t = cudaStream_t;
 
 namespace shipinfer {
 
-/// Thrown for any failed device call. pybind11 maps it to a Python
-/// RuntimeError, so a kernel launch failure surfaces as an ordinary exception
-/// instead of a silent wrong answer or an abort inside the interpreter.
-class GpuError : public std::runtime_error {
-public:
-  explicit GpuError(const std::string &what) : std::runtime_error(what) {}
-};
+  /// Thrown for any failed device call. pybind11 maps it to a Python
+  /// RuntimeError, so a kernel launch failure surfaces as an ordinary exception
+  /// instead of a silent wrong answer or an abort inside the interpreter.
+  class GpuError : public std::runtime_error {
+    public:
+      explicit GpuError(const std::string& what) : std::runtime_error(what) {}
+  };
 
-inline void check(gpuError_t status, const char *what) {
-  if (status != gpuSuccess) {
-    throw GpuError(std::string(what) + " failed: " + gpuGetErrorString(status));
+  inline void check(gpuError_t status, const char* what) {
+    if (status != gpuSuccess) {
+      throw GpuError(std::string(what) + " failed: " + gpuGetErrorString(status));
+    }
   }
-}
 
-/// Check the *asynchronous* error slot after a launch.
-///
-/// A kernel launch reports configuration errors immediately and execution
-/// errors only later; without this an out-of-bounds write shows up as an
-/// unrelated failure in whatever call happens next, which is one of the hardest
-/// CUDA bugs to trace.
-inline void check_launch(const char *what) { check(gpuGetLastError(), what); }
+  /// Check the *asynchronous* error slot after a launch.
+  ///
+  /// A kernel launch reports configuration errors immediately and execution
+  /// errors only later; without this an out-of-bounds write shows up as an
+  /// unrelated failure in whatever call happens next, which is one of the hardest
+  /// CUDA bugs to trace.
+  inline void check_launch(const char* what) {
+    check(gpuGetLastError(), what);
+  }
 
-/// Ceiling division, for grid sizing.
-constexpr int ceil_div(int numerator, int denominator) {
-  return (numerator + denominator - 1) / denominator;
-}
+  /// Ceiling division, for grid sizing.
+  constexpr int ceil_div(int numerator, int denominator) {
+    return (numerator + denominator - 1) / denominator;
+  }
 
-/// 256 threads: enough to hide memory latency on every architecture this
-/// targets, and small enough that the occupancy limit is registers rather than
-/// the block size.
-constexpr int kBlockSize = 256;
+  /// 256 threads: enough to hide memory latency on every architecture this
+  /// targets, and small enough that the occupancy limit is registers rather than
+  /// the block size.
+  constexpr int kBlockSize = 256;
 
-/// A device-side view of one source image inside a ragged batch.
-///
-/// The batch is ragged by nature — 50 cameras do not agree on resolution — so
-/// the kernel cannot index a single dense tensor. One descriptor per image,
-/// uploaded once per call, is what lets a single launch cover the whole batch
-/// instead of one launch per image.
-struct ImageView {
-  const unsigned char *data; ///< HWC, 3 channels, uint8
-  int height;
-  int width;
-  float scale; ///< resize factor applied to fit the destination
-  int pad_x;   ///< letterbox offset in destination pixels
-  int pad_y;
-  int out_h; ///< resized extent inside the destination canvas
-  int out_w;
-};
+  /// A device-side view of one source image inside a ragged batch.
+  ///
+  /// The batch is ragged by nature — 50 cameras do not agree on resolution — so
+  /// the kernel cannot index a single dense tensor. One descriptor per image,
+  /// uploaded once per call, is what lets a single launch cover the whole batch
+  /// instead of one launch per image.
+  struct ImageView {
+      const unsigned char* data; ///< HWC, 3 channels, uint8
+      int height;
+      int width;
+      float scale; ///< resize factor applied to fit the destination
+      int pad_x;   ///< letterbox offset in destination pixels
+      int pad_y;
+      int out_h; ///< resized extent inside the destination canvas
+      int out_w;
+  };
 
 } // namespace shipinfer

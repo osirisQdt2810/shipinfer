@@ -20,89 +20,87 @@
 
 namespace shipinfer {
 
-/// Device scratch that grows to the high-water mark and is never handed back.
-class DeviceScratch {
-public:
-  DeviceScratch() = default;
-  ~DeviceScratch() { release(); }
-  DeviceScratch(const DeviceScratch &) = delete;
-  DeviceScratch &operator=(const DeviceScratch &) = delete;
+  /// Device scratch that grows to the high-water mark and is never handed back.
+  class DeviceScratch {
+    public:
+      DeviceScratch() = default;
+      ~DeviceScratch() { release(); }
+      DeviceScratch(const DeviceScratch&) = delete;
+      DeviceScratch& operator=(const DeviceScratch&) = delete;
 
-  /// A pointer to at least `bytes`, reallocating only when the request grows.
-  void *reserve(size_t bytes) {
-    if (bytes <= capacity_)
-      return ptr_;
-    release();
-    // Over-allocate by a quarter so a slowly growing batch does not reallocate
-    // every call.
-    const size_t target = bytes + bytes / 4;
-    check(gpuMalloc(&ptr_, target), "gpuMalloc (device scratch)");
-    capacity_ = target;
-    return ptr_;
-  }
+      /// A pointer to at least `bytes`, reallocating only when the request grows.
+      void* reserve(size_t bytes) {
+        if (bytes <= capacity_)
+          return ptr_;
+        release();
+        // Over-allocate by a quarter so a slowly growing batch does not reallocate
+        // every call.
+        const size_t target = bytes + bytes / 4;
+        check(gpuMalloc(&ptr_, target), "gpuMalloc (device scratch)");
+        capacity_ = target;
+        return ptr_;
+      }
 
-  size_t capacity() const { return capacity_; }
+      size_t capacity() const { return capacity_; }
 
-  void release() {
-    if (ptr_ != nullptr) {
-      gpuFree(ptr_);
-      ptr_ = nullptr;
-      capacity_ = 0;
-    }
-  }
+      void release() {
+        if (ptr_ != nullptr) {
+          gpuFree(ptr_);
+          ptr_ = nullptr;
+          capacity_ = 0;
+        }
+      }
 
-private:
-  void *ptr_ = nullptr;
-  size_t capacity_ = 0;
-};
+    private:
+      void* ptr_ = nullptr;
+      size_t capacity_ = 0;
+  };
 
-/// Page-locked host scratch, same growth policy.
-///
-/// Worth the trouble for one reason: `cudaMemcpyAsync` from pageable memory
-/// silently degrades to a synchronous copy at about half the bandwidth. Staging
-/// through pinned memory is what makes the upload both faster and genuinely
-/// asynchronous.
-class PinnedScratch {
-public:
-  PinnedScratch() = default;
-  ~PinnedScratch() { release(); }
-  PinnedScratch(const PinnedScratch &) = delete;
-  PinnedScratch &operator=(const PinnedScratch &) = delete;
+  /// Page-locked host scratch, same growth policy.
+  ///
+  /// Worth the trouble for one reason: `cudaMemcpyAsync` from pageable memory
+  /// silently degrades to a synchronous copy at about half the bandwidth. Staging
+  /// through pinned memory is what makes the upload both faster and genuinely
+  /// asynchronous.
+  class PinnedScratch {
+    public:
+      PinnedScratch() = default;
+      ~PinnedScratch() { release(); }
+      PinnedScratch(const PinnedScratch&) = delete;
+      PinnedScratch& operator=(const PinnedScratch&) = delete;
 
-  unsigned char *reserve(size_t bytes) {
-    if (bytes <= capacity_)
-      return ptr_;
-    release();
-    const size_t target = bytes + bytes / 4;
+      unsigned char* reserve(size_t bytes) {
+        if (bytes <= capacity_)
+          return ptr_;
+        release();
+        const size_t target = bytes + bytes / 4;
 #if defined(SHIPINFER_WITH_HIP)
-    check(hipHostMalloc(reinterpret_cast<void **>(&ptr_), target),
-          "hipHostMalloc");
+        check(hipHostMalloc(reinterpret_cast<void**>(&ptr_), target), "hipHostMalloc");
 #else
-    check(cudaHostAlloc(reinterpret_cast<void **>(&ptr_), target,
-                        cudaHostAllocDefault),
-          "cudaHostAlloc");
+        check(cudaHostAlloc(reinterpret_cast<void**>(&ptr_), target, cudaHostAllocDefault),
+              "cudaHostAlloc");
 #endif
-    capacity_ = target;
-    return ptr_;
-  }
+        capacity_ = target;
+        return ptr_;
+      }
 
-  size_t capacity() const { return capacity_; }
+      size_t capacity() const { return capacity_; }
 
-  void release() {
-    if (ptr_ != nullptr) {
+      void release() {
+        if (ptr_ != nullptr) {
 #if defined(SHIPINFER_WITH_HIP)
-      hipHostFree(ptr_);
+          hipHostFree(ptr_);
 #else
-      cudaFreeHost(ptr_);
+          cudaFreeHost(ptr_);
 #endif
-      ptr_ = nullptr;
-      capacity_ = 0;
-    }
-  }
+          ptr_ = nullptr;
+          capacity_ = 0;
+        }
+      }
 
-private:
-  unsigned char *ptr_ = nullptr;
-  size_t capacity_ = 0;
-};
+    private:
+      unsigned char* ptr_ = nullptr;
+      size_t capacity_ = 0;
+  };
 
 } // namespace shipinfer
