@@ -482,6 +482,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--seconds", type=float, default=70.0)
     p.add_argument("--warmup", type=float, default=10.0, dest="warmup_s")
     p.add_argument("--batch", type=int, default=8)
+    p.add_argument(
+        "--pipeline-workers",
+        type=int,
+        default=None,
+        help=(
+            "frames in flight through the DAG (default 96). Exposed because it is the knob "
+            "most likely to be mistaken for a result: a wall at the pipeline queue while "
+            "every model queue stays flat is either the worker pool or the interpreter, "
+            "and only sweeping this tells you which."
+        ),
+    )
     p.add_argument("--resolution", choices=("2k", "4k"), default="2k")
     p.add_argument(
         "--systems",
@@ -537,6 +548,11 @@ def main(argv: list[str] | None = None) -> int:
         warmup_s=args.warmup_s,
         resolution=args.resolution,
         omp_threads=args.omp_threads,
+        **(
+            {"pipeline_workers": args.pipeline_workers}
+            if args.pipeline_workers is not None
+            else {}
+        ),
         out_dir=base_out,
     ).resolved()
     out_dir = cfg.out_dir
