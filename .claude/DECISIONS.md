@@ -173,7 +173,7 @@ against torch's 13.7 ms, bit-identical output.
 
 ## ADR-008 — CUDA graphs need persistent I/O buffers
 
-**Status:** Accepted · 2026-08-22
+**Status:** Accepted · 2026-08-22 · **superseded in part by ADR-013** (default flipped off)
 
 **Context.** For the small, launch-bound models here — a 512-d embedder at batch 8 — kernel
 launch overhead is a large share of wall time. Graph replay collapses an entire inference
@@ -191,6 +191,9 @@ flow does not pay a failed capture on every batch.
 
 **Consequences.** Buffers are sized for the worst case, so memory is held that a small batch
 does not use. That is the trade, and `max_batch_size` is the knob.
+
+The default-on posture in this ADR no longer holds — see ADR-013. The mechanism, the
+preconditions and the capture-failure policy above are unchanged.
 
 ---
 
@@ -335,3 +338,33 @@ And the rename has to be complete to mean anything — `runtime/native.py`, `run
 `pyproject.toml`, the CI workflow and the documentation all named the old module, and a
 half-applied rename is what turned this from a packaging decision into a silent capability
 loss.
+
+---
+
+## ADR-013 — CUDA graphs are opt-in, not the default
+
+**Status:** Accepted · 2026-08-23 · supersedes the default in ADR-008
+
+**Context.** ADR-008 turned graph capture on by default on the strength of the mechanism: for
+launch-bound models, replay collapses an inference into one `cudaGraphLaunch`. That reasoning
+is still right, and it was never measured against the cost of *getting* the graphs.
+
+The first real 50-camera run measured it. Start-up went from 13.71 s to 97.82 s — seven
+times — because capture happens per model, per batch size, per instance, and this
+deployment has four of each. Nothing in the steady state paid that back on the runs we
+can currently perform, and every one of those runs is a benchmark or a test whose whole
+cost is dominated by start-up.
+
+**Decision.** `execution.cuda_graphs` defaults to **False**. It stays a first-class setting
+with the mechanism from ADR-008 intact behind it, and the docstring carries the two numbers
+so the next person can weigh them rather than rediscover them.
+
+**Consequences.** A long-lived production server that would amortise 84 s of capture over
+days is now opting in rather than opting out, which is the wrong default *for that
+deployment* — stated here so the flip is a decision and not an oversight. The knob is one
+line of config, and ADR-008's preconditions (buffers allocated once at load, pinned staging
+from a shape-keyed pool) remain load-bearing for anyone who sets it.
+
+What this does not change: capture failure still means "take the ordinary launch path", and
+`cuda_graph_max_capture_failures` still stops a model with dynamic control flow from paying
+a failed capture on every batch.

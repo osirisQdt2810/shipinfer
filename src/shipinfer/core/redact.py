@@ -22,7 +22,6 @@ and ``core`` may not import upwards (ADR-001).
 from __future__ import annotations
 
 import re
-from urllib.parse import urlsplit, urlunsplit
 
 __all__ = ["PLACEHOLDER", "redact", "redact_in"]
 
@@ -34,37 +33,62 @@ PLACEHOLDER = "***"
 def redact(uri: str | None) -> str:
     """``rtsp://admin:s3cret@host/stream`` -> ``rtsp://admin:***@host/stream``.
 
-    The username is kept: it is useful for diagnosis and is not the secret. Anything that
-    does not parse as a URL, or carries no password, is returned unchanged — a local file
-    path and a plain ``rtsp://host/stream`` are both common and neither is sensitive.
+    The username is kept: it is useful for diagnosis and is not the secret. A URI with no
+    ``@`` in it carries no credential and is returned unchanged — a local file path and a
+    plain ``rtsp://host/stream`` are both common and neither is sensitive.
+
+    **Where the credential ends is decided by the last ``@``, not the first, and not by
+    ``urlsplit``.** Both of the obvious readings fail open on passwords that real fleets
+    actually use:
+
+    - ``urlsplit`` follows RFC 3986, where a ``/`` ends the authority. So in
+      ``rtsp://admin:pa/ss@10.0.0.5/stream`` the authority is ``admin:pa`` with no ``@``,
+      ``parts.password`` is ``None``, and an early return on that echoed the whole URI.
+    - Stopping at the first ``@`` leaves the tail of a password like ``p@ss123`` in the
+      clear, which is worse than not redacting at all because the output *looks* redacted.
+
+    So: everything between the first ``:`` after the scheme and the final ``@`` is the
+    password, whatever characters it contains.
+
+    This over-masks in one case — ``rtsp://host:554/a@b``, a portful host with an ``@``
+    somewhere in the path and no credentials at all, comes back as ``rtsp://host:***@b``.
+    That is the direction to be wrong in: a mangled log line costs a reader a moment, and
+    the alternative costs a fleet its password.
 
     Never raises. This runs inside logging and error construction, and a redaction helper
-    that can throw would turn a diagnostic into a second failure on the path that is already
-    failing.
+    that can throw would turn a diagnostic into a second failure on the path that is
+    already failing.
     """
     if not uri:
         return ""
     try:
-        parts = urlsplit(uri)
-        if not parts.password:
+        scheme, separator, rest = uri.partition("://")
+        if not separator or "@" not in rest:
             return uri
-        host = parts.hostname or ""
-        if parts.port:
-            host = f"{host}:{parts.port}"
-        userinfo = f"{parts.username or ''}:{PLACEHOLDER}"
-        return urlunsplit(
-            (parts.scheme, f"{userinfo}@{host}", parts.path, parts.query, parts.fragment)
-        )
-    except ValueError:
-        # A URI too malformed to split cannot be redacted piecewise, and echoing it raw
-        # risks printing whatever credential it does contain. Callers always have the
-        # camera id alongside, so nothing identifying is lost.
+        userinfo, _, host = rest.rpartition("@")
+        username, colon, _password = userinfo.partition(":")
+        if not colon:
+            # ``rtsp://user@host``: a username with no password is not a secret.
+            return uri
+        if not host:
+            raise ValueError("nothing after the credential")
+        return f"{scheme}://{username}:{PLACEHOLDER}@{host}"
+    except (ValueError, AttributeError):
+        # Too malformed to split, and echoing it raw risks printing whatever credential it
+        # does contain. Callers always have the camera id alongside, so nothing identifying
+        # is lost. Fail closed: this branch exists because the *only* safe default when the
+        # parse is uncertain is to print nothing.
         return "<unparseable uri>"
 
 
-#: ``scheme://user:password@`` inside a larger string. The password is group 2 and is the
+#: ``scheme://user:password@`` inside a larger string. The password is group 3 and is the
 #: only part replaced, so the scheme, the username and everything around it survive.
-_EMBEDDED = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^\s:/@]+):([^\s@/]+)@")
+#:
+#: The password class is ``[^\s]+`` — deliberately including ``/`` and ``@`` — and it is
+#: greedy, so it runs to the **last** ``@`` in the token rather than the first. A narrower
+#: class could not match ``pa/ss`` at all, and a non-greedy one left ``ss123`` of ``p@ss123``
+#: in the clear. It cannot cross whitespace, so two URIs in one line stay two matches.
+_EMBEDDED = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)([^\s:/@]+):([^\s]+)@")
 
 
 def redact_in(text: str) -> str:
@@ -77,4 +101,4 @@ def redact_in(text: str) -> str:
     """
     if not text:
         return ""
-    return _EMBEDDED.sub(lambda m: f"{m.group(1)}:{PLACEHOLDER}@", text)
+    return _EMBEDDED.sub(lambda m: f"{m.group(1)}{m.group(2)}:{PLACEHOLDER}@", text)

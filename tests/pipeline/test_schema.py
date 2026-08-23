@@ -94,7 +94,12 @@ class TestTheV1ContractIsUnchanged:
         assert payload["det_id_vec"] == ["cam0_1_0", "cam0_1_1"]
         assert payload["det_body_score_vec"] == [0.9, 0.5]
         assert payload["body_bbox_vec"] == [[0.0, 1.0, 2.0, 3.0], [1.0, 1.0, 2.0, 3.0]]
-        assert payload["body_feature_vec"] == [[0.1, 0.2], [0.1, 0.2]]
+        # Tuples, not lists. `ObjectRecord.embedding` is already a tuple of floats and
+        # `json.dumps` encodes a tuple as an array, so copying each one into a list per
+        # object bought nothing — at 2048 floats and ~15 000 objects/s it was a second
+        # full copy of every embedding on the emission path. The wire form is unchanged,
+        # which is what `TestTheWireFormIsUnchangedByTheTupleChange` below pins.
+        assert payload["body_feature_vec"] == [(0.1, 0.2), (0.1, 0.2)]
 
     def test_the_v2_payload_still_contains_every_v1_key_with_the_same_value(self):
         subject = event(person(0), ship(1))
@@ -117,7 +122,7 @@ class TestShipsAreAnExtension:
         assert payload["ship_det_id_vec"] == ["cam0_1_1"]
         assert payload["det_ship_score_vec"] == [0.8]
         assert payload["ship_bbox_vec"] == [[10.0, 11.0, 12.0, 13.0]]
-        assert payload["ship_feature_vec"] == [[0.3, 0.4]]
+        assert payload["ship_feature_vec"] == [(0.3, 0.4)]
         assert payload["ship_id_vec"] == [42]
         assert payload["ship_similarity_vec"] == [0.91]
         assert payload["ship_mask_area_vec"] == [1234.0]
@@ -185,14 +190,45 @@ class TestTimestampsAndLatency:
         assert event(captured_ns=2**62).latency_us == 0
 
 
+class TestTheWireFormIsUnchangedByTheTupleChange:
+    """The contract is the bytes on the wire, not the Python type in the dict.
+
+    `body_feature_vec` and `ship_feature_vec` hold tuples now rather than freshly copied
+    lists. That is invisible to every consumer — `json.dumps` writes an array either way —
+    and it removes a per-object copy of a 2048-float embedding from the emission path.
+    """
+
+    def test_an_embedding_encodes_as_a_json_array(self) -> None:
+        subject = event(person(0), ship(1))
+
+        decoded = json.loads(subject.to_json())
+
+        assert decoded["body_feature_vec"] == [[0.1, 0.2]]
+        assert decoded["ship_feature_vec"] == [[0.3, 0.4]]
+
+    def test_the_v1_payload_encodes_identically(self) -> None:
+        """`as_det2mot` is the v1 contract an existing consumer is written against."""
+        payload = event(person(0)).as_det2mot()
+
+        assert json.dumps(payload["body_feature_vec"]) == "[[0.1, 0.2]]"
+
+
 class TestSerialisation:
     """One line of JSON per frame, because a thousand a second cross a broker."""
 
     def test_to_json_is_one_line_and_round_trips(self):
+        """JSON has no tuple, so the embeddings come back as lists — which is the point:
+        the payload holds tuples and the wire holds arrays, and a consumer sees no change."""
         subject = event(person(0), ship(1))
         line = subject.to_json()
         assert "\n" not in line
-        assert json.loads(line) == subject.as_dict()
+
+        decoded = json.loads(line)
+        payload = subject.as_dict()
+        assert decoded.keys() == payload.keys()
+        for key, value in payload.items():
+            expected = json.loads(json.dumps(value))
+            assert decoded[key] == expected, key
 
     def test_it_has_no_wasted_whitespace(self):
         assert ", " not in event(person(0)).to_json()

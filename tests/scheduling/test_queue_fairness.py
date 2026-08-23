@@ -113,6 +113,43 @@ class TestOverflowPolicies:
         queue.put(make_item(frame=1))  # blocks until the drain frees a slot
         assert queue.depth == 1
 
+    def test_the_producer_wakes_when_the_slot_frees_not_when_the_deadline_expires(
+        self, make_item
+    ) -> None:
+        """The test above passes 450 ms late and cannot tell the difference.
+
+        It asserts only that the put eventually succeeds, so it stayed green through a
+        regression that made every blocked producer sleep the entire `block_timeout_ms`: the
+        drain's row-budget exit changed from `break` to `return` and jumped over the
+        `notify_all`. At the design point that is a hard ceiling on the ingest thread, and
+        when the timeout beats the drain, `put` raises `QueueFullError` and the camera actor
+        charges a drop to a camera that did nothing wrong.
+
+        `max_batch_size=1` is the shape that matters: it takes the `rows >= max_rows` exit,
+        which is the one taken on the common path under load.
+        """
+        freed_at: list[float] = []
+        queue = FairPriorityQueue(
+            "q", capacity=1, overflow=OverflowPolicy.BLOCK, block_timeout_ms=2000
+        )
+        queue.put(make_item(frame=0))
+
+        def drain() -> None:
+            time.sleep(0.05)
+            queue.get_batch(BatchWindow(max_batch_size=1))
+            freed_at.append(time.monotonic())
+
+        threading.Thread(target=drain, daemon=True).start()
+        queue.put(make_item(frame=1))
+        unblocked_at = time.monotonic()
+
+        assert freed_at, "the drain never ran"
+        latency_ms = (unblocked_at - freed_at[0]) * 1000
+        assert latency_ms < 250, (
+            f"the producer woke {latency_ms:.0f} ms after the slot freed; "
+            "it was waiting out the timeout, not being notified"
+        )
+
 
 class TestQueueLifecycle:
     """Work that will never be useful is discarded, and a closed queue strands nothing."""

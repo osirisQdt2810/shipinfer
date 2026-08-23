@@ -111,6 +111,28 @@ def _expired_item(runner: PipelineRunner, camera: str = "cam0"):
     return WorkItem(request, ResponseFuture(request))
 
 
+def _item(runner: PipelineRunner, camera: str = "cam0", frame_id: int = 0):
+    """A live pipeline entry item, so a test can hold the future the runner will resolve."""
+    from shipinfer.core.request import InferenceRequest, ResponseFuture
+    from shipinfer.core.types import Tensor
+    from shipinfer.scheduling.work import WorkItem
+
+    frame = FrameCounter(camera).stamp(np.zeros((16, 16, 3), dtype=np.uint8))
+    request = InferenceRequest(
+        model_name="ship_detector",
+        inputs={"images": Tensor.from_numpy(frame.as_batch())},
+        context=frame.context,
+    )
+    return WorkItem(request, ResponseFuture(request))
+
+
+def _event(camera: str = "cam0", frame_id: int = 0):
+    """A minimal `PerceptionEvent`, for the sink tests that never start a runner."""
+    from shipinfer.pipeline.schema import PerceptionEvent
+
+    return PerceptionEvent(source_id=camera, camera_id=camera, frame_id=frame_id, objects=())
+
+
 def publish(runner: PipelineRunner, count: int, camera: str = "cam0") -> list[tuple[str, int]]:
     """Push ``count`` frames through the real sink adapter, as a camera actor would."""
     counter = FrameCounter(camera)
@@ -275,6 +297,72 @@ class TestTheTagSurvivesEveryFailurePath:
         assert runner.sink.emitted == 0
         assert models["ship_detector"].calls == []
         assert isinstance(item.future.exception(0.1), RequestCancelledError)
+
+
+class TestADroppedEventIsNotAPublishedOne:
+    """`pipeline_sink_failures_total` is the metric an operator alerts on, and it could not
+    increment. `ResultSink.emit` is documented "Never raises" and catches everything, so the
+    runner's `except Exception: sink_failures.inc(...)` around it was unreachable — the
+    `# pragma: no cover` on it was the author noticing without asking why. Control fell
+    through to `_record` and `future.set_result(event)`.
+
+    The scenario is a broker whose DNS stops resolving: `_do_emit` raises for every event,
+    `sink_failures` stays 0, `frames_emitted` and `frame_latency_us` climb at full rate, and
+    every caller is told its frame was published. Total publish loss, green dashboard.
+    """
+
+    class BrokenSink(NullResultSink):
+        """A sink whose transport is down — the failure `emit`'s contract is written for."""
+
+        name = "broken"
+
+        def _do_emit(self, event) -> None:
+            raise ConnectionError("broker went away")
+
+    def test_emit_reports_the_drop_rather_than_only_counting_it(self) -> None:
+        """The contract change itself: "never raises" and "the caller learns nothing" are
+        two different promises, and only the first one was wanted."""
+        sink = self.BrokenSink()
+        event = _event()
+
+        assert sink.emit(event) is False
+        assert sink.failed == 1
+        assert sink.emitted == 0
+
+    def test_a_working_sink_says_so(self) -> None:
+        sink = NullResultSink(keep_last=4)
+        assert sink.emit(_event()) is True
+        assert sink.emitted == 1
+
+    def test_a_closed_sink_drops_rather_than_pretending(self) -> None:
+        sink = NullResultSink(keep_last=4)
+        sink.close()
+        assert sink.emit(_event()) is False
+
+    def test_the_failure_reaches_the_metric_and_the_caller(self, runner_for) -> None:
+        """End to end through the runner, which is where the unreachable handler lived."""
+        sink = self.BrokenSink()
+        runner = runner_for(sink=sink).start()
+
+        publish(runner, 3)
+
+        assert wait_for(lambda: sink.failed == 3), runner.health()
+        assert runner.metrics.sink_failures.value(sink="broken") == 3
+        assert (
+            runner.metrics.frames_emitted.value(camera="cam0") == 0
+        ), "a frame nobody received was counted as emitted"
+
+    def test_a_caller_awaiting_a_dropped_frame_is_told(self, runner_for, models) -> None:
+        """`set_result(event)` on an event the broker refused is a lie the caller acts on."""
+        from shipinfer.core.errors import InferenceError
+
+        sink = self.BrokenSink()
+        runner = runner_for(sink=sink).start()
+
+        item = _item(runner)
+        runner.queue.put(item)
+
+        assert isinstance(item.future.exception(10.0), InferenceError)
 
 
 class TestBackpressureReachesTheCamera:

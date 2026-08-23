@@ -199,6 +199,22 @@ class BenchConfig:
     def steady_seconds(self) -> float:
         return self.seconds - self.warmup_s
 
+    def at_offer(self, multiplier: float) -> BenchConfig:
+        """The same run at ``multiplier`` times the offered rate — one rung of a sweep.
+
+        **Scaled by fps, not by camera count.** The number of cameras is the topology: it
+        sets how many source workers each side runs, how the baseline's two queues are fed,
+        and how the fair queue's lanes are populated, so changing it changes the experiment
+        rather than the load. Changing the per-camera frame rate leaves all of that fixed
+        and moves only the thing being swept.
+
+        ``out_dir`` is left alone; the sweep gives each rung its own subdirectory, so the
+        occupancy logs of two rungs cannot land on top of each other.
+        """
+        if multiplier <= 0:
+            raise ValueError(f"a sweep rung must offer something: got x{multiplier}")
+        return replace(self, fps=self.fps * multiplier)
+
     # -- path resolution ----------------------------------------------------------------
 
     def resolved(self) -> BenchConfig:

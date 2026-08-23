@@ -64,6 +64,71 @@ class TestRedact:
         assert "latency=200" in out, "only the password is replaced"
 
 
+class TestPasswordsThatBreakTheEasyParse:
+    """The three shapes that made the first implementation fail *open*.
+
+    Review found all three by running the function rather than reading it, and every one
+    reaches the ingest health endpoint: `SourceOpenError` embeds `redact(uri)`, the actor
+    stores that as `last_error`, and the API serialises it. A URI this malformed also never
+    opens, so the actor retries forever and republishes the leak on every attempt.
+    """
+
+    #: `urlsplit` follows RFC 3986, where `/` ends the authority — so the URI has no `@` in
+    #: its authority at all, `parts.password` is None, and the old early return echoed it.
+    SLASH = "rtsp://admin:pa/ss@10.0.0.5/stream"
+    #: Stopping at the first `@` left `ss123` in the clear, in output that *looks* redacted.
+    AT = "rtsp://admin:p@ss123@10.0.0.5/stream"
+    #: Both at once, with a port, which is what a real fleet credential tends to look like.
+    BOTH = "rtsp://admin:Ab/c@123@cam.local:554/h264"
+
+    @pytest.mark.parametrize("uri", [SLASH, AT, BOTH])
+    def test_no_fragment_of_the_password_survives(self, uri: str) -> None:
+        redacted = redact(uri)
+        assert "pa/ss" not in redacted
+        assert "ss123" not in redacted
+        assert "Ab/c" not in redacted
+        assert PLACEHOLDER in redacted
+
+    @pytest.mark.parametrize("uri", [SLASH, AT, BOTH])
+    def test_the_host_survives_so_the_line_is_still_diagnostic(self, uri: str) -> None:
+        """Redacting by throwing the URI away would be safe and useless."""
+        redacted = redact(uri)
+        assert "admin" in redacted
+        assert uri.rsplit("@", 1)[1].split("/")[0] in redacted
+
+    @pytest.mark.parametrize("uri", [SLASH, AT, BOTH])
+    def test_the_same_holds_for_a_uri_embedded_in_a_decoder_message(self, uri: str) -> None:
+        """The route that actually leaks: PyAV renders `[Errno 111] Connection refused:
+        '<uri>'` and `gst_parse` reports the location property verbatim, and `redact_in` is
+        what stands between those and the log."""
+        for template in (
+            "[Errno 111] Connection refused: '{}'",
+            'could not set property "location" to "{}"',
+        ):
+            redacted = redact_in(template.format(uri))
+            assert "pa/ss" not in redacted
+            assert "ss123" not in redacted
+            assert "Ab/c" not in redacted
+            assert PLACEHOLDER in redacted
+
+
+class TestItFailsClosed:
+    """When the parse is uncertain the answer is to print nothing, not to print the input."""
+
+    def test_a_credential_with_nothing_after_it_is_not_echoed(self) -> None:
+        assert redact("rtsp://admin:secret@") == "<unparseable uri>"
+
+    def test_a_string_with_no_scheme_is_not_a_uri_and_is_left_alone(self) -> None:
+        """A local clip path is a legitimate source and carries no secret."""
+        assert redact("/var/lib/clips/cam0.mp4") == "/var/lib/clips/cam0.mp4"
+
+    def test_over_masking_is_the_direction_it_errs_in(self) -> None:
+        """A portful host with an `@` in the path and no credentials at all comes back
+        masked. Pinned rather than fixed: the alternative reading of this string is the one
+        that leaks `p@ss123`, and a mangled log line is the cheaper mistake."""
+        assert redact("rtsp://host:554/a@b") == "rtsp://host:***@b"
+
+
 class TestTheErrorDoesNotCarryTheSecret:
     def test_source_open_error_message_is_redacted(self) -> None:
         """This message becomes `CameraHealth.last_error` and is served by the health API."""

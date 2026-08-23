@@ -4,8 +4,15 @@
 finished a frame and from the sweeper thread that just timed one out; an exception there
 would take out a worker or, worse, the sweeper, and the sweeper is what guarantees every
 frame is eventually emitted. So :meth:`ResultSink.emit` is a template method: the subclass
-hook may fail, and the wrapper counts the failure and returns. The count is the signal —
-``pipeline_sink_failures_total`` is the metric an operator alerts on.
+hook may fail, and the wrapper counts the failure and **returns ``False``**.
+
+The return value is not decoration. "Never raises" and "the caller learns nothing" are two
+different contracts, and shipping the first while meaning the second made
+``pipeline_sink_failures_total`` — the metric this module's own docstring calls the one an
+operator alerts on — unreachable: the runner incremented it from an `except` around a call
+that cannot raise. A broker whose DNS stopped resolving therefore dropped every event while
+``frames_emitted`` climbed at full rate, every caller was told its frame was published, and
+the dashboard stayed green through total publish loss.
 
 **A sink must not block for long.** Emission happens on the thread that would otherwise be
 running the next frame's graph, so a network sink buffers and flushes asynchronously rather
@@ -38,17 +45,22 @@ class ResultSink(abc.ABC):
 
     # -- the contract ------------------------------------------------------------------
 
-    def emit(self, event: PerceptionEvent) -> None:
-        """Publish one event. Never raises.
+    def emit(self, event: PerceptionEvent) -> bool:
+        """Publish one event. Never raises. ``True`` if it was published.
 
         Returning quietly on failure is not swallowing: the failure is counted and logged
         with the frame's tag, and a sink that is failing is visible in one counter. What the
         pipeline must not do is lose a *worker thread* because a broker went away.
+
+        The caller still has to be told, though, which is what the ``bool`` is for. A
+        dropped event and a published one are two different outcomes, and a caller that
+        cannot distinguish them will resolve its future as success and count the frame as
+        emitted.
         """
         if self._closed:
             self.failed += 1
             _LOG.debug("sink %s is closed; dropping %s", self.name, event.key)
-            return
+            return False
         try:
             self._do_emit(event)
         except Exception:
@@ -59,8 +71,9 @@ class ResultSink(abc.ABC):
                 event.camera_id,
                 event.frame_id,
             )
-            return
+            return False
         self.emitted += 1
+        return True
 
     @abc.abstractmethod
     def _do_emit(self, event: PerceptionEvent) -> None:

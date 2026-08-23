@@ -92,7 +92,10 @@ class TestTheBaselineSumsDisjointStreams:
 
         assert throughput.images_per_s == pytest.approx(900.0, abs=5.0)
         assert throughput.saturated, "a growing buffer is the definition of saturated"
-        assert not throughput.is_rate, "a saturated number is a bound, not a rate"
+        assert throughput.kind == run_bench.CAPACITY, (
+            "a saturated run is the *only* regime in which `offered - growth` is exact; "
+            "refusing it as 'a bound' is what made the speed-up unreachable"
+        )
 
 
 class TestShipInferIsNotDoubleCounted:
@@ -171,48 +174,117 @@ class TestShipInferIsNotDoubleCounted:
         assert not throughput.is_rate
 
 
-class TestTheVerdictRefusesToInvent:
-    """A ratio of two bounds is not a speed-up."""
+class TestTheRatioKnowsWhichWayItIsWrong:
+    """Four ways two numbers combine, and only one of them is a plain division.
 
-    def _throughput(self, system: str, value: float | None, *, saturated: bool):
-        verdict = analysis.SATURATED if saturated else analysis.SUSTAINED
-        return run_bench.SystemThroughput(system, value, saturated, None, "test", verdict)
+    The previous version of this class refused every saturated run as "a bound", which had
+    the methodology backwards and made the PR's headline deliverable unreachable: both
+    systems are offered the same 1000 img/s by construction, so either neither saturated
+    (each reported its offered rate back, ratio 1.00x) or one did (comparison refused). Its
+    green `5.00x` came from a hand-built baseline that was simultaneously at 200 img/s and
+    not saturated, which a 1000 img/s run cannot be.
+    """
 
-    def test_a_real_speedup_is_reported_against_the_target(self):
-        text = run_bench.compare(
-            self._throughput("baseline", 200.0, saturated=False),
-            self._throughput("shipinfer", 1000.0, saturated=False),
-            target=5.0,
+    def _throughput(self, system: str, value: float | None, verdict: str):
+        return run_bench.SystemThroughput(
+            system, value, verdict == analysis.SATURATED, None, "test", verdict
         )
-        assert "5.00x" in text
+
+    def _capacity(self, system: str, value: float):
+        return self._throughput(system, value, analysis.SATURATED)
+
+    def _floor(self, system: str, value: float):
+        return self._throughput(system, value, analysis.SUSTAINED)
+
+    def test_two_capacities_divide_exactly(self):
+        text = run_bench.compare(
+            self._capacity("baseline", 200.0), self._capacity("shipinfer", 1000.0), target=5.0
+        )
+        assert "Speed-up: 5.00x" in text
         assert "MET" in text and "NOT MET" not in text
+        headline = text.split("Speed-up:")[1].split("\n")[0]
+        assert (
+            ">= 5.00x" not in headline and "<= 5.00x" not in headline
+        ), "an exact ratio must not be dressed as a bound"
 
-    def test_falling_short_of_the_target_says_so(self):
+    def test_two_capacities_can_miss_the_target(self):
         text = run_bench.compare(
-            self._throughput("baseline", 400.0, saturated=False),
-            self._throughput("shipinfer", 1000.0, saturated=False),
-            target=5.0,
+            self._capacity("baseline", 400.0), self._capacity("shipinfer", 1000.0), target=5.0
         )
-        assert "2.50x" in text
+        assert "Speed-up: 2.50x" in text
         assert "NOT MET" in text
 
-    def test_a_saturated_side_yields_no_ratio(self):
-        """The number exists but is an upper bound, so dividing it would be a fiction."""
+    def test_a_floor_over_a_capacity_is_a_floor_and_can_meet_the_target(self):
+        """The regime a real run lands in: the baseline hits its wall at 200 while we are
+        still keeping up with everything offered. The true ratio is 5x *or better*, and a
+        floor above the target is enough to claim it."""
         text = run_bench.compare(
-            self._throughput("baseline", 775.5, saturated=True),
-            self._throughput("shipinfer", 1000.0, saturated=False),
-            target=5.0,
+            self._capacity("baseline", 200.0), self._floor("shipinfer", 1000.0), target=5.0
+        )
+        headline = text.split("Speed-up:")[1].split("\n")[0]
+        assert ">= 5.00x" in headline
+        assert "MET" in headline and "NOT MET" not in headline
+
+    def test_a_floor_below_the_target_is_inconclusive_not_a_failure(self):
+        """A floor can meet a target but cannot miss one — the answer is more load."""
+        text = run_bench.compare(
+            self._capacity("baseline", 500.0), self._floor("shipinfer", 1000.0), target=5.0
+        )
+        headline = text.split("Speed-up:")[1].split("\n")[0]
+        assert ">= 2.00x" in headline
+        assert "INCONCLUSIVE" in headline
+        assert "NOT MET" not in headline
+
+    def test_a_capacity_over_a_floor_is_a_ceiling_and_can_only_miss(self):
+        """We saturated and they did not: their number is a floor, so the ratio is an
+        over-estimate. It is enough to fail a target and never enough to pass one."""
+        text = run_bench.compare(
+            self._floor("baseline", 500.0), self._capacity("shipinfer", 900.0), target=5.0
+        )
+        headline = text.split("Speed-up:")[1].split("\n")[0]
+        assert "<= 1.80x" in headline
+        assert "NOT MET" in headline
+
+    def test_a_ceiling_above_the_target_still_claims_nothing(self):
+        text = run_bench.compare(
+            self._floor("baseline", 100.0), self._capacity("shipinfer", 900.0), target=5.0
+        )
+        headline = text.split("Speed-up:")[1].split("\n")[0]
+        assert "<= 9.00x" in headline
+        assert "INCONCLUSIVE" in headline
+
+    def test_two_floors_are_an_artefact_of_the_offered_rate(self):
+        """The case the harness actually produced every time, printed as 1.00x NOT MET.
+
+        Both sides are handed the same load by construction, so when neither saturates the
+        ratio is 1.00 no matter how much headroom either has. That is a fact about the
+        offer, not about either system, and the report has to say so and point at --sweep.
+        """
+        text = run_bench.compare(
+            self._floor("baseline", 1000.0), self._floor("shipinfer", 1000.0), target=5.0
         )
         assert "NOT AVAILABLE" in text
-        assert "x" not in text.split("Speed-up:")[1].split("\n")[0].replace("baseline", "")
+        assert "--sweep" in text
+        assert "1.00x" not in text
 
     def test_an_unmeasured_side_yields_no_ratio(self):
         text = run_bench.compare(
-            self._throughput("baseline", None, saturated=False),
-            self._throughput("shipinfer", 1000.0, saturated=False),
+            self._throughput("baseline", None, analysis.UNMEASURED),
+            self._floor("shipinfer", 1000.0),
             target=5.0,
         )
         assert "NOT AVAILABLE" in text
+
+    def test_a_capped_run_is_unmeasured_whatever_its_number(self):
+        """A capped buffer sheds instead of growing, so its slope is not a rate — and the
+        number it carries is the queue's capacity, not the system's."""
+        capped = self._throughput("shipinfer", 999.0, analysis.UNMEASURED)
+
+        assert capped.kind == run_bench.NOTHING
+        assert not capped.is_rate
+        assert "NOT AVAILABLE" in run_bench.compare(
+            self._capacity("baseline", 100.0), capped, target=5.0
+        )
 
 
 class TestTheFitDistinguishesTheThreeCases:
@@ -592,3 +664,212 @@ class TestADeliveryOfNothingIsRefused:
 
         with pytest.raises(RuntimeError, match="no delivered frames"):
             shipinfer_harness.check_offer(config, self._empty())
+
+
+class TestTheSweepClimbsUntilSomethingSaturates:
+    """One offered rate cannot settle the comparison, so `--sweep` climbs.
+
+    Both systems are handed the same load by construction. If neither saturates, both report
+    that load back and the ratio is 1.00 however much headroom either has — a fact about the
+    offer, not about either system. The ladder's job is to reach the rung where somebody's
+    buffer grows, because that rung is the only place a capacity is measurable.
+    """
+
+    def _throughput(self, kind: str, value: float):
+        verdict = analysis.SATURATED if kind == run_bench.CAPACITY else analysis.SUSTAINED
+        return run_bench.SystemThroughput(
+            "shipinfer", value, kind == run_bench.CAPACITY, None, "test", verdict
+        )
+
+    def _ladder(self, monkeypatch, outcomes):
+        """Drive `sweep_system` over a scripted sequence, recording the rungs it ran."""
+        seen: list[float] = []
+
+        def measure(cfg, _out_dir):
+            seen.append(cfg.fps)
+            kind, value = outcomes[len(seen) - 1]
+            return object(), self._throughput(kind, value)
+
+        monkeypatch.setitem(run_bench.MEASURE, "shipinfer", measure)
+        return seen
+
+    def test_it_stops_at_the_first_saturated_rung(self, monkeypatch, tmp_path: Path):
+        """The rung that saturated *is* the capacity. Climbing past it only saturates
+        harder, and on a shared box every extra rung is minutes of four GPUs spent to
+        learn nothing."""
+        seen = self._ladder(
+            monkeypatch,
+            [
+                (run_bench.FLOOR, 250.0),
+                (run_bench.FLOOR, 500.0),
+                (run_bench.CAPACITY, 780.0),
+                (run_bench.CAPACITY, 790.0),
+            ],
+        )
+        cfg = BenchConfig(cameras=50, fps=20.0, out_dir=tmp_path)
+
+        runs, throughput = run_bench.sweep_system(
+            "shipinfer", cfg, tmp_path, [0.25, 0.5, 1.0, 2.0]
+        )
+
+        assert seen == [5.0, 10.0, 20.0], "it ran a rung past the one that saturated"
+        assert len(runs) == 3
+        assert throughput.kind == run_bench.CAPACITY
+        assert throughput.images_per_s == 780.0
+
+    def test_rungs_are_climbed_low_to_high_whatever_order_they_arrive_in(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """Descending would saturate on the first rung and report the top of the ladder as
+        the capacity, which is the ladder's own number rather than the system's."""
+        seen = self._ladder(
+            monkeypatch, [(run_bench.FLOOR, 250.0), (run_bench.CAPACITY, 600.0)]
+        )
+        cfg = BenchConfig(cameras=50, fps=20.0, out_dir=tmp_path)
+
+        run_bench.sweep_system("shipinfer", cfg, tmp_path, [2.0, 0.5, 0.25])
+
+        assert seen == [5.0, 10.0]
+
+    def test_a_ladder_nobody_saturates_reports_the_highest_floor(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """Not promoted to a capacity. The system kept up with everything it was offered,
+        which says its capacity is above the top rung and nothing more."""
+        self._ladder(
+            monkeypatch,
+            [(run_bench.FLOOR, 250.0), (run_bench.FLOOR, 500.0), (run_bench.FLOOR, 1000.0)],
+        )
+        cfg = BenchConfig(cameras=50, fps=20.0, out_dir=tmp_path)
+
+        _, throughput = run_bench.sweep_system("shipinfer", cfg, tmp_path, [0.25, 0.5, 1.0])
+
+        assert throughput.kind == run_bench.FLOOR
+        assert throughput.images_per_s == 1000.0
+
+    def test_each_rung_gets_its_own_directory(self, monkeypatch, tmp_path: Path):
+        """Two rungs writing one occupancy log would fit a line through both of them."""
+        dirs: list[Path] = []
+
+        def measure(_cfg, out_dir):
+            dirs.append(out_dir)
+            return object(), self._throughput(run_bench.FLOOR, 100.0)
+
+        monkeypatch.setitem(run_bench.MEASURE, "shipinfer", measure)
+        cfg = BenchConfig(cameras=50, fps=20.0, out_dir=tmp_path)
+
+        run_bench.sweep_system("shipinfer", cfg, tmp_path, [0.5, 1.0])
+
+        assert len(set(dirs)) == 2
+
+
+class TestARungIsTheSameExperimentAtADifferentLoad:
+    def test_the_rate_scales_with_the_multiplier(self):
+        cfg = BenchConfig(cameras=50, fps=20.0)
+
+        assert cfg.at_offer(0.5).offered_total == 500.0
+        assert cfg.at_offer(2.0).offered_total == 2000.0
+
+    def test_the_camera_count_does_not_move(self):
+        """Cameras are the topology — source workers, queue lanes, how the baseline's two
+        queues are fed. Scaling them changes the experiment rather than the load."""
+        cfg = BenchConfig(cameras=50, fps=20.0)
+
+        rung = cfg.at_offer(0.25)
+
+        assert rung.cameras == 50
+        assert rung.fps == 5.0
+
+    def test_a_rung_offering_nothing_is_refused(self):
+        with pytest.raises(ValueError, match="offer something"):
+            BenchConfig(cameras=50, fps=20.0).at_offer(0)
+
+
+class TestEveryRateUsesTheWindowTheFitUses:
+    """Offered rate and growth rate have to describe the same seconds.
+
+    The growth fit skips `t < warmup_s`; the counters were cumulative from process start and
+    were divided by the whole run. With 50 cameras staggering their first decode and four
+    GPUs' worth of instances deserialising engines through the warmup, a run that offered a
+    clean 1000 img/s in steady state measured 60000/70 = 857 — which either raised
+    `check_offer`'s "never offered the load" and destroyed a good run, or understated
+    capacity by 143 img/s inside `sustained = offered - growth`.
+    """
+
+    def _result(self, **overrides):
+        base = {
+            "log": Path("unused.jsonl"),
+            "startup_s": 1.0,
+            "elapsed_s": 70.0,
+            "frames_accepted": 60_000,
+            "events_emitted": 60_000,
+            "frames_read": 60_000,
+            "frames_dropped": 0,
+            "steady_s": 60.0,
+            "steady_frames_read": 60_000,
+            "steady_frames_dropped": 0,
+            "steady_events_emitted": 60_000,
+        }
+        base.update(overrides)
+        return shipinfer_harness.ShipInferResult(**base)
+
+    def test_the_warmup_shortfall_does_not_depress_the_offered_rate(self):
+        """Nothing read in the first 10 s, a clean 1000 img/s for the next 60."""
+        cfg = BenchConfig(cameras=50, fps=20.0, seconds=70.0, warmup_s=10.0)
+
+        rate = shipinfer_harness.achieved_offer(cfg, self._result())
+
+        assert rate == pytest.approx(1000.0), "the warmup was charged against steady state"
+
+    def test_rating_the_whole_run_is_what_produced_857(self):
+        """The arithmetic that made this worth fixing, pinned so the regression is legible.
+
+        60 000 frames is a clean 1000 img/s over the 60 s steady window and 857 img/s over
+        the 70 s run — a 14% understatement, silently, on every measurement the harness
+        makes.
+        """
+        whole_run = 60_000 / 70.0
+        assert pytest.approx(857.1, abs=0.1) == whole_run
+
+    def test_a_run_that_never_reached_its_warmup_boundary_rates_the_whole_window(self):
+        """`BenchConfig` refuses a warmup longer than the run, so this can only come from a
+        run that ended early. Rate what there is rather than divide by zero — and note it
+        still cannot invent a number: `steady_frames_read` is 0, so the fallback reads the
+        cumulative counters, which is the honest thing to do with the only data there is."""
+        cfg = BenchConfig(cameras=50, fps=20.0, seconds=70.0, warmup_s=10.0)
+
+        rate = shipinfer_harness.achieved_offer(
+            cfg,
+            self._result(elapsed_s=5.0, steady_s=0.0, frames_read=5_000, steady_frames_read=0),
+        )
+
+        assert rate == pytest.approx(1000.0)
+
+    def test_a_run_with_no_window_at_all_reports_nothing(self):
+        cfg = BenchConfig(cameras=50, fps=20.0, seconds=70.0, warmup_s=10.0)
+
+        rate = shipinfer_harness.achieved_offer(cfg, self._result(elapsed_s=0.0, steady_s=0.0))
+        assert rate == 0.0
+
+    def test_downstream_models_are_rated_over_the_steady_window_too(self):
+        """`requests_total` is cumulative from process start, so dividing by the whole run
+        charged every model for the warmup it spent waiting on engines to deserialise."""
+        cfg = BenchConfig(cameras=50, fps=20.0, seconds=70.0, warmup_s=10.0)
+        result = self._result(
+            requests_total={"person_embedder": 600_000.0},
+            steady_requests_total={"person_embedder": 600_000.0},
+        )
+
+        rates = shipinfer_harness.offered_rates(cfg, result)
+
+        assert rates["person_embedder"] == pytest.approx(10_000.0)
+
+    def test_reconcile_compares_two_rates_from_the_same_window(self):
+        """Averaging the emitted rate over a run that includes start-up would forgive a
+        disagreement that is real — which is the one thing this check exists to catch."""
+        # 60 000 events over the 60 s steady window is 1000/s: a 1000 img/s claim agrees.
+        shipinfer_harness.reconcile(self._result(), 1000.0)
+
+        # The same events over the whole 70 s would read 857/s and refuse it.
+        with pytest.raises(RuntimeError, match="does not support a throughput claim"):
+            shipinfer_harness.reconcile(self._result(steady_events_emitted=30_000), 1000.0)

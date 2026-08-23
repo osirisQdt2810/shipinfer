@@ -114,6 +114,18 @@ class ShipInferResult:
     #: absorbs lateness rather than catching up, so the shortfall is silent.
     frames_read: int = 0
     frames_dropped: int = 0
+    #: The same counters, but only over the window the growth fit actually uses: from the
+    #: warmup boundary to the end. Rating cumulative counters over the *whole* run while
+    #: fitting growth over the steady part alone compares two different windows. With
+    #: cameras staggering their first decode and instances deserialising engines through
+    #: `t < warmup_s`, a run that offered a clean 1000 img/s in steady state measured
+    #: 60000/70 = 857, which either tripped `check_offer` and destroyed a good run or
+    #: understated capacity by 143 img/s in `sustained = offered - growth`.
+    steady_s: float = 0.0
+    steady_frames_read: int = 0
+    steady_frames_dropped: int = 0
+    steady_requests_total: dict[str, float] = field(default_factory=dict)
+    steady_events_emitted: int = 0
     #: model -> requests accepted, from ``ServerMetrics.requests_total``. The delta over the
     #: steady window is what the analysis uses as each downstream model's *offered* rate,
     #: since the crop count is data-dependent and cannot be derived from the config.
@@ -272,13 +284,40 @@ def run_shipinfer(
             ),
         }
 
+        def counters() -> dict[str, Any]:
+            """Every cumulative counter the analysis rates, read at one instant."""
+            manager = created.get("manager")
+            stats = manager.summary() if manager is not None else None
+            return {
+                "read": int(getattr(stats, "frames_read", 0)),
+                "dropped": int(getattr(stats, "frames_dropped", 0)),
+                "emitted": int(runner.sink.emitted),
+                "requests": {n: server.metrics.requests_total.value(model=n) for n in handles},
+            }
+
         sampler = OccupancySampler(log, probe, interval_s=config.sample_interval_s, meta=meta)
         window_started = time.monotonic()
+        # Taken inside the sampler window at the same boundary the fit uses, so the offered
+        # rate and the growth rate describe the same seconds. Sampled by polling rather than
+        # by a timer thread: one more thread contending for this interpreter is exactly the
+        # kind of thing that shows up as a shortfall in the load generator.
+        warmup_at = window_started + config.warmup_s
+        at_warmup: dict[str, Any] | None = None
         with sampler:
             deadline = window_started + config.seconds
             while time.monotonic() < deadline:
+                if at_warmup is None and time.monotonic() >= warmup_at:
+                    at_warmup = counters()
+                    warmup_taken = time.monotonic()
                 time.sleep(0.2)
         elapsed = time.monotonic() - window_started
+        at_end = counters()
+        if at_warmup is None:
+            # A run shorter than its own warmup. Nothing to subtract, and saying so is
+            # better than silently rating the whole window and calling it steady.
+            at_warmup = {"read": 0, "dropped": 0, "emitted": 0, "requests": {}}
+            warmup_taken = window_started
+        steady_s = max(0.0, time.monotonic() - warmup_taken)
 
         manager = created.get("manager")
         ingest_stats = manager.summary() if manager is not None else None
@@ -300,6 +339,14 @@ def run_shipinfer(
             elapsed_s=elapsed,
             frames_read=getattr(ingest_stats, "frames_read", 0),
             frames_dropped=getattr(ingest_stats, "frames_dropped", 0),
+            steady_s=steady_s,
+            steady_frames_read=at_end["read"] - at_warmup["read"],
+            steady_frames_dropped=at_end["dropped"] - at_warmup["dropped"],
+            steady_requests_total={
+                n: at_end["requests"].get(n, 0.0) - at_warmup["requests"].get(n, 0.0)
+                for n in at_end["requests"]
+            },
+            steady_events_emitted=at_end["emitted"] - at_warmup["emitted"],
             frames_accepted=runner.frames_accepted,
             events_emitted=runner.sink.emitted,
             requests_total=requests,
@@ -349,7 +396,7 @@ def _release_cuda() -> None:
         pass
 
 
-def achieved_offer(config: BenchConfig, result: ShipInferResult) -> float:
+def achieved_offer(config: BenchConfig, result: ShipInferResult) -> float:  # noqa: ARG001
     """Images per second the generator actually delivered into the pipeline.
 
     Read from ingest's own counters rather than from the configuration. `frames_read` counts
@@ -357,27 +404,40 @@ def achieved_offer(config: BenchConfig, result: ShipInferResult) -> float:
     the elapsed window is the load the system was really offered, and it is the only figure
     a throughput may be derived from.
 
-    Falls back to the accepted count when ingest reported nothing, and to the configured
-    target only when there is no measurement at all — a case :func:`check_offer` refuses
-    rather than papers over.
+    Falls back to the accepted count when ingest reported nothing, and to zero when there
+    is no measurement at all — a case :func:`check_offer` refuses rather than papers over.
+
+    ``config`` is unused and deliberately kept: it is what this function must *not* read.
+    Falling back to `config.offered_total` made the measurement equal the thing it was being
+    compared against, so the tolerance test could never fire. The signature stays uniform
+    with `offered_rates` and `check_offer`, and the parameter is now a reminder.
     """
-    if result.elapsed_s <= 0:
-        return float(config.offered_total)
+    # The *steady* window, matching the fit. Rating cumulative counters over the whole run
+    # while fitting growth over the steady part alone measures two different things: with
+    # cameras staggering their first decode and instances deserialising engines through
+    # `t < warmup_s`, a clean 1000 img/s run read 60000/70 = 857, which either tripped the
+    # check below or understated capacity by 143 img/s in `offered - growth`.
+    window = result.steady_s if result.steady_s > 0 else result.elapsed_s
+    if window <= 0:
+        return 0.0
     # `frames_read` minus what backpressure refused. A dropped frame never enters the
     # queue, so it cannot grow the buffer and cannot be retired — counting it as offered
     # while `sustained = offered - growth` reads a flat buffer would report the whole
     # offered rate as throughput. Concretely: read 1000/s, reject 700/s, retire 300/s, and
     # the run says SUSTAINED at 1000 img/s. A 3.3x overstatement, and one-sided, because
     # the baseline is a separate binary that is not measured this way.
-    entered = max(0, result.frames_read - result.frames_dropped)
-    if not entered:
-        entered = result.frames_accepted
+    if result.steady_s > 0:
+        entered = max(0, result.steady_frames_read - result.steady_frames_dropped)
+    else:
+        entered = max(0, result.frames_read - result.frames_dropped)
+        if not entered:
+            entered = result.frames_accepted
     # Zero, not the target. Falling back to `offered_total` made the measurement equal the
     # thing it was being compared against, so `check_offer`'s tolerance test could never
     # fire: a run in which nothing was read, nothing accepted and nothing emitted reported
     # 1000 img/s SUSTAINED off an all-zero buffer log. That is not hypothetical — it is the
     # 50-camera run in which every per-device counter stayed at zero.
-    return entered / result.elapsed_s if entered else 0.0
+    return entered / window if entered else 0.0
 
 
 def per_module_capacity(config: BenchConfig, settings: Any = None) -> dict[str, int]:
@@ -428,15 +488,20 @@ def reconcile(result: ShipInferResult, claimed: float) -> None:
             substituting one number for the other would hide that they disagreed, which is
             the fact worth surfacing.
     """
-    if result.elapsed_s <= 0 or not result.events_emitted:
+    # The steady window again: `claimed` is derived from it, and comparing it against a
+    # rate averaged over a run that includes start-up would forgive a real disagreement.
+    steady = result.steady_s > 0
+    window = result.steady_s if steady else result.elapsed_s
+    events = result.steady_events_emitted if steady else result.events_emitted
+    if window <= 0 or not events:
         return
-    emitted = result.events_emitted / result.elapsed_s
+    emitted = events / window
     if emitted <= 0 or claimed <= emitted * (1.0 + MAX_RECONCILE_GAP):
         return
     raise RuntimeError(
         f"the buffer log implies {claimed:.1f} img/s sustained but only {emitted:.1f} img/s "
-        f"of events came out of the pipeline ({result.events_emitted} events in "
-        f"{result.elapsed_s:.1f}s). Work that is refused rather than queued leaves every "
+        f"of events came out of the pipeline ({events} events in "
+        f"{window:.1f}s). Work that is refused rather than queued leaves every "
         f"buffer flat, so growth reads zero and the offered rate publishes as throughput. "
         f"One of these two numbers is wrong; the run does not support a throughput claim."
     )
@@ -513,7 +578,13 @@ def offered_rates(config: BenchConfig, result: ShipInferResult) -> dict[str, flo
         PIPELINE_MODULE: frame_rate,
         "ship_detector": frame_rate,
     }
+    # Same window as `achieved_offer` and as the fit. `requests_total` is cumulative from
+    # process start, so dividing it by the whole run charged every downstream model for the
+    # warmup it spent waiting on engines that had not finished deserialising.
+    steady = result.steady_s > 0
+    window = result.steady_s if steady else result.elapsed_s
+    source = result.steady_requests_total if steady else result.requests_total
     for name in ("ship_segmenter", "ship_embedder", "person_embedder"):
-        total = result.requests_total.get(name, 0.0)
-        rates[name] = total / result.elapsed_s if total and result.elapsed_s > 0 else None
+        total = source.get(name, 0.0)
+        rates[name] = total / window if total and window > 0 else None
     return rates

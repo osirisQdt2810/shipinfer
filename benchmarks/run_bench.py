@@ -37,12 +37,42 @@ image passes through one model, while one ShipInfer frame passes through detect,
 conditional segmentation, then one or two embedders. Equal frames-per-second therefore
 represents strictly more work on our side. The report says so rather than quietly banking it.
 
-WHAT THE VERDICT MEANS
-----------------------
-A speed-up is only reported when both runs produced a usable measurement. If either side is
-SATURATED its sustained rate is a *bound*, not a rate, and the ratio of two bounds is not a
-speed-up — the report prints the bound and says the comparison is not available. A partial
-number presented as a total is the failure mode this whole harness was built to avoid.
+WHAT THE VERDICT MEANS, AND WHICH DIRECTION EACH ONE ERRS IN
+------------------------------------------------------------
+Every run yields one of three things, and conflating them is how a harness publishes a
+number it did not measure. This used to refuse SATURATED as "a bound, not a rate", which had
+it exactly backwards and made the headline deliverable unreachable: both systems are offered
+the same 1000 img/s by construction, so either neither saturated and each reported its own
+offered rate back (ratio 1.00x, "NOT MET"), or one did and the comparison was declared
+unavailable. There was no run that could print a speed-up.
+
+- **SATURATED** (and not capped) is a **capacity**. The buffer grew linearly, so
+  ``offered - growth`` is the rate the module actually retired. This is the whole of the
+  buffer-growth methodology, and the one regime in which the number means something exact.
+- **SUSTAINED** or **DRAINING** is a **floor**. Nothing grew, so the system kept up with
+  what it was given and its real capacity is *at least* the offered rate — how much more,
+  this run cannot say.
+- **UNMEASURED** is nothing. A capped buffer sheds instead of growing, so its slope stops
+  meaning anything; a module whose fit will not bound is the same.
+
+The ratio inherits its meaning from the pair, and :func:`ratio_of` says which it has:
+
+===================  ===================  ==============================================
+baseline             shipinfer            the ratio is
+===================  ===================  ==============================================
+capacity             capacity             an exact speed-up
+capacity             floor                a **floor** on the speed-up — ">= Nx", which is
+                                          enough to *meet* a target
+floor                capacity             a **ceiling** — enough to miss a target, never
+                                          enough to meet one
+floor                floor                nothing. Both kept up; raise the offered rate.
+either               UNMEASURED           nothing
+===================  ===================  ==============================================
+
+Which is why ``--sweep`` exists: one offered rate can leave both sides on the floor, and the
+answer is to climb until somebody saturates rather than to argue about the point you have.
+A partial number presented as a total is the failure mode this whole harness was built to
+avoid; a measurable regime refused on principle is the one it acquired in trying.
 
 USAGE
 -----
@@ -62,6 +92,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -74,6 +105,26 @@ from benchmarks.harness.config import BenchConfig
 
 #: The baseline's two queues, each fed by its own disjoint half of the source workers.
 BASELINE_ENTRY_MODULES = ("det", "seg")
+
+#: What a system's number is. See the module docstring's table for how a pair combines.
+#: A measured rate: the buffer grew, so `offered - growth` is what the module retired.
+CAPACITY = "capacity"
+#: A lower bound: nothing grew, so the system can do at least this and possibly much more.
+FLOOR = "floor"
+#: No measurement at all.
+NOTHING = "none"
+
+#: What the *ratio* of two of those is.
+EXACT = "exact"
+#: The true speed-up is this or better — enough to meet a target, never to miss one.
+AT_LEAST = "at_least"
+#: The true speed-up is this or worse — enough to miss a target, never to meet one.
+AT_MOST = "at_most"
+
+MET = "MET"
+NOT_MET = "NOT MET"
+INCONCLUSIVE = "INCONCLUSIVE"
+UNAVAILABLE = "NOT AVAILABLE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,17 +143,28 @@ class SystemThroughput:
     verdict: str = analysis.SUSTAINED
 
     @property
-    def is_rate(self) -> bool:
-        """True only for a verdict that *is* a measurement.
+    def kind(self) -> str:
+        """What the number is: a measured CAPACITY, a FLOOR under it, or NOTHING.
 
-        Allow-list, not a deny-list. `not saturated` admitted every verdict anyone adds
+        Allow-lists, not deny-lists. `not saturated` admitted every verdict anyone adds
         later, and the one that already existed — UNMEASURED — is precisely the case the
         analysis raises to say "this run cannot support a number".
         """
-        return self.images_per_s is not None and self.verdict in (
-            analysis.SUSTAINED,
-            analysis.DRAINING,
-        )
+        if self.images_per_s is None:
+            return NOTHING
+        if self.verdict == analysis.SATURATED:
+            # Not capped: `RunAnalysis.verdict` downgrades a capped run to UNMEASURED before
+            # it ever reaches here, because a bound buffer sheds rather than grows and its
+            # slope stops meaning anything.
+            return CAPACITY
+        if self.verdict in (analysis.SUSTAINED, analysis.DRAINING):
+            return FLOOR
+        return NOTHING
+
+    @property
+    def is_rate(self) -> bool:
+        """Whether the number can be used at all — for the summary and the exit code."""
+        return self.kind != NOTHING
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -110,6 +172,7 @@ class SystemThroughput:
             "images_per_s": None if self.images_per_s is None else round(self.images_per_s, 1),
             "saturated": self.saturated,
             "verdict": self.verdict,
+            "kind": self.kind,
             "binding_module": self.binding_module,
             "is_rate": self.is_rate,
             "detail": self.detail,
@@ -180,36 +243,123 @@ def system_throughput(run: RunAnalysis) -> SystemThroughput:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class Ratio:
+    """The speed-up, what kind of claim it supports, and why.
+
+    One object rather than a rendered paragraph and a separately computed `summary.json`
+    field. Those were two implementations of the same decision, and the JSON one divided
+    whenever both sides were "a rate" — which under the table above includes floor over
+    floor, the case that is purely an artefact of both systems being handed the same load.
+    """
+
+    value: float | None
+    kind: str | None
+    verdict: str
+    reason: str
+
+    @property
+    def met(self) -> bool:
+        return self.verdict == MET
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "value": None if self.value is None else round(self.value, 3),
+            "kind": self.kind,
+            "verdict": self.verdict,
+            "reason": self.reason,
+        }
+
+    def headline(self, target: float) -> str:
+        if self.value is None:
+            return f"  Speed-up: {self.verdict} — {self.reason}"
+        prefix = {EXACT: "", AT_LEAST: ">= ", AT_MOST: "<= "}[self.kind or EXACT]
+        return (
+            f"  Speed-up: {prefix}{self.value:.2f}x   "
+            f"(target >= {target:g}x — {self.verdict})"
+        )
+
+
+def ratio_of(base: SystemThroughput, ours: SystemThroughput, *, target: float) -> Ratio:
+    """Divide two numbers only when the pair supports a claim, and say which claim.
+
+    The four cases are the module docstring's table. The one that used to be missing is the
+    useful one: a baseline at its measured wall against a ShipInfer run that never grew a
+    buffer gives a *floor* on the speed-up, and a floor above the target meets it.
+    """
+    if NOTHING in (base.kind, ours.kind):
+        which = ", ".join(t.system for t in (base, ours) if t.kind == NOTHING)
+        return Ratio(None, None, UNAVAILABLE, f"{which} produced no measurement")
+
+    if base.kind == FLOOR and ours.kind == FLOOR:
+        return Ratio(
+            None,
+            None,
+            UNAVAILABLE,
+            "neither system saturated, so both numbers are floors and their ratio is an "
+            "artefact of the offered rate being equal by construction",
+        )
+
+    if not base.images_per_s:
+        return Ratio(None, None, UNAVAILABLE, "the baseline sustained nothing to divide by")
+
+    value = ours.images_per_s / base.images_per_s
+    if base.kind == CAPACITY and ours.kind == CAPACITY:
+        return Ratio(
+            value,
+            EXACT,
+            MET if value >= target else NOT_MET,
+            "both sides saturated, so both numbers are measured capacities",
+        )
+    if ours.kind == FLOOR:
+        return Ratio(
+            value,
+            AT_LEAST,
+            MET if value >= target else INCONCLUSIVE,
+            f"{base.system} saturated at its capacity while {ours.system} never grew a "
+            f"buffer, so the real ratio is this or better",
+        )
+    return Ratio(
+        value,
+        AT_MOST,
+        NOT_MET if value < target else INCONCLUSIVE,
+        f"{ours.system} saturated while {base.system} did not, so the baseline's number is "
+        f"a floor and this ratio is a ceiling",
+    )
+
+
 def compare(base: SystemThroughput, ours: SystemThroughput, *, target: float) -> str:
-    """The verdict paragraph. Refuses to divide two numbers that are not both rates."""
+    """The verdict paragraph. Renders :func:`ratio_of`; decides nothing itself."""
+    labels = {
+        CAPACITY: "measured capacity",
+        FLOOR: "a FLOOR — the system kept up, so its capacity is at least this",
+        NOTHING: "no measurement",
+    }
     lines = ["", "COMPARISON", "-" * 78]
     for t in (base, ours):
         value = "unmeasured" if t.images_per_s is None else f"{t.images_per_s:>8.1f} img/s"
-        kind = "" if t.is_rate else f"   (a BOUND, not a rate — the run was {t.verdict})"
-        lines.append(f"  {t.system:<10} {value}{kind}")
+        lines.append(f"  {t.system:<10} {value}   ({labels[t.kind]}; run was {t.verdict})")
         lines.append(f"             {t.detail}")
-    lines.append("")
 
-    if not (base.is_rate and ours.is_rate):
-        which = [t.system for t in (base, ours) if not t.is_rate]
+    ratio = ratio_of(base, ours, target=target)
+    lines += ["", ratio.headline(target), "", f"  {ratio.reason}."]
+
+    if ratio.verdict == INCONCLUSIVE and ratio.kind == AT_LEAST:
+        lines.append("  A floor can meet a target but cannot miss one — raise the load.")
+    if ratio.verdict == UNAVAILABLE and base.kind == FLOOR and ours.kind == FLOOR:
         lines += [
-            f"  Speed-up: NOT AVAILABLE — {', '.join(which)} did not produce a sustained "
-            f"rate.",
-            "  A saturated run's number is an upper bound, and the ratio of two bounds is",
-            "  not a speed-up. Re-run with a lower offered rate to find each system's",
-            "  sustainable point, or with more seconds if the window was too short.",
+            "",
+            "  Raise the load until one of them grows a buffer:",
+            "      python benchmarks/run_bench.py --sweep",
         ]
-        return "\n".join(lines)
-
-    ratio = ours.images_per_s / base.images_per_s if base.images_per_s else float("inf")
-    verdict = "MET" if ratio >= target else "NOT MET"
-    lines += [
-        f"  Speed-up: {ratio:.2f}x   (target >= {target:g}x — {verdict})",
-        "",
-        "  Read this conservatively: one baseline image passes through one model, while one",
-        "  ShipInfer frame passes through detect, conditional segmentation and one or two",
-        "  embedders. Equal images-per-second is strictly more work on our side.",
-    ]
+    if ratio.value is not None:
+        lines += [
+            "",
+            "  Read this conservatively in one further respect: one baseline image passes",
+            "  through one model, while one ShipInfer frame passes through detect,",
+            "  conditional segmentation and one or two embedders. Equal images-per-second is",
+            "  strictly more work on our side.",
+        ]
     return "\n".join(lines)
 
 
@@ -224,6 +374,102 @@ def _analyse(
         capacity=cfg.buffer_capacity if capacity is None else capacity,
         entry_modules=entries,
     )
+
+
+def measure_baseline(cfg: BenchConfig, out_dir: Path) -> tuple[RunAnalysis, SystemThroughput]:
+    """One baseline run at one offered rate. Raises if it produced no samples."""
+    print("\n=== baseline (counting-simulation, its own binary) ===", flush=True)
+    result = baseline.run_baseline(cfg, out_dir / "baseline")
+    if not result.ok:
+        raise RuntimeError("baseline produced no samples")
+    # Each of the baseline's two queues is fed by its own half of the source workers, so
+    # both offered rates are known exactly from the configuration -- unlike ShipInfer's
+    # crop-fed models, which have to be measured.
+    run = _analyse(
+        "baseline",
+        result.log,
+        cfg,
+        offered=dict.fromkeys(BASELINE_ENTRY_MODULES, cfg.offered_per_module),
+        entries=BASELINE_ENTRY_MODULES,
+    )
+    return run, system_throughput(run)
+
+
+def measure_shipinfer(cfg: BenchConfig, out_dir: Path) -> tuple[RunAnalysis, SystemThroughput]:
+    """One ShipInfer run at one offered rate, with every guard the harness has."""
+    print("\n=== shipinfer (ingest -> scheduler -> engines -> reassembly) ===", flush=True)
+    result = shipinfer.run_shipinfer(cfg, out_dir / "shipinfer")
+    # Refuse before analysing. A run whose generator never delivered the load is not a
+    # slower measurement, it is a different experiment, and reporting it against the
+    # configured target publishes a rate that was never sustained.
+    shipinfer.check_offer(cfg, result)
+    achieved = shipinfer.achieved_offer(cfg, result)
+    print(
+        f"offered: {achieved:.1f} img/s achieved of {cfg.offered_total:g} target "
+        f"({achieved / cfg.offered_total:.0%})"
+    )
+    run = _analyse(
+        "shipinfer",
+        result.log,
+        cfg,
+        offered=shipinfer.offered_rates(cfg, result),
+        entries=(shipinfer.PIPELINE_MODULE,),
+        capacity=shipinfer.per_module_capacity(cfg),
+    )
+    ours = system_throughput(run)
+    if ours.images_per_s is not None:
+        # Cross-checked against what came out of the far end. The buffer-growth method
+        # cannot tell a flat queue from a refused one, and an emitted-event count can.
+        shipinfer.reconcile(result, ours.images_per_s)
+    if result.per_device:
+        print("\nper-device execution (the balancing evidence):")
+        for model, devices in sorted(result.per_device.items()):
+            spread = "  ".join(f"gpu{d}={n}" for d, n in sorted(devices.items()))
+            print(f"  {model:<18} {spread}")
+    return run, ours
+
+
+#: One entry per system, so the sweep and the single-point path cannot drift apart.
+MEASURE = {"baseline": measure_baseline, "shipinfer": measure_shipinfer}
+
+
+def sweep_system(
+    system: str, cfg: BenchConfig, out_dir: Path, multipliers: Sequence[float]
+) -> tuple[list[RunAnalysis], SystemThroughput]:
+    """Climb the offered rate until the system saturates, and return that rung.
+
+    A single offered rate cannot settle the comparison, because both systems are handed the
+    same load by construction: if neither saturates, both report that load back and the
+    ratio is 1.00 regardless of how much headroom either has.
+
+    **Stop at the first saturated rung.** That rung is the measured capacity; the higher
+    ones only saturate harder, and this box is shared — every extra rung is minutes of four
+    GPUs spent to learn nothing. If no rung saturates, the highest floor stands, and the
+    caller reports it as a floor rather than promoting it to a capacity.
+    """
+    runs: list[RunAnalysis] = []
+    best: SystemThroughput | None = None
+    for multiplier in sorted(multipliers):
+        rung = cfg.at_offer(multiplier)
+        print(
+            f"\n--- {system}: rung x{multiplier:g} = {rung.offered_total:g} img/s offered ---",
+            flush=True,
+        )
+        run, throughput = MEASURE[system](rung, out_dir / f"x{multiplier:g}")
+        runs.append(run)
+        if throughput.kind == CAPACITY:
+            print(f"    {system} saturated at x{multiplier:g}; the ladder stops here.")
+            return runs, throughput
+        if throughput.kind == FLOOR and (
+            best is None or (throughput.images_per_s or 0) > (best.images_per_s or 0)
+        ):
+            best = throughput
+    if best is None:
+        return runs, SystemThroughput(
+            system, None, False, None, "no rung produced a measurement", analysis.UNMEASURED
+        )
+    print(f"    {system} never saturated; its capacity is above the top rung.")
+    return runs, best
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -248,6 +494,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         help="OMP_NUM_THREADS, applied to both systems; unset leaves both unpinned",
+    )
+    p.add_argument(
+        "--sweep",
+        nargs="?",
+        const="0.25,0.5,1,2,4",
+        default=None,
+        metavar="MULTIPLIERS",
+        help=(
+            "climb the offered rate until a system saturates, instead of measuring one "
+            "point. Comma-separated multipliers of --cameras x --fps, low to high "
+            "(default 0.25,0.5,1,2,4). A system stops at its first saturated rung: that "
+            "rung is its measured capacity, and higher rungs only burn GPU time to "
+            "saturate harder."
+        ),
     )
     p.add_argument("--out-dir", type=Path, default=None)
     p.add_argument("--label", default=None, help="names the output directory")
@@ -299,83 +559,51 @@ def main(argv: list[str] | None = None) -> int:
     print(cfg.concurrency_note)
     print(f"out:  {out_dir}")
 
+    multipliers = None
+    if args.sweep:
+        multipliers = [float(m) for m in args.sweep.split(",") if m.strip()]
+        print("sweep: rungs x" + ", x".join(f"{m:g}" for m in multipliers))
+
     runs: list[RunAnalysis] = []
     throughputs: dict[str, SystemThroughput] = {}
 
-    if "baseline" in systems:
-        print("\n=== baseline (counting-simulation, its own binary) ===", flush=True)
-        result = baseline.run_baseline(cfg, out_dir / "baseline")
-        if not result.ok:
-            print("baseline produced no samples; aborting", file=sys.stderr)
+    for system in ("baseline", "shipinfer"):
+        if system not in systems:
+            continue
+        try:
+            if multipliers:
+                rung_runs, throughput = sweep_system(system, cfg, out_dir / system, multipliers)
+                runs.extend(rung_runs)
+            else:
+                run, throughput = MEASURE[system](cfg, out_dir)
+                runs.append(run)
+        except RuntimeError as exc:
+            print(f"{system}: {exc}; aborting", file=sys.stderr)
             return 1
-        # Each of the baseline's two queues is fed by its own half of the source
-        # workers, so both offered rates are known exactly from the configuration --
-        # unlike ShipInfer's crop-fed models, which have to be measured.
-        run = _analyse(
-            "baseline",
-            result.log,
-            cfg,
-            offered=dict.fromkeys(BASELINE_ENTRY_MODULES, cfg.offered_per_module),
-            entries=BASELINE_ENTRY_MODULES,
-        )
-        runs.append(run)
-        throughputs["baseline"] = system_throughput(run)
-
-    if "shipinfer" in systems:
-        print("\n=== shipinfer (ingest -> scheduler -> engines -> reassembly) ===", flush=True)
-        result = shipinfer.run_shipinfer(cfg, out_dir / "shipinfer")
-        # Refuse before analysing. A run whose generator never delivered the load is not a
-        # slower measurement, it is a different experiment, and reporting it against the
-        # configured target publishes a rate that was never sustained.
-        shipinfer.check_offer(cfg, result)
-        achieved = shipinfer.achieved_offer(cfg, result)
-        print(
-            f"offered: {achieved:.1f} img/s achieved of {cfg.offered_total:g} target "
-            f"({achieved / cfg.offered_total:.0%})"
-        )
-        run = _analyse(
-            "shipinfer",
-            result.log,
-            cfg,
-            offered=shipinfer.offered_rates(cfg, result),
-            entries=(shipinfer.PIPELINE_MODULE,),
-            capacity=shipinfer.per_module_capacity(cfg),
-        )
-        ours = system_throughput(run)
-        if ours.images_per_s is not None:
-            # Cross-checked against what came out of the far end. The buffer-growth method
-            # cannot tell a flat queue from a refused one, and an emitted-event count can.
-            shipinfer.reconcile(result, ours.images_per_s)
-        runs.append(run)
-        throughputs["shipinfer"] = ours
-        if result.per_device:
-            print("\nper-device execution (the balancing evidence):")
-            for model, devices in sorted(result.per_device.items()):
-                spread = "  ".join(f"gpu{d}={n}" for d, n in sorted(devices.items()))
-                print(f"  {model:<18} {spread}")
+        throughputs[system] = throughput
 
     print()
     print(analysis.render(runs))
 
     summary: dict[str, Any] = {
         "config": cfg.as_dict(),
+        "sweep": multipliers,
         "runs": json.loads(analysis.as_json(runs)),
         "throughput": {k: v.as_dict() for k, v in throughputs.items()},
         "target": args.target,
     }
 
     if "baseline" in throughputs and "shipinfer" in throughputs:
-        text = compare(throughputs["baseline"], throughputs["shipinfer"], target=args.target)
-        print(text)
         base, ours = throughputs["baseline"], throughputs["shipinfer"]
-        summary["speedup"] = (
-            round(ours.images_per_s / base.images_per_s, 3)
-            if base.is_rate and ours.is_rate and base.images_per_s
-            else None
-        )
-        summary["target_met"] = (
-            summary["speedup"] is not None and summary["speedup"] >= args.target
-        )
+        print(compare(base, ours, target=args.target))
+        # `ratio_of`, not a second division here. The paragraph and this field were two
+        # implementations of the same decision, and this one divided whenever both sides
+        # were "a rate" — which includes floor over floor, the case that is an artefact of
+        # both systems being handed the same load by construction.
+        ratio = ratio_of(base, ours, target=args.target)
+        summary["speedup"] = ratio.value if ratio.kind == EXACT else None
+        summary["ratio"] = ratio.as_dict()
+        summary["target_met"] = ratio.met
 
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(f"\nwrote {out_dir / 'summary.json'}")

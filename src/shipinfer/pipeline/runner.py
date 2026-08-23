@@ -410,12 +410,28 @@ class PipelineRunner:
             for item in items:
                 try:
                     self._run_frame(item)
-                except Exception:
+                except Exception as exc:
                     # A worker thread that dies stops serving every camera, so the loop
                     # survives one bad frame. The graph already contains per-stage failures;
                     # reaching here means something outside a stage went wrong.
                     self._metrics.frames_failed.inc(camera=item.request.context.camera_id)
                     _LOG.exception("pipeline worker failed on %s", item.request.context.key)
+                    # Fail the future *here*, because the two cases that reach this handler
+                    # both raise before `_run_frame` registers the key in `_awaiting`:
+                    # `FrameState.from_request` rejects a request with no tensor under
+                    # `ingest.input_name`, and one carrying an FP32 NCHW batch instead of a
+                    # `(1, H, W, 3)` uint8 frame. With the key unregistered, `stop()` cannot
+                    # cancel it either, so any producer holding the `ResponseFuture` — the
+                    # bench harness, an HTTP handler, an injected `queue=` — waited forever
+                    # on one malformed frame and the process exited with it pending. The
+                    # `(camera_id, frame_id)` tag has to survive the error path, and a frame
+                    # that vanishes with no typed failure delivered is the opposite of that.
+                    if not item.future.done():
+                        item.fail(
+                            InferenceError(
+                                f"pipeline failed on {item.request.context.key}: {exc}"
+                            )
+                        )
 
     def _run_frame(self, item: WorkItem) -> None:
         request = item.request
@@ -515,11 +531,17 @@ class PipelineRunner:
             self._metrics.build_failures.inc(camera=result.state.camera_id)
             _LOG.exception("failed to build the event for %s", result.key)
             return
-        try:
-            self._sink.emit(event)
-        except Exception:  # pragma: no cover - emission must not kill the caller's thread
+        # `emit` returns whether it published, and never raises — so this has to be a
+        # return-value check, not an `except`. It was an `except`, which made
+        # `pipeline_sink_failures_total` unreachable and let a dropped event fall through to
+        # `_record` and `future.set_result(event)`. The `# pragma: no cover` on that handler
+        # was the author noticing it was dead and marking it instead of asking why.
+        if not self._sink.emit(event):
             self._metrics.sink_failures.inc(sink=self._sink.name)
-            _LOG.exception("sink %r rejected %s", self._sink.name, result.key)
+            if future is not None and future.set_running_or_notify_cancel():
+                future.set_exception(
+                    InferenceError(f"sink {self._sink.name!r} dropped {result.key}")
+                )
             return
         try:
             self._record(result, event)

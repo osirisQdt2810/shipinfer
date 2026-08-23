@@ -51,8 +51,15 @@ _RELEASED = np.zeros((0, 0, 3), dtype=np.uint8)
 
 
 def _as_embedding(row: np.ndarray) -> tuple[float, ...]:
-    """A model row as a tuple of floats — a **copy**, so the source batch can be freed."""
-    return tuple(float(v) for v in np.asarray(row).reshape(-1))
+    """A model row as a tuple of floats — a **copy**, so the source batch can be freed.
+
+    `tolist()`, not `float(v) for v in ...`. The generator was a per-element Python loop on
+    the emission path: `person_embedder` emits 2048 floats and the documented load is
+    ~15 000 objects/s, so ~30 M `float()` calls a second, paid even with the `null` sink.
+    `tolist()` does the identical conversion — it yields Python floats, not `np.float32` —
+    in one C call. ADR-003 and the ponytail principle: numpy already does this well.
+    """
+    return tuple(np.asarray(row).reshape(-1).tolist())
 
 
 def _as_int(row: np.ndarray) -> int:
