@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from shipinfer.backends.base import BackendContext, ModelBackend
@@ -173,20 +174,28 @@ class TensorRTBackend(ModelBackend):
         stream = self._stream
         async_copy = self.context.execution.async_transfers
 
-        for name, tensor in inputs.items():
-            bindings.stage_input(name, tensor.numpy(), stream, async_copy=async_copy)
+        # EVERYTHING in one execution happens on one stream, and that is not a style
+        # choice. `stage_input`'s copy_ and `fetch_output`'s .to("cpu") are torch ops, so
+        # they go to torch's *current* stream; TensorRT enqueues on the handle it is given.
+        # Without this block those are two different streams with nothing ordering them, so
+        # the enqueue can start before a ~39 MB H2D has landed and the readback can run
+        # before the kernels retire — wrong numbers, no error, no crash.
+        with stream.activate():
+            for name, tensor in inputs.items():
+                bindings.stage_input(name, tensor.numpy(), stream, async_copy=async_copy)
 
-        self._set_input_shapes(batch_size)
+            self._set_input_shapes(batch_size)
 
-        graph = self._maybe_replay(batch_size, stream)
-        if graph is None:
-            self._enqueue(stream)
-        self._enqueues += 1
+            if self._maybe_replay(batch_size, stream) is None:
+                self._enqueue(stream)
+            self._enqueues += 1
 
-        outputs: dict[str, Tensor] = {}
-        for spec in self.output_specs:
-            array = bindings.fetch_output(spec.name, batch_size, stream, async_copy=async_copy)
-            outputs[spec.name] = Tensor.from_numpy(array)
+            outputs: dict[str, Tensor] = {}
+            for spec in self.output_specs:
+                array = bindings.fetch_output(
+                    spec.name, batch_size, stream, async_copy=async_copy
+                )
+                outputs[spec.name] = Tensor.from_numpy(array)
         return outputs
 
     def _set_input_shapes(self, batch_size: int) -> None:
@@ -224,24 +233,52 @@ class TensorRTBackend(ModelBackend):
         if not ok:
             raise InferenceError(f"{self.context.instance_name}: TensorRT enqueue failed")
 
+    def _capture_io(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        """The binding tensors a captured graph reads and writes.
+
+        These *are* the static buffers ADR-008 requires: allocated once at load, sized for
+        ``max_batch_size``, never reallocated. Because staging writes straight into them,
+        a replay needs no input copy at all — the data is already at the addresses the
+        graph recorded, which is the whole reason the bindings are persistent.
+        """
+        assert self._bindings is not None
+        inputs = {
+            spec.name: self._bindings.device_tensor(spec.name) for spec in self.input_specs
+        }
+        outputs = {
+            spec.name: self._bindings.device_tensor(spec.name) for spec in self.output_specs
+        }
+        return inputs, outputs
+
     def _maybe_replay(self, batch_size: int, stream: Stream) -> Any:
-        """Replay a captured graph, capturing one first if this size is new."""
+        """Replay a captured graph for this batch size, capturing one if it is new.
+
+        Returns ``None`` to mean "no graph — take the ordinary launch path", which the
+        caller treats as a normal outcome rather than a failure.
+        """
         graphs = self.context.graphs
         if graphs is None or not graphs.enabled:
             return None
 
         captured = graphs.get(batch_size)
         if captured is None and graphs.should_capture(batch_size):
-            # Warm the shape once outside the capture: the very first enqueue of a shape
-            # allocates scratch and picks tactics, and capturing that would bake a
-            # one-time allocation into a graph replayed forever.
-            self._enqueue(stream)
-            stream.synchronize()
-            captured = graphs.capture(batch_size, stream, lambda: self._enqueue(stream))
+            static_inputs, static_outputs = self._capture_io()
+
+            def run() -> Mapping[str, Any]:
+                # Issues the work and names the buffers it produced, which is the contract
+                # GraphCache.capture expects. The cache warms this on a side stream before
+                # recording, so TensorRT's first-call scratch allocation and tactic
+                # selection do not get baked into a graph that replays forever.
+                self._enqueue(stream)
+                return static_outputs
+
+            captured = graphs.capture(batch_size, stream, static_inputs, run)
 
         if captured is None:
             return None
-        captured.launch(stream)
+        # No arguments: staging already wrote into the binding tensors, which are the exact
+        # objects the graph recorded. Passing inputs here would copy them onto themselves.
+        captured.replay()
         self._graph_replays += 1
         return captured
 
