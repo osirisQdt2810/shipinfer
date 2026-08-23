@@ -130,11 +130,13 @@ def _download_with_retry(snapshot_download, *, attempts: int = 6, **kwargs) -> s
             # Serial rather than the default thread pool: the concurrency is what triggers
             # the rate limiter in the first place.
             return snapshot_download(max_workers=2, **kwargs)
-        except Exception as error:  # noqa: BLE001 — any transport failure is retryable here
+        except Exception as error:  # any transport failure here is worth one more attempt
             if attempt == attempts:
                 raise
-            print(f"  attempt {attempt}/{attempts} failed ({type(error).__name__}); "
-                  f"resuming in {delay:.0f}s")
+            print(
+                f"  attempt {attempt}/{attempts} failed ({type(error).__name__}); "
+                f"resuming in {delay:.0f}s"
+            )
             time.sleep(delay)
             delay = min(delay * 2, 120.0)
     raise RuntimeError("unreachable")
@@ -147,7 +149,9 @@ def report(root: Path = DATA_ROOT) -> int:
         print(f"nothing to report — no gt.txt under {root}")
         return 1
 
-    print(f"{'sequence':28s} {'frames':>7s} {'boxes':>9s} {'mean/frame':>11s} {'max':>5s}  target")
+    print(
+        f"{'sequence':28s} {'frames':>7s} {'boxes':>9s} {'mean/frame':>11s} {'max':>5s}  target"
+    )
     print("-" * 76)
     for gt in gts:
         sequence = gt.parent.parent.name
@@ -167,8 +171,10 @@ def fetch(name: str, *, all_sequences: bool) -> Path:
     patterns: list[str] = []
     for template in spec["patterns"]:  # type: ignore[union-attr]
         if "{seq}" in template:
-            for sequence in spec["sequences"]:  # type: ignore[union-attr]
-                patterns.append(template.format(seq=sequence))
+            patterns.extend(
+                template.format(seq=sequence)
+                for sequence in spec["sequences"]  # type: ignore[union-attr]
+            )
         else:
             patterns.append(template)
 
@@ -193,7 +199,9 @@ def fetch(name: str, *, all_sequences: bool) -> Path:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("datasets", nargs="*", choices=[*DATASETS, []], help="which to fetch")
     parser.add_argument("--list", action="store_true", help="show what is available")
     parser.add_argument("--report", action="store_true", help="density of what is on disk")
