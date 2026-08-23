@@ -34,6 +34,30 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = ["ObjectBatch", "ObjectStage"]
 
 
+def _chunks(count: int, limit: int | None) -> list[tuple[int, int]]:
+    """Row ranges no larger than ``limit``.
+
+    A per-object stage submits one request per *frame*, and a frame holds however many
+    objects the detector found — 10 to 20 people is the sizing this project targets, and 25
+    was observed. The engine's plan is built at a fixed batch, so a crowded frame produced a
+    single request larger than the model could ever accept:
+
+        InferenceError: assembled batch of 25 rows exceeds max_batch_size 16
+
+    Every crop in that frame was then lost, and the frame reported a failed stage. Batching
+    *across* requests was already bounded correctly by the queue; what was missing is that a
+    single request can exceed the bound on its own, and no amount of scheduling fixes that.
+
+    An empty batch still yields one range, so a stage with nothing to do makes exactly one
+    call and the response's shape is checked as usual rather than silently skipped.
+    """
+    if count <= 0:
+        return [(0, 0)]
+    if not limit or count <= limit:
+        return [(0, count)]
+    return [(start, min(start + limit, count)) for start in range(0, count, limit)]
+
+
 @dataclass(frozen=True, slots=True)
 class ObjectBatch:
     """``N`` rows, each belonging to one detection of one frame.
@@ -209,24 +233,48 @@ class ObjectStage(ModelStage):
 
     def _do_run(self, state: FrameState) -> int:
         batch = state.batch(self._source)
-        response = self._infer(state, {self.input_name: Tensor.from_numpy(batch.data)})
-        arrays = self._quantities(response.outputs)
+        limit = self._row_limit()
+        chunks = _chunks(batch.count, limit)
+
+        collected: dict[str, list[np.ndarray]] = {name: [] for name in self._outputs}
+        for start, stop in chunks:
+            rows = batch.data[start:stop]
+            response = self._infer(state, {self.input_name: Tensor.from_numpy(rows)})
+            arrays = self._quantities(response.outputs)
+            for output_name in self._outputs:
+                array = arrays.get(output_name)
+                if array is None:
+                    raise InferenceError(
+                        f"stage {self.name!r}: model {self.model_name!r} returned no output "
+                        f"{output_name!r} (got: {sorted(arrays)})"
+                    )
+                collected[output_name].append(np.asarray(array))
+
         for output_name, batch_name in self._outputs.items():
-            array = arrays.get(output_name)
-            if array is None:
-                raise InferenceError(
-                    f"stage {self.name!r}: model {self.model_name!r} returned no output "
-                    f"{output_name!r} (got: {sorted(arrays)})"
-                )
+            pieces = collected[output_name]
+            data = pieces[0] if len(pieces) == 1 else np.concatenate(pieces, axis=0)
             state.attach(
                 ObjectBatch(
                     name=batch_name,
                     class_name=batch.class_name,
                     object_indices=batch.object_indices,
-                    data=np.asarray(array),
+                    data=data,
                 )
             )
         return batch.count
+
+    def _row_limit(self) -> int | None:
+        """The model's ``max_batch_size``, or ``None`` when it does not declare one.
+
+        Read from the artefact rather than configured here, for the same reason
+        :attr:`input_name` is: the number belongs to the engine. A TensorRT plan built at
+        batch 16 cannot be handed 25 rows, whatever the graph would like.
+        """
+        model = self._resolve(self.model_name)
+        artifact = getattr(model, "artifact", None)
+        config = getattr(artifact, "config", None)
+        limit = getattr(config, "max_batch_size", None)
+        return int(limit) if limit else None
 
     def _quantities(self, outputs: Mapping[str, Tensor]) -> Mapping[str, np.ndarray]:
         """The arrays this stage forwards, raw or combined.

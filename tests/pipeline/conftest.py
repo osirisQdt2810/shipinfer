@@ -53,10 +53,17 @@ EMBEDDING_DIM = 8
 
 @dataclass
 class FakeConfig:
-    """The two attributes :meth:`ModelStage.validate` reads off a model's config."""
+    """The attributes a stage reads off a model's config.
+
+    ``max_batch_size`` is here because `ObjectStage` splits a frame's crops to fit it: a
+    TensorRT plan is built at a fixed batch, and a frame with more objects than that used to
+    arrive as one request the engine could never accept. ``0`` means "the artefact does not
+    constrain us", which is what a model with no declared limit reports.
+    """
 
     input_specs: tuple[TensorSpec, ...] = ()
     output_specs: tuple[TensorSpec, ...] = ()
+    max_batch_size: int = 0
 
 
 @dataclass
