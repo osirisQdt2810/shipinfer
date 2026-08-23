@@ -139,7 +139,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: recursive
+          # Deliberately NO submodules, matching the test job above. `benchmarks/baseline`
+          # is `ShipControlPrj/counting-simulation`, which this runner's token cannot read,
+          # so `--init --recursive` aborts the whole checkout:
+          #
+          #   fatal: repository 'ShipControlPrj/counting-simulation.git/' not found
+          #   The process '/usr/bin/git' failed with exit code 1
+          #
+          # The job then "fails" in eight seconds having reviewed nothing, and the merge
+          # gate reads that as BLOCKING — a review verdict manufactured by a clone error.
+          # The reviewer reads the PR diff and the project documents in this checkout;
+          # neither lives in a submodule.
       - name: Review the PR
         uses: anthropics/claude-code-action@c3d45e8e941e1b2ad7b278c57482d9c5bf1f35b3 # v1.0.99
         env:
