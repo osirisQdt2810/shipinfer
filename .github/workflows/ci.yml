@@ -87,12 +87,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Only the kernels. `submodules: recursive` also pulls `benchmarks/baseline`,
-          # which is `ShipControlPrj/counting-simulation` — a third-org SSH remote this
-          # runner cannot read, so the whole checkout aborts before the job starts. Same
-          # failure the review job hit.
+          # Only the kernels, by name. `submodules: recursive` also pulls
+          # `benchmarks/baseline` — `ShipControlPrj/counting-simulation`, a third-org SSH
+          # remote this runner cannot read — and `git submodule update --init --recursive`
+          # aborts the whole checkout when one submodule fails. Same failure that made the
+          # review job report a verdict it never computed.
           submodules: false
       - name: Check out the kernels only
+        # Without this the submodule directory is an empty placeholder and the job below
+        # silently passes having built nothing.
         run: git submodule update --init --depth 1 3rdparty/shipvision
       - uses: actions/setup-python@v5
         with:
