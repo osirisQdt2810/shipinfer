@@ -8,10 +8,21 @@
 # Extra arguments are appended, which is how the coverage job adds its flags.
 set -euo pipefail
 
-# `python` on a CI runner (setup-python provides it), `python3` on a distro that does not
-# ship the unversioned name, and `$PYTHON` when a caller wants a specific interpreter.
-# Guessing wrong here fails with "python: not found", which reads like a broken test suite.
-PYTHON="${PYTHON:-$(command -v python || command -v python3)}"
+# The repository's own virtualenv first, because that is the one with the dependencies in it.
+# Falling through to whatever `python` is on PATH found the system interpreter and failed with
+# "No module named pytest" — which reads like a broken test suite rather than a wrong
+# interpreter, and it only surfaced when the repository moved and PATH no longer happened to
+# carry the venv. `$PYTHON` still wins, for a caller that means a specific one; then a CI
+# runner's `python` (setup-python provides it), then `python3` on a distro without the
+# unversioned name.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -n "${PYTHON:-}" ]; then
+  :
+elif [ -x "$REPO_ROOT/.venv/bin/python" ]; then
+  PYTHON="$REPO_ROOT/.venv/bin/python"
+else
+  PYTHON="$(command -v python || command -v python3)"
+fi
 
 # Hide the GPUs, even on a box that has eight of them.
 #

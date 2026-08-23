@@ -206,6 +206,23 @@ INGEST_READ_TIMEOUT_S: EnvVar[float] = EnvVar(
     ),
 )
 
+CUDA_GRAPHS: EnvVar[str] = EnvVar(
+    name="SHIPINFER_CUDA_GRAPHS",
+    default="",
+    parse=str,
+    choices=("on", "off"),
+    doc=(
+        "Override CUDA graph capture for every model: 'on' or 'off'. Empty leaves each "
+        "model's `execution.cuda_graphs` setting alone, which is the normal case. "
+        "An operator switch rather than the only control, because a graph records device "
+        "addresses and the cases where capture must be refused are per-model — a shape "
+        "tensor, or a model whose batch shape genuinely varies. Triton makes this decision "
+        "per model too, via `optimization { cuda { graphs: true } }`; this is the blunter "
+        "instrument for answering 'is the graph path what is hurting?' in one restart "
+        "without editing six config files. See docs/qa/triton.md."
+    ),
+)
+
 PROFILE_DIR: EnvVar[str] = EnvVar(
     name="SHIPINFER_PROFILE_DIR",
     default="",
