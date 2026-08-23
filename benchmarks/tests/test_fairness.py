@@ -61,10 +61,14 @@ class TestOmpIsSymmetric:
 class TestBothSidesLoadTheSameEngine:
     """Existence was checked; identity was not, and identity is the property that matters."""
 
-    def _repository(self, tmp_path: Path, detector: bytes) -> Path:
+    def _repository(self, tmp_path: Path, detector: bytes | None) -> Path:
+        """A repository holding a plan for both paired models, or for neither."""
         root = tmp_path / "model_repository"
-        (root / "ship_detector" / "1").mkdir(parents=True)
-        (root / "ship_detector" / "1" / "model.plan").write_bytes(detector)
+        for model in ("ship_detector", "ship_segmenter"):
+            version = root / model / "1"
+            version.mkdir(parents=True)
+            if detector is not None:
+                (version / "model.plan").write_bytes(detector)
         return root
 
     def _config(self, tmp_path: Path, flat: bytes, plan: bytes) -> BenchConfig:
@@ -87,16 +91,23 @@ class TestBothSidesLoadTheSameEngine:
         with pytest.raises(RuntimeError, match="measures the engines"):
             config.require_same_engines()
 
-    def test_a_missing_plan_is_not_treated_as_a_mismatch(self, tmp_path: Path) -> None:
-        """`require_inputs` already reports what is absent; reporting it twice, as a
-        mismatch, would point at the wrong problem."""
+    def test_a_missing_plan_is_refused_rather_than_skipped(self, tmp_path: Path) -> None:
+        """Skipping an absent plan made the guard useless in the case it exists for.
+
+        `autobuild` builds the server its own engine from ONNX when the plan is missing —
+        *after* this check has passed — so the two sides then run different engines and the
+        one property this method claims to enforce is the one that silently does not hold.
+        """
         engine = tmp_path / "yolo26n_fp32.engine"
         engine.write_bytes(b"PLAN")
-        empty = tmp_path / "model_repository"
-        (empty / "ship_detector" / "1").mkdir(parents=True)
-        BenchConfig(
-            det_engine=engine, seg_engine=engine, model_repository=empty
-        ).require_same_engines()
+        config = BenchConfig(
+            det_engine=engine,
+            seg_engine=engine,
+            model_repository=self._repository(tmp_path, None),
+        )
+
+        with pytest.raises(RuntimeError, match="build its own from ONNX"):
+            config.require_same_engines()
 
 
 class TestTheHarnessCallsTheApiThatExists:

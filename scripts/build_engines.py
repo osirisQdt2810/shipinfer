@@ -132,6 +132,7 @@ def build(targets: tuple[Target, ...], *, fp16: bool, force: bool) -> int:
             continue
         if engine.is_file() and not force:
             print(f"{target.name}: {engine.name} already built (use --force to rebuild)")
+            _install(target, engine)
             continue
 
         started = time.monotonic()
@@ -148,15 +149,29 @@ def build(targets: tuple[Target, ...], *, fp16: bool, force: bool) -> int:
         size_mb = engine.stat().st_size / 1e6
         print(f"{target.name}: {engine.name}  {size_mb:.1f} MB in {elapsed:.1f}s")
 
-        # The server loads its plan from the model's own version directory. Copying rather
-        # than symlinking: a plan is an artefact, and a dangling link inside a container
-        # whose mount layout differs is a confusing way to fail at start-up.
-        if target.version_dir is not None:
-            target.version_dir.mkdir(parents=True, exist_ok=True)
-            destination = target.version_dir / "model.plan"
-            destination.write_bytes(engine.read_bytes())
-            print(f"{'':<16}  -> {destination.relative_to(REPO)}")
+        _install(target, engine)
     return 1 if failures else 0
+
+
+def _install(target: Target, engine: Path) -> None:
+    """Put the plan where the server looks for it.
+
+    Copying rather than symlinking: a plan is an artefact, and a dangling link inside a
+    container whose mount layout differs is a confusing way to fail at start-up.
+
+    Called on the skip path too. Skipping the copy when the flat engine already existed
+    left `model.plan` absent, `autobuild` then built the server a *different* plan from
+    ONNX, and the benchmark's identity check had nothing to compare — so the two sides ran
+    different engines and the guard passed.
+    """
+    if target.version_dir is None:
+        return
+    destination = target.version_dir / "model.plan"
+    if destination.is_file() and destination.read_bytes() == engine.read_bytes():
+        return
+    target.version_dir.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(engine.read_bytes())
+    print(f"{'':<16}  -> {destination.relative_to(REPO)}")
 
 
 def main(argv: list[str] | None = None) -> int:

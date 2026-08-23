@@ -314,3 +314,72 @@ class TestAStarvedGeneratorIsRefused:
         result = self._result(read=24000, elapsed=30.0)
 
         assert shipinfer_harness.achieved_offer(config, result) == pytest.approx(800.0)
+
+
+class TestDroppedWorkIsNotCountedAsThroughput:
+    """A frame backpressure refused never entered the queue, so it cannot be retired."""
+
+    def _result(self, *, read: int, dropped: int, elapsed: float = 30.0):
+        return shipinfer_harness.ShipInferResult(
+            log=Path("/dev/null"),
+            startup_s=1.0,
+            elapsed_s=elapsed,
+            frames_accepted=read - dropped,
+            events_emitted=read - dropped,
+            frames_read=read,
+            frames_dropped=dropped,
+        )
+
+    def test_the_offered_rate_excludes_what_was_refused(self):
+        """Read 1000/s, refuse 700/s: the load the pipeline saw is 300/s, and a flat buffer
+        used to make that report as 1000 img/s SUSTAINED — a 3.3x overstatement, one-sided
+        because the baseline is a separate binary measured a different way."""
+        config = BenchConfig(cameras=50, fps=20.0, seconds=30.0)
+        result = self._result(read=30000, dropped=21000)
+
+        assert shipinfer_harness.achieved_offer(config, result) == pytest.approx(300.0)
+
+    def test_heavy_dropping_refuses_the_run_outright(self):
+        config = BenchConfig(cameras=50, fps=20.0, seconds=30.0)
+
+        with pytest.raises(RuntimeError, match="shedding system"):
+            shipinfer_harness.check_offer(config, self._result(read=30000, dropped=21000))
+
+    def test_a_trickle_of_drops_is_still_a_measurement(self):
+        """A little shedding is the system working as designed."""
+        config = BenchConfig(cameras=50, fps=20.0, seconds=30.0)
+        shipinfer_harness.check_offer(config, self._result(read=30000, dropped=150))
+
+
+class TestACappedBufferIsNotAMeasurement:
+    """Once occupancy sits at the bound the queue sheds instead of growing."""
+
+    def test_a_buffer_at_its_capacity_forces_unmeasured(self, tmp_path: Path):
+        """A genuinely saturated run used to report SUSTAINED once the cap was reached,
+        turning the queue's capacity into a throughput result."""
+        rows = [{"t": float(t), "det_buffer_size": 1000.0} for t in range(30)]
+        run = analysis.analyse(
+            analysis.read_log(write_log(tmp_path / "l.jsonl", rows), sample_interval_s=1.0),
+            system="baseline",
+            warmup_s=5.0,
+            offered={"det": 500.0},
+            capacity=1000,
+            entry_modules=("det",),
+        )
+
+        assert run.modules[0].capped
+        assert run.verdict == analysis.UNMEASURED
+
+    def test_a_buffer_well_below_capacity_is_measured_normally(self, tmp_path: Path):
+        rows = [{"t": float(t), "det_buffer_size": 40.0} for t in range(30)]
+        run = analysis.analyse(
+            analysis.read_log(write_log(tmp_path / "l.jsonl", rows), sample_interval_s=1.0),
+            system="baseline",
+            warmup_s=5.0,
+            offered={"det": 500.0},
+            capacity=65536,
+            entry_modules=("det",),
+        )
+
+        assert not run.modules[0].capped
+        assert run.verdict == analysis.SUSTAINED

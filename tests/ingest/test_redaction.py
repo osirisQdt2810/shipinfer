@@ -92,11 +92,17 @@ class TestNoLogCallFormatsARawUri:
 
     SITES = (
         "src/shipinfer/ingest/camera/actor.py",
+        "src/shipinfer/ingest/camera/db.py",
+        "src/shipinfer/ingest/camera/health.py",
         "src/shipinfer/ingest/sources/gstreamer.py",
         "src/shipinfer/ingest/sources/pyav.py",
         "src/shipinfer/ingest/sources/replay.py",
         "src/shipinfer/ingest/manager.py",
+        "src/shipinfer/ingest/resolve.py",
     )
+    #: Errors that redact inside their own constructor, so handing them a raw URI is
+    #: correct. Anything else that formats one into a message is not.
+    REDACTING_ERRORS = frozenset({"SourceOpenError"})
     LOG_LEVELS = {"debug", "info", "warning", "error", "exception", "critical"}
 
     @staticmethod
@@ -120,15 +126,29 @@ class TestNoLogCallFormatsARawUri:
         return False
 
     def _offenders(self, source: str, relative: str) -> list[str]:
+        """Every place a URI could become text a human reads: a log line or an error.
+
+        Raise sites are inspected as well as logger calls, because an exception message is
+        logged on every retry *and* served as `CameraHealth.last_error`. Errors that redact
+        inside their own constructor are exempt — handing them the raw URI is the point.
+        """
         found: list[str] = []
         for node in ast.walk(ast.parse(source)):
-            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-                continue
-            if node.func.attr not in self.LOG_LEVELS:
-                continue
-            for argument in list(node.args) + [k.value for k in node.keywords]:
-                if self._mentions_uri(argument) and not self._is_redacted(argument):
-                    found.append(f"{relative}:{node.lineno}")
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr not in self.LOG_LEVELS:
+                    continue
+                for argument in list(node.args) + [k.value for k in node.keywords]:
+                    if self._mentions_uri(argument) and not self._is_redacted(argument):
+                        found.append(f"{relative}:{node.lineno} (log)")
+            elif isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+                name = getattr(node.exc.func, "id", None) or getattr(
+                    node.exc.func, "attr", None
+                )
+                if name in self.REDACTING_ERRORS:
+                    continue
+                for argument in list(node.exc.args) + [k.value for k in node.exc.keywords]:
+                    if self._mentions_uri(argument) and not self._is_redacted(argument):
+                        found.append(f"{relative}:{node.lineno} (raise)")
         return found
 
     def test_no_logger_receives_an_unredacted_uri(self) -> None:
@@ -140,9 +160,23 @@ class TestNoLogCallFormatsARawUri:
                 offenders += self._offenders(path.read_text(), relative)
         assert not offenders, "a raw URI is handed to a logger here: " + ", ".join(offenders)
 
-    def test_the_guard_would_catch_a_regression(self) -> None:
+    def test_the_guard_would_catch_a_logging_regression(self) -> None:
         """Without this the guard could be vacuous: a walker that matches nothing passes."""
         bad = "_LOG.info('camera %s at %s', cam, self.config.uri)"
         good = "_LOG.info('camera %s at %s', cam, redact(self.config.uri))"
         assert self._offenders(bad, "x.py"), "the guard misses the very thing it exists for"
         assert not self._offenders(good, "x.py"), "the guard rejects the correct form"
+
+    def test_the_guard_would_catch_a_raise_regression(self) -> None:
+        """An exception message is logged on every retry and served by the health API, so
+        a raw URI in one is worse than a raw URI in a single log line, not better."""
+        bad = "raise ConfigurationError(f'bad camera: {uri}')"
+        good = "raise ConfigurationError(f'bad camera: {redact(uri)}')"
+        assert self._offenders(bad, "x.py"), "raise sites were not inspected at all"
+        assert not self._offenders(good, "x.py")
+
+    def test_an_error_that_redacts_internally_may_take_the_raw_uri(self) -> None:
+        """`SourceOpenError` is *given* the real URI and masks it in its own message; the
+        attribute has to keep the value so a caller can reopen the stream."""
+        raw = "raise SourceOpenError(self.camera_id, self.config.uri, str(exc))"
+        assert not self._offenders(raw, "x.py")

@@ -425,6 +425,17 @@ class ModuleResult:
         return -self.fit.slope
 
     @property
+    def capped(self) -> bool:
+        """Whether the buffer hit its bound, which makes the growth rate meaningless.
+
+        Once occupancy sits at the capacity the queue sheds instead of growing, so measured
+        growth falls to zero and a genuinely saturated run reports SUSTAINED. At the
+        defaults a 1000 img/s offer reaches 65536 in about 82 s, which is inside the runs
+        this harness is designed for.
+        """
+        return bool(self.capacity) and self.peak >= 0.95 * (self.capacity or 1)
+
+    @property
     def utilisation(self) -> float | None:
         """Peak occupancy as a fraction of capacity — the baseline's ``*_util_max``."""
         if not self.capacity:
@@ -448,6 +459,7 @@ class ModuleResult:
             "last": self.last,
             "peak": self.peak,
             "utilisation": None if self.utilisation is None else round(self.utilisation, 4),
+            "capped": self.capped,
         }
 
 
@@ -465,6 +477,10 @@ class RunAnalysis:
     @property
     def verdict(self) -> str:
         """SATURATED if any module is. One saturated module bounds the whole pipeline."""
+        if any(m.capped for m in self.modules):
+            # A bound buffer stops growing, so its slope stops meaning anything. Reporting
+            # SUSTAINED here would turn the queue's capacity into a throughput result.
+            return UNMEASURED
         verdicts = {m.fit.verdict for m in self.modules}
         if UNMEASURED in verdicts:
             # Fail closed: one module we could not bound means the run does not support a

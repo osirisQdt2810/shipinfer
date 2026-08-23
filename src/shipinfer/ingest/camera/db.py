@@ -20,6 +20,7 @@ from typing import Any
 
 from shipinfer.core.errors import ConfigurationError
 from shipinfer.core.logging import get_logger
+from shipinfer.core.redact import redact, redact_in
 from shipinfer.core.settings.ingest import CameraConfig
 
 __all__ = ["load_camera_db", "translate_reference_record"]
@@ -109,8 +110,11 @@ def translate_reference_record(record: dict[str, Any], *, base_dir: Path) -> Cam
     camera_id = str(record.get("cameraID") or "").strip()
     uri = str(record.get("videoSource") or "").strip()
     if not camera_id or not uri:
+        # The record holds `videoSource` verbatim, so printing it puts the fleet password
+        # in a start-up log. The two identifying fields are enough to find the row.
         raise ConfigurationError(
-            f"camera record needs both 'cameraID' and 'videoSource': {record!r}"
+            f"camera record needs both 'cameraID' and 'videoSource': "
+            f"cameraID={record.get('cameraID')!r} videoSource={redact(uri)!r}"
         )
 
     fields: dict[str, Any] = {"camera_id": camera_id, "uri": uri}
@@ -196,7 +200,11 @@ def load_camera_db(path: str | Path) -> list[CameraConfig]:
         except ValueError as exc:
             # pydantic's ValidationError is a ValueError; re-raise as the project's type so
             # a caller catches one thing and the message names the offending entry.
-            raise ConfigurationError(f"{file_path}: entry {index} is invalid: {exc}") from exc
+            # pydantic embeds the offending input in its message, which for a camera row
+            # is the URI. Redacted for the same reason the record above is not printed.
+            raise ConfigurationError(
+                f"{file_path}: entry {index} is invalid: {redact_in(str(exc))}"
+            ) from exc
         if camera.camera_id in seen:
             raise ConfigurationError(
                 f"{file_path}: camera {camera.camera_id!r} is declared more than once"

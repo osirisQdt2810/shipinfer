@@ -272,8 +272,20 @@ class BenchConfig:
         for model, attribute in self._ENGINE_PAIRS:
             flat = getattr(resolved, attribute)
             plan = repository / model / "1" / "model.plan"
-            if flat is None or not flat.is_file() or not plan.is_file():
+            if flat is None or not flat.is_file():
                 continue
+            if not plan.is_file():
+                # Fails closed. Skipping an absent plan made the guard useless in exactly
+                # the case it exists for: `autobuild` then builds the server its *own*
+                # engine from ONNX after this check has already passed, so the two sides
+                # run different plans and the one property this method claims to enforce
+                # is the one that silently does not hold.
+                raise RuntimeError(
+                    f"{model}: the baseline loads {flat.name} but the server has no plan at "
+                    f"{plan}. It would build its own from ONNX, and a comparison across two "
+                    f"engines measures the engines. Run "
+                    f"`python scripts/build_engines.py --force` to put one file in both."
+                )
             if _digest(flat) != _digest(plan):
                 raise RuntimeError(
                     f"{model}: the baseline loads {flat.name} and the server loads "

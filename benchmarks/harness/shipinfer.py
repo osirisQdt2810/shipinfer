@@ -68,6 +68,11 @@ __all__ = ["PIPELINE_MODULE", "ShipInferResult", "run_shipinfer"]
 #: baseline's ``det_buffer_size``: decoded frames waiting for a worker.
 PIPELINE_MODULE = "pipeline"
 
+#: Fraction of read frames backpressure may refuse before the run stops being a throughput
+#: measurement. Small on purpose: a little shedding is the system working as designed, and a
+#: lot of it means the offered rate and the served rate are different experiments.
+MAX_DROP_FRACTION = 0.02
+
 #: Models the graph drives, in stage order. Their queue depths are the second-level buffer
 #: the baseline has no equivalent of, and they are sampled because a model that is the wall
 #: shows it here before the ingest queue notices.
@@ -338,10 +343,18 @@ def achieved_offer(config: BenchConfig, result: ShipInferResult) -> float:
     """
     if result.elapsed_s <= 0:
         return float(config.offered_total)
-    delivered = result.frames_read or (result.frames_accepted + result.frames_dropped)
-    if not delivered:
+    # `frames_read` minus what backpressure refused. A dropped frame never enters the
+    # queue, so it cannot grow the buffer and cannot be retired — counting it as offered
+    # while `sustained = offered - growth` reads a flat buffer would report the whole
+    # offered rate as throughput. Concretely: read 1000/s, reject 700/s, retire 300/s, and
+    # the run says SUSTAINED at 1000 img/s. A 3.3x overstatement, and one-sided, because
+    # the baseline is a separate binary that is not measured this way.
+    entered = max(0, result.frames_read - result.frames_dropped)
+    if not entered:
+        entered = result.frames_accepted
+    if not entered:
         return float(config.offered_total)
-    return delivered / result.elapsed_s
+    return entered / result.elapsed_s
 
 
 def check_offer(
@@ -357,6 +370,14 @@ def check_offer(
     """
     achieved = achieved_offer(config, result)
     target = float(config.offered_total)
+    read = result.frames_read
+    if read and result.frames_dropped / read > MAX_DROP_FRACTION:
+        raise RuntimeError(
+            f"backpressure refused {result.frames_dropped / read:.0%} of the "
+            f"{read} frames ingest read. Past {MAX_DROP_FRACTION:.0%} the run is measuring "
+            f"a shedding system rather than a serving one, and the sustained figure would "
+            f"describe a load most of which never entered the pipeline."
+        )
     if target > 0 and achieved < tolerance * target:
         raise RuntimeError(
             f"the load generator delivered {achieved:.1f} img/s against a target of "
