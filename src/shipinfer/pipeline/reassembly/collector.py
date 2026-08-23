@@ -154,10 +154,11 @@ class PendingFrame:
 
     @property
     def missing(self) -> tuple[str, ...]:
-        """Expected stages that never answered, in the graph's declaration order.
+        """Expected stages that never answered, sorted.
 
-        Sorted for a stable message; a partial event's ``missing_stages`` is read by a human
-        and by a test, and both want the same list every time.
+        Sorted rather than in the graph's order because a partial event's ``missing_stages``
+        is read by a human and by a test, and both want the same list every time — the
+        graph's order is not available here and set iteration order is not an answer.
         """
         outstanding = self._expected.difference(self._delivered)
         return tuple(sorted(outstanding))
@@ -227,6 +228,7 @@ class FrameCollector:
         self.evicted = 0
         self.late = 0
         self.rejected = 0
+        self.duplicates = 0
 
     # -- the PendingIndex protocol, for the eviction policy ----------------------------
 
@@ -264,6 +266,21 @@ class FrameCollector:
 
         evicted: FrameResult | None = None
         with self._lock:
+            if frame.key in self._pending:
+                # Two live frames with one tag. ADR-002 says this never happens — the frame
+                # counter belongs to the camera's actor for its whole life — and if it does,
+                # replacing the in-flight one would silently discard its partial results and
+                # break the "every opened frame is reported exactly once" invariant. So the
+                # newcomer is refused and the collision is named.
+                self.duplicates += 1
+                _LOG.error(
+                    "duplicate reassembly key %s: a frame with this tag is already in "
+                    "flight, so the new one is refused. A camera's frame_id must never "
+                    "repeat (ADR-002); check first_frame_id after a re-add.",
+                    frame.key,
+                    extra=log_context(camera_id=state.camera_id, frame_id=state.frame_id),
+                )
+                return False
             while len(self._pending) >= self._settings.capacity:
                 victim = self._evict_locked()
                 if victim is None:
@@ -475,6 +492,7 @@ class FrameCollector:
             "evicted": self.evicted,
             "late": self.late,
             "rejected": self.rejected,
+            "duplicates": self.duplicates,
             "timeout_ms": self._settings.timeout_ms,
             "eviction_policy": self._policy.name,
         }

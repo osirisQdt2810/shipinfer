@@ -331,6 +331,21 @@ class TestEvictionsAreReportedButNotPublished:
         assert reported[0].key == ("cam0", 0)
 
 
+class TestDuplicateTagsAreRefusedNotReplaced:
+    """Two live frames with one tag would break "reported exactly once" silently."""
+
+    def test_a_second_frame_with_the_same_tag_is_refused(self):
+        subject, reported = collector()
+        assert subject.open(make_state("cam0", 0), expected=("detect",)) is True
+        assert subject.open(make_state("cam0", 0), expected=("detect",)) is False
+
+        assert subject.duplicates == 1
+        assert len(subject) == 1
+        subject.deliver(("cam0", 0), "detect")
+        subject.seal(("cam0", 0))
+        assert len(reported) == 1, "the in-flight frame kept its place and its results"
+
+
 class TestThePolicyRegistry:
     """Adding a policy is a file and a decorator, and both shipped ones are reachable."""
 

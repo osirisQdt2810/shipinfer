@@ -434,11 +434,20 @@ class PipelineRunner:
             state.deadline_ns = min(state.deadline_ns, budget) if state.deadline_ns else budget
 
         key = state.key
-        self._awaiting[key] = item.future
+        # `setdefault`, not assignment: if a frame with this tag is somehow already in flight
+        # the collector will refuse the newcomer, and clobbering the entry here would leave
+        # the *first* frame's caller waiting on a future nobody will ever resolve.
+        self._awaiting.setdefault(key, item.future)
         if not self._collector.open(state):
-            self._awaiting.pop(key, None)
+            if self._awaiting.get(key) is item.future:
+                del self._awaiting[key]
             self._metrics.frames_failed.inc(camera=camera)
-            item.fail(RequestCancelledError("reassembly refused the frame"))
+            item.fail(
+                RequestCancelledError(
+                    f"reassembly refused {key}: it is either full and unable to evict, or a "
+                    f"frame with this tag is already in flight"
+                )
+            )
             return
 
         observer = _CollectorObserver(self._collector, key, self._metrics)
