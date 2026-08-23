@@ -412,6 +412,14 @@ class TestEndToEndWithReplayAndJsonLines:
 
     This is the combination that has to work for the offline tier to mean anything: it is the
     same wiring ``shipinfer bench`` drives at 50 cameras, minus the cameras.
+
+    It deliberately does **not** pin the image ops, so it takes whichever implementation the
+    host offers — numpy in CI, the fused CUDA kernels on the dev box. ``run_tests.sh`` warns
+    that an unmarked test taking a CUDA path can pass on a dev box and fail on a runner; here
+    the value runs the other way and was demonstrated: this test is what caught three faults
+    that only exist when a GPU is present (a shared staging ring, preprocessing pinned to
+    device 0, and ops built for a device the thread was not bound to). Every other test in
+    this tier pins numpy so it behaves identically everywhere.
     """
 
     @pytest.fixture()
