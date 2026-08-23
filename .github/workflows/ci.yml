@@ -36,6 +36,9 @@ jobs:
         # and a missing leg does not fail loudly — it fails on someone's node.
         python-version: ["3.10", "3.11", "3.12"]
     steps:
+      # Deliberately NO submodules: the offline tier must pass without the fused kernels.
+      # That is the promise of `execution.provider: auto`, and not fetching them here is
+      # how it stays true.
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
@@ -77,12 +80,16 @@ jobs:
       - name: Model repository configs parse
         run: python scripts/hooks/check_model_configs.py model_repository/*/config.yaml
 
-  native:
-    name: Native extension (compile only)
+  kernels:
+    name: Fused kernels (compile only)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The kernels live in shipinfer-imgproc; without this the submodule directory is
+          # an empty placeholder and the job silently passes having built nothing.
+          submodules: recursive
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -93,16 +100,12 @@ jobs:
           method: network
           sub-packages: '["nvcc", "cudart"]'
       - run: pip install pybind11 numpy
-      - name: Configure and build
-        # A runner has nvcc but no device, so this proves the kernels COMPILE — it cannot
-        # prove they are correct. Correctness is the parity tests in the GPU tier, which run
-        # on real hardware before a release.
-        run: python scripts/build_native.py --arch 86 || true
-      - name: Report
-        run: |
-          if [ -f native/build/CMakeCache.txt ]; then
-            echo "CMake configured; see the build log above for compile status."
-          fi
+      - name: Build the submodule's kernels
+        # A runner has nvcc but no device, so this proves the kernels COMPILE against the
+        # pinned commit — it cannot prove they are correct. Correctness is the parity tests
+        # in shipinfer-imgproc's own GPU tier, which run on real hardware before a release.
+        # What this job is really for is catching a submodule bump that does not build.
+        run: python 3rdparty/shipinfer-imgproc/build.py --arch 86
 
   coverage:
     name: Coverage
