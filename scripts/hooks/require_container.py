@@ -126,7 +126,12 @@ PYTHON_RE = re.compile(r"(?:^|/)(python|python3|python3\.\d+)$")
 # with a plain regex would cut `python -c "import torch; print(...)"` in half at
 # the semicolon *inside the quotes*, hiding the device call in a fragment that
 # no longer parses -- so the split happens on lexer tokens, not on characters.
-OPERATORS = {"&&", "||", "|", ";", "&", "\n", ">", ">>", "<"}
+OPERATORS = {"&&", "||", "|", ";", "&", "\n"}
+
+#: Redirections. Separated from the operators above because what follows one is a *file*,
+#: not the next command: lumping them together made `cat > out.md` produce a segment whose
+#: "executable" was `out.md`.
+REDIRECTS = {">", ">>", "<", "<<", "2>", "2>>", "&>", ">&"}
 
 
 #: Modules that run the suite or a benchmark when given to `python -m`.
@@ -331,7 +336,18 @@ def segments(command: str) -> list[list[str]]:
             continue
 
         current: list[str] = []
+        expect_target = False
         for token in tokens:
+            if expect_target:
+                # The word after `>` is a file, not a command. Treating it as one made
+                # `cat > "$S/out.md"` look like a segment whose executable is `$S/out.md`,
+                # which the variable-in-command-position rule then refused — a redirection
+                # into a path held in a variable is completely ordinary.
+                expect_target = False
+                continue
+            if token in REDIRECTS:
+                expect_target = True
+                continue
             if token in OPERATORS:
                 if current:
                     out.append(current)

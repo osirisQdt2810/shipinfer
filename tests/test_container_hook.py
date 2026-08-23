@@ -345,3 +345,12 @@ class TestTheBypassFixesDidNotCostTooMuch:
     def test_a_real_newline_still_starts_a_new_command(self) -> None:
         """The other half: folding continuations must not fold genuine line breaks."""
         assert refused("echo start\npytest tests/ -m gpu") is not None
+
+    def test_a_redirection_target_is_not_a_command(self) -> None:
+        """`>` used to be treated as a command separator, so `cat > "$S/out.md"` produced a
+        segment whose executable was `$S/out.md` — which the variable-in-command-position
+        rule then refused. Redirecting into a path held in a variable is ordinary."""
+        assert refused("cat > \"$OUT/reply.md\" <<'EOF'\nhello\nEOF") is None
+
+    def test_a_redirection_does_not_hide_the_command_after_it(self) -> None:
+        assert refused("echo hi >/dev/null; pytest tests/ -m gpu") is not None
