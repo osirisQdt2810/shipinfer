@@ -12,8 +12,11 @@ Two ways it was wrong here, both fixed and both pinned below:
   * even inside one thread, a model with two inputs of the same shape staged the second
     over the first while the first's async H2D was still in flight.
 
-These need no GPU: ``torch.empty(pin_memory=True)`` works without a device, and the
-property under test is about *identity*, not about the copy.
+These need no GPU. Not because pinning works without one — ``pin_memory=True`` raises
+outright on a host with no accelerator, which is how CI found this — but because the pool
+falls back to pageable memory there, and every property under test is about *identity*:
+which caller gets which buffer, and whether the same one comes back. None of that depends
+on the pages being locked.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ import pytest
 
 from shipinfer.core.settings import MemorySettings
 from shipinfer.runtime.memory import MemoryPool, PinnedStagingPool
+from shipinfer.runtime.platform import is_available
 
 torch = pytest.importorskip("torch")
 
@@ -69,10 +73,19 @@ def test_the_same_name_is_reused(pool: MemoryPool) -> None:
     assert staging.stats()["misses"] == 1
 
 
-def test_buffers_are_actually_pinned(pool: MemoryPool) -> None:
+def test_buffers_are_pinned_exactly_when_pinning_is_possible(pool: MemoryPool) -> None:
     """Pageable memory makes cudaMemcpyAsync silently synchronous, which is the one thing
-    this class exists to prevent."""
-    assert pool.staging_for("instance-0").get("x", (4,), torch.float32).is_pinned()
+    this class exists to prevent — so on a real device the buffer must be pinned.
+
+    On a GPU-less host it must be pageable instead, and must not raise. That is not a
+    concession to CI: with no device there is no DMA, so there is nothing for locked pages
+    to accelerate, and the layers above must keep working either way (ADR-001).
+    """
+    staging = pool.staging_for("instance-0")
+    buffer = staging.get("x", (4,), torch.float32)
+
+    assert staging.pinned is is_available()
+    assert buffer.is_pinned() is staging.pinned
 
 
 def test_a_pool_is_owned_by_one_thread_but_still_locked() -> None:

@@ -16,7 +16,7 @@ import threading
 from typing import Any
 
 from shipinfer.core.logging import get_logger
-from shipinfer.runtime.platform import require_torch
+from shipinfer.runtime.platform import is_available, require_torch
 
 __all__ = ["PinnedStagingPool"]
 
@@ -48,10 +48,18 @@ class PinnedStagingPool:
     Within one owner the buffer for a given name is still reused across calls, which is the
     entire point — the address stays stable, which CUDA graph capture requires (ADR-008).
     A caller must therefore issue its copy before staging that same name again.
+
+    **On a host with no accelerator the buffers are ordinary pageable memory**, and
+    :attr:`pinned` says so. Pinning is not merely unavailable there — ``pin_memory=True``
+    raises outright — it is meaningless: pinned memory buys exactly one thing, an async DMA
+    that does not bounce through a driver-owned staging buffer, and with no device there is
+    no DMA. Everything above this class keeps working, which is what lets the offline test
+    tier run on a GPU-less CI runner (ADR-001).
     """
 
     def __init__(self, owner: str = "shared", max_entries: int = 64) -> None:
         self.owner = owner
+        self.pinned = is_available()
         self._buffers: dict[tuple[str, tuple[int, ...], Any], Any] = {}
         self._max_entries = max_entries
         self._lock = threading.Lock()
@@ -78,7 +86,7 @@ class PinnedStagingPool:
                 return buffer
 
             torch = require_torch()
-            buffer = torch.empty(shape, dtype=dtype, pin_memory=True)
+            buffer = torch.empty(shape, dtype=dtype, pin_memory=self.pinned)
             if len(self._buffers) >= self._max_entries:
                 # Bounded rather than growing forever. Shape churn past this point means a
                 # model with truly dynamic staging, which cannot be graph-captured anyway.
@@ -86,7 +94,12 @@ class PinnedStagingPool:
             self._buffers[key] = buffer
             self._misses += 1
             _LOG.debug(
-                "allocated pinned staging buffer %s/%s %s %s", self.owner, name, shape, dtype
+                "allocated %s staging buffer %s/%s %s %s",
+                "pinned" if self.pinned else "pageable",
+                self.owner,
+                name,
+                shape,
+                dtype,
             )
             return buffer
 
@@ -109,4 +122,5 @@ class PinnedStagingPool:
         }
 
     def __repr__(self) -> str:
-        return f"<PinnedStagingPool {self.owner} entries={len(self._buffers)}>"
+        kind = "pinned" if self.pinned else "pageable"
+        return f"<PinnedStagingPool {self.owner} {kind} entries={len(self._buffers)}>"

@@ -28,7 +28,8 @@ Optional extras: `.[tensorrt]` for the production backend, `.[server]` for the H
 ## The build/verify loop
 
 ```bash
-pytest                                  # offline tier — must stay green, no GPU needed
+bash scripts/run_tests.sh               # offline tier, exactly as CI runs it  <- use this
+pytest                                  # the same selection, but WITH your GPUs visible
 pytest tests/scheduling -q              # one area
 pytest -q -m gpu                        # real devices
 pytest -q -m multigpu                   # the balancing evidence (needs >= 2 GPUs)
@@ -39,6 +40,12 @@ isort --check src tests scripts
 mypy src/shipinfer                      # strict; not a commit gate yet
 pre-commit run --all-files
 ```
+
+**Run `scripts/run_tests.sh`, not bare `pytest`, before pushing.** It exports
+`CUDA_VISIBLE_DEVICES=""`, so the offline tier runs the way CI runs it: with no accelerator
+at all. A bare `pytest` on this box has eight A5000s in view, so a test that quietly takes
+a CUDA path still passes — and then fails on the runner. `torch.empty(pin_memory=True)` is
+the worked example: it succeeds here and raises on a GPU-less host.
 
 ## Fused kernels (the `shipinfer-imgproc` submodule)
 
