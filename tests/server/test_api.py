@@ -62,66 +62,77 @@ def _body(**parameters):
     }
 
 
-def test_the_tag_round_trips(client) -> None:
-    """The regression test. Supplied in parameters, returned in parameters."""
-    response = client.post(
-        "/v2/models/echo/infer", json=_body(camera_id="cam07", frame_id=1234)
-    )
+class TestContextTagOverHttp:
+    """The regression this file exists for: the tag survives the HTTP ingress."""
 
-    assert response.status_code == 200
-    parameters = response.json()["parameters"]
-    assert parameters["camera_id"] == "cam07"
-    assert parameters["frame_id"] == 1234
+    def test_the_tag_round_trips(self, client) -> None:
+        """The regression test. Supplied in parameters, returned in parameters."""
+        response = client.post(
+            "/v2/models/echo/infer", json=_body(camera_id="cam07", frame_id=1234)
+        )
 
+        assert response.status_code == 200
+        parameters = response.json()["parameters"]
+        assert parameters["camera_id"] == "cam07"
+        assert parameters["frame_id"] == 1234
 
-def test_two_cameras_are_distinguishable_in_their_responses(client) -> None:
-    a = client.post("/v2/models/echo/infer", json=_body(camera_id="camA", frame_id=7)).json()
-    b = client.post("/v2/models/echo/infer", json=_body(camera_id="camB", frame_id=3)).json()
+    def test_two_cameras_are_distinguishable_in_their_responses(self, client) -> None:
+        a = client.post(
+            "/v2/models/echo/infer", json=_body(camera_id="camA", frame_id=7)
+        ).json()
+        b = client.post(
+            "/v2/models/echo/infer", json=_body(camera_id="camB", frame_id=3)
+        ).json()
 
-    assert (a["parameters"]["camera_id"], a["parameters"]["frame_id"]) == ("camA", 7)
-    assert (b["parameters"]["camera_id"], b["parameters"]["frame_id"]) == ("camB", 3)
+        assert (a["parameters"]["camera_id"], a["parameters"]["frame_id"]) == ("camA", 7)
+        assert (b["parameters"]["camera_id"], b["parameters"]["frame_id"]) == ("camB", 3)
 
+    def test_an_untagged_request_still_works(self, client) -> None:
+        """Legitimate, and documented as sharing one fairness lane."""
+        response = client.post("/v2/models/echo/infer", json=_body())
+        assert response.status_code == 200
+        assert response.json()["parameters"]["camera_id"] == ""
 
-def test_an_untagged_request_still_works(client) -> None:
-    """Legitimate, and documented as sharing one fairness lane."""
-    response = client.post("/v2/models/echo/infer", json=_body())
-    assert response.status_code == 200
-    assert response.json()["parameters"]["camera_id"] == ""
-
-
-def test_a_malformed_frame_id_is_a_client_error(client) -> None:
-    """Coercing it to the default would silently merge that client's frames into the
-    untagged lane — the bug the tag exists to make impossible."""
-    response = client.post("/v2/models/echo/infer", json=_body(frame_id="not-a-number"))
-    assert response.status_code == 400
-
-
-def test_output_tensors_come_back(client) -> None:
-    body = client.post("/v2/models/echo/infer", json=_body(camera_id="c", frame_id=1)).json()
-    assert body["model_name"] == "echo"
-    assert [o["name"] for o in body["outputs"]] == ["y"]
-    assert np.asarray(body["outputs"][0]["data"]).shape == (2,)
+    def test_a_malformed_frame_id_is_a_client_error(self, client) -> None:
+        """Coercing it to the default would silently merge that client's frames into the
+        untagged lane — the bug the tag exists to make impossible."""
+        response = client.post("/v2/models/echo/infer", json=_body(frame_id="not-a-number"))
+        assert response.status_code == 400
 
 
-def test_error_mapping(client) -> None:
-    """Retryable and not-retryable must be distinguishable by status code, or a client
-    turns its own bug into a retry storm."""
-    assert client.post("/v2/models/nope/infer", json=_body()).status_code == 404
+class TestErrorStatusCodes:
+    """A client can tell its own bug from a server fault by the status code alone."""
 
-    wrong_shape = {
-        "id": "x",
-        "inputs": [{"name": "x", "shape": [1, 9], "datatype": "FP32", "data": [0.0] * 9}],
-        "parameters": {},
-    }
-    assert client.post("/v2/models/echo/infer", json=wrong_shape).status_code == 400
+    def test_error_mapping(self, client) -> None:
+        """Retryable and not-retryable must be distinguishable by status code, or a client
+        turns its own bug into a retry storm."""
+        assert client.post("/v2/models/nope/infer", json=_body()).status_code == 404
+
+        wrong_shape = {
+            "id": "x",
+            "inputs": [{"name": "x", "shape": [1, 9], "datatype": "FP32", "data": [0.0] * 9}],
+            "parameters": {},
+        }
+        assert client.post("/v2/models/echo/infer", json=wrong_shape).status_code == 400
 
 
-def test_health_and_metadata(client) -> None:
-    assert client.get("/v2/health/live").status_code == 200
-    assert client.get("/v2/health/ready").status_code == 200
+class TestKServeSurface:
+    """The rest of the KServe v2 surface: outputs, health and metadata."""
 
-    metadata = client.get("/v2/models/echo").json()
-    assert metadata["name"] == "echo"
-    assert [i["name"] for i in metadata["inputs"]] == ["x"]
+    def test_output_tensors_come_back(self, client) -> None:
+        body = client.post(
+            "/v2/models/echo/infer", json=_body(camera_id="c", frame_id=1)
+        ).json()
+        assert body["model_name"] == "echo"
+        assert [o["name"] for o in body["outputs"]] == ["y"]
+        assert np.asarray(body["outputs"][0]["data"]).shape == (2,)
 
-    assert "shipinfer_requests_total" in client.get("/metrics").text
+    def test_health_and_metadata(self, client) -> None:
+        assert client.get("/v2/health/live").status_code == 200
+        assert client.get("/v2/health/ready").status_code == 200
+
+        metadata = client.get("/v2/models/echo").json()
+        assert metadata["name"] == "echo"
+        assert [i["name"] for i in metadata["inputs"]] == ["x"]
+
+        assert "shipinfer_requests_total" in client.get("/metrics").text
