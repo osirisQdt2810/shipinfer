@@ -49,6 +49,7 @@ from typing import Any, Protocol
 
 from shipinfer.core.errors import (
     ConfigurationError,
+    InferenceError,
     RequestCancelledError,
     ServerStateError,
 )
@@ -200,6 +201,9 @@ class PipelineRunner:
             self._emit,
             settings=pipeline.reassembly,
             metrics=self._metrics,
+            # Records are built while the collector still holds its lock, so the sweeper
+            # never reads a `FrameState` its owning worker is still mutating (ADR-002).
+            snapshot=self._graph.objects,
         )
         self._producer_factory = frames
         self._producer: FrameProducer | None = None
@@ -479,6 +483,20 @@ class PipelineRunner:
         whose survival is the guarantee that every frame is eventually reported.
         """
         future = self._awaiting.pop(result.key, None)
+        # Every exit resolves it. The build-failure path popped the future and returned, so
+        # a caller awaiting that frame blocked forever and `stop()` could no longer find it
+        # to cancel. Harmless only while the shipped sink discards the future; the first
+        # caller that awaits one would hang.
+        try:
+            self._emit_resolved(result, future)
+        finally:
+            if future is not None and not future.done():
+                future.set_exception(
+                    InferenceError(f"frame {result.key} was finished without an event")
+                )
+
+    def _emit_resolved(self, result: FrameResult, future: Any) -> None:
+        """The emission itself. Split out so the future's resolution is a `finally`."""
         try:
             if result.reason == EVICTED:
                 # Counted by the collector and named by camera, not published: the buffer is
@@ -519,7 +537,11 @@ class PipelineRunner:
             camera_id=state.camera_id,
             frame_id=state.frame_id,
             source_id=self._settings.pipeline.source_id,
-            objects=self._graph.objects(state),
+            # The snapshot when there is one; only a directly-constructed FrameResult
+            # (a test) lacks it, and there nothing else is touching the state.
+            objects=(
+                result.objects if result.objects is not None else self._graph.objects(state)
+            ),
             width=state.width,
             height=state.height,
             fps=state.fps,

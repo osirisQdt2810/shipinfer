@@ -33,6 +33,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.settings.pipeline import ReassemblySettings
@@ -74,6 +75,21 @@ class FrameResult:
     missing: tuple[str, ...]
     reason: str = COMPLETE
     waited_us: int = 0
+    #: The objects to publish, captured **under the collector's lock** at the moment the
+    #: frame was finished.
+    #:
+    #: `FrameState` is documented as owned by exactly one worker for the frame's whole life
+    #: (ADR-002), and the sweeper broke that: it built a result under the lock but the
+    #: emission read `state` afterwards, outside it, while the owning worker was still
+    #: inside `graph.execute` and could `set_detections` or `attach`. With a 1500 ms
+    #: reassembly timeout against a 5000 ms stage timeout, any stage waiting on a backed-up
+    #: model queue guarantees the overlap. The reader saw an empty detection list, the
+    #: worker then filled it, and the scatter indexed past the end.
+    #:
+    #: ``None`` means "no snapshot was taken" — a `FrameResult` built directly in a test —
+    #: and the caller falls back to reading the state, which is safe there because nothing
+    #: else is touching it.
+    objects: tuple[Any, ...] | None = None
 
     @property
     def key(self) -> PendingKey:
@@ -166,13 +182,25 @@ class PendingFrame:
     def is_expired(self, now_ns: int) -> bool:
         return now_ns >= self.deadline_ns
 
-    def result(self, reason: str, now_ns: int) -> FrameResult:
+    def result(
+        self,
+        reason: str,
+        now_ns: int,
+        snapshot: Callable[[FrameState], tuple[Any, ...]] | None = None,
+    ) -> FrameResult:
+        """Finish this frame, capturing what emission needs while the lock is still held.
+
+        ``snapshot`` is supplied by the collector's owner because only it knows how to turn
+        a state into records — the collector has no field map. It runs here, under the lock,
+        so the worker cannot be mid-`attach` when it reads.
+        """
         return FrameResult(
             state=self.state,
             delivered=self.delivered,
             missing=self.missing,
             reason=reason,
             waited_us=max(0, (now_ns - self.opened_ns) // 1000),
+            objects=snapshot(self.state) if snapshot is not None else None,
         )
 
     def __repr__(self) -> str:
@@ -206,11 +234,13 @@ class FrameCollector:
         metrics: PipelineMetrics | None = None,
         policy: EvictionPolicy | None = None,
         clock: Callable[[], int] = time.monotonic_ns,
+        snapshot: Callable[[FrameState], tuple[Any, ...]] | None = None,
     ) -> None:
         self._settings = settings or ReassemblySettings()
         self._emit = emit
         self._metrics = metrics
         self._clock = clock
+        self._snapshot = snapshot
         self._policy = policy or EVICTION_POLICIES.create(self._settings.eviction_policy)
         self._timeout_ns = self._settings.timeout_ms * 1_000_000
         self._lock = threading.Lock()
@@ -304,7 +334,7 @@ class FrameCollector:
         if frame is None:  # pragma: no cover - a policy naming a key it was not given
             return None
         self.evicted += 1
-        return frame.result(EVICTED, self._clock())
+        return frame.result(EVICTED, self._clock(), self._snapshot)
 
     def _report_eviction(self, evicted: FrameResult) -> None:
         """Count, log and report an eviction — naming the camera that caused it.
@@ -379,7 +409,7 @@ class FrameCollector:
                 return
             self._forget_camera_locked(key)
             reason = COMPLETE if frame.is_complete else INCOMPLETE
-            result = frame.result(reason, self._clock())
+            result = frame.result(reason, self._clock(), self._snapshot)
         self._publish(result)
 
     # -- the timeout safety net ---------------------------------------------------------
@@ -396,7 +426,7 @@ class FrameCollector:
         with self._lock:
             expired = [key for key, frame in self._pending.items() if frame.is_expired(now)]
             results = [
-                frame.result(TIMEOUT, now)
+                frame.result(TIMEOUT, now, self._snapshot)
                 for frame in (self._remove_locked(key) for key in expired)
                 if frame is not None
             ]
@@ -416,7 +446,9 @@ class FrameCollector:
         """
         now = self._clock()
         with self._lock:
-            results = [frame.result(SHUTDOWN, now) for frame in self._pending.values()]
+            results = [
+                frame.result(SHUTDOWN, now, self._snapshot) for frame in self._pending.values()
+            ]
             self._pending.clear()
             self._by_camera.clear()
         for result in results:

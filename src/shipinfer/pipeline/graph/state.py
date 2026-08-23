@@ -259,7 +259,13 @@ class FrameState:
         A field left unset means the stage that fills it did not run — which is exactly what
         the emitted event should say, and is distinguishable from a zero.
         """
-        fields: list[dict[str, Any]] = [{} for _ in range(len(self.detections))]
+        # Bound once. The generator below used to re-read `self.detections` while `fields`
+        # had been sized from an earlier read, so a concurrent `set_detections` made
+        # `detection.index` run past the end — and unlike the scatter loop below, that line
+        # had no bounds guard. The snapshot in the collector closes the race that caused it;
+        # this makes the function internally consistent whatever happens around it.
+        detections = self.detections
+        fields: list[dict[str, Any]] = [{} for _ in range(len(detections))]
         for name, candidates in field_map.items():
             convert = RECORD_CONVERTERS.get(name)
             if convert is None:
@@ -280,9 +286,9 @@ class FrameState:
                 class_name=detection.class_name,
                 score=detection.score,
                 bbox=detection.box,
-                **fields[detection.index],
+                **(fields[detection.index] if 0 <= detection.index < len(fields) else {}),
             )
-            for detection in self.detections
+            for detection in detections
         )
 
     def footprint_bytes(self) -> int:
