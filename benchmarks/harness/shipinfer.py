@@ -372,9 +372,12 @@ def achieved_offer(config: BenchConfig, result: ShipInferResult) -> float:
     entered = max(0, result.frames_read - result.frames_dropped)
     if not entered:
         entered = result.frames_accepted
-    if not entered:
-        return float(config.offered_total)
-    return entered / result.elapsed_s
+    # Zero, not the target. Falling back to `offered_total` made the measurement equal the
+    # thing it was being compared against, so `check_offer`'s tolerance test could never
+    # fire: a run in which nothing was read, nothing accepted and nothing emitted reported
+    # 1000 img/s SUSTAINED off an all-zero buffer log. That is not hypothetical — it is the
+    # 50-camera run in which every per-device counter stayed at zero.
+    return entered / result.elapsed_s if entered else 0.0
 
 
 def per_module_capacity(config: BenchConfig, settings: Any = None) -> dict[str, int]:
@@ -393,8 +396,20 @@ def per_module_capacity(config: BenchConfig, settings: Any = None) -> dict[str, 
     resolved = settings or ServerSettings()
     per_instance = int(getattr(resolved.scheduler, "max_queue_size", 64))
     capacities = {PIPELINE_MODULE: int(config.buffer_capacity)}
-    for name, instances in (getattr(config, "instances_per_gpu", None) or {}).items():
-        capacities[name] = per_instance * int(instances) * len(config.gpus)
+    # Keyed by the modules this driver actually *samples*, which are `GRAPH_MODELS`.
+    # `instances_per_gpu` is the *baseline's* vocabulary — `det` and `seg` — so keying off it
+    # produced a mapping the ShipInfer log never matched: every model queue got `None`,
+    # `capped` was permanently False, and a detector queue sitting at its 512-deep bound
+    # read SUSTAINED. That is precisely the failure this function was written to fix, landed
+    # on the wrong keys.
+    per_gpu = {
+        "ship_detector": 2,
+        "ship_segmenter": 1,
+        "ship_embedder": 1,
+        "person_embedder": 2,
+    }
+    for name in GRAPH_MODELS:
+        capacities[name] = per_instance * per_gpu.get(name, 1) * len(config.gpus)
     return capacities
 
 
@@ -440,6 +455,13 @@ def check_offer(
     """
     achieved = achieved_offer(config, result)
     target = float(config.offered_total)
+    if achieved <= 0.0:
+        raise RuntimeError(
+            f"ingest reported no delivered frames at all (read={result.frames_read}, "
+            f"accepted={result.frames_accepted}, emitted={result.events_emitted}) over "
+            f"{result.elapsed_s:.1f}s. An all-zero buffer log is flat for the worst possible "
+            f"reason, and a flat log is what the growth fit reads as 'keeping up'."
+        )
     rejected = sum(result.requests_rejected.values())
     offered_requests = max(1.0, target * max(result.elapsed_s, 1.0))
     if rejected / offered_requests > MAX_REJECT_FRACTION:

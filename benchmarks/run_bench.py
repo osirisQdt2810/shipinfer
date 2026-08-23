@@ -85,17 +85,31 @@ class SystemThroughput:
     saturated: bool
     binding_module: str | None
     detail: str
+    #: The run's own verdict, carried whole rather than flattened. Reducing it to
+    #: ``saturated`` lost UNMEASURED, and UNMEASURED then read as "not saturated" and
+    #: therefore as a rate — so a pipeline queue pegged at 65000/65536, which is shedding
+    #: and certainly saturated, printed `Speed-up: 5.26x (MET)` with no bound label.
+    verdict: str = analysis.SUSTAINED
 
     @property
     def is_rate(self) -> bool:
-        """True when the number is a throughput; False when it is only an upper bound."""
-        return self.images_per_s is not None and not self.saturated
+        """True only for a verdict that *is* a measurement.
+
+        Allow-list, not a deny-list. `not saturated` admitted every verdict anyone adds
+        later, and the one that already existed — UNMEASURED — is precisely the case the
+        analysis raises to say "this run cannot support a number".
+        """
+        return self.images_per_s is not None and self.verdict in (
+            analysis.SUSTAINED,
+            analysis.DRAINING,
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "system": self.system,
             "images_per_s": None if self.images_per_s is None else round(self.images_per_s, 1),
             "saturated": self.saturated,
+            "verdict": self.verdict,
             "binding_module": self.binding_module,
             "is_rate": self.is_rate,
             "detail": self.detail,
@@ -122,6 +136,7 @@ def system_throughput(run: RunAnalysis) -> SystemThroughput:
                 saturated,
                 binding.module if binding else None,
                 f"no entry module in the log (saw {sorted(by_name)})",
+                run.verdict,
             )
         if any(m.sustained is None for m in entries):
             return SystemThroughput(
@@ -131,6 +146,7 @@ def system_throughput(run: RunAnalysis) -> SystemThroughput:
                 binding.module if binding else None,
                 "an entry queue's offered rate was not known, so its sustained rate is not "
                 "defined and the sum would be partial",
+                run.verdict,
             )
         total = sum(m.sustained or 0.0 for m in entries)
         names = " + ".join(m.module for m in entries)
@@ -140,6 +156,7 @@ def system_throughput(run: RunAnalysis) -> SystemThroughput:
             saturated,
             binding.module if binding else None,
             f"{names}: two disjoint image streams, so the sum is the system's image rate",
+            run.verdict,
         )
 
     entry = by_name.get(shipinfer.PIPELINE_MODULE)
@@ -150,6 +167,7 @@ def system_throughput(run: RunAnalysis) -> SystemThroughput:
             saturated,
             binding.module if binding else None,
             f"no {shipinfer.PIPELINE_MODULE!r} module with a known offered rate in the log",
+            run.verdict,
         )
     return SystemThroughput(
         run.system,
@@ -158,6 +176,7 @@ def system_throughput(run: RunAnalysis) -> SystemThroughput:
         binding.module if binding else None,
         f"{shipinfer.PIPELINE_MODULE}: every camera frame enters here exactly once; the "
         f"downstream models see crops derived from those frames, not new images",
+        run.verdict,
     )
 
 
@@ -166,7 +185,7 @@ def compare(base: SystemThroughput, ours: SystemThroughput, *, target: float) ->
     lines = ["", "COMPARISON", "-" * 78]
     for t in (base, ours):
         value = "unmeasured" if t.images_per_s is None else f"{t.images_per_s:>8.1f} img/s"
-        kind = "" if t.is_rate else "   (a BOUND, not a rate — the run saturated)"
+        kind = "" if t.is_rate else f"   (a BOUND, not a rate — the run was {t.verdict})"
         lines.append(f"  {t.system:<10} {value}{kind}")
         lines.append(f"             {t.detail}")
     lines.append("")

@@ -175,7 +175,8 @@ class TestTheVerdictRefusesToInvent:
     """A ratio of two bounds is not a speed-up."""
 
     def _throughput(self, system: str, value: float | None, *, saturated: bool):
-        return run_bench.SystemThroughput(system, value, saturated, None, "test")
+        verdict = analysis.SATURATED if saturated else analysis.SUSTAINED
+        return run_bench.SystemThroughput(system, value, saturated, None, "test", verdict)
 
     def test_a_real_speedup_is_reported_against_the_target(self):
         text = run_bench.compare(
@@ -451,12 +452,16 @@ class TestTheCapacityGuardUsesTheRightBound:
     """One capacity for every module could never trip for the queues that saturate first."""
 
     def test_a_model_queue_bound_is_its_instances_times_the_per_instance_size(self):
-        config = BenchConfig(gpus=(2, 3, 4, 5), instances_per_gpu={"det": 2, "seg": 1})
+        """Keyed by the module names the ShipInfer log actually carries. Keying off
+        `instances_per_gpu` used the *baseline's* vocabulary — `det`, `seg` — so the mapping
+        matched nothing our side samples and the guard was dead for every queue it was
+        added for. This test pinned the wrong key and stayed green through that."""
+        config = BenchConfig(gpus=(2, 3, 4, 5))
 
         capacities = shipinfer_harness.per_module_capacity(config)
 
-        assert capacities["det"] == 64 * 2 * 4, "8 instances x the 64-deep default"
-        assert capacities["seg"] == 64 * 1 * 4
+        assert capacities["ship_detector"] == 64 * 2 * 4, "8 instances x the 64-deep default"
+        assert capacities["ship_segmenter"] == 64 * 1 * 4
 
     def test_the_pipeline_queue_keeps_its_own_much_larger_bound(self):
         config = BenchConfig(buffer_capacity=65536)
@@ -467,11 +472,9 @@ class TestTheCapacityGuardUsesTheRightBound:
 
     def test_the_two_bounds_differ_by_orders_of_magnitude(self):
         """Which is why using one for both made the plateau guard unreachable."""
-        capacities = shipinfer_harness.per_module_capacity(
-            BenchConfig(gpus=(2, 3, 4, 5), instances_per_gpu={"det": 2})
-        )
+        capacities = shipinfer_harness.per_module_capacity(BenchConfig(gpus=(2, 3, 4, 5)))
 
-        assert capacities["det"] * 100 < capacities[shipinfer_harness.PIPELINE_MODULE]
+        assert capacities["ship_detector"] * 100 < capacities[shipinfer_harness.PIPELINE_MODULE]
 
     def test_an_unnamed_module_gets_no_guard_rather_than_the_wrong_one(self, tmp_path: Path):
         run = analysis.analyse(
@@ -491,3 +494,101 @@ class TestTheCapacityGuardUsesTheRightBound:
 
         assert run.modules[0].capacity is None
         assert not run.modules[0].capped
+
+
+class TestAnUnmeasurableRunIsNotARate:
+    """UNMEASURED is the verdict the analysis raises to say "this cannot support a number".
+
+    `is_rate` was `not saturated`, so UNMEASURED — the verdict for a buffer pegged at its
+    bound, or a fit that could not be bounded — read as a rate. A pipeline queue at
+    65000/65536 is shedding and certainly saturated, and it printed
+    `Speed-up: 5.26x (MET)` with no bound label.
+    """
+
+    def _throughput(self, verdict: str):
+        return run_bench.SystemThroughput("shipinfer", 1000.0, False, None, "test", verdict)
+
+    def test_unmeasured_is_not_a_rate(self):
+        assert not self._throughput(analysis.UNMEASURED).is_rate
+
+    def test_sustained_and_draining_are(self):
+        assert self._throughput(analysis.SUSTAINED).is_rate
+        assert self._throughput(analysis.DRAINING).is_rate
+
+    def test_an_unknown_future_verdict_is_not(self):
+        """An allow-list, so a verdict added later does not silently become a rate."""
+        assert not self._throughput("SOMETHING_NEW").is_rate
+
+    def test_compare_refuses_to_divide_an_unmeasured_run(self):
+        text = run_bench.compare(
+            run_bench.SystemThroughput("baseline", 200.0, False, None, "t", analysis.SUSTAINED),
+            self._throughput(analysis.UNMEASURED),
+            target=5.0,
+        )
+
+        assert "NOT AVAILABLE" in text
+        assert "5.00x" not in text
+        assert "UNMEASURED" in text, "and it names why"
+
+
+class TestEverySampledModuleHasACapacity:
+    """The plateau guard was keyed on the baseline's vocabulary and matched nothing.
+
+    `instances_per_gpu` names `det` and `seg`; the ShipInfer log carries `pipeline` plus
+    `GRAPH_MODELS`. So `_capacity_for` returned None for all four model queues, `capped` was
+    permanently False, and a detector queue at its 512-deep bound read SUSTAINED — the exact
+    failure the function's docstring says it exists to prevent, landed on the wrong keys.
+    """
+
+    def test_no_sampled_module_is_left_without_a_bound(self):
+        config = BenchConfig(gpus=(2, 3, 4, 5))
+
+        capacities = shipinfer_harness.per_module_capacity(config)
+
+        sampled = (shipinfer_harness.PIPELINE_MODULE, *shipinfer_harness.GRAPH_MODELS)
+        missing = [name for name in sampled if name not in capacities]
+        assert not missing, f"these queues have no plateau guard: {missing}"
+
+    def test_a_model_queue_at_its_bound_is_now_caught(self, tmp_path: Path):
+        capacity = shipinfer_harness.per_module_capacity(BenchConfig(gpus=(2, 3, 4, 5)))
+        rows = [
+            {"t": float(t), "pipeline_buffer_size": 30.0, "ship_detector_buffer_size": 512.0}
+            for t in range(30)
+        ]
+        run = analysis.analyse(
+            analysis.read_log(write_log(tmp_path / "l.jsonl", rows), sample_interval_s=1.0),
+            system="shipinfer",
+            warmup_s=5.0,
+            offered={"pipeline": 1000.0, "ship_detector": 1000.0},
+            capacity=capacity,
+            entry_modules=("pipeline",),
+        )
+
+        assert run.verdict == analysis.UNMEASURED, "a pegged detector queue is not sustained"
+        assert not run_bench.system_throughput(run).is_rate
+
+
+class TestADeliveryOfNothingIsRefused:
+    def _empty(self):
+        return shipinfer_harness.ShipInferResult(
+            log=Path("/dev/null"),
+            startup_s=1.0,
+            elapsed_s=30.0,
+            frames_accepted=0,
+            events_emitted=0,
+            frames_read=0,
+            frames_dropped=0,
+        )
+
+    def test_the_achieved_offer_is_zero_not_the_target(self):
+        """Returning the target made the measurement equal what it was compared against."""
+        config = BenchConfig(cameras=50, fps=20.0, seconds=30.0)
+
+        assert shipinfer_harness.achieved_offer(config, self._empty()) == 0.0
+
+    def test_check_offer_refuses_it(self):
+        """The 50-camera run where every per-device counter stayed at zero used to pass."""
+        config = BenchConfig(cameras=50, fps=20.0, seconds=30.0)
+
+        with pytest.raises(RuntimeError, match="no delivered frames"):
+            shipinfer_harness.check_offer(config, self._empty())
