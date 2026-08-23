@@ -22,7 +22,7 @@ import numpy as np
 
 from shipinfer.core.errors import ValidationError
 
-__all__ = ["UNKNOWN_LABEL", "Detection", "Detections", "decode_detections"]
+__all__ = ["UNKNOWN_LABEL", "DecodeParams", "Detection", "Detections", "decode_detections"]
 
 #: Label for a class id the deployment did not configure. Kept rather than dropped: a
 #: detector that starts emitting class 4 is a model/config mismatch an operator must see,
