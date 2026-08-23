@@ -36,7 +36,11 @@ def main(argv: list[str]) -> int:
     # the submodule is what actually makes the build visible. Checking here turns a
     # confusing "provider fell back to python" into a sentence that says what to run.
     check = subprocess.run(
-        [sys.executable, "-c", "import shipinfer_imgproc; assert shipinfer_imgproc.is_available()"],
+        [
+            sys.executable,
+            "-c",
+            "import shipinfer_imgproc; assert shipinfer_imgproc.is_available()",
+        ],
         cwd=ROOT,
     )
     if check.returncode != 0:
