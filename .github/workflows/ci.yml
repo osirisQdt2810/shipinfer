@@ -87,9 +87,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # The kernels live in shipinfer-imgproc; without this the submodule directory is
-          # an empty placeholder and the job silently passes having built nothing.
-          submodules: recursive
+          # Only the kernels. `submodules: recursive` also pulls `benchmarks/baseline`,
+          # which is `ShipControlPrj/counting-simulation` — a third-org SSH remote this
+          # runner cannot read, so the whole checkout aborts before the job starts. Same
+          # failure the review job hit.
+          submodules: false
+      - name: Check out the kernels only
+        run: git submodule update --init --depth 1 3rdparty/shipvision
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -103,9 +107,9 @@ jobs:
       - name: Build the submodule's kernels
         # A runner has nvcc but no device, so this proves the kernels COMPILE against the
         # pinned commit — it cannot prove they are correct. Correctness is the parity tests
-        # in shipinfer-imgproc's own GPU tier, which run on real hardware before a release.
+        # in shipvision's own GPU tier, which run on real hardware before a release.
         # What this job is really for is catching a submodule bump that does not build.
-        run: python 3rdparty/shipinfer-imgproc/build.py --arch 86
+        run: python 3rdparty/shipvision/build.py --arch 86
 
   coverage:
     name: Coverage
