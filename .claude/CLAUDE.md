@@ -252,7 +252,9 @@ Typical order: **Explore → planner → coder → reviewer**, invoking `debugge
 test or run fails.
 
 ## Slash Commands
-- `/resume` — read JOURNAL.md and brief on where work left off
-- `/daily-wrap` — update JOURNAL.md with today's session summary
-- `/adr` — create a new Architecture Decision Record in DECISIONS.md
 - `/gpu-check` — run the GPU tier plus a bench, and report the evidence
+- `/parallel-tasks` — decompose a task list into file-disjoint lanes, build them in parallel,
+  then one integration review over the combined diff
+
+JOURNAL.md, DECISIONS.md and FEATURE_LOG.md are still maintained — by editing them directly
+when there is something worth recording, not through a command.
