@@ -1,0 +1,201 @@
+# PR pipeline: tests + lint -> a DOMAIN-SPECIALISED Claude review -> gated auto-merge.
+#
+# The reviewer's expertise is not encoded here. It lives in .github/reviewer-prompt.md in
+# this repository, and the prompt below simply tells the reviewer to read and apply it.
+# That is deliberate: every module repo shares one workflow shape, while each gets a
+# reviewer who actually knows its domain — and updating a rubric is a markdown edit rather
+# than a YAML-escaping exercise.
+#
+# A PR auto-merges ONLY when: tests are green, the description carries every template
+# section, the review verdict is an explicit APPROVE, the `automerge` label is present, and
+# the head commit is still the one that was reviewed.
+#
+# Known limitation: a PR that edits .github/workflows/** cannot pass the review job — the
+# GitHub App refuses a token when workflow content differs from the default branch. Those
+# need a manual merge.
+
+name: PR Pipeline
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+    branches: [main]
+
+concurrency:
+  group: pr-pipeline-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install the CUDA toolkit
+        # Only for a repository with a CMakeLists.txt at its root, i.e. one that ships
+        # kernels. `hashFiles` returning empty is the cheapest way to ask "is this the
+        # native repo?" without giving that repo a second, drifting copy of this workflow.
+        if: hashFiles('CMakeLists.txt') != ''
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: "12.6.0"
+          method: network
+          sub-packages: '["nvcc", "cudart"]'
+      - run: bash scripts/ci_setup.sh
+      - name: Lint (pre-commit on the PR's changes)
+        if: matrix.python-version == '3.12'
+        run: >-
+          pre-commit run --show-diff-on-failure
+          --from-ref ${{ github.event.pull_request.base.sha }}
+          --to-ref HEAD
+      - run: bash scripts/run_tests.sh
+
+  pr-body:
+    name: PR description
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Require the template's sections
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          normalised=$(printf '%s' "$BODY" | tr -d '\r' | sed 's/[[:space:]]*$//')
+          missing=()
+          while IFS= read -r heading; do
+            [ -z "$heading" ] && continue
+            grep -qxF "$heading" <<< "$normalised" || missing+=("$heading")
+          done <<'HEADINGS'
+          ## Context
+          ## Content / Changes
+          ## Test Plan
+          ### Test Details
+          ### Test Output / Feature Demonstration
+          HEADINGS
+          if [ ${#missing[@]} -gt 0 ]; then
+            printf 'PR description is missing required section(s):\n'
+            printf '  %s\n' "${missing[@]}"
+            printf '\nStart from .github/pull_request_template.md and keep every heading.\n'
+            printf 'A section that does not apply gets "N/A — <reason>", not a deletion.\n'
+            exit 1
+          fi
+          echo "All required sections present."
+
+  review:
+    name: Claude review
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event.pull_request.draft == false
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    env:
+      HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+    outputs:
+      verdict: ${{ steps.verdict.outputs.value }}
+    steps:
+      - name: Fail closed when the review credential is missing
+        if: env.HAS_TOKEN != 'true'
+        run: |
+          echo "::error::CLAUDE_CODE_OAUTH_TOKEN is not available (unset, or this is a fork PR). Refusing to skip review while auto-merge is possible."
+          exit 1
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Review the PR
+        uses: anthropics/claude-code-action@c3d45e8e941e1b2ad7b278c57482d9c5bf1f35b3 # v1.0.99
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          # ONE credential. An unset secret renders as an empty string, and the SDK treats a
+          # present-but-blank api key as the credential to use rather than falling back.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # OFF: the inline classifier builds `new Anthropic({ apiKey })` directly, which has
+          # no OAuth path, and fails the whole job when only the OAuth token is set.
+          classify_inline_comments: false
+          prompt: |
+            Review pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+
+            FIRST, read `.github/reviewer-prompt.md` in the checkout. It defines who you are
+            for this repository and the rubric you must apply — this repository has a
+            specialist reviewer, not a generic one. Follow it exactly. Also read `CLAUDE.md`
+            for the architecture and conventions.
+
+            Inspect the change with `gh pr diff` and `gh pr view`, and read the surrounding
+            code for context. Every defect you claim needs a concrete failing scenario:
+            specific inputs or state leading to specific wrong behaviour. Style preferences
+            are not findings.
+
+            Post your findings as a single `gh pr comment`: for a clean PR, a short summary
+            of what you checked; for a defective PR, each blocking issue with file:line, the
+            failure scenario, and a suggested fix.
+
+            MANDATORY: the comment's LAST line must be exactly one of
+              VERDICT: APPROVE
+              VERDICT: BLOCKING
+            (the merge gate machine-reads it). Additionally write the same word to the
+            verdict file: `echo APPROVE > "$RUNNER_TEMP/verdict"` or
+            `echo BLOCKING > "$RUNNER_TEMP/verdict"`.
+            If neither the marker nor the file exists, the pipeline treats it as BLOCKING.
+          claude_args: '--model claude-opus-5 --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(echo:*)"'
+      - name: Publish verdict
+        id: verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          v=$(cat "$RUNNER_TEMP/verdict" 2>/dev/null || true)
+          if [ -z "$v" ]; then
+            v=$(gh api "repos/$REPO/issues/$PR/comments" \
+                  --jq '[.[] | select(.user.login == "claude[bot]" or .user.login == "claude") | .body] | join("\n")' \
+                | grep -oE 'VERDICT: (APPROVE|BLOCKING)' | tail -1 | awk '{print $2}' || true)
+          fi
+          if [ "$v" != "APPROVE" ]; then v=BLOCKING; fi
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+          echo "Review verdict: $v"
+
+  merge:
+    name: Auto-merge
+    needs: [test, pr-body, review]
+    if: needs.review.outputs.verdict == 'APPROVE' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Merge when the automerge label is present
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          labels=$(gh pr view "$PR" --repo "$REPO" --json labels --jq '.labels[].name')
+          if printf '%s\n' "$labels" | grep -qx automerge; then
+            gh pr merge "$PR" --repo "$REPO" --squash --match-head-commit "$HEAD_SHA"
+            echo "PR #$PR merged at $HEAD_SHA."
+          else
+            echo "No automerge label — review is APPROVE but merging is left to a human."
+          fi

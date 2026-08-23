@@ -1,0 +1,106 @@
+# Pre-commit hooks — run on STAGED files at every `git commit` (see .claude/WORKFLOW.md).
+# Install once:  pre-commit install
+# Run manually:  pre-commit run              # staged files
+#                pre-commit run --all-files  # whole repo
+
+# `references/` and `3rdparty/` are vendored upstream code — we read them, we never
+# reformat them. Build output, model weights and the venv are likewise off limits.
+exclude: |
+  (?x)^(
+      references/
+    | 3rdparty/
+    | build/
+    | dist/
+    | \.venv/
+    | \.artifacts/
+    | model_repository/.*/(1|[0-9]+)/.*
+  )
+
+default_language_version:
+  python: python3
+
+repos:
+  # General hygiene + config validators.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'            # trailing double-space is a hard line break in markdown
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: ["--allow-multiple-documents"]   # k8s manifests under deploy/
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: check-added-large-files
+        # Engines (.plan/.engine) and weights (.pth/.onnx) belong in the model repository
+        # on disk or in object storage — never in git history.
+        args: ["--maxkb=1024"]
+      - id: detect-private-key
+      - id: check-executables-have-shebangs
+
+  # Import sorting — standalone isort (NOT ruff's "I"), profile=black (pyproject).
+  - repo: https://github.com/pycqa/isort
+    rev: 8.0.1
+    hooks:
+      - id: isort
+
+  # Formatter.
+  - repo: https://github.com/psf/black
+    rev: 26.5.1
+    hooks:
+      - id: black
+
+  # Linter (autofix). `ruff-check`, not the deprecated `ruff` alias.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.4
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+
+  # No clang-format here: the C++/CUDA lives in the shipinfer-imgproc submodule and is
+  # formatted by that repository's own hooks. Running it from the parent would rewrite a
+  # checkout the parent does not own and produce a dirty submodule on every commit.
+
+  - repo: local
+    hooks:
+      # Guards the one-way import rule from CONVENTIONS Part 2 / ADR-001. Cheap, and it
+      # catches the single most damaging mistake here: a torch/tensorrt import creeping
+      # into the pure core, which silently makes the offline suite need a GPU.
+      # `python3`, not `python`: a `language: system` hook runs in the developer's shell,
+      # and plenty of distros ship only the versioned name.
+      - id: layer-check
+        name: layer boundaries (core/ pure, backends/ isolated)
+        entry: python3 scripts/hooks/check_layers.py
+        language: system
+        files: '^src/shipinfer/.*\.py$'
+        pass_filenames: false
+
+      # A model repository whose config does not parse is a runtime crash at server
+      # start-up; parsing it at commit time costs milliseconds.
+      #
+      # `language: python` with an explicit dependency list rather than `system`: the hook
+      # imports `shipinfer.repository`, and a developer who has not activated the venv would
+      # otherwise get a bare ModuleNotFoundError.
+      #
+      # Note what is NOT in this list: torch. `shipinfer.repository` and everything it
+      # imports are the pure core (ADR-001), so the day this hook starts needing an
+      # accelerator runtime, the layering rule has already been broken — and this hook is
+      # where you will find out.
+      - id: model-config-check
+        name: model repository configs parse
+        entry: python -m scripts.hooks.check_model_configs
+        language: python
+        additional_dependencies:
+          - "pydantic>=2.7,<3"
+          - "pydantic-settings>=2.2,<3"
+          - "PyYAML>=6.0"
+          - "numpy>=1.24,<3"
+          - "typing-extensions>=4.9"
+        files: '^(model_repository|tests/data/model_repository)/.*/config\.ya?ml$'
+        pass_filenames: true
+
+  # NOTE: mypy is intentionally NOT a commit gate yet. Strict config lives in
+  # pyproject.toml ([tool.mypy]); run it while typing is filled in:  mypy src/shipinfer

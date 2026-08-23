@@ -1,0 +1,42 @@
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# --- Native build ---------------------------------------------------------
+*.so
+*.o
+compile_commands.json
+.cache/
+
+# --- Model artefacts ------------------------------------------------------
+# Weights and engines are host-specific and large; they belong in object storage.
+*.engine
+*.plan
+*.onnx
+*.pth
+*.pt
+*.trt
+
+# --- Run artefacts --------------------------------------------------------
+.artifacts/
+logs/
+*.log
+
+# --- Editors --------------------------------------------------------------
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
