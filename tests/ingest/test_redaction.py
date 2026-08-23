@@ -110,7 +110,7 @@ class TestNoLogCallFormatsARawUri:
     #: which is the whole RTSP URI, and the actor logs that on every reconnect. Matching only
     #: the identifier `uri` tested the *argument name* rather than the invariant, so
     #: `str(exc)` was invisible and `FrameDecodeError`'s leak read as covered.
-    CARRIERS = frozenset({"uri", "exc", "reason", "error", "record"})
+    CARRIERS = frozenset({"uri", "exc", "reason", "error", "record", "options"})
 
     @classmethod
     def _mentions_uri(cls, node: ast.AST) -> bool:

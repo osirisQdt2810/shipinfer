@@ -158,7 +158,9 @@ class PyAvSource(FrameSource):
             self.height,
             self.fps,
             self._using_hwaccel,
-            options,
+            # AVOptions can carry the credential: an RTSP source's options are built from
+            # the URI, so logging them raw reopens the door the rest of this module closed.
+            redact_in(str(options)),
             extra=log_context(camera_id=self.camera_id),
         )
 

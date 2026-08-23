@@ -60,12 +60,25 @@ fi
 
 # The repository is mounted READ-ONLY on purpose: a test that writes into the source tree is
 # a test that pollutes the next run, and `tmp_path` exists precisely so it does not have to.
+# TensorRT is mounted from the host. No image here carries it, and without it the GPU tier
+# silently reduces to "the tests that do not need an engine" — which is most of the value
+# missing, since the accelerator seam this tier exists to cover is the TensorRT path. The
+# host is jammy like the image, so its libraries load; same arrangement as bench.sh.
+TRT_DIR="${SHIPINFER_TENSORRT_DIR:-/usr/local/TensorRT}"
+trt_mount=()
+trt_path=""
+if [ -d "$TRT_DIR/lib" ]; then
+  trt_mount=(-v "$TRT_DIR:/tensorrt:ro")
+  trt_path=":/tensorrt/lib"
+fi
+
 exec docker run --rm --pid=host --device nvidia.com/gpu=all \
-  -e LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu \
+  -e LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu${trt_path}" \
   -e PYTHONPATH=/work/src \
   -e PYTHONDONTWRITEBYTECODE=1 \
   -v "$REPO:/work:ro" \
   -v "$WHEELS:/wheels:ro" \
+  "${trt_mount[@]}" \
   -w /work "$IMAGE" \
   bash -c '
     set -e
@@ -74,5 +87,8 @@ exec docker run --rm --pid=host --device nvidia.com/gpu=all \
       fastapi httpx starlette uvicorn anyio opencv-python-headless scipy >/dev/null 2>&1 || \
       pip install -q --root-user-action=ignore --no-index --find-links=/wheels \
         pydantic pydantic-settings typer pyyaml pytest pytest-timeout pytest-asyncio
+    python -c "import tensorrt" 2>/dev/null || \
+      pip install -q --root-user-action=ignore --no-index --find-links=/wheels tensorrt \
+        >/dev/null 2>&1 || true
     exec python -m pytest -ra --strict-markers -p no:cacheprovider "$@"
   ' bash "${args[@]}"
