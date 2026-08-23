@@ -17,8 +17,8 @@ from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.registry import Registry
 from shipinfer.core.settings.ingest import CameraConfig, IngestSettings
 from shipinfer.ingest.base import FrameSource
-from shipinfer.ingest.resolve import resolve_source_name
 from shipinfer.ingest.frame.tag import FrameCounter
+from shipinfer.ingest.resolve import resolve_source_name
 
 __all__ = ["SOURCES", "create_source"]
 

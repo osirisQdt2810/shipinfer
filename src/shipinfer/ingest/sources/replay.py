@@ -20,8 +20,8 @@ import numpy as np
 from shipinfer.core.errors import FrameDecodeError, SourceOpenError, SourceUnavailableError
 from shipinfer.core.logging import get_logger, log_context
 from shipinfer.ingest.base import FrameSource
-from shipinfer.ingest.timing.pacing import DeadlinePacer
 from shipinfer.ingest.registry import SOURCES
+from shipinfer.ingest.timing.pacing import DeadlinePacer
 
 __all__ = ["FRAME_SUFFIXES", "ReplaySource"]
 

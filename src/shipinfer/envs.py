@@ -85,10 +85,10 @@ class EnvVar(Generic[T]):
             return self.default
         try:
             return self.parse(raw.strip())
-        except ConfigurationError:
-            raise
-        except (TypeError, ValueError) as exc:
-            raise ConfigurationError(f"{self.name}={raw!r} is invalid: {exc}") from exc
+        except (ConfigurationError, TypeError, ValueError) as exc:
+            # Re-wrapped rather than re-raised so the message always names the variable: a
+            # parser knows what it expected but not which key carried the wrong value.
+            raise ConfigurationError(f"{self.name}={raw.strip()!r} is invalid: {exc}") from exc
 
     def is_set(self) -> bool:
         """Whether the operator said anything, as opposed to taking the default."""
@@ -110,12 +110,10 @@ def _bool(value: str) -> bool:
     )
 
 
-def _choice(name: str, options: Sequence[str]) -> Callable[[str], str]:
+def _choice(options: Sequence[str]) -> Callable[[str], str]:
     def parse(value: str) -> str:
         if value not in options:
-            raise ConfigurationError(
-                f"{name}={value!r} is not a valid choice; valid options: {sorted(options)}"
-            )
+            raise ConfigurationError(f"not a valid choice; valid options: {sorted(options)}")
         return value
 
     return parse
@@ -144,7 +142,7 @@ INGEST_BACKENDS: tuple[str, ...] = ("gstreamer", "pyav", "replay")
 INGEST_BACKEND: EnvVar[str] = EnvVar(
     name="SHIPINFER_INGEST_BACKEND",
     default="gstreamer",
-    parse=_choice("SHIPINFER_INGEST_BACKEND", INGEST_BACKENDS),
+    parse=_choice(INGEST_BACKENDS),
     doc=(
         "Which video source implementation to use when a camera does not name one. "
         "`gstreamer` is the production path (NVDEC via nvv4l2decoder); `pyav` is the "
@@ -168,7 +166,7 @@ INGEST_HWACCEL: EnvVar[bool] = EnvVar(
 INGEST_RTSP_TRANSPORT: EnvVar[str] = EnvVar(
     name="SHIPINFER_INGEST_RTSP_TRANSPORT",
     default="tcp",
-    parse=_choice("SHIPINFER_INGEST_RTSP_TRANSPORT", ("tcp", "udp", "auto")),
+    parse=_choice(("tcp", "udp", "auto")),
     doc=(
         "RTSP lower transport. TCP by default: UDP loses packets under load and the "
         "resulting decode artefacts look exactly like a model regression."

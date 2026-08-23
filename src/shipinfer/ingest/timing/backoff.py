@@ -12,6 +12,7 @@ that has been down all night from waiting hours to notice it is back.
 
 from __future__ import annotations
 
+import math
 import random
 
 __all__ = ["ExponentialBackoff"]
@@ -36,7 +37,7 @@ class ExponentialBackoff:
             adversary.
     """
 
-    __slots__ = ("_attempts", "_rng", "cap_s", "factor", "initial_s", "jitter")
+    __slots__ = ("_attempts", "_ceiling", "_rng", "cap_s", "factor", "initial_s", "jitter")
 
     def __init__(
         self,
@@ -61,6 +62,14 @@ class ExponentialBackoff:
         self.jitter = jitter
         self._rng = rng or random.Random()
         self._attempts = 0
+        # The attempt at which the cap is reached, precomputed so `factor ** attempts` can
+        # never be evaluated for a large exponent. This is not hypothetical: a camera down
+        # overnight reaches attempt ~1000 at 30 s apiece, and `2.0 ** 1000` raises
+        # OverflowError — which would kill the actor thread of the one camera that most
+        # needs to still be trying.
+        self._ceiling = (
+            0 if cap_s <= initial_s else math.ceil(math.log(cap_s / initial_s, factor))
+        )
 
     @property
     def attempts(self) -> int:
@@ -69,6 +78,8 @@ class ExponentialBackoff:
 
     def peek(self) -> float:
         """The next delay's un-jittered value, without consuming an attempt."""
+        if self._attempts >= self._ceiling:
+            return self.cap_s
         return min(self.cap_s, self.initial_s * self.factor**self._attempts)
 
     def next_delay(self) -> float:

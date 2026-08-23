@@ -16,7 +16,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SRC = ROOT / "src" / "shipinfer"
+ROOT_PACKAGE = "shipinfer"
+SRC = ROOT / "src" / ROOT_PACKAGE
 
 #: Third-party modules a layer may never import.
 FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
@@ -36,9 +37,11 @@ FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
     "backends": {"fastapi", "uvicorn", "confluent_kafka"},
 }
 
-#: Top-level modules that are not layers and may therefore be imported from anywhere.
-#: ``_C`` is the compiled extension; ``envs`` is the single place the process environment is
-#: read, which is only useful if every layer can reach it.
+#: Top-level modules that are not layers, and may therefore be imported by any layer
+#: *except* ``core``. ``_C`` is the compiled extension; ``envs`` is the single place the
+#: process environment is read, which is only useful if every layer above ``core`` can reach
+#: it. ``core`` is deliberately excluded: nothing in this project sits below it, so it may
+#: not import even these, and that is what keeps it importable in isolation (ADR-001).
 NON_LAYER_MODULES = frozenset({"_C", "envs"})
 
 #: Which sibling packages a layer may import. A layer may always import itself.
@@ -66,13 +69,30 @@ def layer_of(path: Path) -> str | None:
     return parts[0] if len(parts) > 1 else None
 
 
+def is_submodule(name: str) -> bool:
+    """Whether ``shipinfer.<name>`` is a module rather than a re-exported attribute."""
+    return (SRC / f"{name}.py").is_file() or (SRC / name / "__init__.py").is_file()
+
+
 def imported_modules(tree: ast.AST) -> list[tuple[str, int]]:
     found: list[tuple[str, int]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             found.extend((alias.name, node.lineno) for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            found.append((node.module, node.lineno))
+            if node.module == ROOT_PACKAGE:
+                # `from shipinfer import envs` reaches the same module as
+                # `import shipinfer.envs`, so it must be checked the same way. Without this
+                # the two spellings have different rules and the lax one wins by accident.
+                # `from shipinfer import __version__` names an attribute, not a module, so
+                # the filesystem is what tells the two apart.
+                found.extend(
+                    (f"{ROOT_PACKAGE}.{alias.name}", node.lineno)
+                    for alias in node.names
+                    if is_submodule(alias.name)
+                )
+            else:
+                found.append((node.module, node.lineno))
     return found
 
 
@@ -97,9 +117,10 @@ def check(path: Path) -> list[str]:
                 f"{rel}:{lineno}: layer {layer!r} must not import {module!r} "
                 f"(ADR-001: it stays importable without a GPU)"
             )
+        exempt = frozenset() if layer == "core" else NON_LAYER_MODULES
         if allowed is not None and module.startswith("shipinfer."):
             target = module.split(".")[1]
-            if target != layer and target not in allowed and target not in NON_LAYER_MODULES:
+            if target != layer and target not in allowed and target not in exempt:
                 problems.append(
                     f"{rel}:{lineno}: layer {layer!r} must not import shipinfer.{target} "
                     f"(allowed: {sorted(allowed) or 'nothing'})"

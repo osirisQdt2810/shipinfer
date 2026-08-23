@@ -18,10 +18,10 @@ from shipinfer.core.settings.scheduler import SchedulerSettings
 from shipinfer.core.settings.server import ServerSettings
 
 __all__ = [
+    "CameraConfig",
     "DeviceSettings",
     "ExecutionProvider",
     "ExecutionSettings",
-    "CameraConfig",
     "HttpSettings",
     "IngestSettings",
     "MemorySettings",

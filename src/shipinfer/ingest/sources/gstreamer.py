@@ -30,8 +30,8 @@ from shipinfer.core.errors import (
 )
 from shipinfer.core.logging import get_logger, log_context
 from shipinfer.ingest.base import FrameSource
-from shipinfer.ingest.resolve import resolve_latency_ms, resolve_transport
 from shipinfer.ingest.registry import SOURCES
+from shipinfer.ingest.resolve import resolve_latency_ms, resolve_transport
 
 __all__ = [
     "APPSINK_NAME",
@@ -74,7 +74,7 @@ def build_pipeline(
     codec: str = "h264",
     latency_ms: int = 200,
     transport: str = "tcp",
-    decoder: str = "avdec_h264",
+    decoder: str | None = None,
     converter: str = "videoconvert",
     width: int | None = None,
     height: int | None = None,
@@ -94,7 +94,9 @@ def build_pipeline(
         latency_ms: ``rtspsrc``'s jitter buffer. A direct latency cost, so keep it small.
         transport: ``tcp`` (default), ``udp``, or ``auto`` to omit the property and let
             ``rtspsrc`` choose.
-        decoder: the decoder element name, from :func:`select_decoder`.
+        decoder: the decoder element name, from :func:`select_decoder`. ``None`` falls back
+            to the software decoder for ``codec``, so a hand-written call cannot silently
+            pair an H.265 stream with an H.264 decoder.
         converter: the colour converter element name, from :func:`select_converter`.
         width, height: scale in the pipeline instead of in Python. Both or neither.
         max_buffers: appsink queue depth. ``drop=true`` plus a depth of 2 means the newest
@@ -122,7 +124,8 @@ def build_pipeline(
         # not. The cost is that we no longer know which decoder ran.
         decode = "decodebin"
     else:
-        decode = f"{_DEPAY[codec]} ! {_PARSE[codec]} ! {decoder}"
+        element = decoder or _SW_DECODERS[codec][0]
+        decode = f"{_DEPAY[codec]} ! {_PARSE[codec]} ! {element}"
 
     caps = "video/x-raw,format=BGR"
     if width is not None and height is not None:

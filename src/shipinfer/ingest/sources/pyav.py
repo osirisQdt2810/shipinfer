@@ -26,8 +26,8 @@ from shipinfer.core.errors import FrameDecodeError, SourceOpenError, SourceUnava
 from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.settings.ingest import CameraConfig
 from shipinfer.ingest.base import FrameSource
-from shipinfer.ingest.resolve import resolve_latency_ms, resolve_transport
 from shipinfer.ingest.registry import SOURCES
+from shipinfer.ingest.resolve import resolve_latency_ms, resolve_transport
 
 __all__ = ["PyAvSource", "build_open_options", "is_network_uri"]
 
@@ -178,7 +178,7 @@ class PyAvSource(FrameSource):
             kwargs["hwaccel"] = accel
         try:
             return av.open(self.config.uri, **kwargs)
-        except Exception as exc:  # noqa: BLE001 - PyAV's error tree varies across versions
+        except Exception as exc:  # PyAV's error tree varies across versions
             if hwaccel:
                 _LOG.warning(
                     "camera %s: hardware decode unavailable (%s); falling back to software",
@@ -193,7 +193,7 @@ class PyAvSource(FrameSource):
         """A CUDA hwaccel descriptor, or ``None`` if this PyAV cannot make one."""
         try:
             return av.codec.hwaccel.HWAccel(device_type="cuda", allow_software_fallback=True)
-        except Exception as exc:  # noqa: BLE001 - AttributeError on PyAV < 13, or no device
+        except Exception as exc:  # AttributeError on PyAV < 13, or no device
             _LOG.debug(
                 "camera %s: no PyAV hwaccel support (%s)",
                 self.camera_id,
@@ -209,7 +209,7 @@ class PyAvSource(FrameSource):
             # For a live camera this is the stream ending, not a quiet moment: FFmpeg only
             # stops iterating at EOF or after a fatal demuxer error.
             raise FrameDecodeError(self.camera_id, "stream ended") from exc
-        except Exception as exc:  # noqa: BLE001 - PyAV's error tree varies across versions
+        except Exception as exc:  # PyAV's error tree varies across versions
             raise FrameDecodeError(self.camera_id, str(exc)) from exc
         return np.asarray(frame.to_ndarray(format="bgr24"))
 
@@ -218,6 +218,6 @@ class PyAvSource(FrameSource):
         if self._container is not None:
             try:
                 self._container.close()
-            except Exception as exc:  # noqa: BLE001 - closing a dead socket can raise
+            except Exception as exc:  # closing a dead socket can raise
                 _LOG.debug("camera %s: error closing container: %s", self.camera_id, exc)
         self._container = None

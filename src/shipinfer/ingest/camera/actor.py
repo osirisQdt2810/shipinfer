@@ -35,13 +35,13 @@ from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.request import InferenceRequest, ResponseFuture
 from shipinfer.core.settings.ingest import CameraConfig, IngestSettings
 from shipinfer.core.types import Tensor
-from shipinfer.ingest.timing.backoff import ExponentialBackoff
 from shipinfer.ingest.base import FrameSource
-from shipinfer.ingest.frame.frame import Frame
 from shipinfer.ingest.camera.health import CameraHealth, CameraState
+from shipinfer.ingest.frame.frame import Frame
+from shipinfer.ingest.frame.tag import FrameCounter
 from shipinfer.ingest.metrics import IngestMetrics
 from shipinfer.ingest.registry import create_source
-from shipinfer.ingest.frame.tag import FrameCounter
+from shipinfer.ingest.timing.backoff import ExponentialBackoff
 from shipinfer.scheduling.queues import RequestQueue
 from shipinfer.scheduling.work import WorkItem
 
@@ -166,6 +166,14 @@ class CameraActor:
         )
         self._thread.start()
 
+    def request_stop(self) -> None:
+        """Ask the actor to finish, without waiting for it.
+
+        Separate from :meth:`stop` because shutting down fifty cameras should cost one read
+        timeout, not fifty: signal them all, then join them all.
+        """
+        self._stop.set()
+
     def stop(self, timeout_s: float = 5.0) -> None:
         """Ask the actor to finish, and wait for it. Idempotent.
 
@@ -177,7 +185,7 @@ class CameraActor:
         daemon blocked inside a decoder, and holding up the whole process's shutdown behind
         it would be the worse failure.
         """
-        self._stop.set()
+        self.request_stop()
         thread = self._thread
         if (
             thread is not None
@@ -192,7 +200,7 @@ class CameraActor:
                     timeout_s,
                     extra=log_context(camera_id=self.camera_id),
                 )
-        if not self._in_terminal_state():
+        if not self._state_is_final():
             self._set_state(CameraState.STOPPED)
 
     def __enter__(self) -> CameraActor:
@@ -218,7 +226,7 @@ class CameraActor:
                         continue
                     if not self._pump():
                         break
-                except Exception as exc:  # noqa: BLE001 - a camera must outlive one bad frame
+                except Exception as exc:  # a camera must outlive one bad frame
                     # The safety net. A bug in a decoder or a queue must degrade one camera,
                     # not kill its thread and leave the fleet quietly 49 cameras wide. The
                     # backoff means a *persistent* bug does not become a hot loop either.
@@ -232,7 +240,7 @@ class CameraActor:
                     self._sleep(self._backoff.next_delay())
         finally:
             self._teardown()
-            if not self._in_terminal_state() and not self._fatal:
+            if not self._state_is_final():
                 self._set_state(CameraState.STOPPED)
             _LOG.info(
                 "camera %s: ingest actor stopped after %d frame(s), %d dropped",
@@ -249,7 +257,7 @@ class CameraActor:
         PyGObject, and hammering a reconnect loop against an ImportError buries the one log
         line that says what to do about it.
         """
-        self._set_state(CameraState.CONNECTING)
+        self._mark_connecting()
         try:
             source = self._factory(self.config, self._counter)
             source.open()
@@ -265,7 +273,7 @@ class CameraActor:
             )
             self._stop.set()
             return False
-        except Exception as exc:  # noqa: BLE001 - a decoder can fail in any number of ways
+        except Exception as exc:  # a decoder can fail in any number of ways
             self._record_failure(exc)
             delay = self._backoff.next_delay()
             _LOG.warning(
@@ -300,7 +308,7 @@ class CameraActor:
         assert source is not None  # guarded by the caller
         try:
             frame = source.read()
-        except Exception as exc:  # noqa: BLE001 - decode failures are the expected case here
+        except Exception as exc:  # decode failures are the expected case here
             self._record_failure(exc)
             delay = self._backoff.next_delay()
             _LOG.warning(
@@ -467,15 +475,33 @@ class CameraActor:
             )
         self.metrics.connect_failures_total.inc(camera=self.camera_id)
 
+    def _mark_connecting(self) -> None:
+        """Enter CONNECTING unless the camera is already known to be unhealthy.
+
+        Without the guard, a camera retrying every 30 s flaps between UNHEALTHY and
+        CONNECTING, and a dashboard that samples it sees whichever it happened to catch.
+        Health is sticky until a frame clears it.
+        """
+        with self._lock:
+            if self._state is not CameraState.UNHEALTHY:
+                self._state = CameraState.CONNECTING
+
     def _set_state(self, state: CameraState) -> None:
         with self._lock:
             self._state = state
             if state in (CameraState.STOPPED, CameraState.EXHAUSTED):
                 self._fps = 0.0
 
-    def _in_terminal_state(self) -> bool:
+    def _state_is_final(self) -> bool:
+        """Whether the current state must survive shutdown.
+
+        ``STOPPED``/``EXHAUSTED`` are already terminal. ``_fatal`` matters too: a camera that
+        gave up because its decode runtime is missing should report UNHEALTHY afterwards, not
+        STOPPED — otherwise it is indistinguishable from one an operator removed on purpose,
+        which is the difference between "install python3-gi" and "no action needed".
+        """
         with self._lock:
-            return self._state in (CameraState.STOPPED, CameraState.EXHAUSTED)
+            return self._fatal or self._state in (CameraState.STOPPED, CameraState.EXHAUSTED)
 
     def _teardown(self) -> None:
         source, self._source = self._source, None
@@ -483,7 +509,7 @@ class CameraActor:
             return
         try:
             source.close()
-        except Exception as exc:  # noqa: BLE001 - closing a broken stream can raise
+        except Exception as exc:  # closing a broken stream can raise
             _LOG.debug(
                 "camera %s: error closing source: %s",
                 self.camera_id,

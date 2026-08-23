@@ -18,6 +18,7 @@ would otherwise have to be re-implemented (and eventually mis-implemented) per b
 from __future__ import annotations
 
 import abc
+import contextlib
 from typing import ClassVar
 
 import numpy as np
@@ -147,11 +148,10 @@ class FrameSource(abc.ABC):
             self._do_open()
         except BaseException:
             # A half-open source leaks a socket and a decoder thread. The subclass may not
-            # be able to tell how far it got, so unwind unconditionally and best-effort.
-            try:
+            # be able to tell how far it got, so unwind unconditionally and best-effort —
+            # suppressing, because the *original* failure is the one worth propagating.
+            with contextlib.suppress(Exception):
                 self._do_close()
-            except Exception:  # noqa: BLE001 - the original failure is the interesting one
-                pass
             raise
         self._is_open = True
 

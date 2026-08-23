@@ -12,13 +12,6 @@ from shipinfer.core.errors.config import (
     ModelVersionNotFoundError,
 )
 from shipinfer.core.errors.device import DeviceError, DeviceOutOfMemoryError
-from shipinfer.core.errors.ingest import (
-    CameraUnavailableError,
-    FrameDecodeError,
-    IngestError,
-    SourceOpenError,
-    SourceUnavailableError,
-)
 from shipinfer.core.errors.inference import (
     InferenceError,
     QueueFullError,
@@ -26,6 +19,13 @@ from shipinfer.core.errors.inference import (
     RequestTimeoutError,
     ServerStateError,
     ValidationError,
+)
+from shipinfer.core.errors.ingest import (
+    CameraUnavailableError,
+    FrameDecodeError,
+    IngestError,
+    SourceOpenError,
+    SourceUnavailableError,
 )
 
 __all__ = [

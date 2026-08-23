@@ -170,12 +170,11 @@ def load_camera_db(path: str | Path) -> list[CameraConfig]:
     except FileNotFoundError as exc:
         raise ConfigurationError(f"camera database {file_path} does not exist") from exc
     except json.JSONDecodeError as exc:
-        raise ConfigurationError(f"camera database {file_path} is not valid JSON: {exc}") from exc
+        raise ConfigurationError(
+            f"camera database {file_path} is not valid JSON: {exc}"
+        ) from exc
 
-    if isinstance(raw, dict):
-        records = raw.get("contents", raw.get("cameras"))
-    else:
-        records = raw
+    records = raw.get("contents", raw.get("cameras")) if isinstance(raw, dict) else raw
     if not isinstance(records, list):
         raise ConfigurationError(
             f"camera database {file_path} must hold a list, or a "
