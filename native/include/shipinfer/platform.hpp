@@ -19,6 +19,7 @@
 
 using gpuError_t = hipError_t;
 using gpuStream_t = hipStream_t;
+using gpuEvent_t = hipEvent_t;
 #define gpuSuccess hipSuccess
 #define gpuGetErrorString hipGetErrorString
 #define gpuMalloc hipMalloc
@@ -29,6 +30,17 @@ using gpuStream_t = hipStream_t;
 #define gpuMemcpyDeviceToHost hipMemcpyDeviceToHost
 #define gpuMemsetAsync hipMemsetAsync
 #define gpuStreamSynchronize hipStreamSynchronize
+#define gpuEventCreateWithFlags hipEventCreateWithFlags
+#define gpuEventDisableTiming hipEventDisableTiming
+#define gpuEventRecord hipEventRecord
+#define gpuEventSynchronize hipEventSynchronize
+#define gpuEventDestroy hipEventDestroy
+#define gpuHostAlloc hipHostMalloc
+#define gpuHostAllocDefault hipHostMallocDefault
+#define gpuHostFree hipHostFree
+#define gpuHostAlloc hipHostMalloc
+#define gpuHostAllocDefault hipHostMallocDefault
+#define gpuHostFree hipHostFree
 #define gpuSetDevice hipSetDevice
 #define gpuGetDeviceCount hipGetDeviceCount
 #define gpuGetLastError hipGetLastError
@@ -38,6 +50,7 @@ using gpuStream_t = hipStream_t;
 
 using gpuError_t = cudaError_t;
 using gpuStream_t = cudaStream_t;
+using gpuEvent_t = cudaEvent_t;
 #define gpuSuccess cudaSuccess
 #define gpuGetErrorString cudaGetErrorString
 #define gpuMalloc cudaMalloc
@@ -48,6 +61,17 @@ using gpuStream_t = cudaStream_t;
 #define gpuMemcpyDeviceToHost cudaMemcpyDeviceToHost
 #define gpuMemsetAsync cudaMemsetAsync
 #define gpuStreamSynchronize cudaStreamSynchronize
+#define gpuEventCreateWithFlags cudaEventCreateWithFlags
+#define gpuEventDisableTiming cudaEventDisableTiming
+#define gpuEventRecord cudaEventRecord
+#define gpuEventSynchronize cudaEventSynchronize
+#define gpuEventDestroy cudaEventDestroy
+#define gpuHostAlloc cudaHostAlloc
+#define gpuHostAllocDefault cudaHostAllocDefault
+#define gpuHostFree cudaFreeHost
+#define gpuHostAlloc cudaHostAlloc
+#define gpuHostAllocDefault cudaHostAllocDefault
+#define gpuHostFree cudaFreeHost
 #define gpuSetDevice cudaSetDevice
 #define gpuGetDeviceCount cudaGetDeviceCount
 #define gpuGetLastError cudaGetLastError
@@ -55,9 +79,9 @@ using gpuStream_t = cudaStream_t;
 
 namespace shipinfer {
 
-  /// Thrown for any failed device call. pybind11 maps it to a Python
-  /// RuntimeError, so a kernel launch failure surfaces as an ordinary exception
-  /// instead of a silent wrong answer or an abort inside the interpreter.
+  /// Thrown for any failed device call. A binding layer is free to map it onto its own
+  /// host language's error type; this library only guarantees that a failed device call
+  /// raises instead of returning a silent wrong answer.
   class GpuError : public std::runtime_error {
     public:
       explicit GpuError(const std::string& what) : std::runtime_error(what) {}
@@ -77,6 +101,21 @@ namespace shipinfer {
   /// CUDA bugs to trace.
   inline void check_launch(const char* what) {
     check(gpuGetLastError(), what);
+  }
+
+  /// Round a byte offset up to `alignment`.
+  ///
+  /// Needed wherever two things share one allocation. A frame is `h * w * 3` uint8 bytes,
+  /// which is a multiple of 4 only by luck: a 1079x1919 frame is 6,211,803 bytes, so a
+  /// `float*` placed straight after it is misaligned and the kernel raises
+  /// `cudaErrorMisalignedAddress` — an error that is *sticky*, poisoning the CUDA context
+  /// for the rest of the process. One odd-sized camera would kill that worker permanently.
+  ///
+  /// 16 rather than 4, so a later `float4`-width load stays legal too.
+  constexpr size_t kDeviceAlignment = 16;
+
+  constexpr size_t align_up(size_t offset, size_t alignment = kDeviceAlignment) {
+    return (offset + alignment - 1) / alignment * alignment;
   }
 
   /// Ceiling division, for grid sizing.

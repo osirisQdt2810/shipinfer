@@ -170,58 +170,24 @@ namespace shipinfer {
       }
     }
 
-    /// RAII for a scratch device allocation.
-    ///
-    /// Scoped because these are per-call temporaries. Anything with a lifetime
-    /// longer than one call belongs to torch's caching allocator on the Python
-    /// side, not here.
-    template <typename T> class DeviceBuffer {
-      public:
-        explicit DeviceBuffer(size_t count) : count_(count) {
-          if (count_ > 0)
-            check(gpuMalloc(&ptr_, count_ * sizeof(T)), "gpuMalloc");
-        }
-        ~DeviceBuffer() {
-          if (ptr_ != nullptr)
-            gpuFree(ptr_);
-        }
-        DeviceBuffer(const DeviceBuffer&) = delete;
-        DeviceBuffer& operator=(const DeviceBuffer&) = delete;
-
-        T* get() { return ptr_; }
-        const T* get() const { return ptr_; }
-        size_t size() const { return count_; }
-
-      private:
-        T* ptr_ = nullptr;
-        size_t count_ = 0;
-    };
-
   } // namespace
 
-  void letterbox_batch(const std::vector<ImageView>& images, float* out, int dst_h, int dst_w,
-                       const NormalizeParams& params, unsigned char pad_value,
+  void letterbox_batch(const ImageView* views_device, int batch, float* out, int dst_h,
+                       int dst_w, const NormalizeParams& params, unsigned char pad_value,
                        gpuStream_t stream) {
-    if (images.empty())
+    if (batch <= 0)
       return;
-    const int batch = static_cast<int>(images.size());
-
-    DeviceBuffer<ImageView> views(images.size());
-    check(gpuMemcpyAsync(views.get(), images.data(), images.size() * sizeof(ImageView),
-                         gpuMemcpyHostToDevice, stream),
-          "upload image views");
 
     const int total = batch * dst_h * dst_w;
     const int blocks = std::min(ceil_div(total, kBlockSize), 65535);
     letterbox_kernel<<<blocks, kBlockSize, 0, stream>>>(
-        views.get(), batch, out, dst_h, dst_w, params.mean[0], params.mean[1], params.mean[2],
+        views_device, batch, out, dst_h, dst_w, params.mean[0], params.mean[1], params.mean[2],
         params.std[0], params.std[1], params.std[2], params.swap_rb,
         static_cast<float>(pad_value));
     check_launch("letterbox_kernel");
-    // The descriptor buffer dies at the end of this scope, so the copy that reads
-    // it must have completed. This is the one place a synchronise is not
-    // avoidable overhead.
-    check(gpuStreamSynchronize(stream), "letterbox synchronize");
+    // Deliberately no gpuStreamSynchronize. The descriptor table belongs to the caller and
+    // outlives this call, so there is nothing here whose lifetime the kernel could outrun —
+    // which is what lets the next batch's upload overlap this one's compute.
   }
 
   void crop_batch(const ImageView& frame, const float* boxes, int num_boxes, float* out,
@@ -236,9 +202,15 @@ namespace shipinfer {
     check_launch("crop_kernel");
   }
 
+  size_t nms_mask_words(int num_boxes) {
+    if (num_boxes <= 0)
+      return 0;
+    return static_cast<size_t>(num_boxes) * ceil_div(num_boxes, kNmsBlock);
+  }
+
   std::vector<int64_t> nms(const float* boxes_host, const float* scores_host, int num_boxes,
                            float iou_threshold, float score_threshold, int max_output,
-                           gpuStream_t stream) {
+                           const NmsScratch& scratch, gpuStream_t stream) {
     std::vector<int64_t> order;
     order.reserve(num_boxes);
     for (int i = 0; i < num_boxes; ++i) {
@@ -261,22 +233,26 @@ namespace shipinfer {
                   4 * sizeof(float));
     }
 
-    DeviceBuffer<float> d_boxes(sorted.size());
-    check(gpuMemcpyAsync(d_boxes.get(), sorted.data(), sorted.size() * sizeof(float),
+    const int col_blocks = ceil_div(n, kNmsBlock);
+    const size_t mask_words = static_cast<size_t>(n) * col_blocks;
+    if (scratch.box_floats < sorted.size() || scratch.mask_words < mask_words) {
+      throw GpuError("nms scratch is too small for this batch; reserve it from the caller");
+    }
+
+    check(gpuMemcpyAsync(scratch.boxes, sorted.data(), sorted.size() * sizeof(float),
                          gpuMemcpyHostToDevice, stream),
           "upload nms boxes");
 
-    const int col_blocks = ceil_div(n, kNmsBlock);
-    DeviceBuffer<unsigned long long> d_mask(static_cast<size_t>(n) * col_blocks);
     dim3 grid(col_blocks, col_blocks);
-    nms_mask_kernel<<<grid, kNmsBlock, 0, stream>>>(d_boxes.get(), n, iou_threshold,
-                                                    d_mask.get());
+    nms_mask_kernel<<<grid, kNmsBlock, 0, stream>>>(scratch.boxes, n, iou_threshold,
+                                                    scratch.mask);
     check_launch("nms_mask_kernel");
 
-    std::vector<unsigned long long> mask(static_cast<size_t>(n) * col_blocks);
-    check(gpuMemcpyAsync(mask.data(), d_mask.get(), mask.size() * sizeof(unsigned long long),
+    std::vector<unsigned long long> mask(mask_words);
+    check(gpuMemcpyAsync(mask.data(), scratch.mask, mask.size() * sizeof(unsigned long long),
                          gpuMemcpyDeviceToHost, stream),
           "download nms mask");
+    // Required, not incidental: the sweep below is sequential and runs on the host.
     check(gpuStreamSynchronize(stream), "nms synchronize");
 
     std::vector<unsigned long long> removed(col_blocks, 0ULL);
