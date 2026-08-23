@@ -50,6 +50,11 @@ COMPLETE = "complete"
 INCOMPLETE = "incomplete"
 TIMEOUT = "timeout"
 SHUTDOWN = "shutdown"
+#: Dropped to make room. Reported like any other exit so that "every frame that is opened is
+#: reported exactly once" holds without exception — the runner then decides that an evicted
+#: frame is counted rather than published, because publishing a mostly-empty event while the
+#: system is behind pushes the overload onto a consumer that has to reason about it.
+EVICTED = "evicted"
 
 #: One eviction in this many is logged at WARNING; the rest go to DEBUG. A saturated fleet
 #: evicting at 1000 frames a second would otherwise spend real CPU formatting log records
@@ -124,7 +129,12 @@ class PendingFrame:
         self._expected.update(stages)
 
     def deliver(self, stage: str) -> bool:
-        """Record a stage's answer. Returns True when nothing is outstanding."""
+        """Record a stage's answer. Returns whether nothing is outstanding *right now*.
+
+        "Right now" is the caveat that matters: the expected set grows as the graph decides
+        which branches to run, so this is not the completion test. :meth:`FrameCollector.seal`
+        is.
+        """
         self._expected.add(stage)
         if stage not in self._delivered:
             self._delivered.append(stage)
@@ -208,7 +218,11 @@ class FrameCollector:
         # camera's oldest" is `next(iter(...))` rather than a scan.
         self._by_camera: dict[str, dict[PendingKey, None]] = {}
         self.opened = 0
-        self.emitted = 0
+        #: Frames handed to ``emit``, whatever their reason. Every opened frame is reported
+        #: exactly once, which is the invariant an end-to-end "none lost, none duplicated"
+        #: assertion rests on.
+        self.reported = 0
+        self.complete = 0
         self.partial = 0
         self.evicted = 0
         self.late = 0
@@ -261,7 +275,7 @@ class FrameCollector:
             self.opened += 1
 
         if evicted is not None:
-            self._count_eviction(evicted)
+            self._report_eviction(evicted)
         return True
 
     def _evict_locked(self) -> FrameResult | None:
@@ -273,15 +287,15 @@ class FrameCollector:
         if frame is None:  # pragma: no cover - a policy naming a key it was not given
             return None
         self.evicted += 1
-        return frame.result("evicted", self._clock())
+        return frame.result(EVICTED, self._clock())
 
-    def _count_eviction(self, evicted: FrameResult) -> None:
-        """An evicted frame is **counted and logged, not emitted**.
+    def _report_eviction(self, evicted: FrameResult) -> None:
+        """Count, log and report an eviction — naming the camera that caused it.
 
-        Publishing it would be worse than dropping it: the buffer is full because the system
-        is behind, and adding an event that is mostly empty pushes the overload downstream to
-        a consumer that has to reason about it. What an operator needs is the number and the
-        camera, and those they get.
+        The camera is the whole point. "We dropped 86 frames" is not actionable; "camera
+        ``quay_west`` lost 86 frames while holding 14 incomplete ones" tells an operator
+        which stream to look at. That number is what the previous system could not produce at
+        all, because its buffer had no idea whose entry it was deleting.
         """
         if self._metrics is not None:
             self._metrics.frames_evicted.inc(camera=evicted.camera_id)
@@ -300,6 +314,7 @@ class FrameCollector:
             self.evicted,
             extra=log_context(camera_id=evicted.camera_id, frame_id=evicted.frame_id),
         )
+        self._publish(evicted)
 
     def expect(self, key: PendingKey, stages: Sequence[str]) -> None:
         """Widen the set of stages this frame is waiting for. Idempotent."""
@@ -311,7 +326,19 @@ class FrameCollector:
                 frame.expect(stages)
 
     def deliver(self, key: PendingKey, stage: str) -> None:
-        """Record one stage's answer, and emit the frame if nothing is outstanding."""
+        """Record one stage's answer.
+
+        Recording, not emitting. A frame is *not* published the moment its currently-expected
+        set is satisfied, because that set grows as branches are decided: after the detector
+        answers, ``{detect}`` is momentarily complete while five stages are still to come.
+        Only the worker knows when a frame is finished, and it says so by calling
+        :meth:`seal` — with the sweeper as the safety net for a worker that never does.
+
+        A delivery for a frame that is no longer pending is counted as a **late arrival**:
+        its frame was already timed out or evicted, and the result now has nowhere to go.
+        That number is worth watching — a non-zero rate means the reassembly timeout is
+        tighter than the pipeline's real latency.
+        """
         with self._lock:
             frame = self._pending.get(key)
             if frame is None:
@@ -319,11 +346,7 @@ class FrameCollector:
                 if self._metrics is not None:
                     self._metrics.late_arrivals.inc(camera=key[0], stage=stage)
                 return
-            if not frame.deliver(stage):
-                return
-            self._remove_locked(key)
-            result = frame.result(COMPLETE, self._clock())
-        self._publish(result)
+            frame.deliver(stage)
 
     def seal(self, key: PendingKey) -> None:
         """No further stages are coming for this frame — emit it now.
@@ -406,15 +429,15 @@ class FrameCollector:
             del self._by_camera[key[0]]
 
     def _publish(self, result: FrameResult) -> None:
-        self.emitted += 1
+        self.reported += 1
         if result.is_partial:
             self.partial += 1
-        if self._metrics is not None:
+        else:
+            self.complete += 1
+        if self._metrics is not None and result.reason != EVICTED:
             self._metrics.frames_emitted.inc(camera=result.camera_id, reason=result.reason)
             if result.is_partial:
                 self._metrics.frames_partial.inc(camera=result.camera_id, reason=result.reason)
-                for stage in result.missing:
-                    self._metrics.stages_failed.inc(stage=stage)
         self._emit(result)
 
     # -- introspection ------------------------------------------------------------------
@@ -446,7 +469,8 @@ class FrameCollector:
             "pending": len(self._pending),
             "capacity": self._settings.capacity,
             "opened": self.opened,
-            "emitted": self.emitted,
+            "reported": self.reported,
+            "complete": self.complete,
             "partial": self.partial,
             "evicted": self.evicted,
             "late": self.late,
@@ -458,5 +482,5 @@ class FrameCollector:
     def __repr__(self) -> str:
         return (
             f"<FrameCollector {len(self._pending)}/{self._settings.capacity} "
-            f"emitted={self.emitted} partial={self.partial} evicted={self.evicted}>"
+            f"reported={self.reported} partial={self.partial} evicted={self.evicted}>"
         )
