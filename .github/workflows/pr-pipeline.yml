@@ -47,6 +47,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # Deliberately NO submodules. The offline tier must pass without the fused
+          # kernels — that is what `execution.provider: auto` promises and what ADR-001
+          # rests on — so not fetching them here is the test, not an oversight.
           # Full history so pre-commit can diff against the PR base commit.
           fetch-depth: 0
       - uses: actions/setup-python@v5
@@ -136,6 +139,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          submodules: recursive
       - name: Review the PR
         uses: anthropics/claude-code-action@c3d45e8e941e1b2ad7b278c57482d9c5bf1f35b3 # v1.0.99
         env:
@@ -198,7 +202,7 @@ jobs:
               that could run in the OFFLINE tier must not be marked `gpu`. A fused kernel
               without a parity test against the readable implementation is not done.
             - EVIDENCE. A performance claim without a measurement in the PR body is not a
-              claim. For changes under `runtime/`, `backends/` or `native/`, the body should
+              claim. For changes under `runtime/`, `backends/` or the kernels submodule, the body should
               contain real `pytest -m gpu` output and a `shipinfer bench` table; flag its
               absence.
             - SECRETS. No token, key or credential anywhere, including tests.
