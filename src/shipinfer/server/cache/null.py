@@ -31,7 +31,7 @@ class NullResponseCache(ResponseCache):
         accepts. Returning ``None`` here tells :class:`~shipinfer.server.model.Model` the
         request is not cacheable, so neither :meth:`get` nor :meth:`put` is reached.
         """
-        return None
+        return
 
     def get(self, key: str) -> dict[str, Tensor] | None:
         return None
