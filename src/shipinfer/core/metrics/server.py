@@ -30,6 +30,8 @@ class ServerMetrics:
     requests_rejected: Counter = field(init=False)
     requests_expired: Counter = field(init=False)
     spills_total: Counter = field(init=False)
+    cache_hits: Counter = field(init=False)
+    cache_misses: Counter = field(init=False)
     graph_replays_total: Counter = field(init=False)
     batches_total: Counter = field(init=False)
 
@@ -58,6 +60,13 @@ class ServerMetrics:
         )
         self.spills_total = r.counter(
             "shipinfer_spills_total", "Requests routed off their resident GPU."
+        )
+        self.cache_hits = r.counter(
+            "shipinfer_response_cache_hits_total", "Requests answered from the response cache."
+        )
+        self.cache_misses = r.counter(
+            "shipinfer_response_cache_misses_total",
+            "Cacheable requests the cache did not have.",
         )
         self.graph_replays_total = r.counter(
             "shipinfer_cuda_graph_replays_total", "Executions served by a captured CUDA graph."

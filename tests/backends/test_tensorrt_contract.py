@@ -279,7 +279,7 @@ def test_every_transfer_and_the_enqueue_share_one_stream() -> None:
     orders against the stream TensorRT was handed.
     """
     log: list[str] = []
-    backend, stream, bindings = _backend(log, None)
+    backend, _stream, bindings = _backend(log, None)
 
     backend.execute({"images": Tensor.from_numpy(np.zeros((2, 3, 8, 8), np.float32))}, 2)
 

@@ -17,7 +17,7 @@ from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.metrics import ServerMetrics
 from shipinfer.core.request import InferenceRequest, InferenceResponse, ResponseFuture
 from shipinfer.core.settings import ServerSettings
-from shipinfer.core.types import TensorSpec, validate_against
+from shipinfer.core.types import Tensor, TensorSpec, validate_against
 from shipinfer.repository import ModelArtifact
 from shipinfer.runtime.device import DeviceManager
 from shipinfer.runtime.graphs import GRAPH_CACHES
@@ -28,7 +28,7 @@ from shipinfer.scheduling.dispatcher import Dispatcher
 from shipinfer.scheduling.policies import build_policy
 from shipinfer.scheduling.queues import QUEUES, BatchWindow
 from shipinfer.scheduling.work import WorkItem
-from shipinfer.server.cache import RESPONSE_CACHES, NullResponseCache, ResponseCache, cache_key
+from shipinfer.server.cache import RESPONSE_CACHES, NullResponseCache, ResponseCache
 from shipinfer.server.instance import ModelInstance
 
 __all__ = ["Model"]
@@ -238,10 +238,18 @@ class Model:
 
         future = ResponseFuture(request)
 
-        cached = self._lookup_cache(request)
-        if cached is not None:
-            future.set_result(cached)
-            return future
+        # One hash per request, computed behind the cache object so a model with caching
+        # off (every model by default) pays a virtual call instead of a BLAKE2b pass over
+        # every input byte. `None` means "not cacheable": caching disabled, or inputs that
+        # live on a device and would need a D2H copy just to be hashed.
+        key = self._cache.key_for(self.name, self.version, request.inputs)
+        if key is not None:
+            cached = self._cache.get(key)
+            if cached is not None:
+                self._metrics.cache_hits.inc(model=self.name)
+                return _completed(future, self._response_from(request, cached))
+            self._metrics.cache_misses.inc(model=self.name)
+            self._store_when_done(key, future)
 
         try:
             self._dispatcher.dispatch(WorkItem(request, future), _enqueue)
@@ -253,16 +261,16 @@ class Model:
     def _batcher_input_specs(self) -> tuple[TensorSpec, ...]:
         return self._artifact.config.input_specs
 
-    def _lookup_cache(self, request: InferenceRequest) -> InferenceResponse | None:
-        if isinstance(self._cache, NullResponseCache):
-            return None
-        try:
-            key = cache_key(self.name, self.version, request.inputs)
-        except RuntimeError:
-            return None  # device-resident inputs are not cacheable
-        outputs = self._cache.get(key)
-        if outputs is None:
-            return None
+    def _response_from(
+        self, request: InferenceRequest, outputs: dict[str, Tensor]
+    ) -> InferenceResponse:
+        """Wrap cached outputs in a response carrying *this* request's identity.
+
+        The outputs are shared with every other hit on the key and sealed non-writeable by
+        the cache; everything else — the request id, the (camera, frame) tag, the timings —
+        belongs to this request and must not come from whichever request happened to
+        populate the entry.
+        """
         request.timings.completed_ns = time.monotonic_ns()
         return InferenceResponse(
             request_id=request.request_id,
@@ -272,6 +280,34 @@ class Model:
             context=request.context,
             timings=request.timings,
         )
+
+    def _store_when_done(self, key: str, future: ResponseFuture) -> None:
+        """Populate the cache once the request has actually succeeded.
+
+        A done-callback rather than a write at completion time inside the instance, because
+        the instance is shared by every model and knows nothing about caching. It runs on
+        the worker thread that finished the batch, so the copy `put` makes is charged to
+        that thread — bounded, because caching is opt-in and only sound for the small,
+        deterministic outputs it is enabled for (ADR-009).
+
+        A failed or cancelled request is not cached: a stored exception would be served
+        forever, and that is far worse than being slow.
+        """
+
+        def _store(done: ResponseFuture) -> None:
+            if done.cancelled() or done.exception() is not None:
+                return
+            try:
+                self._cache.put(key, done.result().outputs)
+            except RuntimeError:
+                # Device-resident outputs. Reading them here would mean a D2H copy on the
+                # worker thread to fill a cache that may never be hit.
+                pass
+            except Exception:
+                # A cache is an optimisation; it must never fail the request it served.
+                _LOG.exception("response cache write failed for %s", self.name)
+
+        future.add_done_callback(_store)
 
     def _on_spill(self, wanted: Any, actual: Any) -> None:
         self._metrics.spills_total.inc(model=self.name, device=str(actual.device))
@@ -302,6 +338,12 @@ class Model:
 
     def __repr__(self) -> str:
         return f"<Model {self.name}:{self.version} instances={len(self._instances)}>"
+
+
+def _completed(future: ResponseFuture, response: InferenceResponse) -> ResponseFuture:
+    """Resolve a future immediately. Used by the cache-hit path, which has no work to do."""
+    future.set_result(response)
+    return future
 
 
 def _enqueue(instance: Any, item: WorkItem) -> None:
