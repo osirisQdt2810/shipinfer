@@ -260,7 +260,7 @@ class TestCameraDatabase:
                             "sourceType": "RTSP_SOURCE",
                             "streamType": "MAIN_STREAM",
                             # Shape-faithful, credential invented. The reference `cameradb.json` ships a real
-# fleet password inline; copying it here would have put it in git history.
+                            # fleet password inline; copying it here would have put it in git history.
                             "videoSource": "rtsp://operator:REDACTED%40@10.0.0.100",
                         },
                         {
