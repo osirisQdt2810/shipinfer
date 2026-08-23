@@ -206,6 +206,41 @@ INGEST_READ_TIMEOUT_S: EnvVar[float] = EnvVar(
     ),
 )
 
+PROFILE_DIR: EnvVar[str] = EnvVar(
+    name="SHIPINFER_PROFILE_DIR",
+    default="",
+    parse=str,
+    doc=(
+        "Directory for torch-profiler Chrome traces. Empty disables profiling entirely. "
+        "Heavy: never set this in production. Bounded by SHIPINFER_PROFILE_STEPS, because "
+        "an unbounded profiler at 1000 frames a second fills a disk in minutes and produces "
+        "a trace too large to open — which is a failed measurement, not a thorough one."
+    ),
+)
+
+PROFILE_STEPS: EnvVar[int] = EnvVar(
+    name="SHIPINFER_PROFILE_STEPS",
+    default=8,
+    parse=int,
+    doc=(
+        "How many batches the torch profiler captures once SHIPINFER_PROFILE_DIR is set. "
+        "Eight is enough to see a steady-state pattern and small enough to open."
+    ),
+)
+
+PROFILE_PHASES: EnvVar[bool] = EnvVar(
+    name="SHIPINFER_PROFILE_PHASES",
+    default=False,
+    parse=_bool,
+    doc=(
+        "Split compute_us into h2d_us / execute_us / d2h_us with timed CUDA events, and "
+        "report the device-idle fraction. Answers 'is the GPU idle while we copy?' as a "
+        "Prometheus histogram rather than a trace someone has to open. Opt-in because "
+        "Event(enable_timing=True) plus the synchronise needed to read it serialises the very "
+        "overlap the numbers are meant to inform: measuring this changes it."
+    ),
+)
+
 GST_DECODER_OVERRIDE: EnvVar[str] = EnvVar(
     name="SHIPINFER_GST_DECODER",
     default="",
