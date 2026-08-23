@@ -37,6 +37,16 @@ FRAME_SUFFIXES: tuple[str, ...] = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".ti
 _FALLBACK_FPS = 25.0
 
 
+def _discover_frames(path: Path) -> list[Path]:
+    """The recognised image files in a directory, in name order.
+
+    Module level and used by both the validation in :meth:`ReplaySource._do_open` and the
+    open path, so "which files count" has exactly one definition. Needs no OpenCV, which is
+    what lets the emptiness check run before that import.
+    """
+    return sorted(p for p in path.iterdir() if p.suffix.lower() in FRAME_SUFFIXES)
+
+
 def _load_cv2() -> Any:
     """Import OpenCV, or explain what is missing. Never at module import time."""
     try:
@@ -84,14 +94,30 @@ class ReplaySource(FrameSource):
     # -- lifecycle ---------------------------------------------------------------------
 
     def _do_open(self) -> None:
-        self._cv2 = _load_cv2()
+        # The path is validated BEFORE OpenCV is imported, and the order is the point.
+        # Deciding whether a path exists needs no codec, so importing OpenCV first meant a
+        # typo'd URI on a machine without cv2 reported "install OpenCV" — advice that does
+        # not fix the actual problem and sends the reader somewhere else entirely. The most
+        # specific diagnosis available should win.
+        #
+        # Found by running the suite inside a container: on a host with cv2 installed the two
+        # tests covering these messages passed for the wrong reason.
         path = Path(self.config.uri).expanduser()
         if not path.exists():
             raise SourceOpenError(self.camera_id, self.config.uri, "path does not exist")
 
         if path.is_dir():
-            self._open_directory(path)
+            frames = _discover_frames(path)
+            if not frames:
+                raise SourceOpenError(
+                    self.camera_id,
+                    self.config.uri,
+                    f"directory holds no images with suffixes {list(FRAME_SUFFIXES)}",
+                )
+            self._cv2 = _load_cv2()
+            self._open_directory(frames)
         else:
+            self._cv2 = _load_cv2()
             self._open_video(path)
 
         if self.config.width is not None and self.config.height is not None:
@@ -115,16 +141,14 @@ class ReplaySource(FrameSource):
             extra=log_context(camera_id=self.camera_id),
         )
 
-    def _open_directory(self, path: Path) -> None:
-        self._frame_paths = sorted(
-            p for p in path.iterdir() if p.suffix.lower() in FRAME_SUFFIXES
-        )
-        if not self._frame_paths:
-            raise SourceOpenError(
-                self.camera_id,
-                self.config.uri,
-                f"directory holds no images with suffixes {list(FRAME_SUFFIXES)}",
-            )
+    def _open_directory(self, frames: list[Path]) -> None:
+        """Take the already-discovered, already-non-empty frame list.
+
+        Discovery and the emptiness check happen in :meth:`_do_open`, before OpenCV is
+        imported, so they are not repeated here — a second copy of "which files count" is a
+        second thing to keep in step.
+        """
+        self._frame_paths = frames
         probe = self._cv2.imread(str(self._frame_paths[0]), self._cv2.IMREAD_COLOR)
         if probe is None:
             raise SourceOpenError(
