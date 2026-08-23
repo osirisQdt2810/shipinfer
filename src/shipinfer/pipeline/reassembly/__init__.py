@@ -7,6 +7,7 @@ is a registry so the inherited behaviour can be run beside the fix and lose.
 
 from shipinfer.pipeline.reassembly.collector import (
     COMPLETE,
+    EVICTED,
     INCOMPLETE,
     SHUTDOWN,
     TIMEOUT,
@@ -25,6 +26,7 @@ from shipinfer.pipeline.reassembly.policy import (
 
 __all__ = [
     "COMPLETE",
+    "EVICTED",
     "EVICTION_POLICIES",
     "INCOMPLETE",
     "SHUTDOWN",

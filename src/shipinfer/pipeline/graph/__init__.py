@@ -14,6 +14,7 @@ Layout, one reason each::
     crop.py         the fan-out: one frame -> N crops, the only cardinality change
     state.py        one frame's working state, and how it becomes event records
     graph.py        the DAG itself: planning, liveness, execution, validation
+    ops.py          one ImageOps per worker thread, spread across the visible devices
 """
 
 from shipinfer.pipeline.graph.crop import CropSpec, CropStage
@@ -31,6 +32,7 @@ from shipinfer.pipeline.graph.graph import (
     build_perception_graph,
 )
 from shipinfer.pipeline.graph.objects import ObjectBatch, ObjectStage, mask_area
+from shipinfer.pipeline.graph.ops import ThreadLocalImageOps
 from shipinfer.pipeline.graph.stage import (
     Cardinality,
     ModelStage,
@@ -62,6 +64,7 @@ __all__ = [
     "StageObserver",
     "StageOutcome",
     "StageStatus",
+    "ThreadLocalImageOps",
     "build_perception_graph",
     "decode_detections",
     "mask_area",

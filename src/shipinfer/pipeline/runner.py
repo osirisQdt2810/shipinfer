@@ -55,6 +55,7 @@ from shipinfer.core.errors import (
 from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.request import ResponseFuture
 from shipinfer.core.settings import ServerSettings
+from shipinfer.core.types import Device
 from shipinfer.pipeline.graph import (
     FrameState,
     PipelineGraph,
@@ -62,6 +63,7 @@ from shipinfer.pipeline.graph import (
     StageStatus,
     build_perception_graph,
 )
+from shipinfer.pipeline.graph.ops import ThreadLocalImageOps
 from shipinfer.pipeline.metrics import PipelineMetrics
 from shipinfer.pipeline.reassembly import EVICTED, FrameCollector, FrameResult
 from shipinfer.pipeline.schema import PerceptionEvent
@@ -160,24 +162,39 @@ class PipelineRunner:
         queue: RequestQueue | None = None,
         frames: Callable[[QueueFrameSink], FrameProducer] | None = None,
     ) -> None:
+        # Every default below is `if x is None`, never `x or default`, and that is not
+        # pedantry: a queue and a sink both define `__len__`, so a freshly injected one is
+        # *falsy* and `x or default` silently throws the caller's object away. It cost an
+        # afternoon here — an injected queue's capacity was ignored and an injected sink
+        # received nothing — and the shape of the bug is invisible at the call site.
         self._server = server
-        self._settings = settings or getattr(server, "settings", None) or ServerSettings()
+        if settings is None:
+            settings = getattr(server, "settings", None) or ServerSettings()
+        self._settings = settings
         pipeline = self._settings.pipeline
-        self._metrics = metrics or PipelineMetrics()
-        self._ops = ops or get_image_ops(self._settings.execution.provider)
-        self._graph = graph or build_perception_graph(
-            pipeline, resolve=server.model, ops=self._ops
+        self._metrics = PipelineMetrics() if metrics is None else metrics
+        self._ops = self._build_ops() if ops is None else ops
+        self._graph = (
+            build_perception_graph(pipeline, resolve=server.model, ops=self._ops)
+            if graph is None
+            else graph
         )
-        self._queue = queue or QUEUES.create(
-            pipeline.queue_type,
-            "pipeline",
-            pipeline.queue_capacity,
-            overflow=pipeline.overflow_policy,
-            drop_expired=True,
+        self._queue = (
+            QUEUES.create(
+                pipeline.queue_type,
+                "pipeline",
+                pipeline.queue_capacity,
+                overflow=pipeline.overflow_policy,
+                drop_expired=True,
+            )
+            if queue is None
+            else queue
         )
         self._frame_sink = QueueFrameSink(self._queue, settings=self._settings.ingest)
-        self._sink = sink or RESULT_SINKS.create(
-            pipeline.result_sink, **pipeline.result_sink_options
+        self._sink = (
+            RESULT_SINKS.create(pipeline.result_sink, **pipeline.result_sink_options)
+            if sink is None
+            else sink
         )
         self._collector = FrameCollector(
             self._emit,
@@ -200,6 +217,38 @@ class PipelineRunner:
         self._budget_ns = pipeline.frame_budget_ms * 1_000_000
         self._window = BatchWindow(max_batch_size=pipeline.frames_per_wakeup)
         self.frames_accepted = 0
+
+    def _build_ops(self) -> ImageOps:
+        """One image-ops instance per worker thread, bound to one device for the thread's life.
+
+        Three defects this avoids, all of them found by running the end-to-end test on a
+        machine that has GPUs, and all of them silent or misleading in their raw form:
+
+        * **not one shared instance.** An ``ImageOps`` owns a per-instance staging ring, so
+          sharing one across workers overwrites a pinned buffer while its DMA is in flight.
+          It surfaces as ``GpuError: crop_kernel failed: invalid argument`` from inside a
+          stage, which reads like a bad bounding box.
+        * **not all on device 0.** Letterboxing every frame on ``cuda:0`` while the models
+          are spread over sixteen GPUs re-creates, one layer up, the exact imbalance this
+          project exists to fix.
+        * **bound, once, on the thread that will use it.** A worker whose current device is
+          0 holding ops built for ``cuda:1`` gets ``GpuError: invalid resource handle`` —
+          the events and the stream belong to another context. ADR-002's rule is one thread,
+          one context, one GPU for the thread's whole life, and a pipeline worker that does
+          pre-processing on a GPU is no exception.
+        """
+        provider = self._settings.execution.provider
+        manager = getattr(self._server, "devices", None)
+        devices = tuple(getattr(manager, "visible_gpus", ()) or (0,))
+
+        def build(index: int) -> ImageOps:
+            if manager is not None and getattr(manager, "has_accelerator", False):
+                # Called lazily, on the worker thread itself: a CUDA context belongs to the
+                # thread that created it, so binding from `start()` would bind the wrong one.
+                manager.bind_current_thread(Device.cuda(index))
+            return get_image_ops(provider, device_index=index)
+
+        return ThreadLocalImageOps(build, devices=devices)
 
     # -- properties ----------------------------------------------------------------------
 
