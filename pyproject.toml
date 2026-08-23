@@ -56,7 +56,12 @@ dependencies = [
 
 [project.optional-dependencies]
 # --- runtime backends (pick what the deployment actually needs) -------------------
-cuda = ["cuda-python>=12.0"]                       # device enumeration, streams, pinned mem
+cuda = ["cuda-python>=12.0"]                       # raw driver access, `custom` variants only
+# The fused kernels. Not on PyPI: it is vendored as a submodule, so install it from there
+#   git submodule update --init 3rdparty/shipinfer-imgproc
+#   pip install -e 3rdparty/shipinfer-imgproc
+# Listing it here as a hard dependency would make `pip install shipinfer` fail everywhere.
+imgproc = ["shipinfer-imgproc"]
 tensorrt = ["tensorrt>=8.6", "cuda-python>=12.0"]  # the production backend
 vision = ["torchvision>=0.17"]                     # tuned NMS / roi ops
 onnx = ["onnxruntime-gpu>=1.17"]                   # portable fallback backend
@@ -110,14 +115,13 @@ extend-exclude = '''
   | dist
   | references
   | 3rdparty
-  | native/build
 )/
 '''
 
 [tool.ruff]
 line-length = 96
 target-version = "py310"
-extend-exclude = [".venv", "build", "dist", "references", "3rdparty", "native/build"]
+extend-exclude = [".venv", "build", "dist", "references", "3rdparty"]
 
 [tool.ruff.lint]
 # Import sorting (I) is delegated to standalone isort, not ruff, so pre-commit has one
@@ -176,7 +180,7 @@ python_version = "3.10"
 strict = true
 # tensorrt / cuda-python / torch are optional extras that are simply absent in CI.
 ignore_missing_imports = true
-exclude = '(^|/)(\.venv|build|dist|references|3rdparty|native)/'
+exclude = '(^|/)(\.venv|build|dist|references|3rdparty)/'
 # Do NOT set `files = [...]` — run mypy on changed paths (touch-it-fix-it).
 
 [[tool.mypy.overrides]]

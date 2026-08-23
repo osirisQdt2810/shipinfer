@@ -209,3 +209,47 @@ the moving one. Triton has a response cache; vLLM's prefix cache is the same ide
 stateful or stochastic one returns a stale answer with full confidence, which is far worse
 than being slow. Defaulting it off means the failure mode requires someone to have decided.
 In the demo repository only `ship_recognizer` enables it — a pure gallery lookup.
+
+---
+
+## ADR-010 — Libraries with their own lifecycle get their own repository
+
+**Status:** Accepted · 2026-08-23
+
+**Context.** The fused CUDA/HIP kernels started life as `native/` inside this repository.
+They are not part of the server, though: a kernel that turns a batch of frames into a
+normalised NCHW tensor is useful to anything that feeds a vision model, and the same is
+true of the tracking, re-identification and multi-camera-association work that is coming.
+Keeping them in-tree means one CI, one release, and one reviewer for two very different
+kinds of code — a Python control plane and a set of GPU kernels, which need entirely
+different things looked at in review.
+
+**Decision.** Each such library is its own repository under the `shipinfer-` prefix,
+vendored here as a git submodule under `3rdparty/`. The first is
+`shipinfer-imgproc`; `shipinfer-mot`, `shipinfer-reid` and `shipinfer-mtmc` follow.
+
+Three rules make it work rather than merely tidy:
+
+1. **The dependency is one-way.** A module repository never imports `shipinfer`. It is a
+   standalone library with its own types; the server adapts it. That is what keeps it
+   independently useful and independently testable.
+2. **Each repository carries its own reviewer.** `.github/reviewer-prompt.md` holds a
+   domain specialist — a GPU kernel engineer for `imgproc`, a tracking engineer for `mot` —
+   and the pipeline reads it. The workflow files are identical across the fleet and
+   generated from `scripts/templates/module-repo/`, so the shape never drifts while the
+   expertise stays specific.
+3. **A submodule bump is its own commit.** A kernel change and a server change are never
+   entangled in one revert.
+
+The name is the function, not the implementation. `native` said how the code was written;
+`imgproc` says what it does, and it is the term the reference services in this fleet
+already use for exactly these kernels.
+
+**Consequences.** A change spanning the server and a kernel is now two PRs and a pin bump —
+that is the real cost, and it is the reason the seam between them is deliberately narrow
+(numpy in, device pointer out). In exchange, the kernels get a reviewer who reads PTX, CI
+that installs a CUDA toolkit only where one is needed, and a release cadence of their own.
+
+The parent's CI deliberately does **not** check the submodule out for the offline tier.
+That is not an oversight: the server must run without the kernels, and a test suite that
+always has them would never prove it.

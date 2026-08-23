@@ -40,14 +40,18 @@ mypy src/shipinfer                      # strict; not a commit gate yet
 pre-commit run --all-files
 ```
 
-## Native extension
+## Fused kernels (the `shipinfer-imgproc` submodule)
 
 ```bash
-python scripts/build_native.py                 # newest CUDA toolkit found, all archs
-python scripts/build_native.py --arch 86       # this node only — much faster to build
+git submodule update --init 3rdparty/shipinfer-imgproc
+pip install -e 3rdparty/shipinfer-imgproc      # the Python surface; no toolkit needed
+python scripts/build_native.py --arch 86       # delegates to the submodule's build.py
 python scripts/build_native.py --hip           # ROCm
-python scripts/build_native.py --clean --debug
 ```
+
+Both steps are needed and they fail differently: without the editable install the server
+cannot import the package at all, and without the build it imports but reports
+`is_available() == False` and falls back to torch. `shipinfer doctor` says which.
 
 Three failure modes worth recognising, all of which the script now handles or explains:
 

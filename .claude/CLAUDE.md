@@ -39,14 +39,17 @@ ever called `cudaSetDevice`.
 - **Concurrency is threads, not asyncio.** One worker thread per model instance, bound to
   one GPU for its whole life. The GIL is not the problem because every thread spends its
   time inside TensorRT or a CUDA memcpy, both of which release it.
-- **The native extension is optional.** `shipinfer._C` holds the fused kernels; every
-  native component has a Python counterpart, so a machine with no build still runs.
+- **The fused kernels are optional and live in their own repository.**
+  `3rdparty/shipinfer-imgproc` is a submodule; every native component has a Python
+  counterpart, so a machine with no build still runs — and CI deliberately does not check
+  the submodule out, which is how that promise stays true.
 - **Distribution:** a wheel plus a container. There is no installer and no GUI.
 
 ### Where commands run
-On the host, in the repo's `.venv` (`python3 -m venv .venv`). `deploy/` holds the container
-recipes; CI runs the offline tier on a GPU-less runner, which is exactly why the offline
-tier must never need a GPU.
+**In a container.** `deploy/` holds the recipes: `make shell` drops you into the dev image
+with the repository bind-mounted, so you edit on the host and every command runs inside.
+A host `.venv` still works for the offline tier and is what CI uses, which is exactly why
+that tier must never need a GPU.
 
 ## Architecture (layered; one-way imports)
 
@@ -99,8 +102,11 @@ src/shipinfer/
 │
 └── pipeline/, ingest/     # the ship+person application on top of the server
 
-native/                    # C++17 + CUDA/HIP, pybind11 -> shipinfer._C
+3rdparty/                  # first-party libraries with their own repos, as submodules
+  shipinfer-imgproc/       #   C++17 + CUDA/HIP fused kernels -> shipinfer_imgproc._C
 model_repository/          # the demo repository: the real DAG, on the mock backend
+benchmarks/                # the head-to-head against the counting-simulation architecture
+deploy/                    # Dockerfile + compose; everything runs in a container
 tests/                     # offline tier (default) + `-m gpu` tier
 ```
 
@@ -116,8 +122,9 @@ tests/                     # offline tier (default) + `-m gpu` tier
    Everything above it works unchanged with no driver installed.
 4. **The backend contract** (`backends/base.py`). A backend receives an assembled batch and
    returns one. It does not decide what to batch, where to run, or when.
-5. **The native boundary** (`native/` ↔ `runtime/ops/`). Fused kernels only, numpy in and
-   device-pointer out. Nothing torch already does well lives here.
+5. **The kernel boundary** (`3rdparty/shipinfer-imgproc` ↔ `runtime/ops/`). Fused kernels
+   only, numpy in and device-pointer out. Nothing torch already does well lives there, and
+   the parent depends on it the way it depends on any library — a pinned commit (ADR-010).
 
 ### Coupling rule (enforced in `scripts/hooks/check_layers.py` *and* `tests/test_architecture.py`)
 `core/` imports nothing from the project but `core/`. `core`, `scheduling` and `repository`
@@ -148,20 +155,20 @@ import **no torch, no tensorrt, no onnxruntime, no fastapi**. `runtime` may not 
    see how many instances it expands to on this host.
 3. Put it in an ensemble only after the DAG validates — mismatched shapes fail at start-up.
 
-### A native kernel
-1. Header in `native/include/shipinfer/`, implementation in `native/src/*.cu`, binding in
-   `native/bindings/module.cpp`.
-2. Use the `gpu*` aliases from `platform.hpp` so the ROCm build keeps working.
-3. Provide a `_into` (device-pointer) entry point. The numpy-returning one is for parity
-   tests, not the hot path.
-4. Add it to `tests/runtime/test_ops_parity.py`. **A fused kernel is only trustworthy if a
-   readable implementation agrees with it.**
+### A fused kernel
+It belongs in the **`shipinfer-imgproc` repository**, not here — see its own `CLAUDE.md`.
+Then, in this repository:
+1. Extend the `ImageOps` ABC in `runtime/ops/base.py` and both implementations.
+2. Add it to `tests/runtime/test_ops_parity.py`. **A fused kernel is only trustworthy if a
+   readable implementation agrees with it**, and the readable one lives here.
+3. Bump the submodule pointer in its own commit, so a kernel change and a server change are
+   never entangled in one revert.
 
 ## Testing: two tiers, both mandatory
 - **Offline (default, must stay green):** `pytest` — pure logic, config validation,
   scheduling invariants, architecture rules, ops on numpy. **Needs no GPU**, by design.
-- **GPU (opt-in, run before every release and after touching `runtime/`, `backends/` or
-  `native/`):** `pytest -m gpu`, and `-m multigpu` for the balancing evidence.
+- **GPU (opt-in, run before every release and after touching `runtime/`, `backends/` or the
+  kernels submodule):** `pytest -m gpu`, and `-m multigpu` for the balancing evidence.
 
 Plus one operator command that produces the evidence a PR needs:
 

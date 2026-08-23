@@ -9,7 +9,6 @@ exclude: |
   (?x)^(
       references/
     | 3rdparty/
-    | native/build/
     | build/
     | dist/
     | \.venv/
@@ -61,13 +60,9 @@ repos:
       - id: ruff-check
         args: [--fix]
 
-  # C++/CUDA formatting — native/ is real code, it gets a real formatter.
-  - repo: https://github.com/pre-commit/mirrors-clang-format
-    rev: v18.1.8
-    hooks:
-      - id: clang-format
-        types_or: [c++, c, cuda]
-        files: '^native/'
+  # No clang-format here: the C++/CUDA lives in the shipinfer-imgproc submodule and is
+  # formatted by that repository's own hooks. Running it from the parent would rewrite a
+  # checkout the parent does not own and produce a dirty submodule on every commit.
 
   - repo: local
     hooks:

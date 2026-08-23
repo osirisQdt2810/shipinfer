@@ -136,14 +136,26 @@ This is an inference server; the hot path is measured in microseconds.
 - Anything an operator would page on gets a metric. `queue_depth`, `spills_total`,
   `requests_rejected_total` and the latency histograms are the ones that matter.
 
-### 2.8 Native code (`native/`)
+### 2.8 Native code (`3rdparty/shipinfer-imgproc`)
 
-- C++17, `clang-format` (enforced by pre-commit).
+The kernels are a **separate repository**, vendored as a submodule (ADR-010). Change them
+there, with their own tests and their own reviewer; bump the pointer here in its own commit.
+The rules below are that repository's, restated so a reader of this file knows what to
+expect of it.
+
+- C++17, `clang-format` (enforced by that repository's pre-commit, not this one).
 - Use the `gpu*` aliases from `platform.hpp`; never write `cudaMalloc` directly, or the
   ROCm build silently stops compiling.
 - Every kernel gets a `_into` entry point taking a device pointer. The numpy-returning form
   is a convenience for parity tests, and its docstring must say so.
-- Release the GIL around every launch.
+- **The GIL belongs at the boundary, never in the library.** `include/` and `src/` must not
+  mention Python; `bindings/` crosses exactly once per entry point — prepare with the lock
+  held, release around the compute, wrap the result. Scattered releases across nested
+  helpers are how a `py::` access ends up on the wrong side of one, and that failure is an
+  interpreter crash rather than an exception.
+- **Rotate reused buffers behind an event.** A pinned buffer overwritten while its DMA is in
+  flight produces plausible output and is invisible to a benchmark that submits the same
+  image twice.
 - Check the async error slot after every launch (`check_launch`). Without it an
   out-of-bounds write surfaces as an unrelated failure three calls later.
 - Scratch buffers live on the object, not the call: `cudaMalloc` and `cudaFree` are

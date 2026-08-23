@@ -1,4 +1,4 @@
-"""Image operations backed by the fused CUDA/HIP kernels in ``native/``."""
+"""Image operations backed by the fused kernels in ``shipinfer-imgproc``."""
 
 from __future__ import annotations
 
@@ -82,6 +82,10 @@ class NativeImageOps(ImageOps):
     result — the same technique the reference ``*-trt`` services use in
     ``src/tools/imgproc/*.cu``, generalised over a batch.
 
+    The kernels live in the ``shipinfer-imgproc`` repository, pinned here as the submodule
+    ``3rdparty/shipinfer-imgproc``. This class is the adapter between that library's raw
+    binding and the :class:`~shipinfer.runtime.ops.base.ImageOps` contract.
+
     :meth:`nms` runs on the device for the same reason: 25 000 candidate boxes is ~800 KB
     that never needs to reach the host when only 20 survive.
     """
@@ -91,10 +95,10 @@ class NativeImageOps(ImageOps):
 
     def __init__(self, device_index: int = 0, stream: int = 0) -> None:
         self._native: Any = require_native()
-        if not self._native.cuda_available():
+        if not self._native.is_available():
             raise RuntimeError(
-                "shipinfer._C was built without GPU support; rebuild with "
-                "-DSHIPINFER_WITH_CUDA=ON (or -DSHIPINFER_WITH_HIP=ON)"
+                "shipinfer-imgproc is installed but has no usable kernels; build them "
+                "with `python 3rdparty/shipinfer-imgproc/build.py`"
             )
         self._device_index = device_index
         self._stream = stream
