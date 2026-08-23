@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any
 
 from shipinfer.core.errors import (
@@ -17,6 +18,7 @@ from shipinfer.server.api.schemas import (
     InferenceRequestBody,
     InferenceResponseBody,
     ModelMetadata,
+    RequestTag,
     ServerMetadata,
     TensorMetadata,
     tensor_from_wire,
@@ -28,6 +30,11 @@ from shipinfer.server.health import check_health
 __all__ = ["build_router"]
 
 _LOG = get_logger("server.api")
+
+#: Ceiling on how long one HTTP request may hold a worker. Generous enough that a cold
+#: model finishing its first batch is not cut off, short enough that a wedged backend
+#: cannot accumulate stuck workers until the server stops answering its own health check.
+_INFER_TIMEOUT_S = 120.0
 
 
 def build_router(server: InferenceServer) -> Any:
@@ -105,17 +112,36 @@ def build_router(server: InferenceServer) -> Any:
 
     @router.post("/v2/models/{name}/infer", response_model=InferenceResponseBody)
     def infer(name: str, body: InferenceRequestBody) -> InferenceResponseBody:
+        """Run one inference.
+
+        The ``(camera_id, frame_id)`` tag travels in KServe's request-level ``parameters``
+        and comes back the same way. Without it every HTTP request shares one fairness
+        lane, the queue degenerates to FIFO, and two responses are indistinguishable —
+        which is the defect ADR-005 exists to prevent, reintroduced at the ingress.
+        """
         try:
+            tag = RequestTag.from_parameters(body.parameters)
             inputs = {spec.name: tensor_from_wire(spec) for spec in body.inputs}
             request = InferenceRequest(
                 model_name=name,
                 inputs=inputs,
                 parameters=body.parameters,
-                context=RequestContext(trace_id=body.id or ""),
+                context=RequestContext(
+                    camera_id=tag.camera_id,
+                    frame_id=tag.frame_id,
+                    trace_id=body.id or "",
+                ),
             )
-            response = server.infer(request).result()
+            # Bounded, because an unbounded .result() hands a wedged backend the power to
+            # hold an HTTP worker forever; enough of those and the server stops answering
+            # its own health check.
+            response = server.infer(request).result(timeout=_INFER_TIMEOUT_S)
         except ShipInferError as exc:
             raise _fail(exc) from exc
+        except FuturesTimeout as exc:
+            raise HTTPException(
+                504, f"{name} did not respond within {_INFER_TIMEOUT_S:.0f}s"
+            ) from exc
         except Exception as exc:  # a backend failure surfaced through the future
             _LOG.exception("inference failed for %s", name)
             raise HTTPException(500, str(exc)) from exc
@@ -126,6 +152,8 @@ def build_router(server: InferenceServer) -> Any:
             model_version=str(response.model_version),
             outputs=[tensor_to_wire(k, v) for k, v in response.outputs.items()],
             parameters={
+                "camera_id": response.context.camera_id,
+                "frame_id": response.context.frame_id,
                 "executed_on": str(response.executed_on),
                 "queue_us": round(response.timings.queue_us, 1),
                 "compute_us": round(response.timings.compute_us, 1),

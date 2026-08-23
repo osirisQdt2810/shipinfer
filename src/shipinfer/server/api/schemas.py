@@ -7,6 +7,7 @@ unchanged, and a team migrating between the two does not rewrite its callers.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Literal
 
 import numpy as np
@@ -26,6 +27,46 @@ __all__ = [
     "tensor_from_wire",
     "tensor_to_wire",
 ]
+
+
+class RequestTag(BaseModel):
+    """The provenance tag, carried in KServe's request-level ``parameters`` object.
+
+    In ``parameters`` rather than as new top-level fields, so the server stays wire
+    compatible with a stock Triton client — an unknown top-level key would be rejected by
+    one, while ``parameters`` is exactly the extension point the protocol provides.
+
+    Both fields are optional, and a request without them is legitimate. But it is worth
+    knowing what it costs: every untagged request shares the fairness key ``"-"``, so they
+    all queue in one lane. That is the honest default (the server cannot invent a camera
+    id), not a recommendation — a multi-camera client that omits the tag gets FIFO and
+    the starvation ADR-005 exists to prevent.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    camera_id: str = ""
+    frame_id: int = -1
+
+    @classmethod
+    def from_parameters(cls, parameters: Mapping[str, Any]) -> RequestTag:
+        """Read the tag out of a request's ``parameters``.
+
+        Raises:
+            ValidationError: for a frame_id that is not an integer. Coercing it to the
+                default would silently merge that client's frames into the untagged lane,
+                which is precisely the bug this tag exists to make impossible.
+        """
+        try:
+            return cls(
+                camera_id=str(parameters.get("camera_id", "") or ""),
+                frame_id=int(parameters.get("frame_id", -1)),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(
+                f"parameters.frame_id must be an integer, got "
+                f"{parameters.get('frame_id')!r}"
+            ) from exc
 
 
 class InferInputTensor(BaseModel):
