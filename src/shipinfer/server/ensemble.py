@@ -17,6 +17,7 @@ Two things this adds to the Triton vocabulary, both because this pipeline needs 
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -24,7 +25,13 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from shipinfer.core.errors import ConfigurationError, InferenceError, ServerStateError
+from shipinfer.core.errors import (
+    ConfigurationError,
+    InferenceError,
+    QueueFullError,
+    RequestCancelledError,
+    ServerStateError,
+)
 from shipinfer.core.logging import get_logger
 from shipinfer.core.metrics import ServerMetrics
 from shipinfer.core.request import InferenceRequest, InferenceResponse, ResponseFuture
@@ -70,6 +77,7 @@ class EnsembleModel:
         resolve: Callable[[str], _Servable],
         *,
         max_workers: int = 8,
+        max_pending: int = 0,
     ) -> None:
         self._artifact = artifact
         self._settings = settings
@@ -79,6 +87,14 @@ class EnsembleModel:
         self._pool = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix=f"ensemble-{artifact.name}"
         )
+        # A ThreadPoolExecutor's queue is unbounded, so an ensemble under load accumulates
+        # work forever and never applies the backpressure every other path in this system
+        # applies. The semaphore is the bound; exceeding it raises QueueFullError, exactly
+        # as a saturated instance queue would.
+        self._capacity = max(1, max_pending if max_pending > 0 else max_workers * 4)
+        self._slots = threading.Semaphore(self._capacity)
+        self._pending: list[tuple[InferenceRequest, ResponseFuture]] = []
+        self._pending_lock = threading.Lock()
         self._started = False
         self._executions = 0
         self._skipped_steps = 0
@@ -140,6 +156,10 @@ class EnsembleModel:
         available: dict[str, TensorSpec] = {
             spec.name: spec for spec in self._artifact.config.input_specs
         }
+        # Tensors that only exist when some branch ran. Consuming one unconditionally is a
+        # wiring error: it works on every frame that happens to take the branch and fails
+        # on the first one that does not.
+        conditional: set[str] = set()
 
         for index, step in enumerate(self._steps):
             model = self._resolve(step.model)  # raises ModelNotFoundError if missing
@@ -166,6 +186,13 @@ class EnsembleModel:
                         f"{where}: input {spec.name!r} expects {spec.describe()} but "
                         f"{source!r} is produced as {produced.describe()}"
                     )
+                if source in conditional and not step.condition:
+                    raise ConfigurationError(
+                        f"{where}: input {spec.name!r} reads {source!r}, which only exists "
+                        f"when an earlier conditional step runs, but this step has no "
+                        f"`condition:` of its own. Give it one, or the graph is only valid "
+                        f"for the frames that happen to take that branch."
+                    )
 
             if step.condition and step.condition not in available:
                 raise ConfigurationError(
@@ -178,6 +205,8 @@ class EnsembleModel:
                 available[name] = TensorSpec(
                     name=name, dtype=spec.dtype, shape=spec.shape, optional=spec.optional
                 )
+                if step.condition:
+                    conditional.add(name)
 
         for spec in self._artifact.config.output_specs:
             produced = available.get(spec.name)
@@ -192,8 +221,22 @@ class EnsembleModel:
                 )
 
     def stop(self) -> None:
+        """Stop accepting work and drain.
+
+        ``cancel_futures=True`` would drop queued items on the floor, and the futures it
+        drops are the *caller's* — they would never resolve and every waiter would block
+        forever. So the queued requests are cancelled explicitly, with a typed error,
+        before the pool is told to shut down.
+        """
         self._started = False
-        self._pool.shutdown(wait=True, cancel_futures=True)
+        with self._pending_lock:
+            pending, self._pending = list(self._pending), []
+        for _request, future in pending:
+            if future.set_running_or_notify_cancel():
+                future.set_exception(
+                    RequestCancelledError(f"ensemble {self.name!r} stopped before this ran")
+                )
+        self._pool.shutdown(wait=True)
 
     # -- inference -----------------------------------------------------------------------
 
@@ -209,22 +252,34 @@ class EnsembleModel:
 
             raise ValidationError(f"{self.name}: {exc}") from exc
 
+        if not self._slots.acquire(blocking=False):
+            self._metrics.requests_rejected.inc(model=self.name)
+            raise QueueFullError(f"ensemble:{self.name}", self._capacity, self._capacity)
+
         future = ResponseFuture(request)
+        with self._pending_lock:
+            self._pending.append((request, future))
         self._pool.submit(self._run, request, future)
         return future
 
     def _run(self, request: InferenceRequest, future: ResponseFuture) -> None:
+        with self._pending_lock:
+            entry = (request, future)
+            if entry in self._pending:
+                self._pending.remove(entry)
+        try:
+            self._execute_graph(request, future)
+        finally:
+            self._slots.release()
+
+    def _execute_graph(self, request: InferenceRequest, future: ResponseFuture) -> None:
         if not future.set_running_or_notify_cancel():
             return
         try:
             namespace = dict(request.inputs)
             for step in self._steps:
                 self._run_step(step, request, namespace)
-            outputs = {
-                spec.name: namespace[spec.name]
-                for spec in self._artifact.config.output_specs
-                if spec.name in namespace
-            }
+            outputs = self._collect_outputs(namespace)
             request.timings.completed_ns = time.monotonic_ns()
             self._executions += 1
             future.set_result(
@@ -240,6 +295,27 @@ class EnsembleModel:
         except Exception as exc:
             self._metrics.requests_failed.inc(model=self.name)
             future.set_exception(exc)
+
+    def _collect_outputs(self, namespace: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Every declared output, always.
+
+        A branch that did not run yields a tensor with **zero rows** rather than a missing
+        key. Both are "no ships in this frame", but only one of them is distinguishable
+        from "the ship branch raised and something swallowed it" — and a response whose
+        shape depends on the content of the frame forces every consumer to write the same
+        defensive lookup.
+        """
+        outputs: dict[str, Tensor] = {}
+        for spec in self._artifact.config.output_specs:
+            produced = namespace.get(spec.name)
+            if produced is not None:
+                outputs[spec.name] = produced
+                continue
+            row_shape = tuple(dim if dim > 0 else 0 for dim in spec.shape)
+            outputs[spec.name] = Tensor.from_numpy(
+                np.zeros((0, *row_shape), dtype=spec.dtype.numpy_dtype)
+            )
+        return outputs
 
     def _run_step(
         self, step: EnsembleStep, request: InferenceRequest, namespace: dict[str, Tensor]
