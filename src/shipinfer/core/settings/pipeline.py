@@ -94,7 +94,12 @@ class PipelineSettings(BaseModel):
     #: third class configures it here and the branch declarations keep reading in English.
     class_labels: dict[int, str] = Field(default_factory=lambda: {0: "ship", 1: "person"})
     #: Crop size fed to the ship segmenter, ``(height, width)``.
-    ship_mask_crop: tuple[int, int] = (512, 512)
+    #:
+    #: Dictated by the artefact, not chosen here: yolo26n-seg takes 640x640, and the graph
+    #: refuses to start when this disagrees with the model's declared input rather than
+    #: letting a mis-sized crop through. It was 512x512 while the segmenter was a stand-in,
+    #: and pointing the repository at a real engine is what surfaced the disagreement.
+    ship_mask_crop: tuple[int, int] = (640, 640)
     #: Crop size fed to the ship embedder.
     ship_reid_crop: tuple[int, int] = (256, 128)
     #: Crop size fed to the person embedder — the highest-volume tensor in the system at

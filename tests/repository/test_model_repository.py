@@ -14,6 +14,21 @@ from shipinfer.core.errors import (
 from shipinfer.repository import ModelRepository
 
 
+def _write(root: Path, name: str, config: str, *, versioned: bool = True) -> None:
+    """Write one model's config, and a version directory unless the model is an ensemble.
+
+    An ensemble has no artefact to version, which is the property
+    `test_ensembles_need_no_version_directory` exists to pin — so `versioned=False` is not a
+    convenience, it is the case under test.
+    """
+    model = root / name
+    if versioned:
+        (model / "1").mkdir(parents=True)
+    else:
+        model.mkdir(parents=True)
+    (model / "config.yaml").write_text(config.lstrip())
+
+
 def _repo_with_versions(tmp_path: Path, versions: list[int], latest: int = 1) -> Path:
     root = tmp_path / "repo"
     model = root / "m"
@@ -30,17 +45,94 @@ def _repo_with_versions(tmp_path: Path, versions: list[int], latest: int = 1) ->
 
 
 class TestDemoRepository:
-    """The repository shipped with the project loads, ensembles and all."""
+    """The repository shipped with the project must always be valid.
+
+    Deliberately asserts *properties* rather than exact numbers. It used to pin
+    `max_batch_size == 32`, which became false the moment the detector was pointed at a real
+    engine — the plan is built with a static batch of 8, and the backend refuses to load when
+    the config disagrees rather than silently truncating. A test that has to change every time
+    an engine is rebuilt is testing the engine, not the repository.
+    """
 
     def test_scans_the_demo_repository(self, demo_repository_path: Path) -> None:
-        """The repository shipped with the project must always be valid."""
         repo = ModelRepository.load(demo_repository_path)
-        assert {"ship_detector", "person_embedder", "ship_pipeline"} <= set(repo.names())
-        assert repo.entry("ship_detector").config.max_batch_size == 32
 
-    def test_ensembles_need_no_version_directory(self, demo_repository_path: Path) -> None:
+        assert {"ship_detector", "person_embedder", "ship_segmenter"} <= set(repo.names())
+
+    def test_every_shipped_model_runs_on_a_real_backend(
+        self, demo_repository_path: Path
+    ) -> None:
+        """No stand-ins in the shipped repository.
+
+        Every model here names a backend that executes an artefact. A `mock` platform would
+        make the repository loadable anywhere at the cost of the numbers meaning nothing, and
+        this project measures itself against another system — so the repository has to be the
+        real thing or the comparison is not one.
+        """
         repo = ModelRepository.load(demo_repository_path)
-        artifact = repo.resolve("ship_pipeline")
+        platforms = {name: repo.entry(name).config.platform for name in repo.names()}
+
+        assert "mock" not in platforms.values(), f"stand-in backends remain: {platforms}"
+
+    def test_the_declared_batch_matches_what_the_engine_was_built_for(
+        self, demo_repository_path: Path
+    ) -> None:
+        """Not a fixed number — just that the config commits to one.
+
+        `max_batch_size` has to agree with the plan, and the TensorRT backend fails at load
+        when it does not. Asserting it is positive and that the batch dimension is absent from
+        `dims` is the part that belongs here; the exact value belongs to whoever built the
+        engine.
+        """
+        repo = ModelRepository.load(demo_repository_path)
+        config = repo.entry("ship_detector").config
+
+        assert config.max_batch_size > 0
+        assert config.inputs[0].dims == [
+            3,
+            640,
+            640,
+        ], "the batch dim is owned by max_batch_size"
+
+    def test_ensembles_need_no_version_directory(self, tmp_path: Path) -> None:
+        """A property of the loader, tested against a config written here.
+
+        It used to lean on a demo ensemble, which meant deleting that demo took the coverage
+        with it. The behaviour under test belongs to `ModelRepository`, so the fixture does
+        too.
+        """
+        root = tmp_path / "repo"
+        _write(
+            root,
+            "pipe",
+            """
+name: pipe
+platform: ensemble
+max_batch_size: 8
+inputs: [{name: images, data_type: FP32, dims: [3, 4, 4]}]
+outputs: [{name: score, data_type: FP32, dims: [1]}]
+ensemble:
+  steps:
+    - model: leaf
+      input_map: {images: images}
+      output_map: {score: score}
+""",
+            versioned=False,
+        )
+        _write(
+            root,
+            "leaf",
+            """
+name: leaf
+platform: tensorrt
+max_batch_size: 8
+inputs: [{name: images, data_type: FP32, dims: [3, 4, 4]}]
+outputs: [{name: score, data_type: FP32, dims: [1]}]
+""",
+        )
+
+        artifact = ModelRepository.load(root).resolve("pipe")
+
         assert artifact.config.is_ensemble
         assert artifact.version == 1
 

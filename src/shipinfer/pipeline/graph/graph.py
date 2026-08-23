@@ -19,6 +19,18 @@ addressable model — is the three things an ensemble's fixed-size tensors canno
 Everything tensor-level is *not* reimplemented: stage validation compares
 :class:`~shipinfer.core.types.TensorSpec` objects from the same model configs the ensemble
 reads, in the same way, for the same reason (a mis-wired graph must stop a deploy).
+
+**Where vessel identity went.** There is no ``ship_recognizer`` stage, and that is deliberate
+rather than unfinished. Identity is a **gallery query over the ship embedding**, not a second
+network: `shipvision.reid` already carries bounded galleries with the same-camera exclusion
+protocol and CMC/mAP evaluation, and running an identity *model* would mean training one to
+answer a question a nearest-neighbour search over the embedder's output already answers.
+
+It also puts the step on the right side of the system's main division. Recognition against a
+gallery is **stateful** — the gallery is the state — so it belongs with tracking in the
+stateful plane, not in the stateless GPU pool this graph drives. A stage was there while the
+model was a stand-in; pointing the repository at real engines is what made the mismatch
+visible, since a ResNet embedder cannot answer "which vessel is this".
 """
 
 from __future__ import annotations
@@ -395,7 +407,6 @@ def build_perception_graph(
             model("ship_segmenter"),
             resolve=resolve,
             source=ship_mask_crops,
-            input_name="crops",
             outputs={"masks": "ship_mask_area"},
             # Reduced where it is produced: fifteen 512x512 float masks are 15 MB, and
             # reassembly would hold every one of them until the frame completed.
@@ -408,21 +419,8 @@ def build_perception_graph(
             model("ship_embedder"),
             resolve=resolve,
             source=ship_reid_crops,
-            input_name="crops",
             outputs={"embedding": "ship_embedding"},
             row_shape=(3, *settings.ship_reid_crop),
-            timeout_s=timeout_s,
-        ),
-        ObjectStage(
-            "ship_recognizer",
-            model("ship_recognizer"),
-            resolve=resolve,
-            source="ship_embedding",
-            input_name="embedding",
-            outputs={"ship_id": "ship_id", "similarity": "ship_similarity"},
-            # No row shape of its own: it eats whatever the embedder emits, and the graph
-            # checks that edge against the two models' declared specs instead.
-            row_shape=None,
             timeout_s=timeout_s,
         ),
         ObjectStage(
@@ -430,7 +428,6 @@ def build_perception_graph(
             model("person_embedder"),
             resolve=resolve,
             source=person_crops,
-            input_name="crops",
             outputs={"embedding": "person_embedding"},
             row_shape=(3, *settings.person_reid_crop),
             timeout_s=timeout_s,

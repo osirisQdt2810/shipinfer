@@ -15,7 +15,7 @@ only its crops.
 **Two crop sets of the same class is normal, not waste.** The segmenter wants 512x512 and
 the embedder wants 256x128; resizing once from the full-resolution frame is both cheaper and
 sharper than resizing the 512x512 crop down again, which is exactly why the demo
-repository's ``crop_router`` emits both.
+pipeline emits both, from one pass over the frame.
 """
 
 from __future__ import annotations

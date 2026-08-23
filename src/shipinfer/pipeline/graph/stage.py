@@ -10,8 +10,8 @@ index of every row so a result can never be attached to the wrong object.
 
 **Why not just use an ensemble.** :class:`shipinfer.server.ensemble.EnsembleModel` already
 executes a validated DAG of models and it is the right tool for a caller that wants the DAG
-as *one addressable model* — it is what ``model_repository/ship_pipeline`` is. It cannot
-express what this layer needs: a variable number of crops per frame (its tensors are
+as *one addressable model*, with fixed tensor shapes throughout. It cannot express what this
+layer needs: a variable number of crops per frame (its tensors are
 fixed-size and padded), the identity of each object across stages, or reassembly and
 emission. So this package sits above it and drives the models directly; nothing here
 re-implements the ensemble's tensor-level DAG validation, and
@@ -25,7 +25,7 @@ import abc
 import enum
 import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from typing import TYPE_CHECKING, ClassVar, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 from shipinfer.core.errors import ConfigurationError, RequestTimeoutError
 from shipinfer.core.request import InferenceRequest, InferenceResponse, ResponseFuture
@@ -240,7 +240,7 @@ class ModelStage(PipelineStage):
         model: str,
         *,
         resolve: Callable[[str], Servable],
-        input_name: str,
+        input_name: str | None = None,
         timeout_s: float = 5.0,
         consumes: tuple[str, ...] = (),
         requires: tuple[str, ...] = (),
@@ -251,6 +251,7 @@ class ModelStage(PipelineStage):
             raise ConfigurationError(f"stage {name!r}: timeout_s must be > 0")
         self._model = model
         self._resolve = resolve
+        # Resolved lazily, from the model, when the caller did not name it. See the property.
         self._input_name = input_name
         self._timeout_s = timeout_s
 
@@ -260,7 +261,45 @@ class ModelStage(PipelineStage):
 
     @property
     def input_name(self) -> str:
+        """The tensor this stage feeds, taken from the model when not given explicitly.
+
+        A tensor's name belongs to the artefact, not to this layer. Hard-coding a convention
+        here — the first version said ``"crops"`` — makes the graph refuse any real engine
+        whose ONNX happened to call its input something else, and every export tool has its
+        own habit: ultralytics emits ``images``, torch emits whatever the ``input_names``
+        argument said. Refusing a valid engine over a naming preference is the wrong failure.
+
+        Resolution order: what the caller said, then the model's single declared input, then
+        its first declared input, then ``"images"``. It never raises. A name that cannot be
+        determined is not a useful failure here — this property is read on the hot path, once
+        per batch — and :meth:`validate` already refuses a wrong one at start-up with both the
+        expected and the available names printed, which is where that failure belongs.
+
+        ``"images"`` as the last resort is the overwhelmingly common export name (ultralytics
+        and every torch export that passes ``input_names=["images"]``), so it is the guess most
+        likely to be right and the least likely to hide a real mistake.
+        """
+        if self._input_name is not None:
+            return self._input_name
+        specs = self._declared_inputs()
+        if specs:
+            self._input_name = next(iter(specs))
+        else:
+            # No resolvable config — a model that is not loaded yet, or a stand-in in a test.
+            # Guess, and let validate() be the one to complain if the guess is wrong.
+            self._input_name = "images"
         return self._input_name
+
+    def _declared_inputs(self) -> dict[str, Any] | None:
+        """The model's declared input specs by name, or None if it cannot be resolved."""
+        try:
+            model = self._resolve(self._model)
+        except Exception:  # a model that is not loaded yet is not an error here
+            return None
+        artifact = getattr(model, "artifact", None)
+        if artifact is None:
+            return None
+        return {spec.name: spec for spec in artifact.config.input_specs}
 
     @property
     def timeout_s(self) -> float:
@@ -306,11 +345,11 @@ class ModelStage(PipelineStage):
         if config is None:
             return
         specs = {spec.name: spec for spec in config.config.input_specs}
-        spec = specs.get(self._input_name)
+        spec = specs.get(self.input_name)
         if spec is None:
             raise ConfigurationError(
                 f"stage {self.name!r}: model {self._model!r} declares no input "
-                f"{self._input_name!r} (has: {sorted(specs)})"
+                f"{self.input_name!r} (has: {sorted(specs)})"
             )
         row_shape = self.expected_row_shape
         if row_shape is not None and not spec.matches(row_shape):

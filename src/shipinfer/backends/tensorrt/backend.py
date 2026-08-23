@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from shipinfer.backends.base import BackendContext, ModelBackend
+from shipinfer.backends.tensorrt.autobuild import resolve_engine
 from shipinfer.backends.tensorrt.bindings import BindingSet
 from shipinfer.backends.tensorrt.engine import LoadedEngine, load_engine
 from shipinfer.backends.tensorrt.logger import build_trt_logger
@@ -68,10 +69,21 @@ class TensorRTBackend(ModelBackend):
 
     def _do_initialize(self) -> None:
         context = self.context
-        engine_file = context.config.parameters.get("engine_file", "model.plan")
-        path = context.artifact.file(str(engine_file))
+        params = context.config.parameters
+        engine_file = str(params.get("engine_file", "model.plan"))
 
         self._torch.cuda.set_device(self.device.index)
+        # An engine is a build artefact of *this* GPU and *this* TensorRT, so it cannot be
+        # shipped — what ships is the ONNX. If the configured plan is absent, build it, once,
+        # under a lock shared by every instance of this model. See autobuild's docstring.
+        path = resolve_engine(
+            context.artifact.path,
+            engine_file=engine_file,
+            trt=self._trt,
+            device_index=self.device.index,
+            fp16=bool(params.get("fp16", False)),
+            onnx_file=params.get("onnx_file"),
+        )
         self._loaded = load_engine(self._trt, self._logger, path)
         self._ctx = self._loaded.engine.create_execution_context()
         if self._ctx is None:

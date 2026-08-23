@@ -67,3 +67,7 @@ references/
 # Large, licensed separately, and an engine is valid only for the GPU that built it.
 /models/*
 !/models/README.md
+
+# Built TensorRT plans in the model repository. Same reason as models/: an engine is valid
+# only for the GPU and TensorRT version that built it.
+model_repository/*/*/*.plan

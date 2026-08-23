@@ -172,7 +172,7 @@ class ObjectStage(ModelStage):
         *,
         resolve: Callable[[str], Servable],
         source: str,
-        input_name: str,
+        input_name: str | None = None,
         outputs: Mapping[str, str],
         timeout_s: float = 5.0,
         row_shape: tuple[int, ...] | None = None,

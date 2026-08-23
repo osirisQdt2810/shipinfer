@@ -79,7 +79,7 @@ The number that matters is not "tests pass", it is the per-device breakdown:
 shipinfer bench person_embedder --cameras 50 --fps 20 --seconds 5 --skew 8
 shipinfer bench ship_detector --policy round_robin --seconds 5     # the baseline
 shipinfer repo ls
-shipinfer repo show ship_pipeline
+shipinfer repo show ship_detector
 shipinfer serve --http --port 8000       # then curl /v2/health, /v2/statistics, /metrics
 ```
 
