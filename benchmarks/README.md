@@ -1,110 +1,79 @@
 # Benchmarks
 
-## `compare_baseline.py` — ShipInfer against the `counting-simulation` architecture
+ShipInfer against [`counting-simulation`](baseline/), head to head, under one load.
 
-### What is being compared, and what is not
+## What is compared
 
-`references/counting-simulation` cannot be run on this host: it needs TensorRT, OpenCV and
-two built `.engine` files, and the repository ships none of them. So the *serving
-architecture* is re-implemented faithfully from `sim_pipeline_v2.py` and both systems are
-driven against an identical synthetic backend.
+Both systems are offered the same thing: **50 cameras x 20 fps = 1000 images/s**, from the
+same JPEG frames, on the same four GPUs, against engines built from the same ONNX. Both
+write a once-a-second buffer-occupancy log, and both are analysed by the baseline's own
+methodology — **if a module's buffer grows, that module is not keeping up**, and its
+sustained throughput is `offered - growth`.
 
-That is not a workaround, it is the better experiment. In production both call the same
-TensorRT engine, so the engine is a constant and the serving layer is the variable.
-Comparing two separately-built engines would have measured the wrong thing.
+Nothing here re-implements the baseline. `harness/baseline.py` compiles the submodule's own
+`sim_pipeline_v2.cpp` unchanged and runs the resulting binary. The submodule is read-only,
+and the linters are configured to leave it alone: a baseline we reformatted is not a
+baseline.
 
-The baseline's five decisions, taken from its source:
+## The one asymmetry, and why it is not hidden
 
-- one shared bounded `queue.Queue` per model, holding bare frames with no identity
-- a global `pop_lock` held while a worker dequeues its whole batch
-- workers statically bound to GPUs by `gpu_ids[i % len(gpu_ids)]`
-- a fixed batch size
-- a producer that blocks and retries forever on a full queue rather than shedding
-
-None of those is a strawman. Each is a reasonable first thing to write, and the comparison
-is about what they cost at fifty cameras.
-
-### Results, on 8 × RTX A5000
-
-**Preprocessing — measured, not simulated.** 8 × 1080p → 640×640, median of 5 samples:
-
-| | ms (min–max) | img/s |
-|---|---:|---:|
-| `cv2` loop, all 48 cores | 505–704 (447–950) | 11–16 |
-| `cv2` loop, one core | 469–496 (234–611) | 16–17 |
-| fused CUDA kernel into a torch tensor | **8.8–9.3** (9–26) | 858–907 |
-
-**Roughly 50×**, and the caveats are part of the result. The CPU path's variance is large
-on a shared machine — a first attempt at this measurement swung by 4× between runs, which
-is why OpenCV's thread count is now pinned and the median of five samples is reported
-rather than a single timing. The GPU path is stable to within a millisecond.
-
-Note that `cv2` with all 48 cores is *not* faster than with one: for operations this small
-the thread contention costs more than the parallelism buys on a loaded box. The one-core
-figure is also the more representative one, because in their pipeline every worker thread
-calls `cv2` concurrently, so under load each gets about one core anyway.
-
-**Serving, at the design point** — 50 cameras × 20 fps = 1000 req/s over 8 GPUs, camera 0
-at 8× traffic, a launch-bound cost model (1.2 ms/batch + 0.03 ms/row):
+The systems are shaped differently and it matters for the arithmetic:
 
 | | baseline | ShipInfer |
-|---|---:|---:|
-| achieved | 935 req/s | 997 req/s |
-| p50 | 17.3 ms | 4.6 ms |
-| p99 | 127.8 ms | 13.1 ms |
-| device share | 11.7–12.8% | 12.0–12.8% |
+|---|---|---|
+| topology | two independent single-model pipelines | one DAG |
+| where an image enters | `det` queue **or** `seg` queue | the pipeline queue |
+| per image | one model | detect -> conditional segment -> embed |
 
-**~10× better p99.** The cause is the fixed batch: the baseline makes every request wait
-for 31 companions even when the GPU is idle, while dynamic batching takes whatever is
-actually queued. Load balance is a **tie** — the baseline's shared queue with pull-based
-workers self-balances perfectly well, and it would be dishonest to claim otherwise.
+So an image enters the baseline at one of two disjoint queues, and its system throughput is
+`det_sustained + seg_sustained`. An image enters ShipInfer once, at the pipeline queue, and
+then fans out into *crops* — the segmenter and embedders see work derived from a frame
+already counted. Summing ShipInfer's modules the way the baseline's report legitimately sums
+its own would report **roughly twice** the real throughput.
 
-**At saturation** — 2 GPUs, a segmentation-weight model (8 ms/batch + 1.5 ms/row):
+That decision lives in exactly one place, `run_bench.system_throughput`, and
+`benchmarks/tests/test_comparison_metric.py` asserts the trap directly — including that
+`RunAnalysis.total_sustained` really does return 2000 for a 1000 img/s ShipInfer run, so a
+future refactor reaching for it would be caught.
 
-| | baseline | ShipInfer |
-|---|---:|---:|
-| achieved | 935 req/s | 982 req/s |
-| p50 | 72 ms | 80 ms |
-| p99 | 87 ms | 256 ms |
-| rejected | 0 (invisible) | 73 (reported) |
+The comparison is therefore **conservative in our disfavour**: equal images-per-second means
+strictly more work on our side.
 
-**The baseline wins on the latency number, and the reason matters.** Its producer *blocks*
-on a full queue, so it never admits more than it can serve — the offered rate is silently
-not met (935 of 1000) and everything that does get in waits about the same. ShipInfer meets
-the rate, refuses what it cannot serve, and pays with a longer tail.
+## Running it
 
-Neither is better without saying what you value. What the number does show is the standing
-cost of queue depth: at `max_queue_size: 64` with `max_batch_size: 32`, two batches are
-always queued, and at 56 ms per batch that is ~112 ms of latency that exists by
-configuration. Shallower queues trade it away directly:
-
-| total capacity | ShipInfer p50 | ShipInfer p99 | rejected |
-|---:|---:|---:|---:|
-| 512 | 81 ms | 462 ms | 0 |
-| 128 | 80 ms | 292 ms | 42 |
-| 32 | 55 ms | 238 ms | 538 |
-| 16 | 37 ms | 179 ms | 1095 |
-| 8 | 30 ms | 149 ms | 1692 |
-
-That is the knob, and the bench is how a deployment picks it.
-
-### A negative result worth recording
-
-The saturation numbers suggested the dynamic-batching delay window was pure loss once the
-queue is deep: waiting 3 ms to grow a batch from 29 to 32 costs 1.84 ms/row against
-1.78 ms/row for running immediately. An adaptive version that skips the window after a
-full batch was implemented and A/B'd — and changed nothing measurable (p99 196 ms against
-209 ms, inside run-to-run noise; identical mean batch size). It was reverted. The server's
-own metrics explain why: batch size was already at p50 = p99 = 32, so the window was rarely
-firing in the first place, and the latency was queue depth rather than batching delay.
-
-### Running it
+Everything runs in a container on real GPUs — a host number is not a production number
+(`.claude/CLAUDE.md`, "Where commands run"). The hook on `Bash` refuses a host run.
 
 ```bash
-python benchmarks/compare_baseline.py --seconds 5 --cameras 50 --fps 20 --skew 8
-python benchmarks/compare_baseline.py --gpus 0,1 --fixed-ms 8 --per-item-ms 1.5 --capacity 32
+# both systems, the full 50x20 load, 70 s with a 10 s warmup
+deploy/rootless/test.sh --bench
+
+# or, inside a container
+python benchmarks/run_bench.py --cameras 50 --fps 20 --seconds 70 --gpus 2,3,4,5
+
+# one system at a time, to keep the GPUs uncontended
+python benchmarks/run_bench.py --systems baseline
+python benchmarks/run_bench.py --systems shipinfer
 ```
 
-`--fixed-ms` / `--per-item-ms` are the cost model. Set them from a real engine's measured
-batch-1 and batch-N times; the ratio between them is what decides whether batching helps at
-all.
+Output lands in `.artifacts/bench/run-<label>/`: each system's occupancy JSONL, its console
+capture, and `summary.json` carrying the config, the per-module fits and the verdict.
+
+## Reading the verdict
+
+- **SUSTAINED** — no buffer grew; the number is a throughput.
+- **SATURATED** — at least one buffer grew; the number is an **upper bound**, not a rate.
+  `run_bench` refuses to divide two bounds, because a ratio of bounds is not a speed-up.
+- **DRAINING** — every buffer shrank; the system had headroom at this offered rate.
+
+A speed-up is only printed when both sides produced a real rate. If a side saturated, lower
+the offered rate to find its sustainable point rather than reporting the bound as a result.
+
+## Offline tests
+
+```bash
+deploy/rootless/test.sh benchmarks/tests -q
+```
+
+Pure logic over synthetic occupancy logs — no GPU, no engines, no baseline binary. They run
+as part of the default `pytest`.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from shipinfer import envs
 from shipinfer.backends.base import BackendContext
 from shipinfer.backends.registry import build_backend
 from shipinfer.core.errors import (
@@ -34,6 +35,29 @@ from shipinfer.server.instance import ModelInstance
 __all__ = ["Model"]
 
 _LOG = get_logger("server.model")
+
+
+def _graphs_enabled(execution: Any) -> bool:
+    """Whether to capture graphs for this model, honouring the operator override.
+
+    `SHIPINFER_CUDA_GRAPHS` wins over the per-model setting when it is set at all: an
+    operator who typed it is answering "is the graph path what is hurting?" and a config file
+    silently overruling that answer would make the experiment useless. Unset — the normal
+    case — leaves every model's own setting alone, because whether a model *can* be captured
+    is a property of the model, not of the deployment.
+
+    Read here rather than in `core.settings`: the layer rule forbids `core` from importing
+    `shipinfer.envs`, and it is right to, because a settings object that changes meaning with
+    the environment cannot be reasoned about from the config file alone.
+    """
+    override = envs.CUDA_GRAPHS.get()
+    if not override:
+        return execution.cuda_graphs
+    if override not in ("on", "off"):
+        raise ConfigurationError(
+            f"{envs.CUDA_GRAPHS.name}={override!r} is invalid; expected 'on' or 'off'"
+        )
+    return override == "on"
 
 
 class Model:
@@ -113,7 +137,7 @@ class Model:
                 GRAPH_CACHES.create(
                     execution.graph_cache,
                     device,
-                    enabled=execution.cuda_graphs,
+                    enabled=_graphs_enabled(execution),
                     batch_sizes=tuple(execution.cuda_graph_batch_sizes),
                     max_failures=execution.cuda_graph_max_capture_failures,
                 )

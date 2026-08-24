@@ -23,6 +23,7 @@ host synchronisation inside the captured region.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -171,6 +172,14 @@ class TorchGraphCache(GraphCache):
                     outputs = run()
                 captured = TorchCapturedGraph(graph, batch_size, static_inputs, outputs)
             except Exception as exc:
+                # A capture that raised part-way leaves the stream and the caching allocator
+                # mid-capture. Every later capture on this device then dies with an internal
+                # assert and, worse, ordinary inference on it starts failing too — a failed
+                # optimisation must not take the instance down with it. Synchronising the
+                # device is what actually clears that state, so it happens before anything
+                # else in this handler.
+                with contextlib.suppress(Exception):
+                    torch.cuda.synchronize(self._device.index)
                 self._failures += 1
                 log = _LOG.warning if self._failures >= self._max_failures else _LOG.debug
                 log(

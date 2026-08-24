@@ -24,6 +24,7 @@ from shipinfer.core.request import InferenceResponse
 from shipinfer.core.settings import SchedulerSettings
 from shipinfer.core.types import Device
 from shipinfer.runtime.device import DeviceManager
+from shipinfer.runtime.profiling import PhaseTimer, phase_timer
 from shipinfer.scheduling.batching import AssembledBatch, Batcher
 from shipinfer.scheduling.queues import BatchWindow, RequestQueue
 from shipinfer.scheduling.work import WorkItem
@@ -75,6 +76,13 @@ class ModelInstance:
         self._ewma_latency_us = 0.0
         self._executed_batches = 0
         self._executed_requests = 0
+        # One timer for the life of the instance, not one per batch. `PhaseTimer` documents
+        # that its CUDA events are reused *because* allocating a pair per phase per batch
+        # would be ~5000 allocations a second at the design point and would make the
+        # instrument part of what it measures — and then `_execute` rebuilt it every batch,
+        # so the cache was empty every time. One instance is one thread, so there is no
+        # sharing to worry about.
+        self._phase_timer = phase_timer()
         self._failed_batches = 0
 
     # -- Placeable -----------------------------------------------------------------------
@@ -216,9 +224,14 @@ class ModelInstance:
         label = self._model_label()
         device = str(self.device)
         batched_ns = time.monotonic_ns()
+        timer = self._phase_timer
 
         try:
-            batch = self._batcher.assemble(items)
+            # Triton counts batch assembly and the host-to-device copy together as
+            # `compute_input`; the backend owns the copy, so this span is assembly plus
+            # whatever staging the batcher does.
+            with timer.phase("compute_input"):
+                batch = self._batcher.assemble(items)
         except Exception as exc:
             # An unassemblable batch is one bad *request*, not a broken instance. Fail them
             # all with the same reason rather than killing the worker.
@@ -231,7 +244,11 @@ class ModelInstance:
 
         start_ns = time.monotonic_ns()
         try:
-            outputs = self._backend.execute(batch.inputs, batch.size)
+            # The backend owns the copies, so this is the finest split available without
+            # reaching inside it. `execute` is annotated for NVTX either way, which is what
+            # makes an `nsys` timeline readable at all.
+            with timer.phase("compute_infer"):
+                outputs = self._backend.execute(batch.inputs, batch.size)
         except Exception as exc:
             self._failed_batches += 1
             self._fail_batch(items, exc)
@@ -242,18 +259,44 @@ class ModelInstance:
         self._observe(compute_us, batch, label, device)
 
         try:
-            scattered = self._batcher.scatter(batch, outputs)
+            with timer.phase("compute_output"):
+                scattered = self._batcher.scatter(batch, outputs)
         except Exception as exc:
             self._fail_batch(items, exc)
             return
 
         completed_ns = time.monotonic_ns()
+        self._observe_phases(timer, batched_ns, completed_ns, label, device)
         for item, per_request in zip(batch.items, scattered, strict=True):
             timings = item.request.timings
             timings.compute_start_ns = start_ns
             timings.compute_end_ns = end_ns
             timings.completed_ns = completed_ns
             self._complete(item, per_request, completed_ns)
+
+    def _observe_phases(
+        self,
+        timer: PhaseTimer,
+        batched_ns: int,
+        completed_ns: int,
+        label: str,
+        device: str,
+    ) -> None:
+        """Record the phase split, when it was measured.
+
+        Gated on ``is_measured`` rather than on the env var: with phase timing off,
+        ``device_busy_us`` is zero and the idle fraction would read 100% — a confident
+        falsehood about precisely the quantity this exists to establish. An unmeasured batch
+        contributes nothing rather than contributing a wrong zero.
+        """
+        timings = timer.finish((completed_ns - batched_ns) / 1_000.0)
+        if not timings.is_measured:
+            return
+        for phase, micros in timings.per_phase.items():
+            self._metrics.phase_us.observe(micros, model=label, device=device, phase=phase)
+        self._metrics.device_idle_ratio.observe(
+            timings.idle_fraction, model=label, device=device
+        )
 
     def _observe(
         self, compute_us: float, batch: AssembledBatch, label: str, device: str

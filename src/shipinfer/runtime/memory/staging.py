@@ -15,12 +15,29 @@ from __future__ import annotations
 import threading
 from typing import Any
 
+from shipinfer.core.errors import DeviceError
 from shipinfer.core.logging import get_logger
 from shipinfer.runtime.platform import is_available, require_torch
 
 __all__ = ["PinnedStagingPool"]
 
 _LOG = get_logger("runtime.memory.staging")
+
+
+def _capturing(torch: Any) -> bool:
+    """Whether the calling thread's current stream is mid-capture.
+
+    Guarded rather than assumed: the predicate is new-ish in torch and absent on the CPU
+    build, and a missing probe must read as "not capturing" so a machine without CUDA keeps
+    working. Being wrong in that direction costs nothing — there is no capture to protect.
+    """
+    probe = getattr(torch.cuda, "is_current_stream_capturing", None)
+    if probe is None:
+        return False
+    try:
+        return bool(probe())
+    except (RuntimeError, AssertionError):
+        return False
 
 
 class PinnedStagingPool:
@@ -86,6 +103,20 @@ class PinnedStagingPool:
                 return buffer
 
             torch = require_torch()
+            if self.pinned and _capturing(torch):
+                # A pinned host allocation calls into the driver, which CUDA forbids while a
+                # stream is capturing. Letting `torch.empty` discover that is not equivalent
+                # to refusing here: the failed allocation leaves the caching allocator with a
+                # capture still marked underway, every later capture on that device dies with
+                # an internal assert, and the instance never becomes ready. Observed exactly
+                # that on a 4-GPU bench run — a graph-capture optimisation took the server
+                # down. Refusing before the call keeps the damage to "this graph was not
+                # captured", which the caller already treats as take-the-ordinary-path.
+                raise DeviceError(
+                    f"staging buffer {self.owner}/{name} {tuple(shape)} was not allocated "
+                    f"before capture began. A capture region may not allocate pinned host "
+                    f"memory, so warm the pool with a real execution first."
+                )
             buffer = torch.empty(shape, dtype=dtype, pin_memory=self.pinned)
             if len(self._buffers) >= self._max_entries:
                 # Bounded rather than growing forever. Shape churn past this point means a

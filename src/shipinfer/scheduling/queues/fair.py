@@ -156,6 +156,11 @@ class FairPriorityQueue(RequestQueue):
     def _wait_to_fill_locked(self, window: BatchWindow) -> None:
         deadline = time.monotonic() + window.max_delay_us / 1_000_000.0
         preferred = set(window.preferred_sizes)
+        # `self._size` counts items and `max_batch_size` counts rows, so this is a lower
+        # bound on fullness: with multi-row requests the batch reaches its row budget before
+        # the item count does, and waiting past that only adds latency. Deliberately not
+        # made exact — summing every queued request's rows on each wake would walk the whole
+        # queue thousands of times a second to refine a wait heuristic.
         while self._size < window.max_batch_size and not self._closed:
             if self._size in preferred:
                 return
@@ -164,24 +169,57 @@ class FairPriorityQueue(RequestQueue):
                 return
             self._cond.wait(remaining)
 
-    def _drain_locked(self, count: int) -> list[WorkItem]:
-        """Pop up to ``count`` items highest-priority-first, round-robin within a lane."""
+    def _drain_locked(self, max_rows: int) -> list[WorkItem]:
+        """Pop up to ``max_rows`` **rows** highest-priority-first, round-robin in a lane.
+
+        Rows, not items. A per-object request carries one row per crop, so counting items
+        against a row budget overfills the batch: sixteen person-embedder requests carrying
+        a frame's worth of crops each assembled 24 rows against ``max_batch_size: 16``, the
+        assembler refused it, and every request in it failed. Observed on the first real
+        50-camera run — the offline tests never saw it because their requests are one row.
+
+        An item whose own row count already exceeds the budget is still returned, alone.
+        Refusing to dequeue it would park it at the head of its lane forever and stall the
+        model; letting it through gives the assembler a chance to name the real problem,
+        which is a request too large for the engine rather than a scheduling decision.
+        """
         now = time.monotonic_ns()
         batch: list[WorkItem] = []
-        for lane in self._lanes:
-            while lane.size and len(batch) < count:
-                item = lane.pop()
-                self._size -= 1
-                if self.drop_expired and item.request.is_expired(now):
-                    self._expired += 1
-                    item.fail(RequestCancelledError("request deadline passed before execution"))
-                    continue
-                batch.append(item)
-            if len(batch) >= count:
-                break
-        if self.overflow is OverflowPolicy.BLOCK:
-            self._cond.notify_all()  # producers may be waiting for space
-        return batch
+        rows = 0
+        try:
+            for lane in self._lanes:
+                while lane.size:
+                    head = lane.peek()
+                    if head is None:
+                        break
+                    head_rows = head.request.batch_size or 1
+                    if batch and rows + head_rows > max_rows:
+                        return batch
+                    item = lane.pop()
+                    self._size -= 1
+                    if self.drop_expired and item.request.is_expired(now):
+                        self._expired += 1
+                        item.fail(
+                            RequestCancelledError("request deadline passed before execution")
+                        )
+                        continue
+                    batch.append(item)
+                    rows += head_rows
+                    if rows >= max_rows:
+                        return batch
+            return batch
+        finally:
+            # `finally`, not a line after the loops. Converting the row-budget exits from
+            # `break` to `return` — which they have to be, to leave a partially filled lane
+            # alone — jumped straight over this, and the exit at the row budget is the
+            # *common* one under load, so a blocked producer slept the full
+            # `block_timeout_ms` instead of waking the instant a slot freed. Measured at 500
+            # against 50 ms. Worse than the latency: when the deadline beat the drain, `put`
+            # raised `QueueFullError` and the camera actor charged a drop to a camera that
+            # had done nothing wrong, which is the ADR-005 misattribution this project
+            # exists to prevent. `fifo.py` kept its `break` and never had the bug.
+            if self.overflow is OverflowPolicy.BLOCK:
+                self._cond.notify_all()  # producers may be waiting for space
 
     # -- lifecycle ---------------------------------------------------------------------
 

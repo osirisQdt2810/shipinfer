@@ -14,6 +14,7 @@ from shipinfer.cli.common import build_settings, console, print_table
 from shipinfer.core.errors import QueueFullError
 from shipinfer.core.request import InferenceRequest, RequestContext
 from shipinfer.core.types import Tensor
+from shipinfer.runtime.containment import require_container
 from shipinfer.server import InferenceServer
 
 __all__ = ["bench"]
@@ -47,6 +48,9 @@ def bench(
     like next to an empty corridor. With fair queueing on, the quiet cameras keep their
     share; with it off, they do not.
     """
+    # The gate lives here, not only in the shell hook: a deny-list over command
+    # text cannot be made sound, and this command loads engines and drives GPUs.
+    require_container("`shipinfer bench`")
     out = console()
     settings = build_settings(repository, gpus=gpus, policy=policy, log_level=log_level)
 

@@ -97,93 +97,100 @@ def _item() -> WorkItem:
     return WorkItem(request, ResponseFuture(request))
 
 
-def test_a_clean_stop_finalizes_the_backend() -> None:
-    backend = SpyBackend()
-    instance = _instance(backend)
-    instance.start()
-    assert instance.wait_ready(10)
+class TestBackendTeardownOnStop:
+    """Whether stop() may finalize the backend depends on whether the worker actually left."""
 
-    instance.stop(grace_s=5.0)
+    def test_a_clean_stop_finalizes_the_backend(self) -> None:
+        backend = SpyBackend()
+        instance = _instance(backend)
+        instance.start()
+        assert instance.wait_ready(10)
 
-    assert backend.finalized == 1
-    assert not instance.is_abandoned
+        instance.stop(grace_s=5.0)
 
+        assert backend.finalized == 1
+        assert not instance.is_abandoned
 
-def test_a_stuck_worker_is_abandoned_not_finalized() -> None:
-    """The regression test: finalising here would free memory the GPU is still reading."""
-    block = threading.Event()
-    backend = SpyBackend(block=block)
-    instance = _instance(backend)
-    instance.start()
-    assert instance.wait_ready(10)
+    def test_a_stuck_worker_is_abandoned_not_finalized(self) -> None:
+        """The regression test: finalising here would free memory the GPU is still reading."""
+        block = threading.Event()
+        backend = SpyBackend(block=block)
+        instance = _instance(backend)
+        instance.start()
+        assert instance.wait_ready(10)
 
-    instance.enqueue(_item())
-    time.sleep(0.2)  # let the worker pick it up and block inside execute
+        instance.enqueue(_item())
+        time.sleep(0.2)  # let the worker pick it up and block inside execute
 
-    instance.stop(grace_s=0.3)  # shorter than the batch will take
+        instance.stop(grace_s=0.3)  # shorter than the batch will take
 
-    assert instance.is_abandoned
-    assert backend.finalized == 0, "the backend was torn down under a running batch"
-    assert instance.stats()["abandoned"] is True
+        assert instance.is_abandoned
+        assert backend.finalized == 0, "the backend was torn down under a running batch"
+        assert instance.stats()["abandoned"] is True
 
-    block.set()  # let the worker finish so the test does not leak it
+        block.set()  # let the worker finish so the test does not leak it
 
+    def test_stop_is_idempotent(self) -> None:
+        backend = SpyBackend()
+        instance = _instance(backend)
+        instance.start()
+        assert instance.wait_ready(10)
 
-def test_queued_work_is_failed_on_stop() -> None:
-    """Everything the instance still owns resolves; nothing is left pending forever."""
-    block = threading.Event()
-    backend = SpyBackend(block=block)
-    instance = _instance(backend)
-    instance.start()
-    assert instance.wait_ready(10)
+        instance.stop(grace_s=5.0)
+        instance.stop(grace_s=5.0)
+        instance.stop(grace_s=5.0)
 
-    queued = [_item() for _ in range(3)]
-    instance.enqueue(queued[0])
-    time.sleep(0.2)  # this one is in flight
-    for item in queued[1:]:
-        instance.enqueue(item)
-
-    instance.stop(grace_s=0.3)
-
-    # The two still in the queue are failed by close(); the in-flight one belongs to the
-    # worker and is resolved by it, which is why the test releases the block and waits.
-    done, not_done = wait([i.future for i in queued[1:]], timeout=5)
-    assert not not_done
-    assert all(f.exception() is not None for f in done)
-
-    block.set()
-    wait([queued[0].future], timeout=10)
+        assert backend.finalized == 1, "finalize ran more than once"
 
 
-def test_stop_is_idempotent() -> None:
-    backend = SpyBackend()
-    instance = _instance(backend)
-    instance.start()
-    assert instance.wait_ready(10)
+class TestQueuedWorkOnStop:
+    """Work the instance still owns when it stops resolves, rather than hanging forever."""
 
-    instance.stop(grace_s=5.0)
-    instance.stop(grace_s=5.0)
-    instance.stop(grace_s=5.0)
+    def test_queued_work_is_failed_on_stop(self) -> None:
+        """Everything the instance still owns resolves; nothing is left pending forever."""
+        block = threading.Event()
+        backend = SpyBackend(block=block)
+        instance = _instance(backend)
+        instance.start()
+        assert instance.wait_ready(10)
 
-    assert backend.finalized == 1, "finalize ran more than once"
+        queued = [_item() for _ in range(3)]
+        instance.enqueue(queued[0])
+        time.sleep(0.2)  # this one is in flight
+        for item in queued[1:]:
+            instance.enqueue(item)
+
+        instance.stop(grace_s=0.3)
+
+        # The two still in the queue are failed by close(); the in-flight one belongs to the
+        # worker and is resolved by it, which is why the test releases the block and waits.
+        done, not_done = wait([i.future for i in queued[1:]], timeout=5)
+        assert not not_done
+        assert all(f.exception() is not None for f in done)
+
+        block.set()
+        wait([queued[0].future], timeout=10)
 
 
-def test_readiness_gauge_is_not_decremented_below_zero() -> None:
-    """An instance that never became ready must not decrement a gauge it never
-    incremented — a negative "instances ready" is worse than no metric at all."""
-    metrics = ServerMetrics()
-    backend = SpyBackend()
-    instance = ModelInstance(
-        name="m_0_cpu",
-        backend=backend,
-        queue=FairPriorityQueue("m_0_cpu", capacity=8),
-        batcher=StackingBatcher(INPUTS, OUTPUTS, max_batch_size=4),
-        window=BatchWindow(max_batch_size=4),
-        devices=DeviceManager(),
-        metrics=metrics,
-        scheduler=SchedulerSettings(),
-    )
+class TestReadinessMetric:
+    """The readiness gauge tracks reality, including for an instance that never started."""
 
-    instance.stop()  # never started
+    def test_readiness_gauge_is_not_decremented_below_zero(self) -> None:
+        """An instance that never became ready must not decrement a gauge it never
+        incremented — a negative "instances ready" is worse than no metric at all."""
+        metrics = ServerMetrics()
+        backend = SpyBackend()
+        instance = ModelInstance(
+            name="m_0_cpu",
+            backend=backend,
+            queue=FairPriorityQueue("m_0_cpu", capacity=8),
+            batcher=StackingBatcher(INPUTS, OUTPUTS, max_batch_size=4),
+            window=BatchWindow(max_batch_size=4),
+            devices=DeviceManager(),
+            metrics=metrics,
+            scheduler=SchedulerSettings(),
+        )
 
-    assert metrics.instances_ready.value(model="m") == 0
+        instance.stop()  # never started
+
+        assert metrics.instances_ready.value(model="m") == 0

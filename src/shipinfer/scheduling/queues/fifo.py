@@ -118,13 +118,22 @@ class FifoQueue(RequestQueue):
 
             now = time.monotonic_ns()
             batch: list[WorkItem] = []
-            while self._items and len(batch) < window.max_batch_size:
+            rows = 0
+            # Rows, not items — a per-object request carries one row per crop. See
+            # `FairQueue._drain_locked` for what counting items instead cost.
+            while self._items:
+                head_rows = self._items[0].request.batch_size or 1
+                if batch and rows + head_rows > window.max_batch_size:
+                    break
                 item = self._items.popleft()
                 if self.drop_expired and item.request.is_expired(now):
                     self._expired += 1
                     item.fail(RequestCancelledError("request deadline passed before execution"))
                     continue
                 batch.append(item)
+                rows += head_rows
+                if rows >= window.max_batch_size:
+                    break
             if self.overflow is OverflowPolicy.BLOCK:
                 self._cond.notify_all()
             return batch

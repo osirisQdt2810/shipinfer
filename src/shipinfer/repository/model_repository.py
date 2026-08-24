@@ -10,7 +10,6 @@
       person_embedder/
         config.yaml
         1/model.plan
-      ship_pipeline/
         config.yaml            # platform: ensemble, no version dir needed
 
 Using the same layout is not nostalgia: it means an existing Triton deployment's

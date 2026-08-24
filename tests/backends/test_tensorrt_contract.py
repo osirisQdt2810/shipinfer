@@ -32,7 +32,6 @@ from shipinfer.runtime.graphs.base import CapturedGraph, GraphCache
 INPUTS = (TensorSpec("images", DataType.FP32, (3, 8, 8)),)
 OUTPUTS = (TensorSpec("boxes", DataType.FP32, (4,)),)
 
-
 # -- fakes ---------------------------------------------------------------------------------
 
 
@@ -202,114 +201,116 @@ def _backend(
     return backend, stream, bindings
 
 
-# -- the contract with the graph cache ------------------------------------------------------
+class TestGraphCaptureContract:
+    """How the backend calls capture: the ABC's own signature, and the persistent buffers."""
+
+    def test_backend_calls_capture_with_the_signature_the_abc_declares(self) -> None:
+        """The regression test for the refactor that broke the graph path entirely.
+
+        Binding the recorded call against the ABC's own signature means renaming or reordering
+        a parameter on either side fails here, not on a production GPU.
+        """
+        log: list[str] = []
+        graphs = RecordingGraphCache(log)
+        backend, stream, _bindings = _backend(log, graphs)
+
+        backend._maybe_replay(4, stream)
+
+        assert len(graphs.capture_calls) == 1
+        call = graphs.capture_calls[0]
+        # Would raise TypeError if the backend passed the wrong number or names of arguments.
+        inspect.signature(GraphCache.capture).bind(
+            graphs, call["batch_size"], call["stream"], call["static_inputs"], lambda: {}
+        )
+
+    def test_capture_receives_the_persistent_binding_tensors(self) -> None:
+        """ADR-008: a graph records addresses, so the buffers handed to capture must be the
+        ones staging writes into — not a fresh allocation."""
+        log: list[str] = []
+        graphs = RecordingGraphCache(log)
+        backend, stream, bindings = _backend(log, graphs)
+
+        backend._maybe_replay(4, stream)
+
+        static_inputs = graphs.capture_calls[0]["static_inputs"]
+        assert set(static_inputs) == {"images"}
+        assert static_inputs["images"] is bindings.device_tensor("images")
 
 
-def test_backend_calls_capture_with_the_signature_the_abc_declares() -> None:
-    """The regression test for the refactor that broke the graph path entirely.
+class TestGraphReplayAndFallback:
+    """A captured size replays; an uncaptured or absent graph is a fallback, not an error."""
 
-    Binding the recorded call against the ABC's own signature means renaming or reordering
-    a parameter on either side fails here, not on a production GPU.
-    """
-    log: list[str] = []
-    graphs = RecordingGraphCache(log)
-    backend, stream, _bindings = _backend(log, graphs)
+    def test_second_batch_of_a_captured_size_replays_instead_of_capturing(self) -> None:
+        log: list[str] = []
+        graphs = RecordingGraphCache(log)
+        backend, stream, _bindings = _backend(log, graphs)
 
-    backend._maybe_replay(4, stream)
+        backend._maybe_replay(4, stream)
+        backend._maybe_replay(4, stream)
 
-    assert len(graphs.capture_calls) == 1
-    call = graphs.capture_calls[0]
-    # Would raise TypeError if the backend passed the wrong number or names of arguments.
-    inspect.signature(GraphCache.capture).bind(
-        graphs, call["batch_size"], call["stream"], call["static_inputs"], lambda: {}
-    )
+        assert log.count("capture:4") == 1
+        assert log.count("replay") == 2
+        assert backend._graph_replays == 2
 
+    def test_a_failed_capture_falls_back_to_the_ordinary_launch(self) -> None:
+        """Capture returning None means "no graph", not "error"."""
+        log: list[str] = []
+        graphs = RecordingGraphCache(log, capture_succeeds=False)
+        backend, stream, _bindings = _backend(log, graphs)
 
-def test_capture_receives_the_persistent_binding_tensors() -> None:
-    """ADR-008: a graph records addresses, so the buffers handed to capture must be the
-    ones staging writes into — not a fresh allocation."""
-    log: list[str] = []
-    graphs = RecordingGraphCache(log)
-    backend, stream, bindings = _backend(log, graphs)
+        assert backend._maybe_replay(4, stream) is None
+        assert backend._graph_replays == 0
 
-    backend._maybe_replay(4, stream)
-
-    static_inputs = graphs.capture_calls[0]["static_inputs"]
-    assert set(static_inputs) == {"images"}
-    assert static_inputs["images"] is bindings.device_tensor("images")
+    def test_no_graph_cache_is_not_an_error(self) -> None:
+        log: list[str] = []
+        backend, stream, _bindings = _backend(log, None)
+        assert backend._maybe_replay(4, stream) is None
 
 
-def test_second_batch_of_a_captured_size_replays_instead_of_capturing() -> None:
-    log: list[str] = []
-    graphs = RecordingGraphCache(log)
-    backend, stream, _bindings = _backend(log, graphs)
+class TestStreamOrdering:
+    """Every copy and the enqueue are issued inside one stream activation."""
 
-    backend._maybe_replay(4, stream)
-    backend._maybe_replay(4, stream)
+    def test_every_transfer_and_the_enqueue_share_one_stream(self) -> None:
+        """The regression test for the unordered-copies defect.
 
-    assert log.count("capture:4") == 1
-    assert log.count("replay") == 2
-    assert backend._graph_replays == 2
+        Staging, the enqueue and the readback must all be issued inside the instance stream's
+        activation. Anything issued outside it lands on torch's current stream, which nothing
+        orders against the stream TensorRT was handed.
+        """
+        log: list[str] = []
+        backend, _stream, bindings = _backend(log, None)
 
+        backend.execute({"images": Tensor.from_numpy(np.zeros((2, 3, 8, 8), np.float32))}, 2)
 
-def test_a_failed_capture_falls_back_to_the_ordinary_launch() -> None:
-    """Capture returning None means "no graph", not "error"."""
-    log: list[str] = []
-    graphs = RecordingGraphCache(log, capture_succeeds=False)
-    backend, stream, _bindings = _backend(log, graphs)
-
-    assert backend._maybe_replay(4, stream) is None
-    assert backend._graph_replays == 0
-
-
-def test_no_graph_cache_is_not_an_error() -> None:
-    log: list[str] = []
-    backend, stream, _bindings = _backend(log, None)
-    assert backend._maybe_replay(4, stream) is None
+        assert (
+            bindings.unordered == []
+        ), f"issued outside the stream activation: {bindings.unordered}"
+        assert log[0] == "activate:enter"
+        assert log[-1] == "activate:exit"
+        assert log.index("stage:images") < log.index("enqueue") < log.index("fetch:boxes")
 
 
-# -- the contract with the stream -----------------------------------------------------------
+class TestExecuteContract:
+    """What execute returns, and what it refuses to do before initialise."""
 
+    def test_execute_returns_one_row_per_request_row(self) -> None:
+        log: list[str] = []
+        backend, _stream, _bindings = _backend(log, None)
 
-def test_every_transfer_and_the_enqueue_share_one_stream() -> None:
-    """The regression test for the unordered-copies defect.
+        outputs = backend.execute(
+            {"images": Tensor.from_numpy(np.zeros((3, 3, 8, 8), np.float32))}, 3
+        )
 
-    Staging, the enqueue and the readback must all be issued inside the instance stream's
-    activation. Anything issued outside it lands on torch's current stream, which nothing
-    orders against the stream TensorRT was handed.
-    """
-    log: list[str] = []
-    backend, _stream, bindings = _backend(log, None)
+        assert set(outputs) == {"boxes"}
+        assert outputs["boxes"].shape == (3, 4)
 
-    backend.execute({"images": Tensor.from_numpy(np.zeros((2, 3, 8, 8), np.float32))}, 2)
+    def test_execute_before_initialise_is_refused(self) -> None:
+        from shipinfer.core.errors import InferenceError
 
-    assert (
-        bindings.unordered == []
-    ), f"issued outside the stream activation: {bindings.unordered}"
-    assert log[0] == "activate:enter"
-    assert log[-1] == "activate:exit"
-    assert log.index("stage:images") < log.index("enqueue") < log.index("fetch:boxes")
-
-
-def test_execute_returns_one_row_per_request_row() -> None:
-    log: list[str] = []
-    backend, _stream, _bindings = _backend(log, None)
-
-    outputs = backend.execute(
-        {"images": Tensor.from_numpy(np.zeros((3, 3, 8, 8), np.float32))}, 3
-    )
-
-    assert set(outputs) == {"boxes"}
-    assert outputs["boxes"].shape == (3, 4)
-
-
-def test_execute_before_initialise_is_refused() -> None:
-    from shipinfer.core.errors import InferenceError
-
-    backend = object.__new__(TensorRTBackend)
-    backend._context = _Context(graphs=None)
-    backend._bindings = None
-    backend._ctx = None
-    backend._stream = None
-    with pytest.raises(InferenceError, match="not initialised"):
-        backend.execute({}, 1)
+        backend = object.__new__(TensorRTBackend)
+        backend._context = _Context(graphs=None)
+        backend._bindings = None
+        backend._ctx = None
+        backend._stream = None
+        with pytest.raises(InferenceError, match="not initialised"):
+            backend.execute({}, 1)

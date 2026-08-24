@@ -1,21 +1,27 @@
-# Stage 3b: person ReID embedding. The highest *crop* volume in the system —
-# ~15 person crops per frame x 1000 frames/s = ~15 000 crops/s.
+# Stage 3, people: one appearance vector per person crop, for the tracker to match on.
 #
-# Crops are a few KB each, so unlike a full frame they are cheap to route anywhere: this is
-# the model where locality matters least and pure load balancing matters most.
+# A REAL engine: ResNet-50 with ImageNet weights, global-pooled and L2-normalised to a 2048-d
+# vector — the same backbone family the reference FastReID implementation uses (R50-SBS).
+# Built by `scripts/build_engines.py`.
+#
+# What is claimed and what is not: the whole path is exercised — crop, letterbox, batch,
+# engine, normalise, gallery — with a network of the right shape and the right cost. It is
+# not a re-identification-trained checkpoint, so embedding *accuracy* is not claimed here.
+# Accuracy is measured separately, on MOT17 with ground truth, by `shipvision/eval`. Saying
+# which of the two a number supports is the difference between evidence and decoration.
 name: person_embedder
-platform: mock
-max_batch_size: 128
+platform: tensorrt
+max_batch_size: 16
 
 inputs:
-  - name: crops
+  - name: images
     data_type: FP32
-    dims: [3, 256, 128]
+    dims: [3, 256, 128]          # tall, not square: a person crop wastes half a square
 
 outputs:
   - name: embedding
     data_type: FP32
-    dims: [512]
+    dims: [2048]
 
 instance_groups:
   - kind: KIND_AUTO
@@ -24,10 +30,9 @@ instance_groups:
 
 dynamic_batching:
   enabled: true
-  max_queue_delay_us: 4000
-  preferred_batch_sizes: [32, 64, 128]
+  # The highest-volume model in the repository: ~15 crops per frame at 1000 fps is 15 000 req/s, so a short window and a full batch matter more here than anywhere else.
+  max_queue_delay_us: 3000
+  preferred_batch_sizes: [8, 16]
 
 parameters:
   engine_file: model.plan
-  latency_ms: 1.2
-  per_item_latency_ms: 0.03

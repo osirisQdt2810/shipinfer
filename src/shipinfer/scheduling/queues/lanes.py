@@ -44,6 +44,18 @@ class Lane:
         self.size -= 1
         return item
 
+    def peek(self) -> WorkItem | None:
+        """The item :meth:`pop` would return, without removing it.
+
+        Needed because a batch is bounded in *rows* and an item carries however many rows
+        its request does, so the drain has to see an item's size before committing to it —
+        popping first and pushing back would send it to the back of its own key's FIFO and
+        reorder a camera's frames.
+        """
+        if not self.order:
+            return None
+        return self.by_key[self.order[0]][0]
+
     def evict_from_longest(self) -> WorkItem | None:
         """Drop the oldest request of whichever key is hogging this lane.
 
