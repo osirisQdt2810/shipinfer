@@ -20,28 +20,28 @@
 
 namespace shipinfer {
 
-class OccupancySampler {
-  public:
-    using Probe = std::function<std::map<std::string, long long>()>;
+    class OccupancySampler {
+      public:
+        using Probe = std::function<std::map<std::string, long long>()>;
 
-    OccupancySampler(const std::string& path, Probe probe, double interval_s,
-                     const std::string& meta_json);
-    ~OccupancySampler();
+        OccupancySampler(const std::string& path, Probe probe, double interval_s,
+                         const std::string& meta_json);
+        ~OccupancySampler();
 
-    void start();
-    void stop();
+        void start();
+        void stop();
 
-  private:
-    void run();
+      private:
+        void run();
 
-    std::string path_;
-    Probe probe_;
-    double interval_s_;
-    std::string meta_json_;
-    std::ofstream out_;
-    std::thread thread_;
-    std::atomic<bool> stopping_{false};
-    std::chrono::steady_clock::time_point started_;
-};
+        std::string path_;
+        Probe probe_;
+        double interval_s_;
+        std::string meta_json_;
+        std::ofstream out_;
+        std::thread thread_;
+        std::atomic<bool> stopping_{false};
+        std::chrono::steady_clock::time_point started_;
+    };
 
 }  // namespace shipinfer

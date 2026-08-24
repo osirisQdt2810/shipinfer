@@ -1,0 +1,139 @@
+#include "shipinfer/ingest/sources/replay.h"
+
+#include <opencv2/opencv.hpp>
+
+#include "shipinfer/core/platform.h"
+
+#include <algorithm>
+#include <filesystem>
+
+namespace shipinfer {
+    namespace {
+
+        int64_t unix_ns() {
+            return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        }
+
+    }  // namespace
+
+    FrameLibrary::FrameLibrary(const std::string& folder, int limit) {
+        namespace fs = std::filesystem;
+        if (!fs::is_directory(folder)) {
+            throw SourceError("frame folder is not a directory: " + folder);
+        }
+        std::vector<std::string> paths;
+        for (const auto& entry : fs::directory_iterator(folder)) {
+            if (!entry.is_regular_file()) continue;
+            auto ext = entry.path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            if (ext == ".jpg" || ext == ".jpeg" || ext == ".png") {
+                paths.push_back(entry.path().string());
+            }
+        }
+        // Sorted, so two runs replay the same frames in the same order and a difference between
+        // them is a difference in the system rather than in the input.
+        std::sort(paths.begin(), paths.end());
+        if (limit > 0 && paths.size() > static_cast<size_t>(limit)) {
+            paths.resize(static_cast<size_t>(limit));
+        }
+        for (const auto& path : paths) {
+            cv::Mat image = cv::imread(path, cv::IMREAD_COLOR);
+            if (image.empty()) continue;
+            if (!image.isContinuous()) image = image.clone();
+            Image decoded;
+            decoded.height = image.rows;
+            decoded.width = image.cols;
+            decoded.pixels.assign(
+                image.data, image.data + static_cast<size_t>(image.total()) * image.elemSize());
+            frames_.push_back(std::move(decoded));
+        }
+        // Registered as pinned. Every frame is copied host->device once per replay, and a
+        // *pageable* source forces the driver to stage the copy through its own bounded buffer and
+        // serialise it against every other copy on the context: at 350 img/s x 6 MB that is 2 GB/s
+        // of copies taking the slow path. `gpuHostRegister` on the decoded library is one call at
+        // start-up and makes those copies DMA straight out of these pages.
+        //
+        // Failure is not fatal: registration can be refused (a locked-memory rlimit, a kernel that
+        // will not pin that much), and the correct response is a slower run rather than no run.
+        for (auto& image : frames_) {
+            if (gpuHostRegister(image.pixels.data(), image.pixels.size(), gpuHostRegisterDefault) !=
+                gpuSuccess) {
+                gpuGetLastError();  // cleared, so the next real error is not misattributed
+                pinned_ = false;
+            }
+        }
+
+        if (frames_.empty()) {
+            throw SourceError("no decodable images under " + folder +
+                              " — a run that offers zero frames is not a slower measurement, it is "
+                              "a different experiment");
+        }
+    }
+
+    FrameLibrary::~FrameLibrary() {
+        if (!pinned_) return;
+        for (auto& image : frames_) gpuHostUnregister(image.pixels.data());
+    }
+
+    HostFrame FrameLibrary::at(size_t index) const {
+        const Image& image = frames_[index % frames_.size()];
+        HostFrame frame;
+        frame.pixels = image.pixels.data();
+        frame.height = image.height;
+        frame.width = image.width;
+        return frame;
+    }
+
+    ReplayCamera::ReplayCamera(std::string camera_id, std::shared_ptr<FrameLibrary> library,
+                               double fps, Publish publish)
+        : id_(std::move(camera_id)),
+          library_(std::move(library)),
+          fps_(fps),
+          publish_(std::move(publish)) {}
+
+    ReplayCamera::~ReplayCamera() {
+        stop();
+    }
+
+    void ReplayCamera::start() {
+        if (thread_.joinable()) return;
+        thread_ = std::thread([this] { run(); });
+    }
+
+    void ReplayCamera::stop() {
+        stopping_.store(true);
+        if (thread_.joinable()) thread_.join();
+    }
+
+    void ReplayCamera::run() {
+        using clock = std::chrono::steady_clock;
+        const auto period = std::chrono::duration<double>(1.0 / std::max(1e-6, fps_));
+        auto next = clock::now();
+        int64_t frame_id = 0;
+
+        while (!stopping_.load()) {
+            FrameTag tag;
+            tag.camera_id = id_;
+            tag.frame_id = frame_id++;
+            tag.captured_ns = unix_ns();
+
+            const HostFrame frame = library_->at(static_cast<size_t>(tag.frame_id));
+            read_.fetch_add(1);
+            if (!publish_(tag, frame)) dropped_.fetch_add(1);
+
+            next += std::chrono::duration_cast<clock::duration>(period);
+            const auto now = clock::now();
+            if (next > now) {
+                std::this_thread::sleep_for(next - now);
+            } else {
+                // Behind. Absorb rather than catch up — see the header. Resetting `next` to now is
+                // what makes the deficit show up in `read_` as a lower offered rate instead of
+                // becoming a burst the fleet's queue has to eat.
+                next = now;
+            }
+        }
+    }
+
+}  // namespace shipinfer

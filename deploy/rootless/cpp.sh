@@ -13,7 +13,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 IMAGE="${SHIPINFER_BENCH_IMAGE:-shipinfer-gst:jammy}"
 TRT_DIR="${SHIPINFER_TENSORRT_DIR:-/usr/local/TensorRT}"
 LIBS="$REPO/benchmarks/build/baseline-libs"
-BINARY="$REPO/csrc/build/${SHIPINFER_CPP_BINARY:-shipinfer_pipeline}"
+BINARY="$REPO/csrc/build/${SHIPINFER_CPP_BINARY:-bench}"
 
 if [ ! -x "$BINARY" ]; then
   echo "no binary at $BINARY — run: python scripts/build_csrc.py" >&2
@@ -38,4 +38,4 @@ exec docker run --rm --pid=host --device nvidia.com/gpu=all \
   -v "$TRT_DIR:/tensorrt:ro" \
   "${mount_libs[@]}" \
   -w /work "$IMAGE" \
-  "/work/csrc/build/${SHIPINFER_CPP_BINARY:-shipinfer_pipeline}" "$@"
+  "/work/csrc/build/${SHIPINFER_CPP_BINARY:-bench}" "$@"

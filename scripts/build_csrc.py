@@ -65,9 +65,13 @@ def main() -> int:
     parser.add_argument("--debug", action="store_true", help="-O0 -g instead of -O2")
     args = parser.parse_args()
 
-    sources = sorted((CSRC / "src").glob("*.cpp"))
-    apps = sorted((CSRC / "apps").glob("*.cpp")) + sorted((CSRC / "tests").glob("*.cpp"))
-    cuda_sources = sorted((CSRC / "src").glob("*.cu"))
+    # The tree mirrors `src/shipinfer/` — a thing's header and its translation unit live next
+    # to each other, so there is no `include/` to search separately and the include root is
+    # `csrc/` itself. Entry points are `cli/` (the binaries) and `tests/`.
+    pkg = CSRC / "shipinfer"
+    apps = sorted((pkg / "cli").glob("*.cpp")) + sorted((CSRC / "tests").glob("*.cpp"))
+    sources = [q for q in sorted(pkg.rglob("*.cpp")) if q not in set(apps)]
+    cuda_sources = sorted((CSRC / "shipinfer").rglob("*.cu"))
     if not sources:
         raise SystemExit(f"no sources under {CSRC}")
     if not (TENSORRT / "include" / "NvInfer.h").is_file():
@@ -80,7 +84,7 @@ def main() -> int:
             raise SystemExit(f"{tool} is not on PATH and not under {CUDA / 'bin'}")
 
     newest = max(
-        p.stat().st_mtime for p in [*sources, *apps, *cuda_sources, *CSRC.rglob("*.hpp")]
+        p.stat().st_mtime for p in [*sources, *apps, *cuda_sources, *CSRC.rglob("*.h")]
     )
     targets = [BUILD / p.stem for p in apps]
     if not args.force and all(t.is_file() and t.stat().st_mtime >= newest for t in targets):
@@ -90,7 +94,7 @@ def main() -> int:
     BUILD.mkdir(parents=True, exist_ok=True)
     optimise = ["-O0", "-g"] if args.debug else ["-O2"]
     includes = [
-        f"-I{CSRC / 'include'}",
+        f"-I{CSRC}",
         f"-I{TENSORRT / 'include'}",
         f"-I{CUDA / 'include'}",
     ]

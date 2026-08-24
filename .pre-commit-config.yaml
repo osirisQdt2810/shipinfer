@@ -104,3 +104,10 @@ repos:
 
   # NOTE: mypy is intentionally NOT a commit gate yet. Strict config lives in
   # pyproject.toml ([tool.mypy]); run it while typing is filled in:  mypy src/shipinfer
+  - repo: local
+    hooks:
+      - id: clang-format
+        name: clang-format (csrc/, namespace bodies indented)
+        entry: clang-format -i
+        language: system
+        files: ^csrc/.*\.(h|cpp|cu)$

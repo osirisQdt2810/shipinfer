@@ -14,124 +14,144 @@
 #include <thread>
 #include <vector>
 
-#include "shipinfer/core/cuda_check.hpp"
-#include "shipinfer/ingest/replay.hpp"
-#include "shipinfer/obs/occupancy.hpp"
-#include "shipinfer/pipeline/collector.hpp"
-#include "shipinfer/pipeline/graph.hpp"
-#include "shipinfer/sched/fair_queue.hpp"
+#include "shipinfer/core/platform.h"
+#include "shipinfer/ingest/sources/replay.h"
+#include "shipinfer/obs/sampler.h"
+#include "shipinfer/pipeline/graph/graph.h"
+#include "shipinfer/pipeline/reassembly/collector.h"
+#include "shipinfer/scheduling/queues/fair.h"
 
 using namespace shipinfer;
 
 namespace {
 
-// One frame's worth of work as it sits in the fair queue.
-//
-// The pixels stay on the **host** here, and the worker copies them to its own device. The first
-// version had the camera thread copy to a device chosen by camera index, and then any worker
-// could pick up any frame — a frame on device 1 executed by an instance on device 0, which is
-// a cross-device access. It does not fail at the call that caused it; it surfaces as `an
-// illegal memory access was encountered` inside an unrelated `cudaDeviceSynchronize` several
-// frames later, which is why ADR-002 makes the rule structural rather than advisory.
-//
-// Keeping one fleet-wide fair queue matters more than saving the copy: fairness across cameras
-// is the thing this project exists to get right, and a queue per device would make it fair
-// only within a device.
-struct FrameWork {
-    FrameTag tag;
-    std::shared_ptr<FrameState> state;
-    HostFrame frame;  // the library owns the pixels and outlives every frame in flight
+    // One frame's worth of work as it sits in the fair queue.
+    //
+    // The pixels stay on the **host** here, and the worker copies them to its own device. The first
+    // version had the camera thread copy to a device chosen by camera index, and then any worker
+    // could pick up any frame — a frame on device 1 executed by an instance on device 0, which is
+    // a cross-device access. It does not fail at the call that caused it; it surfaces as `an
+    // illegal memory access was encountered` inside an unrelated `gpuDeviceSynchronize` several
+    // frames later, which is why ADR-002 makes the rule structural rather than advisory.
+    //
+    // Keeping one fleet-wide fair queue matters more than saving the copy: fairness across cameras
+    // is the thing this project exists to get right, and a queue per device would make it fair
+    // only within a device.
+    struct FrameWork {
+        FrameTag tag;
+        std::shared_ptr<FrameState> state;
+        HostFrame frame;  // the library owns the pixels and outlives every frame in flight
 
-    size_t rows() const { return 1; }
-    std::string camera() const { return tag.camera_id; }
-};
+        size_t rows() const { return 1; }
+        std::string camera() const { return tag.camera_id; }
+    };
 
-struct Options {
-    std::string person_frames;
-    std::string ship_frames;
-    std::string det_plan;
-    std::string seg_plan;
-    std::string emb_plan;
-    std::string ship_emb_plan;
-    std::string log_path = "buffers.jsonl";
-    std::vector<int> devices{0};
-    int cameras = 12;
-    double fps = 10.0;
-    double seconds = 40.0;
-    int workers = 32;
-    int queue_capacity = 65536;
-    int reassembly_capacity = 1024;
-    int reassembly_timeout_ms = 1500;
-    int det_instances = 2;
-    int seg_instances = 1;
-    int emb_instances = 2;
-    int ship_emb_instances = 1;
-    double sample_interval_s = 1.0;
-};
+    struct Options {
+        std::string person_frames;
+        std::string ship_frames;
+        std::string det_plan;
+        std::string seg_plan;
+        std::string emb_plan;
+        std::string ship_emb_plan;
+        std::string log_path = "buffers.jsonl";
+        std::vector<int> devices{0};
+        int cameras = 12;
+        double fps = 10.0;
+        double seconds = 40.0;
+        int workers = 32;
+        int queue_capacity = 65536;
+        int reassembly_capacity = 1024;
+        int reassembly_timeout_ms = 1500;
+        int det_instances = 2;
+        int seg_instances = 1;
+        int emb_instances = 2;
+        int ship_emb_instances = 1;
+        double sample_interval_s = 1.0;
+    };
 
-std::vector<int> parse_ints(const std::string& csv) {
-    std::vector<int> out;
-    std::stringstream stream(csv);
-    std::string item;
-    while (std::getline(stream, item, ',')) {
-        if (!item.empty()) out.push_back(std::stoi(item));
+    std::vector<int> parse_ints(const std::string& csv) {
+        std::vector<int> out;
+        std::stringstream stream(csv);
+        std::string item;
+        while (std::getline(stream, item, ',')) {
+            if (!item.empty()) out.push_back(std::stoi(item));
+        }
+        return out;
     }
-    return out;
-}
 
-Options parse(int argc, char** argv) {
-    Options options;
-    for (int i = 1; i < argc; ++i) {
-        const std::string flag = argv[i];
-        auto next = [&]() -> std::string {
-            if (i + 1 >= argc) throw ConfigError("missing value for " + flag);
-            return argv[++i];
-        };
-        if (flag == "--person-frames") options.person_frames = next();
-        else if (flag == "--ship-frames") options.ship_frames = next();
-        else if (flag == "--det-engine") options.det_plan = next();
-        else if (flag == "--seg-engine") options.seg_plan = next();
-        else if (flag == "--emb-engine") options.emb_plan = next();
-        else if (flag == "--ship-emb-engine") options.ship_emb_plan = next();
-        else if (flag == "--log-jsonl") options.log_path = next();
-        else if (flag == "--gpu-ids") options.devices = parse_ints(next());
-        else if (flag == "--cameras") options.cameras = std::stoi(next());
-        else if (flag == "--fps") options.fps = std::stod(next());
-        else if (flag == "--seconds") options.seconds = std::stod(next());
-        else if (flag == "--workers") options.workers = std::stoi(next());
-        else if (flag == "--queue-capacity") options.queue_capacity = std::stoi(next());
-        else if (flag == "--det-instances") options.det_instances = std::stoi(next());
-        else if (flag == "--seg-instances") options.seg_instances = std::stoi(next());
-        else if (flag == "--emb-instances") options.emb_instances = std::stoi(next());
-        else if (flag == "--ship-emb-instances") options.ship_emb_instances = std::stoi(next());
-        else if (flag == "--sample-interval") options.sample_interval_s = std::stod(next());
-        else throw ConfigError("unknown flag " + flag);
+    Options parse(int argc, char** argv) {
+        Options options;
+        for (int i = 1; i < argc; ++i) {
+            const std::string flag = argv[i];
+            auto next = [&]() -> std::string {
+                if (i + 1 >= argc) throw ConfigError("missing value for " + flag);
+                return argv[++i];
+            };
+            if (flag == "--person-frames")
+                options.person_frames = next();
+            else if (flag == "--ship-frames")
+                options.ship_frames = next();
+            else if (flag == "--det-engine")
+                options.det_plan = next();
+            else if (flag == "--seg-engine")
+                options.seg_plan = next();
+            else if (flag == "--emb-engine")
+                options.emb_plan = next();
+            else if (flag == "--ship-emb-engine")
+                options.ship_emb_plan = next();
+            else if (flag == "--log-jsonl")
+                options.log_path = next();
+            else if (flag == "--gpu-ids")
+                options.devices = parse_ints(next());
+            else if (flag == "--cameras")
+                options.cameras = std::stoi(next());
+            else if (flag == "--fps")
+                options.fps = std::stod(next());
+            else if (flag == "--seconds")
+                options.seconds = std::stod(next());
+            else if (flag == "--workers")
+                options.workers = std::stoi(next());
+            else if (flag == "--queue-capacity")
+                options.queue_capacity = std::stoi(next());
+            else if (flag == "--det-instances")
+                options.det_instances = std::stoi(next());
+            else if (flag == "--seg-instances")
+                options.seg_instances = std::stoi(next());
+            else if (flag == "--emb-instances")
+                options.emb_instances = std::stoi(next());
+            else if (flag == "--ship-emb-instances")
+                options.ship_emb_instances = std::stoi(next());
+            else if (flag == "--sample-interval")
+                options.sample_interval_s = std::stod(next());
+            else
+                throw ConfigError("unknown flag " + flag);
+        }
+        if (options.person_frames.empty() || options.det_plan.empty()) {
+            throw ConfigError("--person-frames and --det-engine are required");
+        }
+        return options;
     }
-    if (options.person_frames.empty() || options.det_plan.empty()) {
-        throw ConfigError("--person-frames and --det-engine are required");
-    }
-    return options;
-}
 
-std::string meta_json(const Options& options, const PerceptionGraph& graph) {
-    std::ostringstream out;
-    out << "{\"meta\": {\"system\": \"cpp\", \"config\": {";
-    out << "\"cameras\": " << options.cameras;
-    out << ", \"fps\": " << options.fps;
-    out << ", \"seconds\": " << options.seconds;
-    out << ", \"workers\": " << options.workers;
-    out << ", \"buffer_capacity\": " << options.queue_capacity;
-    out << ", \"gpus\": [";
-    for (size_t i = 0; i < options.devices.size(); ++i) {
-        out << (i ? ", " : "") << options.devices[i];
+    std::string meta_json(const Options& options, const PerceptionGraph& graph) {
+        std::ostringstream out;
+        out << "{\"meta\": {\"system\": \"cpp\", \"config\": {";
+        out << "\"cameras\": " << options.cameras;
+        out << ", \"fps\": " << options.fps;
+        out << ", \"seconds\": " << options.seconds;
+        out << ", \"workers\": " << options.workers;
+        out << ", \"buffer_capacity\": " << options.queue_capacity;
+        out << ", \"gpus\": [";
+        for (size_t i = 0; i < options.devices.size(); ++i) {
+            out << (i ? ", " : "") << options.devices[i];
+        }
+        out << "]}, \"stages\": [";
+        const auto stages = graph.stage_names();
+        for (size_t i = 0; i < stages.size(); ++i)
+            out << (i ? ", " : "") << "\"" << stages[i] << "\"";
+        out << "], \"note\": \"C++ data plane; tracking and fused kernels are NOT in this "
+               "measurement\"}}";
+        return out.str();
     }
-    out << "]}, \"stages\": [";
-    const auto stages = graph.stage_names();
-    for (size_t i = 0; i < stages.size(); ++i) out << (i ? ", " : "") << "\"" << stages[i] << "\"";
-    out << "], \"note\": \"C++ data plane; tracking and fused kernels are NOT in this "
-           "measurement\"}}";
-    return out.str();
-}
 
 }  // namespace
 
@@ -169,8 +189,7 @@ int main(int argc, char** argv) {
             },
             static_cast<size_t>(options.reassembly_capacity), options.reassembly_timeout_ms);
 
-        FairQueue<FrameWork> queue(static_cast<size_t>(options.queue_capacity),
-                                   Overflow::Reject);
+        FairQueue<FrameWork> queue(static_cast<size_t>(options.queue_capacity), Overflow::Reject);
 
         // -- the sampler: the same log shape as the other two systems ---------------------
         OccupancySampler sampler(
@@ -209,8 +228,8 @@ int main(int argc, char** argv) {
             // same device by construction.
             const int device = options.devices[static_cast<size_t>(w) % options.devices.size()];
             workers.emplace_back([&, device]() {
-                SHIPINFER_CUDA(cudaSetDevice(device));
-                // One staging buffer per worker, reused. Allocating per frame put `cudaMalloc`
+                GPU_CHECK(gpuSetDevice(device));
+                // One staging buffer per worker, reused. Allocating per frame put `gpuMalloc`
                 // — which serialises on the driver — on the hot path.
                 DeviceBuffer staging;
                 size_t staged_bytes = 0;
@@ -235,8 +254,8 @@ int main(int argc, char** argv) {
                         const size_t bytes =
                             static_cast<size_t>(item.frame.height) * item.frame.width * 3;
                         auto image = std::make_shared<DeviceBuffer>(bytes);
-                        SHIPINFER_CUDA(cudaMemcpy(image->get(), item.frame.pixels, bytes,
-                                                  cudaMemcpyHostToDevice));
+                        GPU_CHECK(gpuMemcpy(image->get(), item.frame.pixels, bytes,
+                                            gpuMemcpyHostToDevice));
                         item.state->set_image(image, device);
                         images.push_back(image);
                         work.push_back({item.state.get(), image->as<uint8_t>()});
@@ -251,8 +270,8 @@ int main(int argc, char** argv) {
                             failed.fetch_add(static_cast<uint64_t>(work.size()));
                             static std::atomic<int> shouted{0};
                             if (shouted.fetch_add(1) < 5) {
-                                std::cerr << "worker on gpu" << device << " failed: "
-                                          << error.what() << "\n";
+                                std::cerr << "worker on gpu" << device
+                                          << " failed: " << error.what() << "\n";
                             }
                         }
                     }
@@ -290,13 +309,11 @@ int main(int argc, char** argv) {
             // detector produces, so it has to be the same or it is not the same experiment.
             auto library = (c % 2 == 0) ? person_library : ship_library;
             cameras.push_back(std::make_unique<ReplayCamera>(
-                name, library, options.fps,
-                [&queue](const FrameTag& tag, HostFrame frame) -> bool {
+                name, library, options.fps, [&queue](const FrameTag& tag, HostFrame frame) -> bool {
                     FrameWork work;
                     work.tag = tag;
                     work.frame = frame;
-                    work.state = std::make_shared<FrameState>(tag, frame.height, frame.width,
-                                                              0.0f);
+                    work.state = std::make_shared<FrameState>(tag, frame.height, frame.width, 0.0f);
                     return queue.put(std::move(work));
                 }));
         }
