@@ -86,7 +86,7 @@ namespace shipinfer {
         return total;
     }
 
-    PerceptionGraph::PerceptionGraph(const GraphConfig& config) : config_(config) {
+    PipelineGraph::PipelineGraph(const GraphConfig& config) : config_(config) {
         detector_ = std::make_unique<ModelPool>("ship_detector", config.detector_plan,
                                                 config.devices, config.detector_instances);
         if (!config.segmenter_plan.empty()) {
@@ -104,9 +104,9 @@ namespace shipinfer {
         }
     }
 
-    PerceptionGraph::~PerceptionGraph() = default;
+    PipelineGraph::~PipelineGraph() = default;
 
-    std::vector<std::string> PerceptionGraph::stage_names() const {
+    std::vector<std::string> PipelineGraph::stage_names() const {
         std::vector<std::string> names{"detect", "crop"};
         if (segmenter_) names.push_back("ship_segmenter");
         if (embedder_) names.push_back("person_embedder");
@@ -114,7 +114,7 @@ namespace shipinfer {
         return names;
     }
 
-    void PerceptionGraph::execute(std::vector<Work>& batch, int device, FrameCollector& collector) {
+    void PipelineGraph::execute(std::vector<Work>& batch, int device, FrameCollector& collector) {
         if (batch.empty()) return;
         GPU_CHECK(gpuSetDevice(device));
 
@@ -124,6 +124,15 @@ namespace shipinfer {
         // than left uninitialised, because uninitialised device memory can contain NaNs and a NaN
         // through a detector produces warnings on every layer.
         const int rows = detector_->max_batch();
+        // The caller drains a detector-sized batch, so this is an equality in practice. It is
+        // asserted rather than assumed because a frame is one detector row *by convention*
+        // (`FrameWork::rows()` returns 1), and anything past `rows` would be dropped here
+        // without a word.
+        if (batch.size() > static_cast<size_t>(rows)) {
+            throw ConfigError("the graph was handed " + std::to_string(batch.size()) +
+                              " frames for a detector built at batch " + std::to_string(rows) +
+                              "; the drain must not exceed it");
+        }
         const size_t real = std::min(batch.size(), static_cast<size_t>(rows));
         std::vector<LetterboxMap> maps(real);
 
@@ -208,6 +217,26 @@ namespace shipinfer {
                 index->push_back(det.index);
             }
 
+            // Declare what will actually run, *then* run it. A frame with no people does not
+            // run the embedder, and that is a **skip** -- it has to be distinguishable in the
+            // event from a stage that was expected and failed.
+            //
+            // The first version handed `collector.open` the full stage list unconditionally and
+            // never called `expect` at all, so every ship-only frame sealed Incomplete with
+            // `missing=["person_embedder"]` and every person-only frame with
+            // `missing=["ship_segmenter", "ship_embedder"]`. At the 50/50 library split that is
+            // most of the fleet, and a real embedder outage emitted a byte-identical event:
+            // skipped, failed and timed out collapsed into one.
+            std::vector<std::string> will_run;
+            if (embedder_ != nullptr && !person_index.empty()) {
+                will_run.push_back("person_embedder");
+            }
+            if (segmenter_ != nullptr && !ship_index.empty()) will_run.push_back("ship_segmenter");
+            if (ship_embedder_ != nullptr && !ship_index.empty()) {
+                will_run.push_back("ship_embedder");
+            }
+            collector.expect(state.tag(), will_run);
+
             run_objects(embedder_.get(), state, batch[i].image_device, device, person_boxes,
                         person_index, config_.crop_h, config_.crop_w, "person_embedder", collector);
             run_objects(segmenter_.get(), state, batch[i].image_device, device, ship_boxes,
@@ -218,11 +247,10 @@ namespace shipinfer {
         }
     }
 
-    void PerceptionGraph::run_objects(ModelPool* pool, FrameState& state,
-                                      const uint8_t* image_device, int device,
-                                      const std::vector<float>& boxes,
-                                      const std::vector<int>& indices, int crop_h, int crop_w,
-                                      const char* stage, FrameCollector& collector) {
+    void PipelineGraph::run_objects(ModelPool* pool, FrameState& state, const uint8_t* image_device,
+                                    int device, const std::vector<float>& boxes,
+                                    const std::vector<int>& indices, int crop_h, int crop_w,
+                                    const char* stage, FrameCollector& collector) {
         if (pool == nullptr || indices.empty()) return;
         const int limit = pool->max_batch();
         // Chunked to the engine's own batch, and padded up to it because these plans are static

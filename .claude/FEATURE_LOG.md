@@ -5,6 +5,54 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-24 — The C++ data plane (`csrc/`)
+
+**What it is.** A standalone binary that owns everything running once per frame or once per
+object: ingest and per-camera pacing, the fair bounded queue, letterbox and crop-resize kernels
+writing straight into TensorRT bindings, device-affine instance pools, the perception graph,
+per-frame reassembly with a timeout, and the occupancy log. Python keeps the control plane.
+See ADR-014 for why this is not the optional-extension contract ADR-007 governs.
+
+**Why.** The Python data plane capped at 77 img/s using five cores of forty-eight while every
+GPU queue sat empty. Four other candidates were eliminated by measurement first (the GPUs, the
+worker pool, the reassembly lock, the load generator), so the remaining explanation was the
+pure-Python share of the per-frame path holding the GIL.
+
+**The measurement, and the one design decision that makes it trustworthy.** The binary writes
+the *same* `*_buffer_size` occupancy JSONL the Python driver and the baseline binary write, so
+`benchmarks/harness/analysis.py` scores all three with one implementation and one set of
+guards. A port that exists to look good must not be scored by a friendlier judge than the thing
+it is compared against.
+
+    50 cameras x 20 fps on 4x A5000, 70 s, 10 s warmup, scored by the shared analysis
+    pipeline: offered 983, growth +592.9/s, sustained 390.5, SATURATED
+
+390.5 against the Python plane's 77.5 — **5.0x**, with 98% of the offered load actually
+delivered where the Python driver could never exceed ~87 img/s.
+
+**Four bugs found by running it**, each a design error: static plans refuse any batch but their
+own; cross-device execution (an instance on gpu0 executing pixels on gpu1, surfacing as an
+illegal access somewhere else entirely); `gpuDeviceSynchronize` after every kernel, which is
+device-wide; and a pageable host source for 2 GB/s of copies.
+
+**And a hole in the measurement itself**, which is the part worth remembering. The occupancy
+log first carried `busy()` — leases held. This design has no queue in front of a pool (a worker
+blocks inside `lease`), so a *fully committed* pool reads as a flat `busy == size` and the
+analysis scores it SUSTAINED. `ship_segmenter` sat at exactly 4 with exactly 4 instances:
+pegged, and invisible. Logging `waiting()` instead showed 37 of 48 workers blocked on it, and
+every bottleneck since has been a model pool rather than the interpreter — which is the
+qualitative change the port bought and is worth more than the 5x.
+
+**Review found four blocking defects in the first version**, all real: a per-frame
+`gpuMalloc`/`gpuFree` on the dispatch path with the reusable buffer voided by `(void)`; skipped
+branches indistinguishable from failed stages (every ship-only frame sealed Incomplete);
+reassembly eviction destroying a frame with no event and no per-camera attribution; and no ADR
+for a second data plane. Fixing the second took Complete events from a minority to 28656 of
+28808. Fixing the first — the one predicted to be the throughput lever — moved 390 to 400,
+about 2.5%, which is a reminder that a plausible mechanism is not a measured one.
+
+---
+
 ## 2026-08-24 — The benchmark harness: what counts as a measurement
 
 **What it is.** `benchmarks/` drives ShipInfer and `counting-simulation` under one load and

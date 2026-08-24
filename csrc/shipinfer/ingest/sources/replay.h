@@ -34,13 +34,13 @@ namespace shipinfer {
         int width = 0;
     };
 
-    class FrameLibrary {
+    class ReplaySource {
       public:
         // Loads every .jpg/.png under `folder`, decoded once. Throws SourceError if empty, because
         // a benchmark that silently offers zero frames is the failure this project keeps finding.
-        explicit FrameLibrary(const std::string& folder, int limit = 0);
+        explicit ReplaySource(const std::string& folder, int limit = 0);
 
-        ~FrameLibrary();
+        ~ReplaySource();
 
         size_t size() const { return frames_.size(); }
         HostFrame at(size_t index) const;
@@ -58,15 +58,15 @@ namespace shipinfer {
         bool pinned_ = true;
     };
 
-    class ReplayCamera {
+    class CameraActor {
       public:
         // `publish` returns false when the sink refused the frame; the camera counts that as a
         // drop against *itself*, which is the attribution ADR-005 is about.
         using Publish = std::function<bool(const FrameTag&, HostFrame)>;
 
-        ReplayCamera(std::string camera_id, std::shared_ptr<FrameLibrary> library, double fps,
-                     Publish publish);
-        ~ReplayCamera();
+        CameraActor(std::string camera_id, std::shared_ptr<ReplaySource> library, double fps,
+                    Publish publish);
+        ~CameraActor();
 
         void start();
         void stop();
@@ -79,7 +79,7 @@ namespace shipinfer {
         void run();
 
         std::string id_;
-        std::shared_ptr<FrameLibrary> library_;
+        std::shared_ptr<ReplaySource> library_;
         double fps_;
         Publish publish_;
         std::thread thread_;

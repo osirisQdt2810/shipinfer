@@ -43,7 +43,11 @@ namespace shipinfer {
             // keeps the first frame's caller from waiting on something nobody will resolve.
             return false;
         }
-        if (pending_.size() >= capacity_ && !evict_locked()) return false;
+        std::optional<FrameResult> evicted;
+        if (pending_.size() >= capacity_) {
+            evicted = evict_locked(now_ns());
+            if (!evicted.has_value()) return false;
+        }
 
         Pending frame;
         frame.state = state;
@@ -51,6 +55,13 @@ namespace shipinfer {
         frame.opened_ns = now_ns();
         pending_.emplace(key, std::move(frame));
         ++per_camera_[state->tag().camera_id];
+        lock.unlock();
+
+        // Emitted, and outside the lock. The first version destroyed the frame here with no
+        // event at all and still incremented `reported_`, so `collector_reported` over-counted
+        // by the eviction count and an operator had no per-camera number to point at — which
+        // is the entire diagnosis ADR-005 exists to make possible.
+        if (evicted.has_value()) emit_(std::move(*evicted));
         return true;
     }
 
@@ -142,27 +153,32 @@ namespace shipinfer {
         return result;
     }
 
-    bool FrameCollector::evict_locked() {
-        // ADR-005: the camera holding the most frames loses one, not whoever is oldest. That
-        // inversion is the whole bug the previous system had.
-        if (per_camera_.empty()) return false;
+    std::optional<FrameResult> FrameCollector::evict_locked(int64_t at) {
+        // ADR-005: the camera holding the most frames loses one, never whoever is oldest.
+        // That inversion is the bug the previous generation had — a crowded camera filled the
+        // buffer and pushed out a quiet camera's work.
+        if (per_camera_.empty()) return std::nullopt;
         const auto greediest =
             std::max_element(per_camera_.begin(), per_camera_.end(),
                              [](const auto& a, const auto& b) { return a.second < b.second; });
 
         for (auto it = pending_.begin(); it != pending_.end(); ++it) {
             if (it->second.state->tag().camera_id != greediest->first) continue;
-            // Counted and *not* published: the buffer is full because the system is behind, and an
-            // event that is mostly empty moves the overload onto a consumer instead of resolving
-            // it.
+            FrameResult result = finish_locked(it->second, FinishReason::Evicted, at);
             const auto camera = greediest->first;
             pending_.erase(it);
             if (--per_camera_[camera] == 0) per_camera_.erase(camera);
             ++evicted_;
+            ++evicted_by_camera_[camera];
             ++reported_;
-            return true;
+            return result;
         }
-        return false;
+        return std::nullopt;
+    }
+
+    std::map<std::string, uint64_t> FrameCollector::evicted_by_camera() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return evicted_by_camera_;
     }
 
     size_t FrameCollector::pending() const {

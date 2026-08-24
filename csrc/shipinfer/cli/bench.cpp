@@ -132,7 +132,7 @@ namespace {
         return options;
     }
 
-    std::string meta_json(const Options& options, const PerceptionGraph& graph) {
+    std::string meta_json(const Options& options, const PipelineGraph& graph) {
         std::ostringstream out;
         out << "{\"meta\": {\"system\": \"cpp\", \"config\": {";
         out << "\"cameras\": " << options.cameras;
@@ -172,19 +172,23 @@ int main(int argc, char** argv) {
 
         std::cerr << "loading engines...\n";
         const auto load_start = std::chrono::steady_clock::now();
-        PerceptionGraph graph(graph_config);
+        PipelineGraph graph(graph_config);
         const double startup_s =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - load_start).count();
         std::cerr << "engines ready in " << startup_s << "s\n";
 
         std::atomic<uint64_t> emitted{0};
+        std::atomic<uint64_t> complete{0};
         FrameCollector collector(
-            [&emitted](FrameResult&& result) {
+            [&emitted, &complete](FrameResult&& result) {
                 // The null sink: the event is built (the records are the expensive part and
                 // they are built here, outside the collector's lock, deliberately) and
                 // discarded. Same choice the Python driver makes, so neither side is being
                 // measured with a sink the other does not have.
-                (void)result;
+                // Counted apart, because "emitted" and "emitted complete" are different
+                // numbers and quoting the first as throughput while most events are
+                // Incomplete is not a like-for-like comparison.
+                if (result.reason == FinishReason::Complete) complete.fetch_add(1);
                 emitted.fetch_add(1);
             },
             static_cast<size_t>(options.reassembly_capacity), options.reassembly_timeout_ms);
@@ -219,7 +223,12 @@ int main(int argc, char** argv) {
         std::atomic<uint64_t> accepted{0};
         std::atomic<uint64_t> failed{0};
         std::vector<std::thread> workers;
-        const auto expected = graph.stage_names();
+        // Only what runs for *every* frame. The conditional per-object stages are added by
+        // the graph once the detections are known — see `PipelineGraph::execute`. Expecting
+        // all of them up front sealed every ship-only frame as Incomplete with
+        // `missing=["person_embedder"]`, which at a 50/50 library split is most of the fleet,
+        // and made a real embedder outage emit a byte-identical event.
+        const std::vector<std::string> unconditional{"detect", "crop"};
 
         const int detector_batch = graph.detector().max_batch();
         for (int w = 0; w < options.workers; ++w) {
@@ -229,10 +238,21 @@ int main(int argc, char** argv) {
             const int device = options.devices[static_cast<size_t>(w) % options.devices.size()];
             workers.emplace_back([&, device]() {
                 GPU_CHECK(gpuSetDevice(device));
-                // One staging buffer per worker, reused. Allocating per frame put `gpuMalloc`
-                // — which serialises on the driver — on the hot path.
+                // One staging buffer per worker, sized once for a whole detector batch and
+                // reused for the run.
+                //
+                // The first version declared this, wrote a comment saying `gpuMalloc` must not
+                // be on the hot path, then voided it with `(void)` and allocated a fresh
+                // `DeviceBuffer` per frame anyway. At ~1000 img/s that is a thousand
+                // `gpuMalloc` **and a thousand `gpuFree` per second across 48 threads** — and
+                // `gpuFree` is device-blocking, it synchronises every stream on the device. So
+                // it reintroduced, on every single frame, precisely the device-wide stall that
+                // moving preprocessing onto the instance's stream had just removed. Review
+                // caught it, and the comment describing the opposite of the code below it was
+                // worse than no comment at all.
                 DeviceBuffer staging;
-                size_t staged_bytes = 0;
+                gpuStream_t copy_stream = nullptr;
+                GPU_CHECK(gpuStreamCreate(&copy_stream));
 
                 while (!stopping.load()) {
                     // A detector-sized batch, because the plan is static at that batch and
@@ -241,11 +261,20 @@ int main(int argc, char** argv) {
                     auto batch = queue.drain(static_cast<size_t>(detector_batch), 50);
                     if (batch.empty()) continue;
 
-                    std::vector<PerceptionGraph::Work> work;
-                    std::vector<std::shared_ptr<DeviceBuffer>> images;
+                    // Grown once, never shrunk, and never freed inside the loop.
+                    size_t frame_bytes = 0;
+                    for (const auto& item : batch) {
+                        frame_bytes = std::max(frame_bytes, static_cast<size_t>(item.frame.height) *
+                                                                item.frame.width * 3);
+                    }
+                    const size_t needed = frame_bytes * static_cast<size_t>(detector_batch);
+                    if (staging.bytes() < needed) staging = DeviceBuffer(needed);
+
+                    std::vector<PipelineGraph::Work> work;
+                    size_t slot = 0;
                     for (auto& item : batch) {
                         accepted.fetch_add(1);
-                        if (!collector.open(item.state, expected)) {
+                        if (!collector.open(item.state, unconditional)) {
                             // Refused, and *counted*. A frame that vanishes here is exactly
                             // the failure the collector exists to prevent.
                             failed.fetch_add(1);
@@ -253,15 +282,16 @@ int main(int argc, char** argv) {
                         }
                         const size_t bytes =
                             static_cast<size_t>(item.frame.height) * item.frame.width * 3;
-                        auto image = std::make_shared<DeviceBuffer>(bytes);
-                        GPU_CHECK(gpuMemcpy(image->get(), item.frame.pixels, bytes,
-                                            gpuMemcpyHostToDevice));
-                        item.state->set_image(image, device);
-                        images.push_back(image);
-                        work.push_back({item.state.get(), image->as<uint8_t>()});
+                        uint8_t* target = staging.as<uint8_t>() + slot * frame_bytes;
+                        ++slot;
+                        // Async, on this worker's own stream, out of page-locked source pages
+                        // (`ReplaySource` registers the library at load). The DMA was already
+                        // available and the synchronous call was not using it.
+                        GPU_CHECK(gpuMemcpyAsync(target, item.frame.pixels, bytes,
+                                                 gpuMemcpyHostToDevice, copy_stream));
+                        work.push_back({item.state.get(), target});
                     }
-                    (void)staging;
-                    (void)staged_bytes;
+                    GPU_CHECK(gpuStreamSynchronize(copy_stream));
 
                     if (!work.empty()) {
                         try {
@@ -279,6 +309,7 @@ int main(int argc, char** argv) {
                     // holds even when the graph threw halfway through the batch.
                     for (auto& item : batch) collector.seal(item.tag);
                 }
+                gpuStreamDestroy(copy_stream);
             });
         }
 
@@ -291,16 +322,16 @@ int main(int argc, char** argv) {
         });
 
         // -- cameras ----------------------------------------------------------------------
-        auto person_library = std::make_shared<FrameLibrary>(options.person_frames);
+        auto person_library = std::make_shared<ReplaySource>(options.person_frames);
         if (!person_library->pinned()) {
             std::cerr << "warning: the frame library is not page-locked; host->device copies "
                          "will take the slow path\n";
         }
         auto ship_library = options.ship_frames.empty()
                                 ? person_library
-                                : std::make_shared<FrameLibrary>(options.ship_frames);
+                                : std::make_shared<ReplaySource>(options.ship_frames);
 
-        std::vector<std::unique_ptr<ReplayCamera>> cameras;
+        std::vector<std::unique_ptr<CameraActor>> cameras;
         for (int c = 0; c < options.cameras; ++c) {
             char name[32];
             std::snprintf(name, sizeof(name), "cam%02d", c);
@@ -308,7 +339,7 @@ int main(int argc, char** argv) {
             // splits its source workers — the mix of content decides how many crops the
             // detector produces, so it has to be the same or it is not the same experiment.
             auto library = (c % 2 == 0) ? person_library : ship_library;
-            cameras.push_back(std::make_unique<ReplayCamera>(
+            cameras.push_back(std::make_unique<CameraActor>(
                 name, library, options.fps, [&queue](const FrameTag& tag, HostFrame frame) -> bool {
                     FrameWork work;
                     work.tag = tag;
@@ -352,6 +383,11 @@ int main(int argc, char** argv) {
         std::cout << "collector_reported " << collector.reported() << "\n";
         std::cout << "collector_timeouts " << collector.timed_out() << "\n";
         std::cout << "collector_evicted " << collector.evicted() << "\n";
+        for (const auto& [camera, count] : collector.evicted_by_camera()) {
+            std::cout << "collector_evicted_camera " << camera << " " << count << "\n";
+        }
+        std::cout << "events_complete " << complete.load() << "\n";
+        std::cout << "events_incomplete " << (emitted.load() - complete.load()) << "\n";
         std::cout << "per_device";
         for (const auto& [device, count] : graph.detector().per_device()) {
             std::cout << " ship_detector:gpu" << device << "=" << count;

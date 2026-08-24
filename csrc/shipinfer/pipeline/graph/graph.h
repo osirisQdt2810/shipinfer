@@ -100,10 +100,10 @@ namespace shipinfer {
         int ship_class = 8;
     };
 
-    class PerceptionGraph {
+    class PipelineGraph {
       public:
-        explicit PerceptionGraph(const GraphConfig& config);
-        ~PerceptionGraph();
+        explicit PipelineGraph(const GraphConfig& config);
+        ~PipelineGraph();
 
         // Runs a **batch** of frames to completion on one device.
         //

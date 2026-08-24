@@ -19,11 +19,13 @@
 // lock every worker takes on every stage. So `sweep` captures, releases, and only then emits.
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -67,6 +69,9 @@ namespace shipinfer {
         uint64_t reported() const;
         uint64_t evicted() const;
         uint64_t timed_out() const;
+        // Which camera lost frames to eviction. ADR-005 exists to make "camera vắng người
+        // thỉnh thoảng bị miss" answerable with a number, and a global counter cannot.
+        std::map<std::string, uint64_t> evicted_by_camera() const;
 
       private:
         struct Pending {
@@ -75,11 +80,20 @@ namespace shipinfer {
             std::set<std::string> delivered;
             int64_t opened_ns = 0;
 
-            bool complete() const { return delivered.size() >= expected.size(); }
+            // Inclusion, not size. `deliver()` accepts any string, so one name that is not
+            // in `expected` — a future `track` stage, a typo — made the sizes match while
+            // `missing` was still non-empty, and the frame reported Complete with a missing
+            // list. Review's one-liner.
+            bool complete() const {
+                return std::includes(delivered.begin(), delivered.end(), expected.begin(),
+                                     expected.end());
+            }
         };
 
         FrameResult finish_locked(Pending& frame, FinishReason reason, int64_t now_ns) const;
-        bool evict_locked();
+        // Returns the evicted frame's result so the caller can emit it **outside** the lock.
+        // `std::nullopt` means nothing could be evicted, which is a refusal, not a silent drop.
+        std::optional<FrameResult> evict_locked(int64_t now_ns);
 
         Emit emit_;
         size_t capacity_;
@@ -89,6 +103,7 @@ namespace shipinfer {
         std::map<std::string, size_t> per_camera_;
         uint64_t reported_ = 0;
         uint64_t evicted_ = 0;
+        std::map<std::string, uint64_t> evicted_by_camera_;
         uint64_t timed_out_ = 0;
     };
 

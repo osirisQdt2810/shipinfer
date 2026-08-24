@@ -18,7 +18,7 @@ namespace shipinfer {
 
     }  // namespace
 
-    FrameLibrary::FrameLibrary(const std::string& folder, int limit) {
+    ReplaySource::ReplaySource(const std::string& folder, int limit) {
         namespace fs = std::filesystem;
         if (!fs::is_directory(folder)) {
             throw SourceError("frame folder is not a directory: " + folder);
@@ -72,12 +72,12 @@ namespace shipinfer {
         }
     }
 
-    FrameLibrary::~FrameLibrary() {
+    ReplaySource::~ReplaySource() {
         if (!pinned_) return;
         for (auto& image : frames_) gpuHostUnregister(image.pixels.data());
     }
 
-    HostFrame FrameLibrary::at(size_t index) const {
+    HostFrame ReplaySource::at(size_t index) const {
         const Image& image = frames_[index % frames_.size()];
         HostFrame frame;
         frame.pixels = image.pixels.data();
@@ -86,28 +86,28 @@ namespace shipinfer {
         return frame;
     }
 
-    ReplayCamera::ReplayCamera(std::string camera_id, std::shared_ptr<FrameLibrary> library,
-                               double fps, Publish publish)
+    CameraActor::CameraActor(std::string camera_id, std::shared_ptr<ReplaySource> library,
+                             double fps, Publish publish)
         : id_(std::move(camera_id)),
           library_(std::move(library)),
           fps_(fps),
           publish_(std::move(publish)) {}
 
-    ReplayCamera::~ReplayCamera() {
+    CameraActor::~CameraActor() {
         stop();
     }
 
-    void ReplayCamera::start() {
+    void CameraActor::start() {
         if (thread_.joinable()) return;
         thread_ = std::thread([this] { run(); });
     }
 
-    void ReplayCamera::stop() {
+    void CameraActor::stop() {
         stopping_.store(true);
         if (thread_.joinable()) thread_.join();
     }
 
-    void ReplayCamera::run() {
+    void CameraActor::run() {
         using clock = std::chrono::steady_clock;
         const auto period = std::chrono::duration<double>(1.0 / std::max(1e-6, fps_));
         auto next = clock::now();
