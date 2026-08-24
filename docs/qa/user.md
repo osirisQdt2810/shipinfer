@@ -220,6 +220,18 @@ recorded here directly, since the transcript will not keep them).
 
 > note: nếu vấn đề của ta gây performance thấp đang là python multithreading gil thì bạn cóthể portable sang 1 bảng c++ ơ csrc/shipper/
 
+#### V35 — 03:58 UTC
+
+> tiếp tục
+
+#### V36 — 04:35 UTC
+
+> tiêp tục
+
+#### V37 — 11:55 UTC
+
+> vậy tóm lại bạn còn gì chưa làm nữa? bạn không đọc goal của tôi à?
+
 ---
 
 ## 2. Reconstructed requests
