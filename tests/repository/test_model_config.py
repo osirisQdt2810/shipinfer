@@ -19,32 +19,37 @@ BASE = {
 }
 
 
-def test_specs_exclude_the_batch_dimension() -> None:
-    """Triton's convention, kept: ``max_batch_size`` owns dim 0."""
-    config = ModelConfig(**BASE)
-    assert config.input_specs[0].shape == (4,)
-    assert config.input_specs[0].dtype is DataType.FP32
-    assert config.effective_max_batch_size == 8
+class TestBatchDimensionConvention:
+    """max_batch_size owns dim 0, so a declared shape never mentions it."""
+
+    def test_specs_exclude_the_batch_dimension(self) -> None:
+        """Triton's convention, kept: ``max_batch_size`` owns dim 0."""
+        config = ModelConfig(**BASE)
+        assert config.input_specs[0].shape == (4,)
+        assert config.input_specs[0].dtype is DataType.FP32
+        assert config.effective_max_batch_size == 8
+
+    def test_dynamic_batching_requires_a_batch_dimension(self) -> None:
+        with pytest.raises(Exception, match="dynamic_batching needs max_batch_size"):
+            ModelConfig(**{**BASE, "max_batch_size": 0})
 
 
-def test_dynamic_batching_requires_a_batch_dimension() -> None:
-    with pytest.raises(Exception, match="dynamic_batching needs max_batch_size"):
-        ModelConfig(**{**BASE, "max_batch_size": 0})
+class TestConfigRejectsBadWiring:
+    """A config that could not work is refused at load, with the reason in the message."""
 
+    def test_preferred_sizes_may_not_exceed_the_maximum(self) -> None:
+        with pytest.raises(Exception, match="exceeds max_batch_size"):
+            ModelConfig(**{**BASE, "dynamic_batching": {"preferred_batch_sizes": [4, 64]}})
 
-def test_preferred_sizes_may_not_exceed_the_maximum() -> None:
-    with pytest.raises(Exception, match="exceeds max_batch_size"):
-        ModelConfig(**{**BASE, "dynamic_batching": {"preferred_batch_sizes": [4, 64]}})
+    def test_duplicate_tensor_names_are_refused(self) -> None:
+        with pytest.raises(Exception, match="duplicate tensor"):
+            ModelConfig(
+                **{**BASE, "outputs": [{"name": "x", "data_type": "FP32", "dims": [2]}]}
+            )
 
-
-def test_duplicate_tensor_names_are_refused() -> None:
-    with pytest.raises(Exception, match="duplicate tensor"):
-        ModelConfig(**{**BASE, "outputs": [{"name": "x", "data_type": "FP32", "dims": [2]}]})
-
-
-def test_ensemble_requires_steps() -> None:
-    with pytest.raises(Exception, match="requires an `ensemble:` section"):
-        ModelConfig(name="e", platform="ensemble", max_batch_size=0)
+    def test_ensemble_requires_steps(self) -> None:
+        with pytest.raises(Exception, match="requires an `ensemble:` section"):
+            ModelConfig(name="e", platform="ensemble", max_batch_size=0)
 
 
 class TestInstanceGroupExpansion:
@@ -94,22 +99,24 @@ class TestVersionPolicy:
             ModelConfig(**{**BASE, "version_policy": {"latest": 1, "all": True}})
 
 
-def test_load_attaches_the_path_to_an_error(tmp_path: Path) -> None:
-    """A validation error with no path is nearly useless in a thirty-model repository."""
-    bad = tmp_path / "config.yaml"
-    bad.write_text("name: broken\nplatform: mock\nmax_batch_size: -1\n")
-    with pytest.raises(ConfigurationError, match=str(bad)):
-        load_model_config(bad)
+class TestLoadingFromDisk:
+    """Loading from a path: the error names the file, and the directory names the model."""
 
+    def test_load_attaches_the_path_to_an_error(self, tmp_path: Path) -> None:
+        """A validation error with no path is nearly useless in a thirty-model repository."""
+        bad = tmp_path / "config.yaml"
+        bad.write_text("name: broken\nplatform: mock\nmax_batch_size: -1\n")
+        with pytest.raises(ConfigurationError, match=str(bad)):
+            load_model_config(bad)
 
-def test_load_defaults_the_name_to_the_directory(tmp_path: Path) -> None:
-    directory = tmp_path / "implied_name"
-    directory.mkdir()
-    path = directory / "config.yaml"
-    path.write_text(
-        "platform: mock\nmax_batch_size: 1\n"
-        "inputs: [{name: x, data_type: FP32, dims: [1]}]\n"
-        "outputs: [{name: y, data_type: FP32, dims: [1]}]\n"
-        "dynamic_batching: {enabled: false}\n"
-    )
-    assert load_model_config(path).name == "implied_name"
+    def test_load_defaults_the_name_to_the_directory(self, tmp_path: Path) -> None:
+        directory = tmp_path / "implied_name"
+        directory.mkdir()
+        path = directory / "config.yaml"
+        path.write_text(
+            "platform: mock\nmax_batch_size: 1\n"
+            "inputs: [{name: x, data_type: FP32, dims: [1]}]\n"
+            "outputs: [{name: y, data_type: FP32, dims: [1]}]\n"
+            "dynamic_batching: {enabled: false}\n"
+        )
+        assert load_model_config(path).name == "implied_name"

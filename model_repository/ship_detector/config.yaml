@@ -1,44 +1,48 @@
 # Stage 1 of the perception DAG: one detector over every frame, classes {ship, person}.
 #
-# Runs on EVERY frame from every camera, so at 50 cameras x 20 fps it sees 1000 req/s —
-# the highest-volume model in the repository and the one whose instance count matters most.
+# Runs on EVERY frame from every camera, so at 50 cameras x 20 fps it sees 1000 req/s — the
+# highest-volume model in the repository and the one whose instance count matters most.
 #
-# `platform: mock` ships in git so the repository is runnable and testable anywhere. On a
-# real node: set `platform: tensorrt`, drop `1/model.plan` in place, and delete the
-# latency parameters.
+# This is a REAL engine, not a stand-in. `1/model.plan` is yolo26n built from the ultralytics
+# weights by `scripts/build_engines.py`, which is the same model
+# `benchmarks/baseline` (counting-simulation) runs — so a comparison between the two systems
+# is about the serving architecture and not about the network.
+#
+# An engine is only valid for the GPU architecture and TensorRT version that built it, so the
+# plan is gitignored and built per machine. `shipinfer doctor` says whether one is present.
 name: ship_detector
-platform: mock
-max_batch_size: 32
+platform: tensorrt
+
+# The engine is built with a static batch of 8, and the backend fails at load if this
+# disagrees with the plan rather than silently truncating a batch.
+max_batch_size: 8
 
 inputs:
-  - name: images
+  - name: images                 # NCHW, RGB, letterboxed, normalised to [0, 1]
     data_type: FP32
     dims: [3, 640, 640]          # batch dim is owned by max_batch_size, as in Triton
 
 outputs:
-  - name: boxes                  # [x1, y1, x2, y2, score, class]
+  # yolo26 is end-to-end: the engine emits decoded boxes with NMS already applied, so there
+  # are 300 slots of [x1, y1, x2, y2, score, class] and no anchor decode downstream.
+  - name: output0
     data_type: FP32
-    dims: [100, 6]
-  - name: num_detections
-    data_type: INT32
-    dims: [1]
+    dims: [300, 6]
 
 instance_groups:
-  # Empty `gpus` means "every visible device", so this file is unchanged between a 2-GPU
-  # dev box and a 16-GPU node. Two instances per GPU because the detector is the hot path;
-  # two streams each so H2D of the next batch overlaps compute of the current one.
+  # Empty `gpus` means "every visible device", so this file is unchanged between a 4-GPU dev
+  # box and a 16-GPU node. Two instances per GPU because the detector is the hot path; two
+  # streams each so the host-to-device copy of the next batch overlaps the current compute.
   - kind: KIND_AUTO
     count: 2
     streams: 2
 
 dynamic_batching:
   enabled: true
-  # 5 ms is well inside a 50 ms frame budget at 20 fps, and it is enough to fill a batch of
-  # 32 when 50 cameras are feeding one pool.
+  # 5 ms is well inside a 50 ms frame budget at 20 fps, and it is enough to fill a batch of 8
+  # when 50 cameras feed one pool.
   max_queue_delay_us: 5000
-  preferred_batch_sizes: [8, 16, 32]
+  preferred_batch_sizes: [4, 8]
 
 parameters:
   engine_file: model.plan
-  latency_ms: 2.0                # mock only
-  per_item_latency_ms: 0.15      # mock only: makes batching show a real win

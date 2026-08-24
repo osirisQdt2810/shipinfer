@@ -173,7 +173,7 @@ against torch's 13.7 ms, bit-identical output.
 
 ## ADR-008 — CUDA graphs need persistent I/O buffers
 
-**Status:** Accepted · 2026-08-22
+**Status:** Accepted · 2026-08-22 · **superseded in part by ADR-013** (default flipped off)
 
 **Context.** For the small, launch-bound models here — a 512-d embedder at batch 8 — kernel
 launch overhead is a large share of wall time. Graph replay collapses an entire inference
@@ -192,6 +192,9 @@ flow does not pay a failed capture on every batch.
 **Consequences.** Buffers are sized for the worst case, so memory is held that a small batch
 does not use. That is the trade, and `max_batch_size` is the knob.
 
+The default-on posture in this ADR no longer holds — see ADR-013. The mechanism, the
+preconditions and the capture-failure policy above are unchanged.
+
 ---
 
 ## ADR-009 — The response cache is off by default
@@ -208,13 +211,15 @@ the moving one. Triton has a response cache; vLLM's prefix cache is the same ide
 **Consequences.** It is only sound for a deterministic, stateless model. Enabling it on a
 stateful or stochastic one returns a stale answer with full confidence, which is far worse
 than being slow. Defaulting it off means the failure mode requires someone to have decided.
-In the demo repository only `ship_recognizer` enables it — a pure gallery lookup.
+No model in the demo repository enables it. `ship_recognizer` used to — a pure gallery
+lookup, the one shape a cache is safe for — and it was removed when vessel identity
+moved to the stateful tier, so the example went with it. The default is unchanged.
 
 ---
 
 ## ADR-010 — Libraries with their own lifecycle get their own repository
 
-**Status:** Accepted · 2026-08-23
+**Status:** Superseded by [ADR-012](#adr-012--one-algorithms-repository-not-four) · 2026-08-23
 
 **Context.** The fused CUDA/HIP kernels started life as `native/` inside this repository.
 They are not part of the server, though: a kernel that turns a batch of frames into a
@@ -253,3 +258,113 @@ that installs a CUDA toolkit only where one is needed, and a release cadence of 
 The parent's CI deliberately does **not** check the submodule out for the offline tier.
 That is not an oversight: the server must run without the kernels, and a test suite that
 always has them would never prove it.
+
+---
+
+## ADR-011 — Ingest depends on a sink protocol it owns, not on the scheduler
+
+**Status:** Accepted · 2026-08-23
+
+**Context.** The ingest plane produces tagged frames; the inference pool consumes them. The
+obvious wiring is for a camera actor to build the `WorkItem` and push it into
+`scheduling.queues.RequestQueue` directly — one fewer indirection, and `scheduling` is a pure
+layer, so the import breaks nothing ADR-001 was protecting. The first implementation of
+`ingest/` did exactly that, and it required adding an `ingest → scheduling` edge to the
+layering DAG.
+
+**Decision.** `ingest` depends on a one-method `FrameSink` protocol that it defines
+(`ingest/sink.py`), and `pipeline` supplies the `RequestQueue`-backed implementation.
+`ingest` imports `core` and `runtime` and nothing else.
+
+Deciding that a frame becomes a request for a particular model, in a particular queue, at a
+particular priority, is **dispatch policy**. It belongs beside the DAG that consumes it,
+because the code that performs that mapping is the same code that must undo it when it
+reassembles per-frame results — and one decision split across two packages is one that
+drifts. `ingest`'s job ends at "here is a tagged frame".
+
+The protocol signals refusal by **raising**, not by returning a bool. An RTSP camera cannot
+be backpressured: it sends the next frame whether or not anyone is ready. So something must
+drop, and the camera actor is the only component in the system that knows which camera a
+frame came from and can therefore charge the drop to the camera that caused it — which is the
+whole substance of ADR-005. The two errors are `QueueFullError` (drop this frame, continue)
+and `RequestCancelledError` (the consumer is gone, stop); both already live in `core.errors`
+and are already what `RequestQueue.put` raises, so the adapter needs no translation layer.
+
+**Consequences.** The layering DAG in ADR-001 is unchanged, which matters more than one edge:
+the moment a layer rule is loosened to accommodate code, the next loosening is easier to
+argue for. `pipeline` owns both halves of the frame-to-request mapping. And the component
+that has to scale — 50 cameras at 20 fps, 1000 frames a second — is measurable against
+`CountingSink` with no scheduler in the process at all, which is how ingest throughput gets a
+number that is about ingest.
+
+The cost is one indirection and two shipped sinks that are not the production path
+(`CountingSink`, `BoundedSink`). Their docstrings say so, and `BoundedSink` says explicitly
+that it is *not* camera-fair: fairness is the scheduler's job, and a second, subtly different
+implementation of it inside `ingest` is exactly what ADR-005 warns against.
+
+---
+
+## ADR-012 — One algorithms repository, not four
+
+**Status:** Accepted · 2026-08-23 · supersedes [ADR-010](#adr-010--libraries-with-their-own-lifecycle-get-their-own-repository)
+
+**Context.** ADR-010 gave each library its own repository under the `shipinfer-` prefix:
+`shipinfer-imgproc`, and `-mot`, `-reid`, `-mtmc` as they arrived. The reasoning was sound
+— a Python control plane and a set of GPU kernels want different reviewers — and the
+practice did not survive contact with the work.
+
+Three things went wrong. The libraries were not independent: a tracker needs the
+re-identification distance metrics, multi-camera association needs both, and the evaluation
+harness needs all three, so a change to a shared type meant a coordinated bump across four
+repositories in one afternoon. Their *lifecycle* turned out to be identical — they are
+released together because they are used together. And the split cost correctness here: this
+repository's kernel loader still imported `shipinfer_imgproc` after the merge, so
+`provider: native` could never resolve and the fused-kernel seam was dead code that no test
+noticed, because every test either uses the numpy backend or skips without a device.
+
+**Decision.** One repository, `shipvision`, holding imgproc, detection, reid, tracking, mtmc,
+eval and tune, vendored here as `3rdparty/shipvision`. The boundary ADR-010 actually cared
+about — algorithms are not the server, and the dependency runs one way — is unchanged and is
+now enforced by a test in that repository that fails if it imports `shipinfer`.
+
+What is kept from ADR-010: it is still a separate repository with its own CI and its own
+reviewer, the parent still pins a commit, and a submodule bump is still its own commit so a
+kernel change and a server change are never entangled in one revert.
+
+**Consequences.** One reviewer sees Python and CUDA in the same pull request, which ADR-010
+wanted to avoid; the mitigation is that repository's own review configuration rather than a
+repository boundary. Four remotes were deleted, so their history lives only in `shipvision`.
+And the rename has to be complete to mean anything — `runtime/native.py`, `runtime/ops/`,
+`pyproject.toml`, the CI workflow and the documentation all named the old module, and a
+half-applied rename is what turned this from a packaging decision into a silent capability
+loss.
+
+---
+
+## ADR-013 — CUDA graphs are opt-in, not the default
+
+**Status:** Accepted · 2026-08-23 · supersedes the default in ADR-008
+
+**Context.** ADR-008 turned graph capture on by default on the strength of the mechanism: for
+launch-bound models, replay collapses an inference into one `cudaGraphLaunch`. That reasoning
+is still right, and it was never measured against the cost of *getting* the graphs.
+
+The first real 50-camera run measured it. Start-up went from 13.71 s to 97.82 s — seven
+times — because capture happens per model, per batch size, per instance, and this
+deployment has four of each. Nothing in the steady state paid that back on the runs we
+can currently perform, and every one of those runs is a benchmark or a test whose whole
+cost is dominated by start-up.
+
+**Decision.** `execution.cuda_graphs` defaults to **False**. It stays a first-class setting
+with the mechanism from ADR-008 intact behind it, and the docstring carries the two numbers
+so the next person can weigh them rather than rediscover them.
+
+**Consequences.** A long-lived production server that would amortise 84 s of capture over
+days is now opting in rather than opting out, which is the wrong default *for that
+deployment* — stated here so the flip is a decision and not an oversight. The knob is one
+line of config, and ADR-008's preconditions (buffers allocated once at load, pinned staging
+from a shape-keyed pool) remain load-bearing for anyone who sets it.
+
+What this does not change: capture failure still means "take the ordinary launch path", and
+`cuda_graph_max_capture_failures` still stops a model with dynamic control flow from paying
+a failed capture on every batch.

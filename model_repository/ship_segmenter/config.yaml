@@ -1,37 +1,42 @@
-# Stage 2, conditional: segment only the crops the detector called `ship`.
+# Stage 2, ships only: instance masks for the crops the detector classified as vessels.
 #
-# The heaviest model per call, and the reason it is affordable is that it is *conditional*.
-# Running it on every frame would cost more than the rest of the DAG combined; running it
-# on ship crops only makes it a minority of the load.
+# Conditional by design — it never sees a person crop, which is what makes the DAG's
+# class-conditional branch worth having rather than a uniform pipeline.
+#
+# A REAL engine: yolo26n-seg from the ultralytics weights, the same model
+# `benchmarks/baseline` segments with.
 name: ship_segmenter
-platform: mock
+platform: tensorrt
 max_batch_size: 8
 
 inputs:
-  - name: crops
+  - name: images
     data_type: FP32
-    dims: [3, 512, 512]
+    dims: [3, 640, 640]
 
 outputs:
-  - name: masks
+  # 300 slots of [x1, y1, x2, y2, score, class] followed by 32 mask coefficients, plus the
+  # prototype tensor those coefficients combine. The mask is reconstructed downstream, and
+  # reduced to an area at that stage — holding 15 x 512^2 floats per frame through reassembly
+  # is 15 MB a frame and the pipeline would spend its memory on pixels nobody reads.
+  - name: output0
     data_type: FP32
-    dims: [1, 512, 512]
+    dims: [300, 38]
+  - name: output1
+    data_type: FP32
+    dims: [32, 160, 160]
 
 instance_groups:
-  # One per GPU, not two: a heavy model gains little from a second concurrent context and
-  # doubles its working set, which competes with the detector for the same memory.
+  # One per GPU, not two: segmentation runs on a fraction of the frames, so a second instance
+  # would hold memory for work that is not arriving.
   - kind: KIND_AUTO
     count: 1
     streams: 2
 
 dynamic_batching:
   enabled: true
-  # A longer window than the detector's: ship crops arrive in bursts of a few per frame, so
-  # waiting 10 ms is what turns four batches of 2 into one batch of 8.
-  max_queue_delay_us: 10000
-  preferred_batch_sizes: [2, 4, 8]
+  max_queue_delay_us: 8000
+  preferred_batch_sizes: [4, 8]
 
 parameters:
   engine_file: model.plan
-  latency_ms: 8.0
-  per_item_latency_ms: 1.2

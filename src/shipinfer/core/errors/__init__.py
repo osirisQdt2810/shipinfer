@@ -20,14 +20,24 @@ from shipinfer.core.errors.inference import (
     ServerStateError,
     ValidationError,
 )
+from shipinfer.core.errors.ingest import (
+    CameraUnavailableError,
+    FrameDecodeError,
+    IngestError,
+    SourceOpenError,
+    SourceUnavailableError,
+)
 
 __all__ = [
     "BackendLoadError",
     "BackendUnavailableError",
+    "CameraUnavailableError",
     "ConfigurationError",
     "DeviceError",
     "DeviceOutOfMemoryError",
+    "FrameDecodeError",
     "InferenceError",
+    "IngestError",
     "ModelNotFoundError",
     "ModelVersionNotFoundError",
     "QueueFullError",
@@ -35,5 +45,7 @@ __all__ = [
     "RequestTimeoutError",
     "ServerStateError",
     "ShipInferError",
+    "SourceOpenError",
+    "SourceUnavailableError",
     "ValidationError",
 ]

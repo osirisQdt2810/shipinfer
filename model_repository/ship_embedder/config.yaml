@@ -1,17 +1,27 @@
-# Stage 3a: a 512-d appearance embedding per ship crop, for re-identification.
+# Stage 3, ships: one appearance vector per vessel crop, for identity recognition and for MTMC.
+#
+# A REAL engine: ResNet-50 with ImageNet weights, global-pooled and L2-normalised to a 2048-d
+# vector — the same backbone family the reference FastReID implementation uses (R50-SBS).
+# Built by `scripts/build_engines.py`.
+#
+# What is claimed and what is not: the whole path is exercised — crop, letterbox, batch,
+# engine, normalise, gallery — with a network of the right shape and the right cost. It is
+# not a re-identification-trained checkpoint, so embedding *accuracy* is not claimed here.
+# Accuracy is measured separately, on MOT17 with ground truth, by `shipvision/eval`. Saying
+# which of the two a number supports is the difference between evidence and decoration.
 name: ship_embedder
-platform: mock
-max_batch_size: 64
+platform: tensorrt
+max_batch_size: 16
 
 inputs:
-  - name: crops
+  - name: images
     data_type: FP32
-    dims: [3, 256, 128]
+    dims: [3, 256, 128]          # tall, not square: a person crop wastes half a square
 
 outputs:
   - name: embedding
     data_type: FP32
-    dims: [512]
+    dims: [2048]
 
 instance_groups:
   - kind: KIND_AUTO
@@ -20,13 +30,9 @@ instance_groups:
 
 dynamic_batching:
   enabled: true
-  max_queue_delay_us: 5000
-  preferred_batch_sizes: [16, 32, 64]
+  # Ships are fewer and larger, so a longer window is affordable and fills a batch that would otherwise run half empty.
+  max_queue_delay_us: 8000
+  preferred_batch_sizes: [8, 16]
 
 parameters:
   engine_file: model.plan
-  latency_ms: 1.0
-  per_item_latency_ms: 0.05
-  # A small, launch-bound model: this is exactly the shape where CUDA graph replay is worth
-  # the most, because the kernel launches cost as much as the kernels.
-  cuda_graphs: true

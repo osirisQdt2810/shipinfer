@@ -58,10 +58,10 @@ dependencies = [
 # --- runtime backends (pick what the deployment actually needs) -------------------
 cuda = ["cuda-python>=12.0"]                       # raw driver access, `custom` variants only
 # The fused kernels. Not on PyPI: it is vendored as a submodule, so install it from there
-#   git submodule update --init 3rdparty/shipinfer-imgproc
-#   pip install -e 3rdparty/shipinfer-imgproc
+#   git submodule update --init 3rdparty/shipvision
+#   pip install -e 3rdparty/shipvision
 # Listing it here as a hard dependency would make `pip install shipinfer` fail everywhere.
-imgproc = ["shipinfer-imgproc"]
+imgproc = ["shipvision"]
 tensorrt = ["tensorrt>=8.6", "cuda-python>=12.0"]  # the production backend
 vision = ["torchvision>=0.17"]                     # tuned NMS / roi ops
 onnx = ["onnxruntime-gpu>=1.17"]                   # portable fallback backend
@@ -115,13 +115,17 @@ extend-exclude = '''
   | dist
   | references
   | 3rdparty
+  | benchmarks/baseline
 )/
 '''
 
 [tool.ruff]
 line-length = 96
 target-version = "py310"
-extend-exclude = [".venv", "build", "dist", "references", "3rdparty"]
+# `benchmarks/baseline` is the counting-simulation submodule — the system we are measured
+# against. Linting or reformatting it would rewrite the baseline, and a baseline we edited
+# is not a baseline.
+extend-exclude = [".venv", "build", "dist", "references", "3rdparty", "benchmarks/baseline"]
 
 [tool.ruff.lint]
 # Import sorting (I) is delegated to standalone isort, not ruff, so pre-commit has one
@@ -173,7 +177,7 @@ ignore = [
 profile = "black"
 line_length = 96
 src_paths = ["src", "tests", "scripts", "benchmarks"]
-skip_glob = [".venv/*", "build/*", "dist/*", "references/*", "3rdparty/*"]
+skip_glob = [".venv/*", "build/*", "dist/*", "references/*", "3rdparty/*", "benchmarks/baseline/*"]
 
 [tool.mypy]
 python_version = "3.10"
@@ -192,10 +196,18 @@ disallow_untyped_defs = false
 # Tests — two tiers. The default run needs no GPU; `gpu` is opt-in.
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# The benchmark harness ships its own offline tests: the arithmetic that turns a buffer
+# log into a speed-up is the most consequential code in the repository and needs no
+# hardware to verify. Running it on real GPUs without testing it first would only make a
+# wrong number more convincing.
+testpaths = ["tests", "benchmarks/tests"]
 # `-m "not gpu"`: a plain `pytest` must pass on a machine with zero NVIDIA devices, so the
 # scheduler's invariants stay verifiable anywhere. `pytest -m gpu` opts into real hardware.
-addopts = "-ra --strict-markers --strict-config -m 'not gpu'"
+# `not gpu and not multigpu`, not just `not gpu`: `multigpu` is its own marker and some
+# tests carry only that one, so `-m "not gpu"` left them selected. A bare `pytest` on a
+# laptop then hit the container gate and aborted the whole session — breaking the exact
+# promise this line exists to keep, and leaving it kept only by scripts/run_tests.sh.
+addopts = "-ra --strict-markers --strict-config -m 'not gpu and not multigpu'"
 asyncio_mode = "auto"
 timeout = 120
 markers = [

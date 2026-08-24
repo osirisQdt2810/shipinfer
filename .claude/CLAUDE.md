@@ -40,16 +40,47 @@ ever called `cudaSetDevice`.
   one GPU for its whole life. The GIL is not the problem because every thread spends its
   time inside TensorRT or a CUDA memcpy, both of which release it.
 - **The fused kernels are optional and live in their own repository.**
-  `3rdparty/shipinfer-imgproc` is a submodule; every native component has a Python
+  `3rdparty/shipvision` is a submodule; every native component has a Python
   counterpart, so a machine with no build still runs — and CI deliberately does not check
   the submodule out, which is how that promise stays true.
 - **Distribution:** a wheel plus a container. There is no installer and no GUI.
 
-### Where commands run
-**In a container.** `deploy/` holds the recipes: `make shell` drops you into the dev image
-with the repository bind-mounted, so you edit on the host and every command runs inside.
-A host `.venv` still works for the offline tier and is what CI uses, which is exactly why
-that tier must never need a GPU.
+### Where commands run (RULE — enforced, not advisory)
+**Anything that touches an accelerator runs inside a container.** That means the GPU test
+tiers (`-m gpu`, `-m multigpu`), every benchmark, `shipinfer bench|serve`, and any engine
+build. `deploy/` holds the recipes: `deploy/rootless/test.sh` for the suite,
+`deploy/rootless/bench.sh` for the benchmark, `deploy/rootless/prove.sh` for the
+container+GPU attestation, `make shell` for an interactive shell.
+
+**The offline tier is exempt, deliberately.** `pytest` with no marker must pass on a machine
+with no driver — that is ADR-001, it is what CI does on a plain runner, and it is the promise
+that makes the pure layers verifiable anywhere. The rule is about *measurements*, and the
+offline tier produces none.
+
+Enforced in two places, and the split matters:
+
+- **`src/shipinfer/runtime/containment.py`** is the gate. It runs inside the process that
+  would do the work — `tests/conftest.py` for the device tiers, the `serve` and `bench`
+  commands for the CLI — so there is no spelling that avoids it. A container is established
+  by *agreement* between the marker file, pid 1's cgroup and an overlay root: `/.dockerenv`
+  alone is a file anyone can `touch`, and resting on it let a host run self-certify.
+- **`scripts/hooks/require_container.py`** is a `PreToolUse` hook on `Bash`, and is now an
+  advisory fast path rather than the enforcement point. It catches the common case before a
+  command runs at all, which is useful. It is *not* sound: a deny-list over command text
+  cannot be, and review found nine ordinary spellings past it — `( pytest -m gpu )`,
+  `eval "..."`, `coverage run -m pytest`, `echo pytest | sh`. Fix bypasses when you find
+  them, but do not add a rule that only the hook enforces.
+
+Per-command override `SHIPINFER_ALLOW_HOST_RUN=1`, only when the operator has said so, and
+say in the report that you used it. There is no session-wide switch: "I turned it off an hour
+ago and forgot" is how the rule was lost the first time.
+
+Two consequences worth stating plainly:
+- **A host number is not a production number.** Host `nvcc` here is 11.5 against a 12.6
+  driver, so `sm_89` will not build and host timings are not the deployment's timings.
+- **The offline tier being CPU-only by design is not the same as "the GPU path is covered".**
+  `pytest` with no accelerator proves the pure-logic tier; only `-m gpu` inside the container
+  says anything about the data plane.
 
 ## Architecture (layered; one-way imports)
 
@@ -103,8 +134,8 @@ src/shipinfer/
 └── pipeline/, ingest/     # the ship+person application on top of the server
 
 3rdparty/                  # first-party libraries with their own repos, as submodules
-  shipinfer-imgproc/       #   C++17 + CUDA/HIP fused kernels -> shipinfer_imgproc._C
-model_repository/          # the demo repository: the real DAG, on the mock backend
+  shipvision/              #   algorithms + C++17/CUDA/HIP fused kernels -> shipvision._C
+model_repository/          # the demo repository: the real DAG, on real TensorRT engines
 benchmarks/                # the head-to-head against the counting-simulation architecture
 deploy/                    # Dockerfile + compose; everything runs in a container
 tests/                     # offline tier (default) + `-m gpu` tier
@@ -122,7 +153,7 @@ tests/                     # offline tier (default) + `-m gpu` tier
    Everything above it works unchanged with no driver installed.
 4. **The backend contract** (`backends/base.py`). A backend receives an assembled batch and
    returns one. It does not decide what to batch, where to run, or when.
-5. **The kernel boundary** (`3rdparty/shipinfer-imgproc` ↔ `runtime/ops/`). Fused kernels
+5. **The kernel boundary** (`3rdparty/shipvision` ↔ `runtime/ops/`). Fused kernels
    only, numpy in and device-pointer out. Nothing torch already does well lives there, and
    the parent depends on it the way it depends on any library — a pinned commit (ADR-010).
 
@@ -156,13 +187,30 @@ import **no torch, no tensorrt, no onnxruntime, no fastapi**. `runtime` may not 
 3. Put it in an ensemble only after the DAG validates — mismatched shapes fail at start-up.
 
 ### A fused kernel
-It belongs in the **`shipinfer-imgproc` repository**, not here — see its own `CLAUDE.md`.
+It belongs in the **`shipvision` repository**, not here — see its own `CLAUDE.md`.
 Then, in this repository:
 1. Extend the `ImageOps` ABC in `runtime/ops/base.py` and both implementations.
 2. Add it to `tests/runtime/test_ops_parity.py`. **A fused kernel is only trustworthy if a
    readable implementation agrees with it**, and the readable one lives here.
 3. Bump the submodule pointer in its own commit, so a kernel change and a server change are
    never entangled in one revert.
+
+## GPU hygiene (RULE)
+**Free the GPU the moment the task no longer needs it.** This box is shared; a
+finished-but-alive process keeps its CUDA context (~220-480 MiB per device) and starves the
+next person. Bound every GPU run with `timeout`, prefer `docker run --rm`, and drop tensors
+plus `torch.cuda.empty_cache()` in a `finally` — a crash must not be what frees the device.
+Then **verify instead of assuming**:
+
+```bash
+nvidia-smi --query-compute-apps=pid,used_memory --format=csv   # want: empty
+nvidia-smi --query-gpu=index,memory.used --format=csv,noheader # want: ~15-20 MiB idle
+```
+
+Before killing anything, tell a leak from live work: a background agent's probe inside its
+own `timeout` is working, not leaking — check elapsed time and parent first. The operator
+watches VRAM continuously via `~/workspaces/tools/vram_log.sh`, so a leak is visible whether
+or not it gets mentioned.
 
 ## Testing: two tiers, both mandatory
 - **Offline (default, must stay green):** `pytest` — pure logic, config validation,
@@ -213,6 +261,17 @@ the `automerge` label is present **and** the reviewed commit is still HEAD.
 Known permanent exception: a PR that edits `.github/workflows/**` cannot pass the review
 job, so those need a manual merge.
 
+**The review is a loop, not a handoff** (see `.claude/WORKFLOW.md` for the diagram). Push,
+then go do other work — the review takes 10-20 minutes. On APPROVE with the label on, it
+merges itself and there is nothing to say. On BLOCKING, **check each finding against the code
+before fixing it**: fix and push if it is real, comment with the evidence if it is wrong, and
+re-trigger either way — a push fires `synchronize`, and toggling the `automerge` label fires
+`labeled`, which re-runs the review without an empty commit. Loop until merged.
+
+**Keep a PR small.** Few commits, few files, one seam. PR #3 reached ~100 commits and 20k+
+lines, past GitHub's diff API limit, so the reviewer had to check the branch out rather than
+read a diff — and six review rounds followed. Past ~15 commits, open the next PR instead.
+
 ## Documentation Language
 All documentation (README, `docs/`, any `.md`, docstrings, comments, commit messages, PR
 bodies, ADRs) **must be in English**, regardless of the conversation language. Exception:
@@ -225,6 +284,10 @@ principle*, registries, threading, the two test tiers, native code). Part 3 = Ag
 Principles.
 
 ## Project State Files (DYNAMIC — read at session start)
+- **`docs/qa/user.md`** — every request the operator has made, verbatim. **RULE: append each
+  new request here as it arrives**, exactly as written, before acting on it. A rule stated
+  once in passing is otherwise lost to the next compaction; Section 3 of that file is the
+  standing-rules index and is the fastest way to reload the constraints.
 - **`.claude/memory/MEMORY.md`** — durable facts about how this project is worked on.
 - **`.claude/JOURNAL.md`** — daily work log; newest on top. Read first for recent context.
 - **`.claude/FEATURE_LOG.md`** — one entry per large feature (append-only, newest on top).

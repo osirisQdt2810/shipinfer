@@ -136,7 +136,7 @@ This is an inference server; the hot path is measured in microseconds.
 - Anything an operator would page on gets a metric. `queue_depth`, `spills_total`,
   `requests_rejected_total` and the latency histograms are the ones that matter.
 
-### 2.8 Native code (`3rdparty/shipinfer-imgproc`)
+### 2.8 Native code (`3rdparty/shipvision`)
 
 The kernels are a **separate repository**, vendored as a submodule (ADR-010). Change them
 there, with their own tests and their own reviewer; bump the pointer here in its own commit.

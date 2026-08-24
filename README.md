@@ -31,7 +31,7 @@ shipinfer bench person_embedder --cameras 50 --fps 20 --seconds 5 --skew 8
 | **Batching** | Dynamic batching with a delay window and preferred sizes, plus zero-copy scatter back to per-request responses |
 | **Execution** | TensorRT (with CUDA graph replay), ONNX Runtime, TorchScript, or a deterministic mock |
 | **Ensembles** | A declared DAG with conditional steps, type-checked against the loaded models at start-up |
-| **Fused kernels** | `3rdparty/shipinfer-imgproc`: resize + colour convert + normalise + NHWC→NCHW in one pass, batched crop, device-side NMS — CUDA and HIP from one source |
+| **Fused kernels** | `3rdparty/shipvision`: resize + colour convert + normalise + NHWC→NCHW in one pass, batched crop, device-side NMS — CUDA and HIP from one source |
 | **Observability** | Prometheus/JSONL metrics, structured logging with a non-blocking sink, `/v2/health` and `/v2/statistics` |
 
 ## Measured
@@ -83,8 +83,8 @@ src/shipinfer/
   runtime/     devices, streams, memory, graphs, image ops   <- the accelerator seam
   backends/    tensorrt / onnx / torchscript / mock
   server/      instances, models, ensembles, cache, health, KServe v2
-3rdparty/shipinfer-imgproc/   fused CUDA/HIP kernels — its own repository, as a submodule
-model_repository/  the real DAG, runnable anywhere on the mock backend
+3rdparty/shipvision/         algorithms and fused CUDA/HIP kernels — its own repository, as a submodule
+model_repository/  the real DAG, on real TensorRT engines (built by scripts/build_engines.py)
 benchmarks/        the head-to-head against the counting-simulation architecture
 deploy/            Dockerfile and compose; everything runs in a container
 ```
@@ -105,12 +105,12 @@ sixteen GPUs get written once and then never run.
 
 ## Fused kernels
 
-They live in [shipinfer-imgproc](https://github.com/osirisQdt2810/shipinfer-imgproc),
+They live in [shipvision](https://github.com/osirisQdt2810/shipvision),
 vendored here as a submodule:
 
 ```bash
-git submodule update --init 3rdparty/shipinfer-imgproc
-pip install -e 3rdparty/shipinfer-imgproc
+git submodule update --init 3rdparty/shipvision
+pip install -e 3rdparty/shipvision
 python scripts/build_native.py --arch 86     # picks a compatible toolkit and compiler
 ```
 

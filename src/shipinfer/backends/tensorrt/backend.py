@@ -6,8 +6,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from shipinfer.backends.base import BackendContext, ModelBackend
+from shipinfer.backends.tensorrt.autobuild import resolve_engine
 from shipinfer.backends.tensorrt.bindings import BindingSet
-from shipinfer.backends.tensorrt.engine import LoadedEngine, load_engine
+from shipinfer.backends.tensorrt.engine import DYNAMIC, LoadedEngine, load_engine
 from shipinfer.backends.tensorrt.logger import build_trt_logger
 from shipinfer.core.errors import BackendUnavailableError, ConfigurationError, InferenceError
 from shipinfer.core.logging import get_logger
@@ -68,10 +69,25 @@ class TensorRTBackend(ModelBackend):
 
     def _do_initialize(self) -> None:
         context = self.context
-        engine_file = context.config.parameters.get("engine_file", "model.plan")
-        path = context.artifact.file(str(engine_file))
+        params = context.config.parameters
+        engine_file = str(params.get("engine_file", "model.plan"))
 
         self._torch.cuda.set_device(self.device.index)
+        # An engine is a build artefact of *this* GPU and *this* TensorRT, so it cannot be
+        # shipped — what ships is the ONNX. If the configured plan is absent, build it, once,
+        # under a lock shared by every instance of this model. See autobuild's docstring.
+        path = resolve_engine(
+            context.artifact.path,
+            engine_file=engine_file,
+            trt=self._trt,
+            device_index=self.device.index,
+            fp16=bool(params.get("fp16", False)),
+            onnx_file=params.get("onnx_file"),
+            # Part of the cache key: a plan built for one `max_batch_size` cannot serve a
+            # larger one, and without this the old plan kept being loaded after the config
+            # changed. `_validate_batch_capacity` then refuses the mismatch outright.
+            max_batch=int(context.config.max_batch_size or 0),
+        )
         self._loaded = load_engine(self._trt, self._logger, path)
         self._ctx = self._loaded.engine.create_execution_context()
         if self._ctx is None:
@@ -89,6 +105,7 @@ class TensorRTBackend(ModelBackend):
         assert self._loaded is not None
         strip = self.context.config.max_batch_size > 0
         engine_specs = {t.name: t.to_spec(strip) for t in self._loaded.io}
+        self._validate_batch_capacity()
 
         for declared in (*self.context.config.input_specs, *self.context.config.output_specs):
             actual = engine_specs.get(declared.name)
@@ -101,6 +118,37 @@ class TensorRTBackend(ModelBackend):
                 raise ConfigurationError(
                     f"{self.context.instance_name}: {declared.name!r} is "
                     f"{actual.dtype.value} in the engine but {declared.dtype.value} in config"
+                )
+
+    def _validate_batch_capacity(self) -> None:
+        """Refuse an engine whose batch axis cannot hold the batch the config promises.
+
+        Names and dtypes were checked and the batch dimension was not, so a plan built at
+        batch 1 loaded happily under `max_batch_size: 8` and failed later — or, for an
+        auto-built plan, whatever the ONNX export happened to bake in became the real
+        capacity with nothing recording the disagreement. The scheduler assembles batches
+        against the *config*, so the config is what the engine has to be able to satisfy.
+
+        A dynamic axis is accepted: an optimisation profile decides its extent at run time,
+        and refusing it here would refuse every dynamic-shape engine.
+        """
+        assert self._loaded is not None
+        declared = self.context.config.max_batch_size
+        if declared <= 0:
+            return
+        for tensor in self._loaded.io:
+            if not tensor.shape:
+                continue
+            capacity = tensor.shape[0]
+            if capacity in (DYNAMIC, -1):
+                continue
+            if capacity < declared:
+                raise ConfigurationError(
+                    f"{self.context.instance_name}: config promises batches of up to "
+                    f"{declared} but the engine's {tensor.name!r} has a batch axis of "
+                    f"{capacity}. The scheduler assembles against the config, so this plan "
+                    f"cannot serve it. Rebuild the engine at that batch, or lower "
+                    f"`max_batch_size`."
                 )
 
     def _allocate_bindings(self) -> None:

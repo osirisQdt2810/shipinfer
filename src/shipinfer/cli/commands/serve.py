@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 
 from shipinfer.cli.common import build_settings, console
+from shipinfer.runtime.containment import require_container
 from shipinfer.server import InferenceServer, check_health
 
 __all__ = ["serve"]
@@ -29,6 +30,9 @@ def serve(
     the same process wants, and it is also the fastest way to find out whether a
     repository will actually come up on this node.
     """
+    # The gate lives here, not only in the shell hook: a deny-list over command
+    # text cannot be made sound, and this command loads engines and drives GPUs.
+    require_container("`shipinfer serve`")
     out = console()
     settings = build_settings(
         repository,

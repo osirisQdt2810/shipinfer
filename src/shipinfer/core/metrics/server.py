@@ -38,6 +38,8 @@ class ServerMetrics:
     batch_size: Histogram = field(init=False)
     queue_wait_us: Histogram = field(init=False)
     compute_us: Histogram = field(init=False)
+    phase_us: Histogram = field(init=False)
+    device_idle_ratio: Histogram = field(init=False)
     h2d_us: Histogram = field(init=False)
     d2h_us: Histogram = field(init=False)
     e2e_us: Histogram = field(init=False)
@@ -78,6 +80,32 @@ class ServerMetrics:
         )
         self.queue_wait_us = r.histogram("shipinfer_queue_wait_us", "Queue wait, microseconds.")
         self.compute_us = r.histogram("shipinfer_compute_us", "Backend execute, microseconds.")
+        # Triton's split, under Triton's names. `compute_us` covers the copy in, the network
+        # and the copy back as one number, so it cannot say whether an 8 ms batch kept the GPU
+        # busy for 8 ms or for 5. Triton solves this with three spans —
+        # nv_inference_compute_{input,infer,output}_duration_us — and an operator who knows
+        # those dashboards should not have to learn a second vocabulary here, so the label
+        # values are `compute_input` / `compute_infer` / `compute_output` verbatim.
+        #
+        # Only populated when SHIPINFER_PROFILE_PHASES is on: reading a timed CUDA event needs
+        # a synchronise, which serialises the very overlap the numbers are meant to inform.
+        self.phase_us = r.histogram(
+            "shipinfer_inference_compute_duration_us",
+            "Device time per compute phase, microseconds. The `phase` label is Triton's: "
+            "compute_input (assemble + copy in), compute_infer (backend execute), "
+            "compute_output (copy back + scatter).",
+        )
+        # NOT a Triton metric. Triton reports the three spans and leaves the arithmetic to the
+        # reader; this does the arithmetic because it is the decision. The instance worker runs
+        # one batch synchronously, so the device idles through both copies, and whether
+        # overlapping them on separate streams earns its complexity depends only on how large
+        # this is: 0.03 is not worth a redesign, 0.30 is.
+        self.device_idle_ratio = r.histogram(
+            "shipinfer_device_idle_ratio",
+            "Fraction of a worker's batch wall-clock with the device doing nothing. "
+            "An extension, not part of Triton's metric set.",
+            (0.0, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9, 1.0),
+        )
         self.h2d_us = r.histogram("shipinfer_h2d_us", "Host-to-device staging, microseconds.")
         self.d2h_us = r.histogram("shipinfer_d2h_us", "Device-to-host readback, microseconds.")
         self.e2e_us = r.histogram("shipinfer_e2e_us", "Accept to response, microseconds.")

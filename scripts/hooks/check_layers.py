@@ -16,7 +16,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SRC = ROOT / "src" / "shipinfer"
+ROOT_PACKAGE = "shipinfer"
+SRC = ROOT / "src" / ROOT_PACKAGE
 
 #: Third-party modules a layer may never import.
 FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
@@ -36,6 +37,13 @@ FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
     "backends": {"fastapi", "uvicorn", "confluent_kafka"},
 }
 
+#: Top-level modules that are not layers, and may therefore be imported by any layer
+#: *except* ``core``. ``_C`` is the compiled extension; ``envs`` is the single place the
+#: process environment is read, which is only useful if every layer above ``core`` can reach
+#: it. ``core`` is deliberately excluded: nothing in this project sits below it, so it may
+#: not import even these, and that is what keeps it importable in isolation (ADR-001).
+NON_LAYER_MODULES = frozenset({"_C", "envs"})
+
 #: Which sibling packages a layer may import. A layer may always import itself.
 ALLOWED_INTERNAL: dict[str, set[str]] = {
     "core": set(),
@@ -45,6 +53,9 @@ ALLOWED_INTERNAL: dict[str, set[str]] = {
     "backends": {"core", "repository", "runtime"},
     "server": {"core", "repository", "runtime", "backends", "scheduling"},
     "pipeline": {"core", "repository", "runtime", "backends", "scheduling", "server"},
+    # `ingest` does NOT depend on `scheduling`: it publishes into the `FrameSink` protocol
+    # it owns, and `pipeline` supplies the queue-backed implementation. Mapping a frame onto
+    # a request is dispatch policy, and it belongs next to the code that undoes the mapping.
     "ingest": {"core", "runtime"},
     "observability": {"core"},
 }
@@ -58,20 +69,49 @@ def layer_of(path: Path) -> str | None:
     return parts[0] if len(parts) > 1 else None
 
 
+def is_submodule(name: str) -> bool:
+    """Whether ``shipinfer.<name>`` is a module rather than a re-exported attribute."""
+    return (SRC / f"{name}.py").is_file() or (SRC / name / "__init__.py").is_file()
+
+
 def imported_modules(tree: ast.AST) -> list[tuple[str, int]]:
     found: list[tuple[str, int]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             found.extend((alias.name, node.lineno) for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            found.append((node.module, node.lineno))
+            if node.module == ROOT_PACKAGE:
+                # `from shipinfer import envs` reaches the same module as
+                # `import shipinfer.envs`, so it must be checked the same way. Without this
+                # the two spellings have different rules and the lax one wins by accident.
+                # `from shipinfer import __version__` names an attribute, not a module, so
+                # the filesystem is what tells the two apart.
+                found.extend(
+                    (f"{ROOT_PACKAGE}.{alias.name}", node.lineno)
+                    for alias in node.names
+                    if is_submodule(alias.name)
+                )
+            else:
+                found.append((node.module, node.lineno))
     return found
+
+
+#: Top-level modules that every layer may import, and the strictest rule that must hold
+#: for each. `envs` is importable from `core` upwards, so it inherits `core`'s ban: one
+#: `import torch` there would put torch behind `shipinfer.scheduling` while this checker
+#: still exited 0, because a top-level file has no layer and was skipped outright.
+NON_LAYER_RULES: dict[str, str] = {"envs": "core"}
 
 
 def check(path: Path) -> list[str]:
     layer = layer_of(path)
     if layer is None:
-        return []
+        name = path.stem
+        if name not in NON_LAYER_RULES:
+            return []
+        # Checked against the strictest layer that may import it, because that is the
+        # constraint it actually has to satisfy.
+        layer = NON_LAYER_RULES[name]
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except SyntaxError as exc:
@@ -80,7 +120,13 @@ def check(path: Path) -> list[str]:
     problems: list[str] = []
     forbidden = FORBIDDEN_EXTERNAL.get(layer, set())
     allowed = ALLOWED_INTERNAL.get(layer)
-    rel = path.relative_to(ROOT)
+    # `relative_to` raises for anything outside the repository, which made the checker
+    # crash rather than report when handed a path from elsewhere — including a test's own
+    # fixture. A report is not worth failing over.
+    try:
+        rel: Path | str = path.relative_to(ROOT)
+    except ValueError:
+        rel = path
 
     for module, lineno in imported_modules(tree):
         root = module.split(".")[0]
@@ -89,9 +135,10 @@ def check(path: Path) -> list[str]:
                 f"{rel}:{lineno}: layer {layer!r} must not import {module!r} "
                 f"(ADR-001: it stays importable without a GPU)"
             )
+        exempt = frozenset() if layer == "core" else NON_LAYER_MODULES
         if allowed is not None and module.startswith("shipinfer."):
             target = module.split(".")[1]
-            if target != layer and target not in allowed and target != "_C":
+            if target != layer and target not in allowed and target not in exempt:
                 problems.append(
                     f"{rel}:{lineno}: layer {layer!r} must not import shipinfer.{target} "
                     f"(allowed: {sorted(allowed) or 'nothing'})"

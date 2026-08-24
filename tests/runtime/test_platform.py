@@ -12,44 +12,6 @@ from shipinfer.runtime.memory import MemoryPool
 from shipinfer.runtime.platform import AcceleratorKind, accelerator_kind, device_count
 
 
-def test_accelerator_kind_is_reported() -> None:
-    assert accelerator_kind() in set(AcceleratorKind)
-
-
-def test_manager_accepts_a_cpu_only_host() -> None:
-    manager = DeviceManager(DeviceSettings(visible_gpus=[], allow_cpu_only=True))
-    assert manager.describe()
-
-
-def test_requesting_an_absent_device_fails_at_construction() -> None:
-    """Fail-fast: a missing device found at start-up is a config error with a clear
-    message; found at the first inference it is a CUDA error three layers from the cause."""
-    with pytest.raises(ConfigurationError, match="visible_gpus"):
-        DeviceManager(DeviceSettings(visible_gpus=[device_count() + 99]))
-
-
-def test_host_allocator_round_trips() -> None:
-    pool = MemoryPool(MemorySettings())
-    buffer = pool.host.allocate(1024)
-    try:
-        assert buffer.nbytes == 1024
-        assert buffer.kind is MemoryKind.HOST
-        view = buffer.as_array()
-        view[:] = 7
-        assert int(view[0]) == 7
-    finally:
-        buffer.free()
-        pool.close()
-
-
-def test_borrow_releases_on_exit() -> None:
-    pool = MemoryPool(MemorySettings())
-    with pool.borrow(256, MemoryKind.HOST, Device.cpu()) as buffer:
-        assert not buffer.is_freed
-    assert buffer.is_freed
-    pool.close()
-
-
 @pytest.mark.gpu
 class TestGpu:
     def test_manager_sees_devices(self) -> None:
@@ -115,18 +77,62 @@ class TestGpu:
             streams.close()
 
 
-@pytest.mark.multigpu
-def test_allocations_land_on_the_requested_device() -> None:
-    """The invariant the whole worker model rests on: a buffer for cuda:1 is on cuda:1."""
-    import torch
+class TestDeviceDiscovery:
+    """What the runtime reports about this host, and how it refuses a device it cannot see."""
 
-    pool = MemoryPool(MemorySettings())
-    try:
-        for index in (0, 1):
-            buffer = pool.device(Device.cuda(index)).allocate(1 << 20)
-            tensor = buffer.owner_object
-            assert isinstance(tensor, torch.Tensor)
-            assert tensor.device.index == index
+    def test_accelerator_kind_is_reported(self) -> None:
+        assert accelerator_kind() in set(AcceleratorKind)
+
+    def test_manager_accepts_a_cpu_only_host(self) -> None:
+        manager = DeviceManager(DeviceSettings(visible_gpus=[], allow_cpu_only=True))
+        assert manager.describe()
+
+    def test_requesting_an_absent_device_fails_at_construction(self) -> None:
+        """Fail-fast: a missing device found at start-up is a config error with a clear
+        message; found at the first inference it is a CUDA error three layers from the cause."""
+        with pytest.raises(ConfigurationError, match="visible_gpus"):
+            DeviceManager(DeviceSettings(visible_gpus=[device_count() + 99]))
+
+
+class TestHostMemory:
+    """Host buffers round-trip through the pool and are released when borrowed."""
+
+    def test_host_allocator_round_trips(self) -> None:
+        pool = MemoryPool(MemorySettings())
+        buffer = pool.host.allocate(1024)
+        try:
+            assert buffer.nbytes == 1024
+            assert buffer.kind is MemoryKind.HOST
+            view = buffer.as_array()
+            view[:] = 7
+            assert int(view[0]) == 7
+        finally:
             buffer.free()
-    finally:
+            pool.close()
+
+    def test_borrow_releases_on_exit(self) -> None:
+        pool = MemoryPool(MemorySettings())
+        with pool.borrow(256, MemoryKind.HOST, Device.cpu()) as buffer:
+            assert not buffer.is_freed
+        assert buffer.is_freed
         pool.close()
+
+
+class TestDeviceAffinity:
+    """A buffer requested for one GPU is allocated on that GPU and no other."""
+
+    @pytest.mark.multigpu
+    def test_allocations_land_on_the_requested_device(self) -> None:
+        """The invariant the whole worker model rests on: a buffer for cuda:1 is on cuda:1."""
+        import torch
+
+        pool = MemoryPool(MemorySettings())
+        try:
+            for index in (0, 1):
+                buffer = pool.device(Device.cuda(index)).allocate(1 << 20)
+                tensor = buffer.owner_object
+                assert isinstance(tensor, torch.Tensor)
+                assert tensor.device.index == index
+                buffer.free()
+        finally:
+            pool.close()

@@ -35,7 +35,22 @@ class ExecutionSettings(BaseModel):
     provider: ExecutionProvider = ExecutionProvider.AUTO
 
     # -- CUDA graphs -------------------------------------------------------------------
-    cuda_graphs: bool = True
+    #: Off by default, and that default is a measurement rather than a preference.
+    #:
+    #: The TensorRT execute path cannot be captured as written: `fetch_output` synchronises
+    #: the stream and may allocate a pinned staging buffer, and CUDA forbids both inside a
+    #: capture region. Attempting it costs three failed captures per instance at every
+    #: start-up — measured at 24 instances, that alone took the GPU tier's end-to-end test
+    #: past its 90 s timeout — and the failures do not clean up perfectly: the caching
+    #: allocator still reports `captures_underway` afterwards.
+    #:
+    #: The staging pool refuses before the driver call and a partial graph is never stored,
+    #: so a failed capture cannot corrupt a *replay*. It is still not free, and paying for
+    #: it on every start-up to reach a path that cannot succeed is the wrong default.
+    #:
+    #: Turn it on per model once execute keeps device work and host synchronisation apart,
+    #: or globally with `SHIPINFER_CUDA_GRAPHS=on` to measure the difference.
+    cuda_graphs: bool = False
     #: Which implementation captures them. ``torch`` (the default) uses
     #: ``torch.cuda.CUDAGraph``, which warms up on a side stream and shares one memory pool
     #: across batch sizes. ``custom`` is this project's raw-driver reference implementation
