@@ -29,6 +29,8 @@ from shipinfer.core.settings.ingest import CameraConfig, IngestSettings
 from shipinfer.core.settings.pipeline import PipelineSettings, ReassemblySettings
 from shipinfer.ingest.frame import FrameCounter
 from shipinfer.pipeline import PipelineRunner
+from shipinfer.pipeline.graph.state import FrameState
+from shipinfer.pipeline.reassembly.collector import FrameCollector
 from shipinfer.pipeline.sinks import NullResultSink
 from shipinfer.scheduling.queues import FairPriorityQueue
 
@@ -363,6 +365,83 @@ class TestADroppedEventIsNotAPublishedOne:
         runner.queue.put(item)
 
         assert isinstance(item.future.exception(10.0), InferenceError)
+
+
+class TestObjectsTotalIsChargedFromTheCaptureNotTheLiveState:
+    """`_record` read `result.state.detections` — the same ADR-002 race one level down.
+
+    The sweeper finishes a frame carrying 3 detections; the wedged stage then answers and the
+    owning worker calls `set_detections(12)`. `_build_event` correctly reports 3 objects from
+    the capture, and `objects_total` was charged 12 — so per-camera object counts overstate
+    reality on exactly the timed-out frames an operator is investigating.
+
+    This exercises `_record` itself. The first attempt at this test asserted on
+    `result.inputs.detections.counts()` — a property of the capture that three other tests
+    already establish — constructed a `PipelineMetrics()` it never read, and ended with
+    `assert metrics is not None`. Review reverted the one-token fix and the whole suite stayed
+    green: 749 passed. A test that cannot fail is worse than no test, and that was the second
+    one in this PR.
+    """
+
+    def _finished(self, runner: PipelineRunner, count: int):
+        """Open a frame with `count` person detections, seal it, and return the result."""
+        from shipinfer.pipeline.graph.detections import Detections
+        from shipinfer.pipeline.reassembly.collector import FrameResult
+
+        results: list[FrameResult] = []
+        collector = FrameCollector(results.append)
+        state = FrameState(
+            context=RequestContext(camera_id="cam0", frame_id=1),
+            image=np.zeros((8, 8, 3), dtype=np.uint8),
+            detections=Detections(
+                boxes=np.zeros((count, 4), dtype=np.float32),
+                scores=np.full((count,), 0.9, dtype=np.float32),
+                class_ids=np.zeros((count,), dtype=np.int32),
+                labels=("person",) * count,
+            ),
+        )
+        collector.open(state)
+        collector.seal(state.key)
+        (result,) = results
+        return state, result
+
+    def _bigger(self, count: int):
+        from shipinfer.pipeline.graph.detections import Detections
+
+        return Detections(
+            boxes=np.zeros((count, 4), dtype=np.float32),
+            scores=np.full((count,), 0.9, dtype=np.float32),
+            class_ids=np.zeros((count,), dtype=np.int32),
+            labels=("person",) * count,
+        )
+
+    def test_the_counter_reports_what_the_event_reports(self, runner_for) -> None:
+        runner = runner_for()
+        state, result = self._finished(runner, 3)
+
+        # The owning worker carries on after the sweeper has already finished the frame.
+        state.set_detections(self._bigger(12))
+
+        event = runner._build_event(result)
+        runner._record(result, event)
+
+        assert len(event.objects) == 3, "the event should describe the capture"
+        assert (
+            runner.metrics.objects_total.value(camera="cam0", object_class="person") == 3
+        ), "objects_total was charged from the worker's later write, not the capture"
+
+    def test_the_two_cannot_disagree(self, runner_for) -> None:
+        """Both come from one capture now, so there is no arithmetic that can separate them."""
+        runner = runner_for()
+        state, result = self._finished(runner, 5)
+        state.set_detections(self._bigger(30))
+
+        event = runner._build_event(result)
+        runner._record(result, event)
+
+        assert len(event.objects) == runner.metrics.objects_total.value(
+            camera="cam0", object_class="person"
+        )
 
 
 class TestBackpressureReachesTheCamera:
