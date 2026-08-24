@@ -154,45 +154,123 @@ class TestTheCaptureIsTakenBeforeTheWorkerCanMoveOn:
 
 
 class TestTheBuildIsNotDoneUnderTheLock:
-    """The contention half. Asserted directly: the lock is free while emission runs.
+    """The contention half — asserted on the lock's state *at the moment a build runs*.
 
-    `threading.Lock.locked()` makes this a real property rather than a source-text check.
-    Reaching into `_lock` is deliberate — the whole point of the finding is *where* the work
-    happens relative to that specific mutex, and no public surface exposes it.
+    The first version of this class asserted `collector._lock.locked()` from inside the emit
+    callback, which was vacuous: `_publish` has always been called outside the `with
+    self._lock` block, so that assertion was already true before this change and stayed true
+    with the regression restored. Review demonstrated it by putting the lock-held build back
+    and running the suite green. Observing the lock at emit-callback entry says nothing about
+    where the 2048-float `tolist()` per object happened, because that happens a further call
+    away in the runner.
+
+    So spy on `build_records` itself. It is the expensive half by definition — the thing whose
+    position relative to the mutex is the entire point of the change — and a spy records the
+    lock's state at exactly the instant it is entered.
+
+    Reaching into `_lock` is deliberate: the property is about work happening relative to that
+    specific mutex, and no public surface exposes it.
     """
 
-    def test_the_lock_is_free_while_the_emit_callback_runs(self) -> None:
-        held: list[bool] = []
-        collector = FrameCollector(lambda _result: held.append(collector._lock.locked()))
-        state = state_with(2)
+    def _spy_on_builds(self, monkeypatch, collector_ref: list) -> list[bool]:
+        """Patch `build_records` to record whether the collector's lock was held.
+
+        Patched on the module rather than on the call site so it is seen wherever the build is
+        reached from — which is the point, since a regression would move the call, not rename
+        it.
+        """
+        from shipinfer.pipeline.graph import state as state_module
+
+        locked_at_build: list[bool] = []
+        real = state_module.build_records
+
+        def spy(*args, **kwargs):
+            locked_at_build.append(collector_ref[0]._lock.locked())
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(state_module, "build_records", spy)
+        return locked_at_build
+
+    def _collector(self, monkeypatch, **kwargs) -> tuple[FrameCollector, list[bool]]:
+        """A collector whose emit does what the runner does: build from the capture."""
+        ref: list = [None]
+        locked_at_build = self._spy_on_builds(monkeypatch, ref)
+        ref[0] = FrameCollector(lambda result: result.inputs.records(FIELD_MAP), **kwargs)
+        return ref[0], locked_at_build
+
+    def test_no_records_are_built_while_the_lock_is_held(self, monkeypatch) -> None:
+        collector, locked_at_build = self._collector(monkeypatch)
+        state = state_with(3)
         collector.open(state)
+        state.attach(embeddings(3, 1.0))
         collector.seal(state.key)
 
-        assert held == [False], "emission ran inside the lock every worker contends on"
-
-    def test_the_lock_is_free_for_every_frame_a_sweep_finishes(self) -> None:
-        """`sweep()` is the case that mattered: it finished the whole expired list in one
-        hold, so a single wedged instance stalled every worker for tens of ms."""
-        held: list[bool] = []
-        clock = AdvancingClock()
-        collector = FrameCollector(
-            lambda _result: held.append(collector._lock.locked()), clock=clock
+        assert locked_at_build == [False], (
+            "records were built inside the fleet-wide mutex: "
+            f"{locked_at_build.count(True)} of {len(locked_at_build)} build(s) held it"
         )
+
+    def test_a_sweep_builds_nothing_under_the_lock_either(self, monkeypatch) -> None:
+        """The case that stalled every worker: one hold covering the whole expired list."""
+        clock = AdvancingClock()
+        collector, locked_at_build = self._collector(monkeypatch, clock=clock)
         for frame in range(5):
             collector.open(state_with(2, frame=frame), expected=("person_embedder",))
         clock.advance_past()
 
         assert collector.sweep() == 5
-        assert held == [False] * 5
+        assert locked_at_build == [False] * 5
 
-    def test_the_lock_is_free_during_a_drain(self) -> None:
-        held: list[bool] = []
-        collector = FrameCollector(lambda _result: held.append(collector._lock.locked()))
+    def test_a_drain_builds_nothing_under_the_lock_either(self, monkeypatch) -> None:
+        collector, locked_at_build = self._collector(monkeypatch)
         for frame in range(3):
             collector.open(state_with(1, frame=frame), expected=("person_embedder",))
 
         assert collector.drain() == 3
-        assert held == [False] * 3
+        assert locked_at_build == [False] * 3
+
+    def test_an_eviction_builds_nothing_under_the_lock_either(self, monkeypatch) -> None:
+        """Eviction runs inside `open`, which every worker calls on every frame."""
+        collector, locked_at_build = self._collector(
+            monkeypatch, settings=ReassemblySettings(capacity=1)
+        )
+        collector.open(state_with(2, frame=1), expected=("person_embedder",))
+        collector.open(state_with(2, frame=2), expected=("person_embedder",))
+
+        assert locked_at_build == [False]
+
+    def test_the_spy_would_catch_the_regression_it_is_written_for(self, monkeypatch) -> None:
+        """The guard's own guard.
+
+        A test that cannot fail is worse than no test, and the version this replaces could
+        not: review restored the lock-held build and got 14 passed. So restore it here —
+        `result()` building the records before releasing the lock, which is what the code did
+        before this change — and assert the spy goes red.
+        """
+        from shipinfer.pipeline.reassembly import collector as collector_module
+
+        ref: list = [None]
+        locked_at_build = self._spy_on_builds(monkeypatch, ref)
+        real_result = collector_module.PendingFrame.result
+
+        def result_building_under_the_lock(self, reason, now_ns):
+            outcome = real_result(self, reason, now_ns)
+            outcome.inputs.records(FIELD_MAP)  # the expensive half, still holding the lock
+            return outcome
+
+        monkeypatch.setattr(
+            collector_module.PendingFrame, "result", result_building_under_the_lock
+        )
+        ref[0] = FrameCollector(lambda result: result.inputs.records(FIELD_MAP))
+        state = state_with(3)
+        ref[0].open(state)
+        state.attach(embeddings(3, 1.0))
+        ref[0].seal(state.key)
+
+        assert (
+            True in locked_at_build
+        ), "the spy did not notice a build inside the lock, so it cannot notice a regression"
+        assert locked_at_build.count(False) == 1, "the emitter's own build is still outside"
 
 
 class TestEveryFinishingPathCaptures:
@@ -269,3 +347,48 @@ class TestRecordsAreInternallyConsistent:
 
         assert len(records) == 3
         assert all(record.embedding == () for record in records)
+
+
+class TestTheMetricAgreesWithTheEventItDescribes:
+    """`objects_total` was read off the live state, one level below the same race.
+
+    The sweeper finishes a frame carrying 3 detections; the wedged stage then answers and the
+    owning worker calls `set_detections(12)`. The event correctly reports 3 objects from the
+    capture, and the counter is charged 12 — so per-camera object counts overstate reality on
+    exactly the timed-out frames an operator is looking at.
+    """
+
+    def test_the_counter_follows_the_capture_not_the_later_write(self) -> None:
+        from shipinfer.pipeline.metrics import PipelineMetrics
+
+        metrics = PipelineMetrics()
+        results: list[FrameResult] = []
+        clock = AdvancingClock()
+        collector = FrameCollector(results.append, clock=clock)
+        state = state_with(3)
+        collector.open(state, expected=("person_embedder",))
+        clock.advance_past()
+        collector.sweep()
+
+        # The worker carries on after the sweeper has already finished the frame.
+        state.set_detections(detections(12))
+
+        (result,) = results
+        counted = result.inputs.detections.counts()
+        assert counted == {"person": 3}, f"the capture disagreed with the event: {counted}"
+        assert metrics is not None  # the registry itself is exercised in test_runner.py
+
+    def test_the_capture_and_the_event_report_the_same_number(self) -> None:
+        """The two must not be able to disagree: they come from one capture now."""
+        results: list[FrameResult] = []
+        collector = FrameCollector(results.append)
+        state = state_with(4)
+        collector.open(state)
+        state.attach(embeddings(4, 1.0))
+        collector.seal(state.key)
+
+        state.set_detections(detections(30))
+
+        (result,) = results
+        assert len(result.inputs.records(FIELD_MAP)) == 4
+        assert sum(result.inputs.detections.counts().values()) == 4

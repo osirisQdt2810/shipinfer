@@ -578,7 +578,14 @@ class PipelineRunner:
     def _record(self, result: FrameResult, event: PerceptionEvent) -> None:
         camera = event.camera_id
         self._metrics.objects_per_frame.observe(len(event.objects), camera=camera)
-        for class_name, count in result.state.detections.counts().items():
+        # From the capture, not from `result.state`. Reading the live state here was the same
+        # ADR-002 race one level down: the sweeper finishes a frame with 3 detections, the
+        # wedged stage answers, the owning worker calls `set_detections(12)`, and the event
+        # correctly carries the 3 from the capture while `objects_total` is charged 12. The
+        # per-camera counts then overstate reality on exactly the timed-out frames an
+        # operator is investigating. The capture already holds what this needs.
+        detections = result.inputs.detections if result.inputs else result.state.detections
+        for class_name, count in detections.counts().items():
             self._metrics.objects_total.inc(count, camera=camera, object_class=class_name)
         if event.latency_us:
             self._metrics.frame_latency_us.observe(event.latency_us, camera=camera)
