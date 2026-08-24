@@ -261,6 +261,17 @@ the `automerge` label is present **and** the reviewed commit is still HEAD.
 Known permanent exception: a PR that edits `.github/workflows/**` cannot pass the review
 job, so those need a manual merge.
 
+**The review is a loop, not a handoff** (see `.claude/WORKFLOW.md` for the diagram). Push,
+then go do other work — the review takes 10-20 minutes. On APPROVE with the label on, it
+merges itself and there is nothing to say. On BLOCKING, **check each finding against the code
+before fixing it**: fix and push if it is real, comment with the evidence if it is wrong, and
+re-trigger either way — a push fires `synchronize`, and toggling the `automerge` label fires
+`labeled`, which re-runs the review without an empty commit. Loop until merged.
+
+**Keep a PR small.** Few commits, few files, one seam. PR #3 reached ~100 commits and 20k+
+lines, past GitHub's diff API limit, so the reviewer had to check the branch out rather than
+read a diff — and six review rounds followed. Past ~15 commits, open the next PR instead.
+
 ## Documentation Language
 All documentation (README, `docs/`, any `.md`, docstrings, comments, commit messages, PR
 bodies, ADRs) **must be in English**, regardless of the conversation language. Exception:

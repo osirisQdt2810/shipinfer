@@ -202,6 +202,20 @@ recorded here directly, since the transcript will not keep them).
 
 > note: sau khi xong, verify lạ những gì tôi yêu cầu trong docs/qa/user.md bạn đã hoàn thành đúng hết chưa
 
+### 24 Aug 2026
+
+#### V32 — 00:20 UTC
+
+> có 1 vấn đề về ci như sau:
+> - Bạn push PR, bạn đợi Claude review remote PR, trong thời gian đó bạn có thể làm việc khác (vì claude review là khá lâu)
+> - claude review nếu approve => tự động merge không nói làm gì nữa
+> - nhưng nếu claude review blocking, bạn tìm xem liệu có đúng như claude review finding ra bug như vậy không, nếu đúng thì sửa, nếu không đúng - claude review có vẻ bị sai thì bạn comment lại trên PR để claude review xem xét review lại (tôi không rõ để trigger review lại thì hình như phải thêm lại auto-merge - tôi không rõ bạn check nhé).
+> Toàn bộ quá trình trên looping cho tới khi PR được merge xong
+
+#### V33 — 00:22 UTC
+
+> ngoài ra như đã nói trước đó, hạn chế trong 1 PR có quá nhiều commit và file changes, ví dụ như PR #3 hiện tại đã có tận 100 commits => bây giờ đã lỡ rồi thì oke nhưng mà lần sau bạn hãy chú ý để không xảy ra hiện tượng như này nữa
+
 ---
 
 ## 2. Reconstructed requests
@@ -408,5 +422,7 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 | Record every operator request here, verbatim | V23 |
 | Decide autonomously from 23 Aug 18:05 on; do not ask, just finish | V30 |
 | At the end, verify every request in this file was actually done | V31 |
+| PR loop: push, work elsewhere while review runs; a blocking finding is checked before it is trusted — fix it if real, comment back if the review is wrong; loop until merged | V32 |
+| Keep a PR small — few commits, few files changed. PR #3's ~100 commits is the counter-example | V33, R58 |
 | After all tasks: check and carry out `docs/qa/triton.md` | V26 |
 | Deferred: justify or remove every `std::memcpy` — prefer zero-copy/in-place | V28 |

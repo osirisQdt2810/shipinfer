@@ -110,9 +110,41 @@ sed -e 's/^<!--.*-->$//' .github/pull_request_template.md > /tmp/pr-body.md   # 
 gh pr create --base main --title "…" --body-file /tmp/pr-body.md --label automerge
 ```
 
-Then watch the pipeline: `gh pr checks --watch`. If the Claude review returns BLOCKING,
-fix, push, and it re-runs. A PR that edits `.github/workflows/**` cannot pass the review
-job and needs a manual merge — that is a GitHub App restriction, not a bug.
+### Keep it small (RULE)
+
+**Few commits, few files.** PR #3 reached ~100 commits and 20 000+ lines, past GitHub's diff
+API limit, so the reviewer had to check out the branch instead of reading a diff — and six
+review rounds were partly a consequence of the size. Split by seam: one PR for the harness,
+one for the fixes it found, one for the docs. If a branch is growing past ~15 commits, that
+is the signal to open the next PR rather than to keep going.
+
+### The review loop (RULE — this is a loop, not a handoff)
+
+The pipeline fires on `opened, synchronize, reopened, ready_for_review, labeled`, so **a push
+re-runs it and so does adding a label**. Auto-merge needs three things at once: tests green,
+the review verdict `APPROVE`, and the `automerge` label present at merge time.
+
+```
+push
+  └─> review runs (slow — 10-20 min; go do other work, do not idle-poll)
+        ├─ APPROVE + automerge label  ->  it merges itself. Nothing to say, nothing to do.
+        └─ BLOCKING
+              ├─ check each finding against the code before trusting it
+              ├─ real      -> fix, push. The push re-triggers the review.
+              └─ wrong     -> comment on the PR with the evidence, then re-trigger:
+                              gh pr edit N --remove-label automerge
+                              gh pr edit N --add-label automerge     # `labeled` fires
+        loop until merged
+```
+
+**Check the finding before you fix it.** A review can be wrong — round 6 claimed stale
+`shipinfer-imgproc` references that `git show HEAD:.claude/CLAUDE.md` proved absent. Fixing
+what is not broken is worse than arguing: it makes the next reviewer's map of the code wrong.
+Say which it is, with the command that shows it.
+
+**Keep the label on.** Removing it turns the loop into a handoff that waits for a human. The
+only reason to remove it is a PR that edits `.github/workflows/**`, which cannot pass the
+review job at all (a GitHub App restriction, not a bug) and needs a manual merge.
 
 Commit messages: imperative mood, a body explaining *why*. Add the
 `Co-Authored-By: Claude …` trailer only to large feature commits.
