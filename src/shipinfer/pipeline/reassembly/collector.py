@@ -199,6 +199,12 @@ class PendingFrame:
         map. True, and the wrong division: the collector can capture *inputs* without a field
         map, and the owner applies the map afterwards, outside the lock. So the injection is
         gone and the two concerns are on the right sides of the mutex.
+
+        The lock does **not** exclude the owning worker — it mutates the state inside
+        `graph.execute` and only takes this mutex afterwards in `deliver`. What the lock buys
+        is that the frame leaves `_pending` and is captured in one step; what makes the
+        capture itself safe is that `emission_inputs()` is four single reference reads. See
+        its docstring.
         """
         return FrameResult(
             state=self.state,

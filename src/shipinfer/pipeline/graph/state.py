@@ -339,16 +339,32 @@ class FrameState:
     def emission_inputs(self) -> EmissionInputs:
         """Everything :func:`build_records` needs, captured in four reference copies.
 
-        This exists to be called **under the collector's lock**, which is why it copies
-        references rather than building anything. `FrameState` is owned by one worker for the
-        frame's whole life (ADR-002), so the emitter must not read it after the frame is
-        finished; but building the records there instead put ~30M float conversions a second
-        at the design point inside the one mutex every worker takes in `open`/`expect`/
-        `deliver`/`seal`. `sweep()` was worse — it built every expired frame's records in a
-        single lock hold, so one wedged instance blocked every worker for tens of ms.
+        **What makes this safe is not the collector's lock.** Review corrected an earlier
+        version of this docstring that said it was, and the distinction is load-bearing: the
+        owning worker mutates the state *inside* `graph.execute` via `attach`, and only takes
+        the collector's mutex afterwards in `deliver`. So that mutex does not exclude the
+        writer at all.
+
+        What makes it safe is that every field here is a **single reference read**. There is
+        no window in which one field has been read and another has not yet been, so the
+        capture cannot be internally torn. The bug this replaced could be torn: it read
+        `len(detections)`, sized a `fields` list from that, and then re-iterated the
+        attribute — so a concurrent `set_detections` made the index run past the end.
+
+        A maintainer who believes the state is mutex-protected will add the next multi-step
+        read "under the lock" and reintroduce exactly that. It is not; keep reads single.
+
+        The lock does buy one thing, and only this: the frame is removed from `_pending`
+        and captured without another thread finishing it in between. Building the records
+        under it bought nothing and cost ~770 us of hold per frame on the one mutex every
+        worker takes in `open`/`expect`/`deliver`/`seal`.
 
         `dict(self.batches)` is a shallow copy of a handful of entries; the batches
-        themselves are not copied and are not mutated after they are attached.
+        themselves are not copied and are not mutated after they are attached — and it is
+        therefore a **second reference** to those arrays, which is why a worker's `drop()`
+        does not free them until the event has been built. Bounded by the synchronous emit,
+        so not a leak, but this module's docstring makes "`drop` frees something"
+        load-bearing and this is the exception to it.
         """
         return EmissionInputs(
             camera_id=self.camera_id,

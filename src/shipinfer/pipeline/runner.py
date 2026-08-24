@@ -584,7 +584,9 @@ class PipelineRunner:
         # correctly carries the 3 from the capture while `objects_total` is charged 12. The
         # per-camera counts then overstate reality on exactly the timed-out frames an
         # operator is investigating. The capture already holds what this needs.
-        detections = result.inputs.detections if result.inputs else result.state.detections
+        detections = (
+            result.inputs.detections if result.inputs is not None else result.state.detections
+        )
         for class_name, count in detections.counts().items():
             self._metrics.objects_total.inc(count, camera=camera, object_class=class_name)
         if event.latency_us:
