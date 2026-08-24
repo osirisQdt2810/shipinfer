@@ -216,6 +216,10 @@ recorded here directly, since the transcript will not keep them).
 
 > ngoài ra như đã nói trước đó, hạn chế trong 1 PR có quá nhiều commit và file changes, ví dụ như PR #3 hiện tại đã có tận 100 commits => bây giờ đã lỡ rồi thì oke nhưng mà lần sau bạn hãy chú ý để không xảy ra hiện tượng như này nữa
 
+#### V34 — 00:52 UTC
+
+> note: nếu vấn đề của ta gây performance thấp đang là python multithreading gil thì bạn cóthể portable sang 1 bảng c++ ơ csrc/shipper/
+
 ---
 
 ## 2. Reconstructed requests
@@ -424,5 +428,6 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 | At the end, verify every request in this file was actually done | V31 |
 | PR loop: push, work elsewhere while review runs; a blocking finding is checked before it is trusted — fix it if real, comment back if the review is wrong; loop until merged | V32 |
 | Keep a PR small — few commits, few files changed. PR #3's ~100 commits is the counter-example | V33, R58 |
+| If the GIL is what caps throughput, port the hot plane to C++ under `csrc/` in this repository | V34 |
 | After all tasks: check and carry out `docs/qa/triton.md` | V26 |
 | Deferred: justify or remove every `std::memcpy` — prefer zero-copy/in-place | V28 |

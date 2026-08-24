@@ -20,4 +20,3 @@ machine the project is developed on.
 - [operator-request-log.md](operator-request-log.md) — log every operator request verbatim in docs/qa/user.md
 - [PR review loop](pr-review-loop.md) — push, work elsewhere, verify a blocking finding before fixing it, re-trigger by label
 - [Keep PRs small](keep-prs-small.md) — few commits, few files; PR #3's ~100 commits is the counter-example
-
