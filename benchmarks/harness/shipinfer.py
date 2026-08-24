@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -440,7 +441,23 @@ def achieved_offer(config: BenchConfig, result: ShipInferResult) -> float:  # no
     return entered / window if entered else 0.0
 
 
-def per_module_capacity(config: BenchConfig, settings: Any = None) -> dict[str, int]:
+#: Instances per GPU, as the four ``model_repository/*/config.yaml`` files declare them.
+#: A **fallback only** — :func:`per_module_capacity` prefers the count the run actually
+#: started, because this table is a second copy of a fact that lives somewhere else and will
+#: be wrong the first time somebody edits a config without editing this.
+DEFAULT_INSTANCES_PER_GPU = {
+    "ship_detector": 2,
+    "ship_segmenter": 1,
+    "ship_embedder": 1,
+    "person_embedder": 2,
+}
+
+
+def per_module_capacity(
+    config: BenchConfig,
+    settings: Any = None,
+    instances: Mapping[str, int] | None = None,
+) -> dict[str, int]:
     """The bound each module's buffer actually has.
 
     One capacity for every module was wrong, and wrong in the dangerous direction. The
@@ -450,6 +467,16 @@ def per_module_capacity(config: BenchConfig, settings: Any = None) -> dict[str, 
     so an eight-instance detector plateaus at 512: two orders of magnitude below the number
     the guard compared against, which is why it could never trip for the queues that
     saturate first.
+
+    Args:
+        instances: model -> how many instances the *run* actually started. Pass it. Without
+            it this falls back to :data:`DEFAULT_INSTANCES_PER_GPU`, which is a transcription
+            of the four ``config.yaml`` files and therefore a second copy of a fact that
+            already exists — review's finding: set ``ship_detector`` to ``count: 1`` and the
+            real bound becomes 256 while the guard still compares against 512, so a queue
+            pegged at its bound reads SUSTAINED and its offered rate publishes as throughput.
+            The caller holds `len(handle.instances)` and even writes it into the log's
+            metadata, so there is no reason to guess.
     """
     from shipinfer.core.settings import ServerSettings
 
@@ -462,14 +489,12 @@ def per_module_capacity(config: BenchConfig, settings: Any = None) -> dict[str, 
     # `capped` was permanently False, and a detector queue sitting at its 512-deep bound
     # read SUSTAINED. That is precisely the failure this function was written to fix, landed
     # on the wrong keys.
-    per_gpu = {
-        "ship_detector": 2,
-        "ship_segmenter": 1,
-        "ship_embedder": 1,
-        "person_embedder": 2,
-    }
     for name in GRAPH_MODELS:
-        capacities[name] = per_instance * per_gpu.get(name, 1) * len(config.gpus)
+        if instances is not None and name in instances:
+            count = int(instances[name])
+        else:
+            count = DEFAULT_INSTANCES_PER_GPU.get(name, 1) * len(config.gpus)
+        capacities[name] = per_instance * count
     return capacities
 
 

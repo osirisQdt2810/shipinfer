@@ -343,6 +343,22 @@ def compare(base: SystemThroughput, ours: SystemThroughput, *, target: float) ->
 
     ratio = ratio_of(base, ours, target=target)
     lines += ["", ratio.headline(target), "", f"  {ratio.reason}."]
+    if base.kind != NOTHING:
+        # Stated every time, because it is the one asymmetry the harness cannot close from
+        # the outside. Our offered rate is *measured* from ingest counters and gated at 98%
+        # by `check_offer`; the baseline's is asserted from its own configuration, because
+        # its log carries buffer depths and no arrival counter, and it is run unchanged on
+        # purpose. If its CPU-decoding source threads under-deliver, `offered - growth`
+        # over-reports each of its queues. That flatters the *baseline*, so it works against
+        # any conclusion in our favour rather than for it — but it is a real limit on how
+        # many digits of the ratio mean anything.
+        lines += [
+            "",
+            "  Note: the baseline's offered rate is asserted from its configuration, not",
+            "  measured — its log has no arrival counter and it is run unchanged. If its",
+            "  source threads under-deliver, its sustained rate is over-reported, which",
+            "  errs in the baseline's favour.",
+        ]
 
     if ratio.verdict == INCONCLUSIVE and ratio.kind == AT_LEAST:
         lines.append("  A floor can meet a target but cannot miss one — raise the load.")
@@ -374,6 +390,34 @@ def _analyse(
         capacity=cfg.buffer_capacity if capacity is None else capacity,
         entry_modules=entries,
     )
+
+
+#: Above this fraction of the CPU count, a one-second load average means the box has a busy
+#: neighbour and the two systems are no longer being compared on equal terms. Half rather
+#: than one: a CPU-bound Python pipeline starts losing well before the machine is saturated.
+LOAD_WARN_FRACTION = 0.5
+
+
+def load_note(cfg: BenchConfig) -> str:
+    """One line naming the host's load, and saying so plainly when it is high.
+
+    This box is shared, and the asymmetry is not neutral: ShipInfer's pipeline plane is
+    CPU-bound Python and the baseline is a GPU-bound C++ binary, so a noisy neighbour
+    depresses our number much more than theirs. A run taken under load can still be worth
+    having — it is the *ratio* that stops being defensible, not the observation — but it has
+    to arrive labelled.
+    """
+    meta = cfg.as_dict()
+    one, five, fifteen = meta["load_average"]
+    cpus = meta["cpu_count"] or 1
+    line = f"host: load {one:g}/{five:g}/{fifteen:g} over {cpus} cpus"
+    if one > cpus * LOAD_WARN_FRACTION:
+        line += (
+            "  <- BUSY. Another tenant is using this box. A CPU-bound pipeline loses more "
+            "\n      here than a GPU-bound binary does, so treat the ratio as indicative "
+            "only."
+        )
+    return line
 
 
 def measure_baseline(cfg: BenchConfig, out_dir: Path) -> tuple[RunAnalysis, SystemThroughput]:
@@ -414,7 +458,10 @@ def measure_shipinfer(cfg: BenchConfig, out_dir: Path) -> tuple[RunAnalysis, Sys
         cfg,
         offered=shipinfer.offered_rates(cfg, result),
         entries=(shipinfer.PIPELINE_MODULE,),
-        capacity=shipinfer.per_module_capacity(cfg),
+        # The instance counts the run actually started, not a transcription of the four
+        # config.yaml files: a plateau guard keyed on a stale copy compares against the
+        # wrong bound and lets a pegged queue read SUSTAINED.
+        capacity=shipinfer.per_module_capacity(cfg, instances=result.instances),
     )
     ours = system_throughput(run)
     if ours.images_per_s is not None:
@@ -455,7 +502,18 @@ def sweep_system(
             f"\n--- {system}: rung x{multiplier:g} = {rung.offered_total:g} img/s offered ---",
             flush=True,
         )
-        run, throughput = MEASURE[system](rung, out_dir / f"x{multiplier:g}")
+        try:
+            run, throughput = MEASURE[system](rung, out_dir / f"x{multiplier:g}")
+        except (RuntimeError, ValueError) as exc:
+            # Per rung, so one bad rung costs one rung. Without this a `check_offer` refusal
+            # on a high rung propagated out of the loop and discarded every rung already
+            # measured plus `summary.json` — and with the load generator's own ~87 img/s
+            # ceiling that is the *reachable* case: x2 raises, and x0.25/x0.5/x1, the whole
+            # point of the ladder, are lost. `ValueError` as well as `RuntimeError` because
+            # `analyse` raises it for a steady window too short to fit a line.
+            print(f"    x{multiplier:g} produced no measurement: {exc}")
+            print("    keeping the rungs already measured and stopping the climb.")
+            break
         runs.append(run)
         if throughput.kind == CAPACITY:
             print(f"    {system} saturated at x{multiplier:g}; the ladder stops here.")
@@ -574,6 +632,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"gpus: {list(cfg.gpus)}   seconds: {cfg.seconds:g} (warmup {cfg.warmup_s:g})")
     print(cfg.concurrency_note)
     print(f"out:  {out_dir}")
+    print(load_note(cfg))
 
     multipliers = None
     if args.sweep:
@@ -593,7 +652,9 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 run, throughput = MEASURE[system](cfg, out_dir)
                 runs.append(run)
-        except RuntimeError as exc:
+        except (RuntimeError, ValueError) as exc:
+            # `ValueError` too: `analyse` raises it when the steady window holds fewer
+            # samples than a fit needs, which is a bad configuration rather than a crash.
             print(f"{system}: {exc}; aborting", file=sys.stderr)
             return 1
         throughputs[system] = throughput

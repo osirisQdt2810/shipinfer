@@ -61,13 +61,59 @@ capture, and `summary.json` carrying the config, the per-module fits and the ver
 
 ## Reading the verdict
 
-- **SUSTAINED** — no buffer grew; the number is a throughput.
-- **SATURATED** — at least one buffer grew; the number is an **upper bound**, not a rate.
-  `run_bench` refuses to divide two bounds, because a ratio of bounds is not a speed-up.
-- **DRAINING** — every buffer shrank; the system had headroom at this offered rate.
+Three outcomes, and conflating them is how a harness publishes a number it did not measure.
 
-A speed-up is only printed when both sides produced a real rate. If a side saturated, lower
-the offered rate to find its sustainable point rather than reporting the bound as a result.
+- **SATURATED** (and not capped) is a **capacity**. A buffer grew linearly, so
+  `offered - growth` is the rate the module actually retired. This is the whole of the
+  buffer-growth methodology and the one regime in which the number is exact.
+- **SUSTAINED** or **DRAINING** is a **floor**. Nothing grew, so the system kept up with what
+  it was given and its capacity is *at least* the offered rate — how much more, this run
+  cannot say.
+- **UNMEASURED** is nothing. A capped buffer sheds instead of growing, so its slope stops
+  meaning anything.
+
+The ratio inherits its meaning from the pair, and `ratio_of` says which it has:
+
+| baseline | shipinfer | the ratio is |
+|---|---|---|
+| capacity | capacity | an exact speed-up |
+| capacity | floor | a **floor** on the speed-up, `>= Nx` — enough to *meet* a target |
+| floor | capacity | a **ceiling**, `<= Nx` — enough to miss one, never to meet one |
+| floor | floor | nothing. Both kept up; raise the offered rate. |
+| either | UNMEASURED | nothing |
+
+> An earlier version of this harness had the first two rows inverted: it refused SATURATED as
+> "an upper bound, not a rate". Since both systems are offered the same load by construction,
+> that made a speed-up structurally unreachable — either neither side saturated and each
+> reported the offer back at 1.00x, or one did and the comparison was declared unavailable.
+> Six review rounds to find it. If you are tempted to re-tighten one of these refusals, check
+> first that a measurable run still exists on the other side of it.
+
+Which is why `--sweep` exists: one offered rate can leave both sides on the floor, and the
+answer is to climb until somebody saturates.
+
+## Two things every number here is qualified by
+
+**The box is shared, and the two systems are not equally exposed to that.** ShipInfer's
+pipeline plane is CPU-bound Python; the baseline is a GPU-bound C++ binary. A busy neighbour
+therefore depresses *our* number much more than theirs, so a ratio taken under load is
+indicative rather than defensible. Every run records `load_average` and `cpu_count` in its
+metadata and prints them, with a `BUSY` warning past half the CPU count. Check that line
+before quoting a ratio.
+
+**The baseline's offered rate is asserted, not measured.** Ours comes from ingest's own
+counters and `check_offer` refuses a run that delivered under 98% of target. The baseline's is
+read off its own configuration, because its JSONL carries buffer depths and no arrival
+counter — and it is run *unchanged* on purpose, so adding one means patching the submodule.
+If its CPU-decoding source threads under-deliver, `offered - growth` over-reports each of its
+queues. That errs in the **baseline's** favour, so it works against a conclusion in ours
+rather than for it; it is still a real limit on how many digits of the ratio mean anything.
+
+One more constraint worth knowing before you pick an offered rate: **the baseline binary only
+survives while saturated.** Its plans are static-batch and `TrtRunner::infer` calls
+`setInputShape` with whatever batch it assembled, so a partial batch throws inside a worker
+and aborts the process — `terminate called ... what(): setInputShape failed`, reproducibly at
+60 img/s. It cannot be run at the low rates our own driver can currently deliver.
 
 ## Offline tests
 

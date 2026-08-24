@@ -873,3 +873,175 @@ class TestEveryRateUsesTheWindowTheFitUses:
         # The same events over the whole 70 s would read 857/s and refuse it.
         with pytest.raises(RuntimeError, match="does not support a throughput claim"):
             shipinfer_harness.reconcile(self._result(steady_events_emitted=30_000), 1000.0)
+
+
+class TestThePlateauGuardUsesTheRunsOwnInstanceCount:
+    """A bound transcribed from a config file is a copy that will go stale.
+
+    The guard exists to notice a queue sitting *at* its bound — such a queue stops growing,
+    so its slope stops meaning anything and its offered rate would publish as throughput.
+    Comparing against a hardcoded 512 when the real bound is 256 defeats it exactly.
+    """
+
+    def test_the_bound_follows_the_instances_the_run_started(self):
+        cfg = BenchConfig(cameras=50, fps=20.0, gpus=(2, 3, 4, 5))
+
+        capacities = shipinfer_harness.per_module_capacity(
+            cfg, instances={"ship_detector": 4, "person_embedder": 16}
+        )
+
+        assert capacities["ship_detector"] == 4 * 64, "4 instances x max_queue_size"
+        assert capacities["person_embedder"] == 16 * 64
+
+    def test_halving_the_instances_halves_the_bound(self):
+        """The reviewer's case: `count: 1` on the detector makes the real bound 256 while a
+        transcribed table still says 512."""
+        cfg = BenchConfig(cameras=50, fps=20.0, gpus=(2, 3, 4, 5))
+
+        eight = shipinfer_harness.per_module_capacity(cfg, instances={"ship_detector": 8})
+        four = shipinfer_harness.per_module_capacity(cfg, instances={"ship_detector": 4})
+
+        assert eight["ship_detector"] == 2 * four["ship_detector"]
+
+    def test_without_a_count_it_falls_back_to_the_config_defaults(self):
+        """The fallback still has to be right, because a caller that forgets is worse off
+        with `None` than with a slightly stale number."""
+        cfg = BenchConfig(cameras=50, fps=20.0, gpus=(2, 3, 4, 5))
+
+        capacities = shipinfer_harness.per_module_capacity(cfg)
+
+        assert capacities["ship_detector"] == 2 * 4 * 64
+        assert capacities["ship_segmenter"] == 1 * 4 * 64
+
+    def test_every_sampled_module_gets_a_bound(self):
+        """A model added to the graph and left out of the mapping loses its guard silently."""
+        cfg = BenchConfig(cameras=50, fps=20.0, gpus=(2, 3))
+
+        capacities = shipinfer_harness.per_module_capacity(cfg, instances={})
+
+        for module in (shipinfer_harness.PIPELINE_MODULE, *shipinfer_harness.GRAPH_MODELS):
+            assert capacities.get(module), f"{module} has no bound"
+
+
+class TestARungFailureCostsOneRung:
+    """A refusal on a high rung must not discard the rungs already measured.
+
+    With the load generator's own ceiling this is the reachable case, not a hypothetical:
+    the top rung raises, and the lower rungs — the point of the ladder — used to go with it,
+    along with `summary.json`.
+    """
+
+    def _measure(self, outcomes):
+        """Scripted per-rung outcomes: a float sustains, an exception is raised."""
+        seen = []
+
+        def measure(cfg, _out_dir):
+            outcome = outcomes[len(seen)]
+            seen.append(cfg.fps)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return object(), run_bench.SystemThroughput(
+                "shipinfer", outcome, False, None, "test", analysis.SUSTAINED
+            )
+
+        return measure, seen
+
+    def test_the_measured_rungs_survive_a_later_refusal(self, monkeypatch, tmp_path: Path):
+        measure, seen = self._measure(
+            [60.0, 120.0, RuntimeError("the load generator delivered 87 img/s of 240")]
+        )
+        monkeypatch.setitem(run_bench.MEASURE, "shipinfer", measure)
+        cfg = BenchConfig(cameras=12, fps=10.0, out_dir=tmp_path)
+
+        runs, throughput = run_bench.sweep_system("shipinfer", cfg, tmp_path, [0.5, 1.0, 2.0])
+
+        assert len(seen) == 3, "it should have attempted the failing rung"
+        assert len(runs) == 2, "the two good rungs were discarded"
+        assert throughput.images_per_s == 120.0
+        assert throughput.kind == run_bench.FLOOR
+
+    def test_a_short_window_is_caught_too(self, monkeypatch, tmp_path: Path):
+        """`analyse` raises `ValueError`, not `RuntimeError`, when the steady window holds
+        fewer samples than a fit needs — a different exception for the same situation."""
+        measure, _ = self._measure([60.0, ValueError("leaves 0 of 1 sample(s)")])
+        monkeypatch.setitem(run_bench.MEASURE, "shipinfer", measure)
+        cfg = BenchConfig(cameras=12, fps=10.0, out_dir=tmp_path)
+
+        runs, throughput = run_bench.sweep_system("shipinfer", cfg, tmp_path, [1.0, 2.0])
+
+        assert len(runs) == 1
+        assert throughput.images_per_s == 60.0
+
+    def test_a_first_rung_failure_yields_no_measurement_rather_than_a_crash(
+        self, monkeypatch, tmp_path: Path
+    ):
+        measure, _ = self._measure([RuntimeError("nothing delivered")])
+        monkeypatch.setitem(run_bench.MEASURE, "shipinfer", measure)
+        cfg = BenchConfig(cameras=12, fps=10.0, out_dir=tmp_path)
+
+        runs, throughput = run_bench.sweep_system("shipinfer", cfg, tmp_path, [1.0])
+
+        assert runs == []
+        assert throughput.kind == run_bench.NOTHING
+
+
+class TestTheRunRecordsTheBoxItRanOn:
+    """A number taken on a contended box is not comparable with one taken on an idle one,
+    and the two systems are not equally affected: ours is CPU-bound Python and the baseline
+    is a GPU-bound C++ binary, so a noisy neighbour depresses ours much more."""
+
+    def test_the_load_average_is_in_the_metadata(self):
+        meta = BenchConfig(cameras=50, fps=20.0).as_dict()
+
+        assert len(meta["load_average"]) == 3
+        assert all(isinstance(v, float) for v in meta["load_average"])
+        assert meta["cpu_count"] and meta["cpu_count"] > 0
+
+    def test_a_quiet_box_gets_a_plain_line(self, monkeypatch):
+        monkeypatch.setattr(run_bench.os, "getloadavg", lambda: (1.0, 1.0, 1.0))
+        monkeypatch.setattr(run_bench.os, "cpu_count", lambda: 48)
+
+        note = run_bench.load_note(BenchConfig(cameras=50, fps=20.0))
+
+        assert "48 cpus" in note
+        assert "BUSY" not in note
+
+    def test_a_busy_box_says_so_in_the_run_output(self, monkeypatch):
+        """Silently recording it in JSON is not enough — the person reading the console is
+        the one about to quote the ratio."""
+        monkeypatch.setattr(run_bench.os, "getloadavg", lambda: (35.0, 34.0, 33.0))
+        monkeypatch.setattr(run_bench.os, "cpu_count", lambda: 48)
+
+        note = run_bench.load_note(BenchConfig(cameras=50, fps=20.0))
+
+        assert "BUSY" in note
+        assert "indicative only" in note
+
+
+class TestTheBaselinesOfferIsLabelledAsAsserted:
+    """The one asymmetry the harness cannot close from outside, stated on every run.
+
+    Our offered rate is measured from ingest counters and gated at 98%; the baseline's is
+    read off its own configuration, because its log carries buffer depths and no arrival
+    counter and it is run unchanged on purpose.
+    """
+
+    def _capacity(self, system: str, value: float):
+        return run_bench.SystemThroughput(system, value, True, None, "test", analysis.SATURATED)
+
+    def test_the_comparison_says_the_baseline_offer_was_not_measured(self):
+        text = run_bench.compare(
+            self._capacity("baseline", 868.0), self._capacity("shipinfer", 81.0), target=5.0
+        )
+
+        assert "asserted from its configuration, not" in text
+        assert "errs in the baseline's favour" in text
+
+    def test_it_is_omitted_when_there_is_no_baseline_number_to_qualify(self):
+        unmeasured = run_bench.SystemThroughput(
+            "baseline", None, False, None, "test", analysis.UNMEASURED
+        )
+
+        text = run_bench.compare(unmeasured, self._capacity("shipinfer", 81.0), target=5.0)
+
+        assert "errs in the baseline's favour" not in text

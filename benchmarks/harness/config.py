@@ -350,4 +350,10 @@ class BenchConfig:
             "model_repository": str(resolved.model_repository),
             "in_container": Path("/.dockerenv").exists(),
             "hostname": os.uname().nodename,
+            # Recorded because this box is shared and a CPU-bound Python pipeline suffers
+            # far more from a noisy neighbour than the baseline's GPU-bound C++ binary does.
+            # A run taken at `load average 35` on 48 cores is not comparable with one taken
+            # at 2, and without this in the log nobody can tell which they are reading.
+            "load_average": [round(v, 2) for v in os.getloadavg()],
+            "cpu_count": os.cpu_count(),
         }
