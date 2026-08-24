@@ -139,15 +139,16 @@ class ShardPlan:
 
     def describe(self) -> str:
         """One line per shard — what the launcher prints before it spawns anything."""
-        lines = [
-            f"{len(self.shards)} shard(s), imbalance {self.imbalance:.1%}",
-        ]
-        for shard in self.shards:
-            lines.append(
-                f"  shard {shard.index}: {len(shard.cameras)} camera(s), "
-                f"{shard.offered_fps:g} fps offered, gpu(s) {list(shard.gpus)}"
-            )
-        return "\n".join(lines)
+        return "\n".join(
+            [
+                f"{len(self.shards)} shard(s), imbalance {self.imbalance:.1%}",
+                *(
+                    f"  shard {shard.index}: {len(shard.cameras)} camera(s), "
+                    f"{shard.offered_fps:g} fps offered, gpu(s) {list(shard.gpus)}"
+                    for shard in self.shards
+                ),
+            ]
+        )
 
 
 def plan_shards(
@@ -180,11 +181,7 @@ def plan_shards(
             cameras — the last because a shard with no cameras is a process that starts, loads
             engines, holds a CUDA context and reads nothing.
     """
-    load = (
-        dict(cameras)
-        if isinstance(cameras, Mapping)
-        else {name: 1.0 for name in cameras}
-    )
+    load = dict(cameras) if isinstance(cameras, Mapping) else dict.fromkeys(cameras, 1.0)
     if not load:
         raise ConfigurationError("cannot plan shards for an empty fleet")
     if shards < 1:

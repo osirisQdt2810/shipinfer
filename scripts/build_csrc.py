@@ -65,7 +65,8 @@ def main() -> int:
     parser.add_argument("--debug", action="store_true", help="-O0 -g instead of -O2")
     args = parser.parse_args()
 
-    sources = sorted((CSRC / "src").glob("*.cpp")) + sorted((CSRC / "apps").glob("*.cpp"))
+    sources = sorted((CSRC / "src").glob("*.cpp"))
+    apps = sorted((CSRC / "apps").glob("*.cpp")) + sorted((CSRC / "tests").glob("*.cpp"))
     cuda_sources = sorted((CSRC / "src").glob("*.cu"))
     if not sources:
         raise SystemExit(f"no sources under {CSRC}")
@@ -78,10 +79,12 @@ def main() -> int:
         if shutil.which(tool) is None and not (CUDA / "bin" / tool).is_file():
             raise SystemExit(f"{tool} is not on PATH and not under {CUDA / 'bin'}")
 
-    binary = BUILD / "shipinfer_pipeline"
-    newest = max(p.stat().st_mtime for p in [*sources, *cuda_sources, *CSRC.rglob("*.hpp")])
-    if not args.force and binary.is_file() and binary.stat().st_mtime >= newest:
-        print(f"up to date: {binary}")
+    newest = max(
+        p.stat().st_mtime for p in [*sources, *apps, *cuda_sources, *CSRC.rglob("*.hpp")]
+    )
+    targets = [BUILD / p.stem for p in apps]
+    if not args.force and all(t.is_file() and t.stat().st_mtime >= newest for t in targets):
+        print("up to date: " + ", ".join(str(t) for t in targets))
         return 0
 
     BUILD.mkdir(parents=True, exist_ok=True)
@@ -101,8 +104,19 @@ def main() -> int:
             gencode += [f"-gencode=arch=compute_{arch},code=sm_{arch}"]
         print(f"nvcc  {source.name}")
         run(
-            [nvcc, "-std=c++17", *optimise, "-c", str(source), "-o", str(obj),
-             "--compiler-options", "-fPIC", *gencode, *includes],
+            [
+                nvcc,
+                "-std=c++17",
+                *optimise,
+                "-c",
+                str(source),
+                "-o",
+                str(obj),
+                "--compiler-options",
+                "-fPIC",
+                *gencode,
+                *includes,
+            ],
             f"compiling {source.name}",
         )
         objects.append(str(obj))
@@ -112,23 +126,70 @@ def main() -> int:
         obj = BUILD / f"{source.stem}.o"
         print(f"g++   {source.name}")
         run(
-            ["g++", "-std=c++17", *optimise, "-Wall", "-Wextra", "-Wno-unused-parameter",
-             "-c", str(source), "-o", str(obj), *includes,
-             *[f for f in cv_flags if f.startswith("-I")]],
+            [
+                "g++",
+                "-std=c++17",
+                *optimise,
+                "-Wall",
+                "-Wextra",
+                "-Wno-unused-parameter",
+                "-c",
+                str(source),
+                "-o",
+                str(obj),
+                *includes,
+                *[f for f in cv_flags if f.startswith("-I")],
+            ],
             f"compiling {source.name}",
         )
         objects.append(str(obj))
 
-    print(f"link  {binary.name}")
-    run(
-        ["g++", "-std=c++17", *optimise, *objects, "-o", str(binary),
-         f"-L{TENSORRT / 'lib'}", f"-L{CUDA / 'lib64'}",
-         f"-Wl,-rpath,{TENSORRT / 'lib'}", f"-Wl,-rpath,{CUDA / 'lib64'}",
-         "-lnvinfer", "-lnvinfer_plugin", "-lcudart", "-pthread",
-         *[f for f in cv_flags if not f.startswith("-I")]],
-        "linking",
-    )
-    print(f"built {binary}")
+    # One library of shared objects, then one binary per entry point. The test binary links
+    # the same objects the pipeline does, so a test cannot pass against different code.
+    for app in apps:
+        obj = BUILD / f"{app.stem}.o"
+        print(f"g++   {app.name}")
+        run(
+            [
+                "g++",
+                "-std=c++17",
+                *optimise,
+                "-Wall",
+                "-Wextra",
+                "-Wno-unused-parameter",
+                "-c",
+                str(app),
+                "-o",
+                str(obj),
+                *includes,
+                *[f for f in cv_flags if f.startswith("-I")],
+            ],
+            f"compiling {app.name}",
+        )
+        binary = BUILD / app.stem
+        print(f"link  {binary.name}")
+        run(
+            [
+                "g++",
+                "-std=c++17",
+                *optimise,
+                *objects,
+                str(obj),
+                "-o",
+                str(binary),
+                f"-L{TENSORRT / 'lib'}",
+                f"-L{CUDA / 'lib64'}",
+                f"-Wl,-rpath,{TENSORRT / 'lib'}",
+                f"-Wl,-rpath,{CUDA / 'lib64'}",
+                "-lnvinfer",
+                "-lnvinfer_plugin",
+                "-lcudart",
+                "-pthread",
+                *[f for f in cv_flags if not f.startswith("-I")],
+            ],
+            f"linking {binary.name}",
+        )
+        print(f"built {binary}")
     return 0
 
 
