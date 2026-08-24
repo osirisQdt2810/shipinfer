@@ -220,6 +220,22 @@ recorded here directly, since the transcript will not keep them).
 
 > note: nếu vấn đề của ta gây performance thấp đang là python multithreading gil thì bạn cóthể portable sang 1 bảng c++ ơ csrc/shipper/
 
+#### V35 — 03:58 UTC
+
+> tiếp tục
+
+#### V36 — 04:35 UTC
+
+> tiêp tục
+
+#### V37 — 11:55 UTC
+
+> vậy tóm lại bạn còn gì chưa làm nữa? bạn không đọc goal của tôi à?
+
+#### V38 — 12:05 UTC
+
+> /goal tôi suggest bạn nên hạn chế dùng GIL, bạn có thể thử port toàn bộ hệ thống ssang C++ trước và sau đó đo thử performance của hệ thống trên C++. Sau đó tiếp tục thực hiện toàn bộ task như tôi đã nêu. Note: BẠN PHẢI LÀM CHO XONG, không được dở chừng và bắt tôi phải kêu bạn tiếp tục
+
 ---
 
 ## 2. Reconstructed requests
@@ -429,5 +445,6 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 | PR loop: push, work elsewhere while review runs; a blocking finding is checked before it is trusted — fix it if real, comment back if the review is wrong; loop until merged | V32 |
 | Keep a PR small — few commits, few files changed. PR #3's ~100 commits is the counter-example | V33, R58 |
 | If the GIL is what caps throughput, port the hot plane to C++ under `csrc/` in this repository | V34 |
+| Port the system to C++ under `csrc/` and measure it there, then resume the remaining tasks. Finish without being told to continue | V38 |
 | After all tasks: check and carry out `docs/qa/triton.md` | V26 |
 | Deferred: justify or remove every `std::memcpy` — prefer zero-copy/in-place | V28 |

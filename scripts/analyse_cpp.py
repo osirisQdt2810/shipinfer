@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Score a C++ data-plane run with the **same** judge the other two systems use.
+
+There is deliberately no new measurement code here. `benchmarks/harness/analysis.py` fits the
+line, decides SATURATED / SUSTAINED / DRAINING / UNMEASURED and applies every guard it applies
+to the Python driver and to the baseline binary. Given that this port exists to look good, the
+one thing it must not have is a friendlier judge than the thing it is being compared against.
+
+    python scripts/analyse_cpp.py .artifacts/cpp/balanced.jsonl --read 70808 --elapsed 72
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from benchmarks.harness import analysis
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("log", type=Path)
+    parser.add_argument(
+        "--read",
+        type=int,
+        required=True,
+        help="frames_read from the binary's own report — the *measured* offered load, not the "
+        "configured target. A run that never delivered its load is a different experiment.",
+    )
+    parser.add_argument("--elapsed", type=float, required=True, help="wall seconds of the run")
+    parser.add_argument("--warmup", type=float, default=10.0)
+    args = parser.parse_args()
+
+    meta = json.loads(args.log.read_text().splitlines()[0])["meta"]
+    achieved = args.read / args.elapsed
+    samples = analysis.read_log(args.log, sample_interval_s=1.0)
+    run = analysis.analyse(
+        samples,
+        system="cpp",
+        warmup_s=args.warmup,
+        # Only the entry module gets an offered rate from the frame count; the object-fed models
+        # are driven by however many detections there were, which is data rather than config —
+        # the same reason the Python harness measures theirs instead of asserting them.
+        offered={"pipeline": achieved, "ship_detector": achieved},
+        capacity=meta["config"]["buffer_capacity"],
+        entry_modules=("pipeline",),
+    )
+    print(analysis.render([run]))
+    target = meta["config"]["cameras"] * meta["config"]["fps"]
+    print(f"\noffered: {achieved:.1f} img/s of {target:g} target ({achieved / target:.0%})")
+    print(f"verdict: {run.verdict}")
+    binding = run.binding_module
+    if binding is not None:
+        print(f"binding module: {binding.module} (growth {binding.fit.slope:+.1f}/s)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
