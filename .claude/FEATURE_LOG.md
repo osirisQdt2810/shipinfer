@@ -5,6 +5,52 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-24 — The benchmark harness: what counts as a measurement
+
+**What it is.** `benchmarks/` drives ShipInfer and `counting-simulation` under one load and
+compares them by the baseline's own buffer-growth saturation methodology: a buffer whose
+occupancy grows over the steady window is a module that cannot keep up, and
+`sustained = offered - growth`. `benchmarks/baseline/` is the upstream repo as a submodule;
+its `sim_pipeline_v2.cpp` is compiled unchanged and run as its own binary — nothing here
+re-implements it.
+
+**The seam it owns.** `run_bench.system_throughput` is the only place that decides *what
+counts as an image, once*. The baseline runs two independent single-model pipelines over
+disjoint image streams, so its system rate is `det + seg`. ShipInfer runs one DAG where every
+frame enters the pipeline queue once and then fans out into crops, so its rate is the
+pipeline queue alone — summing its modules the way the baseline's report does would count
+each frame at the queue and again at the detector.
+
+**The taxonomy, which is the part worth remembering.** A run yields one of three things and
+conflating them is how a harness publishes a number it did not measure:
+
+- **SATURATED** (not capped) is a **capacity** — the buffer grew, so `offered - growth` is
+  exact. This is the whole methodology.
+- **SUSTAINED / DRAINING** is a **floor** — nothing grew, so capacity is *at least* the
+  offered rate and this run cannot say how much more.
+- **UNMEASURED** is nothing — a capped buffer sheds instead of growing, so its slope means
+  nothing.
+
+`ratio_of` is the single place a pair combines: capacity/capacity is exact, floor/capacity is
+`>= Nx` (can meet a target), capacity/floor is `<= Nx` (can only miss one), floor/floor is
+nothing. The first version had this inverted — it refused SATURATED as "a bound" — which made
+a speed-up structurally unreachable, because both systems are offered the same load by
+construction. Six review rounds to find that.
+
+**The guards, each of which caught a real lie.** Offered is what *entered* (a dropped frame
+cannot grow a buffer, so counting it as offered turned a shedding system into a 3.3x
+overstatement); a capped module forces UNMEASURED; `check_offer` refuses a run whose
+generator delivered under 98% of target; `reconcile` cross-checks the buffer-log rate against
+`events_emitted/elapsed`, which a scheduler that *refuses* work cannot fool; every counter is
+rated over the same window the fit uses. `--sweep` climbs the offered rate until something
+saturates, because one point cannot settle a comparison when both sides get the same load.
+
+**First result.** baseline 868.2 img/s, shipinfer 81.4 img/s, 0.09x against a 5x target. The
+binding module is the pipeline queue, not any GPU queue, and it is insensitive to
+`--pipeline-workers` over an 8x range — the wall is one Python process. See JOURNAL.
+
+---
+
 ## 2026-08-23 — The pipeline plane: the perception DAG, reassembly, and the event contract
 
 **Why.** `src/shipinfer/pipeline/` was empty, so nothing connected the cameras to the models
