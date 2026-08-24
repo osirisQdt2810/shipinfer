@@ -39,6 +39,17 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 scripts/hooks/unfinished_work.py",
+            "timeout": 15
+          }
+        ]
+      }
     ]
   }
 }

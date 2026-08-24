@@ -283,6 +283,34 @@ Part 1 = universal Python. Part 2 = project-specific (the layering rule, the *po
 principle*, registries, threading, the two test tiers, native code). Part 3 = Agent Working
 Principles.
 
+## Finishing (RULE — mechanised, because the promise failed)
+
+**A stopping point is exactly three things:** every item in `.claude/TASKS.md` is `[x]`, `[!]`
+or `[-]`; an action needs the operator's confirmation before it is safe; or the operator
+interrupted. Nothing else.
+
+**Opening a PR is not a stopping point. Pushing is not. Writing a summary is not.** Those are
+milestones, and a milestone is something to report *while continuing*. On 24 Aug this failed
+twice in the same shape: a PR was opened, a summary was written with the words "I'll continue"
+in it, and the turn ended. Ending a turn *is* stopping — there is no "and then I keep going".
+
+The rule was in front of me both times, so a stronger reminder was not the fix. What was
+missing is that nothing *checked*: "is there work left?" was answered by a feeling at the end
+of a long stretch of tool calls rather than by a file. So:
+
+- **`.claude/TASKS.md`** is the ledger. One line per outstanding item. Mark `[~]` while working
+  and `[x]` with the evidence when done. `[!]` means genuinely blocked on the operator, with
+  the question on the line.
+- **`scripts/hooks/unfinished_work.py`** is a `Stop` hook that reads it and returns
+  `decision: block` while anything is open, handing the list back. Escapes, so it cannot trap a
+  session: an `[!]` line, `SHIPINFER_ALLOW_STOP=1` for one command, and a cap of twelve
+  consecutive blocks against an unchanged ledger — past which the loop is not converging and
+  saying so is more useful than spinning.
+
+Keep the ledger current *as you go*, not at the end. It is the file that decides whether the
+session may end, so a stale ledger is either a session that stops early or one that will not
+stop at all.
+
 ## Project State Files (DYNAMIC — read at session start)
 - **`docs/qa/user.md`** — every request the operator has made, verbatim. **RULE: append each
   new request here as it arrives**, exactly as written, before acting on it. A rule stated
