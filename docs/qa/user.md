@@ -368,6 +368,15 @@ is paraphrase. Ordered as they arrived.
 
 ---
 
+## 2b. Verification
+
+Every rule in the index below is checked against the repository — a file, a command's output
+or a git fact — in **`docs/qa/verification.md`**, written at the operator's request on
+24 Aug 2026. Twenty rules held; four are partial and one target was measured and missed, each
+named there rather than argued around.
+
+---
+
 ## 3. Standing rules index
 
 The rules that do not expire, each pointing at where it was stated. `V` = verbatim
