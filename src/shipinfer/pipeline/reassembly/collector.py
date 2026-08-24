@@ -33,11 +33,10 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
 
 from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.settings.pipeline import ReassemblySettings
-from shipinfer.pipeline.graph.state import FrameState
+from shipinfer.pipeline.graph.state import EmissionInputs, FrameState
 from shipinfer.pipeline.metrics import PipelineMetrics
 from shipinfer.pipeline.reassembly.policy import EVICTION_POLICIES, EvictionPolicy, PendingKey
 
@@ -75,8 +74,8 @@ class FrameResult:
     missing: tuple[str, ...]
     reason: str = COMPLETE
     waited_us: int = 0
-    #: The objects to publish, captured **under the collector's lock** at the moment the
-    #: frame was finished.
+    #: What emission needs from the state, captured **under the collector's lock** at the
+    #: moment the frame was finished — four references, not the records themselves.
     #:
     #: `FrameState` is documented as owned by exactly one worker for the frame's whole life
     #: (ADR-002), and the sweeper broke that: it built a result under the lock but the
@@ -86,10 +85,16 @@ class FrameResult:
     #: model queue guarantees the overlap. The reader saw an empty detection list, the
     #: worker then filled it, and the scatter indexed past the end.
     #:
-    #: ``None`` means "no snapshot was taken" — a `FrameResult` built directly in a test —
+    #: The first fix built the *records* under the lock, which closed the race and opened a
+    #: contention problem: `_as_embedding` is a 2048-float `tolist()` per object, so at
+    #: ~15 000 objects/s that is ~30M conversions a second serialised inside the one mutex
+    #: every worker takes in `open`/`expect`/`deliver`/`seal` — and `sweep()` did the whole
+    #: expired list in one hold. Capturing is what has to be locked; building does not.
+    #:
+    #: ``None`` means "nothing was captured" — a `FrameResult` built directly in a test —
     #: and the caller falls back to reading the state, which is safe there because nothing
     #: else is touching it.
-    objects: tuple[Any, ...] | None = None
+    inputs: EmissionInputs | None = None
 
     @property
     def key(self) -> PendingKey:
@@ -186,13 +191,14 @@ class PendingFrame:
         self,
         reason: str,
         now_ns: int,
-        snapshot: Callable[[FrameState], tuple[Any, ...]] | None = None,
     ) -> FrameResult:
         """Finish this frame, capturing what emission needs while the lock is still held.
 
-        ``snapshot`` is supplied by the collector's owner because only it knows how to turn
-        a state into records — the collector has no field map. It runs here, under the lock,
-        so the worker cannot be mid-`attach` when it reads.
+        The capture used to be an injected callable, on the reasoning that only the
+        collector's owner can turn a state into records because the collector has no field
+        map. True, and the wrong division: the collector can capture *inputs* without a field
+        map, and the owner applies the map afterwards, outside the lock. So the injection is
+        gone and the two concerns are on the right sides of the mutex.
         """
         return FrameResult(
             state=self.state,
@@ -200,7 +206,7 @@ class PendingFrame:
             missing=self.missing,
             reason=reason,
             waited_us=max(0, (now_ns - self.opened_ns) // 1000),
-            objects=snapshot(self.state) if snapshot is not None else None,
+            inputs=self.state.emission_inputs(),
         )
 
     def __repr__(self) -> str:
@@ -234,13 +240,11 @@ class FrameCollector:
         metrics: PipelineMetrics | None = None,
         policy: EvictionPolicy | None = None,
         clock: Callable[[], int] = time.monotonic_ns,
-        snapshot: Callable[[FrameState], tuple[Any, ...]] | None = None,
     ) -> None:
         self._settings = settings or ReassemblySettings()
         self._emit = emit
         self._metrics = metrics
         self._clock = clock
-        self._snapshot = snapshot
         self._policy = policy or EVICTION_POLICIES.create(self._settings.eviction_policy)
         self._timeout_ns = self._settings.timeout_ms * 1_000_000
         self._lock = threading.Lock()
@@ -334,7 +338,7 @@ class FrameCollector:
         if frame is None:  # pragma: no cover - a policy naming a key it was not given
             return None
         self.evicted += 1
-        return frame.result(EVICTED, self._clock(), self._snapshot)
+        return frame.result(EVICTED, self._clock())
 
     def _report_eviction(self, evicted: FrameResult) -> None:
         """Count, log and report an eviction — naming the camera that caused it.
@@ -409,7 +413,7 @@ class FrameCollector:
                 return
             self._forget_camera_locked(key)
             reason = COMPLETE if frame.is_complete else INCOMPLETE
-            result = frame.result(reason, self._clock(), self._snapshot)
+            result = frame.result(reason, self._clock())
         self._publish(result)
 
     # -- the timeout safety net ---------------------------------------------------------
@@ -426,7 +430,7 @@ class FrameCollector:
         with self._lock:
             expired = [key for key, frame in self._pending.items() if frame.is_expired(now)]
             results = [
-                frame.result(TIMEOUT, now, self._snapshot)
+                frame.result(TIMEOUT, now)
                 for frame in (self._remove_locked(key) for key in expired)
                 if frame is not None
             ]
@@ -446,9 +450,7 @@ class FrameCollector:
         """
         now = self._clock()
         with self._lock:
-            results = [
-                frame.result(SHUTDOWN, now, self._snapshot) for frame in self._pending.values()
-            ]
+            results = [frame.result(SHUTDOWN, now) for frame in self._pending.values()]
             self._pending.clear()
             self._by_camera.clear()
         for result in results:

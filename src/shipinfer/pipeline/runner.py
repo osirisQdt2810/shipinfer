@@ -201,9 +201,6 @@ class PipelineRunner:
             self._emit,
             settings=pipeline.reassembly,
             metrics=self._metrics,
-            # Records are built while the collector still holds its lock, so the sweeper
-            # never reads a `FrameState` its owning worker is still mutating (ADR-002).
-            snapshot=self._graph.objects,
         )
         self._producer_factory = frames
         self._producer: FrameProducer | None = None
@@ -559,10 +556,15 @@ class PipelineRunner:
             camera_id=state.camera_id,
             frame_id=state.frame_id,
             source_id=self._settings.pipeline.source_id,
-            # The snapshot when there is one; only a directly-constructed FrameResult
-            # (a test) lacks it, and there nothing else is touching the state.
+            # Built here, from the capture the collector took under its lock, and *not*
+            # under that lock: this is the most expensive per-object work in the pipeline
+            # and the mutex it used to run inside is the one every worker takes on every
+            # stage. Only a directly-constructed FrameResult (a test) lacks the capture, and
+            # there nothing else is touching the state.
             objects=(
-                result.objects if result.objects is not None else self._graph.objects(state)
+                result.inputs.records(self._graph.field_map)
+                if result.inputs is not None
+                else self._graph.objects(state)
             ),
             width=state.width,
             height=state.height,
