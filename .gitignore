@@ -76,3 +76,5 @@ model_repository/*/*/*.plan
 # host artefact against this box's TensorRT and CUDA, and a checked-in binary is a binary
 # nobody can tell is stale.
 csrc/build/
+# the Stop hook's consecutive-block counter, written beside the ledger
+.claude/.tasks_state.json

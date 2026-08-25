@@ -18,10 +18,12 @@ So this is deliberately not a reminder. A reminder is what already failed. It re
 
 WHY IT IS SAFE TO BLOCK
 -----------------------
-Three escapes, because a hook that can trap a session is worse than the problem:
+Four escapes, because a hook that can trap a session is worse than the problem:
 
 * Mark a line `[!]` with the question on it. Work genuinely waiting on the operator does not
   block — but the answer has to be the first thing said next.
+* A line ``AWAITING-OPERATOR: <question>`` on its own, when the *whole* session is blocked on
+  an answer rather than one item. The hook stands down and repeats the question.
 * `SHIPINFER_ALLOW_STOP=1` for one command, when the operator has said so.
 * A consecutive-block cap. If this fires ``MAX_CONSECUTIVE`` times in a row without the ledger
   changing, it stands down and says so: at that point the loop is not making progress and
@@ -49,22 +51,29 @@ STATE = ROOT / ".claude" / ".tasks_state.json"
 MAX_CONSECUTIVE = 12
 
 OPEN_MARKS = ("- [ ]", "- [~]")
+#: A whole line in the ledger that says the session is blocked on the operator. Documented
+#: beside the marks in `.claude/TASKS.md`; here so the document and the hook agree.
+AWAITING_MARK = "AWAITING-OPERATOR:"
 
 
 def open_items(text: str) -> list[str]:
-    """Every open line, minus the ledger's own explanatory table."""
-    items: list[str] = []
-    in_body = False
+    """Every open line in the ledger.
+
+    Matched anywhere in the file, not below a particular heading: the first version only
+    collected after a ``## Now`` heading that the ledger it shipped with did not have, so it
+    reported a nine-item ledger as clear — a mechanism that fails while saying everything is
+    fine is worse than the reminder it replaced. The legend table that the heading gate was
+    meant to exclude has rows starting with ``|``, so it never matched a mark in the first place.
+    """
+    return [line.strip() for line in text.splitlines() if line.strip().startswith(OPEN_MARKS)]
+
+
+def awaiting_operator(text: str) -> str | None:
+    """The ``AWAITING-OPERATOR:`` line, if the ledger has one on its own line."""
     for line in text.splitlines():
-        if line.startswith("## Now"):
-            in_body = True
-            continue
-        if not in_body:
-            continue
-        stripped = line.strip()
-        if any(stripped.startswith(mark) for mark in OPEN_MARKS):
-            items.append(stripped)
-    return items
+        if line.strip().startswith(AWAITING_MARK):
+            return line.strip()
+    return None
 
 
 def allow(reason: str) -> None:
@@ -85,6 +94,9 @@ def main() -> int:
         allow("unfinished-work hook: no .claude/TASKS.md, nothing to check")
 
     text = LEDGER.read_text(encoding="utf-8")
+    waiting = awaiting_operator(text)
+    if waiting is not None:
+        allow(f"unfinished-work hook: stood down, the ledger says {waiting}")
     items = open_items(text)
     if not items:
         STATE.unlink(missing_ok=True)

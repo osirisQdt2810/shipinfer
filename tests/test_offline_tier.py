@@ -52,3 +52,17 @@ class TestTheOfflineTierHidesTheAccelerators:
         assert os.environ.get("HIP_VISIBLE_DEVICES") == ""
         torch = pytest.importorskip("torch")
         assert torch.cuda.is_available() is False, "the offline tier opened a CUDA device"
+
+
+class TestAskingTheDriverCannotAbortCollection:
+    """`_device_count_or_zero` takes its probe as an argument for exactly this test."""
+
+    def test_a_driver_that_answers_is_believed(self, device_count_or_zero) -> None:
+        assert device_count_or_zero(lambda: 3) == 3
+
+    def test_a_driver_that_raises_is_a_machine_with_none(self, device_count_or_zero) -> None:
+        def broken():
+            raise RuntimeError("CUDA driver initialization failed")
+
+        with pytest.warns(UserWarning, match="could not ask the driver"):
+            assert device_count_or_zero(broken) == 0

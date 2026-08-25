@@ -88,7 +88,6 @@ fi
 
 exec docker run --rm --pid=host --device nvidia.com/gpu=all \
   -e LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu${trt_path}" \
-  -e PYTHONPATH=/work/src \
   -e PYTHONDONTWRITEBYTECODE=1 \
   -e PYTHONPATH="/work/src${shipvision_path}" \
   -v "$REPO:/work:ro" \

@@ -105,6 +105,12 @@ def tier_predicate():
     return device_tier_requested
 
 
+@pytest.fixture(scope="session")
+def device_count_or_zero():
+    """The driver probe wrapper :func:`pytest_configure` uses, for tests that pin its two answers."""
+    return _device_count_or_zero
+
+
 # -- markers ------------------------------------------------------------------------------
 
 
