@@ -49,6 +49,7 @@ from shipinfer.envs import PROFILE_DIR, PROFILE_PHASES, PROFILE_STEPS
 from shipinfer.runtime.platform import torch_module
 
 __all__ = [
+    "TRACE_EVENTS",
     "PhaseTimer",
     "PhaseTimings",
     "nvtx_range",
@@ -77,17 +78,14 @@ _LOG = get_logger("runtime.profiling")
 #: that eventually ran it.
 PHASES = ("compute_input", "compute_infer", "compute_output")
 
-#: Trace event names, as Triton's trace API emits them. An operator can diff a trace from
-#: this server against one from Triton without a mapping.
-TRACE_EVENTS = (
-    "REQUEST_START",
-    "QUEUE_START",
-    "COMPUTE_START",
-    "COMPUTE_INPUT_END",
-    "COMPUTE_OUTPUT_START",
-    "COMPUTE_END",
-    "REQUEST_END",
-)
+#: Trace event names, as Triton's trace API emits them — re-exported from `core/tracing`, which
+#: owns them, rather than restated. This file *had* its own copy, byte-identical, and the test
+#: pinning the two together was moved out in the same change: the next piece to add an eighth
+#: event or rename one to match a Triton release would have left the two files emitting
+#: different vocabularies with a green suite — and the whole reason for using Triton's names
+#: is that an operator can diff a trace against one from Triton without a translation table.
+#: `runtime` → `core` is a legal import direction, so there is no reason for a copy.
+from shipinfer.core.tracing import TRACE_EVENTS  # noqa: E402 - see the note above
 
 
 def profiling_enabled() -> bool:

@@ -8,6 +8,7 @@ from shipinfer.core.errors.backend import BackendLoadError, BackendUnavailableEr
 from shipinfer.core.errors.base import ShipInferError
 from shipinfer.core.errors.config import (
     ConfigurationError,
+    ModelControlError,
     ModelNotFoundError,
     ModelVersionNotFoundError,
 )
@@ -27,6 +28,8 @@ from shipinfer.core.errors.ingest import (
     SourceOpenError,
     SourceUnavailableError,
 )
+from shipinfer.core.errors.sink import SinkDeliveryError
+from shipinfer.core.errors.tracking import TrackingError
 
 __all__ = [
     "BackendLoadError",
@@ -38,6 +41,7 @@ __all__ = [
     "FrameDecodeError",
     "InferenceError",
     "IngestError",
+    "ModelControlError",
     "ModelNotFoundError",
     "ModelVersionNotFoundError",
     "QueueFullError",
@@ -45,7 +49,9 @@ __all__ = [
     "RequestTimeoutError",
     "ServerStateError",
     "ShipInferError",
+    "SinkDeliveryError",
     "SourceOpenError",
     "SourceUnavailableError",
+    "TrackingError",
     "ValidationError",
 ]

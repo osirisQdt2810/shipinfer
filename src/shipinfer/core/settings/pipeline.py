@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from shipinfer.core.settings.enums import OverflowPolicy
 
-__all__ = ["PipelineSettings", "ReassemblySettings"]
+__all__ = ["PipelineSettings", "ReassemblySettings", "TrackingSettings"]
 
 
 class ReassemblySettings(BaseModel):
@@ -63,6 +63,67 @@ class ReassemblySettings(BaseModel):
     def _policy_is_named(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("eviction_policy must name a registered policy")
+        return value.strip()
+
+
+class TrackingSettings(BaseModel):
+    """Plane 3, single-camera MOT, running inside the perception process.
+
+    ``references/.../new-system-architecture.md`` puts tracking in its own stateful plane and
+    shards it **by camera**, and that sharding is a correctness constraint rather than a
+    scaling one: a tracker's Kalman state, its track ids and its ageing are per camera, so
+    two cameras sharing an instance associate one camera's objects with the other's.
+    :class:`~shipinfer.pipeline.graph.tracking.TrackerShard` is what honours it.
+
+    **Off by default, and that default is load-bearing.** Tracking adds a stateful,
+    per-camera-serialised step to a pipeline whose whole design is stateless fan-out, so
+    turning it on changes the shape of the benchmark. An operator opts in; nothing here
+    starts tracking because a submodule happened to be present.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Off unless an operator says otherwise. See the class docstring.
+    enabled: bool = False
+    #: A name registered in ``shipvision.tracking.TRACKERS`` — ``sort``, ``bytetrack``,
+    #: ``ocsort``, ``botsort``, ``deepsortv2``. Resolved through that registry rather than
+    #: matched here, so adding a tracker there needs no edit in this repository.
+    #:
+    #: ``bytetrack`` is the default because it is the cheapest of the five that survives a
+    #: partial occlusion: it associates over the low-confidence detections the others throw
+    #: away, which is the frame or two where a person walks behind a bollard.
+    algorithm: str = "bytetrack"
+    #: Constructor keyword arguments for that tracker (``track_threshold``, ``max_age``,
+    #: ``min_hits``, ...). Validated by the tracker's own ``__init__`` at start-up, because a
+    #: typo here must stop a deploy rather than surface on the thousandth frame.
+    options: dict[str, Any] = Field(default_factory=dict)
+    #: Pin the implementation behind that name — ``python`` for the numpy reference,
+    #: ``native`` for the compiled association loops. ``None`` takes the fastest one this
+    #: host can actually build, which is what a deployment wants and what the registry
+    #: documents. Naming one disables the fallback on purpose: a deployment that asked for
+    #: ``native`` and silently got numpy is a throughput regression reported as a successful
+    #: start-up.
+    backend: str | None = None
+    #: Minimum overlap for attributing a published track back to the detection it was matched
+    #: to. The tracking library returns tracks, not row indices, and a track published on this
+    #: frame is by construction the filtered estimate of one of this frame's detections — so
+    #: the attribution is an assignment over IoU, and this is its threshold. Low, because the
+    #: only competitors are the frame's *other* objects; it exists to refuse an answer rather
+    #: than to tune one.
+    attribution_iou: float = Field(default=0.3, gt=0.0, le=1.0)
+    #: Hand the decoded frame to the tracker. Off by default and it should stay off unless
+    #: the algorithm is ``botsort``: it is the only one of the five that reads pixels, for
+    #: camera-motion compensation, and turning this on makes tracking the last consumer of
+    #: the image — so a 6 MB frame stays alive through the whole DAG instead of being freed
+    #: after the crop step, on every frame in flight. Worth it on a PTZ head or a moving
+    #: hull; pure cost on the bolted-down cameras that are most of an installation.
+    needs_frame: bool = False
+
+    @field_validator("algorithm")
+    @classmethod
+    def _algorithm_is_named(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("algorithm must name a registered tracker")
         return value.strip()
 
 
@@ -160,6 +221,8 @@ class PipelineSettings(BaseModel):
     source_id: str = "shipinfer"
 
     reassembly: ReassemblySettings = Field(default_factory=ReassemblySettings)
+    #: Plane 3. Off by default — see :class:`TrackingSettings`.
+    tracking: TrackingSettings = Field(default_factory=TrackingSettings)
 
     @field_validator("detector_input", "ship_mask_crop", "ship_reid_crop", "person_reid_crop")
     @classmethod

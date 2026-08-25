@@ -9,10 +9,14 @@ from shipinfer.repository.model_config import (
     InstancePlacement,
     IOConfig,
     ModelConfig,
+    RateLimiterConfig,
     VersionPolicy,
+    WarmupInput,
+    WarmupSample,
     load_model_config,
 )
 from shipinfer.repository.model_repository import ModelArtifact, ModelEntry, ModelRepository
+from shipinfer.repository.warmup import WarmupBatch, build_warmup_batches
 
 __all__ = [
     "DynamicBatchingConfig",
@@ -26,6 +30,11 @@ __all__ = [
     "ModelConfig",
     "ModelEntry",
     "ModelRepository",
+    "RateLimiterConfig",
     "VersionPolicy",
+    "WarmupBatch",
+    "WarmupInput",
+    "WarmupSample",
+    "build_warmup_batches",
     "load_model_config",
 ]

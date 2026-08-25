@@ -29,7 +29,10 @@ __all__ = [
     "InstanceKind",
     "InstancePlacement",
     "ModelConfig",
+    "RateLimiterConfig",
     "VersionPolicy",
+    "WarmupInput",
+    "WarmupSample",
     "load_model_config",
 ]
 
@@ -172,6 +175,116 @@ class DynamicBatchingConfig(_Strict):
         return sorted(set(value))
 
 
+class RateLimiterConfig(_Strict):
+    """A bound on how many of this model's instances may execute at once.
+
+    Different from ``scheduler.max_queue_size``, and the difference is why this exists:
+    the queue bound says how much work may be *waiting*, this one says how much may be
+    *running*. Eight instances each holding a full queue all enter compute the moment their
+    batching windows close, and they share a memory bus, a PCIe root complex and — on a
+    shared box — the devices themselves.
+
+    Triton spells this ``rate_limiter { resources [...] }`` with a general named-resource
+    model. This is the same idea with the generality left out, because the only resource
+    this pipeline has ever needed to bound is "an execution".
+
+    Per model rather than per deployment because the answer differs per model: a detector
+    that owns its GPU wants no bound, a segmenter sharing one with three others does.
+
+    Args:
+        kind: a name registered in :data:`shipinfer.scheduling.limits.RATE_LIMITERS`. A
+            plain string, not an enum, so a limiter shipped by another package is
+            selectable without editing this file — and so ``repository`` never imports
+            ``scheduling``. An unknown name fails when the model is built, with the
+            registry listing what it could have been.
+        max_concurrent_executions: the bound. Meaningless for ``off``, and setting it there
+            is refused rather than ignored: a config that states a bound the server does not
+            apply is worse than one that states none.
+    """
+
+    kind: str = "off"
+    max_concurrent_executions: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def _bound_matches_kind(self) -> RateLimiterConfig:
+        off = self.kind in ("off", "none", "unlimited")
+        if off and self.max_concurrent_executions:
+            raise ValueError(
+                "rate_limiter.max_concurrent_executions is set but kind is "
+                f"{self.kind!r}, which applies no bound; set kind: concurrency"
+            )
+        if not off and self.max_concurrent_executions < 1:
+            raise ValueError(
+                f"rate_limiter kind {self.kind!r} needs max_concurrent_executions >= 1"
+            )
+        return self
+
+    @property
+    def enabled(self) -> bool:
+        return self.max_concurrent_executions > 0
+
+
+class WarmupInput(_Strict):
+    """Where one warm-up tensor's bytes come from — Triton's ``model_warmup`` input.
+
+    Exactly one source, because the alternative is a precedence rule nobody remembers:
+
+    * ``zero_data`` — zeros, which is what the implicit warm-up already does;
+    * ``random_data`` — uniform noise, for a model whose kernels branch on the data (an NMS
+      that finds no boxes in a zero image never runs its sort);
+    * ``input_data_file`` — a real sample, relative to the model's **version directory**.
+      This is the one Triton exists to offer and the one that matters here: the fused
+      preprocessing and the detector's post-processing take a different path on a frame with
+      ships in it than on a frame of zeros, and only the real path can be warmed.
+
+    ``dims`` is needed only when the model declares a dynamic extent, because there is
+    nothing to infer then. Otherwise the model's own declaration is the single source of
+    truth and repeating it here is a second place to get it wrong.
+    """
+
+    zero_data: bool = False
+    random_data: bool = False
+    input_data_file: str | None = None
+    dims: list[int] | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> WarmupInput:
+        chosen = [self.zero_data, self.random_data, self.input_data_file is not None]
+        if sum(chosen) != 1:
+            raise ValueError(
+                "a warm-up input needs exactly one of zero_data / random_data / "
+                "input_data_file"
+            )
+        if self.dims is not None and any(dim < 1 for dim in self.dims):
+            raise ValueError(f"warm-up dims must be positive extents, got {self.dims}")
+        return self
+
+
+class WarmupSample(_Strict):
+    """One named warm-up batch, run ``count`` times before the instance reports ready.
+
+    Triton's ``model_warmup``, same field names. The reason to prefer this over an
+    iteration count is that a count only decides *how often*; the sample decides *what*,
+    and what is what selects the kernels. A TensorRT engine picks tactics per shape, CUDA
+    modules load lazily per kernel, and a detector that never sees a box during warm-up has
+    not warmed its NMS.
+
+    Args:
+        name: what an operator sees in the log when this sample fails. Required, because
+            "warm-up sample 2 failed" in a config with four samples is not a diagnosis.
+        batch_size: rows in the batch. Warm the shape you serve — capturing a graph for
+            batch 8 and warming at batch 1 warms the wrong tactic.
+        count: how many times to run it. Two or three is enough; the first execution pays
+            the lazy costs and the rest confirm they are paid.
+        inputs: one entry per declared model input, keyed by tensor name.
+    """
+
+    name: str = Field(min_length=1)
+    batch_size: int = Field(default=1, ge=1)
+    count: int = Field(default=1, ge=1)
+    inputs: dict[str, WarmupInput] = Field(default_factory=dict)
+
+
 class VersionPolicy(_Strict):
     """Which versions of a model to load. Mirrors Triton's three policies."""
 
@@ -253,6 +366,12 @@ class ModelConfig(_Strict):
     #: Batches sent through every instance at load time so the first real request does not
     #: pay for lazy CUDA module loading and TensorRT's first-call allocations.
     warmup_batches: int = Field(default=2, ge=0)
+    #: Named sample batches run at load time instead of the zero-filled implicit warm-up.
+    #: Present means "warm the model with *these*"; empty keeps the old behaviour, driven by
+    #: ``execution.warmup_iterations``. See :class:`WarmupSample` for why the data matters.
+    model_warmup: list[WarmupSample] = Field(default_factory=list)
+    #: How many of this model's instances may be executing at once. Off by default.
+    rate_limiter: RateLimiterConfig = Field(default_factory=RateLimiterConfig)
 
     @model_validator(mode="after")
     def _coherent(self) -> ModelConfig:
@@ -270,6 +389,7 @@ class ModelConfig(_Strict):
                     f"model {self.name!r}: preferred batch size {size} exceeds "
                     f"max_batch_size {self.max_batch_size}"
                 )
+        self._validate_warmup()
         names = [io.name for io in (*self.inputs, *self.outputs)]
         duplicates = {n for n in names if names.count(n) > 1}
         if duplicates:
@@ -277,6 +397,57 @@ class ModelConfig(_Strict):
                 f"model {self.name!r}: duplicate tensor name(s) {sorted(duplicates)}"
             )
         return self
+
+    def _validate_warmup(self) -> None:
+        """Reject a warm-up sample that could not run, at load rather than at start-up.
+
+        Every complaint here is one an operator would otherwise meet as a failed instance
+        several seconds into a deploy, with the config file the last place they would look.
+        """
+        if not self.model_warmup:
+            return
+        if self.is_ensemble:
+            raise ValueError(
+                f"model {self.name!r}: model_warmup does not apply to an ensemble — warm "
+                "the step models instead, which is where the kernels are"
+            )
+        declared = {io.name: io for io in self.inputs}
+        seen: set[str] = set()
+        for sample in self.model_warmup:
+            if sample.name in seen:
+                raise ValueError(
+                    f"model {self.name!r}: duplicate model_warmup name {sample.name!r}"
+                )
+            seen.add(sample.name)
+            if sample.batch_size > self.effective_max_batch_size:
+                raise ValueError(
+                    f"model {self.name!r}: warm-up sample {sample.name!r} asks for batch "
+                    f"{sample.batch_size}, above max_batch_size "
+                    f"{self.effective_max_batch_size}"
+                )
+            unknown = sorted(set(sample.inputs) - set(declared))
+            if unknown:
+                raise ValueError(
+                    f"model {self.name!r}: warm-up sample {sample.name!r} names "
+                    f"input(s) {unknown} the model does not declare"
+                )
+            missing = sorted(
+                io.name
+                for io in self.inputs
+                if not io.optional and io.name not in sample.inputs
+            )
+            if missing:
+                raise ValueError(
+                    f"model {self.name!r}: warm-up sample {sample.name!r} is missing "
+                    f"required input(s) {missing}"
+                )
+            for tensor_name, warmup_input in sample.inputs.items():
+                dims = warmup_input.dims or declared[tensor_name].dims
+                if DYNAMIC in dims:
+                    raise ValueError(
+                        f"model {self.name!r}: warm-up input {tensor_name!r} in sample "
+                        f"{sample.name!r} has a dynamic extent {dims}; give explicit dims"
+                    )
 
     # -- derived views ---------------------------------------------------------------
 

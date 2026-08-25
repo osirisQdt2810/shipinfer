@@ -8,13 +8,21 @@ Environment overrides use the ``SHIPINFER_`` prefix and ``__`` for nesting::
 """
 
 from shipinfer.core.settings.device import DeviceSettings
-from shipinfer.core.settings.enums import ExecutionProvider, OverflowPolicy
+from shipinfer.core.settings.enums import (
+    ExecutionProvider,
+    ModelControlMode,
+    OverflowPolicy,
+)
 from shipinfer.core.settings.execution import ExecutionSettings
 from shipinfer.core.settings.http import HttpSettings
 from shipinfer.core.settings.ingest import CameraConfig, IngestSettings
 from shipinfer.core.settings.memory import MemorySettings
 from shipinfer.core.settings.observability import ObservabilitySettings
-from shipinfer.core.settings.pipeline import PipelineSettings, ReassemblySettings
+from shipinfer.core.settings.pipeline import (
+    PipelineSettings,
+    ReassemblySettings,
+    TrackingSettings,
+)
 from shipinfer.core.settings.scheduler import SchedulerSettings
 from shipinfer.core.settings.server import ServerSettings
 
@@ -26,10 +34,12 @@ __all__ = [
     "HttpSettings",
     "IngestSettings",
     "MemorySettings",
+    "ModelControlMode",
     "ObservabilitySettings",
     "OverflowPolicy",
     "PipelineSettings",
     "ReassemblySettings",
     "SchedulerSettings",
     "ServerSettings",
+    "TrackingSettings",
 ]
