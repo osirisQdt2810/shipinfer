@@ -2,8 +2,9 @@
 //
 // One priority level: per-key FIFOs plus a round-robin cursor over active keys. Both `push` and
 // `pop` are O(1). The obvious alternative — scan every camera on each tick and take one — is
-// O(cameras) per request, which at 50 cameras and 15 000 requests/s is exactly the kind of quiet
-// waste this project exists to remove. (The first C++ queue did the scan; this is the port.)
+// O(cameras) per request, which at 50 cameras and 15 000 requests/s is exactly the kind of
+// quiet waste this project exists to remove. (The first C++ queue did the scan; this is the
+// port.)
 #pragma once
 
 #include <deque>

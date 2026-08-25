@@ -47,7 +47,8 @@ namespace {
         size_t rows() const { return 1; }
         std::string camera() const { return tag.camera_id; }
         // A frame into the detector is NORMAL priority with no deadline — what the Python
-        // pipeline submits. The lanes above and below exist for the requests that will use them.
+        // pipeline submits. The lanes above and below exist for the requests that will use
+        // them.
         int priority() const { return Priority::Normal; }
         bool expired(int64_t) const { return false; }
     };
@@ -67,7 +68,8 @@ namespace {
         int workers = 32;
         int queue_capacity = 65536;
         // The detector's batch window, `dynamic_batching.max_queue_delay_us` in the demo
-        // repository's config: once one frame is in, the queue waits this long for a batch to fill.
+        // repository's config: once one frame is in, the queue waits this long for a batch to
+        // fill.
         int batch_delay_us = 2000;
         int reassembly_capacity = 1024;
         int reassembly_timeout_ms = 1500;
@@ -213,8 +215,8 @@ int main(int argc, char** argv) {
             },
             static_cast<size_t>(options.reassembly_capacity), options.reassembly_timeout_ms);
 
-        FairPriorityQueue<FrameWork> queue("pipeline", static_cast<size_t>(options.queue_capacity),
-                                           Overflow::Reject);
+        FairPriorityQueue<FrameWork> queue(
+            "pipeline", static_cast<size_t>(options.queue_capacity), Overflow::Reject);
 
         // -- the sampler: the same log shape as the other two systems ---------------------
         OccupancySampler sampler(

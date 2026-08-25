@@ -56,8 +56,9 @@ namespace shipinfer {
     enum class PutStatus { Accepted, Rejected, Closed };
 
     // The batching contract a consumer asks the queue to honour (`BatchWindow`). The trade this
-    // encodes is the whole point of dynamic batching: waiting `max_delay_us` costs every request
-    // that latency, but lets the GPU run one large kernel launch instead of many small ones.
+    // encodes is the whole point of dynamic batching: waiting `max_delay_us` costs every
+    // request that latency, but lets the GPU run one large kernel launch instead of many small
+    // ones.
     struct BatchWindow {
         size_t max_batch_size = 1;
         int64_t max_delay_us = 0;
@@ -67,11 +68,14 @@ namespace shipinfer {
 
         BatchWindow() = default;
         BatchWindow(size_t max_batch, int64_t delay_us = 0, std::vector<size_t> preferred = {})
-            : max_batch_size(max_batch), max_delay_us(delay_us), preferred_sizes(std::move(preferred)) {
+            : max_batch_size(max_batch),
+              max_delay_us(delay_us),
+              preferred_sizes(std::move(preferred)) {
             if (max_batch_size < 1) throw std::invalid_argument("max_batch_size must be >= 1");
             for (size_t s : preferred_sizes) {
                 if (s < 1 || s > max_batch_size) {
-                    throw std::invalid_argument("preferred_sizes must be within [1, max_batch_size]");
+                    throw std::invalid_argument(
+                        "preferred_sizes must be within [1, max_batch_size]");
                 }
             }
         }
@@ -98,7 +102,8 @@ namespace shipinfer {
         std::map<std::string, uint64_t> evicted_by_camera;
 
         double utilisation() const {
-            return capacity == 0 ? 0.0 : static_cast<double>(depth) / static_cast<double>(capacity);
+            return capacity == 0 ? 0.0
+                                 : static_cast<double>(depth) / static_cast<double>(capacity);
         }
     };
 

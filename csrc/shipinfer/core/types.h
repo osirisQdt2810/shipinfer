@@ -113,6 +113,10 @@ namespace shipinfer {
     struct QueueFullError : std::runtime_error {
         using std::runtime_error::runtime_error;
     };
+    // The server is not in a state to do this: no instance is ready, a model has no instances.
+    struct ServerStateError : std::runtime_error {
+        using std::runtime_error::runtime_error;
+    };
     struct SourceError : std::runtime_error {
         using std::runtime_error::runtime_error;
     };

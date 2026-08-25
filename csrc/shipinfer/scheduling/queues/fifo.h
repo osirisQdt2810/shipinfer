@@ -19,7 +19,8 @@ namespace shipinfer {
     class FifoQueue {
       public:
         FifoQueue(std::string name, size_t capacity, Overflow overflow = Overflow::Reject,
-                  int block_timeout_ms = 50, bool drop_expired = true, DropHandler<T> on_drop = {})
+                  int block_timeout_ms = 50, bool drop_expired = true,
+                  DropHandler<T> on_drop = {})
             : name_(std::move(name)),
               capacity_(capacity),
               overflow_(overflow),
@@ -43,7 +44,10 @@ namespace shipinfer {
             return copy;
         }
 
-        PutStatus put(T item) {
+        // Takes the item only on acceptance: a refused or closed put leaves it with the caller,
+        // the way the Python queue raises before taking ownership — the dispatcher's spill
+        // depends on still holding the item after a refusal.
+        PutStatus put(T&& item) {
             std::unique_lock<std::mutex> lock(mutex_);
             if (closed_) return PutStatus::Closed;
             const std::string camera = item.camera();

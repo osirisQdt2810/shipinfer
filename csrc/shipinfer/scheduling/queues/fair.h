@@ -4,18 +4,18 @@
 // This class is the direct answer to the failure documented in the reference system's
 // `docs/flow.md`: every camera fed one shared 1000-slot buffer that evicted the *oldest* entry
 // when full, so a crowded camera silently starved a quiet one. Two choices fix it, and both
-// live here: fair queueing (requests are bucketed by camera and drained round-robin, so a camera
-// producing 30 crops per frame cannot occupy 30 consecutive batch slots) and honest overflow (a
-// full queue refuses by default; backpressure that reaches the producer is a signal, a silent
-// eviction three stages downstream is a bug that takes a week to find).
+// live here: fair queueing (requests are bucketed by camera and drained round-robin, so a
+// camera producing 30 crops per frame cannot occupy 30 consecutive batch slots) and honest
+// overflow (a full queue refuses by default; backpressure that reaches the producer is a
+// signal, a silent eviction three stages downstream is a bug that takes a week to find).
 //
 // WHAT THE FIRST C++ QUEUE GOT DIFFERENT, AND WHY THIS ONE DOES NOT. It evicted the *newest*
-// frame of the greediest camera where the Python queue evicts its *oldest* — a different latency
-// profile under sustained overload, recorded in ADR-014 as the one place the planes had already
-// diverged. It had no priority lanes, no batch window (a fixed wait for the first item and then
-// whatever was there), no expiry, and an O(cameras) rotation. The parity harness (ledger P6)
-// drives both planes with one trace and expects the same batches and the same evictions; that
-// is only possible if the arithmetic is the same, so it is.
+// frame of the greediest camera where the Python queue evicts its *oldest* — a different
+// latency profile under sustained overload, recorded in ADR-014 as the one place the planes had
+// already diverged. It had no priority lanes, no batch window (a fixed wait for the first item
+// and then whatever was there), no expiry, and an O(cameras) rotation. The parity harness
+// (ledger P6) drives both planes with one trace and expects the same batches and the same
+// evictions; that is only possible if the arithmetic is the same, so it is.
 #pragma once
 
 #include <atomic>
@@ -36,9 +36,9 @@ namespace shipinfer {
     template <typename T>
     class FairPriorityQueue {
       public:
-        FairPriorityQueue(std::string name, size_t capacity, Overflow overflow = Overflow::Reject,
-                          int block_timeout_ms = 50, bool drop_expired = true,
-                          DropHandler<T> on_drop = {})
+        FairPriorityQueue(std::string name, size_t capacity,
+                          Overflow overflow = Overflow::Reject, int block_timeout_ms = 50,
+                          bool drop_expired = true, DropHandler<T> on_drop = {})
             : name_(std::move(name)),
               capacity_(capacity),
               overflow_(overflow),
@@ -69,7 +69,10 @@ namespace shipinfer {
         }
 
         // -- producer ---------------------------------------------------------------------
-        PutStatus put(T item) {
+        // Takes the item only on acceptance: a refused or closed put leaves it with the caller,
+        // the way the Python queue raises before taking ownership — the dispatcher's spill
+        // depends on still holding the item after a refusal.
+        PutStatus put(T&& item) {
             std::unique_lock<std::mutex> lock(mutex_);
             if (closed_) return PutStatus::Closed;
             const std::string camera = item.camera();
@@ -164,9 +167,10 @@ namespace shipinfer {
             return false;
         }
 
-        void wait_to_fill_locked(std::unique_lock<std::mutex>& lock, const BatchWindow& window) {
-            const auto deadline =
-                std::chrono::steady_clock::now() + std::chrono::microseconds(window.max_delay_us);
+        void wait_to_fill_locked(std::unique_lock<std::mutex>& lock,
+                                 const BatchWindow& window) {
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::microseconds(window.max_delay_us);
             // `size_` counts items and `max_batch_size` counts rows, so this is a lower bound
             // on fullness: with multi-row requests the batch reaches its row budget before the
             // item count does, and waiting past that only adds latency. Deliberately not made
