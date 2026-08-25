@@ -4,6 +4,76 @@ Newest on top. One entry per working session: what changed, what it cost, what i
 
 ---
 
+## 2026-08-25/26 — The split lands piece by piece, and the review keeps finding the unwired guard
+
+**What merged.** shipinfer #12–#17 in order — pipeline, the bench's other two tiers, the offline
+tier's hidden devices, the C++ data plane (six review rounds), the infra/docs slice with the
+`Stop` hook, and the three reasons the fused kernels were unreachable. shipvision #6–#10: reid,
+mot, mtmc, eval/tune, and S1 — the `tracking` → `mot` rename with one package per algorithm.
+Open at the end of the stretch: shipinfer #18 (the topology seam and the fleet, review round 1
+answered) and shipvision #11 (S3: the native tree, bindings and build in the per-algorithm
+layout — `342 passed` on the native tier inside the container, `2025 passed` for the whole tree).
+
+**S2 does not exist.** The ledger promised "StrongSORT and BoostTrack and the Python tweaks" as
+the second slice of the V70 restructure. `git ls-tree` over every remote ref finds no such file,
+and the remaining Python diff between the source branch (08:39) and main is main being *newer*
+(#3, #5, #9 landed 14:27–19:13). Struck with the evidence, not deferred — a ledger line that
+describes work nobody can do is the kind that gets "continued" forever.
+
+**The port is real now (P1a–d).** `FairPriorityQueue<T>`, the five policies behind a registrar,
+the dispatcher, `ModelInstance` as thread + queue + window, `Model::infer` → `std::future`, the
+graph as stages over it, and a bench that runs the Python plane's shape: ~390 img/s at 48
+workers, ~470 at 96, balanced across GPUs 2–5 to 1%, 0 failed, 0 timeouts. Rebased onto main's
+squash of #15 with an identical base tree (`git diff` empty where it matters); the PR is queued
+behind #18.
+
+**What the review found, and the shape it keeps having.** The `Stop` hook parsed only below a
+`## Now` heading the ledger never had — a mechanism that reported nine open items as "clear",
+worse than the reminder it replaced. The same hook would have fired in the CI review job, where
+none of its escapes are reachable. `scripts/build_native.py` asserted the phantom `is_available`
+that the whole PR was about, so a good build failed the container recipe. `Fleet.supervise()`
+consulted only `dead()` over a fleet `stop()` had just emptied, so Ctrl-C spun until SIGKILL.
+`ShardPlan.instances_for` — the guard whose docstring promised half the instances per shard on a
+shared GPU — had no caller. Round two of the same PR added three more of the same shape: the plan balanced *shards* while two
+of four GPUs carried twice the load of the other two — the founding bug rebuilt one level up, hidden
+by a metric that measured processes rather than the resource; a signal handler that called a blocking
+`stop()` under a lock and deadlocked on the second Ctrl-C; floor division that silently dropped a third
+of a device's configured instances. And one of my own making: an append to the append-only feature
+log that duplicated the file end to end. Every one of these was **a guard written and not wired**, a
+name fixed in one place and not the other, or a metric measuring the wrong thing. The tests that now pin them were written to fail on the
+previous commit first, and did.
+
+**The RTSP path, run for the first time.** The ledger's C4 said "wired and tested offline; not yet
+run", and six container runs later that sentence reads as a warning. Each run died one layer
+deeper, each on a defect no offline test could see: NVDEC's decoder opening a GL display the
+headless container does not have; fifty camera threads racing `Gst.init` so half of them probed
+an empty plugin registry and reported "no decoder found" on an image with three; PyGObject's
+lazy attribute loading racing the same way (`'GLib' object has no attribute 'Idle'`); GIO's
+default proxy resolver, libproxy, throwing a C++ exception through the C boundary and
+terminating the process (`Unable to read configuration`) with fifty cameras connected and zero
+frames read; and the appsink's methods missing because nobody had loaded the GstApp typelib.
+Five commits on `fix/rtsp-headless-decode`, each with a test that fails without it. The sixth
+run decoded fifty streams through NVDEC and pushed frames through the whole graph — and the
+harness refused the number, correctly: one interpreter generated 2% of the offered load. The
+RTSP measurement is a 12 × 5 run; the 50 × 20 one is the fleet's to make.
+
+**What it cost.** The org's monthly spend limit cut off both background agents mid-task (the
+S3 coder had already built the extension in the container; the T3 planner had read nothing).
+The rest of S3 was done in the main session; the T3 plan is still owed and will be written here
+rather than delegated until the limit resets. One host-run refusal from the advisory hook, for
+naming `tests/runtime/test_native.py` in a host `pytest` command — the offline tier is exempt,
+but that file imports torch and the hook is right to stop and ask.
+
+**Next.** The queue: #18 → `port/p1-scheduling` → the docs snapshot (this journal, the ledger,
+V69–V81, the two CLAUDE.md rules) → C47's CUDA-free test binaries (every C++ test binary still
+links four accelerator libraries, so the fairness invariants cannot run on a machine with no
+driver). Then P4 ingest, P5 config-in/events-out, P6 the parity harness; T3 (`service`) and T4
+(DeepStream) against the topology seam; after shipvision #11, the parent's
+`pipeline/graph/tracking.py` switches to `shipvision.mot` with the submodule bump in its own
+commit.
+
+---
+
 ## 2026-08-23/24 — The benchmark answers, and the answer is no
 
 **The number exists now.** Baseline **868.2 img/s** measured capacity at 50x20; ShipInfer
