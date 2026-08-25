@@ -12,7 +12,8 @@ Layout, one reason each::
     detect.py       stage 1: letterbox, infer, decode
     objects.py      the per-object tensor, and the model stage that consumes one
     masks.py        a segmentation engine's two outputs -> one area per object
-    crop.py         the fan-out: one frame -> N crops, the only cardinality change
+    crop.py         the fan-out: one frame -> N crops, the first cardinality change
+    tracking.py     plane 3: the one stateful stage, one tracker per camera
     state.py        one frame's working state, and how it becomes event records
     graph.py        the DAG itself: planning, liveness, execution, validation
     ops.py          one ImageOps per worker thread, spread across the visible devices
@@ -28,6 +29,7 @@ from shipinfer.pipeline.graph.detections import (
 )
 from shipinfer.pipeline.graph.graph import (
     DEFAULT_RECORD_FIELDS,
+    TRACKING_RECORD_FIELDS,
     PipelineGraph,
     StageObserver,
     build_perception_graph,
@@ -44,11 +46,22 @@ from shipinfer.pipeline.graph.stage import (
     StageStatus,
 )
 from shipinfer.pipeline.graph.state import DETECTIONS, FRAME_INPUT, FrameState
+from shipinfer.pipeline.graph.tracking import (
+    TRACK_IDS,
+    TRACK_STATES,
+    TrackerShard,
+    TrackStage,
+    build_tracking_stage,
+    tracking_available,
+)
 
 __all__ = [
     "DEFAULT_RECORD_FIELDS",
     "DETECTIONS",
     "FRAME_INPUT",
+    "TRACKING_RECORD_FIELDS",
+    "TRACK_IDS",
+    "TRACK_STATES",
     "Cardinality",
     "CropSpec",
     "CropStage",
@@ -68,6 +81,10 @@ __all__ = [
     "StageOutcome",
     "StageStatus",
     "ThreadLocalImageOps",
+    "TrackStage",
+    "TrackerShard",
     "build_perception_graph",
+    "build_tracking_stage",
     "decode_detections",
+    "tracking_available",
 ]

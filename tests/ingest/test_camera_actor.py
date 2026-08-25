@@ -379,6 +379,85 @@ class TestShutdown:
         assert "RuntimeError" in actor.health.last_error
 
 
+class TestTheReconnectDelayIsInterruptible:
+    """The one class here that runs the *shipped* sleep instead of injecting one.
+
+    Every other test passes ``sleep=lambda _: None``, which is what left this untested: the
+    default used to be ``time.sleep``, and ``time.sleep`` cannot be woken. A camera that had
+    just failed to connect was therefore deaf to :meth:`CameraActor.request_stop` for the
+    whole backoff — up to ``reconnect_max_ms``, 30 s in the shipped settings — so ``stop()``
+    timed out, logged "abandoning the thread" and returned while the thread still held a
+    decoder, and ``IngestManager.remove_camera`` reported a camera gone that was still alive.
+
+    Both halves are asserted, because the cheap way to pass the first test is to stop
+    waiting at all, and a backoff that does not wait is a hot reconnect loop against a
+    camera that is down.
+    """
+
+    @staticmethod
+    def _settings(fast_settings, reconnect_ms: int):
+        """A fixed, un-jittered backoff, so the assertion is on a known delay.
+
+        Initial equals max, so the growth factor never gets to apply and every attempt waits
+        exactly ``reconnect_ms``.
+        """
+        return fast_settings(
+            reconnect_initial_ms=reconnect_ms,
+            reconnect_max_ms=reconnect_ms,
+            reconnect_jitter=0.0,
+        )
+
+    def test_stop_does_not_wait_out_a_thirty_second_backoff(
+        self, make_camera, fast_settings, scripted_factory, sink
+    ):
+        """The shipped cap is 30 s; stopping must cost milliseconds, not tens of seconds."""
+        factory, created = scripted_factory(open_failures=1_000)
+        actor = CameraActor(
+            make_camera("cam0"),
+            sink,
+            settings=self._settings(fast_settings, 30_000),
+            source_factory=factory,
+        )
+        actor.start()
+        try:
+            assert _wait_for(lambda: bool(created)), "the actor never attempted a connect"
+
+            started = time.monotonic()
+            actor.stop(timeout_s=5.0)
+            elapsed = time.monotonic() - started
+        finally:
+            actor.request_stop()
+
+        assert actor.is_running is False, "the thread was abandoned inside the backoff"
+        assert elapsed < 2.0, f"stop() waited {elapsed:.2f}s on a 30s reconnect delay"
+        assert actor.state is CameraState.STOPPED
+
+    def test_the_backoff_is_still_a_backoff_and_not_a_hot_loop(
+        self, make_camera, fast_settings, scripted_factory, sink
+    ):
+        """Waking on the stop event must not turn the delay into a no-op.
+
+        A camera that is down overnight is reconnected at the capped delay; a sleep that
+        returned immediately would hammer it, which is the failure the backoff exists for.
+        """
+        factory, created = scripted_factory(open_failures=1_000)
+        actor = CameraActor(
+            make_camera("cam0"),
+            sink,
+            settings=self._settings(fast_settings, 400),
+            source_factory=factory,
+        )
+        actor.start()
+        try:
+            assert _wait_for(lambda: bool(created))
+            time.sleep(0.25)
+            attempts = len(created)
+        finally:
+            actor.stop(timeout_s=5.0)
+
+        assert attempts == 1, f"{attempts} connect attempts inside one 400 ms backoff"
+
+
 class TestHealthAndMetrics:
     """What an operator can see: per-camera counters, drops, deadlines, priority."""
 

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -112,6 +115,191 @@ class TestTheJsonLinesSink:
     def test_a_negative_flush_interval_is_refused(self, tmp_path: Path):
         with pytest.raises(ConfigurationError):
             JsonLinesResultSink(tmp_path / "x.jsonl", flush_every=-1)
+
+
+class FakeKafkaError:
+    """The subset of ``confluent_kafka.KafkaError`` the delivery callback reads."""
+
+    def __init__(self, message: str) -> None:
+        self._message = message
+
+    def __str__(self) -> str:
+        return self._message
+
+
+class FakeMessage:
+    """The subset of ``confluent_kafka.Message`` the delivery callback reads."""
+
+    def __init__(self, key: bytes | None) -> None:
+        self._key = key
+
+    def key(self) -> bytes | None:
+        return self._key
+
+
+class FakeProducer:
+    """librdkafka's asymmetry, which is the whole reason the defect existed.
+
+    ``produce()`` always succeeds — it only copies the message into a local queue — and the
+    broker's verdict arrives later, on a callback serviced by ``poll()``. A broker that
+    connects and then rejects the topic looks *exactly* like a healthy one from the produce
+    call, so a sink that reads only that call cannot tell them apart.
+
+    The one-message lag is deliberate too: the callback for the message just queued is never
+    ready inside the same ``poll()``, which is why the sink's failure attribution is a frame
+    late and its failure *count* has to be exact.
+    """
+
+    def __init__(self, settings: dict, *, error: str | None = None) -> None:
+        self.settings = settings
+        self.error = error
+        self.produced: list[tuple[str, bytes | None]] = []
+        self.polls = 0
+        self._inflight: list[tuple[object, bytes | None]] = []
+
+    def produce(self, topic, key=None, value=None, on_delivery=None, **kwargs) -> None:
+        self.produced.append((topic, key))
+        self._inflight.append((on_delivery, key))
+
+    def poll(self, timeout: float = 0.0) -> int:
+        self.polls += 1
+        ready, self._inflight = self._inflight[:-1], self._inflight[-1:]
+        return self._deliver(ready)
+
+    def flush(self, timeout: float = 5.0) -> int:
+        ready, self._inflight = self._inflight, []
+        self._deliver(ready)
+        return 0
+
+    def _deliver(self, ready) -> int:
+        for on_delivery, key in ready:
+            if on_delivery is not None:
+                error = FakeKafkaError(self.error) if self.error else None
+                on_delivery(error, FakeMessage(key))
+        return len(ready)
+
+
+def install_fake_kafka(monkeypatch, *, error: str | None = None) -> list[FakeProducer]:
+    """Put a fake ``confluent_kafka`` in ``sys.modules`` and return the producers built.
+
+    The sink imports the client inside its constructor precisely so a host with no
+    librdkafka can still list it, and that same seam is what lets the offline tier drive a
+    rejecting broker without one.
+    """
+    built: list[FakeProducer] = []
+    module = types.ModuleType("confluent_kafka")
+
+    class Producer(FakeProducer):
+        def __init__(self, settings: dict) -> None:
+            super().__init__(settings, error=error)
+            built.append(self)
+
+    module.Producer = Producer
+    monkeypatch.setitem(sys.modules, "confluent_kafka", module)
+    return built
+
+
+class TestTheKafkaSinkReportsDeliveryFailures:
+    """A ``produce()`` that returns is not a publish.
+
+    The failure this pins is the one :mod:`shipinfer.pipeline.sinks.base` says the ``bool``
+    return exists to prevent: point the sink at a broker that connects and then rejects the
+    topic — an unknown topic, an ACL denial — and every ``emit()`` used to report success
+    while nothing whatsoever was published.
+    """
+
+    UNKNOWN_TOPIC = "Broker: Unknown topic or partition"
+
+    def _sink(self, monkeypatch, *, error: str | None):
+        producers = install_fake_kafka(monkeypatch, error=error)
+        sink = RESULT_SINKS.create("kafka", topic="perception.results", brokers="broker:9092")
+        return sink, producers[0]
+
+    def test_a_rejected_topic_is_a_counted_failure_not_a_silent_success(self, monkeypatch):
+        """The count is exact. What changed is *where* it is reported.
+
+        This used to assert `published == [True, False, False, False, False]` — every frame
+        after the first reporting failure because an *earlier* message had been refused. That
+        was the bug, written down as an expectation: `emit()`'s bool decides the current
+        frame's future, so charging it an earlier message's loss deletes a frame the broker
+        accepted and errors its caller, while the frame genuinely lost was already recorded a
+        success.
+
+        `produce` accepted all five, so all five emits are true; all five refusals are
+        reported through `drain_delivery_failures`, each with its own tag.
+        """
+        sink, producer = self._sink(monkeypatch, error=self.UNKNOWN_TOPIC)
+
+        published = [sink.emit(event(frame)) for frame in range(5)]
+
+        assert published == [True] * 5, "the broker accepted every produce; emit reports that"
+        assert sink.emitted == 5
+        assert sink.failed == 0
+        assert sink.delivered == 0
+        assert len(producer.produced) == 5
+        # Four verdicts have come back by the fifth produce; the last needs a flush.
+        assert sink.delivery_failures == 4
+
+    def test_each_refusal_carries_the_frame_it_belongs_to(self, monkeypatch):
+        """The whole point of the fix. Four refused messages, four tags, and they are *its*
+        tags — not the tag of whichever frame happened to be mid-emit."""
+        sink, _ = self._sink(monkeypatch, error=self.UNKNOWN_TOPIC)
+        for frame in range(5):
+            sink.emit(event(frame, camera="quay_west"))
+
+        drained = sink.drain_delivery_failures()
+
+        assert drained == tuple(("quay_west", frame) for frame in range(4))
+        assert sink.drain_delivery_failures() == (), "drained twice would double-count"
+
+    def test_two_cameras_are_not_charged_each_others_losses(self, monkeypatch):
+        """The concrete failure the review described: a refusal for one camera landing inside
+        another camera's emit."""
+        sink, _ = self._sink(monkeypatch, error=self.UNKNOWN_TOPIC)
+        sink.emit(event(100, camera="cam03"))
+        sink.emit(event(412, camera="cam07"))
+        sink.emit(event(413, camera="cam07"))
+
+        # The fake broker answers on the *next* poll, so by the third emit two verdicts are
+        # back: cam03/100 (arrived inside cam07/412's emit) and cam07/412 (inside 413's).
+        # Under the old code the first of those was charged to cam07/412.
+        assert sink.drain_delivery_failures() == (("cam03", 100), ("cam07", 412))
+
+    def test_the_last_failures_are_counted_at_close_not_discarded(self, monkeypatch):
+        """Flush is the last chance: those messages have nobody left to drain them."""
+        sink, _ = self._sink(monkeypatch, error=self.UNKNOWN_TOPIC)
+        for frame in range(5):
+            sink.emit(event(frame))
+
+        sink.close()
+
+        stats = sink.stats()
+        assert stats["delivery_failures"] == 5
+        assert stats["delivered"] == 0
+        assert stats["undrained_delivery_failures"] == 0
+
+    def test_the_failure_names_the_camera_an_operator_has_to_look_at(self, monkeypatch, caplog):
+        sink, _ = self._sink(monkeypatch, error=self.UNKNOWN_TOPIC)
+        with caplog.at_level(logging.ERROR, logger="shipinfer.pipeline.sinks.kafka"):
+            sink.emit(event(0, camera="quay_west"))
+            sink.emit(event(1, camera="quay_west"))
+
+        refusals = [r.getMessage() for r in caplog.records if "refused" in r.getMessage()]
+        assert refusals and "quay_west" in refusals[0]
+        assert self.UNKNOWN_TOPIC in refusals[0]
+
+    def test_a_healthy_broker_still_publishes_every_frame(self, monkeypatch):
+        """The other half of the contract: the callback must not invent failures."""
+        sink, _ = self._sink(monkeypatch, error=None)
+
+        published = [sink.emit(event(frame)) for frame in range(5)]
+        sink.close()
+
+        assert published == [True] * 5
+        assert sink.failed == 0
+        assert sink.emitted == 5
+        assert sink.delivered == 5
+        assert sink.delivery_failures == 0
 
 
 class TestTheRegistry:

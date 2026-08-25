@@ -31,6 +31,7 @@ from shipinfer.ingest.frame import FrameCounter
 from shipinfer.pipeline import PipelineRunner
 from shipinfer.pipeline.graph.state import FrameState
 from shipinfer.pipeline.reassembly.collector import FrameCollector
+from shipinfer.pipeline.schema import SCHEMA_VERSION
 from shipinfer.pipeline.sinks import NullResultSink
 from shipinfer.scheduling.queues import FairPriorityQueue
 
@@ -299,6 +300,67 @@ class TestTheTagSurvivesEveryFailurePath:
         assert runner.sink.emitted == 0
         assert models["ship_detector"].calls == []
         assert isinstance(item.future.exception(0.1), RequestCancelledError)
+
+
+class TestALateRefusalIsChargedToItsOwnFrame:
+    """#8 review, finding 6: a Kafka delivery verdict arrives *after* `emit()` returned, inside
+    the `poll(0)` of a later frame's emit. Raising it into that later emit charged the loss to
+    the wrong `(camera_id, frame_id)` — the frame the broker accepted got deleted from the
+    records and its caller errored, while the frame genuinely lost was already a success.
+
+    The fix splits the two channels: `emit()` reports what it knows synchronously, and
+    `drain_delivery_failures()` reports the late verdicts with the tag each belongs to. This
+    class pins the runner's half — that it drains, counts each tag once, and leaves the
+    *current* frame's outcome alone.
+    """
+
+    class LateRefusingSink(NullResultSink):
+        """Accepts every produce, then reports the *previous* frame refused on the next emit —
+        which is the shape of an asynchronous acknowledgement."""
+
+        name = "late"
+
+        def __init__(self) -> None:
+            super().__init__(keep_last=8)
+            self._in_flight: tuple[str, int] | None = None
+            self._pending: list[tuple[str, int]] = []
+            self.drained_total = 0
+
+        def _do_emit(self, event) -> None:
+            if self._in_flight is not None:
+                self._pending.append(self._in_flight)
+            self._in_flight = (event.camera_id, event.frame_id)
+            super()._do_emit(event)
+
+        def drain_delivery_failures(self) -> tuple[tuple[str, int], ...]:
+            drained, self._pending = tuple(self._pending), []
+            self.drained_total += len(drained)
+            return drained
+
+    def test_every_frame_is_still_reported_published(self, runner_for) -> None:
+        """The broker accepted every produce, so no frame is a drop and no future fails."""
+        sink = self.LateRefusingSink()
+        runner = runner_for(sink=sink).start()
+
+        publish(runner, 3)
+
+        assert wait_for(lambda: sink.emitted == 3), runner.health()
+        assert sink.failed == 0
+        assert runner.metrics.frames_emitted.value(camera="cam0") == 3, (
+            "a frame the broker accepted was counted as dropped because an earlier one was "
+            "refused — the attribution bug, in the metric"
+        )
+
+    def test_each_late_refusal_is_counted_once_under_the_sink_metric(self, runner_for) -> None:
+        sink = self.LateRefusingSink()
+        runner = runner_for(sink=sink).start()
+
+        publish(runner, 3)
+
+        # Frames 0 and 1 are refused (each reported during the following emit); frame 2's
+        # verdict is still in flight when the run ends.
+        assert wait_for(lambda: sink.drained_total == 2), runner.health()
+        assert runner.metrics.sink_failures.value(sink="late") == 2
 
 
 class TestADroppedEventIsNotAPublishedOne:
@@ -665,7 +727,7 @@ class TestEndToEndWithReplayAndJsonLines:
         assert len(payloads) == 6, "N frames in must be N events out"
         assert sorted(keys) == [("cam0", index) for index in range(6)]
         assert len(set(keys)) == 6, "an event was published twice"
-        assert all(p["schema_version"] == 2 for p in payloads)
+        assert all(p["schema_version"] == SCHEMA_VERSION for p in payloads)
         assert all(p["partial"] is False for p in payloads), [
             p["missing_stages"] for p in payloads
         ]
