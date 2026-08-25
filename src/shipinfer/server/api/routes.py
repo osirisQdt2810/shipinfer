@@ -6,7 +6,10 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any
 
 from shipinfer.core.errors import (
+    ConfigurationError,
+    ModelControlError,
     ModelNotFoundError,
+    ModelVersionNotFoundError,
     QueueFullError,
     ServerStateError,
     ShipInferError,
@@ -55,9 +58,15 @@ def build_router(server: InferenceServer) -> Any:
         load balancer will back off; 400 on a malformed tensor is not, and retrying it
         forever is how a client turns its own bug into an outage.
         """
-        if isinstance(exc, ModelNotFoundError):
+        if isinstance(exc, (ModelNotFoundError, ModelVersionNotFoundError)):
             return HTTPException(404, str(exc))
-        if isinstance(exc, ValidationError):
+        # A refused load/unload is the caller asking for something this server is not
+        # configured to do. 400, never 503: it will not start working on a retry, and a
+        # control-plane script that retries a 503 forever is how one bug becomes a load.
+        # `ConfigurationError` alongside them: a `config.yaml` the caller asked us to load
+        # and that does not parse is the caller's mistake, and it will parse no better on a
+        # retry. It fell through to 500, which is what a control-plane script retries.
+        if isinstance(exc, (ValidationError, ModelControlError, ConfigurationError)):
             return HTTPException(400, str(exc))
         if isinstance(exc, (QueueFullError, ServerStateError)):
             return HTTPException(503, str(exc))
@@ -165,6 +174,79 @@ def build_router(server: InferenceServer) -> Any:
     @router.get("/v2/statistics")
     def statistics() -> dict[str, object]:
         return server.stats()
+
+    @router.get("/v2/models/{name}/stats")
+    def model_statistics(name: str) -> dict[str, object]:
+        """Triton's per-model statistics, for one model.
+
+        `/v2/statistics` returns the whole server, which is the wrong shape for the question
+        an operator actually has at 3am: one camera is slow, its model is `person_embedder`,
+        what has *that* model done. Reading it out of a fleet-wide document, or off a
+        histogram that has no per-model cumulative count at all, is how that question goes
+        unanswered.
+
+        The body is Triton's ``model_stats`` array with one entry, so a Triton client parses
+        it unchanged.
+        """
+        try:
+            model = server.model(name)
+        except ShipInferError as exc:
+            raise _fail(exc) from exc
+        return {"model_stats": [model.model_stats()]}
+
+    @router.get("/v2/models/{name}/versions/{version}/stats")
+    def model_version_statistics(name: str, version: int) -> dict[str, object]:
+        """The same, addressed by version — the spelling a Triton client generates.
+
+        A version that is not the loaded one is a 404 rather than the loaded one's numbers:
+        answering with a different version's statistics under the requested version's URL is
+        how a rollout gets declared healthy on the old build's data.
+        """
+        try:
+            model = server.model(name)
+            if model.version != version:
+                raise ModelVersionNotFoundError(name, version, [model.version])
+        except ShipInferError as exc:
+            raise _fail(exc) from exc
+        return {"model_stats": [model.model_stats()]}
+
+    # -- model control --------------------------------------------------------------------
+    #
+    # Triton's model-repository extension, same paths and same verbs, so an existing control
+    # plane works against this server unchanged. They are POST even where they read, because
+    # that is what the protocol says.
+
+    @router.post("/v2/repository/index")
+    def repository_index() -> list[dict[str, str]]:
+        try:
+            return server.index()
+        except ShipInferError as exc:
+            raise _fail(exc) from exc
+
+    @router.post("/v2/repository/models/{name}/load")
+    def load_model(name: str) -> dict[str, object]:
+        """Load a model into the running server.
+
+        Synchronous, and deliberately so: the response arrives when the model is serving or
+        when it has failed, so a deploy script needs no polling loop and cannot mistake
+        "accepted" for "ready".
+        """
+        try:
+            model = server.load_model(name)
+        except ShipInferError as exc:
+            raise _fail(exc) from exc
+        except Exception as exc:  # a backend or engine failure during load
+            _LOG.exception("loading model %s failed", name)
+            raise HTTPException(500, str(exc)) from exc
+        return {"name": model.name, "version": str(model.version), "state": "READY"}
+
+    @router.post("/v2/repository/models/{name}/unload")
+    def unload_model(name: str) -> dict[str, object]:
+        try:
+            server.unload_model(name)
+        except ShipInferError as exc:
+            raise _fail(exc) from exc
+        return {"name": name, "state": "UNAVAILABLE"}
 
     @router.get(server.settings.http.metrics_path)
     def metrics() -> Response:

@@ -46,6 +46,10 @@ def _annotate(exc: BaseException, note: str) -> None:
     live in ``__notes__`` on every version; 3.11's ``traceback`` prints them and 3.10's
     ignores them, and neither is worse than the wrapped-and-flattened error this replaces.
     """
+    add_note = getattr(exc, "add_note", None)
+    if add_note is not None:  # 3.11+: the library's own semantics, not this file's
+        add_note(note)
+        return
     notes = getattr(exc, "__notes__", None)
     if notes is None:
         notes = []

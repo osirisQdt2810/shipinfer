@@ -11,9 +11,11 @@ from shipinfer.server.ensemble import EnsembleModel
 from shipinfer.server.health import HealthReport, HealthStatus, check_health
 from shipinfer.server.instance import ModelInstance
 from shipinfer.server.model import Model
+from shipinfer.server.statistics import DurationStat, ModelStatistics
 
 __all__ = [
     "RESPONSE_CACHES",
+    "DurationStat",
     "EnsembleModel",
     "HealthReport",
     "HealthStatus",
@@ -21,6 +23,7 @@ __all__ = [
     "LruResponseCache",
     "Model",
     "ModelInstance",
+    "ModelStatistics",
     "ResponseCache",
     "check_health",
 ]
