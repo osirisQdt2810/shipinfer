@@ -25,25 +25,46 @@ namespace shipinfer {
 
     void TrtEngineAdapter::write_rows(size_t row_offset, const float* src, size_t rows,
                                       Device src_device) {
-        // ADR-002: one thread, one context, one GPU. A row that lives on another GPU is not
-        // copied here — the placement policy's job is to keep it from arriving (locality) and
-        // the service topology's job is to move it through the host ring (ledger T3). Refusing
-        // beats a peer copy that works on one box and faults on the next.
-        if (src_device.is_cuda() && src_device != device()) {
-            throw BackendError("a batch row on " + src_device.str() +
-                               " was handed to an instance on " + device().str() +
-                               "; ADR-002 forbids the cross-device access");
-        }
         float* input = static_cast<float*>(instance_->input());
-        const size_t bytes = rows * input_row_elems() * sizeof(float);
+        const size_t width = input_row_elems();
+        const size_t bytes = rows * width * sizeof(float);
+        float* dst = input + row_offset * width;
+        if (src_device.is_cuda() && src_device != device()) {
+            // A spill: the placement policy sent a row that lives on another GPU here, because
+            // its home GPU's queue had backed up past the threshold. The Python plane copies in
+            // that case (`.to(device)`), so this plane copies too — a peer copy on this stream,
+            // which the driver stages through the host when the two devices cannot see each
+            // other. ADR-002 forbids a kernel *accessing* another device's memory; a copy the
+            // policy chose to pay for is the mechanism that keeps that rule true under load.
+            GPU_CHECK(gpuMemcpyPeerAsync(dst, device().index, src, src_device.index, bytes,
+                                         instance_->stream()));
+            return;
+        }
         GPU_CHECK(gpuMemcpyAsync(
-            input + row_offset * input_row_elems(), src, bytes,
+            dst, src, bytes,
             src_device.is_cuda() ? gpuMemcpyDeviceToDevice : gpuMemcpyHostToDevice,
             instance_->stream()));
     }
 
     void TrtEngineAdapter::execute(int rows) {
-        instance_->execute(rows);
+        // These plans are static at their batch, and `setInputShape` refuses any other batch —
+        // the first run of the ported plane sealed every frame Incomplete on exactly that. A
+        // partial batch is padded to the plan's batch by repeating the last real row, so the
+        // padding rows carry a real image rather than whatever the binding held before: a NaN
+        // through a detector produces warnings on every layer. Only the real rows are read
+        // back. The Python TensorRT backend pads the same way.
+        const int plan_batch = instance_->max_batch();
+        if (rows < plan_batch) {
+            float* input = static_cast<float*>(instance_->input());
+            const size_t width = input_row_elems();
+            const float* last = input + static_cast<size_t>(rows - 1) * width;
+            for (int r = rows; r < plan_batch; ++r) {
+                GPU_CHECK(gpuMemcpyAsync(input + static_cast<size_t>(r) * width, last,
+                                         width * sizeof(float), gpuMemcpyDeviceToDevice,
+                                         instance_->stream()));
+            }
+        }
+        instance_->execute(plan_batch);
     }
     const float* TrtEngineAdapter::output() const {
         return instance_->output();

@@ -34,7 +34,7 @@ namespace shipinfer {
         CollectorObserver(FrameCollector& collector, FrameTag tag)
             : collector_(collector), tag_(std::move(tag)) {}
         void planned(const std::vector<std::string>& stages) override {
-            collector_.expect(tag_, stages);
+            collector_.also_expect(tag_, stages);
         }
         void finished(const StageOutcome& outcome) override {
             if (outcome.ran()) collector_.deliver(tag_, outcome.stage);

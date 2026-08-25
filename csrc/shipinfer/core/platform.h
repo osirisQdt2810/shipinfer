@@ -38,6 +38,7 @@ using gpuEvent_t = hipEvent_t;
     #define gpuMemcpyAsync hipMemcpyAsync
     #define gpuMemcpyHostToDevice hipMemcpyHostToDevice
     #define gpuMemcpyDeviceToDevice hipMemcpyDeviceToDevice
+    #define gpuMemcpyPeerAsync hipMemcpyPeerAsync
     #define gpuMemcpyDeviceToHost hipMemcpyDeviceToHost
     #define gpuMemsetAsync hipMemsetAsync
     #define gpuStreamCreate hipStreamCreate
@@ -67,6 +68,7 @@ using gpuEvent_t = cudaEvent_t;
     #define gpuMemcpyAsync cudaMemcpyAsync
     #define gpuMemcpyHostToDevice cudaMemcpyHostToDevice
     #define gpuMemcpyDeviceToDevice cudaMemcpyDeviceToDevice
+    #define gpuMemcpyPeerAsync cudaMemcpyPeerAsync
     #define gpuMemcpyDeviceToHost cudaMemcpyDeviceToHost
     #define gpuMemsetAsync cudaMemsetAsync
     #define gpuStreamCreate cudaStreamCreate
