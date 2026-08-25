@@ -224,6 +224,11 @@ recorded here directly, since the transcript will not keep them).
 
 > tiếp tục
 
+#### V43 — 14:40 UTC
+
+> note: C++ chỉ cần có cách thuật toans track đã sử dụng trong motservice và mtmcservice thôi
+
+
 #### V36 — 04:35 UTC
 
 > tiêp tục
