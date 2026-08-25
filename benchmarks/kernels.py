@@ -133,13 +133,19 @@ def _time(
     return median, spread
 
 
-def _synchronised(ops: Any, call: Callable[[], Any]) -> Callable[[], Any]:
+def _synchronised(
+    ops: Any, call: Callable[[], Any], device: int | None = None
+) -> Callable[[], Any]:
     """Wrap a device call so the timed region includes the work, not just the launch.
 
     A CUDA launch is asynchronous. Timing one without a synchronise measures the cost of
     *asking*, which for a fused kernel is close to zero and would produce a spectacular,
     entirely fictional speed-up. This is the single easiest way to publish a fake number in
     a kernel benchmark, so it is handled once, here.
+
+    The synchronise is on ``device`` — the one the ops are bound to — not on the current
+    device. ``torch.cuda.synchronize()`` with no argument waits on cuda:0, so a run on
+    ``--device 2`` would have timed the launch and waited for the wrong GPU.
     """
     # `on_device` is the ABC's own answer (`runtime/ops/base.py`: "callers should branch on
     # `on_device` rather than catching"). The first version sniffed `describe()` for the words
@@ -156,10 +162,25 @@ def _synchronised(ops: Any, call: Callable[[], Any]) -> Callable[[], Any]:
 
     def synchronised() -> Any:
         result = call()
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(device)
         return result
 
     return synchronised
+
+
+def _destination(device: int | None) -> Any:
+    """The device the `letterbox_to_device` output lives on: the one the ops are bound to.
+
+    No `ImageOps` implementation exposes a public `device` attribute (`TorchImageOps` keeps
+    `_device`, `NativeImageOps` `_device_index`), so the first version's
+    ``getattr(ops, "device", "cuda")`` always fell through to the *current* device. On
+    ``--device 2`` the native path then refused the cross-device write (a skip, so the
+    device-fair column vanished) and the torch path silently ran the whole op on cuda:0
+    while the table said cuda:2. The index is threaded through instead of guessed.
+    """
+    import torch
+
+    return torch.device("cuda") if device is None else torch.device("cuda", device)
 
 
 def _implementations(
@@ -213,8 +234,10 @@ def _bind(registry: Any, name: str, device: int | None) -> Any:
         return registry.create(name)
 
 
-def _to_device_case(ops: Any, frame: np.ndarray, params: Any) -> Callable[[], Any]:
-    """A closure for `letterbox_to_device`, with the destination allocated once.
+def _to_device_case(
+    ops: Any, frame: np.ndarray, params: Any, device: int | None
+) -> Callable[[], Any]:
+    """A closure for `letterbox_to_device`, with the destination allocated once, on ``device``.
 
     The contract is strict about `out` — right device, float32, contiguous, rank 4 NCHW —
     and every violation is silent at the pixel level, so it is checked rather than assumed.
@@ -234,9 +257,7 @@ def _to_device_case(ops: Any, frame: np.ndarray, params: Any) -> Callable[[], An
         # Let the call raise its own `NotImplementedError`, so the table says *why*.
         return lambda: ops.letterbox_to_device([frame], None, params)
 
-    out = torch.empty(
-        (1, 3, *DETECT_HW), dtype=torch.float32, device=getattr(ops, "device", "cuda")
-    )
+    out = torch.empty((1, 3, *DETECT_HW), dtype=torch.float32, device=_destination(device))
     return lambda: ops.letterbox_to_device([frame], out, params)
 
 
@@ -280,9 +301,9 @@ def _inputs(seed: int) -> Inputs:
     return Inputs(frame=frame, boxes=boxes, nms_boxes=nms_boxes, nms_scores=nms_scores)
 
 
-def _cases(ops: Any, inputs: Inputs) -> dict[str, Callable[[], Any]]:
+def _cases(ops: Any, inputs: Inputs, device: int | None) -> dict[str, Callable[[], Any]]:
     """One closure per op over ``inputs``, allocated *outside* the timed region — allocation
-    is not what is being measured."""
+    is not what is being measured. ``device`` is where a device-side output lives."""
     from shipinfer.runtime.ops.base import NormalizeParams
 
     params = NormalizeParams()
@@ -297,7 +318,7 @@ def _cases(ops: Any, inputs: Inputs) -> dict[str, Callable[[], Any]]:
         # this project exists to justify. `letterbox_to_device` is the honest device number,
         # and it is also the call the production path actually makes: the letterboxed tensor's
         # next stop is a TensorRT binding, not the host.
-        "letterbox_to_device": _to_device_case(ops, frame, params),
+        "letterbox_to_device": _to_device_case(ops, frame, params, device),
         "crop_batch": lambda: ops.crop_batch(frame, boxes, CROP_HW, params),
         "nms": lambda: ops.nms(nms_boxes, nms_scores, 0.45, 0.25, 300),
     }
@@ -318,10 +339,10 @@ def measure(
     result.skipped.update(unavailable)
     inputs = _inputs(seed)  # once per op: every implementation is timed on the same data
     for name, ops in available:
-        cases = _cases(ops, inputs)
+        cases = _cases(ops, inputs, device)
         if op not in cases:
             continue
-        call = _synchronised(ops, cases[op])
+        call = _synchronised(ops, cases[op], device)
         try:
             call()  # once, outside the timing, so an unsupported op is reported not timed
         except NotImplementedError as exc:

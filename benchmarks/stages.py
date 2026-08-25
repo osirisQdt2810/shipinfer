@@ -150,8 +150,12 @@ def profile_from(
     cells: dict[str, HistogramCell] = dict(steady_cells or {})
     if steady_cells is not None:
         # The result carries the steady window — even one in which no stage recorded, which
-        # is a fact about the run and not a reason to fall back to a different window.
+        # is a fact about the run and not a reason to fall back to a different window. The
+        # duration comes from the same branch as the frame count: `steady_s` here, never
+        # `elapsed_s`, so the two cannot describe different windows.
         frames = int(getattr(result, "steady_frames_accepted", 0))
+        elapsed = float(getattr(result, "steady_s", 0.0))
+        read = int(getattr(result, "steady_frames_read", 0))
         window = (
             "whole run — the run ended before its own warm-up, so there is no steady window"
             if getattr(result, "steady_is_whole_run", False)
@@ -161,6 +165,8 @@ def profile_from(
         # A result with no per-window cells (an older run file, or a run that recorded no
         # stage). Read the cumulative histogram and say which window that is.
         frames = int(getattr(result, "frames_accepted", 0))
+        elapsed = float(getattr(result, "elapsed_s", 0.0))
+        read = int(getattr(result, "frames_read", 0))
         window = "whole run — this result carries no steady-window histograms"
         if metrics is not None:
             cells = {s: read_cell(metrics.stage_latency_us, stage=s) for s in stages}
@@ -181,10 +187,6 @@ def profile_from(
                 per_frame_us=0.0 if frames <= 0 else cell.total / frames,
             )
         )
-    elapsed = float(getattr(result, "steady_s", 0.0) or getattr(result, "elapsed_s", 0.0))
-    read = int(getattr(result, "steady_frames_read", 0)) or int(
-        getattr(result, "frames_read", 0)
-    )
     return Profile(
         stages=tuple(sorted(costs, key=lambda c: -c.per_frame_us)),
         frames=frames,

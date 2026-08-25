@@ -12,6 +12,9 @@ shift || true
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mkdir -p "$REPO/.artifacts/cpp"
 
+# `set -e` would abort on a non-zero exit before the status is printed, so the run that most
+# needs reading — a timeout (124), a crash — would leave no line and no summary. Capture it.
+status=0
 timeout "${SHIPINFER_BENCH_TIMEOUT:-900}" "$REPO/deploy/rootless/cpp.sh" \
   --person-frames /work/benchmarks/baseline/data/person_2K \
   --ship-frames   /work/benchmarks/baseline/data/ship_2K \
@@ -19,7 +22,7 @@ timeout "${SHIPINFER_BENCH_TIMEOUT:-900}" "$REPO/deploy/rootless/cpp.sh" \
   --seg-engine    /work/models/yolo26n-seg_fp32.engine \
   --emb-engine    /work/models/reid_r50_fp32.engine \
   --ship-emb-engine /work/models/reid_r50_fp32.engine \
-  --gpu-ids 2,3,4,5 \
+  --gpu-ids "${SHIPINFER_BENCH_GPUS:-2,3,4,5}" \
   --cameras "${SHIPINFER_BENCH_CAMERAS:-50}" \
   --fps "${SHIPINFER_BENCH_FPS:-20}" \
   --seconds "${SHIPINFER_BENCH_SECONDS:-70}" \
@@ -28,9 +31,8 @@ timeout "${SHIPINFER_BENCH_TIMEOUT:-900}" "$REPO/deploy/rootless/cpp.sh" \
   --emb-instances "${SHIPINFER_EMB_INSTANCES:-3}" \
   --ship-emb-instances "${SHIPINFER_SHIP_EMB_INSTANCES:-3}" \
   --log-jsonl "/work/.artifacts/cpp/${LABEL}.jsonl" \
-  "$@" > "$REPO/.artifacts/cpp/${LABEL}.log" 2>&1
-
-echo "exit=$?"
+  "$@" > "$REPO/.artifacts/cpp/${LABEL}.log" 2>&1 || status=$?
+echo "exit=$status"
 grep -E '^(startup_s|frames_read|frames_dropped|frames_accepted|frames_failed|events_emitted|events_complete|events_incomplete|queue_rejected|collector_)' \
   "$REPO/.artifacts/cpp/${LABEL}.log" || true
 echo "--- final occupancy ---"

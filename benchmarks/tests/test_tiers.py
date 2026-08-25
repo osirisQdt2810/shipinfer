@@ -420,7 +420,7 @@ class TestTheRtspServerIsRefusedRatherThanToleratedWhenItFails:
 
         assert started == [], "a replay run must not start an RTSP server"
 
-    def test_a_server_that_never_accepts_is_refused(self, monkeypatch) -> None:
+    def test_a_server_that_never_accepts_is_refused(self, monkeypatch, tmp_path) -> None:
         from benchmarks.harness import rtsp
 
         class _Alive:
@@ -442,11 +442,13 @@ class TestTheRtspServerIsRefusedRatherThanToleratedWhenItFails:
 
         with (
             pytest.raises(RuntimeError, match="did not accept a connection"),
-            rtsp.serving(BenchConfig(cameras=4, fps=5.0, source="rtsp"), timeout_s=0.5),
+            rtsp.serving(
+                BenchConfig(cameras=4, fps=5.0, source="rtsp", out_dir=tmp_path), timeout_s=0.5
+            ),
         ):
             pass
 
-    def test_a_server_that_exits_early_reports_its_output(self, monkeypatch) -> None:
+    def test_a_server_that_exits_early_reports_its_output(self, monkeypatch, tmp_path) -> None:
         """The reason it died is the whole diagnosis — a missing GStreamer plugin, a port in
         use — and swallowing it costs an afternoon."""
         import io
@@ -467,16 +469,25 @@ class TestTheRtspServerIsRefusedRatherThanToleratedWhenItFails:
 
             def kill(self) -> None: ...
 
-        monkeypatch.setattr(rtsp.subprocess, "Popen", lambda *_a, **_k: _Dead())
+        def popen(_argv, **kwargs):
+            # The server writes to the file handle it was given, the way the real one does.
+            kwargs["stdout"].write("gst_parse_launch: no element rtph264pay")
+            return _Dead()
+
+        monkeypatch.setattr(rtsp.subprocess, "Popen", popen)
         monkeypatch.setattr(rtsp, "_accepting", lambda *_a, **_k: False)
 
         with (
             pytest.raises(RuntimeError, match="no element rtph264pay"),
-            rtsp.serving(BenchConfig(cameras=4, fps=5.0, source="rtsp"), timeout_s=5.0),
+            rtsp.serving(
+                BenchConfig(cameras=4, fps=5.0, source="rtsp", out_dir=tmp_path), timeout_s=5.0
+            ),
         ):
             pass
 
-    def test_the_server_is_stopped_even_when_the_run_raises(self, monkeypatch) -> None:
+    def test_the_server_is_stopped_even_when_the_run_raises(
+        self, monkeypatch, tmp_path
+    ) -> None:
         """A GLib loop left holding the port makes the *next* run fail with an address
         already in use, minutes later and nowhere near the cause."""
         from benchmarks.harness import rtsp
@@ -504,13 +515,13 @@ class TestTheRtspServerIsRefusedRatherThanToleratedWhenItFails:
 
         with (
             pytest.raises(ValueError, match="the run failed"),
-            rtsp.serving(BenchConfig(cameras=4, fps=5.0, source="rtsp")),
+            rtsp.serving(BenchConfig(cameras=4, fps=5.0, source="rtsp", out_dir=tmp_path)),
         ):
             raise ValueError("the run failed")
 
         assert "terminate" in stopped
 
-    def test_a_server_that_ignores_terminate_is_killed(self, monkeypatch) -> None:
+    def test_a_server_that_ignores_terminate_is_killed(self, monkeypatch, tmp_path) -> None:
         from benchmarks.harness import rtsp
 
         stopped: list[str] = []
@@ -541,13 +552,15 @@ class TestTheRtspServerIsRefusedRatherThanToleratedWhenItFails:
         monkeypatch.setattr(rtsp.subprocess, "Popen", lambda *_a, **_k: _Stubborn())
         monkeypatch.setattr(rtsp, "_accepting", lambda *_a, **_k: True)
 
-        with rtsp.serving(BenchConfig(cameras=4, fps=5.0, source="rtsp")):
+        with rtsp.serving(BenchConfig(cameras=4, fps=5.0, source="rtsp", out_dir=tmp_path)):
             pass
 
         # Two servers — person and ship content — each terminated, then killed.
         assert stopped == ["terminate", "kill", "terminate", "kill"]
 
-    def test_each_content_half_is_served_from_its_own_directory(self, monkeypatch) -> None:
+    def test_each_content_half_is_served_from_its_own_directory(
+        self, monkeypatch, tmp_path
+    ) -> None:
         from benchmarks.harness import rtsp
 
         started: list[list[str]] = []
@@ -572,7 +585,9 @@ class TestTheRtspServerIsRefusedRatherThanToleratedWhenItFails:
 
         monkeypatch.setattr(rtsp.subprocess, "Popen", popen)
         monkeypatch.setattr(rtsp, "_accepting", lambda *_a, **_k: True)
-        config = BenchConfig(cameras=6, fps=5.0, source="rtsp", rtsp_port=9001)
+        config = BenchConfig(
+            cameras=6, fps=5.0, source="rtsp", rtsp_port=9001, out_dir=tmp_path
+        )
 
         with rtsp.serving(config):
             pass
@@ -586,7 +601,7 @@ class TestTheRtspServerIsRefusedRatherThanToleratedWhenItFails:
         assert person[person.index("--streams") + 1] == "3"
         assert ship[ship.index("--streams") + 1] == "3"
 
-    def test_a_failing_server_is_named(self, monkeypatch) -> None:
+    def test_a_failing_server_is_named(self, monkeypatch, tmp_path) -> None:
         """Two servers means the message has to say which one died."""
         import io
 
@@ -611,7 +626,9 @@ class TestTheRtspServerIsRefusedRatherThanToleratedWhenItFails:
 
         with (
             pytest.raises(RuntimeError, match=r"person RTSP server \(port 9001\)"),
-            rtsp.serving(BenchConfig(cameras=4, fps=5.0, source="rtsp", rtsp_port=9001)),
+            rtsp.serving(
+                BenchConfig(cameras=4, fps=5.0, source="rtsp", rtsp_port=9001, out_dir=tmp_path)
+            ),
         ):
             pass
 
@@ -658,3 +675,88 @@ class TestRtspAppliesToShipInferOnly:
 
         assert run_bench.main(["--source", "rtsp", "--systems", "baseline,shipinfer"]) == 2
         assert "applies to shipinfer only" in capsys.readouterr().err
+
+
+class TestTheKernelTierMeasuresTheDeviceItWasAskedFor:
+    """Round 2 of the review: `--device 2` measured cuda:0. No `ImageOps` exposes a public
+    `device`, so the destination fell through to the current device and the synchronise waited
+    on cuda:0 — the native path skipped (a cross-device write, refused) and the torch path ran
+    on the contended GPU while the table named the requested one."""
+
+    def test_the_destination_is_the_requested_device(self) -> None:
+        torch = pytest.importorskip("torch")
+
+        assert kernels._destination(2) == torch.device("cuda", 2)
+        assert kernels._destination(2).index == 2
+        assert kernels._destination(None) == torch.device("cuda")
+
+    def test_the_synchronise_waits_on_the_requested_device(self, monkeypatch) -> None:
+        torch = pytest.importorskip("torch")
+        waited: list[object] = []
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(
+            torch.cuda, "synchronize", lambda device=None: waited.append(device)
+        )
+
+        class _DeviceOps:
+            on_device = True
+
+        result = kernels._synchronised(_DeviceOps(), lambda: "done", 3)()
+
+        assert result == "done"
+        assert waited == [3]
+
+    def test_the_index_reaches_every_case_that_needs_it(self) -> None:
+        """Structural, because allocating on cuda:2 needs cuda:2: the two call sites thread
+        the index rather than guess it."""
+        import inspect
+
+        source = inspect.getsource(kernels.measure)
+        assert "_cases(ops, inputs, device)" in source
+        assert "_synchronised(ops, cases[op], device)" in source
+        assert "_to_device_case(ops, frame, params, device)" in inspect.getsource(
+            kernels._cases
+        )
+
+
+class TestTheServerLogIsAFileNotAPipe:
+    def test_the_servers_write_to_files_under_the_run_directory(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A pipe nobody drains fills at 64 KiB — one GST_DEBUG away — and then the server
+        blocks on write and every camera stalls, which the table reports as a shortfall."""
+        from benchmarks.harness import rtsp
+
+        handed: list[object] = []
+
+        class _Server:
+            returncode = None
+            stdout = None
+
+            def poll(self) -> None:
+                return None
+
+            def terminate(self) -> None: ...
+
+            def wait(self, timeout: float | None = None) -> int:
+                return 0
+
+            def kill(self) -> None: ...
+
+        def popen(_argv, **kwargs):
+            handed.append(kwargs["stdout"])
+            kwargs["stdout"].write("serving\n")
+            return _Server()
+
+        monkeypatch.setattr(rtsp.subprocess, "Popen", popen)
+        monkeypatch.setattr(rtsp, "_accepting", lambda *_a, **_k: True)
+
+        with rtsp.serving(BenchConfig(cameras=4, fps=5.0, source="rtsp", out_dir=tmp_path)):
+            pass
+
+        assert len(handed) == 2  # one handle per server, and each was a real file, not a pipe
+        assert sorted(p.name for p in tmp_path.glob("rtsp-*.log")) == [
+            "rtsp-person.log",
+            "rtsp-ship.log",
+        ]
+        assert (tmp_path / "rtsp-person.log").read_text() == "serving\n"

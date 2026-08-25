@@ -96,41 +96,51 @@ def serving(config: BenchConfig, *, timeout_s: float = 60.0) -> Iterator[None]:
     if not SCRIPT.is_file():
         raise RuntimeError(f"no RTSP server at {SCRIPT}")
 
-    started: list[tuple[str, int, subprocess.Popen[str]]] = []
+    # Each server's output goes to a file under the run directory, not a pipe. A pipe nobody
+    # drains for the length of the run fills at 64 KiB — one `GST_DEBUG` setting away — and
+    # then the server blocks on `write` and every camera stalls, which the table would report
+    # as a delivery shortfall: the exact failure this module exists to refuse. The file also
+    # survives as part of the run's artefacts.
+    log_dir = Path(config.resolved().out_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    started: list[tuple[str, int, subprocess.Popen[str], Path]] = []
     try:
         for content, port, streams, directory in _servers(config):
-            process = subprocess.Popen(
-                [
-                    sys.executable,
-                    str(SCRIPT),
-                    "--streams",
-                    str(streams),
-                    "--port",
-                    str(port),
-                    "--fps",
-                    str(int(config.fps)),
-                    "--data",
-                    str(directory),
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            started.append((content, port, process))
+            log_path = log_dir / f"rtsp-{content}.log"
+            with log_path.open("w") as log:
+                process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        "--streams",
+                        str(streams),
+                        "--port",
+                        str(port),
+                        "--fps",
+                        str(int(config.fps)),
+                        "--data",
+                        str(directory),
+                    ],
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+            started.append((content, port, process, log_path))
         deadline = time.monotonic() + timeout_s
         pending = list(started)
         while pending:
-            for content, port, process in list(pending):
+            for entry in list(pending):
+                content, port, process, log_path = entry
                 if process.poll() is not None:
-                    output = (process.stdout.read() if process.stdout else "") or ""
+                    output = log_path.read_text() if log_path.is_file() else ""
                     raise RuntimeError(
                         f"the {content} RTSP server (port {port}) exited with "
                         f"{process.returncode} before it was ready:\n{output[-2000:]}"
                     )
                 if _accepting(port):
-                    pending.remove((content, port, process))
+                    pending.remove(entry)
             if pending and time.monotonic() >= deadline:
-                waiting = ", ".join(f"{c} on port {p}" for c, p, _ in pending)
+                waiting = ", ".join(f"{c} on port {p}" for c, p, _, _ in pending)
                 raise RuntimeError(
                     f"the RTSP server(s) did not accept a connection within {timeout_s:g}s: "
                     f"{waiting}. A run whose cameras cannot connect reads as a clean zero, so "
@@ -140,5 +150,5 @@ def serving(config: BenchConfig, *, timeout_s: float = 60.0) -> Iterator[None]:
                 time.sleep(0.25)
         yield
     finally:
-        for _content, _port, process in started:
+        for _content, _port, process, _log in started:
             _stop(process)
