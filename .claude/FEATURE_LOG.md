@@ -66,12 +66,19 @@ all four server failure paths. The arithmetic is where a benchmark lies: every d
 found in `run_bench.py` was a formula producing a plausible number from a run that did not
 support it, not a broken measurement loop. 116 tests in `benchmarks/tests`.
 
-**Since then.** Both tiers have run to completion inside the container. The algo tier at
-12 cameras × 5 fps on GPUs 2–5 delivered 60.1 of the 60 img/s offered, with per-stage p50s of
-16–63 ms that are queue-and-batch-window spans rather than kernel time — at 5 fps the lever is
-a shorter window, not a faster op. The kernel tier, once the fused kernels were reachable,
-measured native `letterbox_to_device` at 657 µs against torch's 735 µs — 1.1×, where the
-inherited figure was 50×. The RTSP path has still not been run under load; that is owed to C1a.
+**Since then.** Both tiers have run to completion inside the container, and the algo tier has
+been re-run after review replaced its cost model (exact steady-window means instead of bucket
+edges): 12 cameras × 5 fps on GPUs 2–5, kept up (60.0 of 60 img/s), 1777 frames in the 30 s
+steady window, host load 22/48 with another user's 21 GiB job on GPU 0. Per-frame cost: crop
+149.6 ms (46%), detect 98.6 ms (30%), ship_segmenter 41.5 ms (13%), ship_embedder 17.7 ms,
+person_embedder 17.0 ms; serial 324 ms against wall 16.9 ms. The earlier reading of this run
+("p50 16–63 ms") was the histogram's bucket resolution, not the cost — the exact means are two
+to three times larger and the p95s reach 0.5–1 s. These are submit-to-result spans (queue,
+batch window and work together), so the split between waiting and working is the Nsight
+timeline's job (C1a); that `crop` costs 1.5× `detect` is the first thing that timeline has to
+explain. The kernel tier, once the fused kernels were reachable, measured native
+`letterbox_to_device` at 657 µs against torch's 735 µs — 1.1×, where the inherited figure was
+50×. The RTSP path has still not been run under load.
 
 ---
 
