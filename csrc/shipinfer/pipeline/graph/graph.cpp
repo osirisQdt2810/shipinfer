@@ -8,6 +8,28 @@
 
 namespace shipinfer {
     namespace {
+        // Holds a pool lease for a scope and releases it on every exit — the exception path
+        // included. The first version released by hand in a catch and again after the happy
+        // path, and the `out.data.assign` between the two sat outside the try: a bad_alloc there
+        // left the instance's slot locked for the life of the process, and every worker that
+        // leased it afterwards blocked forever.
+        class LeaseGuard {
+          public:
+            LeaseGuard(ModelPool& pool, int device) : pool_(pool), lease_(pool.lease(device)) {}
+            ~LeaseGuard() { pool_.release(lease_); }
+            LeaseGuard(const LeaseGuard&) = delete;
+            LeaseGuard& operator=(const LeaseGuard&) = delete;
+            TrtInstance& instance() const { return *lease_.instance; }
+
+          private:
+            ModelPool& pool_;
+            ModelPool::Lease lease_;
+        };
+    }  // namespace
+}  // namespace shipinfer
+
+namespace shipinfer {
+    namespace {
 
         // The detector's output is (300, 6): x1, y1, x2, y2, score, class — TensorRT's EfficientNMS
         // layout, which is what these plans are built with.
@@ -116,7 +138,8 @@ namespace shipinfer {
 
     size_t PipelineGraph::execute(std::vector<Work>& batch, int device, FrameCollector& collector) {
         if (batch.empty()) return 0;
-        GPU_CHECK(gpuSetDevice(device));
+        // No `gpuSetDevice` here: the worker bound itself to `device` once, for life (ADR-002),
+        // and the lease below refuses an instance on any other device.
 
         // -- detect, once, for the whole batch ------------------------------------------------
         // The plan is static, so the batch handed to `execute` is exactly `max_batch` rows. A
@@ -136,31 +159,26 @@ namespace shipinfer {
         const size_t real = std::min(batch.size(), static_cast<size_t>(rows));
         std::vector<LetterboxMap> maps(real);
 
-        auto lease = detector_->lease(device);
-        float* input = static_cast<float*>(lease.instance->input());
+        LeaseGuard lease(*detector_, device);
+        float* input = static_cast<float*>(lease.instance().input());
         const size_t stride = static_cast<size_t>(config_.detect_size) * config_.detect_size * 3;
-        try {
-            for (size_t i = 0; i < static_cast<size_t>(rows); ++i) {
-                const Work& work = batch[std::min(i, real - 1)];
-                const LetterboxMap map =
-                    letterbox_into(work.image_device, work.state->height(), work.state->width(),
-                                   input + i * stride, config_.detect_size, config_.detect_size,
-                                   /*swap_rb=*/true, /*pad_value=*/0.5f, lease.instance->stream());
-                if (i < real) maps[i] = map;
-            }
-            // No synchronisation. The kernels and `enqueueV3` are on the same stream, so the
-            // stream orders them — and `execute` syncs that one stream at the end, which is what
-            // makes the outputs readable. The first version launched on the default stream and
-            // then called `gpuDeviceSynchronize`, which waits for *every* context on the device:
-            // at four workers per GPU that serialised all of them behind each other.
-            lease.instance->execute(rows);
-        } catch (...) {
-            detector_->release(lease);
-            throw;
+        for (size_t i = 0; i < static_cast<size_t>(rows); ++i) {
+            const Work& work = batch[std::min(i, real - 1)];
+            const LetterboxMap map =
+                letterbox_into(work.image_device, work.state->height(), work.state->width(),
+                               input + i * stride, config_.detect_size, config_.detect_size,
+                               /*swap_rb=*/true, /*pad_value=*/0.5f, lease.instance().stream());
+            if (i < real) maps[i] = map;
         }
+        // No synchronisation. The kernels and `enqueueV3` are on the same stream, so the
+        // stream orders them — and `execute` syncs that one stream at the end, which is what
+        // makes the outputs readable. The first version launched on the default stream and
+        // then called `gpuDeviceSynchronize`, which waits for *every* context on the device:
+        // at four workers per GPU that serialised all of them behind each other.
+        lease.instance().execute(rows);
 
-        const float* out = lease.instance->output();
-        const size_t per_row = lease.instance->output_rows();
+        const float* out = lease.instance().output();
+        const size_t per_row = lease.instance().output_rows();
         for (size_t i = 0; i < real; ++i) {
             std::vector<Detection> detections;
             const float* frame_out = out + i * per_row;
@@ -183,7 +201,6 @@ namespace shipinfer {
             }
             batch[i].state->set_detections(std::move(detections));
         }
-        detector_->release(lease);
 
         for (size_t i = 0; i < real; ++i) {
             collector.deliver(batch[i].state->tag(), "detect");
@@ -275,49 +292,40 @@ namespace shipinfer {
                                     const char* stage, FrameCollector& collector) {
         if (pool == nullptr || indices.empty()) return;
         const int limit = pool->max_batch();
-        // Chunked to the engine's own batch, and padded up to it because these plans are static
-        // too. Submitting a whole frame's crops as one request is what lost every crop in a
-        // 25-person frame against a plan built at 16 — and 10-20 people per frame is the *normal*
-        // case at this sizing, not an edge one.
+        // One result for the whole frame, grown a chunk at a time and attached once. Chunked to
+        // the engine's own batch, and padded up to it because these plans are static too.
+        // Submitting a whole frame's crops as one request is what lost every crop in a
+        // 25-person frame against a plan built at 16 — and 10-20 people per frame is the
+        // *normal* case at this sizing, not an edge one.
+        ObjectBatch out;
+        out.name = std::string(stage) + "_out";
+        std::vector<float> padded(static_cast<size_t>(limit) * 4);
         for (size_t start = 0; start < indices.size(); start += static_cast<size_t>(limit)) {
             const int count = static_cast<int>(std::min<size_t>(limit, indices.size() - start));
-            auto lease = pool->lease(device);
-            try {
-                // The box list is padded to `limit` by repeating the last box, so the kernel
-                // writes every row the static plan expects.
-                std::vector<float> padded(static_cast<size_t>(limit) * 4);
-                for (int i = 0; i < limit; ++i) {
-                    const size_t source = start + static_cast<size_t>(std::min(i, count - 1));
-                    std::copy_n(boxes.begin() + static_cast<long>(source * 4), 4,
-                                padded.begin() + static_cast<long>(i) * 4);
-                }
-                // The instance's own scratch, not a fresh `gpuMalloc` per chunk: allocation
-                // serialises on the driver and this runs once per object-batch per frame.
-                void* box_device = lease.instance->scratch(padded.size() * sizeof(float));
-                GPU_CHECK(gpuMemcpyAsync(box_device, padded.data(), padded.size() * sizeof(float),
-                                         gpuMemcpyHostToDevice, lease.instance->stream()));
-                crop_resize_into(image_device, state.height(), state.width(),
-                                 static_cast<const float*>(box_device), limit,
-                                 static_cast<float*>(lease.instance->input()), crop_h, crop_w,
-                                 /*swap_rb=*/true, lease.instance->stream());
-                lease.instance->execute(limit);
-            } catch (...) {
-                pool->release(lease);
-                throw;
+            LeaseGuard lease(*pool, device);
+            // The box list is padded to `limit` by repeating the last box, so the kernel
+            // writes every row the static plan expects.
+            for (int i = 0; i < limit; ++i) {
+                const size_t source = start + static_cast<size_t>(std::min(i, count - 1));
+                std::copy_n(boxes.begin() + static_cast<long>(source * 4), 4,
+                            padded.begin() + static_cast<long>(i) * 4);
             }
-            ObjectBatch out;
-            out.name = std::string(stage) + "_out";
-            out.width = static_cast<int>(lease.instance->output_rows());
+            // The instance's own scratch, not a fresh `gpuMalloc` per chunk: allocation
+            // serialises on the driver and this runs once per object-batch per frame.
+            void* box_device = lease.instance().scratch(padded.size() * sizeof(float));
+            GPU_CHECK(gpuMemcpyAsync(box_device, padded.data(), padded.size() * sizeof(float),
+                                     gpuMemcpyHostToDevice, lease.instance().stream()));
+            crop_resize_into(image_device, state.height(), state.width(),
+                             static_cast<const float*>(box_device), limit,
+                             static_cast<float*>(lease.instance().input()), crop_h, crop_w,
+                             /*swap_rb=*/true, lease.instance().stream());
+            lease.instance().execute(limit);
             // Only the real rows are kept; the padding was there to satisfy the plan, not to be
             // reported as a result.
-            out.data.assign(lease.instance->output(),
-                            lease.instance->output() + static_cast<size_t>(count) * out.width);
-            for (int i = 0; i < count; ++i) {
-                out.object_indices.push_back(indices[start + static_cast<size_t>(i)]);
-            }
-            pool->release(lease);
-            state.attach(std::move(out));
+            out.append(lease.instance().output(), count,
+                       static_cast<int>(lease.instance().output_rows()), indices, start);
         }
+        state.attach(std::move(out));
         collector.deliver(state.tag(), stage);
     }
 

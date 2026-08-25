@@ -180,7 +180,9 @@ namespace shipinfer {
                                " rows exceeds max_batch_size " +
                                std::to_string(engine_->max_batch()) + " for " + engine_->path());
         }
-        GPU_CHECK(gpuSetDevice(device_));
+        // No `gpuSetDevice`: the caller runs on a thread bound to this instance's device for
+        // life (ADR-002) and the pool lease is device-affine; binding again per inference was
+        // redundant against both.
 
         for (const auto& spec : engine_->inputs()) {
             nvinfer1::Dims dims{};

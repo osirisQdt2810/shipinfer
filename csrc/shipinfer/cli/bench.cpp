@@ -389,6 +389,7 @@ int main(int argc, char** argv) {
         std::cout << "frames_failed " << failed.load() << "\n";
         std::cout << "events_emitted " << emitted.load() << "\n";
         std::cout << "queue_rejected " << stats.rejected << "\n";
+        std::cout << "queue_evicted " << stats.evicted << "\n";
         std::cout << "collector_reported " << collector.reported() << "\n";
         std::cout << "collector_timeouts " << collector.timed_out() << "\n";
         std::cout << "collector_evicted " << collector.evicted() << "\n";

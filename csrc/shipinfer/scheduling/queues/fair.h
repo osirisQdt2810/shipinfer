@@ -10,8 +10,10 @@
 //
 // So: one lane per camera, round-robin between lanes on drain, and when the queue is full the
 // *greediest* camera loses a frame rather than whichever frame happens to be oldest. Nothing
-// is silently dropped: a refusal throws `QueueFullError` carrying depth and capacity, so the
-// caller can attribute it (ADR-005).
+// is silently dropped: a refusal is returned as `false` and counted per camera in `stats()`
+// (depth and capacity are there too), and an eviction hands the evicted item to `on_evict` so
+// it can reach the operator's event stream. The Python plane raises `QueueFullError` with the
+// same depth and capacity; that is the seam the port (ledger P1–P3) makes identical.
 //
 // ROWS, NOT ITEMS
 // ---------------
@@ -32,6 +34,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <deque>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <string>
@@ -59,8 +62,12 @@ namespace shipinfer {
             std::map<std::string, uint64_t> evicted_by_camera;
         };
 
-        FairQueue(size_t capacity, Overflow overflow, int block_timeout_ms = 0)
-            : capacity_(capacity), overflow_(overflow), block_timeout_ms_(block_timeout_ms) {}
+        FairQueue(size_t capacity, Overflow overflow, int block_timeout_ms = 0,
+                  std::function<void(T&&)> on_evict = {})
+            : capacity_(capacity),
+              overflow_(overflow),
+              block_timeout_ms_(block_timeout_ms),
+              on_evict_(std::move(on_evict)) {}
 
         // Returns false when the item was refused under Overflow::Reject; throws nothing on the
         // hot path so a camera thread never unwinds through a lock.
@@ -190,10 +197,16 @@ namespace shipinfer {
                 }
             }
             if (worst.empty()) return false;
-            lanes_[worst].pop_back();  // the newest of the greediest, not the oldest of anyone
+            // The newest of the greediest, not the oldest of anyone. (The Python queue evicts
+            // the greediest camera's *oldest*; the ported queue in P1a follows Python.)
+            T victim = std::move(lanes_[worst].back());
+            lanes_[worst].pop_back();
             --size_;
             ++stats_.evicted;
             ++stats_.evicted_by_camera[worst];
+            // The evicted item reaches the caller rather than dying here with its tag: a frame
+            // that vanishes at the queue is the failure the collector exists to prevent.
+            if (on_evict_) on_evict_(std::move(victim));
             return true;
         }
 
@@ -207,6 +220,7 @@ namespace shipinfer {
         size_t capacity_;
         Overflow overflow_;
         int block_timeout_ms_;
+        std::function<void(T&&)> on_evict_;
         bool closed_ = false;
         Stats stats_;
     };

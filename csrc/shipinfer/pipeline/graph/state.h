@@ -18,6 +18,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -34,8 +35,32 @@ namespace shipinfer {
         int width = 0;
 
         bool empty() const { return object_indices.empty(); }
+        size_t rows() const { return object_indices.size(); }
         const float* row(size_t index) const {
             return data.data() + index * static_cast<size_t>(width);
+        }
+
+        // Append one engine chunk's real rows. A frame with more objects than the engine's
+        // batch runs in chunks, and the first version built a *new* ObjectBatch per chunk and
+        // attached it under the same name — `attach` assigns, so chunk k+1 replaced chunk k
+        // and a 25-person frame reached the sink with the 9 embeddings of its last chunk,
+        // sealed Complete. One batch per stage now, grown here; `attach` is called once.
+        void append(const float* chunk, int count, int chunk_width, const std::vector<int>& indices,
+                    size_t start) {
+            if (count <= 0) return;
+            if (width == 0) width = chunk_width;
+            if (chunk_width != width) {
+                throw std::logic_error("ObjectBatch " + name + ": chunk width " +
+                                       std::to_string(chunk_width) + " differs from " +
+                                       std::to_string(width));
+            }
+            if (start + static_cast<size_t>(count) > indices.size()) {
+                throw std::logic_error("ObjectBatch " + name +
+                                       ": chunk past the end of the indices");
+            }
+            data.insert(data.end(), chunk, chunk + static_cast<size_t>(count) * width);
+            object_indices.insert(object_indices.end(), indices.begin() + static_cast<long>(start),
+                                  indices.begin() + static_cast<long>(start) + count);
         }
     };
 

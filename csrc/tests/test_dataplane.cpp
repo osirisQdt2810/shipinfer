@@ -33,6 +33,14 @@ namespace {
 
     int failures = 0;
     int checks = 0;
+    int skips = 0;
+
+    // A parity test that cannot run must say so and be counted — a device-less run that prints
+    // "N checks, 0 failure(s)" and reads as green is a test that fails open.
+    void skip(const std::string& why) {
+        ++skips;
+        std::fprintf(stderr, "SKIP: %s\n", why.c_str());
+    }
 
     // "expected:", because the message states the property that was *supposed* to hold.
     // Printing it bare after "FAIL:" reads as though the good thing happened — review caught
@@ -159,6 +167,37 @@ namespace {
         tag.camera_id = camera;
         tag.frame_id = id;
         return std::make_shared<FrameState>(tag, 8, 8, 0.0f);
+    }
+
+    void test_a_frame_with_more_objects_than_the_batch_keeps_every_chunk() {
+        // 17 people against an engine built at 16: two chunks. The first version attached a new
+        // ObjectBatch per chunk under one name and `attach` assigned, so the frame reached the
+        // sink with the last chunk's single row — sealed Complete. The assembly is a pure
+        // function now, so this needs no engine and no device.
+        const int width = 4, limit = 16;
+        std::vector<int> indices;
+        for (int i = 0; i < 17; ++i) indices.push_back(i);
+        ObjectBatch out;
+        out.name = "person_embedder_out";
+        for (size_t start = 0; start < indices.size(); start += limit) {
+            const int count = static_cast<int>(std::min<size_t>(limit, indices.size() - start));
+            std::vector<float> rows(static_cast<size_t>(count) * width);
+            for (int r = 0; r < count; ++r)
+                rows[static_cast<size_t>(r) * width] = static_cast<float>(start + r);
+            out.append(rows.data(), count, width, indices, start);
+        }
+        check(out.rows() == 17, "every object has a row, not only the last chunk's");
+        check(out.data.size() == 17u * width, "the rows of both chunks are kept");
+        check(out.object_indices == indices, "indices are in the frame's own order across chunks");
+        check(out.row(16)[0] == 16.f, "the second chunk's row is the second chunk's data");
+
+        bool refused = false;
+        try {
+            out.append(std::vector<float>(3).data(), 1, 3, indices, 0);
+        } catch (const std::logic_error&) {
+            refused = true;
+        }
+        check(refused, "a chunk of a different width is a bug, refused rather than concatenated");
     }
 
     void test_every_opened_frame_is_reported_exactly_once() {
@@ -303,7 +342,7 @@ namespace {
         uint8_t* device_src = nullptr;
         float* device_dst = nullptr;
         if (gpuMalloc(&device_src, host.size()) != gpuSuccess) {
-            std::fprintf(stderr, "SKIP: no CUDA device for the parity tests\n");
+            skip("no CUDA device for the letterbox parity test");
             return;
         }
         gpuMalloc(&device_dst, static_cast<size_t>(3) * dst * dst * sizeof(float));
@@ -384,7 +423,7 @@ namespace {
 
         uint8_t* device_src = nullptr;
         if (gpuMalloc(&device_src, host.size()) != gpuSuccess) {
-            std::fprintf(stderr, "SKIP: no CUDA device for the crop parity test\n");
+            skip("no CUDA device for the crop parity test");
             return;
         }
         float* device_boxes = nullptr;
@@ -461,7 +500,7 @@ namespace {
         uint8_t* device_src = nullptr;
         float* device_dst = nullptr;
         if (gpuMalloc(&device_src, host.size()) != gpuSuccess) {
-            std::fprintf(stderr, "SKIP: no CUDA device for the NV12 parity test\n");
+            skip("no CUDA device for the NV12 parity test");
             return;
         }
         gpuMalloc(&device_dst, static_cast<size_t>(3) * dst * dst * sizeof(float));
@@ -521,7 +560,10 @@ namespace {
         const int src_h = 32, src_w = 32, ch = 8, cw = 8;
         std::vector<uint8_t> host(static_cast<size_t>(src_h) * src_w * 3, 200);
         uint8_t* device_src = nullptr;
-        if (gpuMalloc(&device_src, host.size()) != gpuSuccess) return;
+        if (gpuMalloc(&device_src, host.size()) != gpuSuccess) {
+            skip("no CUDA device for the degenerate-box test");
+            return;
+        }
         gpuMemcpy(device_src, host.data(), host.size(), gpuMemcpyHostToDevice);
 
         const float boxes[8] = {4, 4, 12, 12, /* degenerate */ 5, 5, 5, 5};
@@ -560,6 +602,7 @@ int main() {
     test_eviction_charges_the_greediest_camera();
     test_a_blocked_producer_wakes_when_a_slot_frees();
 
+    test_a_frame_with_more_objects_than_the_batch_keeps_every_chunk();
     test_every_opened_frame_is_reported_exactly_once();
     test_a_duplicate_tag_is_refused_rather_than_clobbering();
     test_a_timed_out_frame_is_still_reported();
@@ -574,6 +617,6 @@ int main() {
     test_a_degenerate_box_yields_a_black_crop();
     test_a_capture_during_attach_is_a_consistent_snapshot();
 
-    std::printf("%d checks, %d failure(s)\n", checks, failures);
+    std::printf("%d checks, %d failure(s), %d skipped\n", checks, failures, skips);
     return failures == 0 ? 0 : 1;
 }
