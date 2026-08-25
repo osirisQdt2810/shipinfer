@@ -177,10 +177,18 @@ hook down, for when the operator asked to see something before it is executed.
 
 - [ ] **C1 · ≥5× counting-simulation, whole system.** Measured: baseline 868.2 img/s against the
       C++ plane's 390.5 → **0.45×**. The interpreter is no longer the wall.
-- [ ] **C1a · Profile before optimising** (V54, and the operator is right that I was reasoning
-      from symptoms). The buffer-growth log says *which queue* grows, not *where the time goes*.
-      Needed: Nsight Systems over one saturated run, plus per-stage host timings, so the answer
-      is a flame graph rather than an inference. Everything in C1 waits on this.
+- [~] **C1a · Profile before optimising** (V54). Two of the three pieces are in place and
+      neither has been *run*, because the GPUs are held by parallel agents:
+      - per-stage host timings — `benchmarks/stages.py` (C5), reads the histograms the
+        pipeline already fills;
+      - per-op costs — `benchmarks/kernels.py` (C5);
+      - the device timeline — `deploy/rootless/profile.sh`, Nsight Systems mounted from the
+        host the way TensorRT is. `perf_event_paranoid` is 4 here so CPU **sampling** needs
+        CAP_PERFMON and is off; CUDA and NVTX tracing need no perf events and are the useful
+        half — they answer "is the GPU idle, and between what", which is the question standing
+        behind the 390 img/s ceiling.
+      Remaining: run all three on a quiet box and write the answer down. Everything in C1
+      waits on that.
 
 ---
 
