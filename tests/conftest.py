@@ -8,10 +8,19 @@ Two rules the whole suite depends on:
    that needs sixteen GPUs gets written once and then never run again.
 2. **No shared global state between tests.** Each test builds its own server, its own
    metrics registry and its own repository, so a counter from one cannot leak into another.
+3. **The offline tier hides the accelerators.** On a host with a driver, "needs no GPU" is
+   not the same as "touches no GPU": the server tests build real ``DeviceManager``s, and
+   with devices visible each one opened a CUDA context. That made the offline tier depend
+   on how much VRAM someone else's job had left — 110 tests failed with
+   ``CUDA error: out of memory`` on a shared box while GPU 0 was full. So when no device
+   marker is selected, :func:`pytest_configure` blanks ``CUDA_VISIBLE_DEVICES`` and
+   ``HIP_VISIBLE_DEVICES`` before anything imports torch, and a host run *is* the CI run.
 """
 
 from __future__ import annotations
 
+import os
+import re
 import shutil
 from collections.abc import Iterator
 from pathlib import Path
@@ -26,6 +35,74 @@ from shipinfer.core.types import Tensor
 from shipinfer.scheduling.work import WorkItem
 
 DATA = Path(__file__).parent / "data"
+
+
+# -- tiers ------------------------------------------------------------------------------
+
+DEVICE_MARKERS = ("gpu", "multigpu")
+
+
+def device_tier_requested(markexpr: str) -> bool:
+    """Can this ``-m`` expression select a test that carries a device marker?
+
+    Exact for the boolean marker expressions pytest accepts, and decided before collection —
+    which is the only time it can be decided, because the CUDA runtime reads
+    ``CUDA_VISIBLE_DEVICES`` once. Every identifier in the expression other than the device
+    markers is a free variable, and the question is whether *some* assignment of them, with
+    one device marker true and the others false, satisfies the expression: ``"not slow"``
+    selects a fast GPU test, ``"gpu and slow"`` selects a slow one, ``"not gpu"`` still
+    selects a ``multigpu``-only test, and the default ``"not gpu and not multigpu"`` selects
+    none of them. The free variables are enumerated exhaustively; there are never more than
+    a handful in a command line. An expression pytest cannot parse, or one with implausibly
+    many identifiers, answers "yes" — a typo must never hide a device from a run that meant
+    to use one, and pytest will report the typo itself.
+    """
+    from itertools import product
+
+    from _pytest.mark.expression import Expression
+
+    if not markexpr.strip():
+        return True
+    try:
+        expression = Expression.compile(markexpr)
+    except Exception:
+        return True
+    free = sorted(
+        {token for token in re.findall(r"[^\s()]+", markexpr) if token not in _EXPRESSION_WORDS}
+        - set(DEVICE_MARKERS)
+    )
+    if len(free) > 12:
+        return True
+    for device in DEVICE_MARKERS:
+        for values in product((False, True), repeat=len(free)):
+            keywords = dict(zip(free, values, strict=True))
+            keywords[device] = True
+            if expression.evaluate(lambda name, k=keywords: k.get(name, False)):
+                return True
+    return False
+
+
+_EXPRESSION_WORDS = frozenset({"and", "or", "not"})
+
+
+def pytest_configure(config) -> None:
+    """Hide the accelerators from a run that selected no device-tier test.
+
+    Runs before collection, which is before any test module imports torch: the CUDA runtime
+    reads ``CUDA_VISIBLE_DEVICES`` once, at its first initialisation, so setting it later
+    would be silently too late. An operator who passed ``-m gpu`` is unaffected — that run
+    still meets the container gate below.
+    """
+    if device_tier_requested(config.getoption("markexpr") or ""):
+        return
+    for variable in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"):
+        os.environ[variable] = ""
+
+
+@pytest.fixture(scope="session")
+def tier_predicate():
+    """The predicate :func:`pytest_configure` uses, for tests that state its truth table."""
+    return device_tier_requested
 
 
 # -- markers ------------------------------------------------------------------------------
