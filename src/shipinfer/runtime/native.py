@@ -114,8 +114,25 @@ def is_native_available() -> bool:
 
 
 def native_version() -> str | None:
+    """The extension's version, or None when there is no extension.
+
+    `__version__`, not `version()`. The extension has only ever set the attribute
+    (`csrc/bindings/module.cpp` — `m.attr("__version__")`), and the call was unreachable for
+    as long as nothing in `shipinfer` put `shipvision._C` into `sys.modules`. The moment the
+    tracking stage imported `shipvision.tracking` at module scope, it became reachable and
+    took out `InferenceServer.start()` on every host where the submodule is built — which is
+    the production container, and not CI, because CI deliberately does not check the
+    submodule out (ADR-001).
+
+    `getattr` with a default rather than a bare attribute read: a version is a diagnostic, and
+    an extension that does not announce one is a fact to report, not a reason to refuse to
+    start.
+    """
     module = native_module()
-    return module.version() if module is not None else None
+    if module is None:
+        return None
+    version = getattr(module, "__version__", None)
+    return str(version) if version is not None else None
 
 
 def require_native() -> ModuleType:

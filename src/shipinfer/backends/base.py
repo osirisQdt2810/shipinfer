@@ -14,13 +14,20 @@ duplicate that machinery and make ordering guarantees impossible to reason about
 from __future__ import annotations
 
 import abc
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
+from shipinfer.core.errors import InferenceError
 from shipinfer.core.logging import get_logger
 from shipinfer.core.settings import ExecutionSettings
 from shipinfer.core.types import Device, Tensor, TensorSpec
-from shipinfer.repository import ModelArtifact, ModelConfig
+from shipinfer.repository import (
+    ModelArtifact,
+    ModelConfig,
+    WarmupBatch,
+    build_warmup_batches,
+)
 from shipinfer.runtime.graphs import GraphCache
 from shipinfer.runtime.memory import MemoryPool
 from shipinfer.runtime.stream import StreamPool
@@ -161,9 +168,29 @@ class ModelBackend(abc.ABC):
         autotuning, lazy CUDA module loading and TensorRT's first-call allocations all
         land on whichever unlucky request arrives first.
 
-        The default builds zero-filled inputs from :attr:`input_specs`; a backend whose
-        model rejects zeros should override.
+        Two paths, and which one runs is decided by the model's own config:
+
+        **Declared samples win.** ``model_warmup`` in ``config.yaml`` (Triton's key, same
+        semantics) names batches with real shapes and, optionally, real data. Those run
+        whatever ``iterations`` says, including zero — the count is a *deployment* knob for
+        the implicit warm-up, and a deployment-wide number silently cancelling a per-model
+        instruction is the settings split in section 2.6 backwards. Remove the samples to
+        stop them running.
+
+        **Otherwise, the old behaviour:** ``iterations`` batches of zeros shaped from
+        :attr:`input_specs`.
+
+        The two also differ in how they fail, deliberately. A zero-filled batch that cannot
+        be built is a guess that did not work out, so it is logged and skipped. A declared
+        sample that fails is an operator's explicit instruction not being carried out, so it
+        propagates and the instance does not report ready — a model that believes it is warm
+        and is not gives a first p99 nobody can interpret.
         """
+        samples = build_warmup_batches(self._context.config, self._context.artifact.path)
+        if samples:
+            self._run_warmup_samples(samples)
+            return
+
         if iterations <= 0:
             return
         try:
@@ -174,6 +201,29 @@ class ModelBackend(abc.ABC):
         for _ in range(iterations):
             self.execute(batch, batch_size=1)
         _LOG.debug("warmed up %s with %d iteration(s)", self._context.instance_name, iterations)
+
+    def _run_warmup_samples(self, samples: Sequence[WarmupBatch]) -> None:
+        """Execute each declared sample ``count`` times, naming it if it fails.
+
+        Raises:
+            InferenceError: naming the sample. "warm-up failed" against a config with four
+                samples is not a diagnosis; which one failed is the whole message.
+        """
+        for sample in samples:
+            for _ in range(sample.count):
+                try:
+                    self.execute(sample.inputs, batch_size=sample.batch_size)
+                except Exception as exc:
+                    raise InferenceError(
+                        f"{self._context.instance_name}: warm-up sample {sample.name!r} "
+                        f"(batch {sample.batch_size}) failed: {exc}"
+                    ) from exc
+        _LOG.info(
+            "warmed up %s with %d declared sample(s): %s",
+            self._context.instance_name,
+            len(samples),
+            [s.name for s in samples],
+        )
 
     def _warmup_batch(self) -> dict[str, Tensor]:
         import numpy as np

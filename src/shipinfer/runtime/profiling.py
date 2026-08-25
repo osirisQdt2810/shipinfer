@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from shipinfer.core.logging import get_logger
+from shipinfer.core.tracing import TRACE_EVENTS as _TRACE_EVENTS
 from shipinfer.envs import PROFILE_DIR, PROFILE_PHASES, PROFILE_STEPS
 from shipinfer.runtime.platform import torch_module
 
@@ -77,17 +78,11 @@ _LOG = get_logger("runtime.profiling")
 #: that eventually ran it.
 PHASES = ("compute_input", "compute_infer", "compute_output")
 
-#: Trace event names, as Triton's trace API emits them. An operator can diff a trace from
-#: this server against one from Triton without a mapping.
-TRACE_EVENTS = (
-    "REQUEST_START",
-    "QUEUE_START",
-    "COMPUTE_START",
-    "COMPUTE_INPUT_END",
-    "COMPUTE_OUTPUT_START",
-    "COMPUTE_END",
-    "REQUEST_END",
-)
+#: Trace event names, as Triton's trace API emits them. Re-exported from
+#: :mod:`shipinfer.core.tracing`, which owns them because that is where the sink that emits
+#: them lives; two copies of a vocabulary is how the two drift and a trace stops diffing
+#: against a Triton one.
+TRACE_EVENTS = _TRACE_EVENTS
 
 
 def profiling_enabled() -> bool:

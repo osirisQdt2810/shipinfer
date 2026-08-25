@@ -266,3 +266,195 @@ class TestPoolLifecycle:
         assert (
             rejected > 0
         ), "an unbounded ensemble queue accepted 200 requests behind a 200ms model"
+
+
+# A second pass over what the first pass produced. The *model* names its tensors distinctly —
+# the repository refuses an input and an output sharing a name — while the ensemble step maps
+# both onto the same namespace entry, which is what "refine in place" means at this level.
+_REFINE = """
+platform: mock
+max_batch_size: 4
+inputs: [{name: crops_in, data_type: FP32, dims: [2]}]
+outputs: [{name: crops_out, data_type: FP32, dims: [2]}]
+instance_groups: [{kind: KIND_CPU, count: 1}]
+dynamic_batching: {enabled: false}
+parameters: {latency_ms: 0.05}
+"""
+
+_SLOW = """
+platform: mock
+max_batch_size: 4
+inputs: [{name: images, data_type: FP32, dims: [4]}]
+outputs: [{name: crops, data_type: FP32, dims: [2]}]
+instance_groups: [{kind: KIND_CPU, count: 1}]
+dynamic_batching: {enabled: false}
+parameters: {latency_ms: 60.0, seed: 11}
+"""
+
+_FAST = """
+platform: mock
+max_batch_size: 4
+inputs: [{name: images, data_type: FP32, dims: [4]}]
+outputs: [{name: crops, data_type: FP32, dims: [2]}]
+instance_groups: [{kind: KIND_CPU, count: 1}]
+dynamic_batching: {enabled: false}
+parameters: {latency_ms: 0.05, seed: 22}
+"""
+
+
+def _mock_first_draw(seed: int, rows: int = 1, width: int = 2) -> np.ndarray:
+    """What `MockBackend` emits on its first execution for a given seed.
+
+    Mirrors `backends/mock.py`: a seeded `default_rng`, `random((batch, *shape))` in float32.
+    Reproducing it here rather than reading it back from the model is what makes the write
+    race *observable* — two steps writing the same name are otherwise indistinguishable, and
+    a test that cannot tell them apart passes whichever one wins.
+    """
+    return np.random.default_rng(seed).random((rows, width), dtype=np.float32)
+
+
+class TestAStepMayReadANameALaterStepWrites:
+    """Scheduling the steps independently deadlocked refine-in-place.
+
+    A step was admitted only when every producer of every name it reads had finished, and
+    producers were collected over the whole graph with no regard for declaration order. So
+    `detect(images -> crops)` followed by `refine(crops -> crops)` could never run: `refine`
+    is itself a producer of `crops`, so its own precondition included itself. The future never
+    resolved and its semaphore slot was never released — the pool leaks a permit per request
+    until it stops accepting work at all.
+
+    Not an exotic shape: a second pass that improves what the first pass produced is the
+    obvious way to write one, and the sequential walk this replaced ran it happily.
+    """
+
+    def _repo(self, tmp_path: Path) -> Path:
+        root = tmp_path / "repo"
+        _write(root, "router", _ROUTER.format(always=1))
+        _write(root, "refine", _REFINE)
+        _write(
+            root,
+            "pipe",
+            """
+platform: ensemble
+max_batch_size: 0
+inputs: [{name: images, data_type: FP32, dims: [4]}]
+outputs: [{name: crops, data_type: FP32, dims: [2]}]
+dynamic_batching: {enabled: false}
+ensemble:
+  steps:
+    - model: router
+      input_map: {images: images}
+      output_map: {crops: crops, has_thing: has_thing}
+    - model: refine
+      input_map: {crops_in: crops}
+      output_map: {crops_out: crops}
+""",
+            versioned=False,
+        )
+        return root
+
+    def test_refine_in_place_completes_instead_of_hanging(self, tmp_path: Path) -> None:
+        server = _server(self._repo(tmp_path))
+        server.start()
+        try:
+            response = server.infer(_request()).result(timeout=10.0)
+        finally:
+            server.stop()
+
+        assert "crops" in response.outputs
+
+    def test_the_second_pass_output_is_the_one_returned(self, tmp_path: Path) -> None:
+        """Declaration order decides, so the later step's value is what the ensemble emits —
+        the same answer the sequential walk gave."""
+        server = _server(self._repo(tmp_path))
+        server.start()
+        try:
+            first = server.infer(_request()).result(timeout=10.0)
+            second = server.infer(_request()).result(timeout=10.0)
+        finally:
+            server.stop()
+
+        assert first.outputs["crops"].shape == second.outputs["crops"].shape
+
+    def test_the_pool_does_not_leak_a_permit_per_request(self, tmp_path: Path) -> None:
+        """The deadlock's real cost: a stranded request never releases its slot, so the pool
+        stops accepting long after the graph that caused it."""
+        server = _server(self._repo(tmp_path))
+        server.start()
+        try:
+            for _ in range(8):
+                server.infer(_request()).result(timeout=10.0)
+        finally:
+            server.stop()
+
+
+class TestTwoStepsWritingOneNameKeepDeclarationOrder:
+    """Independent steps that map an output onto the same ensemble name now run concurrently
+    and race to write it. Whichever *finished* last would win, non-deterministically, where
+    the sequential walk always gave the later-declared step.
+
+    The slow step is declared first and the fast one second, so completion order and
+    declaration order disagree on every run. A scheduler that resolves the race by arrival
+    returns the slow step's value; the sequential semantics return the fast one's.
+    """
+
+    def _repo(self, tmp_path: Path) -> Path:
+        root = tmp_path / "repo"
+        _write(root, "slow", _SLOW)
+        _write(root, "fast", _FAST)
+        _write(
+            root,
+            "pipe",
+            """
+platform: ensemble
+max_batch_size: 0
+inputs: [{name: images, data_type: FP32, dims: [4]}]
+outputs: [{name: crops, data_type: FP32, dims: [2]}]
+dynamic_batching: {enabled: false}
+ensemble:
+  steps:
+    - model: slow
+      input_map: {images: images}
+      output_map: {crops: crops}
+    - model: fast
+      input_map: {images: images}
+      output_map: {crops: crops}
+""",
+            versioned=False,
+        )
+        return root
+
+    def test_the_later_declared_step_wins_however_the_two_finish(self, tmp_path: Path) -> None:
+        server = _server(self._repo(tmp_path))
+        server.start()
+        try:
+            response = server.infer(_request()).result(timeout=10.0)
+        finally:
+            server.stop()
+
+        got = response.outputs["crops"].numpy()
+        slow_value = _mock_first_draw(11)
+        fast_value = _mock_first_draw(22)
+
+        # `fast` is declared second, so the sequential walk's answer is `fast`'s value —
+        # even though `slow` (60 ms) finishes long after it (0.05 ms) and a scheduler that
+        # resolved the race by arrival would return `slow`'s.
+        assert np.allclose(
+            got, fast_value
+        ), "the ensemble returned the step that finished last, not the one declared last"
+        assert not np.allclose(got, slow_value)
+
+    def test_both_steps_still_run(self, tmp_path: Path) -> None:
+        """The fix must not be "ignore the slow one" — it has to run, its result is simply
+        superseded, exactly as it was in the sequential walk."""
+        root = self._repo(tmp_path)
+        server = _server(root)
+        server.start()
+        try:
+            server.infer(_request()).result(timeout=10.0)
+            stats = server.model("slow").stats()
+        finally:
+            server.stop()
+
+        executed = sum(int(i["requests"]) for i in stats["instances"])
+        assert executed >= 1, "the superseded step was skipped rather than superseded"

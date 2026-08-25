@@ -22,16 +22,27 @@ from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.metrics import ServerMetrics
 from shipinfer.core.request import InferenceResponse
 from shipinfer.core.settings import SchedulerSettings
+from shipinfer.core.tracing import NullTraceSink, RequestTrace, TraceSink
 from shipinfer.core.types import Device
 from shipinfer.runtime.device import DeviceManager
 from shipinfer.runtime.profiling import PhaseTimer, phase_timer
 from shipinfer.scheduling.batching import AssembledBatch, Batcher
+from shipinfer.scheduling.limits import RateLimiter, UnlimitedRateLimiter
 from shipinfer.scheduling.queues import BatchWindow, RequestQueue
 from shipinfer.scheduling.work import WorkItem
+from shipinfer.server.statistics import ModelStatistics
 
 __all__ = ["ModelInstance"]
 
 _LOG = get_logger("server.instance")
+
+#: How long a worker waits for an execution slot before re-checking that it should still be
+#: running. The wait has to be bounded or a stopping server would sit inside the limiter
+#: until some other instance finished its batch; 50 ms is short against a shutdown grace of
+#: seconds and long enough that the re-check costs nothing measurable. A wait that expires is
+#: an ordinary "not yet" and the batch is retried, never dropped — the queue is the only
+#: place in this system that sheds work, on purpose (ADR-005).
+_SLOT_WAIT_S = 0.05
 
 
 class ModelInstance:
@@ -51,6 +62,9 @@ class ModelInstance:
         devices: DeviceManager,
         metrics: ServerMetrics,
         scheduler: SchedulerSettings,
+        statistics: ModelStatistics | None = None,
+        limiter: RateLimiter | None = None,
+        traces: TraceSink | None = None,
     ) -> None:
         self.name = name
         self._backend = backend
@@ -60,6 +74,14 @@ class ModelInstance:
         self._devices = devices
         self._metrics = metrics
         self._alpha = scheduler.latency_ewma_alpha
+        # All three default to the inert implementation rather than to None, so the hot path
+        # has no `if x is not None` on it and no caller can forget one. `Model` supplies the
+        # real objects; the statistics object is per model and shared with the model's other
+        # instances, which is what makes the totals a model's totals.
+        self._statistics = statistics if statistics is not None else ModelStatistics()
+        self._limiter = limiter if limiter is not None else UnlimitedRateLimiter()
+        self._traces = traces if traces is not None else NullTraceSink()
+        self._rate_limit_waits = 0
 
         self._thread: threading.Thread | None = None
         # stop() may be called from the server's shutdown thread while the worker is still
@@ -73,6 +95,13 @@ class ModelInstance:
         self._counted_ready = False
         self._running = threading.Event()
         self._ready = threading.Event()
+        # Set when the worker has *settled* either way — ready, or failed to start. Without
+        # it `wait_ready` cannot tell "still loading" from "already dead", so a model whose
+        # backend raised on the first line held start-up for the whole 120 s timeout before
+        # reporting a failure it had known about immediately. A typo in `model_warmup` is
+        # enough to reach that path.
+        self._settled = threading.Event()
+        self._start_error: BaseException | None = None
         self._ewma_latency_us = 0.0
         self._executed_batches = 0
         self._executed_requests = 0
@@ -121,7 +150,22 @@ class ModelInstance:
         self._thread.start()
 
     def wait_ready(self, timeout: float = 120.0) -> bool:
-        return self._ready.wait(timeout)
+        """Block until the worker is ready or has failed. True only if it is ready.
+
+        Returns as soon as either is known: a failed start is an answer, not something to
+        keep waiting for.
+        """
+        self._settled.wait(timeout)
+        return self._ready.is_set()
+
+    @property
+    def start_error(self) -> BaseException | None:
+        """Why the worker never became ready, or ``None``.
+
+        Kept so the caller can say *what* went wrong rather than "did not become ready
+        within 120s", which describes the symptom and hides the cause.
+        """
+        return self._start_error
 
     def stop(self, grace_s: float = 10.0) -> None:
         """Stop accepting work, drain, and join.
@@ -196,12 +240,15 @@ class ModelInstance:
             self._backend.initialize()
             warmup = self._backend.context.execution.warmup_iterations
             self._backend.warmup(warmup)
-        except Exception:
+        except Exception as exc:
             _LOG.exception("instance %s failed to start", self.name)
-            self._queue.close(InferenceError(f"instance {self.name} failed to start"))
+            self._start_error = exc
+            self._queue.close(InferenceError(f"instance {self.name} failed to start: {exc}"))
+            self._settled.set()
             return
 
         self._ready.set()
+        self._settled.set()
         self._counted_ready = True
         self._metrics.instances_ready.inc(model=label)
         _LOG.info(
@@ -214,11 +261,50 @@ class ModelInstance:
             items = self._queue.get_batch(self._window)
             if not items:
                 continue  # closed, or a spurious wake-up
-            self._execute(items)
+            self._execute_when_permitted(items)
 
         # Drain anything that arrived between the flag clearing and the queue closing.
         for item in self._queue.close():
             item.fail(RequestCancelledError(f"instance {self.name} stopped"))
+
+    def _execute_when_permitted(self, items: list[WorkItem]) -> None:
+        """Hold one of the model's execution slots for the length of the batch.
+
+        The rate limiter bounds *concurrency*, which is a different bound from the queue's:
+        the queue says how much work may be waiting, this says how much may be running. Eight
+        instances whose batching windows close together otherwise enter compute at the same
+        instant, on one memory bus and one PCIe root complex.
+
+        The batch has already left the queue by the time this runs, so it is never dropped
+        for want of a slot — it waits, which converts the burst back into queue depth, a
+        quantity the rest of the system already measures and sheds at the edge. The only
+        outcome that fails the batch is the server stopping while it waits.
+
+        With the default ``off`` limiter every acquire succeeds on the first attempt, so this
+        costs two method calls per *batch* — not per request.
+
+        The acquire is attempted **before** the running flag is consulted, and that order is
+        deliberate: a batch that already has a slot is executed even if the server began
+        stopping between the queue handing it over and this line. Checking the flag first
+        would widen the shutdown race — a request that used to be served would start failing
+        with a cancellation, for every model, including the ones with no limiter at all.
+        """
+        while True:
+            if self._limiter.acquire(_SLOT_WAIT_S):
+                try:
+                    self._execute(items)
+                finally:
+                    self._limiter.release()
+                return
+            self._rate_limit_waits += 1
+            if not self._running.is_set():
+                break
+        self._fail_batch(
+            items,
+            RequestCancelledError(
+                f"instance {self.name} stopped while waiting for an execution slot"
+            ),
+        )
 
     def _execute(self, items: list[WorkItem]) -> None:
         label = self._model_label()
@@ -238,9 +324,12 @@ class ModelInstance:
             self._fail_batch(items, exc)
             return
 
+        queue_ns = 0
         for item in items:
-            item.request.timings.batched_ns = batched_ns
-            self._metrics.queue_wait_us.observe(item.request.timings.queue_us, model=label)
+            timings = item.request.timings
+            timings.batched_ns = batched_ns
+            queue_ns += max(0, batched_ns - timings.queued_ns)
+            self._metrics.queue_wait_us.observe(timings.queue_us, model=label)
 
         start_ns = time.monotonic_ns()
         try:
@@ -267,12 +356,28 @@ class ModelInstance:
 
         completed_ns = time.monotonic_ns()
         self._observe_phases(timer, batched_ns, completed_ns, label, device)
+        total_ns = 0
         for item, per_request in zip(batch.items, scattered, strict=True):
             timings = item.request.timings
             timings.compute_start_ns = start_ns
             timings.compute_end_ns = end_ns
             timings.completed_ns = completed_ns
+            total_ns += max(0, completed_ns - timings.received_ns)
             self._complete(item, per_request, completed_ns)
+
+        # Host spans, not device spans, and the difference is worth stating: the backend owns
+        # the copies, so `compute_infer` is wall-clock around `execute` rather than a CUDA
+        # event pair. That is what Triton reports too for a synchronous backend, and the
+        # event-timed split is available separately behind SHIPINFER_PROFILE_PHASES.
+        self._statistics.record_execution(
+            requests=batch.request_count,
+            batch_size=batch.size,
+            queue_ns=queue_ns,
+            compute_input_ns=start_ns - batched_ns,
+            compute_infer_ns=end_ns - start_ns,
+            compute_output_ns=completed_ns - end_ns,
+            total_ns=total_ns,
+        )
 
     def _observe_phases(
         self,
@@ -332,6 +437,11 @@ class ModelInstance:
         self._metrics.e2e_us.observe(
             item.request.timings.total_us, model=artifact.name, device=str(self.device)
         )
+        # After the future resolves, so tracing can never delay the caller's answer, and
+        # behind `should_record` so a server with tracing off (the default) does not build a
+        # record it would immediately discard.
+        if self._traces.should_record():
+            self._traces.record(RequestTrace.from_response(response))
 
     def _fail_batch(self, items: list[WorkItem], error: BaseException) -> None:
         label = self._model_label()
@@ -345,6 +455,7 @@ class ModelInstance:
         for item in items:
             item.fail(error)
         self._metrics.requests_failed.inc(len(items), model=label, device=str(self.device))
+        self._statistics.record_failure(len(items))
 
     # -- introspection -------------------------------------------------------------------
 
@@ -361,6 +472,10 @@ class ModelInstance:
             "batches": self._executed_batches,
             "requests": self._executed_requests,
             "failed_batches": self._failed_batches,
+            #: Times this worker had to wait for an execution slot. Non-zero means the
+            #: model's rate limiter is actually binding, which is the only way to tell a
+            #: limiter that is shaping a burst from one that is configured and never reached.
+            "rate_limit_waits": self._rate_limit_waits,
             "ewma_latency_us": round(self._ewma_latency_us, 1),
             "backend": self._backend.stats(),
         }

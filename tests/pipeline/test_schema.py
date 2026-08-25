@@ -9,6 +9,7 @@ payload key for key, and the rest assert that everything new is *additive*.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -137,15 +138,64 @@ class TestShipsAreAnExtension:
         assert event(person(0)).to_json().count("0.1,0.2") == 1
 
     def test_the_schema_version_is_explicit(self):
-        """So a consumer branches on a number rather than on the presence of a key."""
-        assert SCHEMA_VERSION == 2
-        assert event().as_dict()["schema_version"] == 2
+        """So a consumer branches on a number rather than on the presence of a key.
+
+        Pinned to a literal, not to the constant: the number *is* the contract, and a test
+        that read the constant would agree with any value the source happened to hold.
+        """
+        assert SCHEMA_VERSION == 3
+        assert event().as_dict()["schema_version"] == 3
 
     def test_masks_are_summarised_not_published(self):
         """This bus carries metadata; a 512x512 float mask is 1 MB and stays out of it."""
         payload = event(ship(0)).as_dict()
         assert payload["ship_mask_area_vec"] == [1234.0]
         assert not any("mask" in key and "area" not in key for key in payload)
+
+
+class TestTrackletsAreAnExtension:
+    """v3 carries the identity Plane 3 assigned, in the same idiom and beside the old keys.
+
+    ``motservice`` was named for the step that used to be missing: this pipeline detected and
+    embedded, and a separate service associated. With tracking in-process the identity is
+    already known when the event is built — so it travels with the object, and a deployed
+    consumer that ignores the new keys and does its own association keeps working unchanged.
+    """
+
+    def tracked(self, **fields) -> PerceptionEvent:
+        return event(
+            replace(person(0), **fields),
+            replace(ship(1), **fields),
+        )
+
+    def test_the_legacy_payload_gains_no_key(self):
+        payload = self.tracked(track_id=7, track_state="confirmed").as_det2mot()
+        assert set(payload) == V1_KEYS
+
+    def test_the_legacy_payload_is_identical_tracked_or_not(self):
+        assert (
+            self.tracked().as_det2mot()
+            == self.tracked(track_id=7, track_state="confirmed").as_det2mot()
+        )
+
+    def test_tracks_follow_the_existing_parallel_array_idiom(self):
+        payload = self.tracked(track_id=7, track_state="confirmed").as_dict()
+        assert payload["body_track_id_vec"] == [7]
+        assert payload["ship_track_id_vec"] == [7]
+        assert payload["body_track_state_vec"] == ["confirmed"]
+        assert payload["ship_track_state_vec"] == ["confirmed"]
+
+    def test_the_arrays_stay_aligned_with_the_boxes_they_describe(self):
+        payload = self.tracked(track_id=7).as_dict()
+        assert len(payload["body_track_id_vec"]) == len(payload["body_bbox_vec"])
+        assert len(payload["ship_track_id_vec"]) == len(payload["ship_bbox_vec"])
+
+    def test_an_untracked_object_serialises_as_null_not_zero(self):
+        """0 is a legitimate track id; ``null`` is "the stage did not run for this object"."""
+        payload = self.tracked().as_dict()
+        assert payload["body_track_id_vec"] == [None]
+        assert payload["body_track_state_vec"] == [None]
+        assert json.loads(self.tracked().to_json())["ship_track_id_vec"] == [None]
 
 
 class TestCompletenessIsExplicit:

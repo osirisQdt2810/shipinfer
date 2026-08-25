@@ -31,6 +31,7 @@ from shipinfer.ingest.frame import FrameCounter
 from shipinfer.pipeline import PipelineRunner
 from shipinfer.pipeline.graph.state import FrameState
 from shipinfer.pipeline.reassembly.collector import FrameCollector
+from shipinfer.pipeline.schema import SCHEMA_VERSION
 from shipinfer.pipeline.sinks import NullResultSink
 from shipinfer.scheduling.queues import FairPriorityQueue
 
@@ -665,7 +666,7 @@ class TestEndToEndWithReplayAndJsonLines:
         assert len(payloads) == 6, "N frames in must be N events out"
         assert sorted(keys) == [("cam0", index) for index in range(6)]
         assert len(set(keys)) == 6, "an event was published twice"
-        assert all(p["schema_version"] == 2 for p in payloads)
+        assert all(p["schema_version"] == SCHEMA_VERSION for p in payloads)
         assert all(p["partial"] is False for p in payloads), [
             p["missing_stages"] for p in payloads
         ]

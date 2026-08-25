@@ -18,19 +18,22 @@ from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.metrics import ServerMetrics
 from shipinfer.core.request import InferenceRequest, InferenceResponse, ResponseFuture
 from shipinfer.core.settings import ServerSettings
+from shipinfer.core.tracing import NullTraceSink, TraceSink
 from shipinfer.core.types import Tensor, TensorSpec, validate_against
 from shipinfer.repository import ModelArtifact
 from shipinfer.runtime.device import DeviceManager
-from shipinfer.runtime.graphs import GRAPH_CACHES
+from shipinfer.runtime.graphs import GRAPH_CACHES, GraphSpec, resolve_graph_spec
 from shipinfer.runtime.memory import MemoryPool
 from shipinfer.runtime.stream import StreamPool
 from shipinfer.scheduling.batching import StackingBatcher
 from shipinfer.scheduling.dispatcher import Dispatcher
+from shipinfer.scheduling.limits import RateLimiter, build_rate_limiter
 from shipinfer.scheduling.policies import build_policy
 from shipinfer.scheduling.queues import QUEUES, BatchWindow
 from shipinfer.scheduling.work import WorkItem
 from shipinfer.server.cache import RESPONSE_CACHES, NullResponseCache, ResponseCache
 from shipinfer.server.instance import ModelInstance
+from shipinfer.server.statistics import ModelStatistics
 
 __all__ = ["Model"]
 
@@ -75,19 +78,33 @@ class Model:
         devices: DeviceManager,
         memory: MemoryPool,
         metrics: ServerMetrics,
+        traces: TraceSink | None = None,
     ) -> None:
         self._artifact = artifact
         self._settings = settings
         self._devices = devices
         self._memory = memory
         self._metrics = metrics
+        self._traces = traces if traces is not None else NullTraceSink()
 
         config = artifact.config
         self._batcher = StackingBatcher(
             config.input_specs, config.output_specs, config.effective_max_batch_size
         )
         self._window = self._build_window()
+        # Resolved here, once, rather than per instance: every instance of a model shares
+        # one batching window, so they must share one capture set or their graph statistics
+        # cannot be compared. Resolved even when capture is off (it is, by default —
+        # ADR-013) so `stats()` can answer "which sizes *would* be captured" without the
+        # operator having to turn capture on to find out.
+        self._graphs_on = _graphs_enabled(settings.execution)
+        self._graph_spec = self._build_graph_spec()
         self._cache = self._build_cache()
+        # One statistics object and one rate limiter per *model*, shared by its instances:
+        # both quantities are the model's, not an instance's. The limiter in particular only
+        # bounds anything if the instances contend for the same one.
+        self._statistics = ModelStatistics()
+        self._limiter = self._build_rate_limiter()
         self._instances: list[ModelInstance] = self._build_instances()
         self._dispatcher = Dispatcher(
             model_name=artifact.name,
@@ -111,6 +128,58 @@ class Model:
             preferred_sizes=tuple(batching.preferred_batch_sizes),
         )
 
+    def _build_graph_spec(self) -> GraphSpec:
+        """Which batch sizes get a captured graph, and why — Triton's ``graph_spec``.
+
+        Derived from :attr:`_window`, which is the *same* object the instance's queue
+        batches against, so the capture set and the batcher cannot drift apart. They used
+        to: ``execution.cuda_graph_batch_sizes`` defaults to ``[1, 2, 4, 8, 16, 32]``, so a
+        model with ``max_batch_size: 8`` captured 16 and 32 — graphs that can never be
+        replayed — and a model with ``preferred_batch_sizes: [6]`` captured nothing the
+        batcher emits. Neither shows up as an error; both show up as a replay counter
+        stuck at zero.
+
+        Two explicit escapes, most specific first, because the derivation is a good default
+        and not a law:
+
+        * ``parameters.graph_spec`` in the model's own ``config.yaml`` — per model, which
+          is where Triton puts it, and the right granularity because whether a shape is
+          worth capturing is a property of the engine;
+        * ``execution.cuda_graph_batch_sizes``, honoured only when the operator set it
+          explicitly. ``model_fields_set`` is what "explicitly" means here: an untouched
+          field is this file's default and must not out-vote the model's own config, while
+          a field someone typed into a settings file or ``SHIPINFER_EXECUTION__*`` is an
+          instruction — the same reasoning that makes ``SHIPINFER_CUDA_GRAPHS`` win in
+          :func:`_graphs_enabled`.
+        """
+        execution = self._settings.execution
+        override: Any = self._artifact.config.parameters.get("graph_spec")
+        source = f"{self._artifact.name}/config.yaml parameters.graph_spec"
+        if override is None and "cuda_graph_batch_sizes" in execution.model_fields_set:
+            override = execution.cuda_graph_batch_sizes
+            source = "settings execution.cuda_graph_batch_sizes"
+
+        try:
+            spec = resolve_graph_spec(
+                max_batch_size=self._window.max_batch_size,
+                preferred=self._window.preferred_sizes,
+                override=override,
+                override_source=source,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(f"model {self._artifact.name!r}: {exc}") from exc
+
+        # Logged only when capture is on, because that is the only case where the answer
+        # changes what the process does; `stats()` carries it unconditionally.
+        if self._graphs_on:
+            _LOG.info(
+                "model %s captures CUDA graphs for batch size(s) %s (%s)",
+                self._artifact.name,
+                list(spec.batch_sizes),
+                spec.reason,
+            )
+        return spec
+
     def _build_cache(self) -> ResponseCache:
         params = self._artifact.config.parameters
         spec = params.get("response_cache")
@@ -121,6 +190,25 @@ class Model:
         options = dict(spec)
         kind = options.pop("type", "lru")
         return RESPONSE_CACHES.create(kind, **options)
+
+    def _build_rate_limiter(self) -> RateLimiter:
+        """The model's concurrency bound, from its own ``config.yaml``.
+
+        Built through the registry rather than a branch on the name, so a deployment can
+        select a limiter this file has never heard of. An unknown name raises
+        :class:`~shipinfer.core.errors.ConfigurationError` here — at model construction,
+        i.e. start-up — listing what was registered.
+        """
+        limits = self._artifact.config.rate_limiter
+        limiter = build_rate_limiter(limits.kind, limits.max_concurrent_executions)
+        if limits.enabled:
+            _LOG.info(
+                "model %s is rate limited to %d concurrent execution(s) across %s",
+                self._artifact.name,
+                limits.max_concurrent_executions,
+                limiter.name,
+            )
+        return limiter
 
     def _build_instances(self) -> list[ModelInstance]:
         config = self._artifact.config
@@ -137,8 +225,8 @@ class Model:
                 GRAPH_CACHES.create(
                     execution.graph_cache,
                     device,
-                    enabled=_graphs_enabled(execution),
-                    batch_sizes=tuple(execution.cuda_graph_batch_sizes),
+                    enabled=self._graphs_on,
+                    batch_sizes=self._graph_spec.batch_sizes,
                     max_failures=execution.cuda_graph_max_capture_failures,
                 )
                 if device.is_cuda
@@ -172,6 +260,9 @@ class Model:
                     devices=self._devices,
                     metrics=self._metrics,
                     scheduler=scheduler,
+                    statistics=self._statistics,
+                    limiter=self._limiter,
+                    traces=self._traces,
                 )
             )
         if not instances:
@@ -197,6 +288,11 @@ class Model:
         return tuple(self._instances)
 
     @property
+    def statistics(self) -> ModelStatistics:
+        """Cumulative per-model counters, in Triton's vocabulary."""
+        return self._statistics
+
+    @property
     def is_ready(self) -> bool:
         return self._started and any(i.is_ready for i in self._instances)
 
@@ -214,8 +310,14 @@ class Model:
         for instance in self._instances:
             remaining = max(0.0, deadline - time.monotonic())
             if not instance.wait_ready(remaining) and self._settings.strict_startup:
+                # The instance's own error when it has one: "did not become ready within
+                # 120s" describes the symptom and hides the cause, and the cause is usually
+                # a missing artefact or a warm-up sample that could not be built.
+                reason = instance.start_error
                 raise ServerStateError(
-                    f"instance {instance.name} did not become ready within {timeout_s:.0f}s"
+                    f"instance {instance.name} failed to start: {reason}"
+                    if reason is not None
+                    else f"instance {instance.name} did not become ready within {timeout_s:.0f}s"
                 )
         self._started = True
         _LOG.info(
@@ -271,8 +373,10 @@ class Model:
             cached = self._cache.get(key)
             if cached is not None:
                 self._metrics.cache_hits.inc(model=self.name)
+                self._statistics.record_cache_hit()
                 return _completed(future, self._response_from(request, cached))
             self._metrics.cache_misses.inc(model=self.name)
+            self._statistics.record_cache_miss()
             self._store_when_done(key, future)
 
         try:
@@ -357,8 +461,24 @@ class Model:
                 "preferred": list(self._window.preferred_sizes),
             },
             "cache": self._cache.stats(),
+            # Reported whether or not capture is enabled: "which sizes were captured, and
+            # why those" is the question a zero replay counter raises, and an operator
+            # should not have to turn capture on to be able to ask it.
+            "cuda_graphs": {"enabled": self._graphs_on, **self._graph_spec.as_dict()},
+            "rate_limiter": self._limiter.stats(),
             "instances": [i.stats() for i in self._instances],
         }
+
+    def model_stats(self) -> dict[str, Any]:
+        """This model's entry of Triton's ``model_stats`` array.
+
+        The wire shape of ``/v2/models/{name}/stats``. Separate from :meth:`stats` because
+        the two answer different questions and mixing them helps nobody: this one is Triton's
+        protocol, diffable against a Triton deployment and parseable by its client; the other
+        is this server's own view, with queue depths, spill counts and the placement policy
+        in it, which Triton has no field for.
+        """
+        return self._statistics.as_dict(self.name, self.version)
 
     def __repr__(self) -> str:
         return f"<Model {self.name}:{self.version} instances={len(self._instances)}>"

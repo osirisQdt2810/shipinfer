@@ -8,6 +8,7 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from shipinfer.core.settings.device import DeviceSettings
+from shipinfer.core.settings.enums import ModelControlMode
 from shipinfer.core.settings.execution import ExecutionSettings
 from shipinfer.core.settings.http import HttpSettings
 from shipinfer.core.settings.ingest import IngestSettings
@@ -40,6 +41,10 @@ class ServerSettings(BaseSettings):
     model_repository: Path = Path("model_repository")
     load_all_models: bool = True
     startup_models: list[str] = Field(default_factory=list)
+    #: Whether ``/v2/repository/models/*/load`` and ``*/unload`` are honoured. ``none`` — the
+    #: default — freezes the model table at start-up and refuses them, so a control-plane bug
+    #: cannot unload the detector out from under fifty cameras.
+    model_control: ModelControlMode = ModelControlMode.NONE
     #: A start-up that keeps going after a model fails to load hides a broken deployment.
     strict_startup: bool = True
     #: Seconds to wait for in-flight batches when shutting down.
@@ -56,6 +61,19 @@ class ServerSettings(BaseSettings):
 
     @model_validator(mode="after")
     def _startup_models_need_selection(self) -> ServerSettings:
-        if not self.load_all_models and not self.startup_models:
-            raise ValueError("load_all_models=false requires a non-empty startup_models list")
+        """A server that loads nothing must have said so deliberately.
+
+        Under explicit model control an empty selection is exactly the point — the models
+        arrive over the control API — so the rule is relaxed there rather than forcing an
+        operator to name a model they intend to unload immediately.
+        """
+        if (
+            not self.load_all_models
+            and not self.startup_models
+            and self.model_control is not ModelControlMode.EXPLICIT
+        ):
+            raise ValueError(
+                "load_all_models=false requires a non-empty startup_models list, "
+                "or model_control='explicit' if the models arrive over the control API"
+            )
         return self
