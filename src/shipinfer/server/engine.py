@@ -116,7 +116,13 @@ class InferenceServer:
             return list(self._models.values())
 
     def models(self) -> list[str]:
-        return sorted(self._models)
+        # Through the snapshot, like every other reader. `sorted(self._models)` iterated the live
+        # dict, and it was the reader that turned a 404 into a 500: `infer` on an unloaded name
+        # builds `ModelNotFoundError(name, self.models())` while a concurrent unload pops the
+        # table, and the `RuntimeError` from the iteration is not a `ShipInferError`, so the
+        # route's handler never sees it. The structural test grepped for `_models.values()` and
+        # this reader spells it `sorted(self._models)` — blind to exactly the one it missed.
+        return sorted(model.name for model in self._models_snapshot())
 
     def model(self, name: str) -> Model | EnsembleModel:
         try:

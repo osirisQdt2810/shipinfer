@@ -324,23 +324,56 @@ class TestTheModelTableIsNeverIteratedLive:
 
         assert len(list(walker)) == 1, "a concurrent unload invalidated the iterator"
 
-    def test_the_three_readers_share_one_snapshot_helper(self) -> None:
-        """Asserted against the source, because three copies of `with self._lock` is how two of
-        them get fixed and the third does not — which is what happened here: `check_health` was
-        careful, `is_ready`, `stats` and `_ensembles_depending_on` were not."""
+    def test_every_reader_of_the_model_table_goes_through_the_snapshot(self) -> None:
+        """Asserted against the source, because N copies of `with self._lock` is how N-2 get
+        fixed — which is what happened here twice: `check_health` was careful and four readers
+        were not; then the fix covered four and review found a fifth, `models()`, which spells
+        its read `sorted(self._models)` and so slipped past a predicate that grepped for
+        `_models.values()`. The predicate is now every mention of `self._models`, minus an
+        explicit allow-list of the sites that are safe: the snapshot's own body, the writes,
+        `pop`/`get`/membership on a single key (atomic under the GIL and correct under the
+        lock), and `stop()`, which clears under the lock.
+        """
         import inspect
 
         from shipinfer.server import engine
 
         source = inspect.getsource(engine.InferenceServer)
-        live = [
-            line.strip()
-            for line in source.splitlines()
-            if "_models.values()" in line and "def _models_snapshot" not in line
-        ]
+        safe = (
+            "_models_snapshot",  # the helper's own read, under the lock
+            "self._models[",  # single-key access
+            "self._models.pop(",
+            "self._models.get(",
+            "self._models.clear()",
+            "self._models = ",
+            "in self._models",  # membership on a single key
+            "len(self._models)",  # a size read, atomic
+            "self._models: ",  # the annotation
+        )
+        lines = source.splitlines()
+        live = []
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if "self._models" not in line or stripped.startswith("#"):
+                continue  # prose about the table is not a read of it
+            if any(marker in line for marker in safe):
+                continue
+            # A `.values()` read directly under `with self._lock:` is the snapshot itself
+            # (the helper's body, and `stop()`, which drains under the lock).
+            previous = next(
+                (lines[j].strip() for j in range(index - 1, -1, -1) if lines[j].strip()), ""
+            )
+            if ".values()" in line and previous == "with self._lock:":
+                continue
+            live.append(stripped)
 
-        assert source.count("_models_snapshot()") >= 4, "a reader stopped using the snapshot"
-        assert len(live) <= 2, (
-            f"these read the table live rather than through the snapshot: {live}. Two are "
-            f"expected — the helper's own body, and `stop()`, which clears under the lock"
+        assert not live, (
+            f"these read the model table live rather than through the snapshot: {live}. A "
+            f"concurrent unload turns each into RuntimeError from an endpoint that worked"
+        )
+        # Second, so a live read is reported as a live read and not as a count mismatch.
+        readers = ("is_ready", "models", "__iter__", "_ensembles_depending_on", "stats")
+        assert source.count("_models_snapshot()") == len(readers), (
+            f"expected exactly one snapshot read per reader in {readers}; a reader was added "
+            f"or removed without updating this list, which is the moment to check it too"
         )
