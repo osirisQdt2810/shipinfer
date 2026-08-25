@@ -20,6 +20,22 @@ fastapi. Device memory is referenced through the `MemoryHandle` *protocol* rathe
 import. The rule is enforced by `scripts/hooks/check_layers.py` at commit time and by
 `tests/test_architecture.py` in CI.
 
+**What it is not yet (V79).** The operator read `csrc/` against `src/shipinfer/` and saw a
+different program. That was accurate. The first binary shares the Python plane's layout and the
+names of its seams, but not their shape: a pool of workers leasing instances instead of one
+thread per instance with its own bounded queue; a device-local `lease()` instead of a placement
+policy chosen by name; a fixed 50 ms drain instead of the batch window; newest-first eviction
+where the Python queue evicts oldest; replay-only ingest; engines named on the command line
+instead of read from the model repository. It answered the question it was written for — the
+interpreter is the wall, 77 against ~450 img/s per process — and that is what it is evidence of.
+
+**The decision (V80) is to port for real.** Every per-frame seam exists in both planes and must
+be the *same* seam, ported in the order that removes the largest architectural difference first
+(ledger Phase 8: instance thread + queue + dispatcher/policy → batch window → eviction order →
+ingest → resolved config in, same events out), with a cross-plane parity harness as the gate.
+And a **sync rule**: a change to a Python data-plane seam is not finished until the C++ seam
+carries it and the parity harness agrees (CLAUDE.md, "Two planes, one architecture").
+
 **Consequences.** The default `pytest` run needs no GPU and finishes in seconds, so CI runs
 on a cheap runner and every contributor can run it. The cost is one indirection: a device
 tensor carries an opaque handle instead of a torch tensor, and the bridge lives in
@@ -368,3 +384,54 @@ from a shape-keyed pool) remain load-bearing for anyone who sets it.
 What this does not change: capture failure still means "take the ordinary launch path", and
 `cuda_graph_max_capture_failures` still stops a model with dynamic control flow from paying
 a failed capture on every batch.
+
+---
+
+## ADR-014 — The data plane is a C++ binary; `csrc/` is not an optional extension
+
+**Status:** Accepted · 2026-08-24 · scopes ADR-007, restores ADR-003's portability rationale in
+a second place · **scope amended 2026-08-25 (V79, V80):** the binary as it stands is the *starting
+point* of the plane, not the plane — see "What it is not yet" below.
+
+**Context.** `CLAUDE.md` has said from the first commit: Python for the control plane,
+C++17/CUDA for the data plane. The control plane was Python and correct. The data plane was
+*also* Python, and it capped throughput at 77 img/s — not through the GIL in the naive sense
+(`docker stats` read 390-534% CPU, so the C extensions really were running in parallel) but
+through the pure-Python share of the per-frame path, which held the GIL and pinned the whole
+process at about five cores of forty-eight while every GPU queue sat empty.
+
+Four candidates were eliminated by measurement before this was reached: the GPUs (every model
+queue SUSTAINED at its offered rate), the worker pool (24/96/192 workers moved throughput under
+8%), the reassembly lock (98.9% of its hold removed, no change), and the load generator (it
+delivered 100% of what was offered).
+
+**Decision.** `csrc/` is a **first-class data plane**, not an optional accelerator: a standalone
+binary owning ingest, the fair queue, preprocessing, TensorRT execution, the perception graph
+and reassembly. Python keeps the control plane — settings, the model repository, registries, the
+CLI, the HTTP surface — and hands this plane a resolved configuration.
+
+**How this differs from ADR-007, which is not superseded.** ADR-007 governs *fused kernels* in
+`3rdparty/shipvision`: an optional pybind11 extension where every native component has a Python
+counterpart selected by `execution.provider`, so a machine with no build still runs. That
+promise is unchanged and still enforced by CI not checking the submodule out. ADR-014 is a
+different artefact with a different contract: `csrc/` is a whole plane, it has no Python
+counterpart, and a deployment either runs it or runs the Python plane — the choice is which
+binary you start, not a provider string.
+
+**Consequences.**
+
+- **Two implementations of the same seams now exist** — the fair queue, reassembly, the graph.
+  That is a real cost, and the mitigation is explicit: both are judged by *one* measurement
+  (`benchmarks/harness/analysis.py` reads the same occupancy log from all three systems), and
+  the C++ side names the Python file it mirrors. Where they have already diverged it is
+  recorded: `fair.h` evicts the *newest* frame of the greediest camera while
+  `scheduling/queues/lanes.py` evicts the *oldest* — a different latency profile under
+  sustained overload, now stated in both.
+- **ADR-003's portability argument had to be restored here.** The first version hard-coded the
+  CUDA runtime throughout, which would have made a ROCm build a port rather than a flag.
+  `csrc/shipinfer/core/platform.h` is the alias layer — mirroring shipvision's own — and is the
+  only header in the tree permitted to name a vendor runtime.
+- **`csrc/` mirrors `src/shipinfer/`'s package layout**, a thing's `.h` and `.cpp` next to each
+  other and the Python names reused, so a reader who knows one tree can navigate the other.
+- The Python data plane stays. It is the reference implementation, it is what the offline tier
+  tests, and it is what makes a claim about the C++ side falsifiable.
