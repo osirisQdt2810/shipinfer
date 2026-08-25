@@ -79,6 +79,18 @@ class TestTheVocabularyIsTritons:
             "REQUEST_END",
         )
 
+    def test_profiling_re_exports_the_same_tuple_rather_than_a_copy(self) -> None:
+        """Two copies of a vocabulary is how the two drift and a trace stops diffing.
+
+        Moved out of this file once, on the grounds that it "belongs with the re-export" in a
+        later piece. Review pointed out what that left behind: the second copy landed here and
+        the only thing that would have caught divergence did not. It stays with the vocabulary
+        it protects.
+        """
+        from shipinfer.runtime import profiling
+
+        assert profiling.TRACE_EVENTS is TRACE_EVENTS
+
 
 class TestRequestTrace:
     """Six stamps onto seven names, and the arithmetic over them."""

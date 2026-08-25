@@ -93,13 +93,26 @@ class ConcurrencyRateLimiter(RateLimiter):
     def release(self) -> None:
         """Give a slot back. Safe to call at most once per :meth:`acquire`.
 
-        The semaphore goes first. `BoundedSemaphore.release` raises on an unpaired call, and
+        Both steps under one lock, and the ordering inside it still matters.
+
+        The semaphore goes first: `BoundedSemaphore.release` raises on an unpaired call, and
         decrementing before it meant the counter had already moved when the raise happened —
         so `in_flight` went permanently negative and every later reading of it was wrong,
         including the one an operator uses to decide whether a pool is saturated.
+
+        And the decrement is under the *same* lock as the release, not a second acquisition of
+        it. Between the two, a waiter parked in `_slots.acquire()` can wake and run
+        `_on_acquired` against a `_held` that has not yet come down — so `in_flight` and
+        `peak_in_flight` both read `limit + 1`. The semaphore never over-admits, so this is not
+        a safety bug; it is a reporting one, and `peak_in_flight` is the one number that says
+        whether the bound is doing anything. A limiter whose peak reads above its own limit
+        reads to an operator as a limiter that is not holding. Review reproduced a peak of 4
+        against a bound of 2; two hammers here did not — the window is small and CPython
+        serialises acquire/release tightly — which is why the fix is argued from the code
+        rather than from a failing run.
         """
-        self._slots.release()
         with self._counter_lock:
+            self._slots.release()
             self._held -= 1
 
     @property

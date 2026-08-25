@@ -200,3 +200,53 @@ class TestConfigSection:
     def test_a_limiter_without_a_bound_is_refused(self) -> None:
         with pytest.raises(ValueError, match="max_concurrent_executions"):
             self._config(kind="concurrency")
+
+
+class TestReleaseIsOneCriticalSection:
+    """`release()` gives the slot back and decrements the counter under *one* lock.
+
+    Under two — semaphore first, then `with self._counter_lock: _held -= 1` — a waiter parked
+    in `_slots.acquire()` wakes between them and runs `_on_acquired` against a `_held` that has
+    not come down yet, so `in_flight` and `peak_in_flight` both read `limit + 1`. The semaphore
+    never over-admits; this is a reporting bug. But `peak_in_flight` is the one number that says
+    whether the bound is doing anything, and a peak above the limit reads to an operator as a
+    limiter that is not holding.
+
+    WHY THIS IS ASSERTED AGAINST THE SOURCE. Review reproduced a peak of 4 against a bound of 2.
+    Two hammers here — 8 threads with a 0.2 ms hold over 60 trials, then 16 threads with no hold
+    over 300 — never saw the peak exceed the limit, and the second never saw it *reach* the
+    limit: CPython serialises acquire/release so tightly that the window did not open. A
+    threaded test that passes on the broken code is worse than none, because it reads as
+    coverage. So the property is pinned structurally: the semaphore release happens inside the
+    counter lock's `with` block. Weaker than a failing run; the strongest thing that is honest.
+    """
+
+    def test_the_semaphore_is_released_inside_the_counter_lock(self) -> None:
+        import ast
+        import inspect
+
+        from shipinfer.scheduling.limits.concurrency import ConcurrencyRateLimiter
+
+        tree = ast.parse(inspect.getsource(ConcurrencyRateLimiter.release).strip())
+        func = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef))
+        withs = [node for node in ast.walk(func) if isinstance(node, ast.With)]
+
+        assert len(withs) == 1, "release() should have exactly one critical section"
+        inside = ast.unparse(withs[0])
+        assert "_slots.release()" in inside, (
+            "the semaphore is released outside the counter lock; a waiter can wake between the "
+            "release and the decrement and over-report in_flight and peak_in_flight"
+        )
+        assert "_held -= 1" in inside
+
+    def test_the_semaphore_still_goes_before_the_decrement(self) -> None:
+        """The ordering the docstring defends survives the move: `BoundedSemaphore.release`
+        raises on an unpaired call, and decrementing first meant the counter had already moved
+        when the raise happened — `in_flight` went permanently negative."""
+        import inspect
+
+        from shipinfer.scheduling.limits.concurrency import ConcurrencyRateLimiter
+
+        source = inspect.getsource(ConcurrencyRateLimiter.release)
+
+        assert source.index("_slots.release()") < source.index("_held -= 1")
