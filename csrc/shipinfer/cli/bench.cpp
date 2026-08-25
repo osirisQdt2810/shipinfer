@@ -46,6 +46,10 @@ namespace {
 
         size_t rows() const { return 1; }
         std::string camera() const { return tag.camera_id; }
+        // A frame into the detector is NORMAL priority with no deadline — what the Python
+        // pipeline submits. The lanes above and below exist for the requests that will use them.
+        int priority() const { return Priority::Normal; }
+        bool expired(int64_t) const { return false; }
     };
 
     struct Options {
@@ -62,6 +66,9 @@ namespace {
         double seconds = 40.0;
         int workers = 32;
         int queue_capacity = 65536;
+        // The detector's batch window, `dynamic_batching.max_queue_delay_us` in the demo
+        // repository's config: once one frame is in, the queue waits this long for a batch to fill.
+        int batch_delay_us = 2000;
         int reassembly_capacity = 1024;
         int reassembly_timeout_ms = 1500;
         int det_instances = 2;
@@ -115,6 +122,8 @@ namespace {
                 options.workers = std::stoi(next());
             else if (flag == "--queue-capacity")
                 options.queue_capacity = std::stoi(next());
+            else if (flag == "--batch-delay-us")
+                options.batch_delay_us = std::stoi(next());
             else if (flag == "--det-instances")
                 options.det_instances = std::stoi(next());
             else if (flag == "--seg-instances")
@@ -142,6 +151,7 @@ namespace {
         out << ", \"seconds\": " << options.seconds;
         out << ", \"workers\": " << options.workers;
         out << ", \"buffer_capacity\": " << options.queue_capacity;
+        out << ", \"batch_delay_us\": " << options.batch_delay_us;
         out << ", \"gpus\": [";
         for (size_t i = 0; i < options.devices.size(); ++i) {
             out << (i ? ", " : "") << options.devices[i];
@@ -203,8 +213,8 @@ int main(int argc, char** argv) {
             },
             static_cast<size_t>(options.reassembly_capacity), options.reassembly_timeout_ms);
 
-        FairQueue<FrameWork> queue(static_cast<size_t>(options.queue_capacity),
-                                   Overflow::Reject);
+        FairPriorityQueue<FrameWork> queue("pipeline", static_cast<size_t>(options.queue_capacity),
+                                           Overflow::Reject);
 
         // -- the sampler: the same log shape as the other two systems ---------------------
         OccupancySampler sampler(
@@ -244,6 +254,7 @@ int main(int argc, char** argv) {
         const std::vector<std::string> unconditional{"detect", "crop"};
 
         const int detector_batch = graph.detector().max_batch();
+        const BatchWindow window(static_cast<size_t>(detector_batch), options.batch_delay_us);
         for (int w = 0; w < options.workers; ++w) {
             // Pinned to one device for its whole life (ADR-002). The worker owns the copy of
             // every frame it takes onto *its* device, so the lease it then takes is on the
@@ -273,7 +284,7 @@ int main(int argc, char** argv) {
                         // A detector-sized batch, because the plan is static at that batch and
                         // `setInputShape` refuses anything else. Rows, not items: the queue
                         // counts rows and one frame is one detector row.
-                        auto batch = queue.drain(static_cast<size_t>(detector_batch), 50);
+                        auto batch = queue.get_batch(window);
                         if (batch.empty()) continue;
 
                         // Only the tags this iteration opened are sealed at the end. Sealing
@@ -396,7 +407,7 @@ int main(int argc, char** argv) {
                     work.frame = frame;
                     work.state =
                         std::make_shared<FrameState>(tag, frame.height, frame.width, 0.0f);
-                    return queue.put(std::move(work));
+                    return queue.put(std::move(work)) == PutStatus::Accepted;
                 }));
         }
 

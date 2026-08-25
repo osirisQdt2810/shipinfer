@@ -26,7 +26,6 @@
 #include "shipinfer/pipeline/graph/state.h"
 #include "shipinfer/pipeline/reassembly/collector.h"
 #include "shipinfer/runtime/ops.h"
-#include "shipinfer/scheduling/queues/fair.h"
 
 using namespace shipinfer;
 
@@ -65,102 +64,15 @@ namespace {
         }
     }
 
-    struct Item {
-        std::string cam;
-        int id = 0;
-        size_t row_count = 1;
-
-        size_t rows() const { return row_count; }
-        std::string camera() const { return cam; }
-    };
+    // The queue tests live in test_scheduling.cpp, next to the seam they mirror.
 
     // -- the fair queue ---------------------------------------------------------------------
 
-    void test_a_busy_camera_cannot_starve_a_quiet_one() {
-        // The failure this project exists to fix, in its smallest form: one camera sends twenty
-        // frames and another sends one, and the quiet camera's frame must not be at the back of
-        // twenty.
-        FairQueue<Item> queue(64, Overflow::Reject);
-        for (int i = 0; i < 20; ++i) queue.put(Item{"busy", i});
-        queue.put(Item{"quiet", 0});
 
-        const auto batch = queue.drain(4, 0);
-        bool saw_quiet = false;
-        for (const auto& item : batch) saw_quiet |= item.cam == "quiet";
-        check(saw_quiet, "the quiet camera appears in the first drain of four");
-    }
 
-    void test_the_drain_counts_rows_not_items() {
-        // A per-object request carries one row per crop. Counting items against a row budget
-        // overfills the batch: sixteen requests of a frame's crops each assembled 24 rows
-        // against max_batch_size 16, the assembler refused it, and every request in it failed.
-        FairQueue<Item> queue(64, Overflow::Reject);
-        queue.put(Item{"a", 0, 6});
-        queue.put(Item{"b", 1, 6});
-        queue.put(Item{"c", 2, 6});
 
-        const auto batch = queue.drain(8, 0);
-        size_t rows = 0;
-        for (const auto& item : batch) rows += item.rows();
-        check(rows <= 8, "the drain respects the row budget");
-        check(batch.size() == 1, "two six-row items do not fit an eight-row budget");
-    }
 
-    void test_an_oversized_item_is_returned_alone_not_refused() {
-        // Refusing it would park it at the head of its lane forever and stall the model.
-        // Letting it through gives the assembler a chance to name the real problem.
-        FairQueue<Item> queue(64, Overflow::Reject);
-        queue.put(Item{"a", 0, 99});
 
-        const auto batch = queue.drain(8, 0);
-        check(batch.size() == 1, "an item larger than the budget is still dequeued");
-    }
-
-    void test_a_full_queue_refuses_rather_than_dropping_silently() {
-        FairQueue<Item> queue(2, Overflow::Reject);
-        check(queue.put(Item{"a", 0}), "first accepted");
-        check(queue.put(Item{"a", 1}), "second accepted");
-        check(!queue.put(Item{"a", 2}), "third refused");
-        check(queue.stats().rejected == 1, "the refusal is counted");
-        check(queue.stats().rejected_by_camera["a"] == 1, "and attributed to the camera");
-    }
-
-    void test_eviction_charges_the_greediest_camera() {
-        // ADR-005: the victim of an eviction should be the cause of the pressure. The previous
-        // generation evicted the *oldest* entry, so a crowded camera pushed out a quiet one's
-        // work.
-        FairQueue<Item> queue(4, Overflow::EvictGreediest);
-        queue.put(Item{"quiet", 0});
-        for (int i = 0; i < 3; ++i) queue.put(Item{"busy", i});
-        queue.put(Item{"busy", 99});  // full: something must go
-
-        const auto stats = queue.stats();
-        check(stats.evicted == 1, "exactly one eviction");
-        check(stats.evicted_by_camera.count("busy") == 1, "the greedy camera lost the frame");
-        check(stats.evicted_by_camera.count("quiet") == 0, "the quiet camera did not");
-    }
-
-    void test_a_blocked_producer_wakes_when_a_slot_frees() {
-        // Not "eventually succeeds" — *when*. The Python version regressed here and its test
-        // could not tell, because it only asserted the outcome: the producer slept the whole
-        // 500 ms timeout instead of waking at 50, and a drop was then charged to a camera that
-        // had done nothing wrong.
-        FairQueue<Item> queue(1, Overflow::Block, 2000);
-        queue.put(Item{"a", 0});
-
-        std::thread drainer([&queue] {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            queue.drain(1, 0);
-        });
-        const auto start = std::chrono::steady_clock::now();
-        check(queue.put(Item{"a", 1}), "the blocked put eventually succeeds");
-        const double waited_ms =
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
-                .count();
-        drainer.join();
-        check(waited_ms < 500, "it woke on the drain, not on the timeout (waited " +
-                                   std::to_string(static_cast<int>(waited_ms)) + " ms)");
-    }
 
     // -- the collector ----------------------------------------------------------------------
 
@@ -667,12 +579,6 @@ namespace {
 }  // namespace
 
 int main() {
-    test_a_busy_camera_cannot_starve_a_quiet_one();
-    test_the_drain_counts_rows_not_items();
-    test_an_oversized_item_is_returned_alone_not_refused();
-    test_a_full_queue_refuses_rather_than_dropping_silently();
-    test_eviction_charges_the_greediest_camera();
-    test_a_blocked_producer_wakes_when_a_slot_frees();
 
     test_a_plan_whose_shape_disagrees_with_the_config_is_refused_at_construction();
     test_a_plan_with_non_float32_io_is_refused();
