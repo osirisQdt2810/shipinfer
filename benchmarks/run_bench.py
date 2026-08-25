@@ -606,6 +606,17 @@ def main(argv: list[str] | None = None) -> int:
     if unknown:
         print(f"unknown system(s): {sorted(unknown)}", file=sys.stderr)
         return 2
+    if args.source == "rtsp" and "baseline" in systems:
+        # `rtsp.serving` wraps the ShipInfer run only; the baseline reads JPEGs off disk. A
+        # head-to-head under rtsp would charge one system for NVDEC, the jitter buffer and the
+        # NV12 conversion and not the other, and the table would render it as a comparison.
+        print(
+            "--source rtsp applies to shipinfer only: the baseline has no RTSP path, so a "
+            "head-to-head under rtsp would compare two different experiments. Run "
+            "`--systems shipinfer` with --source rtsp, or drop --source for the comparison.",
+            file=sys.stderr,
+        )
+        return 2
 
     label = args.label or time.strftime("%Y%m%d-%H%M%S")
     # The default lives on BenchConfig, so a run directory is derived from it rather than

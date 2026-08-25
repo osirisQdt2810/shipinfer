@@ -9,6 +9,7 @@ with no GPU and no engines, exactly as `test_comparison_metric.py` pins the syst
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from benchmarks import kernels, stages
@@ -85,33 +86,56 @@ class TestTheKernelTierFlagsNumbersItDoesNotTrust:
         assert "not a system speed-up" in text
 
 
-class _FakeHistogram:
-    """The two methods the profile reads, and nothing else."""
+def _cells(per_stage: dict[str, list[float]]) -> dict:
+    """Real histograms, observed and read back the way the harness reads them.
 
-    def __init__(self, per_stage: dict[str, tuple[int, float, float]]) -> None:
-        self._per_stage = per_stage
+    The first version of these tests used a fake whose `quantile` returned the exact value it
+    was handed — which removed the bucket quantisation that *was* the defect (CONVENTIONS 2.9:
+    a fake must not be wider than the contract). A real `Histogram` keeps the quantisation.
+    """
+    from benchmarks.harness.histograms import read_cell
+    from shipinfer.core.metrics.histogram import Histogram
 
-    def snapshot(self, **labels: str) -> tuple[int, float]:
-        calls, p50, _ = self._per_stage.get(labels["stage"], (0, 0.0, 0.0))
-        return calls, calls * p50
-
-    def quantile(self, q: float, **labels: str) -> float:
-        _calls, p50, p95 = self._per_stage.get(labels["stage"], (0, 0.0, 0.0))
-        return p95 if q >= 0.9 else p50
-
-
-class _FakeMetrics:
-    def __init__(self, per_stage: dict[str, tuple[int, float, float]]) -> None:
-        self.stage_latency_us = _FakeHistogram(per_stage)
+    histogram = Histogram("shipinfer_pipeline_stage_latency_us", "test")
+    for stage, values in per_stage.items():
+        for value in values:
+            histogram.observe(value, stage=stage)
+    return {stage: read_cell(histogram, stage=stage) for stage in per_stage}
 
 
-class _FakeResult:
-    def __init__(self, frames: int, read: int, steady_s: float) -> None:
-        self.frames_accepted = frames
+class _Result:
+    """The fields `profile_from` reads.
+
+    The whole-run counters are deliberately *not* the steady ones — twice the frames, three
+    times the duration — so a profile that reads the wrong window produces a wrong number
+    rather than the right one by coincidence.
+    """
+
+    def __init__(
+        self,
+        *,
+        frames: int,
+        read: int,
+        steady_s: float,
+        cells: dict | None = None,
+        whole_run: bool = False,
+    ) -> None:
+        self.steady_frames_accepted = frames
         self.steady_frames_read = read
         self.steady_s = steady_s
-        self.elapsed_s = steady_s
-        self.frames_read = read
+        self.steady_stage_latency = dict(cells or {})
+        self.steady_is_whole_run = whole_run
+        self.frames_accepted = frames * 2
+        self.frames_read = read * 2
+        self.elapsed_s = steady_s * 3
+
+
+def _profile(per_stage, *, frames=100, read=100, steady=1.0, stages_run=None, whole_run=False):
+    config = BenchConfig(cameras=10, fps=10.0)
+    result = _Result(
+        frames=frames, read=read, steady_s=steady, cells=_cells(per_stage), whole_run=whole_run
+    )
+    return stages.profile_from(result, None, config, stages_run or tuple(per_stage))
 
 
 class TestTheAlgoTierChargesEachStageWhatItActuallyCosts:
@@ -119,56 +143,117 @@ class TestTheAlgoTierChargesEachStageWhatItActuallyCosts:
     frame in three costs 2.7 ms per frame, and assuming one call per frame would overstate
     the cheap stages and understate the expensive ones by the same factor."""
 
-    def _profile(self, per_stage, *, frames=100, read=100, steady=1.0, stages_run=None):
-        config = BenchConfig(cameras=10, fps=10.0)
-        return stages.profile_from(
-            _FakeResult(frames, read, steady),
-            _FakeMetrics(per_stage),
-            config,
-            stages_run or tuple(per_stage),
-        )
-
     def test_a_conditional_branch_is_charged_pro_rata(self) -> None:
-        # `ship_segmenter` ran on a third of the frames: 8 ms a call is 2.67 ms a frame.
-        profile = self._profile({"ship_segmenter": (33, 8000.0, 9000.0)}, frames=100)
+        profile = _profile(
+            {"detect": [1000.0] * 100, "ship_segmenter": [2000.0] * 50}, frames=100
+        )
+        by_name = {c.stage: c for c in profile.stages}
 
-        (cost,) = profile.stages
-        assert cost.calls_per_frame == pytest.approx(0.33)
-        assert cost.per_frame_us == pytest.approx(2640.0)
+        assert by_name["ship_segmenter"].calls_per_frame == pytest.approx(0.5)
+        assert by_name["ship_segmenter"].per_frame_us == pytest.approx(1000.0)
 
     def test_a_stage_that_runs_more_than_once_a_frame_is_charged_more(self) -> None:
-        """The embedders run once per object batch, not once per frame."""
-        profile = self._profile({"person_embedder": (300, 1000.0, 1200.0)}, frames=100)
+        profile = _profile({"person_embedder": [1000.0] * 300}, frames=100)
 
         (cost,) = profile.stages
         assert cost.calls_per_frame == pytest.approx(3.0)
         assert cost.per_frame_us == pytest.approx(3000.0)
 
     def test_a_stage_that_never_ran_is_omitted_not_zeroed(self) -> None:
-        """A zero row reads as "free", which is a different claim from "did not run"."""
-        profile = self._profile({"detect": (100, 500.0, 700.0), "absent": (0, 0.0, 0.0)})
+        profile = _profile({"detect": [1000.0] * 100}, stages_run=("detect", "crop"))
 
         assert [c.stage for c in profile.stages] == ["detect"]
 
     def test_the_table_is_ordered_by_per_frame_cost(self) -> None:
-        """The reader wants the expensive stage first; per *call* would put a rare, slow
-        stage above a cheap one that runs fifteen times."""
-        profile = self._profile(
-            {
-                "rare_but_slow": (10, 9000.0, 9000.0),  # 0.1/frame -> 900us
-                "cheap_but_often": (1500, 200.0, 300.0),  # 15/frame -> 3000us
-            },
-            frames=100,
+        profile = _profile(
+            {"rare_but_slow": [5000.0] * 10, "cheap_but_often": [100.0] * 1000}, frames=100
         )
 
         assert [c.stage for c in profile.stages] == ["cheap_but_often", "rare_but_slow"]
 
-    def test_the_shares_sum_to_one(self) -> None:
-        profile = self._profile(
-            {"a": (100, 1000.0, 1000.0), "b": (100, 3000.0, 3000.0)}, frames=100
-        )
+    def test_the_cost_is_the_exact_mean_not_the_bucket_edge(self) -> None:
+        """Two stages in one histogram bucket share a p50 and differ by 2.3x in cost. The
+        first version charged both the bucket's upper edge and rendered the difference as a
+        tie; the cost is `sum / count`, which the histogram carries exactly."""
+        profile = _profile({"a": [1050.0] * 100, "b": [2400.0] * 100}, frames=100)
+        by_name = {c.stage: c for c in profile.stages}
 
-        assert sum(profile.share(c) for c in profile.stages) == pytest.approx(1.0)
+        assert by_name["a"].p50_us == by_name["b"].p50_us  # the bucket's resolution
+        assert by_name["a"].per_frame_us == pytest.approx(1050.0)
+        assert by_name["b"].per_frame_us == pytest.approx(2400.0)
+        assert by_name["a"].mean_us == pytest.approx(1050.0)
+
+    def test_shares_follow_the_exact_totals(self) -> None:
+        """1000 us and 3000 us per frame are a quarter and three quarters. Charged by bucket
+        edge they would be 1000 and 5000 — a sixth and five sixths — so this fails on p50."""
+        profile = _profile({"a": [1000.0] * 100, "b": [3000.0] * 100}, frames=100)
+        by_name = {c.stage: c for c in profile.stages}
+
+        assert profile.share(by_name["a"]) == pytest.approx(0.25)
+        assert profile.share(by_name["b"]) == pytest.approx(0.75)
+
+
+class TestTheProfileReadsOneWindow:
+    """A steady-window duration over a whole-run frame count is two windows in one number —
+    the mistake `ShipInferResult.steady_*` exists to prevent, reintroduced by the first version
+    of this tier. Every number here comes from the steady window, and the report says so."""
+
+    def test_per_frame_cost_uses_the_steady_frame_count(self) -> None:
+        profile = _profile({"detect": [1000.0] * 100}, frames=100)
+
+        (cost,) = profile.stages
+        assert profile.frames == 100  # not the whole-run 200
+        assert cost.per_frame_us == pytest.approx(1000.0)  # not 500
+
+    def test_wall_per_frame_uses_the_steady_window(self) -> None:
+        profile = _profile({}, frames=100, read=100, steady=1.0)
+
+        assert profile.wall_per_frame_us == pytest.approx(
+            10_000.0
+        )  # 1.0 s / 100, not 3.0 s / 200
+
+    def test_the_window_is_named_in_the_report(self) -> None:
+        profile = _profile({"detect": [1000.0] * 100})
+
+        assert profile.window == stages.STEADY_WINDOW
+        assert stages.STEADY_WINDOW in stages.render(profile)
+
+    def test_a_run_shorter_than_its_warmup_says_so(self) -> None:
+        profile = _profile({"detect": [1000.0] * 100}, whole_run=True)
+
+        assert "whole run" in profile.window
+        assert "whole run" in stages.render(profile)
+
+    def test_the_steady_cells_are_the_difference_of_two_snapshots(self) -> None:
+        """What the harness does at the warm-up boundary and the end, in miniature."""
+        from benchmarks.harness.histograms import read_cell
+        from shipinfer.core.metrics.histogram import Histogram
+
+        histogram = Histogram("h", "test")
+        for value in (100.0, 100.0, 100.0):  # warm-up: cheap
+            histogram.observe(value, stage="detect")
+        at_warmup = read_cell(histogram, stage="detect")
+        for value in (2000.0, 2000.0):  # steady: what the profile must see
+            histogram.observe(value, stage="detect")
+        steady = read_cell(histogram, stage="detect").minus(at_warmup)
+
+        assert steady.count == 2
+        assert steady.mean == pytest.approx(2000.0)
+        assert steady.quantile(0.5) >= 2000.0  # the bucket that holds 2000, not the 100s
+        assert read_cell(histogram, stage="detect").mean == pytest.approx(860.0)  # whole run
+
+    def test_a_snapshot_cannot_be_subtracted_from_an_earlier_one(self) -> None:
+        from benchmarks.harness.histograms import read_cell
+        from shipinfer.core.metrics.histogram import Histogram
+
+        histogram = Histogram("h", "test")
+        histogram.observe(100.0, stage="detect")
+        earlier = read_cell(histogram, stage="detect")
+        histogram.observe(100.0, stage="detect")
+        later = read_cell(histogram, stage="detect")
+
+        with pytest.raises(ValueError, match="only grows"):
+            earlier.minus(later)
 
 
 class TestTheAlgoTierRefusesToProfileASaturatedRun:
@@ -176,80 +261,60 @@ class TestTheAlgoTierRefusesToProfileASaturatedRun:
     a queueing artefact reads as an expensive stage. A profile wants service time."""
 
     def test_a_run_that_kept_up_is_not_warned_about(self) -> None:
-        config = BenchConfig(cameras=10, fps=10.0)  # 100 img/s offered
+        config = BenchConfig(cameras=10, fps=10.0)
         profile = stages.profile_from(
-            _FakeResult(1000, 1000, 10.0),
-            _FakeMetrics({"detect": (1000, 500.0, 600.0)}),
-            config,
-            ("detect",),
+            _Result(frames=1000, read=1000, steady_s=10.0), None, config, ()
         )
 
-        assert profile.achieved == pytest.approx(100.0)
         assert profile.kept_up
         assert "WARNING" not in stages.render(profile)
 
     def test_a_run_that_fell_behind_is_warned_about_loudly(self) -> None:
-        config = BenchConfig(cameras=10, fps=10.0)  # 100 offered, 60 delivered
+        config = BenchConfig(cameras=10, fps=10.0)
         profile = stages.profile_from(
-            _FakeResult(600, 600, 10.0),
-            _FakeMetrics({"detect": (600, 500.0, 600.0)}),
-            config,
-            ("detect",),
+            _Result(frames=600, read=600, steady_s=10.0), None, config, ()
         )
 
         assert not profile.kept_up
-        text = stages.render(profile)
-        assert "WARNING" in text
-        assert "queueing" in text
+        assert "WARNING" in stages.render(profile)
+        assert "queueing" in stages.render(profile)
 
     def test_the_bar_is_the_same_98_percent_the_system_tier_uses(self) -> None:
-        """One threshold, so a run the system tier accepts is one this tier profiles."""
-        config = BenchConfig(cameras=10, fps=10.0)
-        just_under = stages.profile_from(
-            _FakeResult(979, 979, 10.0), _FakeMetrics({}), config, ()
+        config = BenchConfig(cameras=10, fps=10.0)  # offers 100 img/s
+        below = stages.profile_from(
+            _Result(frames=979, read=979, steady_s=10.0), None, config, ()
         )
-        just_over = stages.profile_from(
-            _FakeResult(981, 981, 10.0), _FakeMetrics({}), config, ()
+        above = stages.profile_from(
+            _Result(frames=981, read=981, steady_s=10.0), None, config, ()
         )
 
-        assert not just_under.kept_up
-        assert just_over.kept_up
+        assert not below.kept_up
+        assert above.kept_up
 
 
 class TestSerialAgainstWallIsWhatConcurrencyBought:
     def test_the_serial_total_is_the_sum_of_the_per_frame_costs(self) -> None:
-        config = BenchConfig(cameras=10, fps=10.0)
-        profile = stages.profile_from(
-            _FakeResult(100, 100, 1.0),
-            _FakeMetrics({"a": (100, 1000.0, 0.0), "b": (100, 2000.0, 0.0)}),
-            config,
-            ("a", "b"),
-        )
+        profile = _profile({"a": [1000.0] * 100, "b": [3000.0] * 100}, frames=100)
 
-        assert profile.serial_per_frame_us == pytest.approx(3000.0)
+        assert profile.serial_per_frame_us == pytest.approx(4000.0)
 
     def test_the_wall_per_frame_is_the_run_divided_by_the_frames(self) -> None:
-        config = BenchConfig(cameras=10, fps=10.0)
-        profile = stages.profile_from(_FakeResult(100, 100, 1.0), _FakeMetrics({}), config, ())
+        profile = _profile({}, frames=100, read=100, steady=1.0)
 
         assert profile.wall_per_frame_us == pytest.approx(10_000.0)
 
     def test_a_run_with_no_frames_divides_by_nothing(self) -> None:
-        config = BenchConfig(cameras=10, fps=10.0)
-        profile = stages.profile_from(_FakeResult(0, 0, 1.0), _FakeMetrics({}), config, ())
+        profile = _profile({}, frames=0, read=0, steady=1.0)
 
         assert profile.wall_per_frame_us == 0.0
         assert profile.serial_per_frame_us == 0.0
 
     def test_the_report_explains_what_the_gap_means(self) -> None:
-        """If serial and wall are close, adding workers will not help — that is the sentence
-        this tier exists to let someone say."""
-        config = BenchConfig(cameras=10, fps=10.0)
-        text = stages.render(
-            stages.profile_from(_FakeResult(100, 100, 1.0), _FakeMetrics({}), config, ())
-        )
+        text = stages.render(_profile({}, frames=100, read=100, steady=1.0))
 
-        assert "no concurrency at all" in text
+        assert "serial per frame" in text
+        assert "wall per frame" in text
+        assert "cheaper stage" in text
 
 
 class TestTheRunRecordsWhichSourceItMeasured:
@@ -285,7 +350,15 @@ class TestTheRunRecordsWhichSourceItMeasured:
         )
 
         assert len(cameras) == 4
-        assert all(c["uri"].startswith("rtsp://127.0.0.1:9001/") for c in cameras)
+        # Person content on the configured port, ship content on the next one — the same
+        # halves replay reads off disk (see `test_the_rtsp_split_matches_the_replay_split`).
+        assert [c["uri"].startswith("rtsp://127.0.0.1:9001/") for c in cameras] == [
+            True,
+            True,
+            False,
+            False,
+        ]
+        assert all(c["uri"].startswith("rtsp://127.0.0.1:9002/") for c in cameras[2:])
         # Left unset on purpose: the point of an RTSP run is to exercise the registry's own
         # decoder selection, the way production does, rather than to pin one.
         assert all("source" not in c for c in cameras)
@@ -307,6 +380,28 @@ class TestTheRunRecordsWhichSourceItMeasured:
         rtsp = harness._cameras(BenchConfig(cameras=6, fps=5.0, source="rtsp"))
 
         assert [c["camera_id"] for c in replay] == [c["camera_id"] for c in rtsp]
+
+    def test_the_rtsp_split_matches_the_replay_split(self) -> None:
+        """The content split decides the crop fan-out, and the crop fan-out is the downstream
+        load. One server fed with person frames starved the ship branch and the analysis
+        blamed the detector — so the ship half must reach the ship server, camera for camera."""
+        from benchmarks.harness import rtsp
+        from benchmarks.harness import shipinfer as harness
+
+        config = BenchConfig(cameras=6, fps=5.0, source="rtsp", rtsp_port=9001)
+        resolved = config.resolved()
+        replay = harness._cameras(BenchConfig(cameras=6, fps=5.0))
+        streamed = harness._cameras(config)
+
+        for index in range(6):
+            is_person = replay[index]["uri"] == str(resolved.person_frames)
+            expected_port = config.rtsp_port if is_person else rtsp.ship_port(config)
+            assert streamed[index]["uri"].startswith(f"rtsp://127.0.0.1:{expected_port}/"), (
+                index,
+                streamed[index]["uri"],
+            )
+        assert sum(r["uri"] == str(resolved.person_frames) for r in replay) == 3
+        assert sum(r["uri"] == str(resolved.ship_frames) for r in replay) == 3
 
 
 class TestTheRtspServerIsRefusedRatherThanToleratedWhenItFails:
@@ -432,13 +527,16 @@ class TestTheRtspServerIsRefusedRatherThanToleratedWhenItFails:
                 stopped.append("terminate")
                 self._terminated = True
 
+            _killed = False
+
             def wait(self, timeout: float | None = None) -> int:
-                if self._terminated and "kill" not in stopped:
+                if self._terminated and not self._killed:
                     raise rtsp.subprocess.TimeoutExpired("rtsp", timeout or 0)
                 return 0
 
             def kill(self) -> None:
                 stopped.append("kill")
+                self._killed = True
 
         monkeypatch.setattr(rtsp.subprocess, "Popen", lambda *_a, **_k: _Stubborn())
         monkeypatch.setattr(rtsp, "_accepting", lambda *_a, **_k: True)
@@ -446,4 +544,117 @@ class TestTheRtspServerIsRefusedRatherThanToleratedWhenItFails:
         with rtsp.serving(BenchConfig(cameras=4, fps=5.0, source="rtsp")):
             pass
 
-        assert stopped == ["terminate", "kill"]
+        # Two servers — person and ship content — each terminated, then killed.
+        assert stopped == ["terminate", "kill", "terminate", "kill"]
+
+    def test_each_content_half_is_served_from_its_own_directory(self, monkeypatch) -> None:
+        from benchmarks.harness import rtsp
+
+        started: list[list[str]] = []
+
+        class _Server:
+            returncode = None
+            stdout = None
+
+            def poll(self) -> None:
+                return None
+
+            def terminate(self) -> None: ...
+
+            def wait(self, timeout: float | None = None) -> int:
+                return 0
+
+            def kill(self) -> None: ...
+
+        def popen(argv, **_kwargs):
+            started.append([str(a) for a in argv])
+            return _Server()
+
+        monkeypatch.setattr(rtsp.subprocess, "Popen", popen)
+        monkeypatch.setattr(rtsp, "_accepting", lambda *_a, **_k: True)
+        config = BenchConfig(cameras=6, fps=5.0, source="rtsp", rtsp_port=9001)
+
+        with rtsp.serving(config):
+            pass
+
+        resolved = config.resolved()
+        by_port = {argv[argv.index("--port") + 1]: argv for argv in started}
+        assert set(by_port) == {"9001", "9002"}
+        person, ship = by_port["9001"], by_port["9002"]
+        assert person[person.index("--data") + 1] == str(resolved.person_frames)
+        assert ship[ship.index("--data") + 1] == str(resolved.ship_frames)
+        assert person[person.index("--streams") + 1] == "3"
+        assert ship[ship.index("--streams") + 1] == "3"
+
+    def test_a_failing_server_is_named(self, monkeypatch) -> None:
+        """Two servers means the message has to say which one died."""
+        import io
+
+        from benchmarks.harness import rtsp
+
+        class _Dead:
+            returncode = 1
+            stdout = io.StringIO("Address already in use")
+
+            def poll(self) -> int:
+                return 1
+
+            def terminate(self) -> None: ...
+
+            def wait(self, timeout: float | None = None) -> int:
+                return 1
+
+            def kill(self) -> None: ...
+
+        monkeypatch.setattr(rtsp.subprocess, "Popen", lambda *_a, **_k: _Dead())
+        monkeypatch.setattr(rtsp, "_accepting", lambda *_a, **_k: False)
+
+        with (
+            pytest.raises(RuntimeError, match=r"person RTSP server \(port 9001\)"),
+            rtsp.serving(BenchConfig(cameras=4, fps=5.0, source="rtsp", rtsp_port=9001)),
+        ):
+            pass
+
+
+class TestTheKernelTierMeasuresWhatProductionRuns:
+    def test_synchronisation_follows_on_device_not_the_description(self) -> None:
+        """`runtime/ops/base.py`: callers branch on `on_device`. Sniffing `describe()` for
+        "cuda" or "torch" worked for the two implementations that mention them and would have
+        left any other device implementation timing its launches."""
+
+        class _HostOpsThatTalksAboutCuda:
+            on_device = False
+
+            def describe(self) -> str:
+                return "torch kernels on cuda:0"  # prose, not a device
+
+        def call() -> int:
+            return 1
+
+        assert kernels._synchronised(_HostOpsThatTalksAboutCuda(), call) is call
+
+    def test_inputs_are_seeded_and_shared_across_implementations(self) -> None:
+        """NMS cost depends on the overlap structure of the boxes, so numpy and native timed on
+        different random box sets carry a data difference in the `vs numpy` ratio."""
+        first, second = kernels._inputs(7), kernels._inputs(7)
+
+        np.testing.assert_array_equal(first.nms_boxes, second.nms_boxes)
+        np.testing.assert_array_equal(first.nms_scores, second.nms_scores)
+        np.testing.assert_array_equal(first.frame, second.frame)
+        np.testing.assert_array_equal(first.boxes, second.boxes)
+        assert not np.array_equal(kernels._inputs(7).frame, kernels._inputs(8).frame)
+
+    def test_the_device_fair_column_can_be_selected_on_its_own(self) -> None:
+        assert kernels.parse_args(["--op", "letterbox_to_device"]).op == "letterbox_to_device"
+        assert kernels.parse_args([]).seed == 0
+
+
+class TestRtspAppliesToShipInferOnly:
+    def test_rtsp_with_the_baseline_is_refused(self, capsys) -> None:
+        """The baseline reads JPEGs off disk; a head-to-head under rtsp charges one system for
+        NVDEC, the jitter buffer and NV12 conversion and not the other, and the table would
+        still render it as a comparison."""
+        from benchmarks import run_bench
+
+        assert run_bench.main(["--source", "rtsp", "--systems", "baseline,shipinfer"]) == 2
+        assert "applies to shipinfer only" in capsys.readouterr().err

@@ -15,7 +15,12 @@ every measurement so far replayed JPEGs off disk. Both closed.
 It *reads* rather than instruments: `PipelineStage.run` already stamps `elapsed_us` on every
 outcome and `_CollectorObserver` already feeds it into `shipinfer_pipeline_stage_latency_us`,
 so a second timing path would be a second implementation that could disagree with the one
-operators watch. Reports per-call p50/p95, calls per frame, per-frame cost and share.
+operators watch. Reports each stage's exact per-call mean and per-frame cost over the **steady window** — the
+histogram's sum over its count, both read at the warm-up boundary and at the end and
+differenced, over the frames accepted in the same window — with p50/p95 as bucket-edge colour.
+The first version charged stages by p50, which is a bucket's upper edge: two stages in one
+bucket rendered a 2.3x cost difference as a tie, and a steady duration was divided by a
+whole-run frame count. Review caught both.
 
 `calls_per_frame` is the whole point: a stage costing 8 ms on one frame in three costs 2.7 ms
 per frame, and the embedders run once per *object batch*. Assuming one call per frame would

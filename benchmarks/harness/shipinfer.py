@@ -61,6 +61,7 @@ from typing import Any
 
 from benchmarks.harness.analysis import BUFFER_SUFFIX
 from benchmarks.harness.config import BenchConfig
+from benchmarks.harness.histograms import HistogramCell, read_cell
 from benchmarks.harness.sampler import OccupancySampler
 
 __all__ = [
@@ -127,6 +128,17 @@ class ShipInferResult:
     steady_frames_dropped: int = 0
     steady_requests_total: dict[str, float] = field(default_factory=dict)
     steady_events_emitted: int = 0
+    #: The algo tier's denominators, over the same window. `steady_frames_accepted` is what
+    #: the pipeline accepted between the warm-up boundary and the end; `steady_stage_latency`
+    #: is each stage's latency histogram over exactly that window — the histogram at the end
+    #: minus the histogram at the boundary, per bucket, so a steady-window mean and quantile
+    #: exist. A per-frame cost is a steady total over a steady frame count; dividing a steady
+    #: duration by a whole-run count is the two-window mistake the comment above describes.
+    steady_frames_accepted: int = 0
+    steady_stage_latency: dict[str, HistogramCell] = field(default_factory=dict)
+    #: True when the run ended before its own warm-up. The `steady_*` fields are then the
+    #: whole run, and anything built on them has to say so rather than call it steady.
+    steady_is_whole_run: bool = False
     #: model -> requests accepted, from ``ServerMetrics.requests_total``. The delta over the
     #: steady window is what the analysis uses as each downstream model's *offered* rate,
     #: since the crop count is data-dependent and cannot be derived from the config.
@@ -180,24 +192,39 @@ def _cameras(config: BenchConfig) -> list[dict[str, Any]]:
 
 
 def _rtsp_cameras(config: BenchConfig) -> list[dict[str, Any]]:
-    """Cameras pointed at the local RTSP server, in the same person/ship split.
+    """Cameras pointed at the local RTSP servers, in the same person/ship split as replay.
+
+    Two servers, because `scripts/rtsp_serve.py --data` serves one directory: the person
+    frames on ``config.rtsp_port`` and the ship frames on the next port
+    (:func:`benchmarks.harness.rtsp.ship_port`). The first version pointed every camera at one
+    server fed with person frames, so an RTSP run starved the ship branch of the graph and the
+    analysis named the detector as the binding module whatever the truth was — the content
+    split decides the crop fan-out, and the crop fan-out is the downstream load.
 
     The URIs are built by `scripts/rtsp_serve.stream_uri`, not by string-formatting them
     here: the server owns the path layout, and a benchmark that guessed it would fail as a
     connection refusal minutes into a run rather than as a mistake at start-up.
     """
+    from benchmarks.harness.rtsp import ship_port
     from scripts.rtsp_serve import stream_uri
 
-    return [
-        {
-            "camera_id": f"cam{index:02d}",
-            "uri": stream_uri(index, port=config.rtsp_port, host="127.0.0.1"),
-            # Left unset so the ingest registry resolves it the way production does — the
-            # point of an RTSP run is to exercise the real decoder selection, not to pin it.
-            "fps": config.fps,
-        }
-        for index in range(config.cameras)
-    ]
+    half = config.cameras // 2
+    cameras: list[dict[str, Any]] = []
+    for index in range(config.cameras):
+        if index < half:
+            uri = stream_uri(index, port=config.rtsp_port, host="127.0.0.1")
+        else:
+            uri = stream_uri(index - half, port=ship_port(config), host="127.0.0.1")
+        cameras.append(
+            {
+                "camera_id": f"cam{index:02d}",
+                "uri": uri,
+                # Left unset so the ingest registry resolves it the way production does — the
+                # point of an RTSP run is to exercise the real decoder selection, not to pin it.
+                "fps": config.fps,
+            }
+        )
+    return cameras
 
 
 def _settings(config: BenchConfig) -> Any:
@@ -340,7 +367,12 @@ def run_shipinfer(
                 "read": int(getattr(stats, "frames_read", 0)),
                 "dropped": int(getattr(stats, "frames_dropped", 0)),
                 "emitted": int(runner.sink.emitted),
+                "accepted": int(runner.frames_accepted),
                 "requests": {n: server.metrics.requests_total.value(model=n) for n in handles},
+                # Per-bucket, so the boundary snapshot can be subtracted from the end one.
+                "stages": {
+                    s: read_cell(runner.metrics.stage_latency_us, stage=s) for s in stages
+                },
             }
 
         sampler = OccupancySampler(log, probe, interval_s=config.sample_interval_s, meta=meta)
@@ -360,10 +392,18 @@ def run_shipinfer(
                 time.sleep(0.2)
         elapsed = time.monotonic() - window_started
         at_end = counters()
+        whole_run = at_warmup is None
         if at_warmup is None:
             # A run shorter than its own warmup. Nothing to subtract, and saying so is
             # better than silently rating the whole window and calling it steady.
-            at_warmup = {"read": 0, "dropped": 0, "emitted": 0, "requests": {}}
+            at_warmup = {
+                "read": 0,
+                "dropped": 0,
+                "emitted": 0,
+                "accepted": 0,
+                "requests": {},
+                "stages": {},
+            }
             warmup_taken = window_started
         steady_s = max(0.0, time.monotonic() - warmup_taken)
 
@@ -395,6 +435,12 @@ def run_shipinfer(
                 for n in at_end["requests"]
             },
             steady_events_emitted=at_end["emitted"] - at_warmup["emitted"],
+            steady_frames_accepted=at_end["accepted"] - at_warmup["accepted"],
+            steady_stage_latency={
+                s: cell.minus(at_warmup["stages"].get(s))
+                for s, cell in at_end["stages"].items()
+            },
+            steady_is_whole_run=whole_run,
             frames_accepted=runner.frames_accepted,
             events_emitted=runner.sink.emitted,
             requests_total=requests,

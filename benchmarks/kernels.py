@@ -141,7 +141,11 @@ def _synchronised(ops: Any, call: Callable[[], Any]) -> Callable[[], Any]:
     entirely fictional speed-up. This is the single easiest way to publish a fake number in
     a kernel benchmark, so it is handled once, here.
     """
-    if "cuda" not in ops.describe().lower() and "torch" not in ops.describe().lower():
+    # `on_device` is the ABC's own answer (`runtime/ops/base.py`: "callers should branch on
+    # `on_device` rather than catching"). The first version sniffed `describe()` for the words
+    # "cuda" or "torch", which worked for the two device implementations that happened to
+    # mention them and would have left any other one unsynchronised — timing its launches.
+    if not getattr(ops, "on_device", False):
         return call
     try:
         import torch
@@ -236,32 +240,54 @@ def _to_device_case(ops: Any, frame: np.ndarray, params: Any) -> Callable[[], An
     return lambda: ops.letterbox_to_device([frame], out, params)
 
 
-def _cases(ops: Any) -> dict[str, Callable[[], Any]]:
-    """One closure per op, at the shapes above, with the inputs allocated *outside* the
-    timed region — allocation is not what is being measured."""
-    from shipinfer.runtime.ops.base import NormalizeParams
+@dataclass(frozen=True)
+class Inputs:
+    """One op's inputs, built once per op and shared by every implementation timed on it.
 
-    params = NormalizeParams()
-    frame = np.random.randint(0, 255, (*FRAME_HW, 3), dtype=np.uint8)
+    Seeded, and built **outside** the per-implementation loop: NMS cost depends on the overlap
+    structure of the boxes, so timing numpy and native on different random box sets put a data
+    difference on top of the implementation difference in the `vs numpy` ratio.
+    """
+
+    frame: np.ndarray
+    boxes: np.ndarray
+    nms_boxes: np.ndarray
+    nms_scores: np.ndarray
+
+
+def _inputs(seed: int) -> Inputs:
+    rng = np.random.default_rng(seed)
+    frame = rng.integers(0, 255, (*FRAME_HW, 3), dtype=np.uint8)
     boxes = np.stack(
         [
-            np.random.uniform(0, FRAME_HW[1] - 64, OBJECTS),
-            np.random.uniform(0, FRAME_HW[0] - 64, OBJECTS),
-            np.random.uniform(64, FRAME_HW[1], OBJECTS),
-            np.random.uniform(64, FRAME_HW[0], OBJECTS),
+            rng.uniform(0, FRAME_HW[1] - 64, OBJECTS),
+            rng.uniform(0, FRAME_HW[0] - 64, OBJECTS),
+            rng.uniform(64, FRAME_HW[1], OBJECTS),
+            rng.uniform(64, FRAME_HW[0], OBJECTS),
         ],
         axis=1,
     ).astype(np.float32)
     nms_boxes = np.stack(
         [
-            np.random.uniform(0, 1000, NMS_CANDIDATES),
-            np.random.uniform(0, 1000, NMS_CANDIDATES),
-            np.random.uniform(1000, 2000, NMS_CANDIDATES),
-            np.random.uniform(1000, 2000, NMS_CANDIDATES),
+            rng.uniform(0, 1000, NMS_CANDIDATES),
+            rng.uniform(0, 1000, NMS_CANDIDATES),
+            rng.uniform(1000, 2000, NMS_CANDIDATES),
+            rng.uniform(1000, 2000, NMS_CANDIDATES),
         ],
         axis=1,
     ).astype(np.float32)
-    nms_scores = np.random.uniform(0, 1, NMS_CANDIDATES).astype(np.float32)
+    nms_scores = rng.uniform(0, 1, NMS_CANDIDATES).astype(np.float32)
+    return Inputs(frame=frame, boxes=boxes, nms_boxes=nms_boxes, nms_scores=nms_scores)
+
+
+def _cases(ops: Any, inputs: Inputs) -> dict[str, Callable[[], Any]]:
+    """One closure per op over ``inputs``, allocated *outside* the timed region — allocation
+    is not what is being measured."""
+    from shipinfer.runtime.ops.base import NormalizeParams
+
+    params = NormalizeParams()
+    frame, boxes = inputs.frame, inputs.boxes
+    nms_boxes, nms_scores = inputs.nms_boxes, inputs.nms_scores
 
     return {
         "letterbox": lambda: ops.letterbox_batch([frame], DETECT_HW, params),
@@ -285,12 +311,14 @@ def measure(
     iterations: int,
     repeat: int,
     warmup: int,
+    seed: int = 0,
 ) -> OpResult:
     result = OpResult(op=op)
     available, unavailable = _implementations(only, device)
     result.skipped.update(unavailable)
+    inputs = _inputs(seed)  # once per op: every implementation is timed on the same data
     for name, ops in available:
-        cases = _cases(ops)
+        cases = _cases(ops, inputs)
         if op not in cases:
             continue
         call = _synchronised(ops, cases[op])
@@ -376,7 +404,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
-        "--op", default="all", choices=("all", "letterbox", "crop_batch", "nms")
+        "--op",
+        default="all",
+        choices=("all", "letterbox", "letterbox_to_device", "crop_batch", "nms"),
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="seed for the inputs; the same seed times every implementation on the same data",
     )
     parser.add_argument("--implementation", default=None, help="only this one, e.g. native")
     parser.add_argument(
@@ -418,6 +454,7 @@ def main(argv: list[str] | None = None) -> int:
             iterations=args.iterations,
             repeat=args.repeat,
             warmup=args.warmup,
+            seed=args.seed,
         )
         for op in ops
     ]
