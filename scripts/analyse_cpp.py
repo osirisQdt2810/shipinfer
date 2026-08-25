@@ -26,7 +26,9 @@ def capacities(meta: dict, samples) -> dict[str, int]:
     workers = int(meta["config"]["workers"])
     out = {}
     for module in samples.modules:
-        out[module] = int(meta["config"]["buffer_capacity"]) if module == "pipeline" else workers
+        out[module] = (
+            int(meta["config"]["buffer_capacity"]) if module == "pipeline" else workers
+        )
     return out
 
 
