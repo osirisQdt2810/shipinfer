@@ -62,7 +62,7 @@ hook down, for when the operator asked to see something before it is executed.
 
 - [x] **A2 · `X.cpp` pairs with `X.h`** (V44) — ten headers renamed.
 - [x] **A4a · `core/platform.h`** — `GPU_CHECK` plus `gpu*` aliases, matching shipvision's
-      existing `core/platform.hpp`. I had invented a second convention; two spellings of one
+      existing `core/platform.h`. I had invented a second convention; two spellings of one
       thing is worse than either.
 - [x] **A3 · Indent inside `namespace X {`** (V45) — `.clang-format` with
       `NamespaceIndentation: All` plus a pre-commit hook, so it is enforced not remembered.
@@ -73,7 +73,7 @@ hook down, for when the operator asked to see something before it is executed.
 ## Phase 2 · The two open PRs
 
 - [ ] **B1 · PR #6** — round-2 blocking answered and pushed; awaiting re-review, then merge.
-- [~] **B2 · PR #8, four blocking**, all real:
+- [x] **B2 · PR #8, four blocking** — all four fixed and pushed (df41e29); finding 1 moved 390.5 -> 400 img/s (2.5%), finding 2 took Complete events from a minority to 28656/28808:
       1. per-frame `gpuMalloc`/`gpuFree` on the dispatch path, with the reusable buffer I
          declared voided by `(void)`. `gpuFree` is device-blocking, so this reintroduces on
          every frame the stall I claimed to have removed.
@@ -83,17 +83,17 @@ hook down, for when the operator asked to see something before it is executed.
          counts it as reported — the inversion ADR-005 exists to prevent.
       4. no ADR and no FEATURE_LOG entry for a second data plane; three real contradictions
          with ADR-007, ADR-003, ADR-005.
-- [ ] **B3 · PR #8, five should-fix** — `complete()` compares sizes not inclusion;
+- [~] **B3 · PR #8, five should-fix** — `complete()`, the batch assert and the counters done; a csrc CI job and moving `sharding.py` remain; — `complete()` compares sizes not inclusion;
       `sharding.py` belongs with its launcher; publish the full counters beside 390.5; a CI job
       that compiles `csrc/`; the nits.
 
 ## Phase 3 · Plane 3 — tracking (first, per V49)
 
-- [ ] **C2a · Repackage `shipvision/tracking/`** (V50) in the shape of roboflow/trackers
+- [x] **C2a · Repackage `shipvision/tracking/`** — done, per-algorithm packages under `core/` plus a TRACKERS registry; adversarial verification found the builder had broken 5 leaf import paths and an efficiency short-circuit, both restored. (V50) in the shape of roboflow/trackers
       `src/trackers/core`: a **package per algorithm**, so an algorithm carries its own
       supporting classes. Today `trackers/{sort,bytetrack,botsort,ocsort,deepsortv2}.py` are
       flat files beside `association/`, `motion/`, `pool.py`.
-- [ ] **C2b · Repackage `shipvision/mtmc/`** the same way.
+- [x] **C2b · Repackage `shipvision/mtmc/`** — done; verification found `matrix/` had become a module (4 leaf paths gone) and `clustering.base.CLUSTERERS` dropped. Both restored as shims.
 - [ ] **C2c · C++ implementations of every MOT/MTMC algorithm** in `shipvision/csrc`, reachable
       through the ops binding (V50). A Python version existing is fine; both must exist.
 - [ ] **C2d · Wire Plane 3 into `shipinfer`** — the DAG ends at the embedders and tracklets go
@@ -114,9 +114,8 @@ hook down, for when the operator asked to see something before it is executed.
 - [ ] **C6 · PR #3 findings 2, 6, 7, 8** — Kafka `produce()` counted as success;
       `actor.stop(0.0)` abandoning every camera thread; the `pending_frames` gauge going stale
       per camera; an uninterruptible reconnect `time.sleep`.
-- [ ] **C7 · `wheels.sh` does not stage the TensorRT wheel** — a fresh cache breaks every bench.
-- [ ] **C8 · `conftest.py` calls `device_count()` during collection**, so an unhealthy driver
-      reddens the *offline* tier, which ADR-001 says must need no driver.
+- [x] **C7 · `wheels.sh` stages the TensorRT wheel** — copied from the host install, matched to the container ABI; absence warns rather than fails, since the offline tier needs none.
+- [x] **C8 · `conftest.py` only asks the driver when a device tier was selected**, and treats a driver that raises as a machine with none. 791 offline tests green.
 - [ ] **C9 · `shipvision` NV12 work** — 1021 lines uncommitted, 26 tests passing, 14 skipped for
       want of a native build. Its own PR in that repo (ADR-010).
 - [x] **C10 · tmux — decided: not retrofitting.** The property tmux was asked for is that a

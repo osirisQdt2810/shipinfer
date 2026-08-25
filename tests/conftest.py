@@ -74,7 +74,20 @@ def pytest_collection_modifyitems(config, items) -> None:
             # not our stack.
             pytest.exit(str(exc), returncode=pytest.ExitCode.USAGE_ERROR)
 
-    count = device_count()
+    # Only ask the driver when something actually needs it, and survive it refusing to answer.
+    #
+    # `device_count()` imports torch and touches CUDA. On a box whose driver is unwell that
+    # raises — `DeferredCudaCallError` from torch.cuda's deferred `_check_capability`, in my
+    # case — during *collection*, which errors every test in the run including the ones that
+    # need no device at all. That happened: 28 failures across `tests/server/`, none of them
+    # touching a GPU, on a plain `pytest`.
+    #
+    # ADR-001 says the offline tier must pass on a machine with no driver. A machine with a
+    # *broken* driver is the same promise, and this hook was breaking it.
+    if not selected:
+        return
+
+    count = _device_count_or_zero(device_count)
     if count >= 2:
         return
     no_gpu = pytest.mark.skip(reason="needs a CUDA device")
@@ -84,6 +97,31 @@ def pytest_collection_modifyitems(config, items) -> None:
             item.add_marker(no_multi)
         elif "gpu" in item.keywords and count < 1:
             item.add_marker(no_gpu)
+
+
+def _device_count_or_zero(probe) -> int:
+    """How many devices there are, or zero if asking was itself a failure.
+
+    A driver that raises rather than reporting zero is, from here, indistinguishable from a
+    machine with no driver — and the right response to both is to skip the device tier, not to
+    abort collection for the whole suite.
+
+    The `except Exception` is deliberate and the narrow alternative was tried: the failure that
+    actually bit was `torch.cuda.DeferredCudaCallError`, which is not exported anywhere
+    importable without touching `torch.cuda` — the very thing that is failing. Catching by type
+    would mean importing the module whose import is the problem.
+    """
+    try:
+        return probe()
+    except Exception as exc:  # noqa: BLE001 - see the docstring; the type is not knowable here
+        import warnings
+
+        warnings.warn(
+            f"could not ask the driver how many devices there are ({exc!r}); treating this as "
+            f"a machine with none, so the device tiers skip and the offline tier still runs",
+            stacklevel=2,
+        )
+        return 0
 
 
 # -- repositories ---------------------------------------------------------------------------
