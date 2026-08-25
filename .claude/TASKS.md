@@ -121,6 +121,14 @@ hook down, for when the operator asked to see something before it is executed.
       than carry it. Recoverable from history at `75fef9d` if a multi-process launcher is ever
       wanted for a 16-GPU box, which is a different reason from the one it was written for.
 
+- [ ] **B4 · The `platform.hpp` -> `core/platform.h` rename in the review prompt** needs its
+      own PR. Reverted on `feat/cpp-data-plane` because a branch whose
+      `.github/workflows/**` differs from `main` cannot run the review job at all — "Workflow
+      validation failed. The workflow file must exist and have identical content to the
+      version on the repository's default branch." That is the documented permanent exception
+      in CLAUDE.md, and it cost PR #8 a review round. A one-line prompt fix is not worth
+      blocking a PR's automation; it goes in a workflow-only PR that is merged by hand.
+
 ## Phase 5 · Everything else still owed
 
 - [ ] **C4 · RTSP in the benchmark** (R55) — tests cover it; the benchmark replays JPEGs, so

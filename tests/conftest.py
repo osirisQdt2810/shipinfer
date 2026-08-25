@@ -113,7 +113,7 @@ def _device_count_or_zero(probe) -> int:
     """
     try:
         return probe()
-    except Exception as exc:  # noqa: BLE001 - see the docstring; the type is not knowable here
+    except Exception as exc:
         import warnings
 
         warnings.warn(

@@ -204,7 +204,7 @@ jobs:
             - PERFORMANCE. Flag per-request allocation on the dispatch path, an
               O(cameras)/O(instances) scan where O(1) was available, a per-image Python loop
               around a device call, and a host round trip that could have stayed on device.
-            - NATIVE CODE. Must use the `gpu*` aliases from `core/platform.h` (a raw `cudaMalloc`
+            - NATIVE CODE. Must use the `gpu*` aliases from `platform.hpp` (a raw `cudaMalloc`
               breaks the ROCm build), release the GIL around launches, check the async error
               slot after a launch, keep scratch on the object rather than per call, and expose
               a `_into` device-pointer entry point.

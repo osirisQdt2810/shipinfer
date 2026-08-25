@@ -33,6 +33,7 @@ progress always buys a fresh budget.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -73,11 +74,10 @@ def allow(reason: str) -> None:
 
 def main() -> int:
     # The hook is fed the stop event on stdin; nothing in it is needed, but draining it keeps
-    # the harness from seeing a broken pipe.
-    try:
+    # the harness from seeing a broken pipe. Any failure reading it is irrelevant — this hook
+    # decides whether a session may stop, and it must not fail closed on a pipe.
+    with contextlib.suppress(Exception):
         sys.stdin.read()
-    except Exception:
-        pass
 
     if os.environ.get("SHIPINFER_ALLOW_STOP") == "1":
         allow("unfinished-work hook: stood down by SHIPINFER_ALLOW_STOP=1")
