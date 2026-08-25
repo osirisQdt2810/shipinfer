@@ -101,6 +101,44 @@ def build_app() -> typer.Typer:
         )
 
     @app.command()
+    def fleet(
+        repository: Path = repo_option,
+        shards: int | None = typer.Option(
+            None,
+            "--shards",
+            "-n",
+            help="How many processes to split the fleet across (default: one per visible GPU).",
+        ),
+        gpus: str = gpus_option,
+        policy: str = policy_option,
+        topology: str | None = typer.Option(
+            None,
+            "--topology",
+            help="Which topology to run: a name from `shipinfer registries` (default: settings).",
+        ),
+        dry_run: bool = typer.Option(
+            False, "--dry-run", help="Print the plan and stop, without spawning anything."
+        ),
+        drain_s: float | None = typer.Option(
+            None, "--drain", help="Seconds a shard gets to drain before it is killed."
+        ),
+        log_level: str = log_option,
+    ) -> None:
+        """Split the fleet across several processes, under one topology, and supervise them."""
+        raise typer.Exit(
+            commands.fleet(
+                repository,
+                shards=shards,
+                gpus=gpus,
+                policy=policy,
+                topology=topology,
+                dry_run=dry_run,
+                drain_s=drain_s,
+                log_level=log_level,
+            )
+        )
+
+    @app.command()
     def bench(
         model: str,
         repository: Path = repo_option,
