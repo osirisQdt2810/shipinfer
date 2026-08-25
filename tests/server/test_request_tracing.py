@@ -98,3 +98,74 @@ class TestTheServerWritesTraces:
 
         assert stats["recorded"] == 2
         assert stats["sampled_out"] == 6
+
+
+_PIPE = """
+platform: ensemble
+max_batch_size: 0
+inputs: [{name: x, data_type: FP32, dims: [2]}]
+outputs: [{name: y, data_type: FP32, dims: [2]}]
+dynamic_batching: {enabled: false}
+ensemble:
+  steps:
+    - model: echo
+      input_map: {x: x}
+      output_map: {y: y}
+"""
+
+
+class TestSamplingReachesTheEnsemblePath:
+    """The ensemble recorded every completion, whatever rate the operator set.
+
+    `ModelInstance._complete` guards its record with `should_record()` — the sampling gate,
+    the thing that advances the sampler and counts `sampled_out`. `EnsembleModel` called
+    `record()` directly, and `record()` applies no rate. So `rate: 1000` on the 50-camera
+    deployment meant one JSONL line per second for plain models and one per completion for
+    every ensemble — and even the default `NullTraceSink` had a `RequestTrace` built per DAG
+    completion only to be thrown away. Review found it on the third round; this path had no
+    test, which is why it survived two.
+    """
+
+    def _server(self, tmp_path: Path, **options) -> InferenceServer:
+        root = tmp_path / "repo"
+        (root / "echo" / "1").mkdir(parents=True)
+        (root / "echo" / "config.yaml").write_text(_ECHO.lstrip())
+        (root / "pipe").mkdir()
+        (root / "pipe" / "config.yaml").write_text(_PIPE.lstrip())
+        return InferenceServer(
+            ServerSettings(
+                model_repository=root,
+                devices={"visible_gpus": []},
+                execution={"warmup_iterations": 0},
+                observability={"trace_sink": "jsonlines", "trace_sink_options": options},
+            )
+        )
+
+    def _request(self, frame: int) -> InferenceRequest:
+        return InferenceRequest(
+            model_name="pipe",
+            inputs={"x": Tensor.from_numpy(np.zeros((1, 2), dtype=np.float32))},
+            context=RequestContext(camera_id="cam07", frame_id=frame),
+        )
+
+    def test_the_operators_rate_applies_to_ensembles_too(self, tmp_path: Path) -> None:
+        """Mirror of `test_sampling_reaches_the_serving_path`, through the DAG.
+
+        One request through `pipe` passes the gate **twice** — once when the `echo` step's
+        instance completes, once when the DAG completes — so eight requests are sixteen gate
+        decisions, and at `rate=4` that is four recorded and twelve sampled out. The invariant
+        this pins is that *every* trace went through the gate: recorded plus sampled_out equals
+        the number of completions. Before the guard the ensemble's eight bypassed it — eight
+        recorded unconditionally on top of the two the step's gate let through — and the
+        numbers read ten recorded, six sampled out, with the sixteen no longer adding up.
+        """
+        path = tmp_path / "traces.jsonl"
+        server = self._server(tmp_path, path=str(path), flush_every=0, rate=4)
+        with server:
+            for frame in range(8):
+                server.infer_sync(self._request(frame), timeout=10)
+            stats = server.traces.stats()
+
+        assert stats["recorded"] + stats["sampled_out"] == 16, "a completion skipped the gate"
+        assert stats["recorded"] == 4
+        assert stats["sampled_out"] == 12

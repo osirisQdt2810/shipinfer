@@ -692,7 +692,13 @@ class EnsembleModel:
         )
         # Recorded before settling: a caller woken by `_settle` can be reading the sink on the
         # next line, and a trace that lands after its own response is a trace nobody finds.
-        self._traces.record(RequestTrace.from_response(response))
+        # Behind the sampling gate, exactly as `ModelInstance._complete` does it. `record()`
+        # applies no rate; `should_record()` is what advances the sampler and counts
+        # `sampled_out`. Unguarded, an ensemble at `rate: 1000` wrote every completion — 1000
+        # JSONL lines a second where the operator asked for one — and even the default
+        # `NullTraceSink` had a `RequestTrace` built per DAG completion only to be discarded.
+        if self._traces.should_record():
+            self._traces.record(RequestTrace.from_response(response))
         _settle(state.future, result=response)
 
     def _fail(self, state: _Execution, exc: BaseException) -> None:
