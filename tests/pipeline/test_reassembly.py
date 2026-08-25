@@ -147,7 +147,12 @@ class TestItIsBounded:
         for frame in range(5_000):
             subject.open(make_state("stuck", frame), expected=("detect", "ship_embedder"))
 
-        assert subject.sizes() == {"pending": 64, "cameras": 1, "camera_entries": 64}
+        assert subject.sizes() == {
+            "pending": 64,
+            "cameras": 1,
+            "camera_entries": 64,
+            "gauged": 0,
+        }
         assert subject.opened == 5_000
         assert subject.evicted == 4_936
         # Every opened frame left exactly one way out: still pending, or reported.
@@ -165,7 +170,12 @@ class TestItIsBounded:
             subject.deliver((camera, 0), "detect")
             subject.seal((camera, 0))
 
-        assert subject.sizes() == {"pending": 0, "cameras": 0, "camera_entries": 0}
+        assert subject.sizes() == {
+            "pending": 0,
+            "cameras": 0,
+            "camera_entries": 0,
+            "gauged": 0,
+        }
 
     def test_capacity_is_honoured_exactly(self):
         subject, _ = collector(settings=ReassemblySettings(capacity=1))
@@ -316,7 +326,12 @@ class TestShutdownPublishesWhatWasInFlight:
 
         assert subject.drain() == 5
         assert [r.reason for r in reported] == [SHUTDOWN] * 5
-        assert subject.sizes() == {"pending": 0, "cameras": 0, "camera_entries": 0}
+        assert subject.sizes() == {
+            "pending": 0,
+            "cameras": 0,
+            "camera_entries": 0,
+            "gauged": 0,
+        }
 
 
 class TestEvictionsAreReportedButNotPublished:
@@ -344,6 +359,72 @@ class TestDuplicateTagsAreRefusedNotReplaced:
         subject.deliver(("cam0", 0), "detect")
         subject.seal(("cam0", 0))
         assert len(reported) == 1, "the in-flight frame kept its place and its results"
+
+
+class TestThePendingGaugeGoesBackToZero:
+    """``pending_frames`` is the reassembly-pressure signal, so a stale series is a lie.
+
+    The per-camera index is deleted the moment a camera's last frame leaves — that deletion
+    is what keeps the structure bounded — so a refresh built from the *live* cameras alone
+    never wrote the 0. The gauge keeps a labelled series once it has seen it, so an idle
+    camera read as a permanent backlog and an operator looking for which camera was falling
+    behind was pointed at one that had nothing outstanding at all.
+    """
+
+    def test_a_camera_that_goes_idle_reads_zero_not_its_last_backlog(self):
+        metrics = PipelineMetrics()
+        subject, _ = collector(metrics=metrics, clock=Clock())
+        subject.open(make_state("quiet", 0), expected=("detect",))
+        for frame in range(2):
+            subject.open(make_state("loud", frame), expected=("detect",))
+        subject.sweep()
+        assert metrics.pending_frames.value(camera="quiet") == 1
+
+        subject.deliver(("quiet", 0), "detect")
+        subject.seal(("quiet", 0))
+        subject.sweep()
+
+        assert metrics.pending_frames.value(camera="quiet") == 0
+        assert metrics.pending_frames.value(camera="loud") == 2, "the busy camera is untouched"
+
+    def test_shutdown_leaves_no_camera_claiming_a_backlog(self):
+        """The last scrape of a stopping process must not report frames that are gone."""
+        metrics = PipelineMetrics()
+        subject, _ = collector(metrics=metrics, clock=Clock())
+        for frame in range(3):
+            subject.open(make_state("cam0", frame), expected=("detect",))
+        subject.sweep()
+
+        assert subject.drain() == 3
+
+        assert metrics.pending_frames.value(camera="cam0") == 0
+
+    def test_the_zero_is_written_once_and_the_tracking_set_stays_bounded(self):
+        """Every transient camera is zeroed, and none of them is remembered afterwards.
+
+        The zeroing needs a memory of which series were written, and a memory in a 24/7
+        process is a leak waiting to happen: a site that reconnects cameras under new ids
+        would grow that set forever. Each camera here is gauged non-zero and then zeroed, so
+        both halves are exercised on the same fifty cameras.
+        """
+        metrics = PipelineMetrics()
+        subject, _ = collector(metrics=metrics, clock=Clock())
+        for index in range(50):
+            camera = f"transient{index}"
+            subject.open(make_state(camera, 0), expected=("detect",))
+            subject.sweep()  # the camera is live: the series is written non-zero
+            subject.seal((camera, 0))
+            subject.sweep()  # the camera is gone: the series must be written back to zero
+
+        assert subject.sizes() == {
+            "pending": 0,
+            "cameras": 0,
+            "camera_entries": 0,
+            "gauged": 0,
+        }
+        samples = list(metrics.pending_frames.samples())
+        assert len(samples) == 50, "one series per camera, all of them still present"
+        assert all(value == 0 for _, _, value in samples)
 
 
 class TestThePolicyRegistry:

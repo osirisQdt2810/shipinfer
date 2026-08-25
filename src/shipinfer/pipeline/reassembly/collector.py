@@ -258,6 +258,9 @@ class FrameCollector:
         # camera -> keys in arrival order. A plain dict is an ordered set here, so "this
         # camera's oldest" is `next(iter(...))` rather than a scan.
         self._by_camera: dict[str, dict[PendingKey, None]] = {}
+        # Cameras whose `pending_frames` series was last written non-zero, so the next
+        # refresh can write the zero. See `_refresh_pending_gauge_locked`.
+        self._gauged: set[str] = set()
         self.opened = 0
         #: Frames handed to ``emit``, whatever their reason. Every opened frame is reported
         #: exactly once, which is the invariant an end-to-end "none lost, none duplicated"
@@ -440,9 +443,7 @@ class FrameCollector:
                 for frame in (self._remove_locked(key) for key in expired)
                 if frame is not None
             ]
-            if self._metrics is not None:
-                for camera, count in self.camera_counts().items():
-                    self._metrics.pending_frames.set(count, camera=camera)
+            self._refresh_pending_gauge_locked()
         for result in results:
             self._publish(result)
         return len(results)
@@ -459,6 +460,9 @@ class FrameCollector:
             results = [frame.result(SHUTDOWN, now) for frame in self._pending.values()]
             self._pending.clear()
             self._by_camera.clear()
+            # Zero the gauge on the way out too: a process that stops with a backlog would
+            # otherwise leave its last scrape claiming frames are still waiting.
+            self._refresh_pending_gauge_locked()
         for result in results:
             self._publish(result)
         return len(results)
@@ -470,6 +474,32 @@ class FrameCollector:
         if frame is not None:
             self._forget_camera_locked(key)
         return frame
+
+    def _refresh_pending_gauge_locked(self) -> None:
+        """Publish the per-camera pending depth, **including the zeroes**. Caller holds the
+        lock.
+
+        The zeroes are the whole point. ``_forget_camera_locked`` deletes a camera's index
+        entry once its last frame is sealed — that deletion is what keeps the structure
+        bounded — so a refresh that walked only the live cameras never wrote 0 for the one
+        that had just gone idle, while the gauge kept the labelled series at its last
+        non-zero value. An idle camera then read as a permanent backlog on
+        ``shipinfer_pipeline_pending_frames``, which is the signal
+        :mod:`shipinfer.pipeline.metrics` describes as reassembly pressure and the one an
+        operator would use to decide which camera is falling behind.
+
+        ``_gauged`` tracks only the cameras currently reading non-zero, so it stays as
+        bounded as the index it mirrors: a camera is written to zero exactly once and then
+        forgotten again.
+        """
+        if self._metrics is None:
+            return
+        counts = self.camera_counts()
+        for camera, count in counts.items():
+            self._metrics.pending_frames.set(count, camera=camera)
+        for camera in self._gauged.difference(counts):
+            self._metrics.pending_frames.set(0, camera=camera)
+        self._gauged = set(counts)
 
     def _forget_camera_locked(self, key: PendingKey) -> None:
         """Drop the key from its camera's index, and the camera when it empties.
@@ -519,6 +549,11 @@ class FrameCollector:
                 "pending": len(self._pending),
                 "cameras": len(self._by_camera),
                 "camera_entries": sum(len(keys) for keys in self._by_camera.values()),
+                # `_gauged` is an internal structure too, and the one most able to grow
+                # without bound: a 24/7 process sees cameras come and go, and a set that
+                # remembered every camera it had ever gauged would be the leak the zeroing
+                # fix introduced. It is here so that stays asserted rather than assumed.
+                "gauged": len(self._gauged),
             }
 
     def stats(self) -> dict[str, int | float]:

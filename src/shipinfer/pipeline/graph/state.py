@@ -78,6 +78,18 @@ def _as_float(row: np.ndarray) -> float:
     return float(np.asarray(row).reshape(-1)[0])
 
 
+def _as_str(row: np.ndarray) -> str:
+    """A one-element row of a unicode batch as a Python ``str``.
+
+    ``str(...)`` and not ``.item()``: numpy's ``str_`` *is* a ``str`` subclass, so it
+    compares and serialises correctly and the cast looks redundant — until the record is
+    pickled between processes or a consumer type-checks it, where the subclass is a
+    surprise nobody signed up for. One call per tracked object is not a cost worth having
+    that conversation about.
+    """
+    return str(np.asarray(row).reshape(-1)[0])
+
+
 #: How a per-object model output becomes a field of
 #: :class:`~shipinfer.pipeline.schema.ObjectRecord`. A table rather than a chain of
 #: conditionals, so adding a field is an entry here and a field there — and so a typo in a
@@ -87,6 +99,8 @@ RECORD_CONVERTERS: Mapping[str, Callable[[np.ndarray], Any]] = {
     "ship_id": _as_int,
     "similarity": _as_float,
     "mask_area_px": _as_float,
+    "track_id": _as_int,
+    "track_state": _as_str,
 }
 
 

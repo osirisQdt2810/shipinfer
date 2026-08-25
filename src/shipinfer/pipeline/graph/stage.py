@@ -131,6 +131,12 @@ class PipelineStage(abc.ABC):
     * :attr:`requires` — names that must exist **and be non-empty**. This is the conditional
       execution the demo ensemble spells ``condition:``, and the reason a frame with only
       people never reaches the ship segmenter.
+    * :attr:`optional` — names this stage reads **if they are there**, and which never gate
+      whether it runs. Tracking is the case that needs it: it wants both embedders' output,
+      but a frame holding only people has no ``ship_embedding`` at all, and declaring that
+      under ``consumes`` would mean the tracker never ran on such a frame. Declared rather
+      than read off the state silently, so the graph still checks at start-up that some
+      earlier stage produces the name, and so liveness knows this stage is a reader.
     * :attr:`produces` — names this stage adds.
     """
 
@@ -139,9 +145,11 @@ class PipelineStage(abc.ABC):
     name: ClassVar[str] = "abstract"
     #: The cardinality of what this stage **produces**.
     cardinality: ClassVar[Cardinality] = Cardinality.PER_FRAME
-    #: True for the one stage where cardinality changes — the crop step, one frame in and N
-    #: objects out. Every other stage must preserve it, and
-    #: :meth:`shipinfer.pipeline.graph.graph.PipelineGraph.validate` checks that it does.
+    #: True for a stage where cardinality changes: one frame in, N objects out. The crop
+    #: step is the fan-out proper; tracking is the other one, because it reads the frame's
+    #: detections and writes one row per tracked object. Every other stage must *preserve*
+    #: cardinality, and :meth:`shipinfer.pipeline.graph.graph.PipelineGraph.validate` checks
+    #: that it does — which is what stops a per-frame stage being handed a per-object batch.
     expands: ClassVar[bool] = False
 
     def __init__(
@@ -150,12 +158,25 @@ class PipelineStage(abc.ABC):
         *,
         consumes: tuple[str, ...] = (),
         requires: tuple[str, ...] = (),
+        optional: tuple[str, ...] = (),
         produces: tuple[str, ...] = (),
     ) -> None:
         self.name = name
         self.consumes = consumes
         self.requires = requires
+        self.optional = optional
         self.produces = produces
+
+    @property
+    def reads(self) -> tuple[str, ...]:
+        """Every name this stage may read — gating or not. What liveness is computed over.
+
+        A name is freed as soon as its *last reader* is past, so an optional read has to
+        count: leaving it out would free a batch while a later stage still looked for it,
+        and the symptom is a tracker that quietly stops seeing appearance vectors rather
+        than an error.
+        """
+        return self.consumes + self.optional
 
     # -- execution ---------------------------------------------------------------------
 
@@ -244,9 +265,16 @@ class ModelStage(PipelineStage):
         timeout_s: float = 5.0,
         consumes: tuple[str, ...] = (),
         requires: tuple[str, ...] = (),
+        optional: tuple[str, ...] = (),
         produces: tuple[str, ...] = (),
     ) -> None:
-        super().__init__(name, consumes=consumes, requires=requires, produces=produces)
+        super().__init__(
+            name,
+            consumes=consumes,
+            requires=requires,
+            optional=optional,
+            produces=produces,
+        )
         if timeout_s <= 0:
             raise ConfigurationError(f"stage {name!r}: timeout_s must be > 0")
         self._model = model

@@ -75,8 +75,10 @@ class CameraActor:
         source_factory: builds the source. Injected for tests and for a deployment with a
             source this package does not ship; defaults to
             :func:`~shipinfer.ingest.registry.create_source`.
-        sleep: sleep function, injected so the offline tier can assert the *sequence* of
-            reconnect delays rather than merely that a retry happened.
+        sleep: how the actor waits out a reconnect delay. Defaults to
+            :meth:`_wait_or_stop`, which waits on the stop event rather than the clock;
+            injected so the offline tier can assert the *sequence* of reconnect delays
+            rather than merely that a retry happened.
     """
 
     def __init__(
@@ -87,13 +89,14 @@ class CameraActor:
         settings: IngestSettings | None = None,
         metrics: IngestMetrics | None = None,
         source_factory: SourceFactory | None = None,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         self.config = config
         self.settings = settings or IngestSettings()
         self.metrics = metrics or IngestMetrics()
         self._sink = sink
-        self._sleep = sleep
+        self._stop = threading.Event()
+        self._sleep: Callable[[float], None] = self._wait_or_stop if sleep is None else sleep
         self._factory: SourceFactory = source_factory or self._default_factory
         self._counter = FrameCounter(config.camera_id, config.first_frame_id)
         self._backoff = ExponentialBackoff(
@@ -104,7 +107,6 @@ class CameraActor:
         )
         self._source: FrameSource | None = None
         self._thread: threading.Thread | None = None
-        self._stop = threading.Event()
         self._fatal = False
 
         # Everything below is written by the actor thread and read by anyone; the lock is
@@ -212,6 +214,18 @@ class CameraActor:
         self.stop()
 
     # -- the actor loop ----------------------------------------------------------------
+
+    def _wait_or_stop(self, delay: float) -> None:
+        """Wait out a reconnect delay, or wake the moment the actor is asked to stop.
+
+        The default because ``time.sleep`` is not interruptible and this delay grows to the
+        ``reconnect_max_ms`` cap — 30 s in the shipped settings. A camera that had just
+        failed to connect therefore ignored :meth:`request_stop` for up to half a minute, so
+        :meth:`stop` timed out and abandoned a thread that was still holding a decoder, and
+        ``IngestManager.remove_camera`` returned while the removed camera was still alive.
+        Waiting on the event costs the same and answers immediately.
+        """
+        self._stop.wait(delay)
 
     def _run(self) -> None:
         _LOG.info(
