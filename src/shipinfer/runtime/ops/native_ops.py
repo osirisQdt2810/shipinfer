@@ -95,10 +95,25 @@ class NativeImageOps(ImageOps):
 
     def __init__(self, device_index: int = 0, stream: int = 0) -> None:
         self._native: Any = require_native()
-        if not self._native.is_available():
+        # `cuda_available`, which is the name the extension actually binds. This read
+        # `is_available` for as long as this class has existed, and nothing caught it: the
+        # AttributeError surfaced upstream as "the fused kernels are unavailable — fetch and
+        # build the submodule", so every kernel benchmark reported the native column skipped
+        # and blamed a missing build. The build was there. The two repositories simply
+        # disagreed about one identifier, which is the same shape as the `version()` /
+        # `__version__` bug found in review — a defect that lives in neither file.
+        probe = getattr(self._native, "cuda_available", None)
+        if probe is None:
             raise RuntimeError(
-                "shipvision is installed but has no usable kernels; build them "
-                "with `python 3rdparty/shipvision/build.py`"
+                f"{self._native.__name__} is built but defines no `cuda_available`, so this "
+                f"build predates the kernels or exports a different surface. Rebuild the "
+                f"submodule; if that does not fix it, the two repositories have drifted and "
+                f"`tests/runtime/test_native.py` is where the agreement is pinned"
+            )
+        if not probe():
+            raise RuntimeError(
+                "shipvision is built but reports no usable GPU kernels — either it was built "
+                "without CUDA, or no device is visible to this process"
             )
         self._device_index = device_index
         self._stream = stream
@@ -127,7 +142,14 @@ class NativeImageOps(ImageOps):
             rows=len(images),
             caller="letterbox_to_device",
         )
-        scales, pads = self._ops.letterbox_into(
+        # Three values since the submodule started reporting the applied extents. The
+        # two-value unpack this used to be raised `ValueError` on every call — and went
+        # unnoticed for as long as it did because the path was unreachable for three
+        # unrelated reasons (see `runtime/native.py`). A dead path is where a contract
+        # change is invisible. The extents are not surfaced here because the ABC returns
+        # `(scales, pads)` and nothing downstream re-derives `out_h` yet; the ledger tracks
+        # widening the contract so they are.
+        scales, pads, _extents = self._ops.letterbox_into(
             [np.ascontiguousarray(img) for img in images],
             int(out.data_ptr()),
             int(out.numel() * out.element_size()),
@@ -155,7 +177,7 @@ class NativeImageOps(ImageOps):
         640x640 batch costs several times the kernel that produced it. Use
         :meth:`letterbox_to_device` for anything on the critical path.
         """
-        tensor, scales, pads = self._ops.letterbox_batch(
+        tensor, scales, pads, extents = self._ops.letterbox_batch(
             [np.ascontiguousarray(img) for img in images],
             int(dst_size[0]),
             int(dst_size[1]),
@@ -165,7 +187,7 @@ class NativeImageOps(ImageOps):
             int(pad_value),
             int(self._stream),
         )
-        return LetterboxResult(tensor=tensor, scales=scales, pads=pads)
+        return LetterboxResult(tensor=tensor, scales=scales, pads=pads, extents=extents)
 
     def crop_batch(
         self,
