@@ -25,6 +25,8 @@ Four escapes, because a hook that can trap a session is worse than the problem:
 * A line ``AWAITING-OPERATOR: <question>`` on its own, when the *whole* session is blocked on
   an answer rather than one item. The hook stands down and repeats the question.
 * `SHIPINFER_ALLOW_STOP=1` for one command, when the operator has said so.
+* A non-interactive session (``CI`` / ``GITHUB_ACTIONS`` set) is never blocked: the review job
+  loads these settings too, and it can neither edit the ledger nor set a variable.
 * A consecutive-block cap. If this fires ``MAX_CONSECUTIVE`` times in a row without the ledger
   changing, it stands down and says so: at that point the loop is not making progress and
   another turn will not help, which is itself worth telling the operator.
@@ -88,6 +90,14 @@ def main() -> int:
     with contextlib.suppress(Exception):
         sys.stdin.read()
 
+    # A CI agent (the review job, `@claude` in a comment) loads the project settings too, and has
+    # none of the escapes: no Edit for the ledger, no shell for the variable. Blocking it would
+    # burn twelve turns against a checkout it cannot change and can turn a review into a timeout
+    # — the hook exists for an interactive session that can act on the list.
+    if os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI"):
+        allow(
+            "unfinished-work hook: non-interactive session, nothing here can act on the ledger"
+        )
     if os.environ.get("SHIPINFER_ALLOW_STOP") == "1":
         allow("unfinished-work hook: stood down by SHIPINFER_ALLOW_STOP=1")
     if not LEDGER.is_file():

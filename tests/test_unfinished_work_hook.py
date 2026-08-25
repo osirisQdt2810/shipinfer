@@ -60,7 +60,10 @@ class TestOpenItemsReadsTheRealLedger:
 
     def test_the_repository_ledger_is_seen(self, hook) -> None:
         """The check that would have failed: the shipped ledger has open items and the hook must
-        see them, whatever its headings are called."""
+        see them, whatever its headings are called. The hook tolerates a missing ledger, so this
+        test does too — a closed-out repository is not a red offline tier."""
+        if not hook.LEDGER.is_file():
+            pytest.skip("no shipped ledger in this checkout")
         text = hook.LEDGER.read_text(encoding="utf-8")
         raw = [line for line in text.splitlines() if line.strip().startswith(hook.OPEN_MARKS)]
         assert hook.open_items(text) == [line.strip() for line in raw]
@@ -71,16 +74,25 @@ class TestOpenItemsReadsTheRealLedger:
         assert hook.awaiting_operator(text) == "AWAITING-OPERATOR: which topology ships first?"
 
 
-def _run(hook, monkeypatch, capsys, tmp_path, text: str, *, env_stop: str | None = None):
+_ENV = ("SHIPINFER_ALLOW_STOP", "CI", "GITHUB_ACTIONS")
+
+
+def _run(
+    hook, monkeypatch, capsys, tmp_path, text: str | None, *, env: dict[str, str] | None = None
+):
+    """Run `main()` against a ledger holding `text` (`None` = no ledger file) with only `env` set."""
     ledger = tmp_path / "TASKS.md"
-    ledger.write_text(text, encoding="utf-8")
+    if text is None:
+        ledger.unlink(missing_ok=True)
+    else:
+        ledger.write_text(text, encoding="utf-8")
     monkeypatch.setattr(hook, "LEDGER", ledger)
     monkeypatch.setattr(hook, "STATE", tmp_path / ".tasks_state.json")
     monkeypatch.setattr(hook.sys, "stdin", type("S", (), {"read": staticmethod(lambda: "")})())
-    if env_stop is None:
-        monkeypatch.delenv("SHIPINFER_ALLOW_STOP", raising=False)
-    else:
-        monkeypatch.setenv("SHIPINFER_ALLOW_STOP", env_stop)
+    for name in _ENV:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in (env or {}).items():
+        monkeypatch.setenv(name, value)
     try:
         hook.main()
     except SystemExit as stop:
@@ -122,3 +134,33 @@ class TestTheDecision:
             _run(hook, monkeypatch, capsys, tmp_path, LEDGER + "\n- [ ] new\n")["decision"]
             == "block"
         )
+
+    def test_a_missing_ledger_allows(self, hook, monkeypatch, capsys, tmp_path) -> None:
+        out = _run(hook, monkeypatch, capsys, tmp_path, None)
+        assert "decision" not in out and "no .claude/TASKS.md" in out["systemMessage"]
+
+    def test_the_operator_variable_allows_for_one_command(
+        self, hook, monkeypatch, capsys, tmp_path
+    ) -> None:
+        out = _run(
+            hook, monkeypatch, capsys, tmp_path, LEDGER, env={"SHIPINFER_ALLOW_STOP": "1"}
+        )
+        assert "decision" not in out and "SHIPINFER_ALLOW_STOP" in out["systemMessage"]
+        # `=1` exactly: an exported leftover like `=0` or `=yes` does not count.
+        assert (
+            _run(
+                hook, monkeypatch, capsys, tmp_path, LEDGER, env={"SHIPINFER_ALLOW_STOP": "0"}
+            )["decision"]
+            == "block"
+        )
+
+    @pytest.mark.parametrize("variable", ["CI", "GITHUB_ACTIONS"])
+    def test_a_ci_agent_is_never_blocked(
+        self, hook, monkeypatch, capsys, tmp_path, variable: str
+    ) -> None:
+        """The review job loads the project settings and has no Edit and no shell: every escape is
+        out of its reach, so blocking it would spend the whole cap against an unchangeable ledger.
+        """
+        out = _run(hook, monkeypatch, capsys, tmp_path, LEDGER, env={variable: "true"})
+        assert "decision" not in out and "non-interactive" in out["systemMessage"]
+        assert not (tmp_path / ".tasks_state.json").exists(), "a CI run must not spend the cap"

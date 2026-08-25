@@ -66,3 +66,13 @@ class TestAskingTheDriverCannotAbortCollection:
 
         with pytest.warns(UserWarning, match="could not ask the driver"):
             assert device_count_or_zero(broken) == 0
+
+    def test_the_failure_is_kept_for_the_skip_reason(self, probe_device_count) -> None:
+        def broken():
+            raise RuntimeError("CUDA driver initialization failed")
+
+        with pytest.warns(UserWarning):
+            count, failure = probe_device_count(broken)
+        assert count == 0
+        assert failure is not None and "CUDA driver initialization failed" in failure
+        assert probe_device_count(lambda: 4) == (4, None)

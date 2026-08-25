@@ -106,8 +106,14 @@ def tier_predicate():
 
 
 @pytest.fixture(scope="session")
+def probe_device_count():
+    """The driver probe :func:`pytest_collection_modifyitems` uses, count and failure together."""
+    return _probe_device_count
+
+
+@pytest.fixture(scope="session")
 def device_count_or_zero():
-    """The driver probe wrapper :func:`pytest_configure` uses, for tests that pin its two answers."""
+    """The driver probe wrapper :func:`pytest_collection_modifyitems` uses, for tests that pin its two answers."""
     return _device_count_or_zero
 
 
@@ -170,11 +176,14 @@ def pytest_collection_modifyitems(config, items) -> None:
     if not selected:
         return
 
-    count = _device_count_or_zero(device_count)
+    count, failure = _probe_device_count(device_count)
     if count >= 2:
         return
-    no_gpu = pytest.mark.skip(reason="needs a CUDA device")
-    no_multi = pytest.mark.skip(reason="needs at least 2 CUDA devices")
+    # When the driver refused to answer, say so in the skip reason: an all-skipped `-m gpu` run
+    # on a broken box must read "the driver failed", not "no hardware here".
+    because = "" if failure is None else f" (asking the driver failed: {failure})"
+    no_gpu = pytest.mark.skip(reason="needs a CUDA device" + because)
+    no_multi = pytest.mark.skip(reason="needs at least 2 CUDA devices" + because)
     for item in items:
         if "multigpu" in item.keywords and count < 2:
             item.add_marker(no_multi)
@@ -183,7 +192,12 @@ def pytest_collection_modifyitems(config, items) -> None:
 
 
 def _device_count_or_zero(probe) -> int:
-    """How many devices there are, or zero if asking was itself a failure.
+    """:func:`_probe_device_count` without the reason, for callers that only need the number."""
+    return _probe_device_count(probe)[0]
+
+
+def _probe_device_count(probe) -> tuple[int, str | None]:
+    """How many devices there are, or zero and the failure if asking was itself a failure.
 
     A driver that raises rather than reporting zero is, from here, indistinguishable from a
     machine with no driver — and the right response to both is to skip the device tier, not to
@@ -195,7 +209,7 @@ def _device_count_or_zero(probe) -> int:
     would mean importing the module whose import is the problem.
     """
     try:
-        return probe()
+        return probe(), None
     except Exception as exc:
         import warnings
 
@@ -204,7 +218,7 @@ def _device_count_or_zero(probe) -> int:
             f"a machine with none, so the device tiers skip and the offline tier still runs",
             stacklevel=2,
         )
-        return 0
+        return 0, repr(exc)
 
 
 # -- repositories ---------------------------------------------------------------------------
