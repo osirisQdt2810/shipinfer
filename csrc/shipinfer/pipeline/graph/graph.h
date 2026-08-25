@@ -12,8 +12,8 @@
 #pragma once
 
 #include <atomic>
-#include <map>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <thread>

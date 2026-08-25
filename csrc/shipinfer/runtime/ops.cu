@@ -95,11 +95,11 @@ namespace shipinfer {
 
             // align_corners=False, in patch coordinates, clamped at zero like torch does.
             const float lx = fmaxf(0.f, (static_cast<float>(x) + 0.5f) * static_cast<float>(box_w) /
-                                            static_cast<float>(dst_w) -
-                                        0.5f);
+                                                static_cast<float>(dst_w) -
+                                            0.5f);
             const float ly = fmaxf(0.f, (static_cast<float>(y) + 0.5f) * static_cast<float>(box_h) /
-                                            static_cast<float>(dst_h) -
-                                        0.5f);
+                                                static_cast<float>(dst_h) -
+                                            0.5f);
             const int px0 = min(static_cast<int>(lx), box_w - 1);
             const int py0 = min(static_cast<int>(ly), box_h - 1);
             const int px1 = min(px0 + 1, box_w - 1);
@@ -114,8 +114,8 @@ namespace shipinfer {
                 const float p01 = static_cast<float>(src[(sy0 * src_w + sx1) * 3 + src_c]);
                 const float p10 = static_cast<float>(src[(sy1 * src_w + sx0) * 3 + src_c]);
                 const float p11 = static_cast<float>(src[(sy1 * src_w + sx1) * 3 + src_c]);
-                const float value = (p00 * (1.f - wx) + p01 * wx) * (1.f - wy) +
-                                    (p10 * (1.f - wx) + p11 * wx) * wy;
+                const float value =
+                    (p00 * (1.f - wx) + p01 * wx) * (1.f - wy) + (p10 * (1.f - wx) + p11 * wx) * wy;
                 out[c * plane + y * dst_w + x] = value / 255.f;
             }
         }

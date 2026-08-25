@@ -114,8 +114,7 @@ namespace shipinfer {
         return names;
     }
 
-    size_t PipelineGraph::execute(std::vector<Work>& batch, int device,
-                                  FrameCollector& collector) {
+    size_t PipelineGraph::execute(std::vector<Work>& batch, int device, FrameCollector& collector) {
         if (batch.empty()) return 0;
         GPU_CHECK(gpuSetDevice(device));
 

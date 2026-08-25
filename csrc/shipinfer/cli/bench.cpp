@@ -177,7 +177,8 @@ int main(int argc, char** argv) {
         // the first few, because a count with no cause is a diagnosis nobody can start.
         graph.on_frame_error([](const FrameTag& tag, const char* what) {
             static std::atomic<int> shouted{0};
-            if (shouted.fetch_add(1) < 5) std::cerr << "frame " << tag.key() << " failed: " << what << "\n";
+            if (shouted.fetch_add(1) < 5)
+                std::cerr << "frame " << tag.key() << " failed: " << what << "\n";
         });
         const double startup_s =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - load_start).count();

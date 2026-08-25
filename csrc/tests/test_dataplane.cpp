@@ -342,7 +342,9 @@ namespace {
                                       const float* box, int dst_h, int dst_w, bool swap_rb) {
         std::vector<float> dst(static_cast<size_t>(3) * dst_h * dst_w, 0.f);
         const int plane = dst_h * dst_w;
-        auto clip = [](float v, float hi) { return static_cast<int>(std::min(std::max(v, 0.f), hi)); };
+        auto clip = [](float v, float hi) {
+            return static_cast<int>(std::min(std::max(v, 0.f), hi));
+        };
         const int x1 = clip(box[0], src_w - 1.f), y1 = clip(box[1], src_h - 1.f);
         const int x2 = clip(box[2], src_w - 1.f), y2 = clip(box[3], src_h - 1.f);
         const int bw = x2 - x1, bh = y2 - y1;
@@ -376,8 +378,8 @@ namespace {
         for (size_t i = 0; i < host.size(); ++i) host[i] = static_cast<uint8_t>((i * 53 + 7) % 249);
         // Fractional boxes, one touching the right/bottom edge, one partly outside the image:
         // the cases where a half-pixel offset or an image-clamp instead of a patch-clamp shows.
-        const float boxes[12] = {10.3f, 5.7f, 57.9f, 40.2f, 100.f, 30.f, 127.f, 71.f,
-                                 -4.f,  -2.f, 20.f,  9.f};
+        const float boxes[12] = {10.3f, 5.7f, 57.9f, 40.2f, 100.f, 30.f,
+                                 127.f, 71.f, -4.f,  -2.f,  20.f,  9.f};
         const int count = 3;
 
         uint8_t* device_src = nullptr;
@@ -403,7 +405,8 @@ namespace {
             const auto want = crop_reference(host, src_h, src_w, boxes + n * 4, ch, cw, true);
             double worst = 0;
             for (size_t i = 0; i < per_crop; ++i) {
-                worst = std::max(worst, static_cast<double>(std::fabs(got[n * per_crop + i] - want[i])));
+                worst = std::max(worst,
+                                 static_cast<double>(std::fabs(got[n * per_crop + i] - want[i])));
             }
             check_near(worst, 0.0, 1e-4,
                        "crop " + std::to_string(n) + " matches the readable implementation");
@@ -435,9 +438,10 @@ namespace {
                 const int cx = (xi / 2) * 2, cy = yi / 2;
                 const float U = static_cast<float>(uv[cy * stride + cx + 0]) - 128.f;
                 const float V = static_cast<float>(uv[cy * stride + cx + 1]) - 128.f;
-                const float bgr[3] = {std::min(255.f, std::max(0.f, Y + 2.017232f * U)),
-                                      std::min(255.f, std::max(0.f, Y - 0.391762f * U - 0.812968f * V)),
-                                      std::min(255.f, std::max(0.f, Y + 1.596027f * V))};
+                const float bgr[3] = {
+                    std::min(255.f, std::max(0.f, Y + 2.017232f * U)),
+                    std::min(255.f, std::max(0.f, Y - 0.391762f * U - 0.812968f * V)),
+                    std::min(255.f, std::max(0.f, Y + 1.596027f * V))};
                 for (int c = 0; c < 3; ++c) {
                     const int sc = swap_rb ? (2 - c) : c;
                     dst[c * plane + y * dst_w + x] = bgr[sc] / 255.f;
@@ -448,9 +452,11 @@ namespace {
     }
 
     void test_the_nv12_letterbox_kernel_agrees_with_the_reference() {
-        const int src_h = 90, src_w = 160, stride = 192, dst = 64;  // a padded stride, as NVDEC gives
+        const int src_h = 90, src_w = 160, stride = 192,
+                  dst = 64;  // a padded stride, as NVDEC gives
         std::vector<uint8_t> host(static_cast<size_t>(stride) * src_h * 3 / 2);
-        for (size_t i = 0; i < host.size(); ++i) host[i] = static_cast<uint8_t>(16 + (i * 29) % 220);
+        for (size_t i = 0; i < host.size(); ++i)
+            host[i] = static_cast<uint8_t>(16 + (i * 29) % 220);
 
         uint8_t* device_src = nullptr;
         float* device_dst = nullptr;
@@ -472,7 +478,8 @@ namespace {
         double worst = 0;
         for (size_t i = 0; i < got.size(); ++i)
             worst = std::max(worst, static_cast<double>(std::fabs(got[i] - want[i])));
-        check_near(worst, 0.0, 1e-4, "the NV12 letterbox kernel matches the readable implementation");
+        check_near(worst, 0.0, 1e-4,
+                   "the NV12 letterbox kernel matches the readable implementation");
         if (map.pad_y > 0) check_near(got[0], 0.5f, 1e-6, "the NV12 top bar is the pad value");
         gpuFree(device_src);
         gpuFree(device_dst);
