@@ -1,0 +1,21 @@
+"""Topologies: how a deployment is laid out into processes. See :mod:`.base`."""
+
+from __future__ import annotations
+
+from shipinfer.core.errors import ConfigurationError
+from shipinfer.server.topology import fleet as _fleet
+from shipinfer.server.topology.base import TOPOLOGIES, TOPOLOGY_ENV, Topology
+
+__all__ = ["TOPOLOGIES", "TOPOLOGY_ENV", "Topology", "build_topology"]
+
+
+def build_topology(kind: str) -> Topology:
+    """The topology named in the settings, or a refusal that lists what there is.
+
+    A typo here is a deployment that never starts, so the message carries the known names
+    rather than only the unknown one.
+    """
+    if kind not in TOPOLOGIES:
+        known = ", ".join(sorted(TOPOLOGIES.names()))
+        raise ConfigurationError(f"unknown topology {kind!r}; known topologies: {known}")
+    return TOPOLOGIES.create(kind)
