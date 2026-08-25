@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import threading
 import time
 from pathlib import Path
 
@@ -18,7 +20,7 @@ from shipinfer.ingest import (
     load_camera_db,
 )
 
-from .conftest import FRAME_COUNT, synthetic_image
+from .conftest import FRAME_COUNT, ScriptedSource, synthetic_image
 
 pytestmark = pytest.mark.timeout(20)
 
@@ -147,6 +149,113 @@ class TestRuntimeMembership:
             manager.stop()
 
         assert [f.frame_id for f in sink.drain()] == [0, 1, 2, 3]
+
+
+#: How long a parked read holds still. Comfortably longer than the observation window
+#: below, so the actor thread cannot legitimately reach its exit while a test is asserting
+#: that it has not.
+PARK_S = 2.0
+
+
+class ParkedSource(ScriptedSource):
+    """A source that parks inside ``read()`` once armed — a camera mid-decode.
+
+    The shutdown defect is only observable while a thread is genuinely still working, and
+    "still working" is otherwise a race a test would lose most of the time. Parking holds
+    that window open for as long as the assertion needs it.
+    """
+
+    def __init__(self, *args, armed: threading.Event, released: threading.Event, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._armed = armed
+        self._released = released
+
+    def _do_read(self):
+        if self._armed.is_set():
+            self._released.wait(PARK_S)
+        return super()._do_read()
+
+
+class TestCleanShutdownDoesNotAbandonThreads:
+    """Shutting the fleet down is a two-pass handshake, and the first pass must not join.
+
+    ``stop(timeout_s=0.0)`` reads as "ask it to stop, do not wait", but ``Thread.join(0.0)``
+    returns immediately with the thread still alive — so the first pass logged "did not stop
+    within 0.0s; abandoning the thread" and marked the camera STOPPED for *every* camera on
+    *every* clean shutdown. Fifty false alarms a shutdown is how a real abandoned thread
+    stops being noticed, and a camera reported STOPPED while it is still reading and
+    publishing is a lie the operator API repeats. ``request_stop()`` exists for this pass.
+    """
+
+    def test_a_clean_shutdown_reports_no_abandoned_threads(
+        self, sink, fast_settings, scripted_factory, make_camera, caplog
+    ):
+        factory, _ = scripted_factory(script=[synthetic_image(0)])
+        settings = fast_settings(cameras=[make_camera(f"cam{index}") for index in range(3)])
+        manager = IngestManager(sink, settings=settings, source_factory=factory)
+        manager.start()
+        try:
+            assert _wait_for(lambda: manager.summary().streaming == 3)
+            with caplog.at_level(logging.WARNING, logger="shipinfer.ingest.camera"):
+                manager.stop()
+        finally:
+            manager.stop()
+
+        abandoned = [
+            record.getMessage()
+            for record in caplog.records
+            if "abandoning the thread" in record.getMessage()
+        ]
+        assert abandoned == [], abandoned
+
+    def test_no_camera_reports_stopped_while_its_thread_is_still_reading(
+        self, sink, fast_settings, make_camera
+    ):
+        armed, released = threading.Event(), threading.Event()
+
+        def factory(config, counter):
+            return ParkedSource(
+                config,
+                counter,
+                script=[synthetic_image(0)],
+                armed=armed,
+                released=released,
+            )
+
+        settings = fast_settings(cameras=[make_camera("cam0"), make_camera("cam1")])
+        manager = IngestManager(sink, settings=settings, source_factory=factory)
+        manager.start()
+        observed: list[tuple[str, CameraState, bool]] = []
+        try:
+            assert _wait_for(lambda: manager.summary().streaming == 2)
+            actors = [manager.actor("cam0"), manager.actor("cam1")]
+            armed.set()
+            time.sleep(0.05)  # let both threads enter a parked read
+
+            stopper = threading.Thread(target=manager.stop, name="fleet-stop")
+            stopper.start()
+            deadline = time.monotonic() + 0.3
+            while time.monotonic() < deadline:
+                observed.extend((a.camera_id, a.state, a.is_running) for a in actors)
+                time.sleep(0.005)
+            released.set()
+            stopper.join(10.0)
+            assert not stopper.is_alive(), "the fleet never finished stopping"
+        finally:
+            released.set()
+            manager.stop()
+
+        # Deduplicated: the window samples every few milliseconds, and a hundred copies of
+        # the same two camera ids makes the failure output unreadable without saying more.
+        lying = sorted(
+            {
+                camera_id
+                for camera_id, state, alive in observed
+                if alive and state is CameraState.STOPPED
+            }
+        )
+        assert observed, "the observation window closed before anything was sampled"
+        assert lying == [], f"reported STOPPED while the thread was still running: {lying}"
 
 
 class TestFleetHealth:

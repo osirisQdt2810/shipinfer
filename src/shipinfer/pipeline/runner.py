@@ -540,6 +540,19 @@ class PipelineRunner:
                     InferenceError(f"sink {self._sink.name!r} dropped {result.key}")
                 )
             return
+        # Refusals the transport reported since the last emit. Counted here, with the tag they
+        # belong to, and deliberately *after* this frame is settled: an asynchronous verdict
+        # about an earlier message must not decide this frame's outcome, which is what raising
+        # into `emit()` used to do.
+        for camera, frame in self._sink.drain_delivery_failures():
+            self._metrics.sink_failures.inc(sink=self._sink.name)
+            _LOG.error(
+                "sink %s did not deliver camera %s frame %d",
+                self._sink.name,
+                camera,
+                frame,
+                extra=log_context(camera_id=camera),
+            )
         try:
             self._record(result, event)
             if future is not None and future.set_running_or_notify_cancel():
@@ -577,6 +590,12 @@ class PipelineRunner:
 
     def _record(self, result: FrameResult, event: PerceptionEvent) -> None:
         camera = event.camera_id
+        # Declared in `PipelineMetrics` and, until this line, incremented by nothing. The
+        # existing assertion that it stays 0 under a broken sink was therefore true for the
+        # wrong reason — a counter nobody touches is 0 whatever the sink does — and the metric
+        # an operator would alert on for "is the pipeline emitting?" was dead on arrival. It is
+        # charged here, after a successful emit, because that is what it counts.
+        self._metrics.frames_emitted.inc(camera=camera)
         self._metrics.objects_per_frame.observe(len(event.objects), camera=camera)
         # From the capture, not from `result.state`. Reading the live state here was the same
         # ADR-002 race one level down: the sweeper finishes a frame with 3 detections, the

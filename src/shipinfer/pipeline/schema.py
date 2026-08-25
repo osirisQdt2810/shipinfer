@@ -25,6 +25,15 @@ one message type, ``Det2MOT``, as parallel arrays::
   embedder is *not* the same event as a frame with no people in it, and v1 could not tell
   those apart.
 
+**What v3 adds** is the tracklet. ``motservice`` was named for the step that was missing:
+this pipeline detected and embedded and then handed the result to a separate service to
+associate. With Plane 3 running in-process the identity is already known when the event is
+built, so it travels with the object — ``body_track_id_vec`` beside ``body_bbox_vec``,
+``ship_track_id_vec`` beside ``ship_bbox_vec``, in the same parallel-array idiom as
+everything else. Purely additive: ``as_det2mot`` is untouched, so a deployed ``motservice``
+that ignores the new keys and does its own association keeps working, and one that reads them
+can stop.
+
 People are **not** duplicated into a generic object array. Two representations of a 512-d
 embedding would double the largest field in the message — at 15 people per frame and 1000
 frames a second that is the difference between 150 MB/s and 300 MB/s of JSON — and it would
@@ -50,8 +59,10 @@ __all__ = [
 #: part of the contract, and a new one would be routed nowhere by a deployed consumer.
 MESSAGE_TYPE = "Det2MOT"
 
-#: 1 was ``DetectionMOTFrameData``. 2 adds ships, timing and completeness, additively.
-SCHEMA_VERSION = 2
+#: 1 was ``DetectionMOTFrameData``. 2 adds ships, timing and completeness; 3 adds the
+#: track id and its state. Every step is additive, and the number is bumped rather than
+#: left alone precisely so a consumer can branch on it instead of probing for a key.
+SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +99,18 @@ class ObjectRecord:
     #: float mask is 1 MB and this bus carries metadata, not pixels — the architecture doc
     #: is explicit that frames stay in shared memory and Kafka gets the small results.
     mask_area_px: float | None = None
+    #: Single-camera track identity, from Plane 3. Process-unique rather than per-camera, so
+    #: two cameras' tracklets can meet in the cross-camera tier without colliding; the camera
+    #: is in :attr:`PerceptionEvent.camera_id`, where it can be read.
+    #:
+    #: ``None`` when tracking is off, when the tracker did not publish this object yet (a
+    #: track is withheld until it has earned confirmation — publishing one that dies after two
+    #: frames hands downstream an identity that never existed), or when the frame lost the
+    #: ordering race. Distinguishable from a track id of 0, which the counter never issues.
+    track_id: int | None = None
+    #: That track's lifecycle state, as the tracker reported it. Carried rather than assumed
+    #: because a consumer that has to trust our filtering cannot apply its own.
+    track_state: str | None = None
 
     @property
     def bbox_list(self) -> list[float]:
@@ -205,8 +228,9 @@ class PerceptionEvent:
         }
 
     def as_dict(self) -> dict[str, Any]:
-        """The v2 payload: every v1 key, plus ships, timing and completeness."""
+        """The current payload: every v1 key, plus ships, timing, completeness and tracklets."""
         ships = self.objects_of("ship")
+        people = self.objects_of("person")
         payload = self.as_det2mot()
         payload.update(
             {
@@ -221,6 +245,14 @@ class PerceptionEvent:
                 "ship_id_vec": [o.ship_id for o in ships],
                 "ship_similarity_vec": [o.similarity for o in ships],
                 "ship_mask_area_vec": [o.mask_area_px for o in ships],
+                # Tracklets (v3). People keep the unprefixed ``body_`` idiom the v1 person
+                # arrays use and ships keep the ``ship_`` one, so a consumer that already
+                # walks one set of parallel arrays walks these with the same helper. A null
+                # entry means this object has no published identity — see ObjectRecord.
+                "body_track_id_vec": [o.track_id for o in people],
+                "body_track_state_vec": [o.track_state for o in people],
+                "ship_track_id_vec": [o.track_id for o in ships],
+                "ship_track_state_vec": [o.track_state for o in ships],
                 "captured_unix_ns": self.captured_unix_ns,
                 "emitted_unix_ns": self.emitted_unix_ns,
                 "latency_us": self.latency_us,

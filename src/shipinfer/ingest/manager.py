@@ -97,13 +97,19 @@ class IngestManager:
         """Stop every actor. Idempotent, and safe before :meth:`start`.
 
         Stop requests are issued to *all* actors first and only then joined, so shutting
-        down fifty cameras costs one read timeout rather than fifty.
+        down fifty cameras costs one read timeout rather than fifty. The first pass is
+        :meth:`~shipinfer.ingest.camera.actor.CameraActor.request_stop`, which is what that
+        method exists for: a ``stop(timeout_s=0.0)`` joins for zero seconds, and
+        ``Thread.join(0.0)`` returns immediately with the thread still alive — so every
+        clean shutdown logged "did not stop within 0.0s; abandoning the thread" once per
+        camera and marked each one STOPPED while it was still reading and publishing. Fifty
+        false alarms per shutdown is how a real abandoned thread stops being noticed.
         """
         with self._lock:
             actors = list(self._actors.values())
             self._actors.clear()
         for actor in actors:
-            actor.stop(timeout_s=0.0)
+            actor.request_stop()
         for actor in actors:
             actor.stop(timeout_s=timeout_s)
         self._started = False

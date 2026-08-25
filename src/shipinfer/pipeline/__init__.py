@@ -59,7 +59,10 @@ from shipinfer.pipeline.graph import (
     PipelineStage,
     StageOutcome,
     StageStatus,
+    TrackerShard,
+    TrackStage,
     build_perception_graph,
+    tracking_available,
 )
 from shipinfer.pipeline.metrics import PipelineMetrics
 from shipinfer.pipeline.reassembly import (
@@ -117,5 +120,8 @@ __all__ = [
     "StageOutcome",
     "StageStatus",
     "TaggedFrame",
+    "TrackStage",
+    "TrackerShard",
     "build_perception_graph",
+    "tracking_available",
 ]

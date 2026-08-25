@@ -79,6 +79,25 @@ class ResultSink(abc.ABC):
     def _do_emit(self, event: PerceptionEvent) -> None:
         """Publish one event, or raise."""
 
+    def drain_delivery_failures(self) -> tuple[tuple[str, int], ...]:
+        """``(camera_id, frame_id)`` for messages the transport refused *asynchronously*.
+
+        Returns them once and forgets them, so the caller counts each exactly once.
+
+        WHY THIS IS NOT THE ``bool`` FROM :meth:`emit`. A transport that acknowledges later
+        than it accepts — Kafka is the one here — answers for message *A* while message *B* is
+        being sent. Folding that into ``emit(B)``'s return value charges A's loss to B: B, which
+        the broker accepted, gets deleted from the pipeline's records and its caller gets an
+        error, while A, genuinely lost, was already recorded as a success. One camera's publish
+        loss corrupts another camera's frame.
+
+        A future that is already settled cannot be un-settled, so the honest split is that
+        ``emit`` reports what it knows synchronously and this reports what arrives afterwards —
+        with the tag it belongs to, so the count stays exact and the attribution stops being
+        wrong. A synchronous sink overrides nothing and returns ``()``.
+        """
+        return ()
+
     def flush(self) -> None:
         """Push anything buffered. Called on a timer and at shutdown."""
 

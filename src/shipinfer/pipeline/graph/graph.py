@@ -20,6 +20,13 @@ Everything tensor-level is *not* reimplemented: stage validation compares
 :class:`~shipinfer.core.types.TensorSpec` objects from the same model configs the ensemble
 reads, in the same way, for the same reason (a mis-wired graph must stop a deploy).
 
+**Where tracking is.** In this graph, when an operator turns it on — see
+:mod:`shipinfer.pipeline.graph.tracking`. It is the one stateful stage in an otherwise
+stateless DAG, and it is last for that reason: everything before it can be batched, spilled
+to another GPU and completed out of order, while it must see one camera's frames one at a
+time and in order. Off by default, because turning it on changes the shape of a benchmark
+whose whole subject is stateless fan-out.
+
 **Where vessel identity went.** There is no ``ship_recognizer`` stage, and that is deliberate
 rather than unfinished. Identity is a **gallery query over the ship embedding**, not a second
 network: `shipvision.reid` already carries bounded galleries with the same-camera exclusion
@@ -28,9 +35,9 @@ answer a question a nearest-neighbour search over the embedder's output already 
 
 It also puts the step on the right side of the system's main division. Recognition against a
 gallery is **stateful** — the gallery is the state — so it belongs with tracking in the
-stateful plane, not in the stateless GPU pool this graph drives. A stage was there while the
-model was a stand-in; pointing the repository at real engines is what made the mismatch
-visible, since a ResNet embedder cannot answer "which vessel is this".
+stateful plane rather than in the stateless GPU pool. A stage was there while the model was a
+stand-in; pointing the repository at real engines is what made the mismatch visible, since a
+ResNet embedder cannot answer "which vessel is this".
 """
 
 from __future__ import annotations
@@ -59,11 +66,17 @@ from shipinfer.pipeline.graph.state import (
     FrameState,
     field_map_names,
 )
+from shipinfer.pipeline.graph.tracking import (
+    TRACK_IDS,
+    TRACK_STATES,
+    build_tracking_stage,
+)
 from shipinfer.pipeline.schema import ObjectRecord
 from shipinfer.runtime.ops import ImageOps
 
 __all__ = [
     "DEFAULT_RECORD_FIELDS",
+    "TRACKING_RECORD_FIELDS",
     "PipelineGraph",
     "StageObserver",
     "build_perception_graph",
@@ -84,6 +97,17 @@ __all__ = [
 DEFAULT_RECORD_FIELDS: Mapping[str, tuple[str, ...]] = {
     "embedding": ("ship_embedding", "person_embedding"),
     "mask_area_px": ("ship_mask_area",),
+}
+
+#: The two fields the tracking stage fills, added to the field map only when that stage is in
+#: the graph. Kept out of :data:`DEFAULT_RECORD_FIELDS` on purpose: the field map is also the
+#: retain set *and* the thing :meth:`PipelineGraph.validate` checks against what the stages
+#: produce, so mapping a field no stage fills would refuse every graph with tracking off — and
+#: tracking is off by default. One name per field here, unlike ``embedding``: a camera has one
+#: tracker and it is given the whole frame, so ships and people come back in one batch.
+TRACKING_RECORD_FIELDS: Mapping[str, tuple[str, ...]] = {
+    "track_id": (TRACK_IDS,),
+    "track_state": (TRACK_STATES,),
 }
 
 
@@ -193,7 +217,11 @@ class PipelineGraph:
         """
         last: dict[str, int] = {}
         for index, stage in enumerate(self._stages):
-            for name in stage.consumes:
+            # `reads`, not `consumes`: an optional read is still a read. Computing this over
+            # the gating names alone would free the embedders' output after the embedders,
+            # while the tracking stage after them still looked for it — and the symptom is
+            # not an error, it is a tracker that quietly stops seeing appearance vectors.
+            for name in stage.reads:
                 last[name] = index
         return tuple(
             frozenset(
@@ -299,7 +327,18 @@ class PipelineGraph:
                     f"{where}: requires {sorted(set(stage.requires) - set(stage.consumes))} "
                     f"which it does not consume"
                 )
-            for name in stage.consumes:
+            both = sorted(set(stage.optional) & set(stage.consumes))
+            if both:
+                raise ConfigurationError(
+                    f"{where}: declares {both} as both consumed and optional. A name either "
+                    f"gates this stage or it does not; declaring both makes whether the stage "
+                    f"runs on a frame missing it depend on which check is read first"
+                )
+            # Over `reads`, so an optional name is checked too: the point of declaring it
+            # rather than reaching into the state is that a graph naming a batch nothing
+            # produces is refused at start-up instead of tracking with no appearance for the
+            # life of the deployment.
+            for name in stage.reads:
                 if name == FRAME_INPUT:
                     continue
                 source = produced.get(name)
@@ -381,16 +420,19 @@ def build_perception_graph(
 ) -> PipelineGraph:
     """The ship + person DAG from ``references/.../new-system-architecture.md``::
 
-        frame -> detect -+- ship   -> segment -> embed
-                         +- person -> embed
+        frame -> detect -+- ship   -> segment -> embed -+- track   (optional)
+                         +- person ------------> embed -+
 
     The shape is the specification's, not an invention: detect, segment and embed are
-    stateless and therefore poolable across all 16 GPUs, while tracking — and the gallery
-    query that turns a ship embedding into an identity — is stateful and lives in another
-    service behind the message bus. Segmentation is conditional because it
-    is the heaviest model in the DAG — running it on every frame would cost more than
-    everything else combined, and running it only where a ship was detected makes it a
-    minority of the load.
+    stateless and therefore poolable across all 16 GPUs, while tracking is stateful and
+    sharded by camera. Segmentation is conditional because it is the heaviest model in the
+    DAG — running it on every frame would cost more than everything else combined, and
+    running it only where a ship was detected makes it a minority of the load.
+
+    Tracking is appended **only when ``settings.tracking.enabled``**, and with it the two
+    track fields join the field map. Both halves of that are one decision: the field map is
+    what the emitted event reads and what :meth:`PipelineGraph.validate` checks against the
+    stages, so a graph that mapped ``track_id`` with no tracking stage would refuse to start.
 
     Model names come from ``settings.model_overrides`` when present, so a deployment can A/B
     a retrained detector by editing settings rather than this function.
@@ -463,4 +505,16 @@ def build_perception_graph(
             timeout_s=timeout_s,
         ),
     ]
-    return PipelineGraph(stages, name="ship_person_perception")
+    field_map: dict[str, tuple[str, ...]] = dict(DEFAULT_RECORD_FIELDS)
+    if settings.tracking.enabled:
+        stages.append(
+            build_tracking_stage(
+                settings.tracking,
+                # Both embedders, and neither of them gating: a frame holding only people
+                # has no `ship_embedding` at all, and requiring it would mean the tracker
+                # never ran on the frames that are most of the fleet's traffic.
+                appearance=("ship_embedding", "person_embedding"),
+            )
+        )
+        field_map.update(TRACKING_RECORD_FIELDS)
+    return PipelineGraph(stages, field_map=field_map, name="ship_person_perception")
