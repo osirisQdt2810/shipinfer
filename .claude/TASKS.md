@@ -131,8 +131,13 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 5 · Everything else still owed
 
-- [ ] **C4 · RTSP in the benchmark** (R55) — tests cover it; the benchmark replays JPEGs, so
-      NVDEC has never been exercised by a measurement.
+- [~] **C4 · RTSP in the benchmark** (R55) — wired and tested offline; **not yet run**.
+      `--source rtsp` points the bench cameras at `scripts/rtsp_serve.py` over a real socket,
+      `benchmarks/harness/rtsp.py` owns the server's lifetime and refuses a run whose server
+      never accepts or exits early, and the source is recorded in the metadata and printed on
+      the console. 11 offline tests. The two sources measure **different things** — replay
+      removes the decode path — so the README says a replay number is an upper bound on the
+      RTSP one. Remaining: an actual RTSP run on a quiet box, which needs the GPUs free.
 - [x] **C5 · Benchmark tiers algo and kernel** (R44) — both exist and are tested offline.
       `benchmarks/kernels.py` times each `ImageOps` implementation per op, bound to a device
       the way `PipelineRunner._build_ops` binds it; `benchmarks/stages.py` reads the

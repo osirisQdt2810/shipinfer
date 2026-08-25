@@ -250,3 +250,200 @@ class TestSerialAgainstWallIsWhatConcurrencyBought:
         )
 
         assert "no concurrency at all" in text
+
+
+class TestTheRunRecordsWhichSourceItMeasured:
+    """R55 makes RTSP mandatory for the benchmark, not only for the tests — and the reason is
+    that a replay run measures the inference plane with the **decode path removed**.
+
+    A deployment reads fifty RTSP cameras, so NVDEC, the jitter buffer, reconnects and the
+    NV12 conversion are part of the real cost and none of them appear in a replay run. A
+    replay number is an upper bound on the RTSP one. The two must never be compared as though
+    they measured the same thing, which is why the source is recorded rather than implied.
+    """
+
+    def test_replay_is_the_default_and_is_recorded(self) -> None:
+        assert BenchConfig(cameras=4, fps=5.0).as_dict()["source"] == "replay"
+
+    def test_an_rtsp_run_says_so_in_its_metadata(self) -> None:
+        assert BenchConfig(cameras=4, fps=5.0, source="rtsp").as_dict()["source"] == "rtsp"
+
+    def test_a_replay_camera_points_at_a_folder(self) -> None:
+        from benchmarks.harness import shipinfer as harness
+
+        cameras = harness._cameras(BenchConfig(cameras=4, fps=5.0))
+
+        assert len(cameras) == 4
+        assert all(c["source"] == "replay" for c in cameras)
+        assert all(not c["uri"].startswith("rtsp://") for c in cameras)
+
+    def test_an_rtsp_camera_points_at_the_local_server(self) -> None:
+        from benchmarks.harness import shipinfer as harness
+
+        cameras = harness._cameras(
+            BenchConfig(cameras=4, fps=5.0, source="rtsp", rtsp_port=9001)
+        )
+
+        assert len(cameras) == 4
+        assert all(c["uri"].startswith("rtsp://127.0.0.1:9001/") for c in cameras)
+        # Left unset on purpose: the point of an RTSP run is to exercise the registry's own
+        # decoder selection, the way production does, rather than to pin one.
+        assert all("source" not in c for c in cameras)
+
+    def test_every_camera_gets_its_own_stream(self) -> None:
+        """Fifty cameras sharing one URI would measure one decode fifty times."""
+        from benchmarks.harness import shipinfer as harness
+
+        cameras = harness._cameras(BenchConfig(cameras=8, fps=5.0, source="rtsp"))
+
+        assert len({c["uri"] for c in cameras}) == 8
+
+    def test_the_camera_ids_match_between_the_two_sources(self) -> None:
+        """So a replay run and an RTSP run are comparable per camera, even though their
+        totals are not comparable to each other."""
+        from benchmarks.harness import shipinfer as harness
+
+        replay = harness._cameras(BenchConfig(cameras=6, fps=5.0))
+        rtsp = harness._cameras(BenchConfig(cameras=6, fps=5.0, source="rtsp"))
+
+        assert [c["camera_id"] for c in replay] == [c["camera_id"] for c in rtsp]
+
+
+class TestTheRtspServerIsRefusedRatherThanToleratedWhenItFails:
+    """A run whose cameras cannot connect produces a clean-looking zero, and this project has
+    already published one of those. So both failure modes raise at start-up rather than
+    surfacing as a mysteriously empty measurement forty seconds later."""
+
+    def test_a_replay_run_starts_nothing(self, monkeypatch) -> None:
+        from benchmarks.harness import rtsp
+
+        started: list[object] = []
+        monkeypatch.setattr(rtsp.subprocess, "Popen", lambda *a, **_k: started.append(a))
+
+        with rtsp.serving(BenchConfig(cameras=4, fps=5.0)):
+            pass
+
+        assert started == [], "a replay run must not start an RTSP server"
+
+    def test_a_server_that_never_accepts_is_refused(self, monkeypatch) -> None:
+        from benchmarks.harness import rtsp
+
+        class _Alive:
+            returncode = None
+            stdout = None
+
+            def poll(self) -> None:
+                return None
+
+            def terminate(self) -> None: ...
+
+            def wait(self, timeout: float | None = None) -> int:
+                return 0
+
+            def kill(self) -> None: ...
+
+        monkeypatch.setattr(rtsp.subprocess, "Popen", lambda *_a, **_k: _Alive())
+        monkeypatch.setattr(rtsp, "_accepting", lambda *_a, **_k: False)
+
+        with (
+            pytest.raises(RuntimeError, match="did not accept a connection"),
+            rtsp.serving(BenchConfig(cameras=4, fps=5.0, source="rtsp"), timeout_s=0.5),
+        ):
+            pass
+
+    def test_a_server_that_exits_early_reports_its_output(self, monkeypatch) -> None:
+        """The reason it died is the whole diagnosis — a missing GStreamer plugin, a port in
+        use — and swallowing it costs an afternoon."""
+        import io
+
+        from benchmarks.harness import rtsp
+
+        class _Dead:
+            returncode = 1
+            stdout = io.StringIO("gst_parse_launch: no element rtph264pay")
+
+            def poll(self) -> int:
+                return 1
+
+            def terminate(self) -> None: ...
+
+            def wait(self, timeout: float | None = None) -> int:
+                return 1
+
+            def kill(self) -> None: ...
+
+        monkeypatch.setattr(rtsp.subprocess, "Popen", lambda *_a, **_k: _Dead())
+        monkeypatch.setattr(rtsp, "_accepting", lambda *_a, **_k: False)
+
+        with (
+            pytest.raises(RuntimeError, match="no element rtph264pay"),
+            rtsp.serving(BenchConfig(cameras=4, fps=5.0, source="rtsp"), timeout_s=5.0),
+        ):
+            pass
+
+    def test_the_server_is_stopped_even_when_the_run_raises(self, monkeypatch) -> None:
+        """A GLib loop left holding the port makes the *next* run fail with an address
+        already in use, minutes later and nowhere near the cause."""
+        from benchmarks.harness import rtsp
+
+        stopped: list[str] = []
+
+        class _Server:
+            returncode = None
+            stdout = None
+
+            def poll(self) -> None:
+                return None
+
+            def terminate(self) -> None:
+                stopped.append("terminate")
+
+            def wait(self, timeout: float | None = None) -> int:
+                return 0
+
+            def kill(self) -> None:
+                stopped.append("kill")
+
+        monkeypatch.setattr(rtsp.subprocess, "Popen", lambda *_a, **_k: _Server())
+        monkeypatch.setattr(rtsp, "_accepting", lambda *_a, **_k: True)
+
+        with (
+            pytest.raises(ValueError, match="the run failed"),
+            rtsp.serving(BenchConfig(cameras=4, fps=5.0, source="rtsp")),
+        ):
+            raise ValueError("the run failed")
+
+        assert "terminate" in stopped
+
+    def test_a_server_that_ignores_terminate_is_killed(self, monkeypatch) -> None:
+        from benchmarks.harness import rtsp
+
+        stopped: list[str] = []
+
+        class _Stubborn:
+            returncode = None
+            stdout = None
+            _terminated = False
+
+            def poll(self) -> None:
+                return None
+
+            def terminate(self) -> None:
+                stopped.append("terminate")
+                self._terminated = True
+
+            def wait(self, timeout: float | None = None) -> int:
+                if self._terminated and "kill" not in stopped:
+                    raise rtsp.subprocess.TimeoutExpired("rtsp", timeout or 0)
+                return 0
+
+            def kill(self) -> None:
+                stopped.append("kill")
+
+        monkeypatch.setattr(rtsp.subprocess, "Popen", lambda *_a, **_k: _Stubborn())
+        monkeypatch.setattr(rtsp, "_accepting", lambda *_a, **_k: True)
+
+        with rtsp.serving(BenchConfig(cameras=4, fps=5.0, source="rtsp")):
+            pass
+
+        assert stopped == ["terminate", "kill"]

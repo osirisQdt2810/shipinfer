@@ -115,6 +115,27 @@ survives while saturated.** Its plans are static-batch and `TrtRunner::infer` ca
 and aborts the process — `terminate called ... what(): setInputShape failed`, reproducibly at
 60 img/s. It cannot be run at the low rates our own driver can currently deliver.
 
+## Where the frames come from (R55)
+
+```bash
+python benchmarks/run_bench.py --systems shipinfer                 # replay (default)
+python benchmarks/run_bench.py --systems shipinfer --source rtsp   # over a real socket
+```
+
+**These are two different experiments, not a fast one and a slow one.** `replay` reads JPEGs
+off disk, which measures the inference plane with the decode path *removed*. `rtsp` pulls
+H.264 from `scripts/rtsp_serve.py` over a real socket, so NVDEC, the jitter buffer, reconnects
+and the NV12 conversion are all included — and the deployment reads fifty RTSP cameras, so
+those are part of its real cost. A replay number is an **upper bound** on the RTSP one.
+
+`config.as_dict()` records which was used and the console names it, because the failure to
+avoid is quoting a replay figure as though the decode path were in it.
+
+The server is started and stopped around the run by `benchmarks/harness/rtsp.py`. It refuses
+rather than tolerates: a server that never accepts a connection, or that exits early, raises
+at start-up with the reason attached. A run whose cameras cannot connect produces a
+clean-looking zero, and this project has already published one of those.
+
 ## The three tiers (R44)
 
 `system → algo → kernel`. Each answers a different question, and reading one as another is the

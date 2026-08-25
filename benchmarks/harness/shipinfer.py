@@ -146,15 +146,24 @@ class ShipInferResult:
 
 
 def _cameras(config: BenchConfig) -> list[dict[str, Any]]:
-    """One replay camera per source, half on person frames and half on ship frames.
+    """One camera per source, half on person frames and half on ship frames.
 
     The split mirrors the baseline exactly: it pushes ``person_2K`` through the detector and
     ``ship_2K`` through the segmenter, so the mix of content — and therefore the number of
     crops the detector produces — has to be the same or the downstream load is not the same
     experiment.
+
+    With ``source == "rtsp"`` the same split is served over a real socket instead of read off
+    disk. That is a **different experiment**, not a slower one: replay measures the inference
+    plane with the decode path removed, while RTSP includes NVDEC, the jitter buffer and the
+    NV12 conversion the deployment actually pays for. `config.as_dict()` records which was
+    used, because the two numbers must never be compared as though they were the same
+    measurement.
     """
     resolved = config.resolved()
     half = config.cameras // 2
+    if config.source == "rtsp":
+        return _rtsp_cameras(config)
     cameras: list[dict[str, Any]] = []
     for index in range(config.cameras):
         folder = resolved.person_frames if index < half else resolved.ship_frames
@@ -168,6 +177,27 @@ def _cameras(config: BenchConfig) -> list[dict[str, Any]]:
             }
         )
     return cameras
+
+
+def _rtsp_cameras(config: BenchConfig) -> list[dict[str, Any]]:
+    """Cameras pointed at the local RTSP server, in the same person/ship split.
+
+    The URIs are built by `scripts/rtsp_serve.stream_uri`, not by string-formatting them
+    here: the server owns the path layout, and a benchmark that guessed it would fail as a
+    connection refusal minutes into a run rather than as a mistake at start-up.
+    """
+    from scripts.rtsp_serve import stream_uri
+
+    return [
+        {
+            "camera_id": f"cam{index:02d}",
+            "uri": stream_uri(index, port=config.rtsp_port, host="127.0.0.1"),
+            # Left unset so the ingest registry resolves it the way production does — the
+            # point of an RTSP run is to exercise the real decoder selection, not to pin it.
+            "fps": config.fps,
+        }
+        for index in range(config.cameras)
+    ]
 
 
 def _settings(config: BenchConfig) -> Any:
