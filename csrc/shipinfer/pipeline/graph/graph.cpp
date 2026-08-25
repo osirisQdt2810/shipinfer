@@ -140,8 +140,14 @@ namespace shipinfer {
 
     void PipelineGraph::check_pool(const ModelPool& pool, const std::vector<int64_t>& fed_row) {
         const TrtEngine& plan = pool.engine();
-        if (plan.inputs().empty())
-            throw ConfigError(pool.name() + ": the plan declares no input");
+        if (plan.inputs().size() != 1) {
+            // `execute` fills exactly one input binding. A two-input plan would infer on
+            // uninitialised device memory for the second with no error — the failure shapes.h
+            // exists to make impossible — so it is refused here, naming the count.
+            throw ConfigError(pool.name() + ": the plan declares " +
+                              std::to_string(plan.inputs().size()) +
+                              " inputs; this graph fills exactly one");
+        }
         expect_input_row(plan.inputs().front(), fed_row, pool.name());
         for (const TensorSpec& spec : plan.inputs()) expect_float32(spec, pool.name());
         for (const TensorSpec& spec : plan.outputs()) expect_float32(spec, pool.name());
@@ -295,7 +301,7 @@ namespace shipinfer {
             if (ship_embedder_ != nullptr && !b.ship_index.empty()) {
                 will_run.push_back("ship_embedder");
             }
-            collector.expect(state.tag(), will_run);
+            collector.also_expect(state.tag(), will_run);
         }
 
         size_t failed = 0;

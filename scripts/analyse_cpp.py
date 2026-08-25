@@ -53,10 +53,12 @@ def main() -> int:
         samples,
         system="cpp",
         warmup_s=args.warmup,
-        # Only the entry module gets an offered rate from the frame count; the object-fed models
-        # are driven by however many detections there were, which is data rather than config —
+        # Only the entry module gets an offered rate from the frame count. The detector is fed by
+        # the worker drain loop, not by the cameras — under saturation only a fraction of what
+        # was read ever reaches it — so giving it the cameras' rate printed a detector row that
+        # "sustained" more than the whole run retired. The object-fed models are data-driven for
         # the same reason the Python harness measures theirs instead of asserting them.
-        offered={"pipeline": achieved, "ship_detector": achieved},
+        offered={"pipeline": achieved},
         # Per module, never one scalar. The pipeline queue's bound is the configured capacity;
         # a model module's series is `ModelPool::waiting()`, which is bounded by the *worker*
         # count — so a pool with every worker blocked in `lease()` plateaus at `workers`, and a

@@ -58,13 +58,16 @@ namespace shipinfer {
         // false and letting it vanish is the bug this whole class exists to prevent.
         bool open(const std::shared_ptr<FrameState>& state,
                   const std::vector<std::string>& expected);
-        // Narrows the expected set once the detections are known, which is what keeps a
-        // *skipped* branch distinguishable from a *failed* one. `open` cannot know: the set
-        // depends on what the detector found. Before this was wired, every ship-only frame
-        // sealed Incomplete with `missing = ["person_embedder"]` and every person-only frame
-        // with the two ship stages — the majority of the fleet, byte-identical to a real
-        // embedder outage. Called from `PerceptionGraph::execute` once the classes are split.
-        void expect(const FrameTag& tag, const std::vector<std::string>& stages);
+        // **Widens** the expected set with the stages that will actually run, once the
+        // detections are known. `open` is called with only the unconditional stages (detect,
+        // crop); this adds the conditional branches that the frame's content selects. It never
+        // removes — which is why it is named for what it does: the first version called it
+        // `expect` and documented it as "narrowing", and a caller who opened with a fuller set
+        // would have found a skipped branch silently expected again. Before this was wired at
+        // all, every ship-only frame sealed Incomplete with `missing = ["person_embedder"]` and
+        // every person-only frame with the two ship stages, byte-identical to a real embedder
+        // outage.
+        void also_expect(const FrameTag& tag, const std::vector<std::string>& stages);
         void deliver(const FrameTag& tag, const std::string& stage);
         void seal(const FrameTag& tag);
         int sweep();

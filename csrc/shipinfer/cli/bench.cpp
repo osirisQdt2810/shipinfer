@@ -250,30 +250,25 @@ int main(int argc, char** argv) {
             // same device by construction.
             const int device = options.devices[static_cast<size_t>(w) % options.devices.size()];
             workers.emplace_back([&, device]() {
-                GPU_CHECK(gpuSetDevice(device));
-                // One staging buffer per worker, sized once for a whole detector batch and
-                // reused for the run.
-                //
-                // The first version declared this, wrote a comment saying `gpuMalloc` must not
-                // be on the hot path, then voided it with `(void)` and allocated a fresh
-                // `DeviceBuffer` per frame anyway. At ~1000 img/s that is a thousand
-                // `gpuMalloc` **and a thousand `gpuFree` per second across 48 threads** — and
-                // `gpuFree` is device-blocking, it synchronises every stream on the device. So
-                // it reintroduced, on every single frame, precisely the device-wide stall that
-                // moving preprocessing onto the instance's stream had just removed. Review
-                // caught it, and the comment describing the opposite of the code below it was
-                // worse than no comment at all.
-                DeviceBuffer staging;
-                gpuStream_t copy_stream = nullptr;
-                GPU_CHECK(gpuStreamCreate(&copy_stream));
-
-                // Everything a worker does is inside one try: a GPU_CHECK throw from the
-                // staging grow or the copy (a cudaErrorMemoryAllocation on a shared box is
-                // realistic) used to escape the thread function and call std::terminate — a 70
-                // s run lost with no counters and a truncated log. Now the frames this
-                // iteration opened are sealed, the failure is counted, and the worker exits
-                // reporting itself.
+                // Everything a worker does — binding its device, creating its stream, growing
+                // its staging, serving — is inside one try. A GPU_CHECK throw anywhere else
+                // escapes the thread function and calls std::terminate: a run lost with no
+                // counters and a truncated log. The first guard covered only the loop; the two
+                // calls that most plausibly fail on a shared box (materialising the context,
+                // creating a stream, both of which can return cudaErrorMemoryAllocation) sat
+                // outside it.
+                struct StreamHolder {
+                    gpuStream_t stream = nullptr;
+                    ~StreamHolder() {
+                        if (stream != nullptr) gpuStreamDestroy(stream);
+                    }
+                };
                 try {
+                    GPU_CHECK(gpuSetDevice(device));
+                    DeviceBuffer staging;
+                    StreamHolder copy;
+                    GPU_CHECK(gpuStreamCreate(&copy.stream));
+                    gpuStream_t copy_stream = copy.stream;
                     while (!stopping.load()) {
                         // A detector-sized batch, because the plan is static at that batch and
                         // `setInputShape` refuses anything else. Rows, not items: the queue
@@ -364,7 +359,6 @@ int main(int argc, char** argv) {
                     std::cerr << "worker on gpu" << device << " exited: " << error.what()
                               << "\n";
                 }
-                gpuStreamDestroy(copy_stream);
             });
         }
 

@@ -65,7 +65,8 @@ namespace shipinfer {
         return true;
     }
 
-    void FrameCollector::expect(const FrameTag& tag, const std::vector<std::string>& stages) {
+    void FrameCollector::also_expect(const FrameTag& tag,
+                                     const std::vector<std::string>& stages) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = pending_.find(tag.key());
         if (it == pending_.end()) return;

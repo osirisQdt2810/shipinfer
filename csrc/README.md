@@ -68,3 +68,11 @@ Host `nvcc` is 11.5 against a 12.6 driver. That is fine for this box — the A50
 which 11.5 supports, and a cudart-linked binary is forward-compatible with a newer driver —
 but it is why `sm_89` cannot be built here, and why a production build belongs in a container
 with a matching toolkit.
+
+## Where it runs
+
+`deploy/rootless/cpp.sh` runs the binaries in the container, which is where every measurement
+belongs (`.claude/CLAUDE.md`, "Where commands run"). Nothing stops `csrc/build/bench` being
+invoked directly on the host — `runtime/containment.py` is a Python gate and does not see this
+binary — so a number from a host run is **not gated** and is not a production number. Ledger
+C47 tracks making the binary consult the gate itself.
