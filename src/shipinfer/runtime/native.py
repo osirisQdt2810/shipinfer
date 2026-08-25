@@ -74,13 +74,29 @@ def native_module() -> ModuleType | None:
         return None
 
     _LOG.info(
+        # `__version__`, not `version` — the extension has only ever set the attribute. The
+        # banner degraded to "shipvision ?" because `_describe` swallowed the AttributeError,
+        # which is exactly why fixing `native_version()` alone left this behind: a guard that
+        # turns a wrong name into a question mark hides the wrong name.
         "fused kernels loaded: shipvision %s (%s, %s device(s))",
-        _describe(kernels, "version"),
+        _version_of(kernels),
         _describe(kernels, "platform"),
         _describe(kernels, "device_count"),
     )
     module: ModuleType = kernels
     return module
+
+
+def _version_of(module: ModuleType) -> str:
+    """The extension's version string, or ``"?"``.
+
+    A free function taking the module rather than a call to :func:`native_version`, because
+    the banner runs *inside* ``native_module()`` and that is `lru_cache`d — the cache is
+    populated only after the call returns, so re-entering it would recurse until the stack
+    ran out. Cheap to write the other way and impossible to get wrong.
+    """
+    version = getattr(module, "__version__", None)
+    return "?" if version is None else str(version)
 
 
 def _describe(module: ModuleType, name: str) -> str:
@@ -114,8 +130,25 @@ def is_native_available() -> bool:
 
 
 def native_version() -> str | None:
+    """The extension's version, or None when there is no extension.
+
+    `__version__`, not `version()`. The extension has only ever set the attribute
+    (`csrc/bindings/module.cpp` — `m.attr("__version__")`), and the call was unreachable for
+    as long as nothing in `shipinfer` put `shipvision._C` into `sys.modules`. The moment the
+    tracking stage imported `shipvision.tracking` at module scope, it became reachable and
+    took out `InferenceServer.start()` on every host where the submodule is built — which is
+    the production container, and not CI, because CI deliberately does not check the
+    submodule out (ADR-001).
+
+    `getattr` with a default rather than a bare attribute read: a version is a diagnostic, and
+    an extension that does not announce one is a fact to report, not a reason to refuse to
+    start.
+    """
     module = native_module()
-    return module.version() if module is not None else None
+    if module is None:
+        return None
+    version = _version_of(module)
+    return None if version == "?" else version
 
 
 def require_native() -> ModuleType:

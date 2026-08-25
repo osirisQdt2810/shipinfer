@@ -72,9 +72,18 @@ class ExecutionSettings(BaseModel):
     async_transfers: bool = True
 
     # -- warm-up -----------------------------------------------------------------------
-    #: Batches pushed through each instance at load time, so the first real request does
-    #: not pay for lazy CUDA module loading, cuBLAS autotuning and TensorRT's first-call
-    #: allocations. Skipping this makes the first p99 of every deploy meaningless.
+    #: Zero-filled batches pushed through each instance at load time, so the first real
+    #: request does not pay for lazy CUDA module loading, cuBLAS autotuning and TensorRT's
+    #: first-call allocations. Skipping this makes the first p99 of every deploy meaningless.
+    #:
+    #: **Not the only warm-up, and not the one that wins.** A model that declares
+    #: ``model_warmup`` samples in its ``config.yaml`` runs *those* at start-up, ``count``
+    #: times each, whatever this is set to — including 0. An iteration count decides how
+    #: often a model is warmed; what selects the kernels is what it is warmed with, and a
+    #: declared sample is the operator saying what that should be. So ``0`` means "no
+    #: implicit warm-up", not "no warm-up". A declared sample that fails stops the instance
+    #: from ever reporting ready, on purpose: a warm-up that quietly did not happen is worse
+    #: than none, because the deployment then believes its first p99 is representative.
     warmup_iterations: int = Field(default=3, ge=0)
     #: Capture graphs during warm-up rather than on the first live request.
     warmup_captures_graphs: bool = True
