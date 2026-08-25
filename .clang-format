@@ -1,46 +1,25 @@
-# C++/CUDA formatting for native/.
+# C++ style for csrc/. Enforced by pre-commit so it is not a thing anyone has to remember.
 #
-# Two deviations from LLVM's defaults, both deliberate and both the project owner's
-# preference — written down here so clang-format enforces them instead of them being
-# re-litigated in review:
+# Three settings are the operator's explicit requests and are written down so clang-format
+# enforces them instead of them being re-litigated in review:
 #
-#   NamespaceIndentation: All      namespace contents are indented, so nesting is visible
-#                                  at a glance instead of being inferred from a closing brace
-#                                  three hundred lines away.
-#   IndentAccessModifiers: true    `public:` gets its own indentation level and members sit
-#                                  one level deeper, rather than the access specifier being
-#                                  outdented past the class body.
+#   NamespaceIndentation: All      the body of a `namespace X {` is indented (V45; ledger A3).
+#                                  LLVM's default is `None`, which is why the first version of
+#                                  csrc/ was flat.
+#   IndentWidth: 4                 four spaces, as the Python side (V44; ledger A1).
+#   AccessModifierOffset: -2       `public:` half-outdented, members one level deeper.
 #
-# ColumnLimit matches the Python side (black's line-length 96), so a file does not change
-# shape depending on which language it is written in.
+# ColumnLimit matches the Python side (black's line-length 96), so a file does not change shape
+# depending on which language it is written in. That decision predates this file's rewrite and
+# was lost in it; restored.
 ---
 Language: Cpp
-BasedOnStyle: LLVM
-
-IndentWidth: 2
-TabWidth: 2
-UseTab: Never
+BasedOnStyle: Google
+Standard: c++17
 ColumnLimit: 96
-
+IndentWidth: 4
+AccessModifierOffset: -2
 NamespaceIndentation: All
-IndentAccessModifiers: true
-CompactNamespaces: false
-FixNamespaceComments: true
-
-# `template <typename T> class Foo {` stays on one line when it fits.
-AlwaysBreakTemplateDeclarations: No
-
-# `char* p`, not `char *p`: the pointer is part of the type.
-PointerAlignment: Left
-ReferenceAlignment: Left
-DerivePointerAlignment: false
-
+IndentPPDirectives: BeforeHash
 AllowShortFunctionsOnASingleLine: Inline
-AllowShortIfStatementsOnASingleLine: Never
-AllowShortLoopsOnASingleLine: false
-BreakBeforeBraces: Attach
-SeparateDefinitionBlocks: Leave
-
-SortIncludes: CaseSensitive
-IncludeBlocks: Preserve
-...
+DerivePointerAlignment: false
