@@ -125,7 +125,18 @@ hook down, for when the operator asked to see something before it is executed.
 
 - [ ] **C4 · RTSP in the benchmark** (R55) — tests cover it; the benchmark replays JPEGs, so
       NVDEC has never been exercised by a measurement.
-- [ ] **C5 · Benchmark tiers algo and kernel** (R44) — only the system tier exists.
+- [x] **C5 · Benchmark tiers algo and kernel** (R44) — both exist and are tested offline.
+      `benchmarks/kernels.py` times each `ImageOps` implementation per op, bound to a device
+      the way `PipelineRunner._build_ops` binds it; `benchmarks/stages.py` reads the
+      `stage_latency_us` histograms the pipeline already fills and reports per-frame cost and
+      share. 20 new offline tests pin the arithmetic (105 in `benchmarks/tests` total).
+      Two findings on the way: the first kernel run timed **torch on the CPU** because
+      `TorchImageOps` defaults there without a `device_index` — a true number about a
+      configuration nobody runs; and `letterbox` returns numpy by contract, so timing only
+      that column charges device implementations for a copy home that numpy never makes.
+      Both are fixed and written down in `benchmarks/README.md`.
+      **Not yet run to completion on a quiet box** — the algo tier's first attempt hit CUDA
+      OOM because parallel agents held 22 GiB on four GPUs. Re-run for C1a.
 - [x] **C6 · PR #3 findings 2, 6, 7, 8** — all four fixed, each with a test verified red
       against the unfixed code; 802 offline tests green. Kafka now registers `on_delivery` and
       charges the broker's verdict back to an `emit()` (`SinkDeliveryError`); `IngestManager.stop`

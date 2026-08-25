@@ -193,6 +193,21 @@ def _settings(config: BenchConfig) -> Any:
     )
 
 
+#: The last run's `PipelineMetrics`, for `benchmarks/stages.py` to read.
+#:
+#: A module global rather than a return value because `ShipInferResult` is a frozen record of
+#: *counts*, and the profile wants the live histogram objects — `quantile` and `snapshot` are
+#: methods, not numbers, and copying every bucket into the result would duplicate the metrics
+#: registry in a dataclass. One run at a time is the only mode this harness has (it owns
+#: `CUDA_VISIBLE_DEVICES` for the process), so a single slot cannot be raced.
+_LAST_METRICS: Any = None
+
+
+def last_pipeline_metrics() -> Any:
+    """The `PipelineMetrics` of the most recent :func:`run_shipinfer`, or None."""
+    return _LAST_METRICS
+
+
 def run_shipinfer(
     config: BenchConfig,
     out_dir: Path | None = None,
@@ -258,6 +273,8 @@ def run_shipinfer(
         return manager
 
     runner = PipelineRunner(server, settings=settings, frames=make_manager)
+    global _LAST_METRICS
+    _LAST_METRICS = runner.metrics
     try:
         runner.start()
         handles = {name: server.model(name) for name in GRAPH_MODELS if name in server.models()}
