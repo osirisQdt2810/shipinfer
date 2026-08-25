@@ -20,6 +20,22 @@ fastapi. Device memory is referenced through the `MemoryHandle` *protocol* rathe
 import. The rule is enforced by `scripts/hooks/check_layers.py` at commit time and by
 `tests/test_architecture.py` in CI.
 
+**What it is not yet (V79).** The operator read `csrc/` against `src/shipinfer/` and saw a
+different program. That was accurate. The first binary shares the Python plane's layout and the
+names of its seams, but not their shape: a pool of workers leasing instances instead of one
+thread per instance with its own bounded queue; a device-local `lease()` instead of a placement
+policy chosen by name; a fixed 50 ms drain instead of the batch window; newest-first eviction
+where the Python queue evicts oldest; replay-only ingest; engines named on the command line
+instead of read from the model repository. It answered the question it was written for — the
+interpreter is the wall, 77 against ~450 img/s per process — and that is what it is evidence of.
+
+**The decision (V80) is to port for real.** Every per-frame seam exists in both planes and must
+be the *same* seam, ported in the order that removes the largest architectural difference first
+(ledger Phase 8: instance thread + queue + dispatcher/policy → batch window → eviction order →
+ingest → resolved config in, same events out), with a cross-plane parity harness as the gate.
+And a **sync rule**: a change to a Python data-plane seam is not finished until the C++ seam
+carries it and the parity harness agrees (CLAUDE.md, "Two planes, one architecture").
+
 **Consequences.** The default `pytest` run needs no GPU and finishes in seconds, so CI runs
 on a cheap runner and every contributor can run it. The cost is one indirection: a device
 tensor carries an opaque handle instead of a torch tensor, and the bridge lives in
@@ -374,7 +390,8 @@ a failed capture on every batch.
 ## ADR-014 — The data plane is a C++ binary; `csrc/` is not an optional extension
 
 **Status:** Accepted · 2026-08-24 · scopes ADR-007, restores ADR-003's portability rationale in
-a second place
+a second place · **scope amended 2026-08-25 (V79, V80):** the binary as it stands is the *starting
+point* of the plane, not the plane — see "What it is not yet" below.
 
 **Context.** `CLAUDE.md` has said from the first commit: Python for the control plane,
 C++17/CUDA for the data plane. The control plane was Python and correct. The data plane was
