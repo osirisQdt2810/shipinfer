@@ -60,6 +60,31 @@ class DurationStat:
     count: int = 0
     ns: int = 0
 
+    def observe_total(self, ns_total: int, count: int) -> None:
+        """Add ``count`` observations whose durations are **already summed**.
+
+        The sibling of :meth:`observe`, and the two are not interchangeable — telling them
+        apart is the whole reason both exist.
+
+        `observe` takes one *per-request* span and credits every request in the batch with
+        it; that is right for a phase timing, which is a single span the whole batch shares.
+        This takes a total already accumulated per request in a loop, and must not multiply
+        it again. `ModelInstance._execute` builds `queue_ns` and `total_ns` exactly that way
+        — `for item in items: queue_ns += ...` — and passing them to `observe` made both
+        figures **exactly `batch_size` times too large**.
+
+        That is not a rounding error in a debug counter. At `max_batch_size: 32` an operator
+        watching `person_embedder` sees a mean queue wait of ~5 ms where the truth is ~167
+        us, and the natural response — add instances to a pool that is not backed up — takes
+        GPU away from the stage that really is behind. It is the one number in this endpoint
+        an autoscaler or a pager keys on.
+
+        The old suite could not see it: the only tests with `requests > 1` did not assert on
+        `queue`, and the serving-path test used a batch of one, where `n == n * 1`.
+        """
+        self.count += count
+        self.ns += max(0, ns_total)
+
     def observe(self, ns: int, count: int = 1) -> None:
         """Add ``count`` observations of ``ns`` each.
 
@@ -143,8 +168,11 @@ class ModelStatistics:
             self.inference_count += requests
             self.execution_count += 1
             self.last_inference_ns = time.time_ns()
-            self._stats["success"].observe(total_ns, requests)
-            self._stats["queue"].observe(queue_ns, requests)
+            # `observe_total` for the two the caller already summed per request, `observe`
+            # for the three that are one span the whole batch shared. Three of five were
+            # right, which is what made the other two easy to miss.
+            self._stats["success"].observe_total(total_ns, requests)
+            self._stats["queue"].observe_total(queue_ns, requests)
             self._stats["compute_input"].observe(compute_input_ns, requests)
             self._stats["compute_infer"].observe(compute_infer_ns, requests)
             self._stats["compute_output"].observe(compute_output_ns, requests)

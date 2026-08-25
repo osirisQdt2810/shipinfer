@@ -186,6 +186,10 @@ class InferenceServer:
                 settings=self._settings,
                 metrics=self._metrics,
                 resolve=self.model,
+                # An ensemble-only deployment traced nothing at the ensemble level: the steps
+                # each traced their own model and the DAG that joined them was invisible,
+                # which is the one span an operator debugging an ensemble actually wants.
+                traces=self._traces,
             )
         else:
             model = Model(
@@ -299,8 +303,20 @@ class InferenceServer:
         if not self._started:
             raise ServerStateError("the server has not been started")
         if self._settings.model_control is ModelControlMode.EXPLICIT:
-            with self._control_lock:
-                self._repository = ModelRepository.load(self._settings.model_repository)
+            # Non-blocking. `index` is what a readiness probe calls, and taking the control
+            # lock put it behind an in-progress `unload_model` for up to
+            # `shutdown_grace_s x instances` — so a rolling update that unloads one model
+            # makes the whole server look unhealthy and gets itself restarted.
+            #
+            # A re-scan that loses the race reports the previous scan, which is a stale
+            # answer rather than a wrong one: the *loaded* set below is read from
+            # `self._models` either way, so a model that is serving always reads as READY.
+            acquired = self._control_lock.acquire(blocking=False)
+            if acquired:
+                try:
+                    self._repository = ModelRepository.load(self._settings.model_repository)
+                finally:
+                    self._control_lock.release()
         entries = []
         for entry in self.repository:
             loaded = self._models.get(entry.name)

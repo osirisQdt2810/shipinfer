@@ -241,3 +241,96 @@ class TestPerModelStatsEndpoint:
 
         assert per_model["inference_count"] == 1
         assert "models" in whole_server  # the server view still exists, unchanged
+
+
+class TestABatchedRequestIsNotChargedItsOwnWaitTwice:
+    """Two of the five spans handed to `record_execution` are already summed across the
+    batch, and `observe` multiplies by the request count — so `queue` and `success` came out
+    **exactly `batch_size` times too large**.
+
+    Measured by review against the mock backend at `max_batch_size: 8` with eight concurrent
+    requests forming one batch: reported queue 1335 us/request against an actual mean of 167,
+    reported end-to-end 43 822 against 5 478. Both ratios exactly 8.0.
+
+    At the design point (`max_batch_size: 32`) that is a mean queue wait of ~5 ms where the
+    truth is ~167 us. The natural response — add instances to a pool that is not backed up —
+    takes GPU from the stage that really is behind, and this is the one number in the
+    endpoint an autoscaler or a pager keys on.
+
+    The old suite could not see it: the tests with `requests > 1` did not assert on `queue`,
+    and the serving-path test used a batch of one, where `n == n * 1`.
+    """
+
+    def _stats(self):
+        from shipinfer.server.statistics import ModelStatistics
+
+        return ModelStatistics()
+
+    def test_a_summed_span_is_not_multiplied_again(self) -> None:
+        stats = self._stats()
+        # Four requests, 100 us of queue wait each: 400 us summed, as `_execute` accumulates.
+        stats.record_execution(
+            requests=4,
+            batch_size=4,
+            queue_ns=400_000,
+            compute_input_ns=1_000,
+            compute_infer_ns=8_000,
+            compute_output_ns=1_000,
+            total_ns=4_000_000,
+        )
+
+        queue = stats.as_dict("m", "1")["inference_stats"]["queue"]
+        assert queue["count"] == 4
+        assert queue["ns"] == 400_000, "the summed wait was multiplied by the batch size"
+        assert queue["ns"] / queue["count"] == 100_000, "reported per-request wait is wrong"
+
+    def test_end_to_end_is_the_same_shape(self) -> None:
+        stats = self._stats()
+        stats.record_execution(
+            requests=8,
+            batch_size=8,
+            queue_ns=0,
+            compute_input_ns=0,
+            compute_infer_ns=0,
+            compute_output_ns=0,
+            total_ns=8 * 5_478_000,
+        )
+
+        success = stats.as_dict("m", "1")["inference_stats"]["success"]
+        assert success["ns"] / success["count"] == 5_478_000
+
+    def test_a_shared_phase_span_is_still_fanned_out(self) -> None:
+        """The other three are one span the whole batch shared, so every request is credited
+        the whole thing — Triton's convention, and the reason `observe` exists at all. Fixing
+        the two must not break the three."""
+        stats = self._stats()
+        stats.record_execution(
+            requests=4,
+            batch_size=4,
+            queue_ns=0,
+            compute_input_ns=0,
+            compute_infer_ns=2_000,
+            compute_output_ns=0,
+            total_ns=0,
+        )
+
+        infer = stats.as_dict("m", "1")["inference_stats"]["compute_infer"]
+        assert infer["count"] == 4
+        assert infer["ns"] == 8_000, "a batch-wide phase must be credited to every request"
+
+    def test_a_batch_of_one_cannot_tell_the_two_apart(self) -> None:
+        """Pinned because it is why the bug survived: at `requests=1` both spellings agree,
+        so every existing serving-path assertion was satisfied by the wrong one."""
+        summed = self._stats()
+        summed.record_execution(
+            requests=1,
+            batch_size=1,
+            queue_ns=100_000,
+            compute_input_ns=0,
+            compute_infer_ns=100_000,
+            compute_output_ns=0,
+            total_ns=100_000,
+        )
+
+        stats = summed.as_dict("m", "1")["inference_stats"]
+        assert stats["queue"]["ns"] == stats["compute_infer"]["ns"] == 100_000

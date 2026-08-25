@@ -117,8 +117,29 @@ def _tensor_for(
         return Tensor.from_numpy(_random(rng, shape, dtype))
     assert warmup_input.input_data_file is not None  # guaranteed by WarmupInput's validator
     return Tensor.from_numpy(
-        _from_file(version_dir / warmup_input.input_data_file, shape, dtype, where)
+        _from_file(
+            _inside(version_dir, warmup_input.input_data_file, where), shape, dtype, where
+        )
     )
+
+
+def _inside(version_dir: Path, name: str, where: str) -> Path:
+    """``version_dir / name``, refused if it escapes ``version_dir``.
+
+    `..` and an absolute path both work through `/`, and an absolute one silently *replaces*
+    the base rather than appending to it. The repository is operator-controlled so this is
+    not an attack surface so much as a footgun — but a warm-up that quietly reads a file from
+    outside the model's own version directory is a model behaving differently from what is
+    on disk beside it, which is the thing a version directory exists to prevent.
+    """
+    candidate = (version_dir / name).resolve()
+    root = version_dir.resolve()
+    if candidate != root and root not in candidate.parents:
+        raise ConfigurationError(
+            f"{where}: input_data_file {name!r} resolves to {candidate}, outside the model "
+            f"version directory {root}. Warm-up data lives beside the model."
+        )
+    return candidate
 
 
 def _random(rng: np.random.Generator, shape: tuple[int, ...], dtype: DataType) -> np.ndarray:

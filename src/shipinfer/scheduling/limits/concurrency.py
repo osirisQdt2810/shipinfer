@@ -91,9 +91,16 @@ class ConcurrencyRateLimiter(RateLimiter):
                 self.wait_ns += waited_ns
 
     def release(self) -> None:
+        """Give a slot back. Safe to call at most once per :meth:`acquire`.
+
+        The semaphore goes first. `BoundedSemaphore.release` raises on an unpaired call, and
+        decrementing before it meant the counter had already moved when the raise happened —
+        so `in_flight` went permanently negative and every later reading of it was wrong,
+        including the one an operator uses to decide whether a pool is saturated.
+        """
+        self._slots.release()
         with self._counter_lock:
             self._held -= 1
-        self._slots.release()
 
     @property
     def in_flight(self) -> int:

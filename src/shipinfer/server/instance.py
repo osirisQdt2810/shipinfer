@@ -257,15 +257,53 @@ class ModelInstance:
             extra=log_context(model=label, device=str(self.device), instance=self.name),
         )
 
-        while self._running.is_set():
-            items = self._queue.get_batch(self._window)
-            if not items:
-                continue  # closed, or a spurious wake-up
-            self._execute_when_permitted(items)
-
-        # Drain anything that arrived between the flag clearing and the queue closing.
-        for item in self._queue.close():
-            item.fail(RequestCancelledError(f"instance {self.name} stopped"))
+        # The batch currently out of the queue. `self._queue.close()` in the `finally` can
+        # only fail what is still *in* it, and a batch that was already dequeued when the
+        # thread died would be stranded — its futures never resolve and the pipeline worker
+        # holding one waits forever, which is the failure mode this whole guard is about.
+        in_flight: list[WorkItem] = []
+        try:
+            while self._running.is_set():
+                items = self._queue.get_batch(self._window)
+                if not items:
+                    continue  # closed, or a spurious wake-up
+                in_flight = items
+                self._execute_when_permitted(items)
+                # Cleared only on the way *out* of a successful call. A `finally` here would
+                # run as an exception propagated and empty the list before the handler below
+                # could fail it — which is what the stranded-request test caught.
+                in_flight = []
+        except BaseException as exc:
+            # A worker that dies must *read* as dead. `_execute_when_permitted` guards the
+            # backend call, but `zip(..., strict=True)`, `RequestTrace.from_response` and the
+            # metric calls in `_complete` all sit outside it — and an escape from any of them
+            # left `_ready` and `_running` set. `is_ready` then kept reporting true, the
+            # dispatcher kept enqueueing, the in-flight batch's futures never resolved, and
+            # the queue filled silently until `QueueFullError` blamed a camera that had done
+            # nothing wrong. That is the ADR-005 misattribution, one layer down.
+            #
+            # `BaseException`: a `KeyboardInterrupt` or a `SystemExit` on this thread must
+            # still clear readiness before it propagates, or a shutting-down server advertises
+            # an instance it no longer has.
+            _LOG.exception("instance %s died in its worker loop", self.name)
+            self._start_error = exc
+            self._running.clear()
+            raise
+        finally:
+            # Ordered: stop advertising *before* failing the queue, so nothing new arrives
+            # between the two and finds a closed queue with a ready instance in front of it.
+            if self._ready.is_set():
+                self._ready.clear()
+                if self._counted_ready:
+                    self._metrics.instances_ready.dec(model=label)
+                    self._counted_ready = False
+            self._settled.set()
+            # The batch that was out of the queue when the thread died, then anything still
+            # in it. Both, and in that order, so nothing this instance had accepted is left
+            # without an answer.
+            for item in (*in_flight, *self._queue.close()):
+                if not item.future.done():
+                    item.fail(RequestCancelledError(f"instance {self.name} stopped"))
 
     def _execute_when_permitted(self, items: list[WorkItem]) -> None:
         """Hold one of the model's execution slots for the length of the batch.

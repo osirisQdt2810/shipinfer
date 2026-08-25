@@ -458,3 +458,101 @@ ensemble:
 
         executed = sum(int(i["requests"]) for i in stats["instances"])
         assert executed >= 1, "the superseded step was skipped rather than superseded"
+
+
+class TestAReaderMayNotHaveAProducerDeclaredAfterIt:
+    """Steps run as soon as their inputs settle, so two with no dependency between them
+    dispatch together. If one writes a name a third reads, the read sees whichever landed
+    first — and the sequential walk always produced the earlier writer's value.
+
+    `written_by` keeps the namespace deterministic but cannot make a reader wait for a writer
+    it was never told about, and making it wait is the deadlock the scheduler was just fixed
+    for. The two requirements are incompatible, so the graph is refused at load instead —
+    which is what CONVENTIONS asks of every other wiring mistake.
+    """
+
+    def _repo(self, tmp_path: Path) -> Path:
+        root = tmp_path / "repo"
+        _write(root, "router", _ROUTER.format(always=1))
+        _write(root, "branch", _BRANCH)
+        _write(root, "refine", _REFINE)
+        _write(
+            root,
+            "pipe",
+            """
+platform: ensemble
+max_batch_size: 0
+inputs: [{name: images, data_type: FP32, dims: [4]}]
+outputs: [{name: embedding, data_type: FP32, dims: [3]}]
+dynamic_batching: {enabled: false}
+ensemble:
+  steps:
+    - model: router
+      input_map: {images: images}
+      output_map: {crops: crops, has_thing: has_thing}
+    - model: branch
+      input_map: {crops: crops}
+      output_map: {embedding: embedding}
+    - model: refine
+      input_map: {crops_in: crops}
+      output_map: {crops_out: crops}
+""",
+            versioned=False,
+        )
+        return root
+
+    def test_the_ambiguous_graph_is_refused_at_start_up(self, tmp_path: Path) -> None:
+        """`branch` reads `crops` at step 1 and `refine` writes it at step 2 — so whether
+        `branch` sees the router's crops or the refined ones is a race."""
+        server = _server(self._repo(tmp_path))
+
+        with pytest.raises(ConfigurationError) as caught:
+            server.start()
+
+        message = str(caught.value)
+        assert "crops" in message, "the message must name the tensor"
+        assert "step 1" in message, "and the reader"
+        assert "[2]" in message, "and the writer that comes after it"
+
+    def test_the_message_says_what_to_do(self, tmp_path: Path) -> None:
+        """A mis-wired ensemble stops a deploy, so the message is what the operator has to
+        act on — "step 1 is ambiguous" without a remedy costs an afternoon."""
+        server = _server(self._repo(tmp_path))
+
+        with pytest.raises(ConfigurationError) as caught:
+            server.start()
+
+        assert "Reorder the steps" in str(caught.value)
+
+    def test_a_step_writing_a_name_it_reads_is_still_allowed(self, tmp_path: Path) -> None:
+        """Refine-in-place is not ambiguous: a step is not a *later* producer of itself, and
+        this is the shape the deadlock fix exists for."""
+        root = tmp_path / "repo"
+        _write(root, "router", _ROUTER.format(always=1))
+        _write(root, "refine", _REFINE)
+        _write(
+            root,
+            "pipe",
+            """
+platform: ensemble
+max_batch_size: 0
+inputs: [{name: images, data_type: FP32, dims: [4]}]
+outputs: [{name: crops, data_type: FP32, dims: [2]}]
+dynamic_batching: {enabled: false}
+ensemble:
+  steps:
+    - model: router
+      input_map: {images: images}
+      output_map: {crops: crops, has_thing: has_thing}
+    - model: refine
+      input_map: {crops_in: crops}
+      output_map: {crops_out: crops}
+""",
+            versioned=False,
+        )
+        server = _server(root)
+        server.start()
+        try:
+            assert server.infer(_request()).result(timeout=10.0).outputs["crops"] is not None
+        finally:
+            server.stop()

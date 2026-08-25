@@ -6,6 +6,7 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any
 
 from shipinfer.core.errors import (
+    ConfigurationError,
     ModelControlError,
     ModelNotFoundError,
     ModelVersionNotFoundError,
@@ -62,7 +63,10 @@ def build_router(server: InferenceServer) -> Any:
         # A refused load/unload is the caller asking for something this server is not
         # configured to do. 400, never 503: it will not start working on a retry, and a
         # control-plane script that retries a 503 forever is how one bug becomes a load.
-        if isinstance(exc, (ValidationError, ModelControlError)):
+        # `ConfigurationError` alongside them: a `config.yaml` the caller asked us to load
+        # and that does not parse is the caller's mistake, and it will parse no better on a
+        # retry. It fell through to 500, which is what a control-plane script retries.
+        if isinstance(exc, (ValidationError, ModelControlError, ConfigurationError)):
             return HTTPException(400, str(exc))
         if isinstance(exc, (QueueFullError, ServerStateError)):
             return HTTPException(503, str(exc))

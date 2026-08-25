@@ -54,6 +54,7 @@ from shipinfer.core.logging import get_logger
 from shipinfer.core.metrics import ServerMetrics
 from shipinfer.core.request import InferenceRequest, InferenceResponse, ResponseFuture
 from shipinfer.core.settings import ServerSettings
+from shipinfer.core.tracing import NullTraceSink, RequestTrace, TraceSink
 from shipinfer.core.types import Tensor, TensorSpec, validate_against
 from shipinfer.repository import EnsembleStep, ModelArtifact
 from shipinfer.server.statistics import ModelStatistics
@@ -147,6 +148,7 @@ class EnsembleModel:
         metrics: ServerMetrics,
         resolve: Callable[[str], _Servable],
         *,
+        traces: TraceSink | None = None,
         max_workers: int = 8,
         max_pending: int = 0,
     ) -> None:
@@ -154,6 +156,10 @@ class EnsembleModel:
         self._settings = settings
         self._metrics = metrics
         self._resolve = resolve
+        # The DAG's own span. Each step already traces its own model, and the thing that
+        # joined them was invisible — which is the one span an operator debugging an ensemble
+        # actually wants, because a slow ensemble is usually slow *between* its steps.
+        self._traces = traces if traces is not None else NullTraceSink()
         self._steps = tuple(artifact.config.ensemble.steps)  # type: ignore[union-attr]
         self._plans: tuple[_StepPlan, ...] = ()
         self._producers: dict[str, frozenset[int]] = {}
@@ -225,6 +231,7 @@ class EnsembleModel:
         construction the graph it checked.
         """
         self._plans = self._validate_graph()
+        self._refuse_late_producers()
         producers: dict[str, set[int]] = {}
         for plan in self._plans:
             for name in plan.writes:
@@ -256,6 +263,49 @@ class EnsembleModel:
             self.name,
             " -> ".join(step.model for step in self._steps),
         )
+
+    def _refuse_late_producers(self) -> None:
+        """Refuse a graph where a step reads a name some *later* step also writes.
+
+        The scheduler runs steps as soon as their inputs are settled, so two steps with no
+        dependency between them dispatch in the same pass. If one of them writes a name a
+        third step reads, the read can see either value depending on which landed first — and
+        the sequential walk this replaced always produced the earlier writer's.
+
+        Concretely, with `0 detect(images->boxes)`, `1 slow(images->tmp)`,
+        `2 embed(boxes->emb)`, `3 refine(images->boxes)`: steps 0, 1 and 3 all dispatch
+        together, and if `refine` lands first then `embed` reads `refine`'s boxes rather than
+        `detect`'s. `written_by` keeps the *namespace* deterministic, but it cannot make a
+        reader wait for a writer it was never told about.
+
+        This is refused at load rather than scheduled around, for the reason CONVENTIONS
+        gives for the rest of this validation: a mis-wired ensemble is a configuration
+        mistake, and a configuration mistake should stop a deploy rather than produce a
+        different answer on the thousandth frame. Ordering it correctly instead would mean a
+        reader waiting on every later producer, which is the deadlock this scheduler was just
+        fixed for — the two requirements are genuinely incompatible, and refusing is the
+        honest resolution.
+
+        Raises:
+            ConfigurationError: naming both steps and the tensor, because "step 2 is
+                ambiguous" without saying against what is a message that costs an afternoon.
+        """
+        writers: dict[str, list[int]] = {}
+        for plan in self._plans:
+            for name in plan.writes:
+                writers.setdefault(name, []).append(plan.index)
+        for plan in self._plans:
+            for name in plan.reads:
+                late = [index for index in writers.get(name, ()) if index > plan.index]
+                if not late:
+                    continue
+                raise ConfigurationError(
+                    f"ensemble {self.name!r}: step {plan.index} ({plan.step.model}) reads "
+                    f"{name!r}, which step(s) {late} also write. Steps run as soon as their "
+                    f"inputs settle, so which value it reads would depend on which finished "
+                    f"first. Reorder the steps so every producer of {name!r} is declared "
+                    f"before every reader of it, or give the later writer its own name."
+                )
 
     def _validate_graph(self) -> tuple[_StepPlan, ...]:
         """Type-check the wiring: every edge must exist, and both ends must agree.
@@ -624,17 +674,18 @@ class EnsembleModel:
         with self._counter_lock:
             self._executions += 1
         self._record(request)
-        _settle(
-            state.future,
-            result=InferenceResponse(
-                request_id=request.request_id,
-                model_name=self.name,
-                model_version=self.version,
-                outputs=outputs,
-                context=request.context,
-                timings=request.timings,
-            ),
+        response = InferenceResponse(
+            request_id=request.request_id,
+            model_name=self.name,
+            model_version=self.version,
+            outputs=outputs,
+            context=request.context,
+            timings=request.timings,
         )
+        # Recorded before settling: a caller woken by `_settle` can be reading the sink on the
+        # next line, and a trace that lands after its own response is a trace nobody finds.
+        self._traces.record(RequestTrace.from_response(response))
+        _settle(state.future, result=response)
 
     def _fail(self, state: _Execution, exc: BaseException) -> None:
         if not self._claim(state):

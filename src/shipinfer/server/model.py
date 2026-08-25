@@ -383,6 +383,11 @@ class Model:
             self._dispatcher.dispatch(WorkItem(request, future), _enqueue)
         except QueueFullError:
             self._metrics.requests_rejected.inc(model=self.name)
+            # And in the per-model statistics, which is where Triton counts a rejection.
+            # Without this `/v2/models/{n}/stats` reported `fail: 0` while the pool was
+            # shedding — the endpoint says the model is perfectly healthy at the exact moment
+            # it is refusing work, which is the reading an operator acts on.
+            self._statistics.record_failure(1)
             raise
         return future
 
