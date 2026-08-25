@@ -15,6 +15,7 @@ import time
 from concurrent.futures import wait
 
 import numpy as np
+import pytest
 
 from shipinfer.core.metrics import ServerMetrics
 from shipinfer.core.request import InferenceRequest, RequestContext, ResponseFuture
@@ -86,6 +87,17 @@ def _instance(backend: SpyBackend) -> ModelInstance:
         metrics=ServerMetrics(),
         scheduler=SchedulerSettings(),
     )
+
+
+def _wait_for(predicate, timeout_s: float = 5.0, poll_s: float = 0.01) -> bool:
+    """Poll rather than sleep: a worker thread's death is asynchronous, and a fixed sleep is
+    either flaky or slow in every run forever."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(poll_s)
+    return False
 
 
 def _item() -> WorkItem:
@@ -191,6 +203,87 @@ class TestReadinessMetric:
             scheduler=SchedulerSettings(),
         )
 
-        instance.stop()  # never started
+        instance.stop(grace_s=5.0)  # never started
 
         assert metrics.instances_ready.value(model="m") == 0
+
+
+# The worker thread is *meant* to die in these tests — that is the subject. pytest reports the
+# escaped exception as `PytestUnhandledThreadExceptionWarning` with the test's node id in the
+# header, which reads as a failure in any grep over the output and cost an afternoon's flake
+# hunt before three fixed-order runs came back 142/142. Declaring it expected keeps the report
+# honest: an *unexpected* thread death elsewhere still warns.
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+class TestAWorkerThatDiesReadsAsDead:
+    """`_run`'s loop had no guard around `_execute_when_permitted`.
+
+    That method wraps the backend call, but `zip(..., strict=True)`,
+    `RequestTrace.from_response` and the metric calls in `_complete` all sit outside every
+    `try`. An escape from any of them killed the thread while `_ready` and `_running` stayed
+    set — so `is_ready` kept reporting true, the dispatcher kept enqueueing, the in-flight
+    batch's futures never resolved, and the queue filled silently until `QueueFullError`
+    blamed a camera that had done nothing wrong. That is ADR-005's misattribution one layer
+    down, and the reading an operator gets is "healthy instance, saturated queue".
+
+    Exercised through the real loop, with the failure injected where the *unguarded*
+    statements are — after the backend has returned — rather than inside the backend, which
+    the existing guard already covers.
+    """
+
+    def _instance_whose_completion_explodes(self) -> ModelInstance:
+        instance = _instance(SpyBackend())
+        original = instance._complete
+
+        def explode(*args, **kwargs):
+            # Exactly the shape of the real hazard: the batch ran, and unpacking its results
+            # is what raised. `strict=True` on a backend that returned the wrong row count is
+            # the concrete case.
+            raise RuntimeError("zip() argument 2 is shorter than argument 1")
+
+        instance._complete = explode  # type: ignore[method-assign]
+        assert original is not instance._complete
+        return instance
+
+    def test_it_stops_advertising_itself(self) -> None:
+        instance = self._instance_whose_completion_explodes()
+        instance.start()
+        try:
+            assert instance.wait_ready(10), "never became ready"
+            instance.enqueue(_item())
+            assert _wait_for(lambda: not instance.is_ready), (
+                "the worker died and the instance still reports ready, so the dispatcher "
+                "will keep enqueueing into a queue nothing is draining"
+            )
+        finally:
+            instance.stop(grace_s=5.0)
+
+    def test_the_work_it_was_holding_is_failed_not_stranded(self) -> None:
+        """The caller must learn. A future that never resolves is worse than an error: the
+        pipeline worker holding it waits forever and takes its slot with it."""
+        instance = self._instance_whose_completion_explodes()
+        instance.start()
+        try:
+            assert instance.wait_ready(10)
+            queued = _item()
+            instance.enqueue(queued)
+            assert _wait_for(lambda: not instance.is_ready)
+            instance.stop(grace_s=5.0)
+            assert queued.future.done(), "the request was left unresolved"
+        finally:
+            instance.stop(grace_s=5.0)
+
+    def test_the_readiness_gauge_comes_back_down(self) -> None:
+        """Otherwise a dashboard counts an instance that no longer exists, and the pool looks
+        larger than it is for as long as the process lives."""
+        instance = self._instance_whose_completion_explodes()
+        instance.start()
+        try:
+            assert instance.wait_ready(10)
+            before = instance._metrics.instances_ready.value(model=instance._model_label())
+            instance.enqueue(_item())
+            assert _wait_for(lambda: not instance.is_ready)
+            after = instance._metrics.instances_ready.value(model=instance._model_label())
+        finally:
+            instance.stop(grace_s=5.0)
+
+        assert after == before - 1
