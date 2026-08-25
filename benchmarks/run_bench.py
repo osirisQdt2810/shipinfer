@@ -99,7 +99,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from benchmarks.harness import analysis, baseline, shipinfer
+from benchmarks.harness import analysis, baseline, rtsp, shipinfer
 from benchmarks.harness.analysis import SATURATED, RunAnalysis
 from benchmarks.harness.config import BenchConfig
 
@@ -442,7 +442,10 @@ def measure_baseline(cfg: BenchConfig, out_dir: Path) -> tuple[RunAnalysis, Syst
 def measure_shipinfer(cfg: BenchConfig, out_dir: Path) -> tuple[RunAnalysis, SystemThroughput]:
     """One ShipInfer run at one offered rate, with every guard the harness has."""
     print("\n=== shipinfer (ingest -> scheduler -> engines -> reassembly) ===", flush=True)
-    result = shipinfer.run_shipinfer(cfg, out_dir / "shipinfer")
+    # The RTSP server, when this is an RTSP run, for exactly the duration of the run. A
+    # no-op for a replay run, so there is one code path rather than two.
+    with rtsp.serving(cfg):
+        result = shipinfer.run_shipinfer(cfg, out_dir / "shipinfer")
     # Refuse before analysing. A run whose generator never delivered the load is not a
     # slower measurement, it is a different experiment, and reporting it against the
     # configured target publishes a rate that was never sustained.
@@ -553,6 +556,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--resolution", choices=("2k", "4k"), default="2k")
     p.add_argument(
+        "--source",
+        choices=("replay", "rtsp"),
+        default="replay",
+        help=(
+            "where ShipInfer's frames come from. `replay` reads JPEGs off disk and measures "
+            "the inference plane with the decode path removed; `rtsp` pulls H.264 from "
+            "scripts/rtsp_serve.py over a real socket and includes NVDEC, the jitter buffer "
+            "and the NV12 conversion the deployment pays for. Two different experiments — "
+            "the source is recorded in the run metadata so they cannot be confused."
+        ),
+    )
+    p.add_argument("--rtsp-port", type=int, default=8554)
+    p.add_argument(
         "--systems",
         default="baseline,shipinfer",
         help="which to run; run one at a time to keep the GPUs uncontended",
@@ -590,6 +606,17 @@ def main(argv: list[str] | None = None) -> int:
     if unknown:
         print(f"unknown system(s): {sorted(unknown)}", file=sys.stderr)
         return 2
+    if args.source == "rtsp" and "baseline" in systems:
+        # `rtsp.serving` wraps the ShipInfer run only; the baseline reads JPEGs off disk. A
+        # head-to-head under rtsp would charge one system for NVDEC, the jitter buffer and the
+        # NV12 conversion and not the other, and the table would render it as a comparison.
+        print(
+            "--source rtsp applies to shipinfer only: the baseline has no RTSP path, so a "
+            "head-to-head under rtsp would compare two different experiments. Run "
+            "`--systems shipinfer` with --source rtsp, or drop --source for the comparison.",
+            file=sys.stderr,
+        )
+        return 2
 
     label = args.label or time.strftime("%Y%m%d-%H%M%S")
     # The default lives on BenchConfig, so a run directory is derived from it rather than
@@ -605,6 +632,8 @@ def main(argv: list[str] | None = None) -> int:
         seconds=args.seconds,
         warmup_s=args.warmup_s,
         resolution=args.resolution,
+        source=args.source,
+        rtsp_port=args.rtsp_port,
         omp_threads=args.omp_threads,
         **(
             {"pipeline_workers": args.pipeline_workers}
@@ -631,6 +660,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"gpus: {list(cfg.gpus)}   seconds: {cfg.seconds:g} (warmup {cfg.warmup_s:g})")
     print(cfg.concurrency_note)
+    print(
+        f"source: {cfg.source}"
+        + ("" if cfg.source == "rtsp" else "  (decode path NOT measured)")
+    )
     print(f"out:  {out_dir}")
     print(load_note(cfg))
 

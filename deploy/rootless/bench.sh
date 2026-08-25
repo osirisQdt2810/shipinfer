@@ -50,11 +50,21 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 fi
 
 # The baseline binary is a host build. Say so plainly if it is missing rather than letting
-# the run fail deep inside the harness.
-if [ ! -x "$REPO/benchmarks/build/sim_pipeline_v2" ]; then
+# the run fail deep inside the harness — but only for the tier that runs it. The kernel and
+# algo tiers measure this project alone and never touch the baseline; gating them on it made
+# "SHIPINFER_BENCH_SCRIPT=benchmarks/stages.py" refuse to start on a checkout with no baseline
+# build, for a precondition of a different measurement.
+SCRIPT="${SHIPINFER_BENCH_SCRIPT:-benchmarks/run_bench.py}"
+if [ "$SCRIPT" = "benchmarks/run_bench.py" ] && [ ! -x "$REPO/benchmarks/build/sim_pipeline_v2" ]; then
   echo "baseline binary missing. Build it on the host first:" >&2
   echo "  python -c 'from benchmarks.harness import baseline; baseline.build_binary()'" >&2
   exit 1
+fi
+# Mounted only when present: a bind mount of a missing host path makes docker create it as a
+# root-owned directory, which then confuses the next host build.
+libs_mount=()
+if [ -d "$LIBS" ]; then
+  libs_mount=(-v "$LIBS:/baseline-libs:ro")
 fi
 
 if [ ! -d "$TRT_DIR/lib" ]; then
@@ -64,17 +74,40 @@ fi
 
 mkdir -p "$REPO/.artifacts/bench"
 
+# WHICH TIER RUNS. `SHIPINFER_BENCH_SCRIPT` selects it; the default is the system tier.
+#
+#   SHIPINFER_BENCH_SCRIPT=benchmarks/kernels.py deploy/rootless/bench.sh --op letterbox
+#   SHIPINFER_BENCH_SCRIPT=benchmarks/stages.py  deploy/rootless/bench.sh <run.json>
+#
+# All three are measurements, so all three run in here. Hardcoding one script meant the other
+# two had no containerised path at all — and a benchmark with no sanctioned way to run is a
+# benchmark that gets run on the host.
+
 # `LD_LIBRARY_PATH` puts the staged closure *after* the image's own directories, so the
 # image's libc and libstdc++ still win and only the baseline's extra dependencies come from
 # the host.
+# The fused kernels live in the submodule, and this script never put it on PYTHONPATH — so
+# every kernel benchmark reported the `native` column skipped and blamed a missing build. The
+# build was fine; the measurement could not see it. `test.sh` was given this in D2 and the
+# other two scripts were not, which is what a fix applied to one caller looks like a week
+# later.
+#
+# Additive and conditional for the same reason it is there: the submodule not being checked
+# out is a supported state, and then this is an empty string and nothing changes.
+shipvision_path=""
+if [ -f "$REPO/3rdparty/shipvision/pyproject.toml" ]; then
+  shipvision_path=":/work/3rdparty/shipvision"
+fi
+
 exec docker run --rm --pid=host --device nvidia.com/gpu=all \
   -e LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/tensorrt/lib:/baseline-libs" \
-  -e PYTHONPATH=/work/src:/work \
+  -e PYTHONPATH="/work/src:/work${shipvision_path}" \
   -e PYTHONDONTWRITEBYTECODE=1 \
   -e SHIPINFER_IN_CONTAINER=1 \
   -e SHIPINFER_CUDA_GRAPHS="${SHIPINFER_CUDA_GRAPHS:-off}" \
+  -e SHIPINFER_BENCH_SCRIPT="${SHIPINFER_BENCH_SCRIPT:-benchmarks/run_bench.py}" \
   -v "$REPO:/work" \
-  -v "$LIBS:/baseline-libs:ro" \
+  "${libs_mount[@]}" \
   -v "$TRT_DIR:/tensorrt:ro" \
   -v "$WHEELS:/wheels:ro" \
   -w /work "$IMAGE" \
@@ -86,5 +119,5 @@ exec docker run --rm --pid=host --device nvidia.com/gpu=all \
     python -c "import pydantic" 2>/dev/null || \
       pip install -q --root-user-action=ignore --no-index --find-links=/wheels \
         pydantic pydantic-settings typer pyyaml >/dev/null 2>&1 || true
-    exec python benchmarks/run_bench.py "$@"
+    exec python "${SHIPINFER_BENCH_SCRIPT:-benchmarks/run_bench.py}" "$@"
   ' bash "$@"

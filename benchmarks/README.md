@@ -115,6 +115,88 @@ survives while saturated.** Its plans are static-batch and `TrtRunner::infer` ca
 and aborts the process — `terminate called ... what(): setInputShape failed`, reproducibly at
 60 img/s. It cannot be run at the low rates our own driver can currently deliver.
 
+## Where the frames come from (R55)
+
+```bash
+python benchmarks/run_bench.py --systems shipinfer                 # replay (default)
+python benchmarks/run_bench.py --systems shipinfer --source rtsp   # over a real socket
+```
+
+**These are two different experiments, not a fast one and a slow one.** `replay` reads JPEGs
+off disk, which measures the inference plane with the decode path *removed*. `rtsp` pulls
+H.264 from `scripts/rtsp_serve.py` over a real socket, so NVDEC, the jitter buffer, reconnects
+and the NV12 conversion are all included — and the deployment reads fifty RTSP cameras, so
+those are part of its real cost. A replay number is an **upper bound** on the RTSP one.
+
+`config.as_dict()` records which was used and the console names it, because the failure to
+avoid is quoting a replay figure as though the decode path were in it.
+
+The server is started and stopped around the run by `benchmarks/harness/rtsp.py`. It refuses
+rather than tolerates: a server that never accepts a connection, or that exits early, raises
+at start-up with the reason attached. A run whose cameras cannot connect produces a
+clean-looking zero, and this project has already published one of those.
+
+## The three tiers (R44)
+
+`system → algo → kernel`. Each answers a different question, and reading one as another is the
+mistake they exist to prevent.
+
+| tier | file | question | when to reach for it |
+|---|---|---|---|
+| **system** | `run_bench.py` | how many images a second does the whole thing retire? | the number a claim is made on |
+| **algo** | `stages.py` | where does one frame's time go, stage by stage? | before optimising anything |
+| **kernel** | `kernels.py` | what does one op cost, per implementation? | deciding whether a fused kernel earns its build |
+
+All three are measurements, so all three run in the container. `deploy/rootless/bench.sh`
+selects the tier with `SHIPINFER_BENCH_SCRIPT` (default: the system tier) and only demands the
+baseline binary for the tier that uses it:
+
+```bash
+deploy/rootless/bench.sh --systems shipinfer                                  # system
+SHIPINFER_BENCH_SCRIPT=benchmarks/stages.py  deploy/rootless/bench.sh --cameras 12 --fps 5  # algo
+SHIPINFER_BENCH_SCRIPT=benchmarks/kernels.py deploy/rootless/bench.sh --op letterbox         # kernel
+```
+
+**A kernel speed-up is not a system speed-up.** An op that is 2% of the frame budget caps out
+at 2% however fast it gets. That is why the algo tier sits between them: it is the one that
+turns "this op takes 400 µs" into "this op is 14% of a frame".
+
+### The algo tier reads, it does not instrument
+
+`PipelineStage.run` already stamps `elapsed_us` on every outcome and `_CollectorObserver`
+already feeds it into `shipinfer_pipeline_stage_latency_us`. `stages.py` drives a run and
+renders those histograms. A second timing path would be a second implementation that could
+disagree with the one operators actually watch.
+
+It runs **below saturation on purpose**. Under saturation a stage's latency includes the time
+it waited behind other frames, so a queueing artefact reads as an expensive stage; the report
+warns loudly when the run did not keep up with 98% of its offered load — the same bar
+`check_offer` holds the system tier to.
+
+### The kernel tier binds to a device the way production does
+
+`TorchImageOps` falls back to the CPU unless it is given a `device_index`, and
+`PipelineRunner._build_ops` always gives it one. The first version of `kernels.py` called
+`create(name)` with no arguments and therefore timed torch on the *CPU*: it came out 7–13×
+slower than numpy, which is a true fact about a configuration nobody runs and a false one
+about this project. Bound correctly, on this box:
+
+```
+op                   impl         per call   spread   vs numpy   where
+letterbox            torch         5390.7 us   35.0%      3.27x   torch kernels on cuda:0
+letterbox            numpy        17613.5 us   54.5%      1.00x   numpy (host)
+crop_batch           torch         4416.9 us   32.1%      1.84x   torch kernels on cuda:0
+nms                  torch         3365.2 us    5.9%      2.47x   torch kernels on cuda:0
+```
+
+Those spreads are the point: taken at load 31–41 of 48 cores, they are **not reproducible**
+and the tool says so rather than printing three significant figures of noise. `native` is
+absent because the fused kernels are not built on this box — reported as a skip with the
+remedy, not dropped from the table.
+
+`letterbox` returns numpy by contract, so a device implementation pays a copy home that numpy
+never makes; `letterbox_to_device` is the device-fair column and the one production calls.
+
 ## Offline tests
 
 ```bash
