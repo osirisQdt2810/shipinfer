@@ -94,7 +94,7 @@ hook down, for when the operator asked to see something before it is executed.
       supporting classes. Today `trackers/{sort,bytetrack,botsort,ocsort,deepsortv2}.py` are
       flat files beside `association/`, `motion/`, `pool.py`.
 - [x] **C2b · Repackage `shipvision/mtmc/`** — done; verification found `matrix/` had become a module (4 leaf paths gone) and `clustering.base.CLUSTERERS` dropped. Both restored as shims.
-- [~] **C2c · C++ implementations of the MOT/MTMC algorithms the reference services use** (V43
+- [x] **C2c · C++ implementations of the MOT/MTMC algorithms the reference services use** (V43
       narrowed this from "every algorithm"). Established from the references rather than
       guessed:
       - **`motservice` uses `deepsortv2` and nothing else** — its README says "currently
@@ -105,12 +105,12 @@ hook down, for when the operator asked to see something before it is executed.
         `VTXTracker` — read off `config/algorithms/mctracker.json`.
       C++ already has `sort` and `bytetrack`, which predate this narrowing and can stay.
       `botsort`/`ocsort` are **out of scope** unless something starts using them.
-- [ ] **C2d · Wire Plane 3 into `shipinfer`** — the DAG ends at the embedders and tracklets go
+- [x] **C2d · Wire Plane 3 into `shipinfer`** — the DAG ends at the embedders and tracklets go
       nowhere; `shipinfer` imports only `shipvision.detection.engine_build`.
 
 ## Phase 4 · Triton parity
 
-- [ ] **C3 · `docs/qa/triton.md`** (V26) — eight features, none implemented: per-model
+- [x] **C3 · `docs/qa/triton.md`** (V26) — eight features, none implemented: per-model
       statistics endpoint, request tracing with named timestamps, `graph_spec` from the batcher,
       rate limiter, model warm-up from real samples, explicit load/unload, ensemble scheduling
       as a first-class scheduler.
@@ -132,6 +132,24 @@ hook down, for when the operator asked to see something before it is executed.
 - [ ] **B5 · A `csrc` compile job in CI** — ~2 000 lines of data plane are green on one box
       only. Needs its own PR with B4, since both edit `.github/workflows/**` and a branch that
       does cannot run the review job.
+
+- [x] **D1 · The integration review's three blocking findings** — all real, all reproduced,
+      all fixed with a test verified red against the unfixed code: `native_version()` called
+      a `version()` the extension never defined (an ownerless bug three lanes saw and none
+      owned); the ensemble scheduler deadlocked refine-in-place by waiting on producers
+      declared *after* the reader; and it resolved concurrent writes to one name by arrival
+      rather than by declaration order.
+- [x] **D2 · The tracking tests ran in no tier.** 42 of them skipped in the container and CI
+      does not check the submodule out — so the one part of Plane 3 that is a *threading*
+      correctness argument was tested nowhere. `test.sh` puts the submodule on PYTHONPATH
+      (pure Python, no build), the skip is now per class rather than per module, and the
+      concurrency properties need no tracker at all. **1005 offline tests, 0 skipped.**
+- [x] **D3 · The per-camera lock had no test that could fail.** `nullcontext()` left all 42
+      green. The first replacement was vacuous too, for a subtler reason worth recording: two
+      threads racing one camera never both reach the tracker, because the ordering guard
+      refuses whichever checks second — so a re-entrancy detector reports zero overlap with or
+      without the lock. The property is now asserted from *inside* the critical section (the
+      tracker checks whether its shard's lock is held), which a `nullcontext` cannot satisfy.
 
 ## Phase 5 · Everything else still owed
 

@@ -19,7 +19,9 @@ guarded against. The *models* are still fakes, as everywhere else in this tier.
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 import pytest
@@ -43,13 +45,18 @@ from shipinfer.pipeline.graph.detections import Detections
 from shipinfer.pipeline.graph.objects import ObjectBatch
 from shipinfer.pipeline.schema import ObjectRecord
 
-pytestmark = [
-    pytest.mark.timeout(60),
-    pytest.mark.skipif(
-        not tracking_available(),
-        reason="shipvision.tracking is not importable; the submodule is not checked out",
-    ),
-]
+#: Everything that needs a real tracker. Applied per class rather than to the module, because
+#: the concurrency invariants below — mutual exclusion per camera, and *not* across cameras —
+#: are properties of `TrackerShard` itself and need no tracker at all. As a module-level mark
+#: they skipped in every tier that runs: the container does not install the submodule and CI
+#: deliberately does not check it out (ADR-001), so the one part of Plane 3 that is a
+#: threading correctness argument was tested nowhere.
+needs_tracking = pytest.mark.skipif(
+    not tracking_available(),
+    reason="shipvision.tracking is not importable; the submodule is not checked out",
+)
+
+pytestmark = [pytest.mark.timeout(60)]
 
 #: ``min_hits=1`` so a track is published on the frame it is born. The default is 3, which is
 #: right in production — an identity that dies after two frames should never have been
@@ -118,6 +125,7 @@ def run(subject: TrackStage, camera: str, frame: int, dets: Detections) -> Frame
     return state
 
 
+@needs_tracking
 class TestATrackIdIsStableAcrossFrames:
     """The whole point of the plane: one object, one identity, for as long as it is seen."""
 
@@ -155,6 +163,7 @@ class TestATrackIdIsStableAcrossFrames:
         assert state.batches[TRACK_STATES].data[0, 0] == "confirmed"
 
 
+@needs_tracking
 class TestTwoCamerasNeverShareTrackerState:
     """Sharing one tracker does not degrade tracking; it reports an object where none was."""
 
@@ -182,6 +191,7 @@ class TestTwoCamerasNeverShareTrackerState:
         assert outcome.status is StageStatus.RAN
 
 
+@needs_tracking
 class TestOutOfOrderFramesDoNotCorruptIds:
     """Reassembly does not order anything, so the shard has to."""
 
@@ -240,6 +250,7 @@ class TestOutOfOrderFramesDoNotCorruptIds:
         assert after != before
 
 
+@needs_tracking
 class TestThreadsCannotInterleaveOneCamerasState:
     """The pipeline is multi-threaded and a tracker is not re-entrant."""
 
@@ -314,6 +325,7 @@ class TestThreadsCannotInterleaveOneCamerasState:
         assert subject.shard.stats()["out_of_order"] == refused
 
 
+@needs_tracking
 class TestAnEmptyFrameStillRuns:
     """Ageing is how a track dies, and a frame with nothing in it is what ages one."""
 
@@ -353,6 +365,7 @@ class TestAnEmptyFrameStillRuns:
         assert graph.runnable(state_for("cam0", 1, Detections.empty())) == ("track",)
 
 
+@needs_tracking
 class TestAppearanceIsOptionalNotRequired:
     """A frame holding only people has no ship embedding, and must still be tracked."""
 
@@ -383,6 +396,7 @@ class TestAppearanceIsOptionalNotRequired:
         assert carried is not None and carried.shape == (8,)
 
 
+@needs_tracking
 class TestAttribution:
     """A published track is matched back to the detection row that produced it.
 
@@ -441,6 +455,7 @@ class TestAttribution:
         assert records[0].track_id is None
 
 
+@needs_tracking
 class TestTheStageIsOffUnlessAskedFor:
     """Enabling tracking changes the shape of the benchmark, so an operator opts in."""
 
@@ -480,6 +495,7 @@ class TestTheStageIsOffUnlessAskedFor:
         return build_perception_graph(settings, resolve=models.__getitem__, ops=ops)
 
 
+@needs_tracking
 class TestTheTrackerIsSelectedByName:
     """A registry lookup, so adding a tracker upstream needs no edit here."""
 
@@ -506,3 +522,169 @@ class TestTheTrackerIsSelectedByName:
 
     def test_the_default_is_bytetrack(self):
         assert TrackingSettings().algorithm == "bytetrack"
+
+
+class _Tag:
+    """The two fields `TrackerShard.update` reads off a `shipvision.types.Detections`.
+
+    A stand-in rather than the real type, so the locking tests below run in the offline tier.
+    The submodule is not checked out in CI (ADR-001) and is not installed in the test
+    container, which is precisely why the per-camera lock had no test that ran anywhere.
+    """
+
+    __slots__ = ("camera_id", "frame_id")
+
+    def __init__(self, camera_id: str, frame_id: int) -> None:
+        self.camera_id = camera_id
+        self.frame_id = frame_id
+
+
+class _Detections:
+    __slots__ = ("tag",)
+
+    def __init__(self, tag: _Tag) -> None:
+        self.tag = tag
+
+
+def _shipvision_detections(camera: str, frame: int) -> _Detections:
+    return _Detections(_Tag(camera, frame))
+
+
+class TestThePerCameraLockActuallyExcludes:
+    """The class above this one is satisfied by the high-water mark alone.
+
+    Review proved it: replacing `_CameraShard.lock` with `contextlib.nullcontext()` left all
+    42 tests green, three runs out of three, while mutating the frame-id guard reddened three.
+    So the lock — which the module docstring calls the first half of the invariant — had no
+    test at all, and this repository has blocked two PRs for exactly that shape.
+
+    **Concurrency here cannot be observed through the tracker's output**, and finding that out
+    is what made these tests right. Two threads racing one camera never both reach the
+    tracker: the ordering guard refuses whichever checks second, so a re-entrancy detector
+    reports zero overlap *with or without* the lock. That was the first attempt, and it was
+    vacuous for a subtler reason than the one it replaced.
+
+    What the lock actually guarantees is that reading the high-water mark, writing it, and
+    running the tracker happen as one step. So the property is asserted from *inside* the
+    critical section: the tracker checks whether the shard's lock is held while it runs. That
+    is exactly what a `nullcontext` cannot satisfy.
+    """
+
+    class _LockObserver:
+        """A tracker that records whether its camera's lock was held while it ran.
+
+        Given the shard after construction, because `_CameraShard` holds the lock and the
+        tracker together — reading one without the other is the race the module prevents.
+        """
+
+        def __init__(self) -> None:
+            self.shard: Any = None
+            self.held: list[bool] = []
+            self.calls = 0
+            self.pool_size = 0
+
+        def update(self, detections, *, image=None):
+            self.calls += 1
+            lock = getattr(self.shard, "lock", None)
+            # `locked()` exists on `threading.Lock` and on nothing else this could be, so an
+            # absent method is itself the answer: whatever is guarding this is not a lock.
+            self.held.append(bool(getattr(lock, "locked", lambda: False)()))
+            return []
+
+        def reset(self) -> None:
+            pass
+
+    class _SlowTracker:
+        def __init__(self, hold_s: float) -> None:
+            self._hold_s = hold_s
+            self.pool_size = 0
+
+        def update(self, detections, *, image=None):
+            time.sleep(self._hold_s)
+            return []
+
+        def reset(self) -> None:
+            pass
+
+    def _sharded(self) -> TrackerShard:
+        """A `TrackerShard` with a stand-in tracker, built without shipvision.
+
+        `TrackerShard.__init__` refuses when the registry is absent, so the object is made
+        through `__new__` and given the same fields. Reaching past the constructor is
+        deliberate: the thing under test is the locking in `update`, and needing the submodule
+        to test it is *why* this property went untested — the container does not install it
+        and CI does not check it out.
+        """
+        shard = TrackerShard.__new__(TrackerShard)
+        shard._algorithm = "stand-in"
+        shard._options = {}
+        shard._backend = None
+        shard._admit = threading.Lock()
+        shard._cameras = {}
+        return shard
+
+    def _seed(self, sharded: TrackerShard, camera: str, tracker):
+        from shipinfer.pipeline.graph.tracking import _CameraShard
+
+        cell = _CameraShard(tracker)
+        sharded._cameras[camera] = cell
+        return cell
+
+    def test_the_cameras_lock_is_held_while_its_tracker_runs(self) -> None:
+        sharded = self._sharded()
+        observer = self._LockObserver()
+        observer.shard = self._seed(sharded, "cam0", observer)
+
+        sharded.update(_shipvision_detections("cam0", 1))
+        sharded.update(_shipvision_detections("cam0", 2))
+
+        assert observer.calls == 2
+        assert observer.held == [True, True], (
+            "the tracker ran without its camera's lock held, so the check-set-update sequence "
+            "is not atomic and two workers can both pass the ordering guard"
+        )
+
+    def test_reset_takes_the_same_lock(self) -> None:
+        """`reset` rewinds the high-water mark and clears the tracks. Doing that beside a
+        frame in flight is the same race with a worse outcome — the frame would be tracked
+        against a pool that is being emptied under it."""
+        sharded = self._sharded()
+        observer = self._LockObserver()
+        cell = self._seed(sharded, "cam0", observer)
+
+        held: list[bool] = []
+        original = observer.reset
+        observer.reset = lambda: held.append(cell.lock.locked()) or original()  # type: ignore[assignment]
+
+        sharded.reset("cam0")
+
+        assert held == [True]
+
+    def test_the_lock_is_per_camera_not_shared(self) -> None:
+        """The other half of the design, and the one that would silently cost throughput: a
+        slow camera must not stall the other forty-nine. Fifty cameras behind one is the
+        failure this project exists to prevent, one layer up."""
+        sharded = self._sharded()
+        self._seed(sharded, "slow", self._SlowTracker(0.4))
+        self._seed(sharded, "quick", self._SlowTracker(0.0))
+
+        started = threading.Event()
+
+        def feed_slow() -> None:
+            started.set()
+            sharded.update(_shipvision_detections("slow", 1))
+
+        thread = threading.Thread(target=feed_slow)
+        thread.start()
+        started.wait(5)
+        time.sleep(0.05)  # the slow camera is definitely inside its critical section
+
+        began = time.perf_counter()
+        sharded.update(_shipvision_detections("quick", 1))
+        elapsed = time.perf_counter() - began
+        thread.join(30)
+
+        assert elapsed < 0.2, (
+            f"the quick camera waited {elapsed:.3f}s behind a slow one — the lock is shared "
+            f"across cameras rather than held per camera"
+        )

@@ -72,10 +72,25 @@ if [ -d "$TRT_DIR/lib" ]; then
   trt_path=":/tensorrt/lib"
 fi
 
+# The tracking plane is the one part of the system whose correctness argument is about
+# *threads*, and its tests were skipping in every tier that runs: the image does not install
+# the submodule and CI deliberately does not check it out (ADR-001). Putting it on PYTHONPATH
+# — pure Python, no build, no install — is enough for `shipvision.tracking`, so those tests
+# run here even though the compiled `_C` is absent.
+#
+# Read-only and additive on purpose: the submodule not being checked out is still a supported
+# state, and then this is an empty string and nothing changes. ADR-001's promise is that a
+# plain `pytest` needs no GPU, not that it needs no submodule.
+shipvision_path=""
+if [ -f "$REPO/3rdparty/shipvision/pyproject.toml" ]; then
+  shipvision_path=":/work/3rdparty/shipvision"
+fi
+
 exec docker run --rm --pid=host --device nvidia.com/gpu=all \
   -e LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu${trt_path}" \
   -e PYTHONPATH=/work/src \
   -e PYTHONDONTWRITEBYTECODE=1 \
+  -e PYTHONPATH="/work/src${shipvision_path}" \
   -v "$REPO:/work:ro" \
   -v "$WHEELS:/wheels:ro" \
   "${trt_mount[@]}" \
