@@ -85,10 +85,12 @@ using gpuEvent_t = cudaEvent_t;
 namespace shipinfer {
 
     // Never called directly — `GPU_CHECK` supplies the expression text and the location.
-    inline void gpu_check(gpuError_t status, const char* expression, const char* file, int line) {
+    inline void gpu_check(gpuError_t status, const char* expression, const char* file,
+                          int line) {
         if (status != gpuSuccess) {
-            throw BackendError(std::string(expression) + " failed: " + gpuGetErrorString(status) +
-                               " at " + file + ":" + std::to_string(line));
+            throw BackendError(std::string(expression) +
+                               " failed: " + gpuGetErrorString(status) + " at " + file + ":" +
+                               std::to_string(line));
         }
     }
 

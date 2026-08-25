@@ -26,8 +26,9 @@
 
 namespace shipinfer {
 
-    // A decoded frame on the host: uint8 HWC BGR. The replay source decodes once per file and then
-    // serves from memory, because decoding the same JPEG a thousand times measures libjpeg.
+    // A decoded frame on the host: uint8 HWC BGR. The replay source decodes once per file and
+    // then serves from memory, because decoding the same JPEG a thousand times measures
+    // libjpeg.
     struct HostFrame {
         const uint8_t* pixels = nullptr;
         int height = 0;
@@ -36,8 +37,9 @@ namespace shipinfer {
 
     class ReplaySource {
       public:
-        // Loads every .jpg/.png under `folder`, decoded once. Throws SourceError if empty, because
-        // a benchmark that silently offers zero frames is the failure this project keeps finding.
+        // Loads every .jpg/.png under `folder`, decoded once. Throws SourceError if empty,
+        // because a benchmark that silently offers zero frames is the failure this project
+        // keeps finding.
         explicit ReplaySource(const std::string& folder, int limit = 0);
 
         ~ReplaySource();
@@ -46,7 +48,10 @@ namespace shipinfer {
         HostFrame at(size_t index) const;
         // Whether every image is page-locked. False means the run is still correct and its
         // host->device copies take the slow path — worth printing, not worth failing over.
-        bool pinned() const { return pinned_; }
+        // True when every image's pages are registered. One refused registration used to flip a
+        // single flag and the destructor then unregistered nothing, leaving the pages that had
+        // registered locked; each image records its own outcome now.
+        bool pinned() const;
 
       private:
         struct Image {
@@ -55,7 +60,7 @@ namespace shipinfer {
             int width = 0;
         };
         std::vector<Image> frames_;
-        bool pinned_ = true;
+        std::vector<char> registered_;  // per image, 1 when gpuHostRegister succeeded
     };
 
     class CameraActor {

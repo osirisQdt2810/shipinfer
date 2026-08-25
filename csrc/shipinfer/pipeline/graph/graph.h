@@ -27,9 +27,9 @@
 namespace shipinfer {
 
     // A model plus its instances, one per (device, stream). Round-robin placement, because with
-    // equal instances on equal devices the cheapest correct policy is the best one — the fancier
-    // policies in `scheduling/policies/` exist for uneven fleets and are a Python-side concern
-    // until this plane needs them.
+    // equal instances on equal devices the cheapest correct policy is the best one — the
+    // fancier policies in `scheduling/policies/` exist for uneven fleets and are a Python-side
+    // concern until this plane needs them.
     class ModelPool {
       public:
         ModelPool(std::string name, const std::string& plan, const std::vector<int>& devices,
@@ -37,9 +37,9 @@ namespace shipinfer {
 
         // Blocks until an instance **on `device`** is free. Device-affine on purpose: a frame's
         // pixels live on the GPU they were copied to, and an execution context's device memory
-        // belongs to the device that allocated it. Leasing across devices is a cross-device access
-        // — ADR-002 forbids it, and it shows up as `an illegal memory access was encountered`
-        // several frames later rather than at the call that caused it.
+        // belongs to the device that allocated it. Leasing across devices is a cross-device
+        // access — ADR-002 forbids it, and it shows up as `an illegal memory access was
+        // encountered` several frames later rather than at the call that caused it.
         struct Lease {
             TrtInstance* instance = nullptr;
             size_t slot = 0;
@@ -50,18 +50,22 @@ namespace shipinfer {
         const std::string& name() const { return name_; }
         int max_batch() const { return instances_.front()->max_batch(); }
         size_t size() const { return instances_.size(); }
+        // The plan behind this pool (one per device, identical): its shapes are what the graph
+        // checks its own configuration against.
+        const TrtEngine& engine(size_t index = 0) const { return *engines_.at(index); }
         TrtInstance& at(size_t index) { return *instances_[index]; }
         // model -> device -> executed. The per-device breakdown the balancing evidence needs.
         std::map<int, uint64_t> per_device() const;
         uint64_t executed() const;
         long long busy() const { return busy_.load(); }
-        // Workers blocked in `lease` — the analogue of a model's queue depth, and the number the
-        // occupancy log must carry.
+        // Workers blocked in `lease` — the analogue of a model's queue depth, and the number
+        // the occupancy log must carry.
         //
-        // `busy()` alone cannot show pressure: this design has no queue in front of a pool, so a
-        // fully committed pool reads as a *flat* `busy == size` and the analysis scores it
-        // SUSTAINED. The first measurement had `ship_segmenter` sitting at exactly 4 with exactly
-        // 4 instances — pegged, and invisible. The waiting count is where the queue actually is.
+        // `busy()` alone cannot show pressure: this design has no queue in front of a pool, so
+        // a fully committed pool reads as a *flat* `busy == size` and the analysis scores it
+        // SUSTAINED. The first measurement had `ship_segmenter` sitting at exactly 4 with
+        // exactly 4 instances — pegged, and invisible. The waiting count is where the queue
+        // actually is.
         long long waiting() const { return waiting_.load(); }
 
       private:
@@ -81,9 +85,9 @@ namespace shipinfer {
         std::string embedder_plan;
         //: Ships get their own embedder pool even though the plan is the same artefact as the
         //: person one. Separate pools, not a shared one: the Python repository declares
-        //: `ship_embedder` and `person_embedder` as two models with their own instance counts and
-        //: their own queues, and collapsing them here would change the concurrency the comparison
-        //: is measuring.
+        //: `ship_embedder` and `person_embedder` as two models with their own instance counts
+        //: and their own queues, and collapsing them here would change the concurrency the
+        //: comparison is measuring.
         std::string ship_embedder_plan;
         std::vector<int> devices;
         int detector_instances = 2;
@@ -108,23 +112,26 @@ namespace shipinfer {
 
         // Runs a **batch** of frames to completion on one device.
         //
-        // Batched because these plans are *static*: `yolo26n_fp32.engine` is built at batch 8 and
-        // `setInputShape` refuses any other batch outright — "Static dimension mismatch ... Set
-        // dimensions are [1,3,640,640]. Expected dimensions are [8,3,640,640]". So a frame at a
-        // time is not merely inefficient here, it does not run. The Python side hit the same wall
-        // from the other direction, submitting a whole frame's crops against a plan built at 16.
+        // Batched because these plans are *static*: `yolo26n_fp32.engine` is built at batch 8
+        // and `setInputShape` refuses any other batch outright — "Static dimension mismatch ...
+        // Set dimensions are [1,3,640,640]. Expected dimensions are [8,3,640,640]". So a frame
+        // at a time is not merely inefficient here, it does not run. The Python side hit the
+        // same wall from the other direction, submitting a whole frame's crops against a plan
+        // built at 16.
         //
-        // Every frame in `batch` must already be on `device`; the worker owns that, which is what
-        // makes the lease device-affine and the access legal.
+        // Every frame in `batch` must already be on `device`; the worker owns that, which is
+        // what makes the lease device-affine and the access legal.
         struct Work {
             FrameState* state = nullptr;
             const uint8_t* image_device = nullptr;
         };
-        // Called once per frame whose object stages threw, with the reason. Defaults to nothing;
-        // the bench installs a printer. Kept off the hot path: only a failure reaches it.
+        // Called once per frame whose object stages threw, with the reason. Defaults to
+        // nothing; the bench installs a printer. Kept off the hot path: only a failure reaches
+        // it.
         void on_frame_error(std::function<void(const FrameTag&, const char*)> hook) {
             on_frame_error_ = std::move(hook);
         }
+        static void check_pool(const ModelPool& pool, const std::vector<int64_t>& fed_row);
         size_t execute(std::vector<Work>& batch, int device, FrameCollector& collector);
 
         ModelPool& detector() { return *detector_; }
@@ -136,8 +143,8 @@ namespace shipinfer {
       private:
         void run_objects(ModelPool* pool, FrameState& state, const uint8_t* image_device,
                          int device, const std::vector<float>& boxes,
-                         const std::vector<int>& indices, int crop_h, int crop_w, const char* stage,
-                         FrameCollector& collector);
+                         const std::vector<int>& indices, int crop_h, int crop_w,
+                         const char* stage, FrameCollector& collector);
 
         GraphConfig config_;
         std::unique_ptr<ModelPool> detector_;

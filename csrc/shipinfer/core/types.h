@@ -68,8 +68,8 @@ namespace shipinfer {
         size_t bytes_ = 0;
     };
 
-    // Pinned host memory. Separate type from DeviceBuffer because the allocator is different and
-    // mixing them up is a silent 10x on every copy.
+    // Pinned host memory. Separate type from DeviceBuffer because the allocator is different
+    // and mixing them up is a silent 10x on every copy.
     class PinnedBuffer {
       public:
         PinnedBuffer() = default;
@@ -102,8 +102,8 @@ namespace shipinfer {
     };
 
     // The typed failure vocabulary, mirroring `core/errors/` on the Python side. One exception
-    // type per domain, because "something went wrong" is not a diagnosis and a caller that cannot
-    // tell a missing engine from a full queue cannot do anything useful about either.
+    // type per domain, because "something went wrong" is not a diagnosis and a caller that
+    // cannot tell a missing engine from a full queue cannot do anything useful about either.
     struct ConfigError : std::runtime_error {
         using std::runtime_error::runtime_error;
     };

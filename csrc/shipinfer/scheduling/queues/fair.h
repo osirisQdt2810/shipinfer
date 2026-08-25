@@ -47,8 +47,8 @@ namespace shipinfer {
 
     enum class Overflow { Reject, Block, EvictGreediest };
 
-    // `T` needs `rows()` and `camera()`. A concept would be clearer; this has to build under the
-    // host's g++ 11 in C++17, so it is a documented duck type.
+    // `T` needs `rows()` and `camera()`. A concept would be clearer; this has to build under
+    // the host's g++ 11 in C++17, so it is a documented duck type.
     template <typename T>
     class FairQueue {
       public:
@@ -113,8 +113,8 @@ namespace shipinfer {
             return true;
         }
 
-        // Round-robin across lanes until `max_rows` rows are collected, the queue empties, or the
-        // wait expires. An empty result means "nothing to do" — the queue is closed, or the
+        // Round-robin across lanes until `max_rows` rows are collected, the queue empties, or
+        // the wait expires. An empty result means "nothing to do" — the queue is closed, or the
         // wait simply expired with the queue empty. A caller that treats empty as "closed"
         // exits on the first idle interval, so a worker has to ask `closed()`; the two are
         // deliberately separate questions.
@@ -149,10 +149,11 @@ namespace shipinfer {
                 next_ = (next_ + 1) % (order_.empty() ? 1 : order_.size());
             }
         done:
-            // `notify_all` before returning, in every case. The Python version reached this only
-            // on the fall-through path, so a producer blocked on a full queue slept the entire
-            // timeout instead of waking when a slot freed — 500 ms against 50 — and when the
-            // deadline beat the drain, the drop was charged to a camera that had done nothing.
+            // `notify_all` before returning, in every case. The Python version reached this
+            // only on the fall-through path, so a producer blocked on a full queue slept the
+            // entire timeout instead of waking when a slot freed — 500 ms against 50 — and when
+            // the deadline beat the drain, the drop was charged to a camera that had done
+            // nothing.
             if (overflow_ == Overflow::Block) space_.notify_all();
             return batch;
         }
@@ -185,8 +186,8 @@ namespace shipinfer {
 
       private:
         // ADR-005: the camera with the deepest lane loses a frame. Charging the drop to the
-        // greediest camera rather than to the oldest frame is the whole point — the victim of an
-        // eviction should be the cause of the pressure.
+        // greediest camera rather than to the oldest frame is the whole point — the victim of
+        // an eviction should be the cause of the pressure.
         bool evict_greediest_locked() {
             std::string worst;
             size_t deepest = 0;

@@ -9,6 +9,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -27,16 +28,17 @@ namespace {
 
     // One frame's worth of work as it sits in the fair queue.
     //
-    // The pixels stay on the **host** here, and the worker copies them to its own device. The first
-    // version had the camera thread copy to a device chosen by camera index, and then any worker
-    // could pick up any frame — a frame on device 1 executed by an instance on device 0, which is
-    // a cross-device access. It does not fail at the call that caused it; it surfaces as `an
-    // illegal memory access was encountered` inside an unrelated `gpuDeviceSynchronize` several
-    // frames later, which is why ADR-002 makes the rule structural rather than advisory.
+    // The pixels stay on the **host** here, and the worker copies them to its own device. The
+    // first version had the camera thread copy to a device chosen by camera index, and then any
+    // worker could pick up any frame — a frame on device 1 executed by an instance on device 0,
+    // which is a cross-device access. It does not fail at the call that caused it; it surfaces
+    // as `an illegal memory access was encountered` inside an unrelated `gpuDeviceSynchronize`
+    // several frames later, which is why ADR-002 makes the rule structural rather than
+    // advisory.
     //
-    // Keeping one fleet-wide fair queue matters more than saving the copy: fairness across cameras
-    // is the thing this project exists to get right, and a queue per device would make it fair
-    // only within a device.
+    // Keeping one fleet-wide fair queue matters more than saving the copy: fairness across
+    // cameras is the thing this project exists to get right, and a queue per device would make
+    // it fair only within a device.
     struct FrameWork {
         FrameTag tag;
         std::shared_ptr<FrameState> state;
@@ -181,7 +183,8 @@ int main(int argc, char** argv) {
                 std::cerr << "frame " << tag.key() << " failed: " << what << "\n";
         });
         const double startup_s =
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - load_start).count();
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - load_start)
+                .count();
         std::cerr << "engines ready in " << startup_s << "s\n";
 
         std::atomic<uint64_t> emitted{0};
@@ -200,7 +203,8 @@ int main(int argc, char** argv) {
             },
             static_cast<size_t>(options.reassembly_capacity), options.reassembly_timeout_ms);
 
-        FairQueue<FrameWork> queue(static_cast<size_t>(options.queue_capacity), Overflow::Reject);
+        FairQueue<FrameWork> queue(static_cast<size_t>(options.queue_capacity),
+                                   Overflow::Reject);
 
         // -- the sampler: the same log shape as the other two systems ---------------------
         OccupancySampler sampler(
@@ -229,6 +233,8 @@ int main(int argc, char** argv) {
         std::atomic<bool> stopping{false};
         std::atomic<uint64_t> accepted{0};
         std::atomic<uint64_t> failed{0};
+        std::mutex refused_mutex;
+        std::map<std::string, uint64_t> open_refused_by_camera;
         std::vector<std::thread> workers;
         // Only what runs for *every* frame. The conditional per-object stages are added by
         // the graph once the detections are known — see `PipelineGraph::execute`. Expecting
@@ -261,62 +267,97 @@ int main(int argc, char** argv) {
                 gpuStream_t copy_stream = nullptr;
                 GPU_CHECK(gpuStreamCreate(&copy_stream));
 
-                while (!stopping.load()) {
-                    // A detector-sized batch, because the plan is static at that batch and
-                    // `setInputShape` refuses anything else. Rows, not items: the queue counts
-                    // rows and one frame is one detector row.
-                    auto batch = queue.drain(static_cast<size_t>(detector_batch), 50);
-                    if (batch.empty()) continue;
+                // Everything a worker does is inside one try: a GPU_CHECK throw from the
+                // staging grow or the copy (a cudaErrorMemoryAllocation on a shared box is
+                // realistic) used to escape the thread function and call std::terminate — a 70
+                // s run lost with no counters and a truncated log. Now the frames this
+                // iteration opened are sealed, the failure is counted, and the worker exits
+                // reporting itself.
+                try {
+                    while (!stopping.load()) {
+                        // A detector-sized batch, because the plan is static at that batch and
+                        // `setInputShape` refuses anything else. Rows, not items: the queue
+                        // counts rows and one frame is one detector row.
+                        auto batch = queue.drain(static_cast<size_t>(detector_batch), 50);
+                        if (batch.empty()) continue;
 
-                    // Grown once, never shrunk, and never freed inside the loop.
-                    size_t frame_bytes = 0;
-                    for (const auto& item : batch) {
-                        frame_bytes = std::max(frame_bytes, static_cast<size_t>(item.frame.height) *
-                                                                item.frame.width * 3);
-                    }
-                    const size_t needed = frame_bytes * static_cast<size_t>(detector_batch);
-                    if (staging.bytes() < needed) staging = DeviceBuffer(needed);
-
-                    std::vector<PipelineGraph::Work> work;
-                    size_t slot = 0;
-                    for (auto& item : batch) {
-                        accepted.fetch_add(1);
-                        if (!collector.open(item.state, unconditional)) {
-                            // Refused, and *counted*. A frame that vanishes here is exactly
-                            // the failure the collector exists to prevent.
-                            failed.fetch_add(1);
-                            continue;
-                        }
-                        const size_t bytes =
-                            static_cast<size_t>(item.frame.height) * item.frame.width * 3;
-                        uint8_t* target = staging.as<uint8_t>() + slot * frame_bytes;
-                        ++slot;
-                        // Async, on this worker's own stream, out of page-locked source pages
-                        // (`ReplaySource` registers the library at load). The DMA was already
-                        // available and the synchronous call was not using it.
-                        GPU_CHECK(gpuMemcpyAsync(target, item.frame.pixels, bytes,
-                                                 gpuMemcpyHostToDevice, copy_stream));
-                        work.push_back({item.state.get(), target});
-                    }
-                    GPU_CHECK(gpuStreamSynchronize(copy_stream));
-
-                    if (!work.empty()) {
+                        // Only the tags this iteration opened are sealed at the end. Sealing
+                        // every drained tag found the *other*, still-running frame behind a
+                        // duplicate tag and sealed it early as Incomplete — unreachable while
+                        // frame ids are monotonic, reachable the day a reconnecting camera
+                        // restarts its counter.
+                        std::vector<FrameTag> opened;
                         try {
-                            // Per-frame failures come back as a count; only a detector failure,
-                            // which is a whole-batch fact, still arrives as a throw.
-                            failed.fetch_add(graph.execute(work, device, collector));
+                            // Grown once, never shrunk, and never freed inside the loop.
+                            size_t frame_bytes = 0;
+                            for (const auto& item : batch) {
+                                frame_bytes = std::max(frame_bytes,
+                                                       static_cast<size_t>(item.frame.height) *
+                                                           item.frame.width * 3);
+                            }
+                            const size_t needed =
+                                frame_bytes * static_cast<size_t>(detector_batch);
+                            if (staging.bytes() < needed) staging = DeviceBuffer(needed);
+
+                            std::vector<PipelineGraph::Work> work;
+                            size_t slot = 0;
+                            for (auto& item : batch) {
+                                accepted.fetch_add(1);
+                                if (!collector.open(item.state, unconditional)) {
+                                    // Refused, counted, and attributed: ADR-005 exists so a
+                                    // camera's misses are a number, and a global counter is
+                                    // not.
+                                    failed.fetch_add(1);
+                                    std::lock_guard<std::mutex> lock(refused_mutex);
+                                    ++open_refused_by_camera[item.tag.camera_id];
+                                    continue;
+                                }
+                                opened.push_back(item.tag);
+                                const size_t bytes = static_cast<size_t>(item.frame.height) *
+                                                     item.frame.width * 3;
+                                uint8_t* target = staging.as<uint8_t>() + slot * frame_bytes;
+                                ++slot;
+                                // Async, on this worker's own stream, out of page-locked source
+                                // pages (`ReplaySource` registers the library at load).
+                                GPU_CHECK(gpuMemcpyAsync(target, item.frame.pixels, bytes,
+                                                         gpuMemcpyHostToDevice, copy_stream));
+                                work.push_back({item.state.get(), target});
+                            }
+                            GPU_CHECK(gpuStreamSynchronize(copy_stream));
+
+                            if (!work.empty()) {
+                                try {
+                                    // Per-frame failures come back as a count; only a detector
+                                    // failure, a whole-batch fact, still arrives as a throw.
+                                    failed.fetch_add(graph.execute(work, device, collector));
+                                } catch (const std::exception& error) {
+                                    failed.fetch_add(static_cast<uint64_t>(work.size()));
+                                    static std::atomic<int> shouted{0};
+                                    if (shouted.fetch_add(1) < 5) {
+                                        std::cerr << "worker on gpu" << device
+                                                  << " failed: " << error.what() << "\n";
+                                    }
+                                }
+                            }
                         } catch (const std::exception& error) {
-                            failed.fetch_add(static_cast<uint64_t>(work.size()));
-                            static std::atomic<int> shouted{0};
-                            if (shouted.fetch_add(1) < 5) {
+                            // The staging or the copy failed: every frame opened this round is
+                            // failed and sealed below, so it is reported exactly once, and the
+                            // worker keeps serving — the next batch may well succeed.
+                            failed.fetch_add(static_cast<uint64_t>(opened.size()));
+                            static std::atomic<int> shouted_staging{0};
+                            if (shouted_staging.fetch_add(1) < 5) {
                                 std::cerr << "worker on gpu" << device
-                                          << " failed: " << error.what() << "\n";
+                                          << " could not stage a batch: " << error.what()
+                                          << "\n";
                             }
                         }
+                        // Sealed on every path, so "every opened frame is reported exactly
+                        // once" holds even when the graph threw halfway through the batch.
+                        for (const FrameTag& tag : opened) collector.seal(tag);
                     }
-                    // Sealed on every path, so "every opened frame is reported exactly once"
-                    // holds even when the graph threw halfway through the batch.
-                    for (auto& item : batch) collector.seal(item.tag);
+                } catch (const std::exception& error) {
+                    std::cerr << "worker on gpu" << device << " exited: " << error.what()
+                              << "\n";
                 }
                 gpuStreamDestroy(copy_stream);
             });
@@ -349,11 +390,13 @@ int main(int argc, char** argv) {
             // detector produces, so it has to be the same or it is not the same experiment.
             auto library = (c % 2 == 0) ? person_library : ship_library;
             cameras.push_back(std::make_unique<CameraActor>(
-                name, library, options.fps, [&queue](const FrameTag& tag, HostFrame frame) -> bool {
+                name, library, options.fps,
+                [&queue](const FrameTag& tag, HostFrame frame) -> bool {
                     FrameWork work;
                     work.tag = tag;
                     work.frame = frame;
-                    work.state = std::make_shared<FrameState>(tag, frame.height, frame.width, 0.0f);
+                    work.state =
+                        std::make_shared<FrameState>(tag, frame.height, frame.width, 0.0f);
                     return queue.put(std::move(work));
                 }));
         }
@@ -387,6 +430,9 @@ int main(int argc, char** argv) {
         std::cout << "frames_dropped " << dropped << "\n";
         std::cout << "frames_accepted " << accepted.load() << "\n";
         std::cout << "frames_failed " << failed.load() << "\n";
+        for (const auto& [camera, count] : open_refused_by_camera) {
+            std::cout << "open_refused_by_camera " << camera << " " << count << "\n";
+        }
         std::cout << "events_emitted " << emitted.load() << "\n";
         std::cout << "queue_rejected " << stats.rejected << "\n";
         std::cout << "queue_evicted " << stats.evicted << "\n";

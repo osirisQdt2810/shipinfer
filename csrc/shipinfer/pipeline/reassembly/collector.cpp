@@ -87,16 +87,17 @@ namespace shipinfer {
             auto it = pending_.find(tag.key());
             if (it == pending_.end()) return;
             const bool complete = it->second.complete();
-            result = finish_locked(
-                it->second, complete ? FinishReason::Complete : FinishReason::Incomplete, now_ns());
+            result = finish_locked(it->second,
+                                   complete ? FinishReason::Complete : FinishReason::Incomplete,
+                                   now_ns());
             auto camera = it->second.state->tag().camera_id;
             pending_.erase(it);
             if (--per_camera_[camera] == 0) per_camera_.erase(camera);
             ++reported_;
             ready = true;
         }
-        // Outside the lock. See the header: this is where the per-object work happens and it must
-        // not be serialised on the mutex every worker takes on every stage.
+        // Outside the lock. See the header: this is where the per-object work happens and it
+        // must not be serialised on the mutex every worker takes on every stage.
         if (ready) emit_(std::move(result));
     }
 

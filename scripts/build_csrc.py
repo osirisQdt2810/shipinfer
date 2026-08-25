@@ -102,7 +102,9 @@ def main() -> int:
     objects: list[str] = []
     nvcc = str(CUDA / "bin" / "nvcc") if (CUDA / "bin" / "nvcc").is_file() else "nvcc"
     for source in cuda_sources:
-        obj = BUILD / f"{source.stem}.cu.o"
+        # Named by the path under csrc/, not the stem: two files with one stem in different
+        # directories used to overwrite each other's object and one was never linked.
+        obj = BUILD / (str(source.relative_to(CSRC)).replace("/", "__") + ".o")
         gencode: list[str] = []
         for arch in ARCHES:
             gencode += [f"-gencode=arch=compute_{arch},code=sm_{arch}"]
@@ -127,7 +129,7 @@ def main() -> int:
 
     cv_flags = opencv_flags()
     for source in sources:
-        obj = BUILD / f"{source.stem}.o"
+        obj = BUILD / (str(source.relative_to(CSRC)).replace("/", "__") + ".o")
         print(f"g++   {source.name}")
         run(
             [

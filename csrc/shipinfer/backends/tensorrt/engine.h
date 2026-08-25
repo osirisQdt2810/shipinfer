@@ -95,11 +95,12 @@ namespace shipinfer {
         // graph's next decision is made on the host, so they come back.
         void execute(int rows);
 
-        // The instance's own stream. Exposed so preprocessing can be launched **on it**: a kernel
-        // and the inference that consumes its output on the same stream are ordered by the stream
-        // itself, and no synchronisation is needed at all. The first version launched the kernels
-        // on the default stream and then called `gpuDeviceSynchronize`, which is device-wide —
-        // every worker on that GPU stalled on every other worker's kernels.
+        // The instance's own stream. Exposed so preprocessing can be launched **on it**: a
+        // kernel and the inference that consumes its output on the same stream are ordered by
+        // the stream itself, and no synchronisation is needed at all. The first version
+        // launched the kernels on the default stream and then called `gpuDeviceSynchronize`,
+        // which is device-wide — every worker on that GPU stalled on every other worker's
+        // kernels.
         gpuStream_t stream() const { return stream_; }
 
         // A scratch buffer on this instance's device, for the small per-call inputs the graph
@@ -108,7 +109,9 @@ namespace shipinfer {
         void* scratch(size_t bytes);
 
         void* input(size_t index = 0) const { return input_buffers_.at(index).get(); }
-        const float* output(size_t index = 0) const { return host_outputs_.at(index).as<float>(); }
+        const float* output(size_t index = 0) const {
+            return host_outputs_.at(index).as<float>();
+        }
         size_t output_rows(size_t index = 0) const;
 
         int max_batch() const { return engine_->max_batch(); }
@@ -130,7 +133,8 @@ namespace shipinfer {
         uint64_t rows_ = 0;
     };
 
-    // Process-wide, for the reason in the header comment. Exposed so a test can assert it exists.
+    // Process-wide, for the reason in the header comment. Exposed so a test can assert it
+    // exists.
     std::mutex& engine_load_mutex();
 
 }  // namespace shipinfer

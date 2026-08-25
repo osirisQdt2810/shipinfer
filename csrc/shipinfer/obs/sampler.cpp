@@ -9,7 +9,10 @@ namespace shipinfer {
 
     OccupancySampler::OccupancySampler(const std::string& path, Probe probe, double interval_s,
                                        const std::string& meta_json)
-        : path_(path), probe_(std::move(probe)), interval_s_(interval_s), meta_json_(meta_json) {}
+        : path_(path),
+          probe_(std::move(probe)),
+          interval_s_(interval_s),
+          meta_json_(meta_json) {}
 
     OccupancySampler::~OccupancySampler() {
         stop();
@@ -46,8 +49,8 @@ namespace shipinfer {
             line << "}";
             out_ << line.str() << "\n";
             // Flushed every sample. A run that is killed — by a timeout, by an operator, by the
-            // out-of-memory killer — still has to leave an analysable log behind, and a truncated
-            // last line is how a buffered writer loses the interesting part.
+            // out-of-memory killer — still has to leave an analysable log behind, and a
+            // truncated last line is how a buffered writer loses the interesting part.
             out_.flush();
 
             next += std::chrono::duration_cast<std::chrono::steady_clock::duration>(period);

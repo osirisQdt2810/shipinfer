@@ -1,11 +1,10 @@
 #include "shipinfer/ingest/sources/replay.h"
 
+#include <algorithm>
+#include <filesystem>
 #include <opencv2/opencv.hpp>
 
 #include "shipinfer/core/platform.h"
-
-#include <algorithm>
-#include <filesystem>
 
 namespace shipinfer {
     namespace {
@@ -50,31 +49,46 @@ namespace shipinfer {
             frames_.push_back(std::move(decoded));
         }
         // Registered as pinned. Every frame is copied host->device once per replay, and a
-        // *pageable* source forces the driver to stage the copy through its own bounded buffer and
-        // serialise it against every other copy on the context: at 350 img/s x 6 MB that is 2 GB/s
-        // of copies taking the slow path. `gpuHostRegister` on the decoded library is one call at
-        // start-up and makes those copies DMA straight out of these pages.
+        // *pageable* source forces the driver to stage the copy through its own bounded buffer
+        // and serialise it against every other copy on the context: at 350 img/s x 6 MB that is
+        // 2 GB/s of copies taking the slow path. `gpuHostRegister` on the decoded library is
+        // one call at start-up and makes those copies DMA straight out of these pages.
         //
-        // Failure is not fatal: registration can be refused (a locked-memory rlimit, a kernel that
-        // will not pin that much), and the correct response is a slower run rather than no run.
-        for (auto& image : frames_) {
-            if (gpuHostRegister(image.pixels.data(), image.pixels.size(), gpuHostRegisterDefault) !=
-                gpuSuccess) {
+        // Failure is not fatal: registration can be refused (a locked-memory rlimit, a kernel
+        // that will not pin that much), and the correct response is a slower run rather than no
+        // run.
+        registered_.assign(frames_.size(), 0);
+        for (size_t i = 0; i < frames_.size(); ++i) {
+            auto& image = frames_[i];
+            if (gpuHostRegister(image.pixels.data(), image.pixels.size(),
+                                gpuHostRegisterDefault) == gpuSuccess) {
+                registered_[i] = 1;
+            } else {
                 gpuGetLastError();  // cleared, so the next real error is not misattributed
-                pinned_ = false;
             }
         }
 
         if (frames_.empty()) {
-            throw SourceError("no decodable images under " + folder +
-                              " — a run that offers zero frames is not a slower measurement, it is "
-                              "a different experiment");
+            throw SourceError(
+                "no decodable images under " + folder +
+                " — a run that offers zero frames is not a slower measurement, it is "
+                "a different experiment");
         }
     }
 
     ReplaySource::~ReplaySource() {
-        if (!pinned_) return;
-        for (auto& image : frames_) gpuHostUnregister(image.pixels.data());
+        // Only what registered is unregistered — per image, so one refusal does not leak the
+        // rest.
+        for (size_t i = 0; i < frames_.size(); ++i) {
+            if (registered_[i]) gpuHostUnregister(frames_[i].pixels.data());
+        }
+    }
+
+    bool ReplaySource::pinned() const {
+        for (char r : registered_) {
+            if (!r) return false;
+        }
+        return !frames_.empty();
     }
 
     HostFrame ReplaySource::at(size_t index) const {
@@ -128,9 +142,9 @@ namespace shipinfer {
             if (next > now) {
                 std::this_thread::sleep_for(next - now);
             } else {
-                // Behind. Absorb rather than catch up — see the header. Resetting `next` to now is
-                // what makes the deficit show up in `read_` as a lower offered rate instead of
-                // becoming a burst the fleet's queue has to eat.
+                // Behind. Absorb rather than catch up — see the header. Resetting `next` to now
+                // is what makes the deficit show up in `read_` as a lower offered rate instead
+                // of becoming a burst the fleet's queue has to eat.
                 next = now;
             }
         }

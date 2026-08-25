@@ -71,8 +71,8 @@ namespace shipinfer {
         if (!file.read(blob.data(), size)) throw BackendError("cannot read plan " + plan_path);
 
         {
-            // See the header: kept for host-memory and driver contention, not for a GIL that does
-            // not exist here.
+            // See the header: kept for host-memory and driver contention, not for a GIL that
+            // does not exist here.
             std::lock_guard<std::mutex> lock(engine_load_mutex());
             static bool plugins_ready = false;
             if (!plugins_ready) {
@@ -80,13 +80,15 @@ namespace shipinfer {
                 plugins_ready = true;
             }
             self->runtime_ = nvinfer1::createInferRuntime(logger());
-            if (self->runtime_ == nullptr) throw BackendError("createInferRuntime returned null");
+            if (self->runtime_ == nullptr)
+                throw BackendError("createInferRuntime returned null");
             self->engine_ = self->runtime_->deserializeCudaEngine(blob.data(), blob.size());
         }
         if (self->engine_ == nullptr) {
-            throw BackendError("deserializeCudaEngine returned null for " + plan_path +
-                               " — the plan is truncated, or was built for a different TensorRT "
-                               "version or compute capability");
+            throw BackendError(
+                "deserializeCudaEngine returned null for " + plan_path +
+                " — the plan is truncated, or was built for a different TensorRT "
+                "version or compute capability");
         }
         self->introspect();
         return self;
@@ -97,7 +99,8 @@ namespace shipinfer {
         for (int i = 0; i < total; ++i) {
             const char* name = engine_->getIOTensorName(i);
             const auto shape = engine_->getTensorShape(name);
-            const bool is_input = engine_->getTensorIOMode(name) == nvinfer1::TensorIOMode::kINPUT;
+            const bool is_input =
+                engine_->getTensorIOMode(name) == nvinfer1::TensorIOMode::kINPUT;
 
             TensorSpec spec;
             spec.name = name;
@@ -152,9 +155,9 @@ namespace shipinfer {
     }
 
     TrtInstance::~TrtInstance() {
-        // Order matters: the context references the buffers, so it goes first. And the stream is
-        // synchronised before anything is freed, because a free racing an in-flight kernel is a
-        // crash somewhere else entirely.
+        // Order matters: the context references the buffers, so it goes first. And the stream
+        // is synchronised before anything is freed, because a free racing an in-flight kernel
+        // is a crash somewhere else entirely.
         if (stream_ != nullptr) gpuStreamSynchronize(stream_);
         if (context_ != nullptr) delete context_;
         if (stream_ != nullptr) gpuStreamDestroy(stream_);
@@ -162,8 +165,8 @@ namespace shipinfer {
 
     void* TrtInstance::scratch(size_t bytes) {
         if (scratch_.bytes() < bytes) {
-            // Grown, never shrunk: the sizes here are bounded by `max_batch` so this settles after
-            // the first few calls and then never allocates again.
+            // Grown, never shrunk: the sizes here are bounded by `max_batch` so this settles
+            // after the first few calls and then never allocates again.
             scratch_ = DeviceBuffer(bytes);
         }
         return scratch_.get();
@@ -176,9 +179,9 @@ namespace shipinfer {
     void TrtInstance::execute(int rows) {
         if (rows <= 0) return;
         if (rows > engine_->max_batch()) {
-            throw BackendError("assembled batch of " + std::to_string(rows) +
-                               " rows exceeds max_batch_size " +
-                               std::to_string(engine_->max_batch()) + " for " + engine_->path());
+            throw BackendError(
+                "assembled batch of " + std::to_string(rows) + " rows exceeds max_batch_size " +
+                std::to_string(engine_->max_batch()) + " for " + engine_->path());
         }
         // No `gpuSetDevice`: the caller runs on a thread bound to this instance's device for
         // life (ADR-002) and the pool lease is device-affine; binding again per inference was

@@ -4,15 +4,16 @@
 #include <cmath>
 
 #include "shipinfer/core/platform.h"
+#include "shipinfer/pipeline/graph/shapes.h"
 #include "shipinfer/runtime/ops.h"
 
 namespace shipinfer {
     namespace {
         // Holds a pool lease for a scope and releases it on every exit — the exception path
         // included. The first version released by hand in a catch and again after the happy
-        // path, and the `out.data.assign` between the two sat outside the try: a bad_alloc there
-        // left the instance's slot locked for the life of the process, and every worker that
-        // leased it afterwards blocked forever.
+        // path, and the `out.data.assign` between the two sat outside the try: a bad_alloc
+        // there left the instance's slot locked for the life of the process, and every worker
+        // that leased it afterwards blocked forever.
         class LeaseGuard {
           public:
             LeaseGuard(ModelPool& pool, int device) : pool_(pool), lease_(pool.lease(device)) {}
@@ -31,14 +32,14 @@ namespace shipinfer {
 namespace shipinfer {
     namespace {
 
-        // The detector's output is (300, 6): x1, y1, x2, y2, score, class — TensorRT's EfficientNMS
-        // layout, which is what these plans are built with.
+        // The detector's output is (300, 6): x1, y1, x2, y2, score, class — TensorRT's
+        // EfficientNMS layout, which is what these plans are built with.
         constexpr int kDetStride = 6;
 
     }  // namespace
 
-    ModelPool::ModelPool(std::string name, const std::string& plan, const std::vector<int>& devices,
-                         int per_device)
+    ModelPool::ModelPool(std::string name, const std::string& plan,
+                         const std::vector<int>& devices, int per_device)
         : name_(std::move(name)) {
         if (devices.empty()) throw ConfigError(name_ + " has no devices");
         if (per_device < 1) {
@@ -46,8 +47,8 @@ namespace shipinfer {
                               std::to_string(per_device));
         }
         for (int device : devices) {
-            // One engine per device, shared by that device's instances: the weights are paid for
-            // once per GPU rather than once per instance.
+            // One engine per device, shared by that device's instances: the weights are paid
+            // for once per GPU rather than once per instance.
             auto engine = TrtEngine::load(plan, device);
             engines_.push_back(engine);
             for (int i = 0; i < per_device; ++i) {
@@ -60,16 +61,17 @@ namespace shipinfer {
 
     ModelPool::Lease ModelPool::lease(int device) {
         // Only this device's instances are candidates. Round-robin among them, then spin to the
-        // first free one: with equal instances the next free is as good as the nominated one, and
-        // waiting for a specific instance is how a queue forms behind a slow device.
+        // first free one: with equal instances the next free is as good as the nominated one,
+        // and waiting for a specific instance is how a queue forms behind a slow device.
         auto it = by_device_.find(device);
         if (it == by_device_.end() || it->second.empty()) {
             throw ConfigError(name_ + " has no instance on device " + std::to_string(device) +
                               "; a frame cannot be executed on a device its pixels are not on");
         }
         const auto& slots = it->second;
-        // Counted around the whole acquisition, including the spin: a worker spinning for a free
-        // instance is a worker waiting, and pretending otherwise is what hid the pegged pool.
+        // Counted around the whole acquisition, including the spin: a worker spinning for a
+        // free instance is a worker waiting, and pretending otherwise is what hid the pegged
+        // pool.
         waiting_.fetch_add(1);
         struct Leaving {
             std::atomic<long long>* counter;
@@ -112,8 +114,9 @@ namespace shipinfer {
         detector_ = std::make_unique<ModelPool>("ship_detector", config.detector_plan,
                                                 config.devices, config.detector_instances);
         if (!config.segmenter_plan.empty()) {
-            segmenter_ = std::make_unique<ModelPool>("ship_segmenter", config.segmenter_plan,
-                                                     config.devices, config.segmenter_instances);
+            segmenter_ =
+                std::make_unique<ModelPool>("ship_segmenter", config.segmenter_plan,
+                                            config.devices, config.segmenter_instances);
         }
         if (!config.embedder_plan.empty()) {
             embedder_ = std::make_unique<ModelPool>("person_embedder", config.embedder_plan,
@@ -124,6 +127,24 @@ namespace shipinfer {
                 std::make_unique<ModelPool>("ship_embedder", config.ship_embedder_plan,
                                             config.devices, config.ship_embedder_instances);
         }
+
+        // The config is a claim about the plans; the plans are the fact. Every extent the graph
+        // writes into a binding is checked against that binding's own shape, here, once — so a
+        // mismatch is a start-up error naming both numbers, not an out-of-bounds device write.
+        const int64_t d = config.detect_size;
+        check_pool(*detector_, {3, d, d});
+        if (segmenter_) check_pool(*segmenter_, {3, d, d});
+        if (embedder_) check_pool(*embedder_, {3, config.crop_h, config.crop_w});
+        if (ship_embedder_) check_pool(*ship_embedder_, {3, config.crop_h, config.crop_w});
+    }
+
+    void PipelineGraph::check_pool(const ModelPool& pool, const std::vector<int64_t>& fed_row) {
+        const TrtEngine& plan = pool.engine();
+        if (plan.inputs().empty())
+            throw ConfigError(pool.name() + ": the plan declares no input");
+        expect_input_row(plan.inputs().front(), fed_row, pool.name());
+        for (const TensorSpec& spec : plan.inputs()) expect_float32(spec, pool.name());
+        for (const TensorSpec& spec : plan.outputs()) expect_float32(spec, pool.name());
     }
 
     PipelineGraph::~PipelineGraph() = default;
@@ -136,16 +157,17 @@ namespace shipinfer {
         return names;
     }
 
-    size_t PipelineGraph::execute(std::vector<Work>& batch, int device, FrameCollector& collector) {
+    size_t PipelineGraph::execute(std::vector<Work>& batch, int device,
+                                  FrameCollector& collector) {
         if (batch.empty()) return 0;
         // No `gpuSetDevice` here: the worker bound itself to `device` once, for life (ADR-002),
         // and the lease below refuses an instance on any other device.
 
         // -- detect, once, for the whole batch ------------------------------------------------
         // The plan is static, so the batch handed to `execute` is exactly `max_batch` rows. A
-        // short batch is padded: the padding rows are letterboxed from the last real frame rather
-        // than left uninitialised, because uninitialised device memory can contain NaNs and a NaN
-        // through a detector produces warnings on every layer.
+        // short batch is padded: the padding rows are letterboxed from the last real frame
+        // rather than left uninitialised, because uninitialised device memory can contain NaNs
+        // and a NaN through a detector produces warnings on every layer.
         const int rows = detector_->max_batch();
         // The caller drains a detector-sized batch, so this is an equality in practice. It is
         // asserted rather than assumed because a frame is one detector row *by convention*
@@ -159,11 +181,12 @@ namespace shipinfer {
         const size_t real = std::min(batch.size(), static_cast<size_t>(rows));
         std::vector<LetterboxMap> maps(real);
 
-        // The detector lease lives exactly as long as the detector phase. The first RAII version
-        // let the guard run to the end of `execute`, which held a detector instance through every
-        // frame's embedder and segmenter work — other workers then spun on `lease()` waiting for a
-        // detector, and the 40 s bench went from 8 reassembly timeouts to 1104. Same throughput,
-        // frames stuck behind a lock they did not need. The scope is the fix.
+        // The detector lease lives exactly as long as the detector phase. The first RAII
+        // version let the guard run to the end of `execute`, which held a detector instance
+        // through every frame's embedder and segmenter work — other workers then spun on
+        // `lease()` waiting for a detector, and the 40 s bench went from 8 reassembly timeouts
+        // to 1104. Same throughput, frames stuck behind a lock they did not need. The scope is
+        // the fix.
         {
             LeaseGuard lease(*detector_, device);
             float* input = static_cast<float*>(lease.instance().input());
@@ -171,17 +194,17 @@ namespace shipinfer {
                 static_cast<size_t>(config_.detect_size) * config_.detect_size * 3;
             for (size_t i = 0; i < static_cast<size_t>(rows); ++i) {
                 const Work& work = batch[std::min(i, real - 1)];
-                const LetterboxMap map =
-                    letterbox_into(work.image_device, work.state->height(), work.state->width(),
-                                   input + i * stride, config_.detect_size, config_.detect_size,
-                                   /*swap_rb=*/true, /*pad_value=*/0.5f, lease.instance().stream());
+                const LetterboxMap map = letterbox_into(
+                    work.image_device, work.state->height(), work.state->width(),
+                    input + i * stride, config_.detect_size, config_.detect_size,
+                    /*swap_rb=*/true, /*pad_value=*/0.5f, lease.instance().stream());
                 if (i < real) maps[i] = map;
             }
             // No synchronisation. The kernels and `enqueueV3` are on the same stream, so the
-            // stream orders them — and `execute` syncs that one stream at the end, which is what
-            // makes the outputs readable. The first version launched on the default stream and
-            // then called `gpuDeviceSynchronize`, which waits for *every* context on the device:
-            // at four workers per GPU that serialised all of them behind each other.
+            // stream orders them — and `execute` syncs that one stream at the end, which is
+            // what makes the outputs readable. The first version launched on the default stream
+            // and then called `gpuDeviceSynchronize`, which waits for *every* context on the
+            // device: at four workers per GPU that serialised all of them behind each other.
             lease.instance().execute(rows);
 
             const float* out = lease.instance().output();
@@ -190,14 +213,14 @@ namespace shipinfer {
                 std::vector<Detection> detections;
                 const float* frame_out = out + i * per_row;
                 const size_t candidates = per_row / kDetStride;
-                for (size_t d = 0;
-                     d < candidates && detections.size() < static_cast<size_t>(config_.max_objects);
+                for (size_t d = 0; d < candidates &&
+                                   detections.size() < static_cast<size_t>(config_.max_objects);
                      ++d) {
                     const float* row = frame_out + d * kDetStride;
                     if (row[4] < config_.score_threshold) continue;
                     Detection det;
-                    // Model space back to original pixels. Cropping in letterboxed coordinates is
-                    // where the off-by-a-pad-bar bugs live.
+                    // Model space back to original pixels. Cropping in letterboxed coordinates
+                    // is where the off-by-a-pad-bar bugs live.
                     det.x1 = (row[0] - static_cast<float>(maps[i].pad_x)) / maps[i].scale;
                     det.y1 = (row[1] - static_cast<float>(maps[i].pad_y)) / maps[i].scale;
                     det.x2 = (row[2] - static_cast<float>(maps[i].pad_x)) / maps[i].scale;
@@ -274,12 +297,12 @@ namespace shipinfer {
             const Branches& b = branches[i];
             if (b.person_index.empty() && b.ship_index.empty()) continue;
             try {
-                run_objects(embedder_.get(), state, batch[i].image_device, device, b.person_boxes,
-                            b.person_index, config_.crop_h, config_.crop_w, "person_embedder",
-                            collector);
-                run_objects(segmenter_.get(), state, batch[i].image_device, device, b.ship_boxes,
-                            b.ship_index, config_.detect_size, config_.detect_size,
-                            "ship_segmenter", collector);
+                run_objects(embedder_.get(), state, batch[i].image_device, device,
+                            b.person_boxes, b.person_index, config_.crop_h, config_.crop_w,
+                            "person_embedder", collector);
+                run_objects(segmenter_.get(), state, batch[i].image_device, device,
+                            b.ship_boxes, b.ship_index, config_.detect_size,
+                            config_.detect_size, "ship_segmenter", collector);
                 run_objects(ship_embedder_.get(), state, batch[i].image_device, device,
                             b.ship_boxes, b.ship_index, config_.crop_h, config_.crop_w,
                             "ship_embedder", collector);
@@ -293,8 +316,9 @@ namespace shipinfer {
         return failed;
     }
 
-    void PipelineGraph::run_objects(ModelPool* pool, FrameState& state, const uint8_t* image_device,
-                                    int device, const std::vector<float>& boxes,
+    void PipelineGraph::run_objects(ModelPool* pool, FrameState& state,
+                                    const uint8_t* image_device, int device,
+                                    const std::vector<float>& boxes,
                                     const std::vector<int>& indices, int crop_h, int crop_w,
                                     const char* stage, FrameCollector& collector) {
         if (pool == nullptr || indices.empty()) return;

@@ -30,8 +30,9 @@ namespace shipinfer {
     // A per-object result: N rows, each belonging to one detection of one frame.
     struct ObjectBatch {
         std::string name;
-        std::vector<int> object_indices;  // object_indices[row] is the detection that produced it
-        std::vector<float> data;          // row-major, `width` floats per row
+        std::vector<int>
+            object_indices;       // object_indices[row] is the detection that produced it
+        std::vector<float> data;  // row-major, `width` floats per row
         int width = 0;
 
         bool empty() const { return object_indices.empty(); }
@@ -45,8 +46,8 @@ namespace shipinfer {
         // attached it under the same name — `attach` assigns, so chunk k+1 replaced chunk k
         // and a 25-person frame reached the sink with the 9 embeddings of its last chunk,
         // sealed Complete. One batch per stage now, grown here; `attach` is called once.
-        void append(const float* chunk, int count, int chunk_width, const std::vector<int>& indices,
-                    size_t start) {
+        void append(const float* chunk, int count, int chunk_width,
+                    const std::vector<int>& indices, size_t start) {
             if (count <= 0) return;
             if (width == 0) width = chunk_width;
             if (chunk_width != width) {
@@ -59,13 +60,14 @@ namespace shipinfer {
                                        ": chunk past the end of the indices");
             }
             data.insert(data.end(), chunk, chunk + static_cast<size_t>(count) * width);
-            object_indices.insert(object_indices.end(), indices.begin() + static_cast<long>(start),
+            object_indices.insert(object_indices.end(),
+                                  indices.begin() + static_cast<long>(start),
                                   indices.begin() + static_cast<long>(start) + count);
         }
     };
 
-    // What the event builder needs, and nothing else. Captured under the collector's lock; built
-    // outside it.
+    // What the event builder needs, and nothing else. Captured under the collector's lock;
+    // built outside it.
     struct EmissionInputs {
         FrameTag tag;
         int width = 0;
@@ -120,22 +122,22 @@ namespace shipinfer {
             return inputs;
         }
 
-        // The frame's pixels, on the device it was decoded on (ADR-004: a frame stays where it was
-        // decoded, and only its crops travel).
+        // The frame's pixels, on the device it was decoded on (ADR-004: a frame stays where it
+        // was decoded, and only its crops travel).
         void set_image(std::shared_ptr<DeviceBuffer> image, int device) {
             image_ = std::move(image);
             device_ = device;
         }
         const DeviceBuffer* image() const { return image_.get(); }
         int device() const { return device_; }
-        // Released as soon as the last stage that needs pixels is done, because a 1080p frame is
-        // 6 MB and a thousand of them in flight is the whole budget.
-        // Not called yet, and kept deliberately. ADR-004: a frame stays on the GPU it was
-        // decoded on and only its crops travel, so the pixels should be released the moment
-        // the last stage that needs them is done — a 1080p frame is 6 MB and at the design
-        // point a thousand of them in flight is the whole budget. The graph runs every stage
-        // that needs pixels before it returns, so today the `shared_ptr` dies with the frame
-        // and the effect is the same; this is the hook for when a stage runs after them.
+        // Released as soon as the last stage that needs pixels is done, because a 1080p frame
+        // is 6 MB and a thousand of them in flight is the whole budget. Not called yet, and
+        // kept deliberately. ADR-004: a frame stays on the GPU it was decoded on and only its
+        // crops travel, so the pixels should be released the moment the last stage that needs
+        // them is done — a 1080p frame is 6 MB and at the design point a thousand of them in
+        // flight is the whole budget. The graph runs every stage that needs pixels before it
+        // returns, so today the `shared_ptr` dies with the frame and the effect is the same;
+        // this is the hook for when a stage runs after them.
         void release_image() { image_.reset(); }
 
       private:
