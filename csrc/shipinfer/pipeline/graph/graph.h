@@ -15,6 +15,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -48,7 +49,7 @@ namespace shipinfer {
         void release(const Lease& lease);
 
         const std::string& name() const { return name_; }
-        int max_batch() const { return instances_.front()->max_batch(); }
+        int max_batch() const { return instances_.at(0)->max_batch(); }
         size_t size() const { return instances_.size(); }
         // The plan behind this pool (one per device, identical): its shapes are what the graph
         // checks its own configuration against.

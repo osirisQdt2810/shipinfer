@@ -52,6 +52,9 @@ namespace shipinfer {
         // single flag and the destructor then unregistered nothing, leaving the pages that had
         // registered locked; each image records its own outcome now.
         bool pinned() const;
+        // Files under the folder that did not decode — skipped, and reported rather than
+        // hidden.
+        size_t undecodable() const { return undecodable_; }
 
       private:
         struct Image {
@@ -61,6 +64,7 @@ namespace shipinfer {
         };
         std::vector<Image> frames_;
         std::vector<char> registered_;  // per image, 1 when gpuHostRegister succeeded
+        size_t undecodable_ = 0;
     };
 
     class CameraActor {

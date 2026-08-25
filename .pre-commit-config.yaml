@@ -60,9 +60,9 @@ repos:
       - id: ruff-check
         args: [--fix]
 
-  # No clang-format here: the C++/CUDA lives in the shipinfer-imgproc submodule and is
-  # formatted by that repository's own hooks. Running it from the parent would rewrite a
-  # checkout the parent does not own and produce a dirty submodule on every commit.
+  # clang-format runs only over csrc/ (the local hook below). The submodule's C++ is formatted by
+  # that repository's own hooks; running the parent's over it would rewrite a checkout the parent
+  # does not own and produce a dirty submodule on every commit.
 
   - repo: local
     hooks:

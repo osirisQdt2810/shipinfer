@@ -51,9 +51,9 @@ namespace shipinfer {
             if (count <= 0) return;
             if (width == 0) width = chunk_width;
             if (chunk_width != width) {
-                throw std::logic_error("ObjectBatch " + name + ": chunk width " +
-                                       std::to_string(chunk_width) + " differs from " +
-                                       std::to_string(width));
+                throw BackendError("ObjectBatch " + name + ": chunk width " +
+                                   std::to_string(chunk_width) + " differs from " +
+                                   std::to_string(width));
             }
             if (start + static_cast<size_t>(count) > indices.size()) {
                 throw std::logic_error("ObjectBatch " + name +

@@ -197,7 +197,8 @@ namespace {
         bool refused = false;
         try {
             out.append(std::vector<float>(3).data(), 1, 3, indices, 0);
-        } catch (const std::logic_error&) {
+        } catch (
+            const BackendError&) {  // the house vocabulary, caught by the per-frame handler
             refused = true;
         }
         check(refused,
@@ -411,13 +412,14 @@ namespace {
         gpuMalloc(&device_dst, static_cast<size_t>(3) * dst * dst * sizeof(float));
         gpuMemcpy(device_src, host.data(), host.size(), gpuMemcpyHostToDevice);
 
-        const LetterboxMap map =
-            letterbox_into(device_src, src_h, src_w, device_dst, dst, dst, true, 0.5f, nullptr);
+        const LetterboxMap map = letterbox_into(device_src, src_h, src_w, device_dst, dst, dst,
+                                                true, 114.f / 255.f, nullptr);
         gpuDeviceSynchronize();
 
         std::vector<float> got(static_cast<size_t>(3) * dst * dst);
         gpuMemcpy(got.data(), device_dst, got.size() * sizeof(float), gpuMemcpyDeviceToHost);
-        const auto want = letterbox_reference(host, src_h, src_w, dst, dst, true, 0.5f, map);
+        const auto want =
+            letterbox_reference(host, src_h, src_w, dst, dst, true, 114.f / 255.f, map);
 
         double worst = 0;
         for (size_t i = 0; i < got.size(); ++i)
@@ -430,7 +432,9 @@ namespace {
 
         // The bars carry the pad value, not a smeared edge pixel. Clamping instead would give
         // the detector an object to find in the padding.
-        if (map.pad_y > 0) check_near(got[0], 0.5f, 1e-6, "the top bar is the pad value");
+        if (map.pad_y > 0)
+            check_near(got[0], 114.f / 255.f, 1e-6,
+                       "the top bar is 114/255, the Python plane's pad");
         check(map.new_w == dst && map.new_h == 36 && map.pad_y == 14,
               "160x90 onto 64: 64x36 at (0, 14)");
         gpuFree(device_src);

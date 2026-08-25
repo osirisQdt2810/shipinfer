@@ -1,6 +1,7 @@
 #include "shipinfer/obs/sampler.h"
 
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 
 #include "shipinfer/core/types.h"
@@ -37,6 +38,18 @@ namespace shipinfer {
     void OccupancySampler::run() {
         const auto period = std::chrono::duration<double>(interval_s_);
         auto next = started_;
+        // The probe builds a map per sample; an allocation failure here would take the process
+        // down through std::terminate and truncate the very log this class exists to keep. A
+        // sample that could not be taken is a gap in the series, not the end of the run.
+        try {
+            run_loop(period, next);
+        } catch (const std::exception& error) {
+            std::cerr << "occupancy sampler stopped: " << error.what() << "\n";
+        }
+    }
+
+    void OccupancySampler::run_loop(std::chrono::duration<double> period,
+                                    std::chrono::steady_clock::time_point next) {
         while (!stopping_.load()) {
             const auto now = std::chrono::steady_clock::now();
             const double t = std::chrono::duration<double>(now - started_).count();

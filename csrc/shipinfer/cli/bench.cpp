@@ -289,6 +289,11 @@ int main(int argc, char** argv) {
                         std::vector<FrameTag> opened;
                         try {
                             // Grown once, never shrunk, and never freed inside the loop.
+                            // Rewritten every iteration while the previous batch's kernels read
+                            // it on a leased instance's stream — safe only because
+                            // TrtInstance::execute synchronises that stream before the lease is
+                            // released, so every reader has retired. That safety is non-local,
+                            // which is why it is written down here.
                             size_t frame_bytes = 0;
                             for (const auto& item : batch) {
                                 frame_bytes = std::max(frame_bytes,
@@ -428,6 +433,14 @@ int main(int argc, char** argv) {
         std::cout << "startup_s " << startup_s << "\n";
         std::cout << "frames_read " << read << "\n";
         std::cout << "frames_dropped " << dropped << "\n";
+        // Per camera, because 5 000 drops from one starved camera and 100 from each of fifty
+        // are the same total — and telling them apart is what ADR-005 exists for.
+        for (const auto& camera : cameras) {
+            if (camera->dropped() > 0) {
+                std::cout << "frames_dropped_by_camera " << camera->id() << " "
+                          << camera->dropped() << "\n";
+            }
+        }
         std::cout << "frames_accepted " << accepted.load() << "\n";
         std::cout << "frames_failed " << failed.load() << "\n";
         for (const auto& [camera, count] : open_refused_by_camera) {
@@ -435,6 +448,9 @@ int main(int argc, char** argv) {
         }
         std::cout << "events_emitted " << emitted.load() << "\n";
         std::cout << "queue_rejected " << stats.rejected << "\n";
+        for (const auto& [camera, count] : stats.rejected_by_camera) {
+            std::cout << "queue_rejected_by_camera " << camera << " " << count << "\n";
+        }
         std::cout << "queue_evicted " << stats.evicted << "\n";
         std::cout << "collector_reported " << collector.reported() << "\n";
         std::cout << "collector_timeouts " << collector.timed_out() << "\n";

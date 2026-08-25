@@ -157,6 +157,13 @@ namespace shipinfer {
         return names;
     }
 
+    // `TorchImageOps._letterbox` fills the canvas with 114 and then normalises with the default
+    // mean 0 / std 255, so the Python plane's bar is 114/255. The first version used 0.5 — a
+    // 0.053 difference on both bars of every detector input, on the same engines. The C++ plane
+    // applies no mean/std of its own, which is only correct while the Python config keeps those
+    // defaults; the parity harness (ledger P6) is where a changed normalisation would show.
+    constexpr float kPadValue = 114.f / 255.f;
+
     size_t PipelineGraph::execute(std::vector<Work>& batch, int device,
                                   FrameCollector& collector) {
         if (batch.empty()) return 0;
@@ -197,7 +204,7 @@ namespace shipinfer {
                 const LetterboxMap map = letterbox_into(
                     work.image_device, work.state->height(), work.state->width(),
                     input + i * stride, config_.detect_size, config_.detect_size,
-                    /*swap_rb=*/true, /*pad_value=*/0.5f, lease.instance().stream());
+                    /*swap_rb=*/true, /*pad_value=*/kPadValue, lease.instance().stream());
                 if (i < real) maps[i] = map;
             }
             // No synchronisation. The kernels and `enqueueV3` are on the same stream, so the
@@ -330,7 +337,14 @@ namespace shipinfer {
         // *normal* case at this sizing, not an edge one.
         ObjectBatch out;
         out.name = std::string(stage) + "_out";
-        std::vector<float> padded(static_cast<size_t>(limit) * 4);
+        // Page-locked, once per worker thread: a pageable `gpuMemcpyAsync` source silently
+        // degrades to a staged, synchronous copy (CONVENTIONS 2.4), and this is on the
+        // per-chunk path. ~256 bytes, so the cost was noise — but the file honours the rule
+        // everywhere else.
+        thread_local PinnedBuffer pinned_boxes;
+        const size_t box_bytes = static_cast<size_t>(limit) * 4 * sizeof(float);
+        if (pinned_boxes.bytes() < box_bytes) pinned_boxes = PinnedBuffer(box_bytes);
+        float* padded = pinned_boxes.as<float>();
         for (size_t start = 0; start < indices.size(); start += static_cast<size_t>(limit)) {
             const int count = static_cast<int>(std::min<size_t>(limit, indices.size() - start));
             LeaseGuard lease(*pool, device);
@@ -338,14 +352,13 @@ namespace shipinfer {
             // writes every row the static plan expects.
             for (int i = 0; i < limit; ++i) {
                 const size_t source = start + static_cast<size_t>(std::min(i, count - 1));
-                std::copy_n(boxes.begin() + static_cast<long>(source * 4), 4,
-                            padded.begin() + static_cast<long>(i) * 4);
+                std::copy_n(boxes.begin() + static_cast<long>(source * 4), 4, padded + i * 4);
             }
             // The instance's own scratch, not a fresh `gpuMalloc` per chunk: allocation
             // serialises on the driver and this runs once per object-batch per frame.
-            void* box_device = lease.instance().scratch(padded.size() * sizeof(float));
-            GPU_CHECK(gpuMemcpyAsync(box_device, padded.data(), padded.size() * sizeof(float),
-                                     gpuMemcpyHostToDevice, lease.instance().stream()));
+            void* box_device = lease.instance().scratch(box_bytes);
+            GPU_CHECK(gpuMemcpyAsync(box_device, padded, box_bytes, gpuMemcpyHostToDevice,
+                                     lease.instance().stream()));
             crop_resize_into(image_device, state.height(), state.width(),
                              static_cast<const float*>(box_device), limit,
                              static_cast<float*>(lease.instance().input()), crop_h, crop_w,

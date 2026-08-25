@@ -6,8 +6,8 @@
 // way for this port to be scored by a friendlier judge than the thing it is being compared
 // against, which given that this port exists to look good is the property that matters.
 //
-// Line 1 is a `{"meta": {...}}` object; every later line is `{"t": <seconds>, "<name>_buffer":
-// <depth>, ...}`.
+// Line 1 is a `{"meta": {...}}` object; every later line is `{"t": <seconds>,
+// "<name>_buffer_size": <depth>, ...}` — `_buffer_size`, the key `analysis.read_log` strips.
 #pragma once
 
 #include <atomic>
@@ -33,6 +33,8 @@ namespace shipinfer {
 
       private:
         void run();
+        void run_loop(std::chrono::duration<double> period,
+                      std::chrono::steady_clock::time_point next);
 
         std::string path_;
         Probe probe_;

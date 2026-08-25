@@ -46,7 +46,7 @@ falls, and it is what `CLAUDE.md` specified before any of this was written.
 
 ## The measurement is deliberately shared
 
-`apps/shipinfer_pipeline.cpp` writes **the same buffer-occupancy JSONL** the Python driver and
+`cli/bench.cpp` writes **the same buffer-occupancy JSONL** the Python driver and
 the baseline binary write. So `benchmarks/harness/analysis.py` judges all three with one
 implementation and one set of guards — no new measurement code, and no way for the C++ side to
 be scored by a friendlier judge than the thing it is being compared against.
@@ -60,7 +60,7 @@ shared-library closure is staged into a directory the container mounts. See
 `stage_runtime_libs`.
 
 ```bash
-python scripts/build_csrc.py            # host build -> csrc/build/shipinfer_pipeline
+python scripts/build_csrc.py            # host build -> csrc/build/bench and the test binaries; run them with deploy/rootless/cpp.sh (SHIPINFER_CPP_BINARY=test_dataplane for the checks)
 deploy/rootless/bench.sh --systems cpp  # run it in the container, on real GPUs
 ```
 

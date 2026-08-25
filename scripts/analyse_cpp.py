@@ -21,6 +21,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from benchmarks.harness import analysis
 
 
+def capacities(meta: dict, samples) -> dict[str, int]:
+    """The bound each module's occupancy can actually reach."""
+    workers = int(meta["config"]["workers"])
+    out = {}
+    for module in samples.modules:
+        out[module] = int(meta["config"]["buffer_capacity"]) if module == "pipeline" else workers
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log", type=Path)
@@ -46,7 +55,13 @@ def main() -> int:
         # are driven by however many detections there were, which is data rather than config —
         # the same reason the Python harness measures theirs instead of asserting them.
         offered={"pipeline": achieved, "ship_detector": achieved},
-        capacity=meta["config"]["buffer_capacity"],
+        # Per module, never one scalar. The pipeline queue's bound is the configured capacity;
+        # a model module's series is `ModelPool::waiting()`, which is bounded by the *worker*
+        # count — so a pool with every worker blocked in `lease()` plateaus at `workers`, and a
+        # plateau guard set at 0.95 x 65536 could never trip for it. The first version passed the
+        # scalar, and the four model rows it printed as SUSTAINED were structurally unreachable
+        # by the guard: the friendlier judge this file says it must never be.
+        capacity=capacities(meta, samples),
         entry_modules=("pipeline",),
     )
     print(analysis.render([run]))

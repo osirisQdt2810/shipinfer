@@ -1,7 +1,9 @@
 #include "shipinfer/ingest/sources/replay.h"
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
+#include <iostream>
 #include <opencv2/opencv.hpp>
 
 #include "shipinfer/core/platform.h"
@@ -39,7 +41,13 @@ namespace shipinfer {
         }
         for (const auto& path : paths) {
             cv::Mat image = cv::imread(path, cv::IMREAD_COLOR);
-            if (image.empty()) continue;
+            if (image.empty()) {
+                // Counted and named: 900 undecodable files out of 1000 must not silently become
+                // a 100-frame library that replays ten times faster than the real footage.
+                ++undecodable_;
+                std::cerr << "replay: cannot decode " << path << "\n";
+                continue;
+            }
             if (!image.isContinuous()) image = image.clone();
             Image decoded;
             decoded.height = image.rows;
@@ -135,7 +143,20 @@ namespace shipinfer {
 
             const HostFrame frame = library_->at(static_cast<size_t>(tag.frame_id));
             read_.fetch_add(1);
-            if (!publish_(tag, frame)) dropped_.fetch_add(1);
+            // `publish_` allocates (a FrameState, a lane entry); a std::bad_alloc escaping this
+            // thread would call std::terminate and lose the run with no counters — the same
+            // failure the worker threads were guarded against. A frame that could not be
+            // published is a dropped frame, counted, and this camera keeps going.
+            try {
+                if (!publish_(tag, frame)) dropped_.fetch_add(1);
+            } catch (const std::exception& error) {
+                dropped_.fetch_add(1);
+                static std::atomic<int> shouted{0};
+                if (shouted.fetch_add(1) < 5) {
+                    std::cerr << "camera " << id_ << " could not publish frame " << tag.frame_id
+                              << ": " << error.what() << "\n";
+                }
+            }
 
             next += std::chrono::duration_cast<clock::duration>(period);
             const auto now = clock::now();
