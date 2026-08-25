@@ -129,6 +129,20 @@ class BenchConfig:
     #: ``2k`` or ``4k``.
     resolution: Resolution = "2k"
 
+    #: Where frames come from: ``replay`` decodes JPEGs from disk, ``rtsp`` pulls H.264 over a
+    #: real socket from ``scripts/rtsp_serve.py``.
+    #:
+    #: R55 makes RTSP mandatory for the benchmark and not only for the tests, and the reason
+    #: is not pedantry: replay measures the inference plane with the decode path *removed*.
+    #: The deployment reads fifty RTSP cameras, so NVDEC, the jitter buffer, reconnects and
+    #: the NV12 path are all part of the system's real cost and none of them appear in a
+    #: replay run. A replay number is therefore an upper bound on the RTSP one, and the two
+    #: must never be compared as though they measured the same thing — which is why the source
+    #: is recorded in the run's metadata rather than left implicit.
+    source: str = "replay"
+    #: The port `rtsp_serve` listens on when ``source == "rtsp"``.
+    rtsp_port: int = 8554
+
     #: Where the frames come from. Defaults resolve under ``benchmarks/baseline/data``.
     person_frames: Path | None = None
     ship_frames: Path | None = None
@@ -340,6 +354,7 @@ class BenchConfig:
             "buffer_capacity": self.buffer_capacity,
             "pipeline_workers": self.pipeline_workers,
             "resolution": self.resolution,
+            "source": self.source,
             "sources_per_module": self.sources_per_module,
             "offered_per_module": self.offered_per_module,
             "offered_total": self.offered_total,
