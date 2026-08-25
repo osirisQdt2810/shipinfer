@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "shipinfer/core/device.h"
 #include "shipinfer/core/types.h"
 
 namespace shipinfer {
@@ -77,6 +78,30 @@ namespace shipinfer {
         std::map<std::string, ObjectBatch> batches;
     };
 
+    //: The names the planner reads — `pipeline/graph/state.py`. `FRAME_INPUT` is the frame's
+    //: own pixels; a stage that consumes it says so and the graph then knows when they may be
+    //: released.
+    inline const char* const FRAME_INPUT = "image";
+    inline const char* const DETECTIONS = "detections";
+
+    // N rows of a per-object tensor living on a device — a crop set going *into* a model. Kept
+    // apart from `ObjectBatch` (a model's *output*, host memory, copied into the emission)
+    // because device memory is move-only and must never be copied into a capture. The buffer is
+    // owned by the worker's scratch, not by the frame: a worker runs one frame at a time and
+    // waits on every stage's future before reusing it, so the payload outlives every read of
+    // it.
+    struct DevicePayload {
+        std::string name;
+        std::string class_name;
+        const float* data = nullptr;  // rows x row_elems floats, on `device`
+        size_t rows = 0;
+        size_t row_elems = 0;
+        Device device;
+        std::vector<int> object_indices;  // the detection each row belongs to
+        std::vector<float> boxes;         // (rows, 4) source boxes, for the event builder
+        bool empty() const { return rows == 0; }
+    };
+
     class FrameState {
       public:
         FrameState(FrameTag tag, int height, int width, float fps)
@@ -101,6 +126,63 @@ namespace shipinfer {
         void attach(ObjectBatch batch) {
             std::lock_guard<std::mutex> lock(mutex_);
             batches_[batch.name] = std::move(batch);
+        }
+        // A crop set (or any per-object device tensor) under its name, for the stages that read
+        // it.
+        void attach_payload(DevicePayload payload) {
+            payloads_[payload.name] = std::move(payload);
+        }
+        const DevicePayload* payload(const std::string& name) const {
+            auto it = payloads_.find(name);
+            return it == payloads_.end() ? nullptr : &it->second;
+        }
+        const ObjectBatch* batch(const std::string& name) const {
+            auto it = batches_.find(name);
+            return it == batches_.end() ? nullptr : &it->second;
+        }
+
+        // What the letterbox applied, stored rather than recomputed: the decode must undo
+        // exactly the transform that was applied, and these are the numbers that were applied.
+        void set_letterbox(float scale, int pad_x, int pad_y) {
+            scale_ = scale;
+            pad_x_ = pad_x;
+            pad_y_ = pad_y;
+        }
+        float scale() const { return scale_; }
+        int pad_x() const { return pad_x_; }
+        int pad_y() const { return pad_y_; }
+        void set_detected(bool detected) { detected_ = detected; }
+
+        int priority() const { return priority_; }
+        void set_priority(int priority) { priority_ = priority; }
+        int64_t deadline_ns() const { return deadline_ns_; }
+        void set_deadline_ns(int64_t deadline_ns) { deadline_ns_ = deadline_ns; }
+
+        // -- the planner's two questions -----------------------------------------------------
+        // Names present right now: the image while it is held, the detections once the detector
+        // answered (even if it found nothing), every payload and every batch.
+        std::vector<std::string> available() const {
+            std::vector<std::string> names;
+            if (image_) names.push_back(FRAME_INPUT);
+            if (detected_) names.push_back(DETECTIONS);
+            for (const auto& [name, _] : payloads_) names.push_back(name);
+            for (const auto& [name, _] : batches_) names.push_back(name);
+            return names;
+        }
+        // Names present *and non-empty*: what a stage with `requires` waits for. The
+        // conditional branch lives here — a ship crop set with zero rows is available (the
+        // graph is valid) and not non-empty (the segmenter is never called for it).
+        std::vector<std::string> non_empty() const {
+            std::vector<std::string> names;
+            if (image_) names.push_back(FRAME_INPUT);
+            if (detected_ && !detections_.empty()) names.push_back(DETECTIONS);
+            for (const auto& [name, payload] : payloads_) {
+                if (!payload.empty()) names.push_back(name);
+            }
+            for (const auto& [name, batch] : batches_) {
+                if (!batch.empty()) names.push_back(name);
+            }
+            return names;
         }
         void drop(const std::string& name) {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -146,6 +228,13 @@ namespace shipinfer {
         int width_ = 0;
         float fps_ = 0.f;
         int device_ = 0;
+        float scale_ = 1.f;
+        int pad_x_ = 0;
+        int pad_y_ = 0;
+        bool detected_ = false;
+        int priority_ = 2;
+        int64_t deadline_ns_ = 0;
+        std::map<std::string, DevicePayload> payloads_;  // the owning worker's, never captured
         mutable std::mutex mutex_;  // guards the two containers below, and only them
         std::vector<Detection> detections_;
         std::map<std::string, ObjectBatch> batches_;

@@ -72,6 +72,7 @@ namespace shipinfer {
         PutStatus enqueue(WorkItem&& item);
 
         InstanceStats stats() const;
+        int max_batch() const { return engine_->max_batch(); }
 
       private:
         void run();

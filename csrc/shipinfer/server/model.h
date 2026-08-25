@@ -28,6 +28,8 @@ namespace shipinfer {
         void stop();
         bool is_ready() const;
         size_t total_depth() const;
+        // The smallest engine batch across the instances — what a per-object stage chunks to.
+        int max_batch() const;
 
         // Place the request and return the future its caller waits on. A request nothing will
         // take — every ready instance refused, or nothing is ready — comes back as a future

@@ -121,5 +121,9 @@ namespace shipinfer {
     struct RequestCancelledError : std::runtime_error {
         using std::runtime_error::runtime_error;
     };
+    // `core.errors.RequestTimeoutError`: a stage waited its whole budget for a model.
+    struct RequestTimeoutError : std::runtime_error {
+        using std::runtime_error::runtime_error;
+    };
 
 }  // namespace shipinfer

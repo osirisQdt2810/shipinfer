@@ -1,5 +1,6 @@
 #include "shipinfer/server/model.h"
 
+#include <algorithm>
 #include <utility>
 
 #include "shipinfer/core/types.h"
@@ -45,6 +46,15 @@ namespace shipinfer {
             if (instance->is_ready()) return true;
         }
         return false;
+    }
+
+    int Model::max_batch() const {
+        int smallest = 0;
+        for (const auto& instance : instances_) {
+            smallest = smallest == 0 ? instance->max_batch()
+                                     : std::min(smallest, instance->max_batch());
+        }
+        return smallest;
     }
 
     size_t Model::total_depth() const {
