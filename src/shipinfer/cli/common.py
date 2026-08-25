@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
+from shipinfer.core.errors import ConfigurationError
 from shipinfer.core.logging import configure
 from shipinfer.core.settings import ServerSettings
 
@@ -35,7 +37,48 @@ def build_settings(
         data["devices"] = {"visible_gpus": parsed}
     if policy is not None:
         data["scheduler"] = {"placement_policy": policy}
-    return ServerSettings(**data)
+    settings = ServerSettings(**data)
+    return _narrow_to_shard(settings)
+
+
+def _narrow_to_shard(settings: ServerSettings) -> ServerSettings:
+    """Keep only this shard's cameras, when the launcher says which ones are ours.
+
+    Every shard is started from the *same* configuration — that is the point, since a fleet
+    described in two places is a fleet that can disagree with itself — and each is told which
+    slice of it to read through ``SHIPINFER_SHARD_CAMERAS``. With the variable unset this is
+    the identity, which is what a single-process run is.
+
+    A named camera that the configuration does not have is refused rather than skipped. The
+    plan and the config are two views of one fleet; if they disagree, some camera is going
+    unread, and the shard that would have read it is the only thing that can notice.
+    """
+    from shipinfer.server.launcher import SHARD_CAMERAS_ENV
+
+    raw = os.environ.get(SHARD_CAMERAS_ENV)
+    if raw is None:
+        return settings
+    wanted = [name for name in raw.replace(" ", "").split(",") if name]
+    if not wanted:
+        raise ConfigurationError(
+            f"{SHARD_CAMERAS_ENV} is set but empty. A shard with no cameras still loads "
+            f"engines and holds a CUDA context; unset the variable to serve the whole fleet"
+        )
+    available = {camera.camera_id: camera for camera in settings.ingest.cameras}
+    unknown = [name for name in wanted if name not in available]
+    if unknown:
+        raise ConfigurationError(
+            f"{SHARD_CAMERAS_ENV} names {unknown}, which this configuration does not define "
+            f"(it has {sorted(available)}). The plan and the config are two views of one "
+            f"fleet, so a disagreement means a camera is going unread"
+        )
+    return settings.model_copy(
+        update={
+            "ingest": settings.ingest.model_copy(
+                update={"cameras": [available[name] for name in wanted]}
+            )
+        }
+    )
 
 
 def console() -> Any:

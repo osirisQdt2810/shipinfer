@@ -1,0 +1,297 @@
+"""One OS process per shard — the half of the throughput answer the C++ plane did not give.
+
+WHY A LAUNCHER AND NOT MORE THREADS
+-----------------------------------
+Measured on the dev box, a saturated run of the Python plane used **390-534% CPU**: five cores
+of forty-eight, with every model queue empty and only the pipeline queue growing. Four
+candidates were eliminated before this one — not the GPUs (the detector retired 119.9 of 120
+offered), not the worker pool (24 / 96 / 192 workers gave 87.6 / 81.4 / 85.0 img/s, an eightfold
+range for under 8% and not monotonic), not the reassembly lock (98.9% of its hold removed, no
+change), not the load generator (it delivered 100% of what it offered).
+
+The C++ data plane answered the first half of that: it took the per-frame work out of the
+interpreter and the pipeline from 77 to 390 img/s. It did not answer the second half, which is
+that 390 is still **one process**. A process is a wall, and this is the tool for putting more
+than one of them on a forty-eight-core box.
+
+That is also the shape vLLM settled on for the same problem: its ``MultiprocExecutor`` spawns
+``context.Process`` per GPU worker and talks over ZMQ, with threads kept for auxiliary work.
+Forty-one of its files touch ``multiprocessing``; none of its twenty-one ``threading.Thread``
+uses is on the model-execution path.
+
+WHY SUBPROCESSES RATHER THAN ``multiprocessing``
+------------------------------------------------
+Because of one line: ``CUDA_VISIBLE_DEVICES`` has to be set **before anything imports torch**,
+and it has to differ per child. With ``multiprocessing``'s spawn context the child inherits the
+parent's ``os.environ``, so every child would see the same value; setting it inside the child
+means racing whatever imported torch first, and in this codebase that is a module-scope import
+two packages deep. A ``Popen`` with an explicit ``env=`` cannot lose that race — the variable is
+in place before the interpreter starts, let alone before it imports anything.
+
+It also means a shard is an ordinary process. It can be inspected with ``ps``, killed on its
+own, and profiled without the profiler seeing three other shards' kernels — and the same
+arrangement is what a container orchestrator would do anyway, one shard per container, so
+nothing here has to be undone to get there.
+
+WHAT THIS DOES NOT DO
+---------------------
+It does not aggregate. Each shard serves its own cameras end to end and hands its own tracklets
+downstream, because cameras are independent of each other all the way to MTMC — which is a
+separate plane consuming tracklets rather than frames. A launcher that collected results would
+be reintroducing the single process this exists to escape.
+"""
+
+from __future__ import annotations
+
+import os
+import signal
+import subprocess
+import sys
+import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+
+from shipinfer.core.errors import ConfigurationError
+from shipinfer.core.logging import get_logger
+from shipinfer.scheduling.sharding import Shard, ShardPlan
+
+__all__ = ["Fleet", "ShardExitedError", "ShardProcess", "forward_signals", "serve_command"]
+
+_LOG = get_logger(__name__)
+
+#: How long a shard gets to drain after SIGTERM before it is killed. Longer than a request,
+#: shorter than a deploy's patience: a shard mid-batch has one batch to finish, not one video.
+DEFAULT_DRAIN_S = 20.0
+
+
+class ShardExitedError(RuntimeError):
+    """A shard exited when it should have been serving.
+
+    A distinct type because the correct reaction is distinct. A shard is a *slice of the
+    fleet*, so one dying is not a degraded service — it is a set of cameras that has gone dark
+    with everything else still reporting healthy. Silently continuing would leave a deployment
+    whose dashboards are green and whose quay is unwatched.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class ShardProcess:
+    """One shard and the process serving it."""
+
+    shard: Shard
+    process: subprocess.Popen[bytes]
+
+    @property
+    def alive(self) -> bool:
+        return self.process.poll() is None
+
+    def __str__(self) -> str:
+        return (
+            f"shard {self.shard.index} (pid {self.process.pid}, "
+            f"{len(self.shard.cameras)} cameras, gpu(s) {list(self.shard.gpus)})"
+        )
+
+
+@dataclass
+class Fleet:
+    """Every shard's process, started together and stopped together.
+
+    Args:
+        plan: who owns which cameras and which GPUs. Pure, decided by
+            :func:`~shipinfer.scheduling.sharding.plan_shards`, and printed before anything is
+            spawned — a plan is cheap to read and a mis-sharded deployment is not.
+        command: given a shard, the argv for its process. Injected rather than hardcoded so the
+            offline tier can supervise a process that is not a server: everything below this
+            line is about *supervision*, and testing it against a real server would test CUDA.
+        env: extra environment for every child, on top of the parent's. ``CUDA_VISIBLE_DEVICES``
+            is added per shard and overrides anything here — a shard's device set is the one
+            thing the plan, not the operator, decides.
+        drain_s: how long a shard gets after SIGTERM before SIGKILL.
+    """
+
+    plan: ShardPlan
+    command: Callable[[Shard], Sequence[str]]
+    env: Mapping[str, str] = field(default_factory=dict)
+    drain_s: float = DEFAULT_DRAIN_S
+    _running: list[ShardProcess] = field(default_factory=list, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.drain_s <= 0:
+            raise ConfigurationError(
+                f"drain_s must be positive, got {self.drain_s}; a shard given no time to drain "
+                f"is a shard killed mid-batch on every restart"
+            )
+
+    # -- lifecycle -----------------------------------------------------------------------
+
+    def start(self) -> None:
+        """Spawn one process per shard. Any failure takes down whatever already started.
+
+        Partial start-up is the failure worth naming: three of four shards up means
+        three-quarters of the cameras are being watched and nothing says which quarter is not.
+        So the first exception unwinds the ones that made it.
+        """
+        if self._running:
+            raise ConfigurationError("this fleet is already running")
+
+        _LOG.info("starting fleet\n%s", self.plan.describe())
+        try:
+            for shard in self.plan.shards:
+                self._running.append(self._spawn(shard))
+        except BaseException:
+            self.stop()
+            raise
+        _LOG.info("fleet up: %d shard(s)", len(self._running))
+
+    def _spawn(self, shard: Shard) -> ShardProcess:
+        argv = list(self.command(shard))
+        if not argv:
+            raise ConfigurationError(f"empty command for shard {shard.index}")
+        # Built from the parent's environment rather than replacing it: a child needs PATH,
+        # HOME and whatever the container set, and `CUDA_VISIBLE_DEVICES` is the one value this
+        # module owns outright.
+        child_env = {**os.environ, **self.env}
+        child_env["CUDA_VISIBLE_DEVICES"] = shard.cuda_visible_devices
+        child_env[SHARD_CAMERAS_ENV] = ",".join(shard.cameras)
+        # Its own process group, so a Ctrl-C in the parent's terminal does not deliver SIGINT
+        # to every shard at once and race this class's own orderly shutdown.
+        process = subprocess.Popen(argv, env=child_env, start_new_session=True)
+        running = ShardProcess(shard=shard, process=process)
+        _LOG.info("spawned %s: CUDA_VISIBLE_DEVICES=%s", running, shard.cuda_visible_devices)
+        return running
+
+    def stop(self, *, drain_s: float | None = None) -> None:
+        """SIGTERM every shard, then SIGKILL whatever is still up. Idempotent.
+
+        Kill is not a fallback that should never happen — a shard blocked in a CUDA call is not
+        interruptible, and a launcher that waits forever for one leaks the GPU it holds. The
+        deadline is shared across all shards rather than per shard, so stopping N of them takes
+        ``drain_s``, not ``N * drain_s``.
+        """
+        if not self._running:
+            return
+        deadline = time.monotonic() + (self.drain_s if drain_s is None else drain_s)
+
+        for running in self._running:
+            if running.alive:
+                running.process.terminate()
+
+        for running in self._running:
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                running.process.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                _LOG.warning("%s did not drain in time; killing", running)
+                running.process.kill()
+                # Reaped unconditionally: a killed child that is never waited for is a zombie,
+                # and a supervisor that leaks those is worse than one that never ran.
+                running.process.wait()
+
+        self._running.clear()
+
+    # -- supervision ---------------------------------------------------------------------
+
+    @property
+    def running(self) -> tuple[ShardProcess, ...]:
+        return tuple(self._running)
+
+    def dead(self) -> tuple[ShardProcess, ...]:
+        """Shards that have exited, in plan order. Does not block."""
+        return tuple(r for r in self._running if not r.alive)
+
+    def supervise(
+        self, *, poll_s: float = 1.0, until: Callable[[], bool] | None = None
+    ) -> None:
+        """Block until a shard dies or ``until()`` says to stop.
+
+        Raises:
+            ShardExitedError: a shard exited. Its cameras are dark, and the rest of the fleet is
+                still reporting healthy — which is exactly the state a supervisor exists to
+                refuse to sit in. The fleet is stopped before this is raised, so the caller
+                does not have to remember to.
+        """
+        if not self._running:
+            raise ConfigurationError("supervise() called on a fleet that is not running")
+        while True:
+            casualties = self.dead()
+            if casualties:
+                detail = ", ".join(
+                    f"{c} exited with {c.process.returncode}" for c in casualties
+                )
+                self.stop()
+                raise ShardExitedError(
+                    f"{len(casualties)} of {len(self.plan)} shard(s) exited: {detail}. Those "
+                    f"cameras are no longer being read, so the fleet is stopped rather than "
+                    f"left partially serving"
+                )
+            if until is not None and until():
+                return
+            time.sleep(poll_s)
+
+    # -- context manager ------------------------------------------------------------------
+
+    def __enter__(self) -> Fleet:
+        self.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.stop()
+
+
+#: How a shard learns which cameras are its own.
+#:
+#: An environment variable rather than a flag, because ``shipinfer serve`` has no camera flag
+#: and inventing one for this would put fleet-splitting into the vocabulary of a command that
+#: serves models. It also matches how the rest of the configuration already travels — the
+#: settings tree reads ``SHIPINFER_*`` with ``__`` for nesting — so a shard is configured the
+#: same way an operator would configure one by hand.
+#:
+#: A comma-separated list of ids, not a JSON fleet: the child already has the whole fleet from
+#: its own configuration, and sending the full camera objects would mean two descriptions of
+#: one camera that can disagree.
+SHARD_CAMERAS_ENV = "SHIPINFER_SHARD_CAMERAS"
+
+
+def serve_command(
+    shard: Shard,  # noqa: ARG001 - part of the Fleet.command contract; see below
+    *,
+    repository: str,
+    extra: Sequence[str] = (),
+) -> list[str]:
+    """The default argv: this interpreter, running ``shipinfer serve`` on one repository.
+
+    ``sys.executable`` rather than ``"shipinfer"`` so a child lands in the same virtualenv as
+    the parent — the console script may not be on ``PATH`` inside a container, and a shard that
+    starts under a different interpreter is a debugging session nobody wants.
+
+    Two things are deliberately **not** on this line.
+
+    The cameras. ``serve`` takes no such flag, and the first version of this function invented
+    one — an argv that reads plausibly and that the CLI rejects. They travel in
+    :data:`SHARD_CAMERAS_ENV` instead, which :meth:`Fleet._spawn` sets.
+
+    The GPUs. The child sees only its own devices, because ``CUDA_VISIBLE_DEVICES`` was in its
+    environment before it started, so to the child they are ``0..n-1`` — passing the physical
+    ordinals as well would ask it to select devices it cannot see.
+
+    Which leaves ``shard`` unused here, and that is the shape of the answer rather than an
+    oversight: everything per-shard travels in the environment, so the argv is identical for
+    every shard. The parameter stays because :attr:`Fleet.command` is handed one and another
+    command may want it — a per-shard log file, a different repository per shard.
+    """
+    return [sys.executable, "-m", "shipinfer", "serve", "-r", repository, *extra]
+
+
+def forward_signals(fleet: Fleet) -> None:
+    """Make Ctrl-C and SIGTERM stop the fleet instead of orphaning it.
+
+    Installed by the caller rather than by ``Fleet`` itself: signal handlers are process-global
+    and a library that installs them behind your back is a library you cannot embed.
+    """
+
+    def _handle(signum: int, _frame: object) -> None:
+        _LOG.info("received signal %d; stopping fleet", signum)
+        fleet.stop()
+
+    signal.signal(signal.SIGINT, _handle)
+    signal.signal(signal.SIGTERM, _handle)
