@@ -147,6 +147,16 @@ mistake they exist to prevent.
 | **algo** | `stages.py` | where does one frame's time go, stage by stage? | before optimising anything |
 | **kernel** | `kernels.py` | what does one op cost, per implementation? | deciding whether a fused kernel earns its build |
 
+All three are measurements, so all three run in the container. `deploy/rootless/bench.sh`
+selects the tier with `SHIPINFER_BENCH_SCRIPT` (default: the system tier) and only demands the
+baseline binary for the tier that uses it:
+
+```bash
+deploy/rootless/bench.sh --systems shipinfer                                  # system
+SHIPINFER_BENCH_SCRIPT=benchmarks/stages.py  deploy/rootless/bench.sh --cameras 12 --fps 5  # algo
+SHIPINFER_BENCH_SCRIPT=benchmarks/kernels.py deploy/rootless/bench.sh --op letterbox         # kernel
+```
+
 **A kernel speed-up is not a system speed-up.** An op that is 2% of the frame budget caps out
 at 2% however fast it gets. That is why the algo tier sits between them: it is the one that
 turns "this op takes 400 µs" into "this op is 14% of a frame".

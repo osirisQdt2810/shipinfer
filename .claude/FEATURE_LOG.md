@@ -5,6 +5,71 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-25 — The benchmark's other two tiers, and an RTSP source
+
+**What it is.** R44 asks for three benchmark tiers — system, algo, kernel — and only the
+system one existed. R55 makes RTSP mandatory for the benchmark, not only for the tests, and
+every measurement so far replayed JPEGs off disk. Both closed.
+
+**`benchmarks/stages.py` — the algo tier.** Where does one frame's time go, stage by stage.
+It *reads* rather than instruments: `PipelineStage.run` already stamps `elapsed_us` on every
+outcome and `_CollectorObserver` already feeds it into `shipinfer_pipeline_stage_latency_us`,
+so a second timing path would be a second implementation that could disagree with the one
+operators watch. Reports per-call p50/p95, calls per frame, per-frame cost and share.
+
+`calls_per_frame` is the whole point: a stage costing 8 ms on one frame in three costs 2.7 ms
+per frame, and the embedders run once per *object batch*. Assuming one call per frame would
+overstate the cheap stages and understate the expensive ones by the same factor.
+
+It runs **below saturation deliberately** and warns loudly when the run did not keep up.
+Under saturation a stage's latency includes the time it waited behind other frames, so a
+backlog reads as an expensive stage — the same 98% bar `check_offer` holds the system tier to.
+
+**`benchmarks/kernels.py` — the kernel tier.** What one op costs, per implementation, at the
+shapes this project runs. Two corrections on the way in, both of the same family — measuring
+something adjacent to what production does:
+
+- It called `IMAGE_OPS.create(name)` with no arguments. `TorchImageOps` falls back to the CPU
+  without a `device_index` and `PipelineRunner._build_ops` always supplies one, so the first
+  run timed torch on the **CPU** and reported it 7–13× slower than numpy. Bound correctly,
+  torch on `cuda:0` is 3.27× numpy on letterbox, 1.84× on crop_batch, 2.47× on nms.
+- `letterbox_batch` returns numpy by contract, so a device implementation pays a copy home
+  that numpy never makes. Timing only that column charges the device implementations for the
+  round trip; `letterbox_to_device` is the device-fair case and the one production calls.
+
+Both tiers report what they could **not** measure rather than printing a shorter table — a
+missing column with no explanation is how "we never measured it" becomes "it is not faster" —
+record the host load, and mark a spread over 20% as noisy. The first kernel run was taken at
+load 41 of 48 with spreads to 76%.
+
+**`--source rtsp`.** The bench cameras point at `scripts/rtsp_serve.py` over a real socket,
+with `benchmarks/harness/rtsp.py` owning the server's lifetime. It refuses rather than
+tolerates: a server that never accepts, or that exits early, raises at start-up with its
+output attached — a run whose cameras cannot connect produces a clean-looking zero and this
+project has already published one of those. Readiness is a socket poll rather than a sleep;
+teardown is terminate-then-kill, because a GLib loop holding the port makes the *next* run
+fail with an address already in use, minutes later and nowhere near the cause.
+
+**Replay and RTSP are different experiments, not a fast one and a slow one.** Replay measures
+the inference plane with the decode path removed, so a replay number is an upper bound on the
+RTSP one. The source is recorded in the run metadata, printed on the console, and explained
+in the README, because the failure to avoid is quoting a replay figure as though NVDEC were
+in it.
+
+**Tests.** 31 offline tests over the two tiers and the RTSP wiring, pinning the arithmetic and
+all four server failure paths. The arithmetic is where a benchmark lies: every defect review
+found in `run_bench.py` was a formula producing a plausible number from a run that did not
+support it, not a broken measurement loop. 116 tests in `benchmarks/tests`.
+
+**Since then.** Both tiers have run to completion inside the container. The algo tier at
+12 cameras × 5 fps on GPUs 2–5 delivered 60.1 of the 60 img/s offered, with per-stage p50s of
+16–63 ms that are queue-and-batch-window spans rather than kernel time — at 5 fps the lever is
+a shorter window, not a faster op. The kernel tier, once the fused kernels were reachable,
+measured native `letterbox_to_device` at 657 µs against torch's 735 µs — 1.1×, where the
+inherited figure was 50×. The RTSP path has still not been run under load; that is owed to C1a.
+
+---
+
 ## 2026-08-24 — The benchmark harness: what counts as a measurement
 
 **What it is.** `benchmarks/` drives ShipInfer and `counting-simulation` under one load and
