@@ -151,6 +151,23 @@ hook down, for when the operator asked to see something before it is executed.
       without the lock. The property is now asserted from *inside* the critical section (the
       tracker checks whether its shard's lock is held), which a `nullcontext` cannot satisfy.
 
+- [x] **D4 · PR #8's second review round** — the blocking finding and eight of the nine
+      should-fix items, each with a test verified red: batched `queue`/`success` were reported
+      exactly `batch_size` times too large; both of my previous round's fixes were
+      *incomplete* (the version probe and the ensemble ordering) and review caught both; a
+      worker that died read as alive; rejections were missing from `record_failure`;
+      `ConfigurationError` was a 500; the ensemble traced no span of its own; `index()` blocked
+      a readiness probe behind an unload; `release()` could leave `in_flight` negative; and a
+      warm-up file could escape its version directory. Plus `execution.cuda_graph_batch_sizes`
+      is now a **filter** on a mixed repository rather than a per-model assertion — treating a
+      deployment-wide setting as a claim about each model made it unusable at all.
+- [ ] **D5 · The one-crossing MTMC matchers are unreachable** from shipping code:
+      `MTMC_MATCHERS.build("gated", backend="native")` resolves to the older pass-by-pass
+      classes, so `_C.MtmcGatedMatcher` is only exercised through adapters defined inside the
+      test file. Belongs in the submodule's own PR with C9 (ADR-010). Either wire it and
+      measure what the crossings cost, or delete it — shipping two implementations and using
+      the slower one is the thing the operator's "delete what is redundant" rule is about.
+
 ## Phase 5 · Everything else still owed
 
 - [~] **C4 · RTSP in the benchmark** (R55) — wired and tested offline; **not yet run**.

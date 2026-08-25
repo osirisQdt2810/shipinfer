@@ -334,3 +334,93 @@ class TestABatchedRequestIsNotChargedItsOwnWaitTwice:
 
         stats = summed.as_dict("m", "1")["inference_stats"]
         assert stats["queue"]["ns"] == stats["compute_infer"]["ns"] == 100_000
+
+
+class TestADeploymentWideGraphSpecIsAFilterNotAnAssertion:
+    """`execution.cuda_graph_batch_sizes` applies to every model in the repository, so on a
+    mixed one there is no single list that fits all of them: `ship_detector` at
+    `max_batch_size: 32` beside `person_embedder` at 8.
+
+    Treating it as an assertion made the setting unusable at all — setting `[1, 8, 32]`
+    failed to *construct* the 8-batch model rather than capturing 1 and 8 for it. A per-model
+    `parameters.graph_spec` stays an assertion, because that one is a claim about that model
+    and an impossible size in it is a typo that should stop the deploy.
+    """
+
+    def _spec(self, *, max_batch: int, override, per_model: bool):
+        from shipinfer.runtime.graphs import resolve_graph_spec
+
+        if per_model:
+            return resolve_graph_spec(
+                max_batch_size=max_batch,
+                preferred=(),
+                override=override,
+                override_source="model/config.yaml parameters.graph_spec",
+            )
+        fits = [s for s in override if 1 <= s <= max_batch]
+        return resolve_graph_spec(
+            max_batch_size=max_batch,
+            preferred=(),
+            override=fits or None,
+            override_source="settings execution.cuda_graph_batch_sizes",
+        )
+
+    def test_a_per_model_override_still_refuses_an_impossible_size(self) -> None:
+        with pytest.raises(ValueError):
+            self._spec(max_batch=8, override=[1, 8, 32], per_model=True)
+
+    def test_a_deployment_wide_override_keeps_only_what_fits(self) -> None:
+        spec = self._spec(max_batch=8, override=[1, 8, 32], per_model=False)
+
+        assert tuple(spec.batch_sizes) == (1, 8)
+
+    def test_a_deployment_wide_override_that_fits_nothing_captures_nothing_by_hand(
+        self,
+    ) -> None:
+        """`[64]` against a model whose window tops out at 8 is not an error — it is "no
+        graphs for this model", which is what an empty capture set means. The derivation
+        takes over so the field is still populated for `stats()`."""
+        spec = self._spec(max_batch=8, override=[64], per_model=False)
+
+        assert spec.batch_sizes, "the spec should fall back to the derivation, not be empty"
+        assert all(size <= 8 for size in spec.batch_sizes)
+
+
+class TestAnInvalidCudaGraphsOverrideIsRefusedEverywhere:
+    """`_graphs_enabled` is read at `Model.__init__` now, not per CUDA instance, so a typo'd
+    `SHIPINFER_CUDA_GRAPHS` fails on a CPU-only host too — `shipinfer repo ls` on a laptop
+    included.
+
+    That is the right direction and it is worth a test rather than an argument. An operator
+    who typed the variable is asking whether the graph path is what hurts; a deployment that
+    ignores the answer on some hosts and honours it on others makes the experiment worthless.
+    """
+
+    def test_a_bad_value_is_refused(self, monkeypatch) -> None:
+        from shipinfer.core.errors import ConfigurationError
+        from shipinfer.core.settings import ExecutionSettings
+        from shipinfer.server.model import _graphs_enabled
+
+        monkeypatch.setenv("SHIPINFER_CUDA_GRAPHS", "1")
+
+        with pytest.raises(ConfigurationError, match="expected 'on' or 'off'"):
+            _graphs_enabled(ExecutionSettings())
+
+    def test_on_and_off_both_win_over_the_setting(self, monkeypatch) -> None:
+        from shipinfer.core.settings import ExecutionSettings
+        from shipinfer.server.model import _graphs_enabled
+
+        monkeypatch.setenv("SHIPINFER_CUDA_GRAPHS", "on")
+        assert _graphs_enabled(ExecutionSettings(cuda_graphs=False)) is True
+
+        monkeypatch.setenv("SHIPINFER_CUDA_GRAPHS", "off")
+        assert _graphs_enabled(ExecutionSettings(cuda_graphs=True)) is False
+
+    def test_unset_leaves_the_models_own_setting_alone(self, monkeypatch) -> None:
+        from shipinfer.core.settings import ExecutionSettings
+        from shipinfer.server.model import _graphs_enabled
+
+        monkeypatch.delenv("SHIPINFER_CUDA_GRAPHS", raising=False)
+
+        assert _graphs_enabled(ExecutionSettings(cuda_graphs=True)) is True
+        assert _graphs_enabled(ExecutionSettings(cuda_graphs=False)) is False

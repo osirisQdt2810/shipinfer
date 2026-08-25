@@ -60,6 +60,13 @@ def _graphs_enabled(execution: Any) -> bool:
         raise ConfigurationError(
             f"{envs.CUDA_GRAPHS.name}={override!r} is invalid; expected 'on' or 'off'"
         )
+        # Refused even on a host with no accelerator, and deliberately: this is read at
+        # `Model.__init__` now rather than per CUDA instance, so `shipinfer repo ls` on a
+        # laptop with a typo'd value fails instead of starting. That is the right direction.
+        # An operator who typed this variable is asking a question — "is the graph path what
+        # is hurting?" — and a deployment that quietly ignores the answer on some hosts and
+        # honours it on others makes the experiment worthless. A refusal names the typo where
+        # it was made; a shrug surfaces as a graph path that did not change.
     return override == "on"
 
 
@@ -155,9 +162,46 @@ class Model:
         execution = self._settings.execution
         override: Any = self._artifact.config.parameters.get("graph_spec")
         source = f"{self._artifact.name}/config.yaml parameters.graph_spec"
+        # A per-model override is an assertion *about this model*, so an impossible size in
+        # it is a typo and must stop the deploy. A deployment-wide one is not: it applies to
+        # every model in the repository, and on a mixed repository — `ship_detector` at
+        # `max_batch_size: 32` beside `person_embedder` at 8 — there is no single list that
+        # fits all of them. Treating it as an assertion made the setting unusable at all:
+        # `SHIPINFER_EXECUTION__CUDA_GRAPH_BATCH_SIZES=[1,8,32]` failed to construct the
+        # 8-batch model rather than capturing 1 and 8 for it.
+        #
+        # So the specificity of the source decides. Sizes the window cannot emit are
+        # *filtered* out of a deployment-wide list, and the filtering is logged, because a
+        # silently shorter capture set is a replay counter nobody can explain.
+        deployment_wide = False
         if override is None and "cuda_graph_batch_sizes" in execution.model_fields_set:
             override = execution.cuda_graph_batch_sizes
             source = "settings execution.cuda_graph_batch_sizes"
+            deployment_wide = True
+
+        if deployment_wide and override:
+            fits = [size for size in override if 1 <= int(size) <= self._window.max_batch_size]
+            dropped = [size for size in override if size not in fits]
+            if dropped:
+                _LOG.info(
+                    "model %s: graph sizes %s from %s exceed max_batch_size %d and were "
+                    "dropped; capturing %s",
+                    self._artifact.name,
+                    dropped,
+                    source,
+                    self._window.max_batch_size,
+                    fits,
+                )
+                source = f"{source} (filtered to this model's window)"
+            # Nothing left means the operator's list has no size this model can serve. That
+            # is not an error either — it is "no graphs for this model", which is exactly
+            # what an empty capture set means.
+            override = fits or None
+            if override is None:
+                source = (
+                    f"derived: no size in {execution.cuda_graph_batch_sizes} fits "
+                    f"max_batch_size {self._window.max_batch_size}"
+                )
 
         try:
             spec = resolve_graph_spec(
