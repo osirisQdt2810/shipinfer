@@ -13,6 +13,11 @@ those three things are legible rather than magic (ADR-003).
 from shipinfer.runtime.graphs.base import CapturedGraph, GraphCache
 from shipinfer.runtime.graphs.custom_graph import CustomCapturedGraph, CustomGraphCache
 from shipinfer.runtime.graphs.registry import GRAPH_CACHES
+from shipinfer.runtime.graphs.spec import (
+    GraphSpec,
+    derive_graph_batch_sizes,
+    resolve_graph_spec,
+)
 from shipinfer.runtime.graphs.torch_graph import TorchCapturedGraph, TorchGraphCache
 
 __all__ = [
@@ -21,6 +26,9 @@ __all__ = [
     "CustomCapturedGraph",
     "CustomGraphCache",
     "GraphCache",
+    "GraphSpec",
     "TorchCapturedGraph",
     "TorchGraphCache",
+    "derive_graph_batch_sizes",
+    "resolve_graph_spec",
 ]

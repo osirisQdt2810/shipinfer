@@ -85,7 +85,14 @@ class ExecutionSettings(BaseModel):
     #: from ever reporting ready, on purpose: a warm-up that quietly did not happen is worse
     #: than none, because the deployment then believes its first p99 is representative.
     warmup_iterations: int = Field(default=3, ge=0)
-    #: Capture graphs during warm-up rather than on the first live request.
+    #: **Not honoured yet.** Declared with the intent "capture graphs during warm-up rather
+    #: than on the first live request", and read by nothing in ``src/`` — review found it, and
+    #: a setting that states an effect the server does not apply is worse than one that states
+    #: none. Today capture is lazy: ``GraphCache.should_capture`` fires the first time a batch
+    #: of a spec'd size arrives, which for most sizes is a live request. Honouring this means
+    #: running one warm-up batch at *each* size in the model's graph spec, so the capture cost
+    #: lands at start-up; that pairs the setting with the spec and is tracked as its own change.
+    #: Kept rather than deleted so a deployment that already sets it does not fail validation.
     warmup_captures_graphs: bool = True
 
     # -- pre/post-processing -----------------------------------------------------------
