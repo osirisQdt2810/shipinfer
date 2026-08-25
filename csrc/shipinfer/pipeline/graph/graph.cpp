@@ -159,49 +159,56 @@ namespace shipinfer {
         const size_t real = std::min(batch.size(), static_cast<size_t>(rows));
         std::vector<LetterboxMap> maps(real);
 
-        LeaseGuard lease(*detector_, device);
-        float* input = static_cast<float*>(lease.instance().input());
-        const size_t stride = static_cast<size_t>(config_.detect_size) * config_.detect_size * 3;
-        for (size_t i = 0; i < static_cast<size_t>(rows); ++i) {
-            const Work& work = batch[std::min(i, real - 1)];
-            const LetterboxMap map =
-                letterbox_into(work.image_device, work.state->height(), work.state->width(),
-                               input + i * stride, config_.detect_size, config_.detect_size,
-                               /*swap_rb=*/true, /*pad_value=*/0.5f, lease.instance().stream());
-            if (i < real) maps[i] = map;
-        }
-        // No synchronisation. The kernels and `enqueueV3` are on the same stream, so the
-        // stream orders them — and `execute` syncs that one stream at the end, which is what
-        // makes the outputs readable. The first version launched on the default stream and
-        // then called `gpuDeviceSynchronize`, which waits for *every* context on the device:
-        // at four workers per GPU that serialised all of them behind each other.
-        lease.instance().execute(rows);
-
-        const float* out = lease.instance().output();
-        const size_t per_row = lease.instance().output_rows();
-        for (size_t i = 0; i < real; ++i) {
-            std::vector<Detection> detections;
-            const float* frame_out = out + i * per_row;
-            const size_t candidates = per_row / kDetStride;
-            for (size_t d = 0;
-                 d < candidates && detections.size() < static_cast<size_t>(config_.max_objects);
-                 ++d) {
-                const float* row = frame_out + d * kDetStride;
-                if (row[4] < config_.score_threshold) continue;
-                Detection det;
-                // Model space back to original pixels. Cropping in letterboxed coordinates is
-                // where the off-by-a-pad-bar bugs live.
-                det.x1 = (row[0] - static_cast<float>(maps[i].pad_x)) / maps[i].scale;
-                det.y1 = (row[1] - static_cast<float>(maps[i].pad_y)) / maps[i].scale;
-                det.x2 = (row[2] - static_cast<float>(maps[i].pad_x)) / maps[i].scale;
-                det.y2 = (row[3] - static_cast<float>(maps[i].pad_y)) / maps[i].scale;
-                det.score = row[4];
-                det.class_id = static_cast<int>(row[5]);
-                detections.push_back(det);
+        // The detector lease lives exactly as long as the detector phase. The first RAII version
+        // let the guard run to the end of `execute`, which held a detector instance through every
+        // frame's embedder and segmenter work — other workers then spun on `lease()` waiting for a
+        // detector, and the 40 s bench went from 8 reassembly timeouts to 1104. Same throughput,
+        // frames stuck behind a lock they did not need. The scope is the fix.
+        {
+            LeaseGuard lease(*detector_, device);
+            float* input = static_cast<float*>(lease.instance().input());
+            const size_t stride =
+                static_cast<size_t>(config_.detect_size) * config_.detect_size * 3;
+            for (size_t i = 0; i < static_cast<size_t>(rows); ++i) {
+                const Work& work = batch[std::min(i, real - 1)];
+                const LetterboxMap map =
+                    letterbox_into(work.image_device, work.state->height(), work.state->width(),
+                                   input + i * stride, config_.detect_size, config_.detect_size,
+                                   /*swap_rb=*/true, /*pad_value=*/0.5f, lease.instance().stream());
+                if (i < real) maps[i] = map;
             }
-            batch[i].state->set_detections(std::move(detections));
-        }
+            // No synchronisation. The kernels and `enqueueV3` are on the same stream, so the
+            // stream orders them — and `execute` syncs that one stream at the end, which is what
+            // makes the outputs readable. The first version launched on the default stream and
+            // then called `gpuDeviceSynchronize`, which waits for *every* context on the device:
+            // at four workers per GPU that serialised all of them behind each other.
+            lease.instance().execute(rows);
 
+            const float* out = lease.instance().output();
+            const size_t per_row = lease.instance().output_rows();
+            for (size_t i = 0; i < real; ++i) {
+                std::vector<Detection> detections;
+                const float* frame_out = out + i * per_row;
+                const size_t candidates = per_row / kDetStride;
+                for (size_t d = 0;
+                     d < candidates && detections.size() < static_cast<size_t>(config_.max_objects);
+                     ++d) {
+                    const float* row = frame_out + d * kDetStride;
+                    if (row[4] < config_.score_threshold) continue;
+                    Detection det;
+                    // Model space back to original pixels. Cropping in letterboxed coordinates is
+                    // where the off-by-a-pad-bar bugs live.
+                    det.x1 = (row[0] - static_cast<float>(maps[i].pad_x)) / maps[i].scale;
+                    det.y1 = (row[1] - static_cast<float>(maps[i].pad_y)) / maps[i].scale;
+                    det.x2 = (row[2] - static_cast<float>(maps[i].pad_x)) / maps[i].scale;
+                    det.y2 = (row[3] - static_cast<float>(maps[i].pad_y)) / maps[i].scale;
+                    det.score = row[4];
+                    det.class_id = static_cast<int>(row[5]);
+                    detections.push_back(det);
+                }
+                batch[i].state->set_detections(std::move(detections));
+            }
+        }
         for (size_t i = 0; i < real; ++i) {
             collector.deliver(batch[i].state->tag(), "detect");
             collector.deliver(batch[i].state->tag(), "crop");
