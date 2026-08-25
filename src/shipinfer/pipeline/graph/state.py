@@ -32,7 +32,15 @@ from shipinfer.pipeline.graph.detections import Detections
 from shipinfer.pipeline.graph.objects import ObjectBatch
 from shipinfer.pipeline.schema import ObjectRecord
 
-__all__ = ["DETECTIONS", "FRAME_INPUT", "RECORD_CONVERTERS", "FrameState", "field_map_names"]
+__all__ = [
+    "DETECTIONS",
+    "FRAME_INPUT",
+    "RECORD_CONVERTERS",
+    "EmissionInputs",
+    "FrameState",
+    "build_records",
+    "field_map_names",
+]
 
 #: The name the frame's pixels are known by inside the graph. A stage declares
 #: ``consumes=(FRAME_INPUT,)`` and the graph then knows when the pixels may be released.
@@ -80,6 +88,80 @@ RECORD_CONVERTERS: Mapping[str, Callable[[np.ndarray], Any]] = {
     "similarity": _as_float,
     "mask_area_px": _as_float,
 }
+
+
+@dataclass(frozen=True, slots=True)
+class EmissionInputs:
+    """A finished frame's emission inputs, captured under the collector's lock.
+
+    Four references, not a copy of the data and not the records themselves. The split is the
+    point: capturing has to happen while the lock is held, because the owning worker may
+    still be inside `graph.execute`; *building* must not, because it is the most expensive
+    per-object work in the pipeline.
+    """
+
+    camera_id: str
+    frame_id: int
+    detections: Detections
+    batches: Mapping[str, ObjectBatch]
+
+    def records(self, field_map: Mapping[str, Sequence[str]]) -> tuple[ObjectRecord, ...]:
+        """Build one :class:`ObjectRecord` per detection. Call this outside the lock."""
+        return build_records(
+            self.camera_id, self.frame_id, self.detections, self.batches, field_map
+        )
+
+
+def build_records(
+    camera_id: str,
+    frame_id: int,
+    detections: Detections,
+    batches: Mapping[str, ObjectBatch],
+    field_map: Mapping[str, Sequence[str]],
+) -> tuple[ObjectRecord, ...]:
+    """One :class:`ObjectRecord` per detection, from whatever landed.
+
+    Args:
+        field_map: ``ObjectRecord`` field -> the batch names that can fill it, in priority
+            order. Two names per field is normal: ``embedding`` comes from ``ship_embedding``
+            for a ship and ``person_embedding`` for a person, and a batch only ever holds the
+            rows of its own class, so they cannot collide.
+
+    A field left unset means the stage that fills it did not run — which is exactly what the
+    emitted event should say, and is distinguishable from a zero.
+
+    A free function rather than a method because both callers hold different things: a live
+    `FrameState` during a synchronous emit, and an :class:`EmissionInputs` capture after the
+    collector has already let go of the frame. One implementation for both.
+    """
+    fields: list[dict[str, Any]] = [{} for _ in range(len(detections))]
+    for name, candidates in field_map.items():
+        convert = RECORD_CONVERTERS.get(name)
+        if convert is None:
+            raise ValidationError(
+                f"no converter for ObjectRecord field {name!r}; "
+                f"known: {sorted(RECORD_CONVERTERS)}"
+            )
+        for candidate in candidates:
+            batch = batches.get(candidate)
+            if batch is None or batch.is_empty:
+                continue
+            for index, row in batch.scatter():
+                if 0 <= index < len(fields):
+                    fields[index][name] = convert(row)
+    return tuple(
+        ObjectRecord(
+            det_id=f"{camera_id}_{frame_id}_{detection.index}",
+            class_name=detection.class_name,
+            score=detection.score,
+            bbox=detection.box,
+            # Guarded, because `detections` and `fields` are sized from the same capture but
+            # a detection's `index` is data: a batch scattered against a shorter list would
+            # otherwise raise here rather than simply have nothing to fill.
+            **(fields[detection.index] if 0 <= detection.index < len(fields) else {}),
+        )
+        for detection in detections
+    )
 
 
 @dataclass(slots=True)
@@ -254,49 +336,46 @@ class FrameState:
 
     # -- emission ----------------------------------------------------------------------
 
-    def objects(self, field_map: Mapping[str, Sequence[str]]) -> tuple[ObjectRecord, ...]:
-        """Build one :class:`ObjectRecord` per detection, from whatever landed.
+    def emission_inputs(self) -> EmissionInputs:
+        """Everything :func:`build_records` needs, captured in four reference copies.
 
-        Args:
-            field_map: ``ObjectRecord`` field -> the batch names that can fill it, in
-                priority order. Two names per field is normal: ``embedding`` comes from
-                ``ship_embedding`` for a ship and ``person_embedding`` for a person, and a
-                batch only ever holds the rows of its own class, so they cannot collide.
+        **What makes this safe is not the collector's lock.** Review corrected an earlier
+        version of this docstring that said it was, and the distinction is load-bearing: the
+        owning worker mutates the state *inside* `graph.execute` via `attach`, and only takes
+        the collector's mutex afterwards in `deliver`. So that mutex does not exclude the
+        writer at all.
 
-        A field left unset means the stage that fills it did not run — which is exactly what
-        the emitted event should say, and is distinguishable from a zero.
+        What makes it safe is that every field here is a **single reference read**. There is
+        no window in which one field has been read and another has not yet been, so the
+        capture cannot be internally torn. The bug this replaced could be torn: it read
+        `len(detections)`, sized a `fields` list from that, and then re-iterated the
+        attribute — so a concurrent `set_detections` made the index run past the end.
+
+        A maintainer who believes the state is mutex-protected will add the next multi-step
+        read "under the lock" and reintroduce exactly that. It is not; keep reads single.
+
+        The lock does buy one thing, and only this: the frame is removed from `_pending`
+        and captured without another thread finishing it in between. Building the records
+        under it bought nothing and cost ~770 us of hold per frame on the one mutex every
+        worker takes in `open`/`expect`/`deliver`/`seal`.
+
+        `dict(self.batches)` is a shallow copy of a handful of entries; the batches
+        themselves are not copied and are not mutated after they are attached — and it is
+        therefore a **second reference** to those arrays, which is why a worker's `drop()`
+        does not free them until the event has been built. Bounded by the synchronous emit,
+        so not a leak, but this module's docstring makes "`drop` frees something"
+        load-bearing and this is the exception to it.
         """
-        # Bound once. The generator below used to re-read `self.detections` while `fields`
-        # had been sized from an earlier read, so a concurrent `set_detections` made
-        # `detection.index` run past the end — and unlike the scatter loop below, that line
-        # had no bounds guard. The snapshot in the collector closes the race that caused it;
-        # this makes the function internally consistent whatever happens around it.
-        detections = self.detections
-        fields: list[dict[str, Any]] = [{} for _ in range(len(detections))]
-        for name, candidates in field_map.items():
-            convert = RECORD_CONVERTERS.get(name)
-            if convert is None:
-                raise ValidationError(
-                    f"no converter for ObjectRecord field {name!r}; "
-                    f"known: {sorted(RECORD_CONVERTERS)}"
-                )
-            for candidate in candidates:
-                batch = self.batches.get(candidate)
-                if batch is None or batch.is_empty:
-                    continue
-                for index, row in batch.scatter():
-                    if 0 <= index < len(fields):
-                        fields[index][name] = convert(row)
-        return tuple(
-            ObjectRecord(
-                det_id=f"{self.camera_id}_{self.frame_id}_{detection.index}",
-                class_name=detection.class_name,
-                score=detection.score,
-                bbox=detection.box,
-                **(fields[detection.index] if 0 <= detection.index < len(fields) else {}),
-            )
-            for detection in detections
+        return EmissionInputs(
+            camera_id=self.camera_id,
+            frame_id=self.frame_id,
+            detections=self.detections,
+            batches=dict(self.batches),
         )
+
+    def objects(self, field_map: Mapping[str, Sequence[str]]) -> tuple[ObjectRecord, ...]:
+        """Build one :class:`ObjectRecord` per detection, from whatever landed."""
+        return self.emission_inputs().records(field_map)
 
     def footprint_bytes(self) -> int:
         """Host bytes this state is holding — what a memory assertion reads."""
