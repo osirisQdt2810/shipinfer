@@ -1,46 +1,19 @@
-# C++/CUDA formatting for native/.
+# C++ style for csrc/. Enforced by pre-commit so it is not a thing anyone has to remember.
 #
-# Two deviations from LLVM's defaults, both deliberate and both the project owner's
-# preference — written down here so clang-format enforces them instead of them being
-# re-litigated in review:
-#
-#   NamespaceIndentation: All      namespace contents are indented, so nesting is visible
-#                                  at a glance instead of being inferred from a closing brace
-#                                  three hundred lines away.
-#   IndentAccessModifiers: true    `public:` gets its own indentation level and members sit
-#                                  one level deeper, rather than the access specifier being
-#                                  outdented past the class body.
-#
-# ColumnLimit matches the Python side (black's line-length 96), so a file does not change
-# shape depending on which language it is written in.
+# `NamespaceIndentation: All` is the operator's explicit request (V45): the body of a
+# `namespace X {` is indented. LLVM's default is `None`, which is why the first version of
+# csrc/ was flat.
 ---
 Language: Cpp
-BasedOnStyle: LLVM
-
-IndentWidth: 2
-TabWidth: 2
-UseTab: Never
-ColumnLimit: 96
-
+BasedOnStyle: Google
+Standard: c++17
+ColumnLimit: 100
+IndentWidth: 4
+AccessModifierOffset: -2
 NamespaceIndentation: All
-IndentAccessModifiers: true
-CompactNamespaces: false
-FixNamespaceComments: true
-
-# `template <typename T> class Foo {` stays on one line when it fits.
-AlwaysBreakTemplateDeclarations: No
-
-# `char* p`, not `char *p`: the pointer is part of the type.
-PointerAlignment: Left
-ReferenceAlignment: Left
-DerivePointerAlignment: false
-
+IndentPPDirectives: BeforeHash
 AllowShortFunctionsOnASingleLine: Inline
-AllowShortIfStatementsOnASingleLine: Never
-AllowShortLoopsOnASingleLine: false
-BreakBeforeBraces: Attach
-SeparateDefinitionBlocks: Leave
-
-SortIncludes: CaseSensitive
+DerivePointerAlignment: false
+PointerAlignment: Left
 IncludeBlocks: Preserve
-...
+SortIncludes: CaseSensitive
