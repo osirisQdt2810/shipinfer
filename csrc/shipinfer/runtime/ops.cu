@@ -57,6 +57,15 @@ namespace shipinfer {
             }
         }
 
+        // The readable implementation this must agree with is `TorchImageOps.crop_batch`
+        // (`src/shipinfer/runtime/ops/torch_ops.py`): clip the box to the image, truncate it to
+        // integers, slice the patch `[y1:y2, x1:x2]`, and resize it with
+        // `interpolate(align_corners=False)` — whose source coordinate is
+        // `(dst + 0.5) * (in / out) - 0.5`, clamped at zero, with the right/bottom neighbour
+        // clamped *inside the patch*. The first version skipped the `- 0.5` and clamped to the
+        // image instead of the patch, so every crop reaching the embedder was offset by half a
+        // source pixel relative to the Python plane's and the two planes' embeddings were not
+        // comparable. `test_dataplane.cpp` carries the same arithmetic as a readable reference.
         __global__ void crop_resize_kernel(const uint8_t* src, int src_h, int src_w,
                                            const float* boxes, int count, float* dst, int dst_h,
                                            int dst_w, bool swap_rb) {
@@ -65,32 +74,49 @@ namespace shipinfer {
             const int n = blockIdx.z;
             if (x >= dst_w || y >= dst_h || n >= count) return;
 
-            const float x1 = boxes[n * 4 + 0];
-            const float y1 = boxes[n * 4 + 1];
-            const float x2 = boxes[n * 4 + 2];
-            const float y2 = boxes[n * 4 + 3];
-            const float box_w = x2 - x1;
-            const float box_h = y2 - y1;
+            // Clip to the image, then truncate: `np.clip(...)` into an integer array.
+            const int x1 = static_cast<int>(fminf(fmaxf(boxes[n * 4 + 0], 0.f), src_w - 1.f));
+            const int y1 = static_cast<int>(fminf(fmaxf(boxes[n * 4 + 1], 0.f), src_h - 1.f));
+            const int x2 = static_cast<int>(fminf(fmaxf(boxes[n * 4 + 2], 0.f), src_w - 1.f));
+            const int y2 = static_cast<int>(fminf(fmaxf(boxes[n * 4 + 3], 0.f), src_h - 1.f));
+            const int box_w = x2 - x1;
+            const int box_h = y2 - y1;
 
             const int plane = dst_h * dst_w;
             float* out = dst + static_cast<size_t>(n) * 3 * plane;
 
             // A degenerate box is data, not a bug: a zero-area detection can come out of any
             // detector, and the answer is a black crop rather than a launch that reads out of
-            // bounds. The Python parity test pins the same behaviour.
-            if (box_w <= 0.f || box_h <= 0.f) {
+            // bounds. The Python implementation yields zeros for the same box.
+            if (box_w <= 0 || box_h <= 0) {
                 for (int c = 0; c < 3; ++c) out[c * plane + y * dst_w + x] = 0.f;
                 return;
             }
 
-            const float sx =
-                x1 + (static_cast<float>(x) + 0.5f) * box_w / static_cast<float>(dst_w);
-            const float sy =
-                y1 + (static_cast<float>(y) + 0.5f) * box_h / static_cast<float>(dst_h);
+            // align_corners=False, in patch coordinates, clamped at zero like torch does.
+            const float lx = fmaxf(0.f, (static_cast<float>(x) + 0.5f) * static_cast<float>(box_w) /
+                                            static_cast<float>(dst_w) -
+                                        0.5f);
+            const float ly = fmaxf(0.f, (static_cast<float>(y) + 0.5f) * static_cast<float>(box_h) /
+                                            static_cast<float>(dst_h) -
+                                        0.5f);
+            const int px0 = min(static_cast<int>(lx), box_w - 1);
+            const int py0 = min(static_cast<int>(ly), box_h - 1);
+            const int px1 = min(px0 + 1, box_w - 1);
+            const int py1 = min(py0 + 1, box_h - 1);
+            const float wx = lx - static_cast<float>(px0);
+            const float wy = ly - static_cast<float>(py0);
+            const int sx0 = x1 + px0, sx1 = x1 + px1, sy0 = y1 + py0, sy1 = y1 + py1;
+
             for (int c = 0; c < 3; ++c) {
                 const int src_c = swap_rb ? (2 - c) : c;
-                out[c * plane + y * dst_w + x] =
-                    sample_bilinear(src, src_h, src_w, src_c, sy, sx) / 255.f;
+                const float p00 = static_cast<float>(src[(sy0 * src_w + sx0) * 3 + src_c]);
+                const float p01 = static_cast<float>(src[(sy0 * src_w + sx1) * 3 + src_c]);
+                const float p10 = static_cast<float>(src[(sy1 * src_w + sx0) * 3 + src_c]);
+                const float p11 = static_cast<float>(src[(sy1 * src_w + sx1) * 3 + src_c]);
+                const float value = (p00 * (1.f - wx) + p01 * wx) * (1.f - wy) +
+                                    (p10 * (1.f - wx) + p11 * wx) * wy;
+                out[c * plane + y * dst_w + x] = value / 255.f;
             }
         }
 

@@ -14,6 +14,7 @@
 //    checked is this translation unit's arithmetic.
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -21,6 +22,7 @@
 #include <thread>
 #include <vector>
 
+#include "shipinfer/pipeline/graph/state.h"
 #include "shipinfer/pipeline/reassembly/collector.h"
 #include "shipinfer/runtime/ops.h"
 #include "shipinfer/scheduling/queues/fair.h"
@@ -332,6 +334,180 @@ namespace {
         gpuFree(device_dst);
     }
 
+    // The readable crop: `TorchImageOps.crop_batch` in nested loops — clip, truncate, slice the
+    // patch, `interpolate(align_corners=False)`. If this and the kernel disagree, the kernel is
+    // wrong; and if this and the torch implementation disagree, the *Python* parity test in the
+    // parent (`tests/runtime/test_ops_parity.py`) is where that shows.
+    std::vector<float> crop_reference(const std::vector<uint8_t>& src, int src_h, int src_w,
+                                      const float* box, int dst_h, int dst_w, bool swap_rb) {
+        std::vector<float> dst(static_cast<size_t>(3) * dst_h * dst_w, 0.f);
+        const int plane = dst_h * dst_w;
+        auto clip = [](float v, float hi) { return static_cast<int>(std::min(std::max(v, 0.f), hi)); };
+        const int x1 = clip(box[0], src_w - 1.f), y1 = clip(box[1], src_h - 1.f);
+        const int x2 = clip(box[2], src_w - 1.f), y2 = clip(box[3], src_h - 1.f);
+        const int bw = x2 - x1, bh = y2 - y1;
+        if (bw <= 0 || bh <= 0) return dst;
+        for (int y = 0; y < dst_h; ++y) {
+            for (int x = 0; x < dst_w; ++x) {
+                const float lx = std::max(0.f, (x + 0.5f) * bw / static_cast<float>(dst_w) - 0.5f);
+                const float ly = std::max(0.f, (y + 0.5f) * bh / static_cast<float>(dst_h) - 0.5f);
+                const int px0 = std::min(static_cast<int>(lx), bw - 1);
+                const int py0 = std::min(static_cast<int>(ly), bh - 1);
+                const int px1 = std::min(px0 + 1, bw - 1), py1 = std::min(py0 + 1, bh - 1);
+                const float wx = lx - px0, wy = ly - py0;
+                for (int c = 0; c < 3; ++c) {
+                    const int sc = swap_rb ? (2 - c) : c;
+                    const auto at = [&](int yy, int xx) {
+                        return static_cast<float>(src[((y1 + yy) * src_w + (x1 + xx)) * 3 + sc]);
+                    };
+                    dst[c * plane + y * dst_w + x] =
+                        ((at(py0, px0) * (1 - wx) + at(py0, px1) * wx) * (1 - wy) +
+                         (at(py1, px0) * (1 - wx) + at(py1, px1) * wx) * wy) /
+                        255.f;
+                }
+            }
+        }
+        return dst;
+    }
+
+    void test_the_crop_kernel_agrees_with_the_reference() {
+        const int src_h = 72, src_w = 128, ch = 24, cw = 16;
+        std::vector<uint8_t> host(static_cast<size_t>(src_h) * src_w * 3);
+        for (size_t i = 0; i < host.size(); ++i) host[i] = static_cast<uint8_t>((i * 53 + 7) % 249);
+        // Fractional boxes, one touching the right/bottom edge, one partly outside the image:
+        // the cases where a half-pixel offset or an image-clamp instead of a patch-clamp shows.
+        const float boxes[12] = {10.3f, 5.7f, 57.9f, 40.2f, 100.f, 30.f, 127.f, 71.f,
+                                 -4.f,  -2.f, 20.f,  9.f};
+        const int count = 3;
+
+        uint8_t* device_src = nullptr;
+        if (gpuMalloc(&device_src, host.size()) != gpuSuccess) {
+            std::fprintf(stderr, "SKIP: no CUDA device for the crop parity test\n");
+            return;
+        }
+        float* device_boxes = nullptr;
+        float* device_dst = nullptr;
+        gpuMalloc(&device_boxes, sizeof(boxes));
+        gpuMalloc(&device_dst, static_cast<size_t>(count) * 3 * ch * cw * sizeof(float));
+        gpuMemcpy(device_src, host.data(), host.size(), gpuMemcpyHostToDevice);
+        gpuMemcpy(device_boxes, boxes, sizeof(boxes), gpuMemcpyHostToDevice);
+
+        crop_resize_into(device_src, src_h, src_w, device_boxes, count, device_dst, ch, cw, true,
+                         nullptr);
+        gpuDeviceSynchronize();
+        std::vector<float> got(static_cast<size_t>(count) * 3 * ch * cw);
+        gpuMemcpy(got.data(), device_dst, got.size() * sizeof(float), gpuMemcpyDeviceToHost);
+
+        const size_t per_crop = static_cast<size_t>(3) * ch * cw;
+        for (int n = 0; n < count; ++n) {
+            const auto want = crop_reference(host, src_h, src_w, boxes + n * 4, ch, cw, true);
+            double worst = 0;
+            for (size_t i = 0; i < per_crop; ++i) {
+                worst = std::max(worst, static_cast<double>(std::fabs(got[n * per_crop + i] - want[i])));
+            }
+            check_near(worst, 0.0, 1e-4,
+                       "crop " + std::to_string(n) + " matches the readable implementation");
+        }
+        gpuFree(device_src);
+        gpuFree(device_boxes);
+        gpuFree(device_dst);
+    }
+
+    // The readable NV12 letterbox: nearest sample, BT.601 limited range, the same constants as
+    // the kernel, written out. The kernel is nearest rather than bilinear on purpose — the chroma
+    // plane is half resolution and NVDEC's output is what a camera sent — and the reference says
+    // so by construction.
+    std::vector<float> nv12_letterbox_reference(const std::vector<uint8_t>& nv12, int src_h,
+                                                int src_w, int stride, int dst_h, int dst_w,
+                                                bool swap_rb, float pad_value, LetterboxMap map) {
+        std::vector<float> dst(static_cast<size_t>(3) * dst_h * dst_w, pad_value);
+        const int plane = dst_h * dst_w;
+        const uint8_t* uv = nv12.data() + static_cast<size_t>(stride) * src_h;
+        for (int y = 0; y < dst_h; ++y) {
+            for (int x = 0; x < dst_w; ++x) {
+                const float sx = (static_cast<float>(x) - map.pad_x) / map.scale;
+                const float sy = (static_cast<float>(y) - map.pad_y) / map.scale;
+                const bool inside = sx >= 0.f && sy >= 0.f && sx <= src_w - 1 && sy <= src_h - 1;
+                if (!inside) continue;
+                const int xi = std::max(0, std::min(src_w - 1, static_cast<int>(sx)));
+                const int yi = std::max(0, std::min(src_h - 1, static_cast<int>(sy)));
+                const float Y = (static_cast<float>(nv12[yi * stride + xi]) - 16.f) * 1.164383f;
+                const int cx = (xi / 2) * 2, cy = yi / 2;
+                const float U = static_cast<float>(uv[cy * stride + cx + 0]) - 128.f;
+                const float V = static_cast<float>(uv[cy * stride + cx + 1]) - 128.f;
+                const float bgr[3] = {std::min(255.f, std::max(0.f, Y + 2.017232f * U)),
+                                      std::min(255.f, std::max(0.f, Y - 0.391762f * U - 0.812968f * V)),
+                                      std::min(255.f, std::max(0.f, Y + 1.596027f * V))};
+                for (int c = 0; c < 3; ++c) {
+                    const int sc = swap_rb ? (2 - c) : c;
+                    dst[c * plane + y * dst_w + x] = bgr[sc] / 255.f;
+                }
+            }
+        }
+        return dst;
+    }
+
+    void test_the_nv12_letterbox_kernel_agrees_with_the_reference() {
+        const int src_h = 90, src_w = 160, stride = 192, dst = 64;  // a padded stride, as NVDEC gives
+        std::vector<uint8_t> host(static_cast<size_t>(stride) * src_h * 3 / 2);
+        for (size_t i = 0; i < host.size(); ++i) host[i] = static_cast<uint8_t>(16 + (i * 29) % 220);
+
+        uint8_t* device_src = nullptr;
+        float* device_dst = nullptr;
+        if (gpuMalloc(&device_src, host.size()) != gpuSuccess) {
+            std::fprintf(stderr, "SKIP: no CUDA device for the NV12 parity test\n");
+            return;
+        }
+        gpuMalloc(&device_dst, static_cast<size_t>(3) * dst * dst * sizeof(float));
+        gpuMemcpy(device_src, host.data(), host.size(), gpuMemcpyHostToDevice);
+
+        const LetterboxMap map = nv12_letterbox_into(device_src, src_h, src_w, stride, device_dst,
+                                                     dst, dst, true, 0.5f, nullptr);
+        gpuDeviceSynchronize();
+        std::vector<float> got(static_cast<size_t>(3) * dst * dst);
+        gpuMemcpy(got.data(), device_dst, got.size() * sizeof(float), gpuMemcpyDeviceToHost);
+        const auto want =
+            nv12_letterbox_reference(host, src_h, src_w, stride, dst, dst, true, 0.5f, map);
+
+        double worst = 0;
+        for (size_t i = 0; i < got.size(); ++i)
+            worst = std::max(worst, static_cast<double>(std::fabs(got[i] - want[i])));
+        check_near(worst, 0.0, 1e-4, "the NV12 letterbox kernel matches the readable implementation");
+        if (map.pad_y > 0) check_near(got[0], 0.5f, 1e-6, "the NV12 top bar is the pad value");
+        gpuFree(device_src);
+        gpuFree(device_dst);
+    }
+
+    void test_a_capture_during_attach_is_a_consistent_snapshot() {
+        // The sweeper captures a frame whose worker is mid-`attach` — the designed timeout path.
+        // Without the lock this is two threads on one std::map, and this hammer crashes or reads
+        // a torn map; with it, every snapshot is a batch set that existed at some instant. A
+        // hammer proves a negative only weakly, so the check is on the invariant, not on timing.
+        FrameState state(FrameTag{"cam", 1}, 8, 8, 20.f);
+        std::atomic<bool> stop{false};
+        std::atomic<int> bad{0};
+        std::thread writer([&]() {
+            for (int i = 0; i < 20000; ++i) {
+                ObjectBatch batch;
+                batch.name = (i % 2 == 0) ? "person_embedder_out" : "ship_embedder_out";
+                batch.width = 4;
+                batch.object_indices = {i};
+                batch.data = {1.f, 2.f, 3.f, 4.f};
+                state.attach(std::move(batch));
+                if (i % 1000 == 0) state.drop("ship_embedder_out");
+            }
+            stop.store(true);
+        });
+        while (!stop.load()) {
+            const EmissionInputs snapshot = state.capture();
+            for (const auto& [name, batch] : snapshot.batches) {
+                if (batch.name != name || batch.data.size() != 4u) bad.fetch_add(1);
+            }
+        }
+        writer.join();
+        check(bad.load() == 0, "every capture during attach was a consistent snapshot");
+    }
+
     void test_a_degenerate_box_yields_a_black_crop() {
         // A zero-area detection is data, not a bug. The alternative is a launch that reads out of
         // bounds, and the Python parity test pins the same behaviour.
@@ -386,7 +562,10 @@ int main() {
     test_a_full_buffer_evicts_the_greediest_camera();
 
     test_the_letterbox_kernel_agrees_with_the_reference();
+    test_the_crop_kernel_agrees_with_the_reference();
+    test_the_nv12_letterbox_kernel_agrees_with_the_reference();
     test_a_degenerate_box_yields_a_black_crop();
+    test_a_capture_during_attach_is_a_consistent_snapshot();
 
     std::printf("%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;

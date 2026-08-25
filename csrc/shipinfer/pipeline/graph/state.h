@@ -4,11 +4,20 @@
 // The Python version broke that once — the reassembly sweeper read a state whose worker was
 // still inside the graph — and the fix there is the design here: whatever the emitter needs is
 // **captured** when the frame is finished, and the emitter never touches the state again.
+//
+// One exception, and it is the designed path rather than a rare interleave: a frame *times out*
+// precisely because its worker is still inside `run_objects`, so the sweeper's `capture()` runs
+// while that worker is writing `detections_` or `batches_`. Two threads on one `std::map` is
+// undefined behaviour, however brief. So the two containers the sweeper copies are behind a
+// mutex — taken by the writer for the duration of a move and by `capture()` for the duration of
+// a copy, both microseconds, once per stage per frame. The image, the tag and the sizes are set
+// before the frame is opened and never change, and stay lock-free.
 #pragma once
 
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -52,24 +61,35 @@ namespace shipinfer {
         float fps() const { return fps_; }
 
         void set_detections(std::vector<Detection> detections) {
-            detections_ = std::move(detections);
-            for (size_t i = 0; i < detections_.size(); ++i) {
-                detections_[i].index = static_cast<int>(i);
+            for (size_t i = 0; i < detections.size(); ++i) {
+                detections[i].index = static_cast<int>(i);
             }
+            std::lock_guard<std::mutex> lock(mutex_);
+            detections_ = std::move(detections);
         }
+        // The owning worker's view, between `set_detections` and the frame's end. Not for the
+        // sweeper: it copies through `capture()`, which takes the lock.
         const std::vector<Detection>& detections() const { return detections_; }
 
-        void attach(ObjectBatch batch) { batches_[batch.name] = std::move(batch); }
-        void drop(const std::string& name) { batches_.erase(name); }
+        void attach(ObjectBatch batch) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            batches_[batch.name] = std::move(batch);
+        }
+        void drop(const std::string& name) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            batches_.erase(name);
+        }
 
-        // Four copies, cheap on purpose — see the header. The batches are moved out because the
-        // state is finished by the time this is called and nothing will read them again.
+        // Copies, cheap on purpose — see the header. Under the lock, because the sweeper calls
+        // this on a frame whose worker may be mid-`attach`; the copy is what lets the emitter
+        // never touch the state again.
         EmissionInputs capture() const {
             EmissionInputs inputs;
             inputs.tag = tag_;
             inputs.width = width_;
             inputs.height = height_;
             inputs.fps = fps_;
+            std::lock_guard<std::mutex> lock(mutex_);
             inputs.detections = detections_;
             inputs.batches = batches_;
             return inputs;
@@ -99,6 +119,7 @@ namespace shipinfer {
         int width_ = 0;
         float fps_ = 0.f;
         int device_ = 0;
+        mutable std::mutex mutex_;  // guards the two containers below, and only them
         std::vector<Detection> detections_;
         std::map<std::string, ObjectBatch> batches_;
         std::shared_ptr<DeviceBuffer> image_;

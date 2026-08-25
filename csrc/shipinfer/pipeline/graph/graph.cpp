@@ -114,8 +114,9 @@ namespace shipinfer {
         return names;
     }
 
-    void PipelineGraph::execute(std::vector<Work>& batch, int device, FrameCollector& collector) {
-        if (batch.empty()) return;
+    size_t PipelineGraph::execute(std::vector<Work>& batch, int device,
+                                  FrameCollector& collector) {
+        if (batch.empty()) return 0;
         GPU_CHECK(gpuSetDevice(device));
 
         // -- detect, once, for the whole batch ------------------------------------------------
@@ -191,23 +192,32 @@ namespace shipinfer {
         }
 
         // -- the per-object branches, per frame ----------------------------------------------
-        for (size_t i = 0; i < real; ++i) {
-            FrameState& state = *batch[i].state;
-            if (state.detections().empty()) continue;
-
-            // Conditional branches: a frame with no people does not run the embedder, and that is
-            // a *skip*, distinguishable in the event from a failure.
+        //
+        // Two passes, and the order is the fix. First every frame declares what will run, then
+        // every frame runs it — with its own try/catch. The first version did both in one loop
+        // and let a throw escape `execute`: the frames *after* the one that failed had never
+        // reached `expect()`, so their expected set was still `{detect, crop}`, both delivered,
+        // and the caller's `seal` reported seven batch-mates **Complete with missing=[]** while
+        // their embedder had never run. A frame's failure is now its own: its unrun stages are
+        // in `missing`, the others are unaffected, and the count comes back to the caller for
+        // `frames_failed` — a batch-wide throw is kept for the detector, where it is true.
+        struct Branches {
             std::vector<float> person_boxes, ship_boxes;
             std::vector<int> person_index, ship_index;
+        };
+        std::vector<Branches> branches(real);
+        for (size_t i = 0; i < real; ++i) {
+            FrameState& state = *batch[i].state;
+            Branches& b = branches[i];
             for (const auto& det : state.detections()) {
                 std::vector<float>* boxes = nullptr;
                 std::vector<int>* index = nullptr;
                 if (det.class_id == config_.person_class) {
-                    boxes = &person_boxes;
-                    index = &person_index;
+                    boxes = &b.person_boxes;
+                    index = &b.person_index;
                 } else if (det.class_id == config_.ship_class) {
-                    boxes = &ship_boxes;
-                    index = &ship_index;
+                    boxes = &b.ship_boxes;
+                    index = &b.ship_index;
                 }
                 if (boxes == nullptr) continue;
                 boxes->push_back(det.x1);
@@ -216,35 +226,48 @@ namespace shipinfer {
                 boxes->push_back(det.y2);
                 index->push_back(det.index);
             }
-
             // Declare what will actually run, *then* run it. A frame with no people does not
             // run the embedder, and that is a **skip** -- it has to be distinguishable in the
-            // event from a stage that was expected and failed.
-            //
-            // The first version handed `collector.open` the full stage list unconditionally and
-            // never called `expect` at all, so every ship-only frame sealed Incomplete with
-            // `missing=["person_embedder"]` and every person-only frame with
-            // `missing=["ship_segmenter", "ship_embedder"]`. At the 50/50 library split that is
-            // most of the fleet, and a real embedder outage emitted a byte-identical event:
-            // skipped, failed and timed out collapsed into one.
+            // event from a stage that was expected and failed. Before this was wired, every
+            // ship-only frame sealed Incomplete with `missing=["person_embedder"]` and every
+            // person-only frame with the two ship stages: skipped, failed and timed out
+            // collapsed into one.
             std::vector<std::string> will_run;
-            if (embedder_ != nullptr && !person_index.empty()) {
+            if (embedder_ != nullptr && !b.person_index.empty()) {
                 will_run.push_back("person_embedder");
             }
-            if (segmenter_ != nullptr && !ship_index.empty()) will_run.push_back("ship_segmenter");
-            if (ship_embedder_ != nullptr && !ship_index.empty()) {
+            if (segmenter_ != nullptr && !b.ship_index.empty()) {
+                will_run.push_back("ship_segmenter");
+            }
+            if (ship_embedder_ != nullptr && !b.ship_index.empty()) {
                 will_run.push_back("ship_embedder");
             }
             collector.expect(state.tag(), will_run);
-
-            run_objects(embedder_.get(), state, batch[i].image_device, device, person_boxes,
-                        person_index, config_.crop_h, config_.crop_w, "person_embedder", collector);
-            run_objects(segmenter_.get(), state, batch[i].image_device, device, ship_boxes,
-                        ship_index, config_.detect_size, config_.detect_size, "ship_segmenter",
-                        collector);
-            run_objects(ship_embedder_.get(), state, batch[i].image_device, device, ship_boxes,
-                        ship_index, config_.crop_h, config_.crop_w, "ship_embedder", collector);
         }
+
+        size_t failed = 0;
+        for (size_t i = 0; i < real; ++i) {
+            FrameState& state = *batch[i].state;
+            const Branches& b = branches[i];
+            if (b.person_index.empty() && b.ship_index.empty()) continue;
+            try {
+                run_objects(embedder_.get(), state, batch[i].image_device, device, b.person_boxes,
+                            b.person_index, config_.crop_h, config_.crop_w, "person_embedder",
+                            collector);
+                run_objects(segmenter_.get(), state, batch[i].image_device, device, b.ship_boxes,
+                            b.ship_index, config_.detect_size, config_.detect_size,
+                            "ship_segmenter", collector);
+                run_objects(ship_embedder_.get(), state, batch[i].image_device, device,
+                            b.ship_boxes, b.ship_index, config_.crop_h, config_.crop_w,
+                            "ship_embedder", collector);
+            } catch (const std::exception& error) {
+                // This frame's stages that did not run stay undelivered, so `seal` reports it
+                // Incomplete and names them. The batch-mates carry on.
+                ++failed;
+                if (on_frame_error_) on_frame_error_(state.tag(), error.what());
+            }
+        }
+        return failed;
     }
 
     void PipelineGraph::run_objects(ModelPool* pool, FrameState& state, const uint8_t* image_device,

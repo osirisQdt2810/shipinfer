@@ -173,6 +173,12 @@ int main(int argc, char** argv) {
         std::cerr << "loading engines...\n";
         const auto load_start = std::chrono::steady_clock::now();
         PipelineGraph graph(graph_config);
+        // A frame whose object stages threw is counted by `execute`; the reason is printed for
+        // the first few, because a count with no cause is a diagnosis nobody can start.
+        graph.on_frame_error([](const FrameTag& tag, const char* what) {
+            static std::atomic<int> shouted{0};
+            if (shouted.fetch_add(1) < 5) std::cerr << "frame " << tag.key() << " failed: " << what << "\n";
+        });
         const double startup_s =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - load_start).count();
         std::cerr << "engines ready in " << startup_s << "s\n";
@@ -295,7 +301,9 @@ int main(int argc, char** argv) {
 
                     if (!work.empty()) {
                         try {
-                            graph.execute(work, device, collector);
+                            // Per-frame failures come back as a count; only a detector failure,
+                            // which is a whole-batch fact, still arrives as a throw.
+                            failed.fetch_add(graph.execute(work, device, collector));
                         } catch (const std::exception& error) {
                             failed.fetch_add(static_cast<uint64_t>(work.size()));
                             static std::atomic<int> shouted{0};

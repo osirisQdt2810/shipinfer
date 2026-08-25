@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <map>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -119,7 +120,12 @@ namespace shipinfer {
             FrameState* state = nullptr;
             const uint8_t* image_device = nullptr;
         };
-        void execute(std::vector<Work>& batch, int device, FrameCollector& collector);
+        // Called once per frame whose object stages threw, with the reason. Defaults to nothing;
+        // the bench installs a printer. Kept off the hot path: only a failure reaches it.
+        void on_frame_error(std::function<void(const FrameTag&, const char*)> hook) {
+            on_frame_error_ = std::move(hook);
+        }
+        size_t execute(std::vector<Work>& batch, int device, FrameCollector& collector);
 
         ModelPool& detector() { return *detector_; }
         ModelPool* segmenter() { return segmenter_.get(); }
@@ -135,6 +141,7 @@ namespace shipinfer {
 
         GraphConfig config_;
         std::unique_ptr<ModelPool> detector_;
+        std::function<void(const FrameTag&, const char*)> on_frame_error_;
         std::unique_ptr<ModelPool> segmenter_;
         std::unique_ptr<ModelPool> embedder_;
         std::unique_ptr<ModelPool> ship_embedder_;
