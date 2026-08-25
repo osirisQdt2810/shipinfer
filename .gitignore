@@ -71,3 +71,10 @@ references/
 # Built TensorRT plans in the model repository. Same reason as models/: an engine is valid
 # only for the GPU and TensorRT version that built it.
 model_repository/*/*/*.plan
+
+# The host-built C++ data plane. Built by scripts/build_csrc.py, never committed: it is a
+# host artefact against this box's TensorRT and CUDA, and a checked-in binary is a binary
+# nobody can tell is stale.
+csrc/build/
+# the Stop hook's consecutive-block counter, written beside the ledger
+.claude/.tasks_state.json

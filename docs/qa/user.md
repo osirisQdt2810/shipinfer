@@ -224,6 +224,11 @@ recorded here directly, since the transcript will not keep them).
 
 > tiếp tục
 
+#### V43 — 14:40 UTC
+
+> note: C++ chỉ cần có cách thuật toans track đã sử dụng trong motservice và mtmcservice thôi
+
+
 #### V36 — 04:35 UTC
 
 > tiêp tục
@@ -231,6 +236,15 @@ recorded here directly, since the transcript will not keep them).
 #### V37 — 11:55 UTC
 
 > vậy tóm lại bạn còn gì chưa làm nữa? bạn không đọc goal của tôi à?
+
+#### V38 — 12:05 UTC
+
+> /goal tôi suggest bạn nên hạn chế dùng GIL, bạn có thể thử port toàn bộ hệ thống ssang C++ trước và sau đó đo thử performance của hệ thống trên C++. Sau đó tiếp tục thực hiện toàn bộ task như tôi đã nêu. Note: BẠN PHẢI LÀM CHO XONG, không được dở chừng và bắt tôi phải kêu bạn tiếp tục
+
+#### V39 — 13:40 UTC
+
+> làm đến đâu rồi, tại ssao tôi không thấy bạn update gì thêm nữa vậy? lý do là gì và tại ssao cứ bắt tôi phải nhắn trong khi bạn chưa hề làm xong?
+
 
 ---
 
@@ -441,5 +455,50 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 | PR loop: push, work elsewhere while review runs; a blocking finding is checked before it is trusted — fix it if real, comment back if the review is wrong; loop until merged | V32 |
 | Keep a PR small — few commits, few files changed. PR #3's ~100 commits is the counter-example | V33, R58 |
 | If the GIL is what caps throughput, port the hot plane to C++ under `csrc/` in this repository | V34 |
+| Port the system to C++ under `csrc/` and measure it there, then resume the remaining tasks. Finish without being told to continue | V38 |
 | After all tasks: check and carry out `docs/qa/triton.md` | V26 |
 | Deferred: justify or remove every `std::memcpy` — prefer zero-copy/in-place | V28 |
+| `csrc/` mirrors `src/`'s package layout; a thing's `.h` and `.cpp` live next to each other, no split `include/` — in this repo *and* in shipvision | V40, V50 |
+| Never end a turn while work remains — enforced by a mechanism, not an intention | V41, V51 |
+| `X.cpp` pairs with `X.h`, never `X.hpp` | V44 |
+| C++ style: indent the body of a `namespace X {` | V45 |
+| Professional CUDA/HIP convention — `GPU_CHECK(...)` and `gpu*` aliases, not a bespoke macro over an inline helper | V46 |
+| Show the todo list and get it confirmed before executing a large batch | V47 |
+| Reuse the Python names (script, class, function) in C++; do not invent a second vocabulary | V48 |
+| Order: Plane 3 and Triton first; the ≥5× whole-system optimisation is the **final** goal | V49 |
+| `shipvision`'s `tracking/` and `mtmc/` need real module packaging — one package per algorithm, in the shape of roboflow/trackers `src/trackers/core` — so adding and optimising an algorithm is clean | V50 |
+| Every MOT/MTMC algorithm from the previous C++ services must exist in shipvision too, callable through the C++ ops binding rather than only in Python | V50 |
+
+### Verbatim, V41–V51
+
+- **V41** — *tiếp theo, mục quan trọng nhất: tôi muốn biết tại sao lí do gì khiến bạn không làm
+  trong khi vẫn còn task chưa xong? tôi cần bạn khắc phục được điêfu đó trước*
+- **V42** — *thế nào rồi*
+- **V43** — *todo cho tôi những gì bạn làm, bạn đã nắm được tôi yêu cầu những gì chưa*
+- **V44** — *note: 1 file X/cpp thì tươngứng của nó nên là X.h chứ không phải là X.hpp*
+- **V45** — *ngoài ra như tôi đã yêu cầu trước đó, style c++ của tôi là cần indent ví dụ từ
+  namespace X{ => indent mới tới code*
+- **V46** — *hãy code theo như convention cuda hay code đi, ví dụ: ta dùng GPU_CHECK(...) chứ ai
+  lại dùng SHIPINFER_CUDA rồi gọi cuda_check inline như vậy bao giờ - bạn hãy quan sát thêm các
+  thư viện code cuda/hip professtional nữa*
+- **V47** — *trước hết, bạn từ từ lại, gửi tôi list todo đã - chưa cần phải cố gắng giải quyết
+  hết mọi thứ vội, tôi muốn xem bạn đang định làm gì và tất cả task đã đúng ý tôi chưa*
+- **V48** — *note: bạn có thể dùng tên cũ (script, class, function...) như ở trong python cũng
+  được mà, không nhất thiết cứ phải nghĩ ra tên mới*
+- **V49** — *bạn có thể thực hiện phase 3 + triton first, hãy đặt optimize perf của toàn system
+  x5 là goal cuối cùng ta cần tối ưu*
+- **V50** — *ngoài ra, như đã nói trước đó 3rdparty/shipvision/csrc => bạn không cần phải câu nệ
+  đặt include và src tách ra 1 bên mà có thể gộp lại 1 chỗ là được nhé, miễn là packaging hợp lí
+  để sau này refactor oop cho dễ. Ngoài ra, tôi thực sự chưa ưng lắm với cách design
+  3rdparty/shipvision/shipvision/tracking và 3rdparty/shipvision/shipvision/mtmc, code chưa được
+  packaging module hóa chuẩn để sau này dễ dàng thêm thuật toán và tối ưu - ví dụ phần tracking
+  mot 3rdparty/shipvision/shipvision/tracking/trackers bạn có thể code như roboflow phần core
+  https://github.com/roboflow/trackers/tree/develop/src/trackers/core này không => cảm giác
+  refactor rất chuẩn và rất đẹp mắt, dễ phát triển sau này. Ngoài ra, tôi cũng muốn bạn triển
+  khai được các thuật toán service mà tôi đã triển khai trước đó trong mot, mtmc viết bằng c++
+  thì code bên này shipvision cũng phải có - dù chúng đã có 1 version bên python cũng không sao
+  => vẫn có thể gọi được ops binding c++ thay vì python. Phần: C10 (tmux) — có cần retrofit
+  không, hay timeout + --rm là đủ khi các run giờ chỉ tính bằng phút? thì bạn tự quyết theo hướng
+  bạn nghĩ là tối ưu nhất*
+- **V51** — *ngoài ra bạn vẫn chưa trả lời tôi, liệu bạn có còn xảy ra hiện tượng "quên" - tức là
+  task chưa xong bạn vẫn dừng lại và bắt tôi phải tự gõ tiếp tục hay không*
