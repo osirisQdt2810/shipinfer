@@ -68,12 +68,6 @@ namespace {
 
     // -- the fair queue ---------------------------------------------------------------------
 
-
-
-
-
-
-
     // -- the collector ----------------------------------------------------------------------
 
     std::shared_ptr<FrameState> a_frame(const std::string& camera, int64_t id) {
@@ -579,7 +573,6 @@ namespace {
 }  // namespace
 
 int main() {
-
     test_a_plan_whose_shape_disagrees_with_the_config_is_refused_at_construction();
     test_a_plan_with_non_float32_io_is_refused();
     test_a_frame_with_more_objects_than_the_batch_keeps_every_chunk();
