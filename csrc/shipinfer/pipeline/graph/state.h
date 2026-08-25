@@ -85,6 +85,12 @@ namespace shipinfer {
         int device() const { return device_; }
         // Released as soon as the last stage that needs pixels is done, because a 1080p frame is
         // 6 MB and a thousand of them in flight is the whole budget.
+        // Not called yet, and kept deliberately. ADR-004: a frame stays on the GPU it was
+        // decoded on and only its crops travel, so the pixels should be released the moment
+        // the last stage that needs them is done — a 1080p frame is 6 MB and at the design
+        // point a thousand of them in flight is the whole budget. The graph runs every stage
+        // that needs pixels before it returns, so today the `shared_ptr` dies with the frame
+        // and the effect is the same; this is the hook for when a stage runs after them.
         void release_image() { image_.reset(); }
 
       private:

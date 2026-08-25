@@ -27,6 +27,7 @@
 // request too large for the engine rather than a scheduling decision.
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -90,11 +91,14 @@ namespace shipinfer {
                     return false;
                 }
             }
-            auto& lane = lanes_[camera];
-            lane.push_back(std::move(item));
-            if (order_.empty() || std::find(order_.begin(), order_.end(), camera) == order_.end()) {
-                order_.push_back(camera);
-            }
+            // `try_emplace` tells us whether the lane is new in the same lookup that finds
+            // it, so a camera is appended to the round-robin order exactly once and `put` is
+            // O(log cameras) rather than O(cameras). The scan it replaces ran on **every**
+            // frame — a linear walk of fifty strings a thousand times a second to answer a
+            // question the map had already answered.
+            const auto [entry, is_new] = lanes_.try_emplace(camera);
+            entry->second.push_back(std::move(item));
+            if (is_new) order_.push_back(camera);
             ++size_;
             ++stats_.accepted;
             stats_.peak = std::max(stats_.peak, size_);
@@ -103,8 +107,10 @@ namespace shipinfer {
         }
 
         // Round-robin across lanes until `max_rows` rows are collected, the queue empties, or the
-        // wait expires. An empty result means "closed", which is how a worker learns to exit
-        // without a separate sentinel.
+        // wait expires. An empty result means "nothing to do" — the queue is closed, or the
+        // wait simply expired with the queue empty. A caller that treats empty as "closed"
+        // exits on the first idle interval, so a worker has to ask `closed()`; the two are
+        // deliberately separate questions.
         std::vector<T> drain(size_t max_rows, int wait_ms) {
             std::vector<T> batch;
             std::unique_lock<std::mutex> lock(mutex_);

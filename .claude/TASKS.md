@@ -83,7 +83,7 @@ hook down, for when the operator asked to see something before it is executed.
          counts it as reported — the inversion ADR-005 exists to prevent.
       4. no ADR and no FEATURE_LOG entry for a second data plane; three real contradictions
          with ADR-007, ADR-003, ADR-005.
-- [~] **B3 · PR #8, five should-fix** — `complete()`, the batch assert and the counters are done; `sharding.py` removed from this PR (below); a `csrc` CI job remains and needs its own PR, because a PR touching `.github/workflows/**` cannot pass the review job.
+- [x] **B3 · PR #8, five should-fix** — all taken. `complete()` uses inclusion, the batch assert is in, the counters are attributed, `sharding.py` left the PR (B3a), and the nine nits are closed: `<algorithm>` included, `put`'s O(cameras) scan replaced by `try_emplace` (it ran on **every** frame — fifty strings walked a thousand times a second to answer a question the map had already answered), `drain`'s comment no longer claims empty means closed, the two unused hooks say why they exist, and the test harness prints `FAIL: expected: …` so a regression stops reading as good news. A `csrc` CI job is B5, separately, because it edits `.github/workflows/**`.
       `sharding.py` belongs with its launcher; publish the full counters beside 390.5; a CI job
       that compiles `csrc/`; the nits.
 
@@ -128,6 +128,10 @@ hook down, for when the operator asked to see something before it is executed.
       version on the repository's default branch." That is the documented permanent exception
       in CLAUDE.md, and it cost PR #8 a review round. A one-line prompt fix is not worth
       blocking a PR's automation; it goes in a workflow-only PR that is merged by hand.
+
+- [ ] **B5 · A `csrc` compile job in CI** — ~2 000 lines of data plane are green on one box
+      only. Needs its own PR with B4, since both edit `.github/workflows/**` and a branch that
+      does cannot run the review job.
 
 ## Phase 5 · Everything else still owed
 

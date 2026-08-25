@@ -58,6 +58,12 @@ namespace shipinfer {
         // false and letting it vanish is the bug this whole class exists to prevent.
         bool open(const std::shared_ptr<FrameState>& state,
                   const std::vector<std::string>& expected);
+        // Narrows the expected set once the detections are known, which is what keeps a
+        // *skipped* branch distinguishable from a *failed* one. `open` cannot know: the set
+        // depends on what the detector found. Before this was wired, every ship-only frame
+        // sealed Incomplete with `missing = ["person_embedder"]` and every person-only frame
+        // with the two ship stages — the majority of the fleet, byte-identical to a real
+        // embedder outage. Called from `PerceptionGraph::execute` once the classes are split.
         void expect(const FrameTag& tag, const std::vector<std::string>& stages);
         void deliver(const FrameTag& tag, const std::string& stage);
         void seal(const FrameTag& tag);

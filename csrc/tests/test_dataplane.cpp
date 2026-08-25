@@ -32,11 +32,16 @@ namespace {
     int failures = 0;
     int checks = 0;
 
+    // "expected:", because the message states the property that was *supposed* to hold.
+    // Printing it bare after "FAIL:" reads as though the good thing happened — review caught
+    // exactly that: a regression printed "FAIL: the degenerate box produced a black crop",
+    // which is the opposite of the news. Fixing the frame rather than rewording thirty
+    // messages keeps every one of them readable as the property it asserts.
     void check(bool condition, const std::string& what) {
         ++checks;
         if (!condition) {
             ++failures;
-            std::fprintf(stderr, "FAIL: %s\n", what.c_str());
+            std::fprintf(stderr, "FAIL: expected: %s\n", what.c_str());
         }
     }
 
@@ -44,8 +49,8 @@ namespace {
         ++checks;
         if (std::fabs(actual - expected) > tolerance) {
             ++failures;
-            std::fprintf(stderr, "FAIL: %s (got %g, expected %g +- %g)\n", what.c_str(), actual,
-                         expected, tolerance);
+            std::fprintf(stderr, "FAIL: expected: %s (got %g, wanted %g +- %g)\n", what.c_str(),
+                         actual, expected, tolerance);
         }
     }
 
