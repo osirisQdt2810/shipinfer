@@ -144,7 +144,7 @@ The rules below are that repository's, restated so a reader of this file knows w
 expect of it.
 
 - C++17, `clang-format` (enforced by that repository's pre-commit, not this one).
-- Use the `gpu*` aliases from `platform.hpp`; never write `cudaMalloc` directly, or the
+- Use the `gpu*` aliases from `core/platform.h`; never write `cudaMalloc` directly, or the
   ROCm build silently stops compiling.
 - Every kernel gets a `_into` entry point taking a device pointer. The numpy-returning form
   is a convenience for parity tests, and its docstring must say so.

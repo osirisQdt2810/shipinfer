@@ -29,4 +29,23 @@ echo "==> downloading ${ABI} wheels into $DEST"
   fastapi httpx starlette uvicorn anyio \
   opencv-python-headless
 
+# TensorRT is not on PyPI for this platform, but the host install ships the wheels it was
+# built with, so copy the one matching the container's interpreter.
+#
+# Without this a *fresh* wheel directory breaks every benchmark run: `bench.sh` and `cpp.sh`
+# try `import tensorrt` and fall back to `pip install --no-index --find-links=/wheels
+# tensorrt`, which finds nothing, and the run dies minutes later with
+# `BackendUnavailableError: TensorRT is not installed`. That happened after a reboot cleared
+# /tmp, and the cause was several layers away from the symptom.
+TRT_DIR="${SHIPINFER_TENSORRT_DIR:-/usr/local/TensorRT}"
+TRT_WHEEL="$(ls "$TRT_DIR/python/tensorrt-"*"-${ABI}-none-linux_x86_64.whl" 2>/dev/null | head -1 || true)"
+if [ -n "$TRT_WHEEL" ]; then
+  cp -n "$TRT_WHEEL" "$DEST/"
+  echo "==> staged $(basename "$TRT_WHEEL")"
+else
+  # Not fatal: the offline tier needs no TensorRT, and saying so beats failing a setup step
+  # that most runs do not depend on.
+  echo "==> no ${ABI} TensorRT wheel under $TRT_DIR/python — benchmarks will not run" >&2
+fi
+
 printf '==> %s wheels\n' "$(ls -1 "$DEST"/*.whl | wc -l)"

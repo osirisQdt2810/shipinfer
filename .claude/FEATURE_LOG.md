@@ -82,6 +82,52 @@ explain. The kernel tier, once the fused kernels were reachable, measured native
 
 ---
 
+## 2026-08-25 — Five of Triton's features, taken (`docs/qa/triton.md` §3)
+
+**What it is.** The five rows of that document's "features Triton has that we should take"
+table that were still a plan, implemented and the table rewritten to describe the code rather
+than the intention:
+
+1. **`GET /v2/models/{name}/stats`** (and the `/versions/{v}/` spelling) — `server/statistics.py`
+   holds `ModelStatistics`, one per model, shared by its instances and by the ensemble path.
+2. **Explicit model control** — `model_control: explicit` plus
+   `POST /v2/repository/{index, models/{n}/load, models/{n}/unload}`.
+3. **A rate limiter** — `scheduling/limits/`, a registry with `off` (default) and
+   `concurrency`, configured per model.
+4. **Warm-up from declared samples** — Triton's `model_warmup` key, materialised by
+   `repository/warmup.py` and run by `ModelBackend.warmup`.
+5. **Request tracing** — `core/tracing/`, Triton's seven event names, `none` (default) and
+   `jsonlines` sinks, `rate=N` sampling.
+
+**Why each one, in one line.** A histogram has no per-model cumulative count, so an operator
+debugging one camera's model had to read the fleet's numbers to find one. A repository that
+grows cannot be loaded whole. The queue bounds what is *waiting*, and nothing bounded what was
+*running* — eight instances whose windows close together all enter compute at once. A fixed
+count of zero-filled batches decides how often a model is warmed but not *what with*, and the
+data is what selects the kernels. And six stamps with no sink cannot answer "why was frame
+8213 slow".
+
+**Two things the wiring changed that the feature list does not show.**
+`DurationStat.observe(ns, count)` now adds `count * ns` rather than `ns`: crediting a batch's
+span once instead of once per request divides the reported latency by the batch size, which is
+an error in the flattering direction and was caught by the first test written against it. And
+`ModelInstance.wait_ready` now returns as soon as the worker has *settled* either way — before
+that, a worker that failed on its first line held start-up for the whole 120 s timeout and then
+reported "did not become ready", hiding the cause. A typo in `model_warmup` is enough to reach
+that path, which is how it was found.
+
+**Where Triton was deliberately not followed**, each recorded in the document: `poll` model
+control (a timer can load a half-written config), reload-on-load (it must stop the running copy
+first, so a half-failed reload takes a working model down), and the general named-resource rate
+limiter (the only resource this pipeline has needed to bound is "an execution").
+
+**Cost.** 90 new offline tests, all class-based; 892 pass with no GPU. Nothing new is on by
+default: `off` limiter, `none` trace sink, `none` model control, and no `model_warmup` in any
+shipped config, so a deployment that does not opt in pays one virtual call per completed
+request and two per batch.
+
+---
+
 ## 2026-08-24 — The C++ data plane (`csrc/`)
 
 **What it is.** A standalone binary that owns everything running once per frame or once per
