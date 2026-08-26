@@ -58,7 +58,10 @@ class TestPipelineString:
 
     def test_auto_codec_delegates_to_decodebin(self):
         pipeline = build_pipeline(URI, codec="auto")
-        assert "decodebin" in pipeline
+        assert "decodebin ! video/x-raw !" in pipeline, (
+            "decodebin must be told to negotiate system memory, or NVDEC opens a GL display "
+            "the headless container does not have"
+        )
         assert "depay" not in pipeline and "parse" not in pipeline
 
     def test_scaling_and_transport_and_latency(self):
@@ -73,10 +76,24 @@ class TestPipelineString:
             max_buffers=4,
         ) == (
             f"rtspsrc location={URI} latency=100 protocols=udp ! "
-            "rtph264depay ! h264parse ! nvh264dec ! videoconvert ! "
+            "rtph264depay ! h264parse ! nvh264dec ! video/x-raw ! videoconvert ! "
             "videoscale ! video/x-raw,format=BGR,width=1280,height=720 ! "
             f"appsink name={APPSINK_NAME} emit-signals=false sync=false drop=true max-buffers=4"
         )
+
+    def test_the_deepstream_pair_keeps_its_nvmm_handoff(self):
+        """`nvv4l2decoder ! nvvideoconvert` passes NVMM memory between them; forcing system
+        memory there would undo the reason for choosing them. Only the GL-capable nvcodec
+        decoders and the open-ended `decodebin` get the filter."""
+        pipeline = build_pipeline(
+            URI, codec="h264", decoder="nvv4l2decoder", converter="nvvideoconvert"
+        )
+        assert "nvv4l2decoder ! nvvideoconvert" in pipeline
+        assert "video/x-raw ! nvvideoconvert" not in pipeline
+
+    def test_the_software_decoder_needs_no_filter(self):
+        pipeline = build_pipeline(URI, codec="h264", decoder="avdec_h264")
+        assert "avdec_h264 ! videoconvert" in pipeline
 
     def test_auto_transport_omits_the_property(self):
         """`protocols=auto` is not a GStreamer value; leaving it out is what "let rtspsrc decide" is."""
@@ -177,3 +194,113 @@ class TestImportSafety:
         source.close()
         source.close()
         assert source.is_open is False
+
+
+class TestInitialisationIsSerialised:
+    """Fifty camera threads call `_load_gst` at once. `Gst.is_initialized()` turns true before
+    the registry is populated, so an unguarded caller could probe an empty registry and give
+    its camera up as "no decoder found" on an image that has three."""
+
+    def test_concurrent_callers_initialise_once_and_all_see_the_registry(self, monkeypatch):
+        import sys
+        import threading
+        import time
+        import types
+
+        from shipinfer.ingest.sources import gstreamer
+
+        state = {"initialised": False, "inits": 0, "ready": False}
+
+        class FakeGst:
+            @staticmethod
+            def is_initialized():
+                return state["initialised"]
+
+            @staticmethod
+            def init(_argv):
+                state["inits"] += 1
+                state["initialised"] = True  # visible before the registry is ready...
+                time.sleep(0.05)  # ...which takes a while
+                state["ready"] = True
+
+        gi = types.ModuleType("gi")
+        gi.require_version = lambda *_a: None
+        repository = types.ModuleType("gi.repository")
+        repository.Gst = FakeGst
+        repository.GLib = object()
+        gi.repository = repository
+        monkeypatch.setitem(sys.modules, "gi", gi)
+        monkeypatch.setitem(sys.modules, "gi.repository", repository)
+
+        seen_ready: list[bool] = []
+        lock = threading.Lock()
+
+        def worker():
+            _gst, _glib = gstreamer._load_gst()
+            with lock:
+                seen_ready.append(state["ready"])
+
+        threads = [threading.Thread(target=worker) for _ in range(16)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert state["inits"] == 1, "one init, however many threads arrive at once"
+        assert all(seen_ready), "every caller returned only after the registry existed"
+
+    def test_gio_is_told_not_to_use_libproxy_unless_the_operator_chose_one(self, monkeypatch):
+        """libproxy throws a C++ exception through GIO when it has no configuration to read —
+        `terminate` for the whole process, seen on the first containerised RTSP run."""
+        import os
+        import sys
+        import types
+
+        from shipinfer.ingest.sources import gstreamer
+
+        class FakeGst:
+            @staticmethod
+            def is_initialized():
+                return True
+
+        gi = types.ModuleType("gi")
+        gi.require_version = lambda *_a: None
+        repository = types.ModuleType("gi.repository")
+        repository.Gst = FakeGst
+        repository.GLib = object()
+        gi.repository = repository
+        monkeypatch.setitem(sys.modules, "gi", gi)
+        monkeypatch.setitem(sys.modules, "gi.repository", repository)
+
+        monkeypatch.delenv("GIO_USE_PROXY_RESOLVER", raising=False)
+        gstreamer._load_gst()
+        assert os.environ["GIO_USE_PROXY_RESOLVER"] == "dummy"
+
+        monkeypatch.setenv("GIO_USE_PROXY_RESOLVER", "gnome")  # an operator's real choice stays
+        gstreamer._load_gst()
+        assert os.environ["GIO_USE_PROXY_RESOLVER"] == "gnome"
+
+
+class TestPullingASampleDoesNotDependOnTheTypelib:
+    """`GstApp.AppSink.try_pull_sample` is a method only when the GstApp typelib is loaded;
+    the `try-pull-sample` signal always exists. The first containerised RTSP run that reached
+    a read failed on every camera with "'GstAppSink' object has no attribute 'try_pull_sample'".
+    """
+
+    def test_the_method_is_used_when_present(self):
+        from shipinfer.ingest.sources.gstreamer import _try_pull_sample
+
+        class Sink:
+            def try_pull_sample(self, timeout):
+                return ("method", timeout)
+
+        assert _try_pull_sample(Sink(), 5) == ("method", 5)
+
+    def test_the_signal_is_the_fallback(self):
+        from shipinfer.ingest.sources.gstreamer import _try_pull_sample
+
+        class BareElement:
+            def emit(self, name, *args):
+                return (name, args)
+
+        assert _try_pull_sample(BareElement(), 7) == ("try-pull-sample", (7,))

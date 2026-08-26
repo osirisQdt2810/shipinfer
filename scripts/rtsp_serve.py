@@ -57,7 +57,18 @@ DEFAULT_DATA = REPO / "benchmarks" / "baseline" / "data" / "person_2K"
 DEFAULT_PORT = 8554
 DEFAULT_FPS = 20
 
-__all__ = ["RtspFixtureServer", "encode_fixture", "stream_uri"]
+__all__ = ["RtspFixtureServer", "default_fixture_path", "encode_fixture", "stream_uri"]
+
+
+def default_fixture_path(data_dir: Path, fps: int) -> Path:
+    """Where the encoded stream for ``data_dir`` at ``fps`` is cached — keyed by frame rate.
+
+    The stream's own timing (the SPS written by ``ffmpeg -framerate``) is what paces playback,
+    and it used to be cached under the directory's name alone: a fixture encoded for one run's
+    20 fps was served to the next run's ``--fps 5`` at 20 fps, and twelve "5 fps" cameras
+    offered 240. One cache entry per rate, so the rate asked for is the rate served.
+    """
+    return data_dir.parent / ".rtsp" / f"{data_dir.name}-{fps}fps.h264"
 
 
 def encode_fixture(
@@ -173,14 +184,24 @@ class RtspFixtureServer:
 
         ``multifilesrc ... loop=true`` on a single filename is what makes the stream
         endless: multifilesrc re-reads the same file forever, so the ten real frames repeat
-        like a camera pointed at a slowly changing scene. ``do-timestamp`` plus the framerate
-        in the caps is what paces it at ``fps`` — without them the packetiser pushes the whole
-        file as fast as the socket accepts it, and a "20 fps camera" delivers 4000 fps.
+        like a camera pointed at a slowly changing scene.
+
+        Pacing is ``identity single-segment=true sync=true``, not the caps alone. ``h264parse``
+        gives each access unit a timestamp from the framerate in the caps, and ``identity
+        sync=true`` holds a buffer until the pipeline clock reaches that timestamp — so the
+        stream runs at ``fps`` by the clock. ``single-segment`` is what makes that hold across
+        the loop: each pass of ``multifilesrc loop=true`` starts a new segment whose timestamps
+        restart at zero, and against a clock already seconds in, every buffer of the second
+        pass is "late" and goes out unpaced — the 127% run. One segment, continuous running
+        time, every pass paced. Without it the packetiser pushes the file as fast as the socket accepts,
+        and the first containerised RTSP measurement offered 170% of its target: twelve "5 fps"
+        cameras delivered 101.8 img/s, limited only by how fast the client could decode.
         """
         return (
             f"( multifilesrc location={self.fixture} loop=true "
             f"caps=video/x-h264,framerate={self.fps}/1,stream-format=byte-stream,alignment=au "
-            f"! h264parse config-interval=1 ! rtph264pay name=pay0 pt=96 )"
+            f"! h264parse config-interval=1 ! identity single-segment=true sync=true "
+            f"! rtph264pay name=pay0 pt=96 )"
         )
 
     def start(self) -> None:
@@ -248,14 +269,14 @@ def main(argv: list[str] | None = None) -> int:
         "--fixture",
         type=Path,
         default=None,
-        help="where to cache the encoded H.264 (default: <data>/../.rtsp/<name>.h264)",
+        help="where to cache the encoded H.264 (default: <data>/../.rtsp/<name>-<fps>fps.h264)",
     )
     parser.add_argument("--user", default=None)
     parser.add_argument("--password", default=None)
     parser.add_argument("--print-uris", action="store_true", help="print the URIs and exit")
     args = parser.parse_args(argv)
 
-    fixture = args.fixture or (args.data.parent / ".rtsp" / f"{args.data.name}.h264")
+    fixture = args.fixture or default_fixture_path(args.data, args.fps)
     encode_fixture(args.data, fixture, fps=args.fps)
 
     server = RtspFixtureServer(
