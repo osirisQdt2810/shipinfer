@@ -476,32 +476,56 @@ class TestAShortBlockIsRefused:
 
 
 class TestTheUnpinWaitsForTheViews:
-    def test_close_under_a_live_view_parks_the_unregister_for_a_later_reap(self, ring) -> None:
-        """Round 2's finding 4: the reap that runs inside close() must not unpin the pages the
-        same call just decided were unsafe to unpin. The unregister runs at a later reap."""
+    """Liveness is tracked, not guessed: `pinned_tensor` counts its handouts, `close()` unpins
+    only at zero, a reap can never unpin, and the last finalizer unpins and closes itself."""
+
+    class _View:
+        """Weakref-able stand-in for the torch tensor `pinned_tensor` hands out."""
+
+    def _pinned_ring(self, ring, calls):
         from types import SimpleNamespace
 
-        from shipinfer.runtime.memory import shared_ring as module
-
-        calls: list[int] = []
         fake_torch = SimpleNamespace(
+            uint8="uint8",
+            frombuffer=lambda *a, **k: self._View(),
             cuda=SimpleNamespace(
                 cudart=lambda: SimpleNamespace(cudaHostUnregister=lambda ptr: calls.append(ptr))
-            )
+            ),
         )
         ring._pinned = fake_torch
         ring._pinned_ptr = 0xDEAD
-        writer = SharedRing.open(ring.name, ring.layout)
-        index = writer.claim(timeout_s=0.1)
-        writer.publish(index)
-        taken = ring.take(timeout_s=0.5)
-        view = ring.payload(taken)  # the in-flight zero-copy hold
-        ring.close()
-        assert calls == [], "unpinning under the live view would corrupt an in-flight DMA"
+        return ring
+
+    def test_close_with_no_pinned_views_out_unpins_immediately(self, ring) -> None:
+        """Round 3's finding 2: a pinned ring must free its pages at its own close, not when
+        an unrelated object happens to be destroyed."""
+        from shipinfer.runtime.memory import shared_ring as module
+
+        calls: list[int] = []
+        self._pinned_ring(ring, calls)
+        view = ring.pinned_tensor(0)
         del view
+        gc.collect()
+        ring.close()
+        assert calls == [0xDEAD], "unpinned inside close(), nothing deferred"
+        assert module.reap_pending_closes() == 0, "and nothing was parked"
+
+    def test_a_reap_never_unpins_and_the_last_finalizer_does(self, ring) -> None:
+        """Round 3's finding 1: another ring's close reaps microseconds after a park — the
+        reap must be unable to unpin under the live view, and the finalizer frees instead."""
+        from shipinfer.runtime.memory import shared_ring as module
+
+        calls: list[int] = []
+        self._pinned_ring(ring, calls)
+        held = ring.pinned_tensor(0)
+        ring.close()
+        assert calls == [], "close under a live pinned view unpins nothing"
         module.reap_pending_closes()
-        assert calls == [0xDEAD], "the parked unregister ran at the later reap, once"
-        writer.close()
+        assert calls == [], "a reap while the view is held cannot unpin either"
+        del held
+        gc.collect()
+        assert calls == [0xDEAD], "the last finalizer unpinned, exactly once"
+        assert module.reap_pending_closes() == 0
 
 
 class TestPeerLostSpeaksItsTags:
@@ -512,3 +536,34 @@ class TestPeerLostSpeaksItsTags:
         error = PeerLostError("2:person_embedder", tags)
         assert error.owner == "2:person_embedder" and len(error.tags) == 11
         assert "('cam00', 0)" in str(error) and "and 3 more" in str(error)
+
+
+def _spawn_writer(name: str, slots: int, slot_bytes: int) -> None:
+    """A real peer process: open by name, submit one payload, exit without unlinking."""
+    from shipinfer.runtime.memory.shared_ring import RingLayout, SharedRing
+
+    writer = SharedRing.open(name, RingLayout(slots=slots, slot_bytes=slot_bytes))
+    index = writer.claim(timeout_s=5.0)
+    writer.payload(index)[:5] = b"hello"
+    writer.publish(index)
+    writer.close()
+
+
+class TestARealPeerProcess:
+    def test_a_spawned_writer_submits_and_its_exit_unlinks_nothing(self, ring) -> None:
+        """The bpo-38119 handling exists for *processes*: a spawn-context child attaches,
+        writes, and exits — and the block must survive it, because `_attach` kept the child's
+        resource tracker out of it. The owner still reads the payload afterwards."""
+        import multiprocessing
+
+        context = multiprocessing.get_context("spawn")
+        child = context.Process(
+            target=_spawn_writer, args=(ring.name, ring.layout.slots, ring.layout.slot_bytes)
+        )
+        child.start()
+        child.join(timeout=30)
+        assert child.exitcode == 0
+        taken = ring.take(timeout_s=5.0)
+        assert taken is not None, "the block outlived the child"
+        assert bytes(ring.payload(taken)[:5]) == b"hello"
+        ring.release(taken)

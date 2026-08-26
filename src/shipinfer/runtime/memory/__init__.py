@@ -19,7 +19,13 @@ from shipinfer.runtime.memory.custom import (
 from shipinfer.runtime.memory.pool import MemoryPool
 from shipinfer.runtime.memory.registry import ALLOCATORS
 from shipinfer.runtime.memory.report import MemoryReport, device_report
-from shipinfer.runtime.memory.shared_ring import RingHeader, RingLayout, SharedRing, SlotState
+from shipinfer.runtime.memory.shared_ring import (
+    RingHeader,
+    RingLayout,
+    SharedRing,
+    SlotState,
+    reap_pending_closes,
+)
 from shipinfer.runtime.memory.staging import PinnedStagingPool
 from shipinfer.runtime.memory.torch_alloc import (
     HostAllocator,
@@ -46,4 +52,5 @@ __all__ = [
     "TorchPinnedAllocator",
     "align_up",
     "device_report",
+    "reap_pending_closes",
 ]

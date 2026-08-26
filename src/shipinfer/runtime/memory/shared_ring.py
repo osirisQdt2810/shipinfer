@@ -58,9 +58,14 @@ Memory ordering: the state-byte-after-payload discipline assumes stores are not 
 reader could observe WRITTEN before the payload stores land; accepted for now — this box and
 the deployment are x86 — and recorded here so a port knows where to add the fence.
 
-`_PENDING_CLOSE` is process-wide and reaped on every close; if the *last* ring in a process
-closes under a live view, its mapping stays until exit. Rings are few and long-lived, so
-that is accepted rather than threaded through a finalizer.
+Pinned-view liveness is tracked, not guessed: `pinned_tensor` counts what it hands out and a
+finalizer on each tensor brings the count down, so `close()` unpins immediately when nothing
+is held and otherwise the last finalizer unpins and closes. Plain `payload()` memoryviews are
+not weakref-able; a mapping still viewed by one at close is parked in `_PENDING_CLOSE` (pages
+already unpinned — payload views are used synchronously, so that is safe) and reaped on any
+later close; if the *last* ring in a process closes under such a view, its mapping stays until
+exit. A slot is always `slot_bytes` long and `abandon` leaves stale bytes behind: a consumer
+frames its own payload (a length prefix, a versioned head), never trusts the slot's tail.
 """
 
 from __future__ import annotations
@@ -69,6 +74,7 @@ import contextlib
 import struct
 import threading
 import time
+import weakref
 from dataclasses import dataclass
 from multiprocessing import shared_memory
 from typing import Any
@@ -153,6 +159,7 @@ _HEADER = struct.Struct("<IIIIIIdQB63s")
 #: The stamp's in-place window: depth u32, reserved u32, ewma f64, heartbeat u64 at offset 16
 #: — everything before it (magic, version, layout) and after it (closed, owner) untouched.
 _STAMP = struct.Struct("<IIdQ")
+_STAMP_OFFSET = 16  # after magic, version, slots, slot_bytes — four u32
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,7 +177,7 @@ class RingHeader:
 
 
 _PENDING_LOCK = threading.Lock()
-_PENDING_CLOSE: list[tuple[shared_memory.SharedMemory, Any]] = []
+_PENDING_CLOSE: list[shared_memory.SharedMemory] = []
 
 
 def reap_pending_closes() -> int:
@@ -182,16 +189,11 @@ def reap_pending_closes() -> int:
     """
     with _PENDING_LOCK:
         still = []
-        for block, unregister in _PENDING_CLOSE:
-            if unregister is not None:
-                # The close-time in-flight window is long past by the time a reap runs, so
-                # unpinning first is safe — and it must precede the close, which unmaps.
-                unregister()
-                unregister = None
+        for block in _PENDING_CLOSE:
             try:
                 block.close()
             except BufferError:
-                still.append((block, unregister))
+                still.append(block)
         _PENDING_CLOSE[:] = still
         return len(still)
 
@@ -250,6 +252,9 @@ class SharedRing:
         self._take_next = 0
         self._pinned: Any = None
         self._pinned_ptr = 0
+        self._pin_lock = threading.Lock()
+        self._pinned_live = 0
+        self._parked_unregister: Any = None
         self._closed_here = False
         self._detached = False
 
@@ -360,7 +365,9 @@ class SharedRing:
             raise RingProtocolError(
                 f"ring {self._name!r}: only the owner stamps; this handle merely reads"
             )
-        _STAMP.pack_into(self._view, 16, depth, 0, float(ewma_latency_us), time.monotonic_ns())
+        _STAMP.pack_into(
+            self._view, _STAMP_OFFSET, depth, 0, float(ewma_latency_us), time.monotonic_ns()
+        )
 
     def _write_header(
         self, *, depth: int, ewma_latency_us: float, heartbeat_ns: int, closed: bool
@@ -538,9 +545,36 @@ class SharedRing:
             raise RingClosedError(self._owner, self._name)
         torch = self._torch_with_registration()
         start = self._layout.slot_offset(index)
-        return torch.frombuffer(
+        tensor = torch.frombuffer(
             self._block.buf, dtype=torch.uint8, count=self._layout.slot_bytes, offset=start
         )
+        # Liveness is tracked, not guessed: every handed-out pinned view is counted, and the
+        # count comes down in a finalizer when the tensor dies. `close()` reads the count to
+        # decide whether unpinning is safe *now*, and the last finalizer runs a parked
+        # unregister itself — so a pinned ring frees its pages at the true last-view death,
+        # with no external reaper needed.
+        with self._pin_lock:
+            self._pinned_live += 1
+        weakref.finalize(tensor, self._pinned_view_died)
+        return tensor
+
+    def _pinned_view_died(self) -> None:
+        with self._pin_lock:
+            self._pinned_live -= 1
+            unregister = None
+            if self._pinned_live == 0 and self._parked_unregister is not None:
+                unregister = self._parked_unregister
+                self._parked_unregister = None
+        if unregister is None:
+            return
+        unregister()
+        try:
+            self._block.close()
+        except BufferError:
+            # A plain payload view is still out there; the *mapping* waits for it (the pages
+            # are already unpinned, which is safe — payload views are used synchronously).
+            with _PENDING_LOCK:
+                _PENDING_CLOSE.append(self._block)
 
     def _torch_with_registration(self) -> Any:
         if self._pinned is not None:
@@ -596,24 +630,30 @@ class SharedRing:
             # export so the mapping can close the moment the callers' slices die.
             self._view.release()
         self._view = memoryview(b"")
-        # Reap earlier leftovers *before* deciding this handle's fate: the reap unregisters
-        # and closes, and running it after the append would unpin this ring's pages in the
-        # very call that may have just decided an in-flight view makes that unsafe.
+        # Reap earlier leftovers first — the reap only ever closes mappings whose pages are
+        # already unpinned, so it can never unpin anything, let alone under a live DMA.
         reap_pending_closes()
+        if unregister is not None:
+            with self._pin_lock:
+                if self._pinned_live == 0:
+                    # No pinned view is out, so no DMA through this ring can be in flight:
+                    # unpin now, while the mapping is certainly alive.
+                    unregister()
+                    unregister = None
+                else:
+                    # Pinned views are still held; the last one's finalizer unpins and closes.
+                    self._parked_unregister = unregister
+                    unregister = "parked"
         closed_now = False
         if unregister is None:
             try:
                 self._block.close()
                 closed_now = True
             except BufferError:
-                pass  # a zero-copy payload is still in flight; parked below
-        # A *pinned* ring is always parked: there is no reliable way to see the callers'
-        # in-flight views from here, unregistering under a live DMA is undefined, and the
-        # unregister must precede the close that unmaps — so both wait for a later reap,
-        # by which time the close-era copies have long completed.
-        if not closed_now:
-            with _PENDING_LOCK:
-                _PENDING_CLOSE.append((self._block, unregister))
+                pass  # a zero-copy payload is still in flight; the mapping waits for it
+            if not closed_now:
+                with _PENDING_LOCK:
+                    _PENDING_CLOSE.append(self._block)
         if self._is_owner:
             # `_attach` unregisters on open; in one process (the tests, and any same-process
             # pair) that removes the create-time entry too, because the tracker's cache is a
