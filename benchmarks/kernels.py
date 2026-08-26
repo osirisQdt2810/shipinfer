@@ -184,7 +184,7 @@ def _destination(device: int | None) -> Any:
 
 
 def _implementations(
-    only: str | None, device: int | None
+    only: str | None, device: int | None, *, staging: str | None = None
 ) -> tuple[list[tuple[str, Any]], dict[str, str]]:
     """Every registered `ImageOps` that could be constructed, and why the rest could not.
 
@@ -205,14 +205,14 @@ def _implementations(
         if only and name != only:
             continue
         try:
-            built.append((name, _bind(IMAGE_OPS, name, device)))
+            built.append((name, _bind(IMAGE_OPS, name, device, staging=staging)))
         except Exception as exc:
             # First line only: the remedy is several lines long and the table has one column.
             unavailable[name] = str(exc).splitlines()[0]
     return built, unavailable
 
 
-def _bind(registry: Any, name: str, device: int | None) -> Any:
+def _bind(registry: Any, name: str, device: int | None, *, staging: str | None = None) -> Any:
     """Construct one implementation **the way production constructs it**.
 
     `TorchImageOps.__init__` falls back to `torch.device("cpu")` unless it is given a
@@ -224,11 +224,22 @@ def _bind(registry: Any, name: str, device: int | None) -> Any:
     That is the recurring error in every measurement in this repository — benchmarking
     something adjacent to what production does — so the binding is explicit here and the
     device each implementation ended up on is printed in the table.
+
+    The same argument applies to `staging`, which is why it is threaded through: production
+    hands torch a pinned pool, so timing it without one measures the pageable copy home and
+    reports it as the cost of the op. `--no-staging` is that pre-pool configuration, kept
+    deliberately so the two can be compared in one run. Only torch takes a pool — native
+    stages inside the extension and numpy has no device — so only torch is given one.
     """
     if device is None:
         return registry.create(name)
+    options: dict[str, Any] = {"device_index": device}
+    if staging is not None and name == "torch":
+        from shipinfer.runtime.memory import PinnedStagingPool
+
+        options["staging"] = PinnedStagingPool(owner=staging)
     try:
-        return registry.create(name, device_index=device)
+        return registry.create(name, **options)
     except TypeError:
         # A host-only implementation takes no device. numpy is the case; it is not an error.
         return registry.create(name)
@@ -333,9 +344,13 @@ def measure(
     repeat: int,
     warmup: int,
     seed: int = 0,
+    staging: bool = True,
 ) -> OpResult:
     result = OpResult(op=op)
-    available, unavailable = _implementations(only, device)
+    # A private pool named for what it is timing, built fresh for this op. Only torch is
+    # given one (see `_bind`), and a pool belongs to exactly one holder.
+    owner = f"bench:{op}:{device}" if staging else None
+    available, unavailable = _implementations(only, device, staging=owner)
     result.skipped.update(unavailable)
     inputs = _inputs(seed)  # once per op: every implementation is timed on the same data
     for name, ops in available:
@@ -446,6 +461,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "configuration nothing in this project runs."
         ),
     )
+    parser.add_argument(
+        "--staging",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "give the torch implementation a pinned staging pool for its copies home, as "
+            "the pipeline does. --no-staging reproduces the pre-pool pageable number."
+        ),
+    )
     parser.add_argument("--iterations", type=int, default=50)
     parser.add_argument("--repeat", type=int, default=7, help="timed batches; the median wins")
     parser.add_argument("--warmup", type=int, default=10)
@@ -476,6 +500,7 @@ def main(argv: list[str] | None = None) -> int:
             repeat=args.repeat,
             warmup=args.warmup,
             seed=args.seed,
+            staging=args.staging,
         )
         for op in ops
     ]

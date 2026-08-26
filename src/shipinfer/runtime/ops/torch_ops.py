@@ -35,16 +35,20 @@ library.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterator, Sequence
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 
-from shipinfer.core.errors import ConfigurationError
+from shipinfer.core.errors import ConfigurationError, DeviceError
 from shipinfer.core.logging import get_logger
 from shipinfer.runtime.ops.base import ImageOps, LetterboxResult, NormalizeParams
 from shipinfer.runtime.ops.registry import IMAGE_OPS
 from shipinfer.runtime.platform import require_torch
+
+if TYPE_CHECKING:  # a type only; importing the pool here would tie every ops import to it
+    from shipinfer.runtime.memory.staging import PinnedStagingPool
 
 __all__ = ["TorchImageOps"]
 
@@ -72,9 +76,32 @@ class TorchImageOps(ImageOps):
     #: than into a leak on a 24/7 server.
     _CACHE_LIMIT: ClassVar[int] = 32
 
+    #: float32 elements one *pinned host* staging buffer may hold. Deliberately its own
+    #: bound and not derived from :attr:`_CROP_CHUNK_ELEMENTS`: that one caps device memory a
+    #: caching allocator hands straight back, this one caps page-locked host memory, which
+    #: the kernel can never swap and every process on the box competes for. At 8 MiB per
+    #: named buffer a worker holds about 20 MB — letterbox ``(1, 3, 640, 640)`` 4.9 MB,
+    #: person crops ``(21, 3, 256, 128)`` 8.3 MB, ship crops ``(2, 3, 512, 512)`` 6.3 MB — so
+    #: the four pipeline workers on this box cost ~80 MB. Raising it to the crop bound would
+    #: cost ~330 MB and buy nothing: the only per-chunk expense is a stream synchronise of
+    #: some tens of microseconds against a DMA of roughly half a millisecond.
+    _STAGE_CHUNK_ELEMENTS: ClassVar[int] = 2 * 1024 * 1024
+
     def __init__(
-        self, device_index: int | None = None, *, interpolation: str = "bilinear"
+        self,
+        device_index: int | None = None,
+        *,
+        interpolation: str = "bilinear",
+        staging: PinnedStagingPool | None = None,
     ) -> None:
+        """Bind these ops to one device, and optionally to one caller's staging pool.
+
+        Args:
+            staging: the pinned host buffers this instance copies results back through, from
+                the owning caller's :meth:`~shipinfer.runtime.memory.MemoryPool.staging_for`.
+                A pool belongs to exactly one thread and so does an ``ImageOps``, which is
+                what makes reusing a buffer safe (see :meth:`_to_host`).
+        """
         self._torch = require_torch()
         self._device = (
             self._torch.device("cuda", device_index)
@@ -82,6 +109,11 @@ class TorchImageOps(ImageOps):
             else self._torch.device("cpu")
         )
         self._interpolation = interpolation
+        # Decided once here rather than per call, because the answer cannot change: a pool
+        # only pays for itself where there is a DMA to accelerate. `.cpu()` on a tensor that
+        # is already host memory is a free no-op, so a CPU-bound instance handed a pool would
+        # bounce every result through an extra copy for nothing.
+        self._staging = staging if staging is not None and self.on_device else None
         # Small constant tensors that depend only on the config, cached because building
         # them is a host-to-device copy: at 1000 frames a second, four synchronous copies
         # per frame for twelve floats that never change is pure latency on the worker.
@@ -139,6 +171,90 @@ class TorchImageOps(ImageOps):
             cache.clear()
         cache[key] = value
 
+    # -- the trip home ------------------------------------------------------------------
+
+    @classmethod
+    def _stage_rows(cls, shape: tuple[int, ...]) -> int:
+        """How many rows of ``shape`` one staging buffer holds — at least one.
+
+        Flooring at one is the same policy as :meth:`_crop_chunks`: refusing a 512x512 mask
+        because a single row exceeds the budget is a worse failure than one large buffer.
+        """
+        return max(1, cls._STAGE_CHUNK_ELEMENTS // max(1, math.prod(shape[1:])))
+
+    def _to_host(self, tensor: Any, name: str) -> np.ndarray:
+        """A device tensor as a host array, copied through pinned memory when there is a pool.
+
+        A copy into *pageable* host memory never DMAs. The driver moves it in pieces through
+        a bounce buffer of its own, which is why the same transfer measures around 1.4 GB/s
+        pageable and around 10 GB/s pinned. The C++ plane had this exact defect in NMS —
+        downloading the mask into a fresh pageable vector cost 30.8 ms a call against 1.7 ms
+        through a pinned scratch (ledger C32) — and these two sites are the Python plane's
+        version of it: at 1000 frames a second they carry the letterboxed batch and every
+        crop back across PCIe.
+
+        The pool key is the **fixed** shape ``(name, rows, *shape[1:])``, never the true row
+        count. That is deliberate: a crowded frame's eighteen crops and a quiet frame's three
+        must land in the same buffer. Keying on ``N`` would put one entry per crowd size into
+        a 64-entry pool, evict, and turn steady-state calls back into ``cudaHostAlloc`` —
+        slower than the pageable copy this replaces.
+
+        The copy is serial with the compute on purpose. Real overlap needs a second stream,
+        events and a double-buffered pool, and on one stream the reused buffer's synchronise
+        would drain the compute anyway; what this buys is bandwidth, not concurrency. The
+        overlap is a separate change behind its own measurement.
+
+        Args:
+            tensor: the result to bring home, batched along dimension 0.
+            name: which buffer this is — one per call site, because two names in one pool are
+                two buffers. Sharing a pool between ``"letterbox"`` and ``"crop"`` is safe
+                for the stronger reason that every chunk is synchronised before this returns,
+                so no DMA of this instance's is ever still in flight when it does.
+
+        Returns:
+            A freshly allocated host array the caller owns outright — never a view of the
+            staging buffer, which the next call overwrites.
+        """
+        torch = self._torch
+        shape = tuple(tensor.shape)
+        if self._staging is None or not shape:
+            return tensor.cpu().numpy()
+        if shape[0] == 0:
+            # Nothing to copy, and asking the pool would allocate a buffer for a batch that
+            # does not exist.
+            return torch.empty(shape, dtype=tensor.dtype).numpy()
+
+        rows = self._stage_rows(shape)
+        try:
+            staged = self._staging.get(name, (rows, *shape[1:]), tensor.dtype)
+        except (DeviceError, RuntimeError) as exc:
+            # Refused because a capture is underway, or because the host is out of lockable
+            # pages. Degrade once and then never ask again: the array is identical either
+            # way, and an optimisation must not be able to take a worker down.
+            self._staging = None
+            _LOG.warning(
+                "pinned staging unavailable for %s on %s (%s); copying pageable from now on",
+                name,
+                self._device,
+                exc,
+            )
+            return tensor.cpu().numpy()
+
+        host = torch.empty(shape, dtype=tensor.dtype)
+        tensor = tensor.contiguous()  # a no-op for both call sites; a whole-batch copy if not
+        stream = torch.cuda.current_stream(self._device)
+        for lo in range(0, shape[0], rows):
+            hi = min(lo + rows, shape[0])
+            staged[: hi - lo].copy_(tensor[lo:hi], non_blocking=True)
+            # Not optional. The buffer is reused by the next chunk and by the next call, so
+            # reading it before the DMA lands returns the *previous* frame's pixels: no
+            # error, plausible values, and invisible to anything that submits one frame. On
+            # this thread's own stream, never the device-wide `torch.cuda.synchronize()`,
+            # which would wait on every other worker sharing the GPU (ADR-002).
+            stream.synchronize()
+            host[lo:hi].copy_(staged[: hi - lo])
+        return host.numpy()
+
     # -- preprocess ---------------------------------------------------------------------
 
     def letterbox_to_device(
@@ -168,7 +284,7 @@ class TorchImageOps(ImageOps):
         )
         scales, pads, extents = self._letterbox(images, canvas, params, pad_value)
         return LetterboxResult(
-            tensor=canvas.cpu().numpy(), scales=scales, pads=pads, extents=extents
+            tensor=self._to_host(canvas, "letterbox"), scales=scales, pads=pads, extents=extents
         )
 
     def _letterbox(
@@ -304,7 +420,7 @@ class TorchImageOps(ImageOps):
         result = out.permute(1, 0, 2, 3)[:, self._channel_order(params.swap_rb, device)]
         mean, std = self._normalization(params, device)
         result.sub_(mean).div_(std)
-        return result.cpu().numpy()
+        return self._to_host(result, "crop")
 
     def _sample_rows(self, planes: Any, rows: Any, column: Any, weight: Any) -> Any:
         """One bilinearly interpolated row per crop: gather both columns, blend across.
@@ -359,6 +475,9 @@ class TorchImageOps(ImageOps):
             kept = tv_nms(b, s, iou_threshold)
         except ImportError:
             kept = self._nms_fallback(b, s, iou_threshold)
+        # Not staged, unlike the two image paths: the survivors are a few hundred int64 at
+        # most (2.4 KB at `max_output=300`), and the synchronise a staged copy needs costs
+        # more than the copy itself.
         return candidates[kept[:max_output].cpu().numpy()]
 
     def _nms_fallback(self, boxes: Any, scores: Any, iou_threshold: float) -> Any:
@@ -389,7 +508,8 @@ class TorchImageOps(ImageOps):
         return torch.tensor(kept, dtype=torch.long, device=boxes.device)
 
     def describe(self) -> str:
-        return f"torch kernels on {self._device}"
+        staged = " (pinned staging)" if self._staging is not None else ""
+        return f"torch kernels on {self._device}{staged}"
 
 
 def _bilinear_axis(

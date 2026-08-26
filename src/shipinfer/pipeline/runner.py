@@ -64,7 +64,7 @@ from shipinfer.pipeline.graph import (
     StageStatus,
     build_perception_graph,
 )
-from shipinfer.pipeline.graph.ops import ThreadLocalImageOps
+from shipinfer.pipeline.graph.ops import ThreadLocalImageOps, staging_owner
 from shipinfer.pipeline.metrics import PipelineMetrics
 from shipinfer.pipeline.reassembly import EVICTED, FrameCollector, FrameResult
 from shipinfer.pipeline.schema import PerceptionEvent
@@ -237,17 +237,34 @@ class PipelineRunner:
           the events and the stream belong to another context. ADR-002's rule is one thread,
           one context, one GPU for the thread's whole life, and a pipeline worker that does
           pre-processing on a GPU is no exception.
+
+        Each instance also gets its own pinned staging pool, from the **server's**
+        :class:`~shipinfer.runtime.memory.MemoryPool` rather than one made here: that is what
+        makes the locked pages visible in ``stats()`` and releases them on ``close()``. It is
+        passed down because ``runtime`` may not reach up into ``server`` — the layer that
+        owns the memory is the layer that hands it out.
         """
         provider = self._settings.execution.provider
         manager = getattr(self._server, "devices", None)
         devices = tuple(getattr(manager, "visible_gpus", ()) or (0,))
+        # `is not None` rather than truthiness, as everywhere else in this class: these are
+        # objects whose emptiness is not their absence.
+        memory = getattr(self._server, "memory", None)
 
         def build(index: int) -> ImageOps:
-            if manager is not None and getattr(manager, "has_accelerator", False):
+            accelerated = manager is not None and getattr(manager, "has_accelerator", False)
+            if accelerated:
                 # Called lazily, on the worker thread itself: a CUDA context belongs to the
                 # thread that created it, so binding from `start()` would bind the wrong one.
                 manager.bind_current_thread(Device.cuda(index))
-            return get_image_ops(provider, device_index=index)
+            # The owner key is per *thread*, not per device: several workers share a device
+            # in rotation, and one pool between two of them is one buffer between two DMAs.
+            staging = (
+                memory.staging_for(staging_owner(index))
+                if accelerated and memory is not None
+                else None
+            )
+            return get_image_ops(provider, device_index=index, staging=staging)
 
         return ThreadLocalImageOps(build, devices=devices)
 
