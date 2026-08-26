@@ -15,7 +15,7 @@ answered) and shipvision #11 (S3: the native tree, bindings and build in the per
 layout — `342 passed` on the native tier inside the container, `2025 passed` for the whole tree).
 
 **S2 does not exist.** The ledger promised "StrongSORT and BoostTrack and the Python tweaks" as
-the second slice of the V70 restructure. `git ls-tree` over every remote ref finds no such file,
+the second slice of the V79 restructure. `git ls-tree` over every remote ref finds no such file,
 and the remaining Python diff between the source branch (08:39) and main is main being *newer*
 (#3, #5, #9 landed 14:27–19:13). Struck with the evidence, not deferred — a ledger line that
 describes work nobody can do is the kind that gets "continued" forever.
@@ -65,7 +65,7 @@ naming `tests/runtime/test_native.py` in a host `pytest` command — the offline
 but that file imports torch and the hook is right to stop and ask.
 
 **Next.** The queue: #18 → `port/p1-scheduling` → the docs snapshot (this journal, the ledger,
-V69–V81, the two CLAUDE.md rules) → C47's CUDA-free test binaries (every C++ test binary still
+V78–V90, the two CLAUDE.md rules) → C47's CUDA-free test binaries (every C++ test binary still
 links four accelerator libraries, so the fairness invariants cannot run on a machine with no
 driver). Then P4 ingest, P5 config-in/events-out, P6 the parity harness; T3 (`service`) and T4
 (DeepStream) against the topology seam; after shipvision #11, the parent's
@@ -73,6 +73,16 @@ driver). Then P4 ingest, P5 config-in/events-out, P6 the parity harness; T3 (`se
 commit.
 
 ---
+
+**The request log, numbered once.** Review of the docs snapshot (#21) found the request log
+carrying two assignments for V41–V51: the verbatim appendix's C++-convention requests, cited
+by ~18 rules-index rows and the ledger, and the 24-Aug shipvision requests added to Section 1
+under the same numbers. Repaired in one commit: V40 is the `csrc` mirrors `src` request the
+index already cited, the duplicate of V49 folded into V49 with its time, the 24–26 Aug entries
+renumbered V52–V90 (+9) with every citation in TASKS, CLAUDE.md, this journal and the design
+doc shifted the same way, and main's misplaced `V43 — 14:40` (the trackers-the-services-used
+note) is V91. Verified mechanically: no duplicate, no gap, no citation that resolves to nothing.
+The rule-value paraphrases (V86, V88–V89) moved from the verbatim appendix into the rules table.
 
 ## 2026-08-23/24 — The benchmark answers, and the answer is no
 

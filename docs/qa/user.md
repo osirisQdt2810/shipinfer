@@ -240,108 +240,104 @@ recorded here directly, since the transcript will not keep them).
 
 > làm đến đâu rồi, tại ssao tôi không thấy bạn update gì thêm nữa vậy? lý do là gì và tại ssao cứ bắt tôi phải nhắn trong khi bạn chưa hề làm xong?
 
-#### V40 — 12:35 UTC
-
-> note: C++ chỉ cần có cách thuật toans track đã sử dụng trong motservice và mtmcservice thôi
-
-#### V41 — 13:52 UTC
+#### V40 — 13:52 UTC
 
 > ngoài ra, tôi không muốn code csrc như này, tôi muốn cấu trúc csrc giống với src luôn. ngoài ra bạn không cần phải thiết kế C++ theo hướng include 1 bbên rồi src 1 bên như vậy, bạn cứ thoải mái 2 file .h và .cpp trong cùng 1 file thôi, có vấn đề gì đâu?
 
-#### V42 — 14:20 UTC
-
-> bạn có thể thực hiện phase 3 + triton first, hãy đặt optimize perf của toàn system x5 là goal cuối cùng ta cần tối ưu
-
-#### V43 — 14:25 UTC
+#### V52 — 14:25 UTC
 
 > tiếp tục
 
-#### V44 — 15:30 UTC
+#### V91 — 14:40 UTC
+
+> note: C++ chỉ cần có cách thuật toans track đã sử dụng trong motservice và mtmcservice thôi
+
+#### V53 — 15:30 UTC
 
 > tiếpt ục
 
-#### V45 — 16:10 UTC
+#### V54 — 16:10 UTC
 
 > tiếp tục
 
-#### V46 — 16:40 UTC
+#### V55 — 16:40 UTC
 
 > 1. đổi 3rdparty/shipvision/shipvision/tracking -> 3rdparty/shipvision/shipvision/mot
 > 2. đổi 3rdparty/shipvision/shipvision/tracking/core -> trackers
 > 3. có cách nào để đưa các tracker native vào luôn trong trackers không? (recommend nên như vậy - nếu không được thì thôi) - vì bản chất tôi thấy nó là algo tracker mà (làm tương tự với mtmc)
 > 4. làm tương tự với mtmc (mot và mtmc gần như nhau)
 
-#### V47 — 16:45 UTC
+#### V56 — 16:45 UTC
 
 > ví dụ deepsorrtv2 c++ có thể đặt trong 3rdparty/shipvision/shipvision/tracking/core/deepsortv2/tracker.py?
 
-#### V48 — 16:50 UTC
+#### V57 — 16:50 UTC
 
 > tôi nghĩ vẫn nên để trong mot/trackers/deepsortv2/tracker.py - vì bản chất nó vẫn là 1 thuật toán track của deepsort, chỉ là implementation nó khác đi thôi
 
-#### V49 — 17:05 UTC
+#### V58 — 17:05 UTC
 
 > tôi nhớ trong mot-service hay là mtmc-service làm gì có implement full c++ các thuật toán tracker khác ngoài deepsortv2 đâu nhỉ?
 
-#### V50 — 17:10 UTC
+#### V59 — 17:10 UTC
 
 > không, đã code rồi thì giữ nguyên đi
 
-#### V51 — 17:20 UTC
+#### V60 — 17:20 UTC
 
 > không cần xoá nhé, ngoài ra fill thêm code các trackers khác trên roboflow
 
-#### V52 — 17:35 UTC
+#### V61 — 17:35 UTC
 
 > đặt 3rdparty/shipvision/shipvision/mtmc/tracker.py -> 3rdparty/shipvision/shipvision/mtmc/trackers/ để ta có base và theo cơ chế registry.
 
-#### V53 — 17:50 UTC
+#### V62 — 17:50 UTC
 
 > thực tế cái shipvission (ví dụ mtmc) expose là tracker, mà tracker thì ta có thể dev theo kiểu nào cũng được (ví dụ native hoặc đơn giản là backend python).
 > Tương tự với các matchers, cluster...
 > Do đó, kiểu code refactor cần đáp ứng được tính flexible - ta có thể native 1 phần hoặc native toàn bộ code tracker
 > Ngoài ra, 3rdparty/shipvision/shipvision/mtmc/identity.py theo tôi hiểu là 1 component của 1 loại tracker hoặc 1 loại tracker, nên đặt ở ngay thư mục mtmc không chuẩn lắm
 
-#### V54 — 18:00 UTC
+#### V63 — 18:00 UTC
 
 > ví dụ như hiện tại 3rdparty/shipvision/shipvision/mtmc/trackers/cluster/tracker.py có dùng kiểu self.lock trên python - tôi dự đoán là sẽ không hiệu quả và ảnh hưởng performance, ví dụ như trong mtmc service đã có 1 thư viện tracker native c++ riêng rồi?
 
-#### V55 — 18:10 UTC
+#### V64 — 18:10 UTC
 
 > không, ý của tôi là đúng là nó phải có lock, nhưng mà nếu ta xác định dùng lock thì có thể nên dùng c++ native perf sẽ tốt hơn nhiều => nên có 1 bản native tracker c++ tương ứng (hãy nhìn vào c++ trackers/ trong mtmcservice => đã implement sẵn 1 số loại tracker rồi)
 
-#### V56 — 18:15 UTC
+#### V65 — 18:15 UTC
 
 > 3rdparty/shipvision/shipvision/mot/backends/base.py => đặt là 3rdparty/shipvision/shipvision/mot/backends/native.py (tương tự với mtmc)
 
-#### V57 — 18:20 UTC
+#### V66 — 18:20 UTC
 
 > 3rdparty/shipvision/csrc/shipvision/mtmc/core đây là 3rdparty/shipvision/csrc/shipvision/mtmc/matchers chứ không phải core
 
-#### V58 — 18:30 UTC
+#### V67 — 18:30 UTC
 
 > cách design chưa chuẩn: 3rdparty/shipvision/csrc/bindings/module.cpp
 > Phần bindings chỉ nên là define binding thôi, không được có các function như là run_nms, run_crop...
 > ví dụ ta chỉ binding ops nms, nv12_letterbox... thôi hoặc là binding tracker... chứ không được viết nguyên code trong các file bindings như này
 
-#### V59 — 18:40 UTC
+#### V68 — 18:40 UTC
 
 > tại sao lại không có mạng, tôi thử: git clone --recursive https://github.com/roboflow/tracker vẫn bình thường (trong references)
 
-#### V60 — 18:45 UTC
+#### V69 — 18:45 UTC
 
 > không còn tracking mà phân biệt rõ mot và mtmc
 
-#### V61 — 18:55 UTC
+#### V70 — 18:55 UTC
 
 > rule: khi bạn thực hiện quá nhiều feature mà chưa commit, bạn phải tách nhỏ feature ra thành các PR riêng biệt để đảm bảo reviewer không bị quá tải
 
-#### V62 — 19:05 UTC
+#### V71 — 19:05 UTC
 
 > note: tôi chưa hiểu tại sao cứ phải đặt py::gil_scoped_release release; rất gây down performance. nên đặt chỗ nào hợp lí hơn. Ví dụ nếu ta đã đặt ngoài tracker rồi thì thôi, (vì nếu tracker thì cứ đặt lock sau mỗi step track), còn ví dụ các function mtmc_threshold_similarity là các function con trong mỗi track, nó không thể bị lỗi race condition được. => Bạn review xem có đúng không?
 > Tức là: đã đặt lock tránh condition thì nên đặt tại mỗi bước trong track()
 
-#### V63 — 19:20 UTC
+#### V72 — 19:20 UTC
 
 > bạn hãy nghĩ đơn giản như này: shipvission chỉ là thư viện về thuật toán, bao gồm c++ và binding của nó; hoặc là native python sẵn.
 > Vậy thì:
@@ -350,32 +346,32 @@ recorded here directly, since the transcript will not keep them).
 > - còn nếu là tracking (ví dụ: mot/mtmc) thì sau mỗi step tracker() có thể gây ra racecondition => ta đặt ngay threading.lock ngay tại đầu hàm .track() của nó là được mà?
 > Nên nhớ: SHIPVISSION chỉ là thư viện ta gọi thuật toán
 
-#### V64 — 19:30 UTC
+#### V73 — 19:30 UTC
 
 > ủa tại sao lại cần như này: py::gil_scoped_release không phải lock — nó là điều ngược lại. Nó nhả GIL để các thread Python khác chạy được trong lúc C++ làm việc
 > python trên tầng system của ta đang dùng có threading à?
 
-#### V65 — 19:40 UTC
+#### V74 — 19:40 UTC
 
 > thực tế, python dùng threading sẽ cực kì chậm
 
-#### V66 — 19:45 UTC
+#### V75 — 19:45 UTC
 
 > à nhưng mà không sao, bản chất ta có thể switch sang system C++ mà
 
-#### V67 — 19:55 UTC
+#### V76 — 19:55 UTC
 
 > bạn để ý là ví dụ trong vllm họ không hề dùng threading (hoặc dùng rất ít), những phần core wrap thuật toán để launching họ hầu hết dùng multi-process - dùng threading trong python cực kì down performance
 
-#### V68 — 20:05 UTC
+#### V77 — 20:05 UTC
 
 > oke tiếp tục, làm tiếp khi xong
 
-#### V69 — 20:40 UTC
+#### V78 — 20:40 UTC
 
 > note: bạn đẩy PR cũng phải theo thứ tự nhé (vì claude review có thể blocking và bạn cần sửa lại) - do đó không được puhs 1 lần nhiều PR
 
-#### V70 — 20:55 UTC
+#### V79 — 20:55 UTC
 
 > tôi chưa thích cách bạn binding, theo tôi hiểu nó gồm các bước:
 > 1. pybind
@@ -387,20 +383,22 @@ recorded here directly, since the transcript will not keep them).
 > Ngoài ra, hạn chế và tôi vẫn không muốn dùng gil_release - lí do: phần shipvision chỉ define thuật toán,  tối đa là có thêm lock mutex đặt ở BaseTracker, chứ không được đặt gil gì ở đây cả - vì tôi chưa hiểu gil là tránh multithread truy cập, như vậy nếu đặt gil ta phải chặn từ tầng python chứ không đặt ở tầng algorithm
 
 
-#### V71 — 11:30 UTC
+### 25 Aug 2026
+
+#### V80 — 11:30 UTC
 
 > tôi đã bảo rồi nhưng hình như bạn đã quên: https://github.com/osirisQdt2810/shipvision/pull/2/changes hãy tách nhỏ pr ra, pr quá to rồi (ghì mà tận 45 commit, 290 file changes vậy) => nếu bạn chưa đặt rule cho yêu cầucủa tôi thì hãy đặt ngay đi nhé, lại quên context rồi
 
 
-#### V72 — 13:05 UTC
+#### V81 — 13:05 UTC
 
 > tương tự như vậy, hãy nhìn xem https://github.com/osirisQdt2810/shipinfer/pull/8/changes cũng quá to này
 
-#### V73 — 13:40 UTC
+#### V82 — 13:40 UTC
 
 > như nào rồi
 
-#### V74 — 16:45 UTC
+#### V83 — 16:45 UTC
 
 > tạm thời hãy dừng lại 1 chút và thảo luận với tôi về architecture design của hệ thống này.
 > Ban đầu tôi nghĩ rằng hệ thống nên thiết kế theo hướng:
@@ -413,13 +411,13 @@ recorded here directly, since the transcript will not keep them).
 > +) Theo bạn, cách thiết kế design như này đã đủ tốt chưa. Và cách thiết kế system hiện tại có tuân theo design trên không? 
 > Note: Ưu tiên thảo luận với tôi về vấn đề này đã nhé.
 
-#### V75 — 17:20 UTC
+#### V84 — 17:20 UTC
 
 > So với mtmc_deepstream.py
 > Sketch đó là topology B, không phải C: mỗi nhánh GPU có nvstreammux(gpu-id) → nvinferserver (config riêng per GPU) → nvtracker → sgie → probe;
 > tôi nghĩ file này là topology C chứ, vì C tôi nghĩ là cách giải quyết tốt nhất cho bài toán trên single-node này rồi (hạn chế rất nhiều được hiện tượng imbalance). Nếu ko phải, các pipeline lớn trên thế giới họ xử lý dạng bài toán CV này như thế nào?
 
-#### V76 — 17:50 UTC
+#### V85 — 17:50 UTC
 
 > Mục tiêu cuối cùng của tôi là C, và như vậy tôi nghĩ rằng pipeline có thể abstract hóa được theo C và hiện tại ta có 3 instance có thể sử dụng abstract pipeline này:
 > +) B (chỉ cần chỉnh 1 chút là được đúng không?)
@@ -427,25 +425,25 @@ recorded here directly, since the transcript will not keep them).
 > +) deepstream => phần sẽ cần code thêm
 > Nếu bạn không còn hỏi gì thì tôi muốn bạn thêm task ở trên, và hoàn thiện tất cả các task khác
 
-#### V77 — 18:20 UTC
+#### V86 — 18:20 UTC
 
 > note; khi bạn không biết code như nào, hãy nhìn vào các bản code profession như triton inference sserver hoặc là vllm
 
-#### V78 — 18:55 UTC
+#### V87 — 18:55 UTC
 
 > tiếp tục
 
-#### V79 — 19:40 UTC
+#### V88 — 19:40 UTC
 
 > C++ dataplane tôi thấy đang chưa giống với python (tôi thấy khác hẳn luôn ấy - có thực sự là đã port sang chưa)
 
-#### V80 — 19:55 UTC
+#### V89 — 19:55 UTC
 
 > B. Port thật: C++ plane phải mirror kiến trúc Python plane: note khi ta update python thì c++ cũng phải sync theo nhé
 
 ### 26 Aug 2026
 
-#### V81 — 01:20 UTC
+#### V90 — 01:20 UTC
 
 > tiếptuccj
 
@@ -659,11 +657,11 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 | At the end, verify every request in this file was actually done | V31 |
 | PR loop: push, work elsewhere while review runs; a blocking finding is checked before it is trusted — fix it if real, comment back if the review is wrong; loop until merged | V32 |
 | Keep a PR small — few commits, few files changed. PR #3's ~100 commits is the counter-example | V33, R58 |
-| When uncommitted work has grown to several features, **split it into separate PRs** before pushing — a reviewer who is overloaded reviews nothing | V61 |
-| **Push those PRs one at a time, in order.** Never open several at once: review can block, and a blocked PR has to be fixed before the next one is opened on top of it | V69 |
-| **A PR is at most ~15 commits and ~25 files. Check the numbers *before* opening it, not in the body afterwards.** Past that, split by package or seam and push the pieces one at a time. Acknowledging that a PR is oversized is not the same as splitting it | V71, V61, V33 |
-| **`bindings/` holds pybind declarations and nothing else.** The pybind-type → C++-type conversion and the algorithm both live under `csrc/shipvision/`: a shared dtype at the top level if several algorithm families use it, otherwise per-algorithm | V70, V60 |
-| **No `gil_scoped_release` anywhere in shipvision.** It is an algorithm library; thread discipline belongs to the caller. A `std::mutex` on a stateful tracker base is the most it may hold | V70 |
+| When uncommitted work has grown to several features, **split it into separate PRs** before pushing — a reviewer who is overloaded reviews nothing | V70 |
+| **Push those PRs one at a time, in order.** Never open several at once: review can block, and a blocked PR has to be fixed before the next one is opened on top of it | V78 |
+| **A PR is at most ~15 commits and ~25 files. Check the numbers *before* opening it, not in the body afterwards.** Past that, split by package or seam and push the pieces one at a time. Acknowledging that a PR is oversized is not the same as splitting it | V80, V70, V33 |
+| **`bindings/` holds pybind declarations and nothing else.** The pybind-type → C++-type conversion and the algorithm both live under `csrc/shipvision/`: a shared dtype at the top level if several algorithm families use it, otherwise per-algorithm | V79, V69 |
+| **No `gil_scoped_release` anywhere in shipvision.** It is an algorithm library; thread discipline belongs to the caller. A `std::mutex` on a stateful tracker base is the most it may hold | V79 |
 | If the GIL is what caps throughput, port the hot plane to C++ under `csrc/` in this repository | V34 |
 | Port the system to C++ under `csrc/` and measure it there, then resume the remaining tasks. Finish without being told to continue | V38 |
 | After all tasks: check and carry out `docs/qa/triton.md` | V26 |
@@ -678,6 +676,8 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 | Order: Plane 3 and Triton first; the ≥5× whole-system optimisation is the **final** goal | V49 |
 | `shipvision`'s `tracking/` and `mtmc/` need real module packaging — one package per algorithm, in the shape of roboflow/trackers `src/trackers/core` — so adding and optimising an algorithm is clean | V50 |
 | Every MOT/MTMC algorithm from the previous C++ services must exist in shipvision too, callable through the C++ ops binding rather than only in Python | V50 |
+| **Reference implementations first** — when the way to build something is not clear, read how Triton Inference Server or vLLM does it before inventing — their shape is the default, and a departure from it is stated with its reason. | V86 |
+| **Two planes, one architecture** — `csrc/` mirrors the Python data plane seam for seam — instance thread + queue, dispatcher + policy, batch window, fair-queue eviction order, graph, reassembly, ingest — and a change to a Python data-plane seam is not done until the C++ seam is synced and the cross-plane parity test agrees. | V88–V89 |
 
 ### Verbatim, V41–V51
 
@@ -695,7 +695,7 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
   hết mọi thứ vội, tôi muốn xem bạn đang định làm gì và tất cả task đã đúng ý tôi chưa*
 - **V48** — *note: bạn có thể dùng tên cũ (script, class, function...) như ở trong python cũng
   được mà, không nhất thiết cứ phải nghĩ ra tên mới*
-- **V49** — *bạn có thể thực hiện phase 3 + triton first, hãy đặt optimize perf của toàn system
+- **V49** (24 Aug 2026, 14:20 UTC) — *bạn có thể thực hiện phase 3 + triton first, hãy đặt optimize perf của toàn system
   x5 là goal cuối cùng ta cần tối ưu*
 - **V50** — *ngoài ra, như đã nói trước đó 3rdparty/shipvision/csrc => bạn không cần phải câu nệ
   đặt include và src tách ra 1 bên mà có thể gộp lại 1 chỗ là được nhé, miễn là packaging hợp lí
@@ -712,5 +712,3 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
   bạn nghĩ là tối ưu nhất*
 - **V51** — *ngoài ra bạn vẫn chưa trả lời tôi, liệu bạn có còn xảy ra hiện tượng "quên" - tức là
   task chưa xong bạn vẫn dừng lại và bắt tôi phải tự gõ tiếp tục hay không*
-- **Reference implementations first** (V77): when the way to build something is not clear, read how Triton Inference Server or vLLM does it before inventing — their shape is the default, and a departure from it is stated with its reason.
-- **Two planes, one architecture** (V79–V80): `csrc/` mirrors the Python data plane seam for seam — instance thread + queue, dispatcher + policy, batch window, fair-queue eviction order, graph, reassembly, ingest — and a change to a Python data-plane seam is not done until the C++ seam is synced and the cross-plane parity test agrees.

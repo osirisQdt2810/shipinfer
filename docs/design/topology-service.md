@@ -52,7 +52,7 @@ class RingProtocolError(ShipInferError):    # header version / layout mismatch b
 class ServiceSettings(BaseModel):
     """`service`: the fleet plus a cross-process tier for the crop-stage models."""
     shared_models: list[str] = ["person_embedder", "ship_embedder", "ship_segmenter"]  # crops, not frames
-    ring_slots: int = 64          # per (owner, model); 64 × slot_bytes pinned per ring
+    slots_per_pair: int = 8       # per (submitter, owner, model) ring — single writer each; 8 × slot_bytes pinned per ring
     slot_bytes: int = 1_572_864   # 1.5 MiB: one crop batch (32 × 3 × 128 × 64 fp16 fits; letterboxed full frames do not, by design)
     submit_timeout_ms: int = 5    # a full ring refuses after this; the policy then picks another candidate
     heartbeat_ms: int = 200       # an owner that has not stamped its header in 5 × this is lost
@@ -100,8 +100,8 @@ claim is a per-slot `multiprocessing` lock-free trick vLLM avoids by having one 
 have N writers, so: **one submit ring per (submitter, owner, model)**, single writer each,
 which restores vLLM's discipline exactly and costs `N × (N−1) × models` small rings (for 4
 shards and 3 models: 36 rings × 64 × 1.5 MiB = 3.4 GiB pinned — too much). Hence
-`ring_slots` is per *pair*, sized 8 by default in the pair layout (0.4 GiB pinned for 4 shards),
-and the setting above is renamed `slots_per_pair`. **This is the first design decision the
+the setting is `slots_per_pair`, sized 8 by default in the pair layout (0.4 GiB pinned for 4
+shards), and the block above says so. **This is the first design decision the
 coder must not silently re-make**: single writer per ring, pairwise rings, small slot counts.
 
 ### `server/remote_instance.py` (new)
@@ -109,8 +109,9 @@ coder must not silently re-make**: single writer per ring, pairwise rings, small
 class RemoteInstance:  # satisfies scheduling.policies.base.Placeable
     """A peer shard's instance of one model, seen through its ring header."""
     def __init__(self, owner: int, model: str, submit: SharedRing, results: SharedRing, staging: PinnedStagingPool) -> None: ...
-    @property device -> Device      # the *owner's* logical device, tagged remote: policies compare `device` to
-                                    # `request.resident_device`, so a proxy must never equal the local device
+    @property device -> Device      # `Device.cpu()`: a proxy is not here. Policies compare `device` to
+                                    # `request.resident_device`, so a proxy never equals the local device and never
+                                    # wins a locality tie; the response's `executed_on` says where it really ran
     @property depth -> int          # header.depth, read without a lock (same rule as the local instance)
     @property ewma_latency_us -> float
     @property is_ready -> bool      # header.heartbeat within 5 × heartbeat_ms and not closed
@@ -195,7 +196,7 @@ queue's wait exceeds that, which is what `spill_threshold` encodes in queue dept
 | Ring full | `claim` times out → `RingFullError(depth, capacity)`; dispatcher re-selects (local or another peer); never silently dropped | offline |
 | Consumer slower than producer | depth in the header rises → `locality_spillover` stops spilling to it (its depth exceeds the local one) — the ring is a queue whose depth the policy reads, so the back-pressure *is* the routing signal | offline, with a scripted depth |
 | A process restarts | the new process re-`create`s its rings under the same names after `unlink`; peers `open` lazily on `is_ready` flipping back; pending futures from the old incarnation were already failed by the heartbeat rule | multigpu |
-| `CUDA_VISIBLE_DEVICES` mismatch | a proxy's `device` is tagged with the *owner's shard index*, never a local ordinal, so it can never compare equal to `resident_device`; a header whose owner index disagrees with the ring name → `RingProtocolError` at open | offline |
+| `CUDA_VISIBLE_DEVICES` mismatch | a proxy has no device ordinal at all (`device` is `cpu`), so it can never compare equal to `resident_device` and a peer's numbering never reaches a local policy; the owner reports `executed_on` in *its* numbering, which the per-device counters label by shard; a header whose owner index disagrees with the ring name → `RingProtocolError` at open | offline |
 | Header layout drift between versions | `RingHeader.version` checked at `open`; mismatch → `RingProtocolError` naming both versions | offline |
 
 ## 5. Tests by tier
@@ -216,9 +217,11 @@ queue's wait exceeds that, which is what `spill_threshold` encodes in queue dept
 - **multigpu** (`-m multigpu`): two real shard processes on GPUs 2 and 3 with the mock backend,
   one spills to the other, results resolve, per-device counters show the split; kill one, the
   other's pending futures fail with `PeerLostError`.
-- **bench gate** (inside the container): `shipinfer bench person_embedder --cameras 50 --fps 20
-  --seconds 40 --skew 8 --topology fleet` against `--topology service`, GPUs 2–5. "C beats B"
-  must show: per-device *retired* counts within 10% of each other under `--skew 8` (B shows the
+- **bench gate** (inside the container): `deploy/rootless/bench.sh --systems shipinfer --cameras 50
+  --fps 20 --seconds 40 --gpus 2,3,4,5` with the fleet driving the shards, once under
+  `--topology fleet` and once under `--topology service` (the harness gains the flag; `shipinfer
+  bench` is the in-process demonstration and one interpreter generates ~2% of 50 × 20, so it
+  cannot produce this number). "C beats B" must show: per-device *retired* counts within 10% of each other under `--skew 8` (B shows the
   busy shard's device at the offered skew), p99 end-to-end on the busy cameras lower, and no
   increase in `frames_failed`. Both numbers as CAPACITY per the harness's rules.
 
@@ -233,8 +236,8 @@ queue's wait exceeds that, which is what `spill_threshold` encodes in queue dept
    `core/settings/topology.py` (`ServiceSettings`), the launcher's environment, CLI wiring,
    `tests/server/test_service_topology.py`, the multigpu test, docs + feature log + ADR-015
    ("inference crosses processes through pinned host memory, never CUDA IPC"). ~10 files.
-4. **`bench(topology): B against C`** — `--topology` on the bench, the per-device table, the
-   evidence run. ~4 files.
+4. **`bench(topology): B against C`** — `--topology` on the harness (`bench.sh` → `run_bench.py`,
+   the fleet driving the shards), the per-device table, the evidence run. ~4 files.
 
 ## 7. Open questions for the operator
 

@@ -24,7 +24,7 @@ confirmation before it is safe; or the operator interrupted. **Opening a PR is n
 is not one. Writing a summary is not one.** `AWAITING-OPERATOR:` on its own line also stands the
 hook down, for when the operator asked to see something before it is executed.
 
-> ## Z · The final gate — never remove this line (V52)
+> ## Z · The final gate — never remove this line (V61)
 >
 > **When every item below is closed, re-read `docs/qa/user.md` end to end and check each
 > request against the repository.** Not the standing-rules index — the *whole file*, including
@@ -94,7 +94,7 @@ hook down, for when the operator asked to see something before it is executed.
       supporting classes. Today `trackers/{sort,bytetrack,botsort,ocsort,deepsortv2}.py` are
       flat files beside `association/`, `motion/`, `pool.py`.
 - [x] **C2b · Repackage `shipvision/mtmc/`** — done; verification found `matrix/` had become a module (4 leaf paths gone) and `clustering.base.CLUSTERERS` dropped. Both restored as shims.
-- [x] **C2c · C++ implementations of the MOT/MTMC algorithms the reference services use** (V43
+- [x] **C2c · C++ implementations of the MOT/MTMC algorithms the reference services use** (V91
       narrowed this from "every algorithm"). Established from the references rather than
       guessed:
       - **`motservice` uses `deepsortv2` and nothing else** — its README says "currently
@@ -120,7 +120,7 @@ hook down, for when the operator asked to see something before it is executed.
       data plane superseded. The operator's standing rule is to delete what is redundant rather
       than carry it. Recoverable from history at `75fef9d` if a multi-process launcher is ever
       wanted for a 16-GPU box, which is a different reason from the one it was written for.
-- [x] **B3b · `sharding.py` restored, and the "superseded" claim corrected** (V67). The
+- [x] **B3b · `sharding.py` restored, and the "superseded" claim corrected** (V76). The
       operator's vLLM observation is the reason: vLLM's `MultiprocExecutor` spawns
       `context.Process` per GPU worker and talks ZMQ, and none of its twenty-one
       `threading.Thread` uses is on the model-execution path. So process-split and the C++
@@ -170,7 +170,7 @@ hook down, for when the operator asked to see something before it is executed.
       `extent - 1` prose corrected. 472 pass, whole submodule.
 - [x] **GPU hygiene checked** after the container runs: no compute apps, every device at
       ~15 MiB, no containers alive.
-- [ ] **C22 · shipinfer PR #8 is also over the limit** (V71) — 18 commits, 119 files, 14.3k
+- [ ] **C22 · shipinfer PR #8 is also over the limit** (V80) — 18 commits, 119 files, 14.3k
       lines, and on its **fourth** BLOCKING review round, which is the symptom. Its seven
       blocking findings map onto the seams, which is itself the argument for splitting:
       1-2 the C++ reassembly race and the batch-abort that seals seven frames Complete;
@@ -319,7 +319,7 @@ hook down, for when the operator asked to see something before it is executed.
       an injected `sleep=lambda _: None`.
 - [x] **C7 · `wheels.sh` stages the TensorRT wheel** — copied from the host install, matched to the container ABI; absence warns rather than fails, since the offline tier needs none.
 - [x] **C8 · `conftest.py` only asks the driver when a device tier was selected**, and treats a driver that raises as a machine with none. 791 offline tests green.
-- [x] **C16 · `bindings/` holds pybind and nothing else** (V70). Three steps, three homes: step 1
+- [x] **C16 · `bindings/` holds pybind and nothing else** (V79). Three steps, three homes: step 1
       (pybind declarations) in `csrc/bindings/`, step 2 (numpy → plain C++) and step 3 (the
       algorithm) under `csrc/shipvision/`. `bindings/` went 1440 → 364 lines; the conversion and
       the nine session classes moved to `shipvision/{mot,mtmc}/session.h` beside the algorithms
@@ -328,7 +328,7 @@ hook down, for when the operator asked to see something before it is executed.
       pass findable only by reading the single-camera table — and are now in `bindings/mtmc.cpp`.
       The five per-session mutexes collapsed into one `TrackerSession` base. Builds clean,
       `_C` exposes the same 22 names.
-- [x] **C17 · No `gil_scoped_release` anywhere in shipvision** (V70) — 29 removed. It is an
+- [x] **C17 · No `gil_scoped_release` anywhere in shipvision** (V79) — 29 removed. It is an
       algorithm library; thread discipline belongs to the caller. Two things worth stating
       rather than burying:
       * **A real cost.** The GIL is now held for a whole native call, so a threaded caller gets
@@ -343,7 +343,7 @@ hook down, for when the operator asked to see something before it is executed.
         a green run is not mistaken for evidence, and what remains checkable offline — the lock
         is present, every session derives from the base, twenty acquisitions — is asserted
         against the source and mutation-tested in both directions.
-- [x] **C18 · Two ownerless bugs from the V48 merge, found by running the suite** — 203 red tests
+- [x] **C18 · Two ownerless bugs from the V57 merge, found by running the suite** — 203 red tests
       in the submodule, both invisible to a type checker because a name used only inside a
       method body is not resolved until it runs. (1) Five `tracker.py` files called
       `_C.XTracker(...)` on a name only `backends/native.py` imports; `require_extension` now
@@ -353,7 +353,7 @@ hook down, for when the operator asked to see something before it is executed.
       calling them from nowhere; both are back in the shared module. Plus `native.py`'s
       `__all__` still named five classes that had left it.
 - [x] **C19 · The submodule layout tests, honestly updated rather than loosened.**
-      `test_layout.py` asserted *one* class per `tracker.py`, which is what V48 changed — it now
+      `test_layout.py` asserted *one* class per `tracker.py`, which is what V57 changed — it now
       asserts *exactly the registered implementations of this name*, a stronger claim, and both
       failure directions are mutation-verified. `test_registry.py`'s `PUBLISHED` stays
       hand-written on purpose (those strings are a config-file contract) and gained the two new
@@ -364,7 +364,7 @@ hook down, for when the operator asked to see something before it is executed.
       comparing the registry against itself. Deleted; the assertion that carries the property
       is `all_spaces()` against the registry.
 - [x] **C20 · The parent's 42 tracking tests were skipping again** — they import
-      `shipvision.tracking`, renamed to `shipvision.mot` in V60, so D2's fix silently came
+      `shipvision.tracking`, renamed to `shipvision.mot` in V69, so D2's fix silently came
       undone. Six files repointed. **1061 offline tests, 0 skipped** (was 1019 + 42 skipped).
 - [x] **C21 · shipvision PR #1 — MERGED.** Three blocking findings, each reproduced by
       *running* it before fixing: `Embedding` documented an L2-normalisation invariant it did
@@ -433,7 +433,7 @@ hook down, for when the operator asked to see something before it is executed.
       "static batch 8" comment is stale; check `scripts/build_engines.py` and fix the prose.
 - [x] **C36 · shipvision PR #4, review round 1 — two BLOCKING, both true, and the first was
       the third body this day that promised tests not in the diff.** The alias-guard class and
-      the `sys.modules.pop` precondition lived on the V70 branch; this branch took the test file
+      the `sys.modules.pop` precondition lived on the V79 branch; this branch took the test file
       from `feat/library`, which lacked both and *reverted* main's precondition. Fixed in
       `b10edf0` with the mutation re-run on this branch (3 of 4 red), the empty test given
       assertions, and an admission in the PR comment. Plus the black-hook trap (a rewriting hook
@@ -449,7 +449,7 @@ hook down, for when the operator asked to see something before it is executed.
       check cannot be followed by a push. Also: shipvision's PR pipeline runs `pre-commit
       run --show-diff-on-failure` (pinned ruff-format), not black; run `pre-commit run
       --all-files` there before pushing.
-- [x] **C34 · The two csrc fixes are ported to the V70 branch** (`refactor/per-algorithm-
+- [x] **C34 · The two csrc fixes are ported to the V79 branch** (`refactor/per-algorithm-
       packages`, 88d9a15) — `BoundDevice` before the ring in `session.h`, and the NMS mask
       through pinned scratch. The structural tests came with them, pointed at `session.h`:
       red before the port, green after; the extension compiles. `benchmarks/tests` green (121)
@@ -490,7 +490,7 @@ hook down, for when the operator asked to see something before it is executed.
 - [x] **C29 · shipinfer PR #9 MERGED** (APPROVE on round 2). **PR #10 (`runtime-seam`, 6 files)
       open.** `profiling.py` deliberately not taken from the #8 branch — its copy there would
       have reverted #9's re-export.
-- [~] **C12 · The submodule PR sequence** (V61 + V69 + **V71**). PR #2 was 45 commits and 290
+- [~] **C12 · The submodule PR sequence** (V70 + V78 + **V80**). PR #2 was 45 commits and 290
       files; the operator had to ask twice. **Writing "this PR is too big" in the description
       is not splitting it** — that was the mistake, and the rule is now a hard limit in
       CLAUDE.md with the numbers and the measuring commands.
@@ -524,7 +524,7 @@ hook down, for when the operator asked to see something before it is executed.
       native class merged into its algorithm's `tracker.py`; (2) the imgproc library lifted
       out of `bindings/module.cpp` (891 → 130 lines); (3) the new `strongsort`/`boosttrack`
       trackers with their Optuna spaces; (4) the native MTMC tracker (C13).
-- [ ] **C13 · A native C++ MTMC tracker** (V55) — `mtmc/trackers/cluster/tracker.py` holds a
+- [ ] **C13 · A native C++ MTMC tracker** (V64) — `mtmc/trackers/cluster/tracker.py` holds a
       Python `threading.Lock` around `track()`, and the operator's point is that if a lock is
       needed at all it should be a C++ one. `mtmcservice`'s `VTXTracker`/`AICTracker` are the
       reference.
@@ -580,9 +580,7 @@ hook down, for when the operator asked to see something before it is executed.
       parent unpacked 2 and 3. Now unpacked, and `LetterboxResult` gained an optional `extents`
       so the batch path carries them; `letterbox_to_device` still returns `(scales, pads)`
       because nothing downstream re-derives `out_h` yet — widening that contract is C28.
-- [ ] **C28 · Carry `extents` through the ABC** for all three implementations and have
-      `detect.py` read it rather than ever re-deriving `out_h` from `scale`. Small, its own PR., both now visible because the
-      native ops path finally loads:
+      Two defects, both visible only once the native ops path finally loaded (C22):
       * `NativeImageOps.letterbox_batch` raises `GpuError: gpuEventRecord failed: invalid
         resource handle`. Reproducible standalone (`--implementation native` alone fails; torch
         alone succeeds), and once it fires the CUDA context is poisoned so torch's *next*
@@ -594,13 +592,19 @@ hook down, for when the operator asked to see something before it is executed.
         pixel while scale and pad both still match. The parent should *use* it, not drop it.
       Both went unnoticed because the path was unreachable (C22): a dead path is where a
       breaking change is invisible.
+- [ ] **C28 · Carry `extents` through the ABC** for all three implementations and have
+      `detect.py` read it rather than ever re-deriving `out_h` from `scale`. Small, its own PR.
+- [ ] **C48 · `bench.sh` refuses to start without the baseline binary even for `--systems
+      shipinfer`**, which measures this project alone — so the documented evidence command exits 1
+      on a clean checkout. The gate now reads `--systems` and fires only when the list names
+      `baseline`; fixed on `fix/rtsp-headless-decode` (the harness PR), lands with C4.
 
 ## Phase 6 · The final goal (V49)
 
 - [ ] **C1 · ≥5× counting-simulation, whole system.** Measured: baseline 868.2 img/s against the
       C++ plane's 390.5 → **0.45×**. The interpreter is no longer the wall *inside a process*;
       the remaining gap is that 390 is one process on a forty-eight-core box. Two halves:
-      C1a (profile first, V54) then C1b.
+      C1a (profile first, V63) then C1b.
 - [x] **C1b · The multi-process launcher** — `server/launcher.py` plus the settings side.
       `Fleet` spawns one `Popen` per shard with `CUDA_VISIBLE_DEVICES` and
       `SHIPINFER_SHARD_CAMERAS` in the child's environment *before the interpreter starts* —
@@ -631,7 +635,7 @@ hook down, for when the operator asked to see something before it is executed.
       output says what a quantile is. And `settings.tracking.enabled` crashed the harness at
       the end of a real GPU run because the unit tests never went through the call site; now
       `tracking_enabled()` is reached through a real `ServerSettings`.
-- [~] **C1a · Profile before optimising** (V54). Two of the three pieces are in place and
+- [~] **C1a · Profile before optimising** (V63). Two of the three pieces are in place and
       neither has been *run*, because the GPUs are held by parallel agents:
       - per-stage host timings — `benchmarks/stages.py` (C5), reads the histograms the
         pipeline already fills;
@@ -644,7 +648,7 @@ hook down, for when the operator asked to see something before it is executed.
       Remaining: run all three on a quiet box and write the answer down. Everything in C1
       waits on that.
 
-## Phase 7 · Topology — B, C and DeepStream behind one abstraction (V74–V76)
+## Phase 7 · Topology — B, C and DeepStream behind one abstraction (V83–V85)
 
 The operator's final target is **C**: stateful streaming (decode, detect-local, track) pinned per
 GPU, stateless inference (crops) balanced across every GPU by a queue whichever instance is free
@@ -679,7 +683,11 @@ that exposes the four attributes a policy reads.
       `server/remote_instance.py` — `RemoteInstance` as a `Placeable` (`device` is `cpu`: a proxy is *not
       here*), `ResultReader` (one per process, heartbeat watch → `PeerLostError` with the tags), `RingIngress`
       (owner side: through the model's own `infer`, slot held until the future settles). Tests run two
-      "processes" as objects over real rings. `fleet` plus a cross-process inference tier, symmetric — every shard
+      "processes" as objects over real rings — **37 tests green** across the ring, the wire and the proxy;
+      found and fixed on the way: a ring closed under a live view raised `BufferError` and skipped its
+      unlink, and a closed handle raised from a released view instead of answering "closed". Step 3
+      (the `service` topology itself: settings, ring management per shard pair, `Topology.attach`, the
+      ingress and reader threads started with the server) is next. `fleet` plus a cross-process inference tier, symmetric — every shard
       process serves its own GPU's crop-stage instances to its peers, so a dead process loses its K
       cameras and its capacity, nothing else. Pieces: (a) `runtime/memory/shared_ring.py` — a
       `multiprocessing.shared_memory` ring pinned in each process via `torch.cuda.cudart()
@@ -716,7 +724,7 @@ that exposes the four attributes a policy reads.
       clamp inside the patch) instead of half a pixel off; readable references and parity tests
       for `crop_resize` and `nv12_letterbox`. 47 C++ checks, 0 failures, in the container.
 
-## Phase 8 · The real port — `csrc/` mirrors the Python data plane (V79, V80)
+## Phase 8 · The real port — `csrc/` mirrors the Python data plane (V88, V89)
 
 The operator looked at `csrc/` and saw a different program. They were right: the C++ plane
 (2.8k lines) is a purpose-built throughput binary sharing the Python plane's layout and names,
@@ -724,7 +732,7 @@ not a port — a worker pool leasing instances instead of one thread per instanc
 no placement policy, a fixed 50 ms drain instead of the batch window, newest-first eviction,
 replay-only ingest, engines from CLI flags. It answered C1's question (the interpreter is the
 wall: 77 vs ~450 img/s per process) and earns its place as the starting point. The decision
-(V80) is **B**: port for real, seam by seam, with a cross-plane parity harness as the acceptance
+(V89) is **B**: port for real, seam by seam, with a cross-plane parity harness as the acceptance
 test, in the order that removes the largest architectural difference first. Control plane stays
 Python (ADR-014). From now on a Python data-plane change is not done until the C++ seam is synced
 (CLAUDE.md, "Two planes, one architecture").
@@ -753,13 +761,13 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       trace and diff events, per-camera eviction counts and batch boundaries. This is the gate
       the sync rule refers to; CI runs its offline half.
 
-- [x] **C22 progress (V71/V72).** shipvision: #2 split into #1, #3, #4, #5, #6, #7, #8, #9 — all
+- [x] **C22 progress (V80/V81).** shipvision: #2 split into #1, #3, #4, #5, #6, #7, #8, #9 — all
       merged, #2 closed; the native sessions in the restructured `csrc/` layout remain (from the
-      V70 branch). shipinfer: #8 split into #9, #10, #11, #12, #13, #14, #15 (all merged; csrc took six review
+      V79 branch). shipinfer: #8 split into #9, #10, #11, #12, #13, #14, #15 (all merged; csrc took six review
       rounds), #16 infra-docs (open), then `fix/native-reachable`, `feat/fleet-topology`,
       `port/p1-scheduling` in that order, each built and green.
 
-- [~] **C46 · The shipvision restructure (V70) is the last unsplit branch.** S1 opened as shipvision's
+- [~] **C46 · The shipvision restructure (V79) is the last unsplit branch.** S1 opened as shipvision's
       next PR (`refactor/mot-per-algorithm`: the rename and the per-algorithm layout, 1694 passing). `refactor/per-algorithm-
       packages` is 216 files / +12.4k / −4.5k against main. Cut, in dependency order, each with the
       parent's sync in mind: **S1** the `tracking` → `mot` rename with the compatibility shim
@@ -769,7 +777,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       remote ref), and the remaining Python diff between `refactor/per-algorithm-packages` (tip
       08:39) and main is main being *newer* — #3, #5 and #9 landed 14:27–19:13 with the
       `_as_unit_vector` invariant, the study.py `constants` fix, and a different isort width; the
-      V70 side of each hunk is the older text. S2 is struck, not deferred; **S3** `csrc/` in
+      V79 side of each hunk is the older text. S2 is struck, not deferred; **S3** `csrc/` in
       the new layout (`csrc/shipvision/{interop,imgproc,mot,mtmc}`, `bindings/` declarations only,
       no GIL release anywhere, one mutex on the tracker session) with the native sessions, the
       native tests and `tests/test_architecture.py` — **built and green** on `/tmp/svs3`
@@ -813,7 +821,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       order as Python's dict scan does — a real parity defect the old test could not see; fixed with
       `seen_` and the review's serve-then-evict trace as a test (red on the old lane). **Merged 26 Aug
       03:11** after round 4 approved — four rounds, every finding real.) → a docs snapshot (this
-      ledger, `docs/qa/user.md` through V80, the CLAUDE.md rules) → P1c.
+      ledger, `docs/qa/user.md` through V89, the CLAUDE.md rules) → P1c.
 
 - [x] **C47 · Two follow-ups the csrc review named for later** — *both built on `/tmp/c47`
       (`chore/csrc-cuda-free-tests`, stacked on #19; body at the scratchpad `pr-c47.md`): the owning buffers

@@ -219,7 +219,11 @@ or not it gets mentioned.
   kernels submodule):** `pytest -m gpu`, and `-m multigpu` for the balancing evidence.
 
 Plus one operator command that produces the evidence a PR needs — the benchmark harness,
-inside the container, for at least the analysis's 10 s warm-up plus a steady window:
+inside the container, for at least the analysis's 10 s warm-up plus a steady window. It
+needs the host-built baseline binary first (`benchmarks/build/sim_pipeline_v2`, built with
+`python -c 'from benchmarks.harness import baseline; baseline.build_binary()'`): the script
+refuses to start without it, today even when `--systems shipinfer` names no baseline at all
+(ledger C48 relaxes that gate):
 
 ```bash
 deploy/rootless/bench.sh --systems shipinfer --seconds 40      # the system tier, per-device table
@@ -248,7 +252,7 @@ with a per-device breakdown is.
    Small incidental commits do not carry it.
 5. **All remotes are SSH** (`git@github.com:…`), never HTTPS.
 
-### Three rules from one afternoon of review rounds (V71 follow-through)
+### Three rules from one afternoon of review rounds (V80 follow-through)
 
 - **A push is `&&`-chained to the check that gates it.** Twice in one hour a branch was pushed
   after its own check had just failed, because the push was on the next line. `test && commit
@@ -301,7 +305,7 @@ before fixing it**: fix and push if it is real, comment with the evidence if it 
 re-trigger either way — a push fires `synchronize`, and toggling the `automerge` label fires
 `labeled`, which re-runs the review without an empty commit. Loop until merged.
 
-**Keep a PR small — this is a hard limit, not a preference (V71).**
+**Keep a PR small — this is a hard limit, not a preference (V80).**
 
 > **At most ~15 commits and ~25 files changed.** Measure before opening:
 > `git diff <base> --stat | tail -1` and `git log --oneline <base>..HEAD | wc -l`.
@@ -331,7 +335,7 @@ All documentation (README, `docs/`, any `.md`, docstrings, comments, commit mess
 bodies, ADRs) **must be in English**, regardless of the conversation language. Exception:
 only when the user explicitly asks for Vietnamese in a specific file.
 
-## Two planes, one architecture (RULE — V79, V80)
+## Two planes, one architecture (RULE — V88, V89)
 `csrc/` is a **port** of the Python data plane, not a second design. Every per-frame seam
 exists twice and must be the *same* seam: one thread per instance with its own bounded queue,
 a dispatcher and a placement policy chosen by name, the batch window with `max_queue_delay`,
@@ -344,7 +348,7 @@ the same change and the cross-plane parity harness agrees (same inputs → same 
 eviction counts per camera, same batches). A PR that changes one plane and not the other says
 so in its body and opens the ledger item for the other; it does not merge as "done".
 
-## Reference implementations first (RULE — V77)
+## Reference implementations first (RULE — V86)
 When the way to build something is not clear, **read how Triton Inference Server or vLLM does
 it before inventing.** Their shape is the default: Triton for the model repository, instance
 groups, the per-model queue that instances on several GPUs pull from, model control and
