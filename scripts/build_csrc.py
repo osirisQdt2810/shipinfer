@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -59,8 +60,44 @@ def opencv_flags() -> list[str]:
     return probe.stdout.split()
 
 
+_INCLUDE = re.compile(r'^\s*#include\s+"(shipinfer/[^"]+)"', re.MULTILINE)
+
+
+def include_closure(app: Path) -> set[Path]:
+    """Every translation unit ``app`` reaches through ``#include "shipinfer/..."`` lines.
+
+    A header's definitions live in the ``.cpp`` (or ``.cu``) beside it with the same stem —
+    the layout rule this tree follows — so reaching a header means linking its unit. Returns
+    the units and the headers, so :func:`needs_accelerator` can look for ``core/platform.h``.
+    """
+    seen: set[Path] = set()
+    todo = [app]
+    while todo:
+        path = todo.pop()
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        for name in _INCLUDE.findall(path.read_text(errors="replace")):
+            header = CSRC / name
+            todo.append(header)
+            todo.extend(header.with_suffix(suffix) for suffix in (".cpp", ".cu"))
+    return seen
+
+
+def needs_accelerator(closure: set[Path]) -> bool:
+    """Whether any unit in the closure includes the driver's headers (through ``platform.h``)."""
+    return any(p.name == "platform.h" and p.parent.name == "core" for p in closure)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="build only the apps whose includes never reach core/platform.h, with g++ alone: "
+        "no nvcc, no CUDA, no TensorRT — the C++ offline tier, runnable on a machine with no "
+        "driver",
+    )
     parser.add_argument("--force", action="store_true", help="rebuild even if up to date")
     parser.add_argument("--debug", action="store_true", help="-O0 -g instead of -O2")
     args = parser.parse_args()
@@ -70,16 +107,25 @@ def main() -> int:
     # `csrc/` itself. Entry points are `cli/` (the binaries) and `tests/`.
     pkg = CSRC / "shipinfer"
     apps = sorted((pkg / "cli").glob("*.cpp")) + sorted((CSRC / "tests").glob("*.cpp"))
+    closures = {app: include_closure(app) for app in apps}
+    cuda_free = {app for app, closure in closures.items() if not needs_accelerator(closure)}
+    if args.offline:
+        # Only the apps whose include closure never reaches `core/platform.h`: buildable and
+        # runnable on a machine with no driver, no nvcc and no TensorRT — the C++ offline tier.
+        apps = [app for app in apps if app in cuda_free]
+        if not apps:
+            raise SystemExit("no CUDA-free apps found under csrc/")
     sources = [q for q in sorted(pkg.rglob("*.cpp")) if q not in set(apps)]
     cuda_sources = sorted((CSRC / "shipinfer").rglob("*.cu"))
     if not sources:
         raise SystemExit(f"no sources under {CSRC}")
-    if not (TENSORRT / "include" / "NvInfer.h").is_file():
+    if not args.offline and not (TENSORRT / "include" / "NvInfer.h").is_file():
         raise SystemExit(
             f"no TensorRT headers under {TENSORRT}. Set SHIPINFER_TENSORRT_DIR to the "
             f"install root."
         )
-    for tool in ("g++", "nvcc"):
+    needed_tools = ["g++"] if args.offline else ["g++", "nvcc"]
+    for tool in needed_tools:
         if shutil.which(tool) is None and not (CUDA / "bin" / tool).is_file():
             raise SystemExit(f"{tool} is not on PATH and not under {CUDA / 'bin'}")
 
@@ -93,14 +139,19 @@ def main() -> int:
 
     BUILD.mkdir(parents=True, exist_ok=True)
     optimise = ["-O0", "-g"] if args.debug else ["-O2"]
-    includes = [
-        f"-I{CSRC}",
-        f"-I{TENSORRT / 'include'}",
-        f"-I{CUDA / 'include'}",
-    ]
+    includes = [f"-I{CSRC}"]
+    if not args.offline:
+        includes += [f"-I{TENSORRT / 'include'}", f"-I{CUDA / 'include'}"]
 
     objects: list[str] = []
+    object_of: dict[Path, str] = {}
     nvcc = str(CUDA / "bin" / "nvcc") if (CUDA / "bin" / "nvcc").is_file() else "nvcc"
+    if args.offline:
+        # Every translation unit any requested app's closure reaches, and nothing else — a
+        # CUDA-free app must not even *compile* a unit that includes the driver's headers.
+        wanted = set().union(*(closures[app] for app in apps))
+        sources = [q for q in sources if q in wanted]
+        cuda_sources = []
     for source in cuda_sources:
         # Named by the path under csrc/, not the stem: two files with one stem in different
         # directories used to overwrite each other's object and one was never linked.
@@ -126,6 +177,7 @@ def main() -> int:
             f"compiling {source.name}",
         )
         objects.append(str(obj))
+        object_of[source] = str(obj)
 
     cv_flags = opencv_flags()
     for source in sources:
@@ -149,6 +201,7 @@ def main() -> int:
             f"compiling {source.name}",
         )
         objects.append(str(obj))
+        object_of[source] = str(obj)
 
     # One library of shared objects, then one binary per entry point. The test binary links
     # the same objects the pipeline does, so a test cannot pass against different code.
@@ -173,16 +226,16 @@ def main() -> int:
             f"compiling {app.name}",
         )
         binary = BUILD / app.stem
-        print(f"link  {binary.name}")
-        run(
-            [
-                "g++",
-                "-std=c++17",
-                *optimise,
-                *objects,
-                str(obj),
-                "-o",
-                str(binary),
+        print(f"link  {binary.name}" + ("  (CUDA-free)" if app in cuda_free else ""))
+        if app in cuda_free:
+            # Only the closure's objects, and no accelerator library: `ldd` on the result
+            # must show neither libcuda nor libnvinfer, which is what makes it runnable — and
+            # meaningful — on a machine with no driver.
+            link_objects = [object_of[q] for q in sorted(closures[app]) if q in object_of]
+            link_libs = ["-pthread"]
+        else:
+            link_objects = objects
+            link_libs = [
                 f"-L{TENSORRT / 'lib'}",
                 f"-L{CUDA / 'lib64'}",
                 f"-Wl,-rpath,{TENSORRT / 'lib'}",
@@ -192,6 +245,17 @@ def main() -> int:
                 "-lcudart",
                 "-pthread",
                 *[f for f in cv_flags if not f.startswith("-I")],
+            ]
+        run(
+            [
+                "g++",
+                "-std=c++17",
+                *optimise,
+                *link_objects,
+                str(obj),
+                "-o",
+                str(binary),
+                *link_libs,
             ],
             f"linking {binary.name}",
         )
