@@ -4,6 +4,7 @@
 #include <cstring>
 #include <future>
 
+#include "shipinfer/core/buffers.h"
 #include "shipinfer/runtime/ops.h"
 
 namespace shipinfer {

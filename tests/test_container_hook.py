@@ -59,6 +59,8 @@ class TestRefuses:
             "cd /somewhere && .venv/bin/python -m pytest -m gpu",
             "shipinfer bench person_embedder --cameras 50",
             "shipinfer serve --port 8000",
+            "csrc/build/bench --plan model.plan --cameras 50",
+            "./csrc/build/test_dataplane",
             "trtexec --onnx=models/yolo26n.onnx",
             "python benchmarks/run_bench.py --cameras 50",
             "python benchmarks/compare_baseline.py",
@@ -149,6 +151,19 @@ class TestAllows:
     )
     def test_an_already_containerised_command_passes(self, command: str) -> None:
         assert refused(command) is None, command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "csrc/build/test_scheduling",
+            "./csrc/build/test_server",
+            "csrc/build/test_containment",
+        ],
+    )
+    def test_the_cuda_free_cpp_tests_are_the_offline_tier(self, command: str) -> None:
+        """They link no accelerator library (`ldd` shows neither libcuda nor libnvinfer), so
+        they are to the C++ plane what a bare `pytest` is to the Python one."""
+        assert refused(command) is None
 
     def test_the_offline_runner_script_is_allowed(self) -> None:
         """`run_tests.sh` adds `-m "not gpu and not multigpu"` and exports empty

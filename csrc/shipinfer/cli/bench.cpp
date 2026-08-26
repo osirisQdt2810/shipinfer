@@ -17,6 +17,7 @@
 
 #include "shipinfer/backends/tensorrt/adapter.h"
 #include "shipinfer/backends/tensorrt/engine.h"
+#include "shipinfer/core/buffers.h"
 #include "shipinfer/core/platform.h"
 #include "shipinfer/ingest/sources/replay.h"
 #include "shipinfer/obs/sampler.h"
@@ -24,6 +25,7 @@
 #include "shipinfer/pipeline/graph/shapes.h"
 #include "shipinfer/pipeline/graph/stages.h"
 #include "shipinfer/pipeline/reassembly/collector.h"
+#include "shipinfer/runtime/containment.h"
 #include "shipinfer/scheduling/policies/registry.h"
 #include "shipinfer/scheduling/queues/fair.h"
 #include "shipinfer/server/model.h"
@@ -184,6 +186,11 @@ namespace {
 
 int main(int argc, char** argv) {
     try {
+        // Before any device is opened: the rule is enforced in the process that would do
+        // the work, and this binary run directly used to be the one spelling that passed
+        // both gates. Inside the try, so a host run reports and exits 1 like every other
+        // failure instead of terminating.
+        shipinfer::runtime::require_container("csrc bench");
         const Options options = parse(argc, argv);
 
         // -- the models: one Model per plan, one instance per (device x count), each behind the

@@ -6,6 +6,7 @@
 #include <iostream>
 #include <numeric>
 
+#include "shipinfer/core/buffers.h"
 #include "shipinfer/core/platform.h"
 
 namespace shipinfer {

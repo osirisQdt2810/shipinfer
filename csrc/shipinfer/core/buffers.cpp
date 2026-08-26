@@ -1,4 +1,4 @@
-#include "shipinfer/core/types.h"
+#include "shipinfer/core/buffers.h"
 
 #include "shipinfer/core/platform.h"
 
