@@ -80,6 +80,31 @@ jobs:
       - name: Model repository configs parse
         run: python scripts/hooks/check_model_configs.py model_repository/*/config.yaml
 
+  cpp-offline:
+    name: C++ offline tier (no driver)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the CUDA-free test binaries with g++ alone
+        # `--offline` builds only the apps whose include closure never reaches `core/platform.h`:
+        # no nvcc, no CUDA, no TensorRT. These are the scheduler's fairness invariants, the
+        # instance/model seam and the containment gate — the C++ plane's counterpart of the
+        # Python offline tier, and the tests most worth running on a machine with no driver.
+        run: python scripts/build_csrc.py --offline
+      - name: Run them
+        run: |
+          set -e
+          for binary in csrc/build/test_scheduling csrc/build/test_server csrc/build/test_containment; do
+            echo "== $binary"
+            "$binary"
+          done
+
   kernels:
     name: Fused kernels (compile only)
     runs-on: ubuntu-latest
