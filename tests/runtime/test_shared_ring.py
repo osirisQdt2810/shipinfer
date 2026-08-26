@@ -95,12 +95,15 @@ class TestCreateAndOpen:
 
     def test_the_owner_unlinks_on_close(self) -> None:
         name = _name()
-        owner = SharedRing.create(name, RingLayout(slots=1, slot_bytes=8), owner="s")
+        layout = RingLayout(slots=1, slot_bytes=8)
+        owner = SharedRing.create(name, layout, owner="s")
         owner.close()
         from multiprocessing import shared_memory
 
         with pytest.raises(FileNotFoundError):
-            shared_memory.SharedMemory(name=name, create=False)
+            shared_memory.SharedMemory(name=name, create=False)  # the raw name is gone
+        with pytest.raises(RingClosedError, match="gone or leaving"):
+            SharedRing.open(name, layout)  # and the ring API says so in its own vocabulary
 
 
 class TestTheProtocol:
@@ -263,7 +266,7 @@ class TestClosingUnderALiveView:
 
         writer.close()
         owner.close()  # neither raises
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(RingClosedError, match="gone or leaving"):
             SharedRing.open(owner.name, layout)  # the name is gone regardless
         waiting = module.reap_pending_closes()
         assert waiting >= 1, "the owner's handle waits for the view"
@@ -367,7 +370,13 @@ class TestAClosedHandleIsInert:
             assert handle.depth == 0
             assert handle.state(0) == SlotState.FREE
             assert handle.header().closed
-            assert handle.take(timeout_s=0.01) is None
+            if handle is ring:
+                assert handle.take(timeout_s=0.01) is None
+            else:
+                # The one-reader discipline outranks the closed rule: a submit handle taking
+                # is a wiring mistake and fails loudly whatever the ring's state.
+                with pytest.raises(RingProtocolError, match="only the owner takes"):
+                    handle.take(timeout_s=0.01)
             with pytest.raises(RingClosedError):
                 handle.claim(timeout_s=0.01)
             with pytest.raises(RingClosedError):
@@ -417,7 +426,7 @@ class TestPinnedForReal:
         from shipinfer.runtime.memory.shared_ring import reap_pending_closes
 
         assert reap_pending_closes() == 0, "the views are gone, so unregister + close ran"
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(RingClosedError, match="gone or leaving"):
             SharedRing.open(ring.name, layout)
 
 
@@ -567,3 +576,49 @@ class TestARealPeerProcess:
         assert taken is not None, "the block outlived the child"
         assert bytes(ring.payload(taken)[:5]) == b"hello"
         ring.release(taken)
+
+
+class TestCloseIsConcurrentByDesign:
+    def test_a_sweeping_consumer_survives_a_close_from_another_thread(self) -> None:
+        """Round 4's reproduction: a consumer suspended between the detached check and the
+        view read must never resume onto a released view. A few hundred close-vs-sweep races,
+        zero tolerance for an exception in the consumer."""
+        errors: list[BaseException] = []
+        for _ in range(200):
+            ring = SharedRing.create(_name(), RingLayout(slots=4, slot_bytes=4096), owner="A")
+            started = threading.Event()
+
+            def sweep(ring=ring, started=started) -> None:
+                try:
+                    started.set()
+                    while not ring.is_closed:
+                        index = ring.take(timeout_s=0)
+                        if index is not None:
+                            ring.payload(index)
+                            ring.release(index)
+                        ring.state(0)
+                        ring.header()
+                except RingClosedError:
+                    pass  # the read raced the close and was told so, in the vocabulary
+                except BaseException as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=sweep)
+            thread.start()
+            started.wait(1.0)
+            ring.close()
+            thread.join(timeout=2.0)
+            assert not thread.is_alive()
+        assert errors == [], errors[:3]
+
+    def test_close_is_idempotent_and_unlinks_once(self) -> None:
+        """A second close must not re-register the name and orphan the tracker entry."""
+        from shipinfer.runtime.memory import shared_ring as module
+
+        ring = SharedRing.create(_name(), RingLayout(slots=1, slot_bytes=8), owner="A")
+        ring.close()
+        ring.close()
+        with ring:  # __exit__ closes a third time
+            pass
+        assert ring.is_closed
+        assert module.reap_pending_closes() == 0

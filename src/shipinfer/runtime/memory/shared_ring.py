@@ -160,6 +160,7 @@ _HEADER = struct.Struct("<IIIIIIdQB63s")
 #: — everything before it (magic, version, layout) and after it (closed, owner) untouched.
 _STAMP = struct.Struct("<IIdQ")
 _STAMP_OFFSET = 16  # after magic, version, slots, slot_bytes — four u32
+assert _STAMP_OFFSET + _STAMP.size <= _HEADER.size - 64, "the stamp must never reach `closed`"
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,18 +202,26 @@ def reap_pending_closes() -> int:
 def _attach(name: str) -> shared_memory.SharedMemory:
     """Map an existing block without registering it with the resource tracker.
 
+    Raises:
+        RingClosedError: the name does not exist — never created, or its owner unlinked it on
+            the way out. Typed so a submit path that catches ``QueueFullError`` treats a peer
+            restart as an excluded candidate, not an unhandled ``OSError``.
+
     Before Python 3.13 every ``SharedMemory`` attach registers the name for cleanup at exit, so a
     process that merely *opened* a peer's ring would unlink it when it stops (bpo-38119) and warn
     about "leaked" objects that were never its to free. The owner is the one that unlinks.
     """
     try:
-        return shared_memory.SharedMemory(name=name, create=False, track=False)  # 3.13+
-    except TypeError:
-        block = shared_memory.SharedMemory(name=name, create=False)
-        from multiprocessing import resource_tracker
+        try:
+            return shared_memory.SharedMemory(name=name, create=False, track=False)  # 3.13+
+        except TypeError:
+            block = shared_memory.SharedMemory(name=name, create=False)
+    except FileNotFoundError as exc:
+        raise RingClosedError("unknown", name) from exc
+    from multiprocessing import resource_tracker
 
-        resource_tracker.unregister(block._name, "shared_memory")
-        return block
+    resource_tracker.unregister(block._name, "shared_memory")
+    return block
 
 
 class SharedRing:
@@ -248,6 +257,11 @@ class SharedRing:
         self._owner = owner
         self._is_owner = is_owner
         self._view = memoryview(block.buf)
+        # Guards every access to `_view` against `close()` swapping it out from another thread
+        # (the consumer loop and the closer are concurrent by design). Uncontended acquire is
+        # tens of nanoseconds against a ~125 us slot copy; slices already handed out stay
+        # valid regardless — they export the mapping itself, not this object.
+        self._view_lock = threading.Lock()
         self._next = 0
         self._take_next = 0
         self._pinned: Any = None
@@ -256,6 +270,7 @@ class SharedRing:
         self._pinned_live = 0
         self._parked_unregister: Any = None
         self._closed_here = False
+        self._unlinked = False
         self._detached = False
 
     # -- construction ------------------------------------------------------------------
@@ -326,7 +341,19 @@ class SharedRing:
                 True,
                 self._owner,
             )
-        f = _HEADER.unpack_from(self._view, 0)
+        with self._view_lock:
+            if self._detached:
+                return RingHeader(
+                    RING_VERSION,
+                    self._layout.slots,
+                    self._layout.slot_bytes,
+                    0,
+                    0.0,
+                    0,
+                    True,
+                    self._owner,
+                )
+            f = _HEADER.unpack_from(self._view, 0)
         return RingHeader(
             version=f[1],
             slots=f[2],
@@ -348,7 +375,8 @@ class SharedRing:
         ``None`` for an idle window — closed and idle are different events and this is the
         one that ends the loop. Allocation-free, so a spin may read it every iteration.
         """
-        return self._detached or self._view[self._CLOSED_OFFSET] == 1
+        with self._view_lock:
+            return self._detached or self._view[self._CLOSED_OFFSET] == 1
 
     def stamp(self, *, depth: int, ewma_latency_us: float) -> None:
         """The owner publishes its load. Called on every enqueue and dequeue; cheap on purpose.
@@ -365,27 +393,33 @@ class SharedRing:
             raise RingProtocolError(
                 f"ring {self._name!r}: only the owner stamps; this handle merely reads"
             )
-        _STAMP.pack_into(
-            self._view, _STAMP_OFFSET, depth, 0, float(ewma_latency_us), time.monotonic_ns()
-        )
+        with self._view_lock:
+            if self._detached:
+                return
+            _STAMP.pack_into(
+                self._view, _STAMP_OFFSET, depth, 0, float(ewma_latency_us), time.monotonic_ns()
+            )
 
     def _write_header(
         self, *, depth: int, ewma_latency_us: float, heartbeat_ns: int, closed: bool
     ) -> None:
-        _HEADER.pack_into(
-            self._view,
-            0,
-            _MAGIC,
-            RING_VERSION,
-            self._layout.slots,
-            self._layout.slot_bytes,
-            depth,
-            0,
-            float(ewma_latency_us),
-            heartbeat_ns,
-            1 if closed else 0,
-            self._owner.encode(),
-        )
+        with self._view_lock:
+            if self._detached:
+                return
+            _HEADER.pack_into(
+                self._view,
+                0,
+                _MAGIC,
+                RING_VERSION,
+                self._layout.slots,
+                self._layout.slot_bytes,
+                depth,
+                0,
+                float(ewma_latency_us),
+                heartbeat_ns,
+                1 if closed else 0,
+                self._owner.encode(),
+            )
 
     # -- the protocol ------------------------------------------------------------------
 
@@ -402,12 +436,16 @@ class SharedRing:
         return self._owner
 
     def state(self, index: int) -> int:
-        if self._detached:
-            return int(SlotState.FREE)
-        return self._view[self._layout.state_offset(index)]
+        with self._view_lock:
+            if self._detached:
+                return int(SlotState.FREE)
+            return self._view[self._layout.state_offset(index)]
 
     def _set_state(self, index: int, value: int) -> None:
-        self._view[self._layout.state_offset(index)] = value
+        with self._view_lock:
+            if self._detached:
+                return
+            self._view[self._layout.state_offset(index)] = value
 
     @property
     def depth(self) -> int:
@@ -446,10 +484,11 @@ class SharedRing:
                 the guard this would answer a 0-byte view — and an empty buffer read as "no
                 detections" is the silent-wrong-answer the house rules name as blocking.
         """
-        if self._detached:
-            raise RingClosedError(self._owner, self._name)
-        start = self._layout.slot_offset(index)
-        return self._view[start : start + self._layout.slot_bytes]
+        with self._view_lock:
+            if self._detached:
+                raise RingClosedError(self._owner, self._name)
+            start = self._layout.slot_offset(index)
+            return self._view[start : start + self._layout.slot_bytes]
 
     def publish(self, index: int) -> None:
         """Writer: the payload is complete; the reader may take it.
@@ -501,6 +540,10 @@ class SharedRing:
 
         (:attr:`is_closed` is the event that ends the loop, and it is a one-byte read.)
         """
+        if not self._is_owner:
+            raise RingProtocolError(
+                f"ring {self._name!r}: only the owner takes; this handle submits"
+            )
         deadline = None if timeout_s is None else time.monotonic() + timeout_s
         spins = 0
         while True:
@@ -526,6 +569,10 @@ class SharedRing:
         """
         if self._detached:
             return
+        if not self._is_owner:
+            raise RingProtocolError(
+                f"ring {self._name!r}: only the owner releases; this handle submits"
+            )
         if self.state(index) != SlotState.TAKEN:
             raise RingProtocolError(
                 f"ring {self._name!r}: slot {index} is not taken (state {self.state(index)})"
@@ -623,13 +670,14 @@ class SharedRing:
         # A payload decoded without a copy may still view the block (an in-flight tensor);
         # releasing under it would raise `BufferError` and skip the unlink. The mapping then
         # lives until the last view dies, which is the right lifetime — the *name* goes now.
-        self._detached = True
-        with contextlib.suppress(BufferError):
-            # Slices taken from `_view` hold the *underlying* buffer, not this object, so a
-            # clean release here proves nothing about in-flight views — it only drops our own
-            # export so the mapping can close the moment the callers' slices die.
-            self._view.release()
-        self._view = memoryview(b"")
+        with self._view_lock:
+            self._detached = True
+            with contextlib.suppress(BufferError):
+                # Slices taken from `_view` hold the *underlying* buffer, not this object, so
+                # a clean release here proves nothing about in-flight views — it only drops
+                # our own export so the mapping can close once the callers' slices die.
+                self._view.release()
+            self._view = memoryview(b"")
         # Reap earlier leftovers first — the reap only ever closes mappings whose pages are
         # already unpinned, so it can never unpin anything, let alone under a live DMA.
         reap_pending_closes()
@@ -654,11 +702,13 @@ class SharedRing:
             if not closed_now:
                 with _PENDING_LOCK:
                     _PENDING_CLOSE.append(self._block)
-        if self._is_owner:
+        if self._is_owner and not self._unlinked:
+            self._unlinked = True
             # `_attach` unregisters on open; in one process (the tests, and any same-process
             # pair) that removes the create-time entry too, because the tracker's cache is a
             # set. Re-register before unlink so its own unregister finds the entry instead of
-            # a KeyError in the tracker daemon.
+            # a KeyError in the tracker daemon — and only once: a second register+failed-unlink
+            # would orphan the entry and warn about a "leak" at exit.
             from multiprocessing import resource_tracker
 
             resource_tracker.register(self._block._name, "shared_memory")
@@ -680,10 +730,12 @@ def _align_up(value: int, to: int) -> int:
 
 
 def _backoff(spins: int) -> int:
-    """Spin briefly, yield, then sleep in short steps — vLLM's waiting shape without the extension."""
-    if spins < 64:
-        pass
-    elif spins < 256:
+    """Spin politely: yield the GIL from the very first iteration, sleep once it drags on.
+
+    vLLM spins hot because its ring lives in C without the GIL; a Python spinner holding the
+    GIL starves the process's other threads, so even the first spins cost a ``sleep(0)``.
+    """
+    if spins < 256:
         time.sleep(0)
     else:
         time.sleep(0.00005)
