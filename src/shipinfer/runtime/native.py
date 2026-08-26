@@ -26,6 +26,7 @@ used is decided by ``execution.provider``:
 from __future__ import annotations
 
 import functools
+import importlib
 from types import ModuleType
 
 from shipinfer.core.errors import ConfigurationError
@@ -56,12 +57,17 @@ def native_module() -> ModuleType | None:
     construction.
     """
     try:
-        import shipvision
-
-        kernels = shipvision._C
-    except (ImportError, AttributeError) as exc:
-        # AttributeError too: `shipvision` imports fine as pure Python while its compiled
-        # extension is absent, which is the normal state on a machine with no build.
+        # `import_module("shipvision._C")`, not `import shipvision` followed by
+        # `shipvision._C`. The second only works when something has *already* imported the
+        # submodule, because a submodule becomes an attribute of its package as a side effect
+        # of being imported — and `shipvision/__init__.py` deliberately imports nothing eagerly
+        # so that `import shipvision` stays free. So the kernels were reachable only when some
+        # unrelated import happened to have pulled them in first, and reported "not installed"
+        # otherwise, on a machine where they were built and working.
+        kernels = importlib.import_module("shipvision._C")
+    except ImportError as exc:
+        # The package may be absent, or present as pure Python with no build. Both are
+        # ordinary, and both arrive here as ImportError.
         _LOG.debug("shipvision kernels are not installed: %s", exc)
         return None
 
@@ -107,6 +113,11 @@ def _describe(module: ModuleType, name: str) -> str:
     one that says less.
     """
     probe = getattr(module, name, None)
+    if probe is not None and not callable(probe):
+        # `platform` is a string attribute, not a call. Calling it raised TypeError, which the
+        # except below turned into "?" — the same trap as `version()`: a guard that converts a
+        # wrong access into a question mark hides the wrong access.
+        return str(probe)
     if probe is None:
         return "?"
     try:
@@ -116,9 +127,21 @@ def _describe(module: ModuleType, name: str) -> str:
 
 
 def _reports_devices(module: ModuleType) -> bool:
-    probe = getattr(module, "is_available", None)
+    """Does this build have GPU kernels and a device to run them on?
+
+    ``cuda_available`` is the name the extension binds. It used to read ``is_available``, which
+    it never defined — and because a missing probe was treated as "assume usable" here, that
+    disagreement produced no error at all on this side. It produced one two files away, in
+    `runtime/ops/native_ops.py`, where the same wrong name was called directly.
+
+    A build with no probe is *not* usable: `NativeImageOps` refuses it, so saying "usable" here
+    would have the banner, `health()` and `resolve_provider(AUTO)` all report the fast path
+    while every instance construction failed over to torch — the regression the provider
+    machinery exists to prevent. One answer, given once.
+    """
+    probe = getattr(module, "cuda_available", None)
     if probe is None:
-        return True  # an extension that does not say assumes usable; ops will tell us
+        return False
     try:
         return bool(probe())
     except Exception:  # pragma: no cover
