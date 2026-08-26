@@ -5,6 +5,29 @@ edits, typo fixes and pure docs.
 
 ---
 
+## perf: multi-chunk copies home go through pinned ping-pong staging (26 Aug 2026)
+
+C44's lever 2, converged over three review rounds. The pageable D2H tails were the ops
+layer, not TensorRT. The rule that survived review is **structural**: `_to_host` stages a
+result only when it spans more than one chunk — one span has no overlap to win and the
+staged path would add a full-size serial host memcpy that `.cpu()` never performs. So the
+production letterbox frame (1×3×640×640) and design-sizing person-reid batches (~15 crops)
+take the plain `.cpu()` path they always had, and the mask-sized batches (every ship its
+own span at 640²) stage through a **ping-pong pair with one `torch.cuda.Event` per buffer**
+on the worker's own stream — the copy engine runs chunk k+1's DMA while the host drains
+chunk k. Budget, re-derivable: 8 MiB per buffer, a pair only for a genuinely multi-chunk
+name — at most 16 MiB pinned per worker, released at the runner's stop
+(`MemoryPool.release_staging`) and at `close()`; `stats()`/`close()` snapshot the staging
+map under the lock. A mid-capture refusal goes pageable for that call only; an allocation
+failure degrades once with a warning.
+
+Measurement honesty (recorded because it gates the numbers): this box's inter-invocation
+micro noise floor measured 25% on an identical-code control row, wider than every micro
+effect attempted — so no per-call speedup is claimed; the claims are the mechanism, the
+flat alternating end-to-end A/B, exact-equality tests, and the bounded budget. The
+quiet-window pair is the recorded gate for any numeric claim. Deleting the copies entirely
+(`letterbox_to_device` through the dispatcher) stays the ADR-007 follow-up.
+
 ## perf: crop_batch is one batched pass (26 Aug 2026)
 
 C44's Nsight timeline said the crop stage's ~150 ms/frame was host-side wait — GPUs ~14%
