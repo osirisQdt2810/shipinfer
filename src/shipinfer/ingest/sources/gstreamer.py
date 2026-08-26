@@ -204,29 +204,33 @@ def _load_gst() -> tuple[Any, Any]:
     Deliberately inside a function: importing this module must work on a host with no
     PyGObject, so the whole offline test tier can exercise the pipeline builder and the
     camera actor.
-    """
-    try:
-        import gi
 
-        gi.require_version("Gst", "1.0")
-        from gi.repository import GLib, Gst
-    except (ImportError, ValueError) as exc:
-        raise SourceUnavailableError(
-            "gstreamer",
-            "PyGObject with GStreamer 1.0 typelibs is not importable "
-            f"({redact_in(str(exc))}). Install python3-gi and gstreamer1.0-plugins-{{base,good,bad}}, "
-            "or select the 'pyav' backend with SHIPINFER_INGEST_BACKEND=pyav",
-        ) from exc
-    # Fifty camera actors call this from fifty threads at start-up. `Gst.is_initialized()`
-    # turns true as soon as *some* thread has begun initialising, before the plugin
-    # registry is populated — so a thread that saw "initialised" and went straight to
-    # `ElementFactory.find` got `None` for every decoder and gave its camera up as
-    # "no h264 decoder found" on an image that has three. One lock, one init, and every
-    # caller returns only after the registry exists.
+    The whole body runs under one lock. Fifty camera actors call this from fifty threads at
+    start-up, and neither half is safe to race: PyGObject resolves ``gi.repository`` members
+    lazily and a concurrent first touch has come back as ``'GLib' object has no attribute
+    'Idle'``; and ``Gst.is_initialized()`` turns true as soon as *some* thread has begun
+    initialising, before the plugin registry is populated — a thread that saw "initialised"
+    and probed the registry found no decoder and gave its camera up as "no h264 decoder
+    found" on an image that has three. One lock, one import, one init, and every caller
+    returns only after the registry exists.
+    """
     with _GST_INIT_LOCK:
+        try:
+            import gi
+
+            gi.require_version("Gst", "1.0")
+            from gi.repository import GLib, Gst
+        except (ImportError, ValueError) as exc:
+            raise SourceUnavailableError(
+                "gstreamer",
+                "PyGObject with GStreamer 1.0 typelibs is not importable "
+                f"({redact_in(str(exc))}). Install python3-gi and "
+                "gstreamer1.0-plugins-{base,good,bad}, or select the 'pyav' backend with "
+                "SHIPINFER_INGEST_BACKEND=pyav",
+            ) from exc
         if not Gst.is_initialized():
             Gst.init(None)
-    return Gst, GLib
+        return Gst, GLib
 
 
 @SOURCES.register("gstreamer", "gst")
