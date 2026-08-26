@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "shipinfer/core/platform.h"
 #include "shipinfer/pipeline/graph/dag.h"
 #include "shipinfer/pipeline/graph/stage.h"
 #include "shipinfer/pipeline/graph/stages.h"
@@ -18,6 +19,22 @@ namespace {
 
     int failures = 0;
     int checks = 0;
+    int skips = 0;
+
+    // A test that cannot run must say so and be counted — a device-less run that prints
+    // "N checks, 0 failure(s)" and reads as green is a test that fails open.
+    void skip(const std::string& why) {
+        ++skips;
+        std::fprintf(stderr, "SKIP: %s\n", why.c_str());
+    }
+
+    bool has_device() {
+        void* probe = nullptr;
+        if (gpuMalloc(&probe, 256) != gpuSuccess) return false;
+        gpuFree(probe);
+        return true;
+    }
+
     void check(bool condition, const std::string& what) {
         ++checks;
         if (!condition) {
@@ -218,12 +235,19 @@ void scratch_pool_refuses_unbounded_growth() {
 }
 
 int main() {
-    scratch_pool_reuses_only_released_buffers();
-    scratch_pool_refuses_unbounded_growth();
+    // The graph tests need no device and run first; the scratch tests allocate device
+    // memory and skip — counted, on stderr — where there is none, so a device-less run
+    // still exercises what this binary exists for instead of terminating on the way in.
     test_a_stage_whose_input_is_empty_is_skipped_not_failed();
     test_a_failing_stage_does_not_end_the_frame();
     test_the_collector_sees_planned_delivered_and_missing();
     test_a_skipped_branch_is_a_complete_frame();
-    std::printf("%d checks, %d failure(s)\n", checks, failures);
+    if (has_device()) {
+        scratch_pool_reuses_only_released_buffers();
+        scratch_pool_refuses_unbounded_growth();
+    } else {
+        skip("no CUDA device for the worker-scratch pool tests");
+    }
+    std::printf("%d checks, %d failure(s), %d skipped\n", checks, failures, skips);
     return failures == 0 ? 0 : 1;
 }

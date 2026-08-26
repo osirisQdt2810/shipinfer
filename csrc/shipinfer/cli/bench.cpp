@@ -212,6 +212,13 @@ int main(int argc, char** argv) {
                 // One engine per device, shared by that device's instances: the weights are
                 // paid for once per GPU rather than once per instance.
                 auto engine = TrtEngine::load(spec.plan, device);
+                if (device == options.devices.front()) {
+                    // Once per model: which `execute()` branch this plan takes. A static plan
+                    // is padded to its batch; a dynamic one runs the rows it was given.
+                    std::printf("engine %s: max_batch %d, %s plan\n", spec.name.c_str(),
+                                engine->max_batch(),
+                                engine->is_static() ? "static" : "dynamic");
+                }
                 // The config is a claim about the plan; the plan is the fact (review of #15).
                 if (engine->inputs().empty())
                     throw ConfigError(spec.name + ": the plan declares no input");

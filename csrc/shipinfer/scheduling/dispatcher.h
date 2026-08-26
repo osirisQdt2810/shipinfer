@@ -79,8 +79,11 @@ namespace shipinfer {
             if (ready.empty()) {
                 throw ServerStateError("model '" + model_name_ + "' has no ready instance");
             }
+            size_t closed = 0;
             Placeable* first = policy_->select(ready, request);
-            if (enqueue(first) == PutStatus::Accepted) return DispatchResult{first, 1, false};
+            const PutStatus status = enqueue(first);
+            if (status == PutStatus::Accepted) return DispatchResult{first, 1, false};
+            if (status == PutStatus::Closed) ++closed;
             // Spill: try the remaining instances shortest-queue-first. Sorting is acceptable
             // here because this path only runs when a queue is already full — rarely, and
             // never in the steady state.
@@ -93,11 +96,21 @@ namespace shipinfer {
                 [](Placeable* a, Placeable* b) { return a->depth() < b->depth(); });
             int attempt = 2;
             for (Placeable* candidate : remaining) {
-                if (enqueue(candidate) == PutStatus::Accepted) {
+                const PutStatus spill = enqueue(candidate);
+                if (spill == PutStatus::Accepted) {
                     if (on_spill_) on_spill_(first, candidate);
                     return DispatchResult{candidate, attempt, true};
                 }
+                if (spill == PutStatus::Closed) ++closed;
                 ++attempt;
+            }
+            if (closed == ready.size()) {
+                // Every instance closed between `ready_instances()` and the put: the pool is
+                // shutting down, which is a different operational event from a full one and
+                // keeps the three-way distinction — nothing ready / closed / saturated.
+                throw ServerStateError("model '" + model_name_ + "': every ready instance (" +
+                                       std::to_string(ready.size()) +
+                                       ") closed while dispatching; the pool is stopping");
             }
             size_t depth = 0, capacity = 0;
             for (Placeable* candidate : ready) {

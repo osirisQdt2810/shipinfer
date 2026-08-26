@@ -195,8 +195,13 @@ namespace shipinfer {
                 continue;
             }
             const int count = static_cast<int>(indices.size());
+            // Sized for what was detected, rounded up in steps of eight so the pool reuses a
+            // buffer across frames of similar crowds — not for `max_objects_` every time:
+            // at 64 objects a 640x640 crop set is 64 * 3 * 640^2 * 4 B = 315 MB per buffer
+            // per worker, and the pool may hold a second one under a timeout.
+            const int rows = std::min(max_objects_, ((count + 7) / 8) * 8);
             std::shared_ptr<DeviceBuffer> owner =
-                scratch_.acquire(spec.name, static_cast<size_t>(std::max(count, max_objects_)) *
+                scratch_.acquire(spec.name, static_cast<size_t>(std::max(count, rows)) *
                                                 payload.row_elems * sizeof(float));
             float* dst = owner->as<float>();
             const float* boxes_device = scratch_.upload_boxes(boxes);

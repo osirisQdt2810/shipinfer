@@ -73,9 +73,11 @@ namespace shipinfer {
         // the way the Python queue raises before taking ownership — the dispatcher's spill
         // depends on still holding the item after a refusal.
         PutStatus put(T&& item) {
+            std::optional<T> evicted;
             std::unique_lock<std::mutex> lock(mutex_);
             if (closed_) return PutStatus::Closed;
-            if (size_.load(std::memory_order_relaxed) >= capacity_ && !make_room_locked(lock)) {
+            if (size_.load(std::memory_order_relaxed) >= capacity_ &&
+                !make_room_locked(lock, evicted)) {
                 ++stats_.rejected;
                 ++stats_.rejected_by_camera[item.camera()];  // the one branch that needs it
                 return PutStatus::Rejected;
@@ -87,6 +89,13 @@ namespace shipinfer {
             ++stats_.accepted;
             if (now > stats_.peak) stats_.peak = now;
             work_.notify_one();
+            lock.unlock();
+            // The drop handler runs outside the lock, as `close()` already does: a handler
+            // that settles a promise is safe either way, but the next one someone writes may
+            // touch the queue, and a callback under the queue's own mutex is a deadlock waiting
+            // for its second author.
+            if (evicted.has_value() && on_drop_)
+                on_drop_(std::move(*evicted), DropReason::Evicted);
             return PutStatus::Accepted;
         }
 
@@ -137,8 +146,9 @@ namespace shipinfer {
             return level < 0 ? 0 : (level >= kPriorityLevels ? kPriorityLevels - 1 : level);
         }
 
-        // Try to free one slot. True if the caller may now enqueue.
-        bool make_room_locked(std::unique_lock<std::mutex>& lock) {
+        // Try to free one slot. True if the caller may now enqueue. An evicted item is handed
+        // back in `evicted` for the caller to fail once it has released the lock.
+        bool make_room_locked(std::unique_lock<std::mutex>& lock, std::optional<T>& evicted) {
             if (overflow_ == Overflow::Reject) return false;
             if (overflow_ == Overflow::Block) {
                 const auto deadline = std::chrono::steady_clock::now() +
@@ -159,7 +169,7 @@ namespace shipinfer {
                     size_.fetch_sub(1, std::memory_order_relaxed);
                     ++stats_.evicted;
                     ++stats_.evicted_by_camera[victim->camera()];
-                    if (on_drop_) on_drop_(std::move(*victim), DropReason::Evicted);
+                    evicted = std::move(victim);
                     return true;
                 }
             }

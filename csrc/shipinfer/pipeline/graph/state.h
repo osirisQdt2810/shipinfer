@@ -87,9 +87,7 @@ namespace shipinfer {
     // N rows of a per-object tensor living on a device — a crop set going *into* a model. Kept
     // apart from `ObjectBatch` (a model's *output*, host memory, copied into the emission)
     // because device memory is move-only and must never be copied into a capture. The buffer is
-    // owned by the worker's scratch, not by the frame: a worker runs one frame at a time and
-    // waits on every stage's future before reusing it, so the payload outlives every read of
-    // it.
+    // owned through `owner`, below, by everyone who still refers to it.
     struct DevicePayload {
         std::string name;
         std::string class_name;
