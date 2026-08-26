@@ -1,7 +1,7 @@
 // The perception graph as a sequence of stages — `pipeline/graph/graph.py`.
 //
 // Run every stage that can run, in declared order, and report each one. A stage is *runnable*
-// when everything it consumes is available and everything it requires is non-empty — decided
+// when everything it consumes is available and everything it needs is non-empty — decided
 // from the frame's state right now, never speculatively: a frame with three ships and no
 // people must not announce a person embedder that is never called, or reassembly would wait for
 // it until the frame timed out. A stage that fails does not end the frame; its branch is
@@ -69,8 +69,7 @@ namespace shipinfer {
                 bool ok = true;
                 for (const std::string& name : stage->consumes())
                     ok = ok && has(available, name);
-                for (const std::string& name : stage->requires())
-                    ok = ok && has(non_empty, name);
+                for (const std::string& name : stage->needs()) ok = ok && has(non_empty, name);
                 if (ok) ready.push_back(stage->name());
             }
             return ready;

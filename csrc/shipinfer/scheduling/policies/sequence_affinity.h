@@ -31,17 +31,18 @@ namespace shipinfer {
                           const PlacementRequest& request) override {
             const std::string& key = request.camera_id;
             if (key.empty()) return fallback_->select(candidates, request);
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                auto pinned = assigned_.find(key);
-                if (pinned != assigned_.end() && pinned->second->is_ready() &&
-                    std::find(candidates.begin(), candidates.end(), pinned->second) !=
-                        candidates.end()) {
-                    return pinned->second;
-                }
+            // One lock across lookup and insert: dropping it between the two let two
+            // concurrent first requests for one camera pin it to different instances, which
+            // is the one thing an affinity policy must never do. The fallback is pure, so
+            // holding the lock through it costs a few hundred nanoseconds and no deadlock.
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto pinned = assigned_.find(key);
+            if (pinned != assigned_.end() && pinned->second->is_ready() &&
+                std::find(candidates.begin(), candidates.end(), pinned->second) !=
+                    candidates.end()) {
+                return pinned->second;
             }
             Placeable* chosen = fallback_->select(candidates, request);
-            std::lock_guard<std::mutex> lock(mutex_);
             if (assigned_.size() >= max_sequences_) assigned_.clear();
             assigned_[key] = chosen;
             return chosen;

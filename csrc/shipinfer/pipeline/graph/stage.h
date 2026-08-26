@@ -1,4 +1,4 @@
-// The stage contract — `pipeline/graph/stage.py`: a stage declares what it consumes, requires
+// The stage contract — `pipeline/graph/stage.py`: a stage declares what it consumes, needs
 // and produces, and the graph decides from the frame's state whether it runs, in declared
 // order.
 //
@@ -45,10 +45,10 @@ namespace shipinfer {
     class Stage {
       public:
         Stage(std::string name, std::vector<std::string> consumes,
-              std::vector<std::string> requires, std::vector<std::string> produces)
+              std::vector<std::string> needs, std::vector<std::string> produces)
             : name_(std::move(name)),
               consumes_(std::move(consumes)),
-              requires_(std::move(requires)),
+              requires_(std::move(needs)),
               produces_(std::move(produces)) {}
         virtual ~Stage() = default;
 
@@ -57,7 +57,7 @@ namespace shipinfer {
         const std::vector<std::string>& consumes() const { return consumes_; }
         // Names that must be present *and non-empty* for the stage to run — the conditional
         // branch: no ship crops, no ship segmenter, and that is a skip, not a failure.
-        const std::vector<std::string>& requires() const { return requires_; }
+        const std::vector<std::string>& needs() const { return requires_; }
         const std::vector<std::string>& produces() const { return produces_; }
 
         // Template method: times the work, turns an exception into a Failed outcome carrying

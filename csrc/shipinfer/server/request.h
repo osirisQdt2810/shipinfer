@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <exception>
 #include <future>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -41,6 +42,11 @@ namespace shipinfer {
         size_t rows = 0;
         size_t row_elems = 0;
         Device payload_device = Device::cpu();
+        // Whatever `data` points into, kept alive for as long as this request exists. The
+        // Python plane gets this for free — a request holds a reference to its tensor —
+        // and without it a stage that times out leaves a queued request pointing at a
+        // buffer the next frame overwrites while the instance DMAs out of it.
+        std::shared_ptr<const void> keepalive;
         int64_t received_ns = monotonic_ns();
 
         bool is_expired(int64_t now_ns) const {
@@ -85,8 +91,11 @@ namespace shipinfer {
         int64_t enqueued_ns() const { return enqueued_ns_; }
 
         // -- the queue contract --------------------------------------------------------------
-        std::string camera() const {
-            return request_.tag.camera_id.empty() ? "-" : request_.tag.camera_id;
+        // By reference: this is read on every put and every lane push (CONVENTIONS 2.5, no
+        // per-request allocation on the dispatch path). Non-video callers share one lane.
+        const std::string& camera() const {
+            static const std::string shared_lane = "-";
+            return request_.tag.camera_id.empty() ? shared_lane : request_.tag.camera_id;
         }
         size_t rows() const { return request_.rows == 0 ? 1 : request_.rows; }
         int priority() const { return request_.priority; }

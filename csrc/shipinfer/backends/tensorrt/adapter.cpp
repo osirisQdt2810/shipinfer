@@ -31,13 +31,19 @@ namespace shipinfer {
         float* dst = input + row_offset * width;
         if (src_device.is_cuda() && src_device != device()) {
             // A spill: the placement policy sent a row that lives on another GPU here, because
-            // its home GPU's queue had backed up past the threshold. The Python plane copies in
-            // that case (`.to(device)`), so this plane copies too — a peer copy on this stream,
-            // which the driver stages through the host when the two devices cannot see each
-            // other. ADR-002 forbids a kernel *accessing* another device's memory; a copy the
-            // policy chose to pay for is the mechanism that keeps that rule true under load.
-            GPU_CHECK(gpuMemcpyPeerAsync(dst, device().index, src, src_device.index, bytes,
-                                         instance_->stream()));
+            // its home GPU's queue had backed up past the threshold. ADR-002 is absolute about
+            // how it travels — nothing in this codebase performs a cross-device memory access,
+            // and a payload that must move between GPUs goes through host memory. So: D2H into
+            // page-locked staging, then H2D into the binding, both on this instance's stream,
+            // which orders them. Two PCIe copies is the price the ADR names; it is the same on
+            // every topology, which is what the ADR bought, and the policy chose to pay it.
+            const size_t needed = static_cast<size_t>(max_batch()) * width * sizeof(float);
+            if (stage_.bytes() < needed) stage_ = PinnedBuffer(needed);
+            float* stage = stage_.as<float>() + row_offset * width;
+            GPU_CHECK(
+                gpuMemcpyAsync(stage, src, bytes, gpuMemcpyDeviceToHost, instance_->stream()));
+            GPU_CHECK(
+                gpuMemcpyAsync(dst, stage, bytes, gpuMemcpyHostToDevice, instance_->stream()));
             return;
         }
         GPU_CHECK(gpuMemcpyAsync(
@@ -47,12 +53,16 @@ namespace shipinfer {
     }
 
     void TrtEngineAdapter::execute(int rows) {
-        // These plans are static at their batch, and `setInputShape` refuses any other batch —
-        // the first run of the ported plane sealed every frame Incomplete on exactly that. A
-        // partial batch is padded to the plan's batch by repeating the last real row, so the
-        // padding rows carry a real image rather than whatever the binding held before: a NaN
-        // through a detector produces warnings on every layer. Only the real rows are read
-        // back. The Python TensorRT backend pads the same way.
+        // A static plan refuses any batch but its own — the first run of the ported plane
+        // sealed every frame Incomplete on exactly that — so a partial batch is padded to the
+        // plan's batch by repeating the last real row: the padding rows carry a real image
+        // rather than whatever the binding held before, because a NaN through a detector
+        // produces warnings on every layer. Only the real rows are read back. A dynamic plan
+        // runs the rows it was given; padding it would discard the batch window's whole point.
+        if (!instance_->is_static()) {
+            instance_->execute(rows);
+            return;
+        }
         const int plan_batch = instance_->max_batch();
         if (rows < plan_batch) {
             float* input = static_cast<float*>(instance_->input());
@@ -66,6 +76,7 @@ namespace shipinfer {
         }
         instance_->execute(plan_batch);
     }
+
     const float* TrtEngineAdapter::output() const {
         return instance_->output();
     }

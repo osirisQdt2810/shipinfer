@@ -24,6 +24,8 @@ namespace shipinfer {
         virtual size_t depth() const = 0;
         virtual double ewma_latency_us() const = 0;
         virtual bool is_ready() const = 0;
+        // The queue's capacity, for the refusal that names it. Zero means "not a queue".
+        virtual size_t capacity() const { return 0; }
     };
 
     // The slice of a request a policy may see: the locality hint and the sequence key.

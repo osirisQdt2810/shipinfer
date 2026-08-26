@@ -75,10 +75,9 @@ namespace shipinfer {
         PutStatus put(T&& item) {
             std::unique_lock<std::mutex> lock(mutex_);
             if (closed_) return PutStatus::Closed;
-            const std::string camera = item.camera();
             if (size_.load(std::memory_order_relaxed) >= capacity_ && !make_room_locked(lock)) {
                 ++stats_.rejected;
-                ++stats_.rejected_by_camera[camera];
+                ++stats_.rejected_by_camera[item.camera()];  // the one branch that needs it
                 return PutStatus::Rejected;
             }
             if (closed_) return PutStatus::Closed;  // BLOCK may have waited through a close

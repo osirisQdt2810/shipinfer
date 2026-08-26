@@ -14,17 +14,26 @@ namespace shipinfer {
     // LocalityAwareSpilloverPolicy and SequenceAffinityPolicy.
     class PowerOfTwoChoicesPolicy : public PlacementPolicy {
       public:
-        explicit PowerOfTwoChoicesPolicy(unsigned seed = std::random_device{}()) : rng_(seed) {}
+        // Unseeded (the default): one generator per thread, no lock — as the fallback of
+        // `locality_spillover` this runs on every spill from 48 dispatchers, and a process-wide
+        // mutex there is a contended lock at design load. Seeded: the deterministic shared
+        // generator the tests rely on, behind the mutex.
+        PowerOfTwoChoicesPolicy() = default;
+        explicit PowerOfTwoChoicesPolicy(unsigned seed) : seeded_(true), rng_(seed) {}
 
         Placeable* select(const std::vector<Placeable*>& candidates,
                           const PlacementRequest&) override {
             const size_t n = candidates.size();
             if (n == 1) return candidates[0];
             size_t i, j;
-            {
+            if (seeded_) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 i = std::uniform_int_distribution<size_t>(0, n - 1)(rng_);
                 j = std::uniform_int_distribution<size_t>(0, n - 2)(rng_);
+            } else {
+                thread_local std::mt19937 local_rng{std::random_device{}()};
+                i = std::uniform_int_distribution<size_t>(0, n - 1)(local_rng);
+                j = std::uniform_int_distribution<size_t>(0, n - 2)(local_rng);
             }
             if (j >= i) ++j;  // sample without replacement, no rejection loop
             Placeable* a = candidates[i];
@@ -37,8 +46,9 @@ namespace shipinfer {
         }
 
       private:
-        std::mutex mutex_;  // the generator is not thread-safe; dispatchers are many
-        std::mt19937 rng_;
+        bool seeded_ = false;
+        std::mutex mutex_;  // the seeded generator is shared and not thread-safe
+        std::mt19937 rng_{std::random_device{}()};
     };
 
 }  // namespace shipinfer

@@ -19,10 +19,31 @@ namespace shipinfer {
         if (stream_ != nullptr) gpuStreamDestroy(stream_);
     }
 
-    float* WorkerScratch::slot(const std::string& name, size_t bytes) {
-        DeviceBuffer& buffer = slots_[name];
-        if (buffer.bytes() < bytes) buffer = DeviceBuffer(bytes);
-        return buffer.as<float>();
+    std::shared_ptr<DeviceBuffer> WorkerScratch::acquire(const std::string& name,
+                                                         size_t bytes) {
+        auto& pool = pools_[name];
+        for (auto& buffer : pool) {
+            if (buffer.use_count() != 1) continue;  // a request still points into it
+            if (buffer->bytes() < bytes) buffer = std::make_shared<DeviceBuffer>(bytes);
+            return buffer;
+        }
+        if (pool.size() >= kMaxHeldPerName) {
+            throw ServerStateError("worker scratch '" + name +
+                                   "': " + std::to_string(pool.size()) +
+                                   " payloads are still held by requests that have not "
+                                   "completed (timed out or still queued); refusing to "
+                                   "allocate more rather than grow without bound");
+        }
+        pool.push_back(std::make_shared<DeviceBuffer>(bytes));
+        return pool.back();
+    }
+
+    size_t WorkerScratch::held(const std::string& name) const {
+        const auto it = pools_.find(name);
+        if (it == pools_.end()) return 0;
+        size_t held = 0;
+        for (const auto& buffer : it->second) held += buffer.use_count() != 1 ? 1 : 0;
+        return held;
     }
 
     const float* WorkerScratch::upload_boxes(const std::vector<float>& boxes) {
@@ -43,9 +64,9 @@ namespace shipinfer {
     // ----------------------------------------------------------------------------
 
     ModelStage::ModelStage(std::string name, Model& model, std::chrono::milliseconds timeout,
-                           std::vector<std::string> consumes, std::vector<std::string> requires,
+                           std::vector<std::string> consumes, std::vector<std::string> needs,
                            std::vector<std::string> produces)
-        : Stage(std::move(name), std::move(consumes), std::move(requires), std::move(produces)),
+        : Stage(std::move(name), std::move(consumes), std::move(needs), std::move(produces)),
           model_(model),
           timeout_(timeout) {
         if (timeout_.count() <= 0)
@@ -53,7 +74,8 @@ namespace shipinfer {
     }
 
     InferenceResponse ModelStage::infer(const FrameState& state, const float* data, size_t rows,
-                                        size_t row_elems, Device device) {
+                                        size_t row_elems, Device device,
+                                        std::shared_ptr<const void> keepalive) {
         // The request carries the frame's tag **unchanged** (ADR-002): batching, spillover to
         // another GPU and out-of-order completion are all fine because reassembly keys on the
         // tag rather than on arrival order.
@@ -67,6 +89,7 @@ namespace shipinfer {
         request.rows = rows;
         request.row_elems = row_elems;
         request.payload_device = device;
+        request.keepalive = std::move(keepalive);
         std::future<InferenceResponse> future = model_.infer(std::move(request));
         if (future.wait_for(timeout_) != std::future_status::ready) {
             // Bounded so a wedged instance costs one frame and one worker for this long rather
@@ -90,7 +113,9 @@ namespace shipinfer {
 
     size_t DetectStage::do_run(FrameState& state) {
         const size_t row_elems = static_cast<size_t>(3) * config_.size * config_.size;
-        float* input = scratch_.slot("letterbox", row_elems * sizeof(float));
+        std::shared_ptr<DeviceBuffer> owner =
+            scratch_.acquire("letterbox", row_elems * sizeof(float));
+        float* input = owner->as<float>();
         const LetterboxMap map = letterbox_into(
             state.image()->as<uint8_t>(), state.height(), state.width(), input, config_.size,
             config_.size, /*swap_rb=*/true, config_.pad_value, scratch_.stream());
@@ -99,7 +124,8 @@ namespace shipinfer {
         // transform that was applied.
         state.set_letterbox(map.scale, map.pad_x, map.pad_y);
 
-        const InferenceResponse response = infer(state, input, 1, row_elems, scratch_.device());
+        const InferenceResponse response =
+            infer(state, input, 1, row_elems, scratch_.device(), owner);
         if (response.row_elems % kDetectionStride != 0) {
             throw BackendError("stage " + name() + ": the detector's row of " +
                                std::to_string(response.row_elems) + " floats is not " +
@@ -169,15 +195,17 @@ namespace shipinfer {
                 continue;
             }
             const int count = static_cast<int>(indices.size());
-            float* dst =
-                scratch_.slot(spec.name, static_cast<size_t>(std::max(count, max_objects_)) *
-                                             payload.row_elems * sizeof(float));
+            std::shared_ptr<DeviceBuffer> owner =
+                scratch_.acquire(spec.name, static_cast<size_t>(std::max(count, max_objects_)) *
+                                                payload.row_elems * sizeof(float));
+            float* dst = owner->as<float>();
             const float* boxes_device = scratch_.upload_boxes(boxes);
             crop_resize_into(state.image()->as<uint8_t>(), state.height(), state.width(),
                              boxes_device, count, dst, spec.height, spec.width,
                              /*swap_rb=*/true, scratch_.stream());
             scratch_.synchronise();
             payload.data = dst;
+            payload.owner = std::move(owner);
             payload.rows = static_cast<size_t>(count);
             payload.object_indices = std::move(indices);
             payload.boxes = std::move(boxes);
@@ -210,7 +238,7 @@ namespace shipinfer {
             const size_t count = std::min(limit, payload->rows - start);
             const InferenceResponse response =
                 infer(state, payload->data + start * payload->row_elems, count,
-                      payload->row_elems, payload->device);
+                      payload->row_elems, payload->device, payload->owner);
             if (response.rows != count) {
                 throw BackendError("stage " + name() + ": model " + model().name() +
                                    " returned " + std::to_string(response.rows) +

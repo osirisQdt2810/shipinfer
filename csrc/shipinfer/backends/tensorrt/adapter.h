@@ -23,6 +23,10 @@ namespace shipinfer {
 
       private:
         std::unique_ptr<TrtInstance> instance_;
+        // Page-locked staging for rows that arrive from another GPU. Sized for a whole batch
+        // and indexed by row offset, so two spilled rows of one batch never share a region
+        // and the stream's ordering is the only synchronisation needed.
+        PinnedBuffer stage_;
     };
 
 }  // namespace shipinfer

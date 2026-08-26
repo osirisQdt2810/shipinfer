@@ -110,8 +110,13 @@ namespace shipinfer {
     struct BackendError : std::runtime_error {
         using std::runtime_error::runtime_error;
     };
+    // Carries the numbers (ADR-005): an operator paged on a refusal must be able to tell a
+    // queue at 5/4096 from one at 4096/4096, and the parity harness compares them.
     struct QueueFullError : std::runtime_error {
-        using std::runtime_error::runtime_error;
+        QueueFullError(const std::string& message, size_t depth_, size_t capacity_)
+            : std::runtime_error(message), depth(depth_), capacity(capacity_) {}
+        size_t depth;
+        size_t capacity;
     };
     // The server is not in a state to do this: no instance is ready, a model has no instances.
     struct ServerStateError : std::runtime_error {

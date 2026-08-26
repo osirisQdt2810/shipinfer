@@ -56,6 +56,7 @@ namespace shipinfer {
         size_t depth() const override { return queue_.depth(); }
         double ewma_latency_us() const override { return ewma_latency_us_.load(); }
         bool is_ready() const override { return ready_.load(); }
+        size_t capacity() const override { return queue_capacity_; }
 
         // -- lifecycle
         // -------------------------------------------------------------------------
@@ -80,6 +81,7 @@ namespace shipinfer {
         void fail_batch(std::vector<WorkItem>& items, std::exception_ptr error);
 
         std::string name_;
+        size_t queue_capacity_ = 0;
         std::unique_ptr<Engine> engine_;
         BatchWindow window_;
         std::function<void(Device)> bind_thread_;

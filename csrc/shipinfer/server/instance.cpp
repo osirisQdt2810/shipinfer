@@ -17,29 +17,33 @@ namespace shipinfer {
                                  BatchWindow window, size_t queue_capacity, Overflow overflow,
                                  std::function<void(Device)> bind_thread)
         : name_(std::move(name)),
+          queue_capacity_(queue_capacity),
           engine_(std::move(engine)),
           window_(std::move(window)),
           bind_thread_(std::move(bind_thread)),
           // Dropped items are failed here with the same reasons the Python queue raises: a
           // queue that hands an item back with a reason is a queue that never loses one.
-          queue_(name_, queue_capacity, overflow, 50, true,
-                 [this](WorkItem&& item, DropReason why) {
-                     switch (why) {
-                         case DropReason::Evicted:
-                             item.fail_with(QueueFullError(
-                                 "queue " + name_ +
-                                 " evicted the request of the greediest camera"));
-                             break;
-                         case DropReason::Expired:
-                             item.fail_with(RequestCancelledError(
-                                 "request deadline passed before execution"));
-                             break;
-                         case DropReason::Closed:
-                             item.fail_with(
-                                 RequestCancelledError("instance " + name_ + " stopped"));
-                             break;
-                     }
-                 }) {
+          queue_(
+              name_, queue_capacity, overflow, 50, true,
+              [this](WorkItem&& item, DropReason why) {
+                  switch (why) {
+                      case DropReason::Evicted:
+                          // Evicted because the queue was full: the would-be depth is
+                          // one past capacity, the way the Python queue reports it.
+                          item.fail_with(QueueFullError(
+                              "queue " + name_ + " evicted the request of the greediest camera",
+                              queue_capacity_ + 1, queue_capacity_));
+                          break;
+                      case DropReason::Expired:
+                          item.fail_with(RequestCancelledError(
+                              "request deadline passed before execution"));
+                          break;
+                      case DropReason::Closed:
+                          item.fail_with(
+                              RequestCancelledError("instance " + name_ + " stopped"));
+                          break;
+                  }
+              }) {
         if (!engine_) throw ConfigError("instance " + name_ + " has no engine");
         if (window_.max_batch_size > static_cast<size_t>(engine_->max_batch())) {
             throw ConfigError("instance " + name_ + ": the window's max_batch_size " +

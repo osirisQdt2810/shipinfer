@@ -94,6 +94,10 @@ namespace shipinfer {
         std::string name;
         std::string class_name;
         const float* data = nullptr;  // rows x row_elems floats, on `device`
+        // What `data` points into. A request made from this payload keeps a copy, so the
+        // buffer outlives a stage that gave up waiting on it — the worker's scratch cannot
+        // hand it out again while an instance may still be reading it.
+        std::shared_ptr<DeviceBuffer> owner;
         size_t rows = 0;
         size_t row_elems = 0;
         Device device;
@@ -169,7 +173,7 @@ namespace shipinfer {
             for (const auto& [name, _] : batches_) names.push_back(name);
             return names;
         }
-        // Names present *and non-empty*: what a stage with `requires` waits for. The
+        // Names present *and non-empty*: what a stage with `needs` waits for. The
         // conditional branch lives here — a ship crop set with zero rows is available (the
         // graph is valid) and not non-empty (the segmenter is never called for it).
         std::vector<std::string> non_empty() const {

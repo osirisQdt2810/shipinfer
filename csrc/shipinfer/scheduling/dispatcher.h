@@ -99,9 +99,16 @@ namespace shipinfer {
                 }
                 ++attempt;
             }
+            size_t depth = 0, capacity = 0;
+            for (Placeable* candidate : ready) {
+                depth += candidate->depth();
+                capacity += candidate->capacity();
+            }
             throw QueueFullError("model '" + model_name_ + "': every ready instance refused (" +
-                                 std::to_string(ready.size()) +
-                                 " tried); the pool is saturated");
+                                     std::to_string(ready.size()) + " tried, " +
+                                     std::to_string(depth) + "/" + std::to_string(capacity) +
+                                     " queued over the pool); the pool is saturated",
+                                 depth, capacity);
         }
 
       private:

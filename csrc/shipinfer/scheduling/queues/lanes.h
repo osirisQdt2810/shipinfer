@@ -20,7 +20,7 @@ namespace shipinfer {
     class Lane {
       public:
         void push(T item) {
-            const std::string key = item.camera();
+            const std::string& key = item.camera();
             auto it = by_key_.find(key);
             if (it == by_key_.end()) {
                 it = by_key_.emplace(key, std::deque<T>{}).first;

@@ -448,10 +448,8 @@ int main(int argc, char** argv) {
         queue.close();
         for (auto& worker : workers) worker.join();
         // After the workers: a model stopped while a worker still had a frame in hand failed
-        // that
-
-        // frame's embedder request as 'instance stopped' and sealed it Incomplete at shutdown.
-
+        // that frame's embedder request as 'instance stopped' and sealed it Incomplete at
+        // shutdown.
         for (auto& [name, model] : models) model->stop();
         sweeper.join();
         collector.drain();

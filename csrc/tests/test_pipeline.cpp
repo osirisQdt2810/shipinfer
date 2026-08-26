@@ -8,6 +8,7 @@
 
 #include "shipinfer/pipeline/graph/dag.h"
 #include "shipinfer/pipeline/graph/stage.h"
+#include "shipinfer/pipeline/graph/stages.h"
 #include "shipinfer/pipeline/graph/state.h"
 #include "shipinfer/pipeline/reassembly/collector.h"
 
@@ -29,9 +30,9 @@ namespace {
     class FakeStage : public Stage {
       public:
         FakeStage(std::string name, std::vector<std::string> consumes,
-                  std::vector<std::string> requires, std::string produces, size_t rows,
+                  std::vector<std::string> needs, std::string produces, size_t rows,
                   bool fail = false)
-            : Stage(std::move(name), std::move(consumes), std::move(requires), {produces}),
+            : Stage(std::move(name), std::move(consumes), std::move(needs), {produces}),
               produces_(std::move(produces)),
               rows_(rows),
               fail_(fail) {}
@@ -180,7 +181,45 @@ namespace {
 
 }  // namespace
 
+// -- WorkerScratch: a buffer is reused only once nobody else holds it -----------------
+void scratch_pool_reuses_only_released_buffers() {
+    WorkerScratch scratch(Device::cuda(0));
+    std::shared_ptr<DeviceBuffer> first = scratch.acquire("crops", 1024);
+    std::shared_ptr<DeviceBuffer> second = scratch.acquire("crops", 1024);
+    check(first.get() != second.get(),
+          "a held buffer is not handed out again (the timed-out request still points at it)");
+    check(scratch.held("crops") == 2, "both are held");
+    const DeviceBuffer* released = first.get();
+    first.reset();
+    std::shared_ptr<DeviceBuffer> third = scratch.acquire("crops", 1024);
+    check(third.get() == released, "a released buffer is the one reused");
+    check(scratch.held("crops") == 2, "still two held: the reused one and `second`");
+    std::shared_ptr<DeviceBuffer> larger = scratch.acquire("crops", 4096);
+    check(
+        larger->bytes() >= 4096 && larger.get() != second.get() && larger.get() != third.get(),
+        "a request for more bytes than any free buffer holds gets a new one");
+}
+
+void scratch_pool_refuses_unbounded_growth() {
+    WorkerScratch scratch(Device::cuda(0));
+    std::vector<std::shared_ptr<DeviceBuffer>> held;
+    for (size_t i = 0; i < WorkerScratch::kMaxHeldPerName; ++i) {
+        held.push_back(scratch.acquire("frames", 256));
+    }
+    bool refused = false;
+    try {
+        scratch.acquire("frames", 256);
+    } catch (const ServerStateError& error) {
+        refused = std::string(error.what()).find("still held") != std::string::npos;
+    }
+    check(refused, "the pool refuses past its cap, naming the held payloads");
+    held.pop_back();
+    check(scratch.acquire("frames", 256) != nullptr, "one release, one more acquire");
+}
+
 int main() {
+    scratch_pool_reuses_only_released_buffers();
+    scratch_pool_refuses_unbounded_growth();
     test_a_stage_whose_input_is_empty_is_skipped_not_failed();
     test_a_failing_stage_does_not_end_the_frame();
     test_the_collector_sees_planned_delivered_and_missing();
