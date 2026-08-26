@@ -204,19 +204,17 @@ class TestTheChunkLoopCoversTheBatch:
             _CountingEvent.records == 3 and _CountingEvent.syncs == 3
         ), "each chunk records its event once and is waited for once before its read"
 
-    def test_a_letterbox_batch_larger_than_one_chunk_matches(self, stream, monkeypatch) -> None:
-        monkeypatch.setattr(TorchImageOps, "_STAGE_CHUNK_ELEMENTS", 3 * 12 * 20)
-        images = [NOISE, FRAME, NOISE, PIXEL]
+    def test_letterbox_never_touches_the_pool(self, stream) -> None:
+        """Round 2 of #31: letterbox is one chunk at the production shape, where the
+        ping-pong cannot engage and staging only adds a serial memcpy — so it stays on the
+        plain `.cpu()` path, deliberately, and a pool handed to the ops must stay cold."""
         pool = PinnedStagingPool(owner="test")
-        staged, plain = _pair(pool)
-        assert TorchImageOps._stage_rows((4, 3, 12, 20)) == 1, "the case must chunk"
-
-        result = staged.letterbox_batch(images, (12, 20), IMAGENET)
-
-        np.testing.assert_array_equal(
-            result.tensor, plain.letterbox_batch(images, (12, 20), IMAGENET).tensor
-        )
-        assert _CountingEvent.records == 4 and _CountingEvent.syncs == 4
+        staged_ops, plain_ops = _pair(pool)
+        ours = staged_ops.letterbox_batch([FRAME], (16, 16), PARAMS)
+        theirs = plain_ops.letterbox_batch([FRAME], (16, 16), PARAMS)
+        np.testing.assert_array_equal(ours.tensor, theirs.tensor)
+        assert pool.stats()["misses"] == 0, "letterbox is unstaged by decision, not accident"
+        assert _CountingEvent.records == 0
 
 
 class TestTheBufferIsFixedShape:
@@ -236,31 +234,26 @@ class TestTheBufferIsFixedShape:
         for count in (1, 5, 40):
             ops.crop_batch(NOISE, _random_boxes(count, NOISE.shape), (8, 8), PARAMS)
 
-        # A ping-pong PAIR per name: two entries and two allocations however the crowd
-        # changes; anything above two means N reached the key.
+        # Crowds 1 and 5 are single-chunk (one buffer, `:b` lazy — #31 round 2); crowd 40
+        # spans five chunks and brings the pair in. Two entries and two allocations across
+        # three different crowds is the claim: N never reaches the key.
         assert pool.stats()["entries"] == 2
         assert pool.stats()["misses"] == 2, "a third allocation means N reached the key"
-        assert pool.stats()["hits"] == 4
+        assert pool.stats()["hits"] == 2
 
-    def test_letterbox_and_crop_do_not_share_a_buffer(self, stream) -> None:
-        """Two names, two buffers — the pool's own rule. One buffer between them would stage
-        a crop over a letterbox that a backend had not read yet."""
+    def test_the_second_buffer_exists_only_where_the_ping_pong_engages(
+        self, stream, monkeypatch
+    ) -> None:
+        """#31 round 2: a single-chunk call must not lock a second page it never reads;
+        a multi-chunk call gets the pair, and the two buffers are distinct memory."""
+        monkeypatch.setattr(TorchImageOps, "_STAGE_CHUNK_ELEMENTS", 3 * 8 * 8)
         pool = PinnedStagingPool(owner="test")
         ops = _staged(pool)
-        ops.letterbox_batch([FRAME], (16, 16), PARAMS)
-        ops.crop_batch(FRAME, _random_boxes(3, FRAME.shape), (8, 8), PARAMS)
-
-        assert pool.stats()["entries"] == 4  # a ping-pong pair per name
-        allocations = pool.stats()["misses"]
-        letterbox = pool.get(
-            "letterbox:a", (TorchImageOps._stage_rows((1, 3, 16, 16)), 3, 16, 16), torch.float32
-        )
-        crop = pool.get(
-            "crop:a", (TorchImageOps._stage_rows((3, 3, 8, 8)), 3, 8, 8), torch.float32
-        )
-
-        assert pool.stats()["misses"] == allocations, "those are not the buffers the ops used"
-        assert letterbox.data_ptr() != crop.data_ptr()
+        ops.crop_batch(FRAME, _random_boxes(3, FRAME.shape), (8, 8), PARAMS)  # 3 chunks
+        assert pool.stats()["entries"] == 2, "multi-chunk: the ping-pong pair"
+        first = pool.get("crop:a", (1, 3, 8, 8), torch.float32)
+        second = pool.get("crop:b", (1, 3, 8, 8), torch.float32)
+        assert first.data_ptr() != second.data_ptr()
 
     def test_the_result_is_not_a_view_of_the_reused_buffer(self, stream) -> None:
         """The caller owns its array. Returning a view would mean the next crop of the next
@@ -475,3 +468,37 @@ class TestReleaseStaging:
         assert memory.staging_for("ops:test#1:cuda:0") is not pool, "a new claim is fresh"
         memory.release_staging("ops:test#1:cuda:0")
         memory.release_staging("never-claimed")  # both must be quiet no-ops
+
+    def test_stats_survives_a_concurrent_release(self) -> None:
+        """#31 round 2: `release_staging` is the first path that removes entries, and
+        `stats()` used to iterate the live dict — /v2/statistics 500'd with "dictionary
+        changed size" exactly while a pipeline was stopping. 200 alternations pin the
+        snapshot."""
+        import threading as _threading
+
+        from shipinfer.runtime.memory.pool import MemoryPool
+
+        memory = MemoryPool()
+        errors: list[BaseException] = []
+
+        def churn() -> None:
+            try:
+                for index in range(200):
+                    memory.staging_for(f"ops:hammer#{index}:cuda:0")
+                    memory.release_staging(f"ops:hammer#{index - 1}:cuda:0")
+            except BaseException as exc:
+                errors.append(exc)
+
+        def read() -> None:
+            try:
+                for _ in range(200):
+                    memory.stats()
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [_threading.Thread(target=churn), _threading.Thread(target=read)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        assert errors == []

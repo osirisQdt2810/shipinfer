@@ -230,10 +230,20 @@ class TorchImageOps(ImageOps):
             return torch.empty(shape, dtype=tensor.dtype).numpy()
 
         rows = self._stage_rows(shape)
+        spans = [(lo, min(lo + rows, shape[0])) for lo in range(0, shape[0], rows)]
         try:
+            # `:b` exists only where the ping-pong can engage. A single-chunk call — the
+            # production letterbox frame, a reid-sized crop set — never touches a second
+            # buffer, and an eagerly allocated one would be a permanently locked page that
+            # buys nothing (#31 round 2).
+            first = self._staging.get(f"{name}:a", (rows, *shape[1:]), tensor.dtype)
             staged = (
-                self._staging.get(f"{name}:a", (rows, *shape[1:]), tensor.dtype),
-                self._staging.get(f"{name}:b", (rows, *shape[1:]), tensor.dtype),
+                first,
+                (
+                    self._staging.get(f"{name}:b", (rows, *shape[1:]), tensor.dtype)
+                    if len(spans) > 1
+                    else first
+                ),
             )
         except (DeviceError, RuntimeError) as exc:
             # Refused because a capture is underway, or because the host is out of lockable
@@ -249,10 +259,9 @@ class TorchImageOps(ImageOps):
             return tensor.cpu().numpy()
 
         host = torch.empty(shape, dtype=tensor.dtype)
-        tensor = tensor.contiguous()  # a no-op for both call sites; a whole-batch copy if not
+        tensor = tensor.contiguous()  # a no-op for the call site; a whole-batch copy if not
         stream = torch.cuda.current_stream(self._device)
         events = self._stage_events(name)
-        spans = [(lo, min(lo + rows, shape[0])) for lo in range(0, shape[0], rows)]
         for index, (lo, hi) in enumerate(spans):
             staged[index % 2][: hi - lo].copy_(tensor[lo:hi], non_blocking=True)
             events[index % 2].record(stream)
@@ -286,7 +295,7 @@ class TorchImageOps(ImageOps):
         if pair is None:
             torch = self._torch
             pair = (torch.cuda.Event(), torch.cuda.Event())
-            if len(self._event_cache) > self._CACHE_LIMIT:
+            if len(self._event_cache) >= self._CACHE_LIMIT:
                 self._event_cache.clear()
             self._event_cache[name] = pair
         return pair
@@ -320,7 +329,17 @@ class TorchImageOps(ImageOps):
         )
         scales, pads, extents = self._letterbox(images, canvas, params, pad_value)
         return LetterboxResult(
-            tensor=self._to_host(canvas, "letterbox"), scales=scales, pads=pads, extents=extents
+            # Deliberately NOT staged (#31 round 2): the production letterbox is one chunk
+            # ((1, 3, 640, 640) -> a single span), where the ping-pong cannot engage and the
+            # staged path is a pinned D2H plus a serial full-size host memcpy the plain
+            # `.cpu()` never performs — and the micro-bench measured the staged row at or
+            # above pageable on every attempt. Staging letterbox is a follow-up gated on a
+            # quiet-box pair at this exact shape (see the PR's record); `crop_batch`'s mask
+            # batches are multi-chunk and keep the staged path, where it measured a win.
+            tensor=canvas.cpu().numpy(),
+            scales=scales,
+            pads=pads,
+            extents=extents,
         )
 
     def _letterbox(
