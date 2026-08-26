@@ -252,3 +252,48 @@ class TestBackpressureAndLoss:
         assert caught.value.owner == "B" and caught.value.tags == (("quay-3", 77),)
         assert not proxy.is_ready
         assert reader.pending == 0
+
+
+class TestRepliesThatCannotLand:
+    """A reply is held through a burst and dropped only for a corpse — never lost silently."""
+
+    def _ingress(self, results_slots: int = 1, patience_s: float = 0.05):
+        layout = RingLayout(slots=4, slot_bytes=64 * 1024)
+        inbound = SharedRing.create(_name("inb"), layout, owner="B")
+        results_owner = SharedRing.create(
+            _name("res"), RingLayout(slots=results_slots, slot_bytes=64 * 1024), owner="A"
+        )
+        results_writer = SharedRing.open(results_owner.name, results_owner.layout)
+        ingress = RingIngress(
+            submitter="A",
+            inbound=inbound,
+            results=results_writer,
+            infer=FakeModel().infer,
+            load=lambda: (0, 0.0),
+            result_timeout_s=0.01,
+            result_patience_s=patience_s,
+        )
+        return ingress, inbound, results_owner, results_writer
+
+    def test_a_closed_result_ring_means_the_submitter_is_gone(self) -> None:
+        ingress, inbound, results_owner, results_writer = self._ingress()
+        results_owner.close()  # the submitter left; its reader failed its futures already
+        ingress._reply_failure(7, "m", ValueError("late"))
+        assert ingress.dropped == 1, "counted, not raised"
+        inbound.close()
+        results_writer.close()
+
+    def test_a_full_result_ring_is_waited_out_then_given_up_with_a_count(self) -> None:
+        ingress, inbound, results_owner, results_writer = self._ingress(
+            results_slots=1, patience_s=0.05
+        )
+        blocker = results_writer.claim(timeout_s=0.1)  # the one slot, held for the whole test
+        started = time.monotonic()
+        ingress._reply_failure(9, "m", ValueError("burst"))
+        waited = time.monotonic() - started
+        assert ingress.dropped == 1
+        assert waited >= 0.05, "the patience was actually spent waiting, not skipped"
+        results_writer.abandon(blocker)
+        results_owner.close()
+        inbound.close()
+        results_writer.close()

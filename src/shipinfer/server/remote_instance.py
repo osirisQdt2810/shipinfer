@@ -42,7 +42,12 @@ import time
 from collections.abc import Callable
 from concurrent.futures import Future
 
-from shipinfer.core.errors import PeerLostError, RingFullError, ServerStateError
+from shipinfer.core.errors import (
+    PeerLostError,
+    RingClosedError,
+    RingFullError,
+    ServerStateError,
+)
 from shipinfer.core.logging import get_logger
 from shipinfer.core.request import InferenceRequest, InferenceResponse
 from shipinfer.core.types import Device
@@ -281,6 +286,7 @@ class RingIngress(threading.Thread):
         load: Callable[[], tuple[int, float]],
         stamp_every_s: float = 0.2,
         result_timeout_s: float = 1.0,
+        result_patience_s: float = 30.0,
         poll_s: float = 0.0005,
     ) -> None:
         super().__init__(name=f"shipinfer-ring-ingress-{submitter}", daemon=True)
@@ -291,11 +297,16 @@ class RingIngress(threading.Thread):
         self._load = load
         self._stamp_every_ns = int(stamp_every_s * 1e9)
         self._result_timeout_s = result_timeout_s
+        self._result_patience_s = result_patience_s
         self._poll_s = poll_s
         self._stopping = threading.Event()
         self._last_stamp_ns = 0
         self.served = 0
         self.failed = 0
+        #: Replies that could not land: the submitter's result ring stayed full past
+        #: `result_patience_s`, or was already closed (the submitter is gone). The submitter's
+        #: own timeout/heartbeat machinery fails the future; this counter says it was us.
+        self.dropped = 0
 
     def stop(self) -> None:
         self._stopping.set()
@@ -306,7 +317,7 @@ class RingIngress(threading.Thread):
             self._stamp()
             index = self._inbound.take(timeout_s=self._poll_s)
             if index is None:
-                if self._inbound.header().closed:
+                if self._inbound.is_closed:
                     return
                 continue
             self._serve(index)
@@ -355,7 +366,9 @@ class RingIngress(threading.Thread):
         future.add_done_callback(done)
 
     def _reply(self, response: InferenceResponse) -> None:
-        index = self._results.claim(self._result_timeout_s)
+        index = self._claim_result_slot(response.request_id)
+        if index is None:
+            return
         try:
             wire.encode_response(response, self._results.payload(index))
         except Exception as exc:
@@ -369,15 +382,35 @@ class RingIngress(threading.Thread):
 
     def _reply_failure(self, request_id: int, model_name: str, error: BaseException) -> None:
         self.failed += 1
-        try:
-            index = self._results.claim(self._result_timeout_s)
-        except RingFullError:
-            _LOG.error(
-                "result ring to %s full; failure for %d dropped: %s",
-                self._submitter,
-                request_id,
-                error,
-            )
+        index = self._claim_result_slot(request_id)
+        if index is None:
             return
         wire.encode_failure(request_id, model_name, error, self._results.payload(index))
         self._results.publish(index)
+
+    def _claim_result_slot(self, request_id: int) -> int | None:
+        """A slot in the submitter's result ring — waiting out a burst, never a corpse.
+
+        A full result ring is back-pressure from the submitter's reader: hold the reply (and,
+        upstream, the inbound slot) and retry, up to ``result_patience_s`` — the pressure is
+        the design (ADR-005), and a reply must not be dropped for a burst. A *closed* ring is
+        the submitter gone: drop quietly, because its own heartbeat machinery has already
+        failed every future it was waiting on. Both outcomes count in ``dropped``.
+        """
+        deadline = time.monotonic() + self._result_patience_s
+        while True:
+            try:
+                return self._results.claim(self._result_timeout_s)
+            except RingClosedError:
+                self.dropped += 1
+                return None
+            except RingFullError:
+                if self._stopping.is_set() or time.monotonic() >= deadline:
+                    self.dropped += 1
+                    _LOG.error(
+                        "result ring to %s stayed full for %.0fs; reply for request %d dropped",
+                        self._submitter,
+                        self._result_patience_s,
+                        request_id,
+                    )
+                    return None
