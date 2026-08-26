@@ -425,3 +425,59 @@ class TestAnInvalidCudaGraphsOverrideIsRefusedEverywhere:
 
         assert _graphs_enabled(ExecutionSettings(cuda_graphs=True)) is True
         assert _graphs_enabled(ExecutionSettings(cuda_graphs=False)) is False
+
+
+class TestTheTierRetrySeam:
+    """`admit_local` / `try_dispatch_local` / `count_local_rejection` (#26 round 3).
+
+    Admission is first-entry work; a dispatch retry re-runs none of it and records
+    nothing, and only the tier's final give-up counts as the rejection `_infer` records.
+    """
+
+    def test_a_dispatch_retry_records_nothing_and_the_give_up_records_once(
+        self, server: InferenceServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from shipinfer.core.errors import QueueFullError
+
+        model = server.model("echo")
+        item = model.admit_local(_request())
+        assert not item.future.done()
+
+        class Refusing:
+            @staticmethod
+            def dispatch(*_args, **_kwargs):
+                raise QueueFullError("echo", 8, 8)
+
+        monkeypatch.setattr(model, "_local_dispatcher", Refusing())
+
+        def failures() -> int:
+            return model.statistics.as_dict("echo", 1)["inference_stats"]["fail"]["count"]
+
+        before = failures()
+        for _ in range(50):  # a saturated queue probed 50 times
+            assert model.try_dispatch_local(item) is False
+        assert failures() == before, "retries record nothing"
+        model.count_local_rejection()
+        assert failures() == before + 1, "the give-up records once"
+
+    def test_an_admitted_item_dispatches_and_answers(self, server: InferenceServer) -> None:
+        model = server.model("echo")
+        item = model.admit_local(_request())
+        assert model.try_dispatch_local(item) is True
+        response = item.future.result(timeout=5.0)
+        assert response.model_name == "echo"
+
+    def test_a_wire_stamped_received_ns_survives_admission(
+        self, server: InferenceServer
+    ) -> None:
+        """The wire carries the submitter's stamp; the owner keeps it, so a borrowed
+        request's end-to-end latency is not rewritten as owner-side latency."""
+        model = server.model("echo")
+        stamped = _request()
+        stamped.timings.received_ns = 123_456
+        model.admit_local(stamped)
+        assert stamped.timings.received_ns == 123_456
+
+        fresh = _request()
+        model.admit_local(fresh)
+        assert fresh.timings.received_ns > 0, "a local request is stamped on arrival"

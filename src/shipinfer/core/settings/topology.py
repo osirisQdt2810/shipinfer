@@ -17,7 +17,53 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-__all__ = ["TopologySettings"]
+__all__ = ["ServiceSettings", "TopologySettings"]
+
+
+class ServiceSettings(BaseModel):
+    """`service`: the fleet plus a cross-process inference tier for the crop-stage models.
+
+    Every shard keeps serving its own GPU's instances of the shared models *and* offers them to
+    its peers through pinned shared-memory rings (`runtime/memory/shared_ring.py`). The
+    per-child keys (`shard`, `peers`, `run_id`) are set by the launcher, never by an operator.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: The models a shard offers to its peers: crops, never frames — a 1080p frame is 6 MB and
+    #: would triple the pinned footprint; the detector stays local by design. The segmenter is
+    #: not in the default either: its batch is 8 x 3 x 640 x 640 fp32 = 39 MB, so its rings would
+    #: dwarf the embedders' — whether to pay that is the operator's call (T3's open question).
+    shared_models: list[str] = Field(
+        default_factory=lambda: ["person_embedder", "ship_embedder"]
+    )
+    #: Slots per (submitter, owner, model) ring. Small on purpose: the rings are pairwise, so
+    #: four shards and three models are 24 rings each way, and every slot is pinned.
+    slots_per_pair: int = Field(default=8, ge=1)
+    #: The fallback slot size, used only when a model declares a dynamic extent. Otherwise slots
+    #: are sized per model *and per direction* from the model's own config
+    #: (`service_mesh.wire_slot_bytes`): max_batch x the tensors' bytes plus 64 KiB for the heads,
+    #: which travel in the slot ahead of the bytes, page-rounded. A request that does not fit is
+    #: refused before a byte moves.
+    slot_bytes: int = Field(default=1_638_400, ge=4096)
+    #: How long a submit waits for a free slot before the ring is called full.
+    submit_timeout_ms: float = Field(default=5.0, gt=0.0)
+    #: How often an owner stamps its ring headers, and after how many missed stamps a peer is
+    #: lost. 200 ms and 1 s: one missed stamp is a scheduler hiccup, five is a dead process.
+    heartbeat_ms: float = Field(default=200.0, gt=0.0)
+    lost_after_ms: float = Field(default=1000.0, gt=0.0)
+    #: How long a pending remote request may wait for its reply before it fails with a
+    #: timeout — the bound on how long a stranded WorkItem can pin its inputs.
+    pending_timeout_ms: float = Field(default=60_000.0, gt=0.0)
+    #: How long a starting shard waits for its peers' rings to appear.
+    connect_timeout_s: float = Field(default=60.0, gt=0.0)
+
+    #: Set by the launcher for each child: this shard's index, every shard's index, and the
+    #: run id that names the rings. `None` / empty in a single-process `serve`, where there is
+    #: no tier to join.
+    shard: int | None = Field(default=None, ge=0)
+    peers: list[int] = Field(default_factory=list)
+    run_id: str = ""
 
 
 class TopologySettings(BaseModel):
@@ -36,6 +82,8 @@ class TopologySettings(BaseModel):
     shards: int | None = Field(default=None, ge=1)
     #: Seconds a shard gets after SIGTERM before SIGKILL.
     drain_s: float = Field(default=20.0, gt=0.0)
+    #: The `service` topology's knobs; unused by `fleet`.
+    service: ServiceSettings = Field(default_factory=ServiceSettings)
 
 
 #: The settings-tree keys a fleet launcher sets for each shard process. Defined here, beside the
@@ -54,3 +102,7 @@ SHARED_BY_ENV = "SHIPINFER_DEVICES__SHARED_BY"
 #: The shard's rank among the processes sharing each device, aligned with the ordinals. The
 #: remainder of a count that does not divide evenly goes to the lowest ranks.
 SHARE_RANK_ENV = "SHIPINFER_DEVICES__SHARE_RANK"
+#: The `service` topology's per-child keys, settings-tree spellings (`topology.service.*`).
+SERVICE_SHARD_ENV = "SHIPINFER_TOPOLOGY__SERVICE__SHARD"
+SERVICE_PEERS_ENV = "SHIPINFER_TOPOLOGY__SERVICE__PEERS"
+SERVICE_RUN_ENV = "SHIPINFER_TOPOLOGY__SERVICE__RUN_ID"

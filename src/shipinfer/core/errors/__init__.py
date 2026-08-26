@@ -35,6 +35,7 @@ from shipinfer.core.errors.topology import (
     RingFullError,
     RingProtocolError,
     ShardExitedError,
+    WireRefusedError,
 )
 from shipinfer.core.errors.tracking import TrackingError
 
@@ -66,4 +67,5 @@ __all__ = [
     "SourceUnavailableError",
     "TrackingError",
     "ValidationError",
+    "WireRefusedError",
 ]

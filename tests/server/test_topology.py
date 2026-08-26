@@ -151,8 +151,10 @@ class TestTheFleetCommandGoesThroughTheTopology:
         received: dict[str, object] = {}
 
         class _Fleet:
-            def __init__(self, *, plan, command, env, drain_s) -> None:
-                received.update(plan=plan, command=command, env=env, drain_s=drain_s)
+            def __init__(self, *, plan, command, env, shard_env, drain_s) -> None:
+                received.update(
+                    plan=plan, command=command, env=env, shard_env=shard_env, drain_s=drain_s
+                )
 
             def start(self) -> None: ...
 
@@ -165,6 +167,9 @@ class TestTheFleetCommandGoesThroughTheTopology:
 
         assert module.fleet(Path("model_repository"), shards=2, gpus="2,3", drain_s=7.0) == 0
         assert received["env"][TOPOLOGY_ENV] == "fleet"
+        assert (
+            received["shard_env"](received["plan"].shards[0]) == {}
+        ), "fleet says nothing per shard"
         assert received["drain_s"] == 7.0
         shard = received["plan"].shards[0]
         assert received["command"](shard) == serve_command(shard, repository="model_repository")

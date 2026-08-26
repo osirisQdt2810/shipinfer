@@ -473,6 +473,19 @@ class SharedRing:
         with self._view_lock:
             return self._detached or self._view[self._CLOSED_OFFSET] == 1
 
+    def load_signal(self) -> tuple[int, float, int]:
+        """``(depth, ewma_latency_us, heartbeat_ns)`` — one unpack over the stamp window.
+
+        The cheap read for the per-request path: `header()` builds a dataclass and decodes
+        the owner name, which is five allocations a policy touching every candidate per
+        request does not need. A detached handle answers ``(0, 0.0, 0)``.
+        """
+        with self._view_lock:
+            if self._detached:
+                return (0, 0.0, 0)
+            depth, _pad, ewma, heartbeat = _STAMP.unpack_from(self._view, _STAMP_OFFSET)
+        return (depth, ewma, heartbeat)
+
     def stamp(self, *, depth: int, ewma_latency_us: float) -> None:
         """The owner publishes its load. Called on every enqueue and dequeue; cheap on purpose.
 

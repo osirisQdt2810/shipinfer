@@ -4,6 +4,8 @@
 #   deploy/rootless/test.sh                    # the offline tier
 #   deploy/rootless/test.sh -m gpu             # the GPU tier
 #   deploy/rootless/test.sh -m multigpu
+#   SHIPINFER_TEST_GPUS=3,4 deploy/rootless/test.sh -m multigpu   # which physical GPUs a
+#                                              # multi-process test may take (default 0,1)
 #   deploy/rootless/test.sh tests/ingest -q    # any pytest arguments
 #
 # WHY A CONTAINER IS NOT OPTIONAL HERE
@@ -90,6 +92,7 @@ exec docker run --rm --pid=host --device nvidia.com/gpu=all \
   -e LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu${trt_path}" \
   -e PYTHONDONTWRITEBYTECODE=1 \
   -e PYTHONPATH="/work/src${shipvision_path}" \
+  -e SHIPINFER_TEST_GPUS \
   -v "$REPO:/work:ro" \
   -v "$WHEELS:/wheels:ro" \
   "${trt_mount[@]}" \

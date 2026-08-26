@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 from shipinfer.core.errors import ConfigurationError
-from shipinfer.server.topology import fleet as _fleet
 from shipinfer.server.topology.base import TOPOLOGIES, TOPOLOGY_ENV, Topology
+from shipinfer.server.topology.fleet import FleetTopology
+from shipinfer.server.topology.service import ServiceTopology
 
-__all__ = ["TOPOLOGIES", "TOPOLOGY_ENV", "Topology", "build_topology"]
+__all__ = [
+    "TOPOLOGIES",
+    "TOPOLOGY_ENV",
+    "FleetTopology",
+    "ServiceTopology",
+    "Topology",
+    "build_topology",
+]
 
 
 def build_topology(kind: str) -> Topology:

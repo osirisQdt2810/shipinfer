@@ -23,6 +23,7 @@ def fleet(
     log_level: str = "INFO",
     dry_run: bool = False,
     drain_s: float | None = None,
+    http_port_base: int | None = None,
 ) -> int:
     """Split the configured fleet across ``shards`` processes and supervise them.
 
@@ -92,8 +93,11 @@ def fleet(
 
     running = Fleet(
         plan=plan,
-        command=lambda shard: chosen.command(shard, repository=str(repository)),
+        command=lambda shard: chosen.command(
+            shard, repository=str(repository), http_port_base=http_port_base
+        ),
         env=chosen.environment(settings),
+        shard_env=chosen.shard_environment,
         drain_s=drain,
     )
     # The handler goes in before the first child exists: a signal in the window between
