@@ -66,6 +66,19 @@ class MemoryPool:
                     self._staging_pools[owner] = pool
         return pool
 
+    def release_staging(self, owner: str) -> None:
+        """Free one owner's staging pool now instead of at :meth:`close`.
+
+        Owner keys can embed a thread ident (the pipeline's do), so a runner that stops and
+        starts again mints new keys each cycle — without this, every cycle strands its
+        page-locked buffers for the life of the server. Releasing an unknown owner is a
+        no-op: the caller records what it created and this forgives a double release.
+        """
+        with self._lock:
+            pool = self._staging_pools.pop(owner, None)
+        if pool is not None:
+            pool.clear()
+
     @property
     def pinned(self) -> Allocator:
         """Page-locked host memory.
@@ -145,9 +158,14 @@ class MemoryPool:
         return device_report(device)
 
     def stats(self) -> dict[str, dict[str, int]]:
+        # `release_staging` is the first path that removes staging entries; iterating the
+        # live dict here raced it into "dictionary changed size" on /v2/statistics — the
+        # same hazard engine.stats() documents for the model table. Snapshot under the lock.
+        with self._lock:
+            staging = list(self._staging_pools.items())
         out: dict[str, dict[str, int]] = {
             "host": self._host.stats(),
-            **{f"staging[{o}]": p.stats() for o, p in self._staging_pools.items()},
+            **{f"staging[{o}]": p.stats() for o, p in staging},
         }
         if self._pinned is not None:
             out["pinned"] = self._pinned.stats()
@@ -160,13 +178,14 @@ class MemoryPool:
             allocators = list(self._device_allocators.values())
             self._device_allocators.clear()
             pinned, self._pinned = self._pinned, None
+            staging = list(self._staging_pools.values())
+            self._staging_pools.clear()
         for allocator in allocators:
             allocator.close()
         if pinned is not None and pinned is not self._host:
             pinned.close()
-        for pool in self._staging_pools.values():
+        for pool in staging:
             pool.clear()
-        self._staging_pools.clear()
         self._host.close()
 
     def __repr__(self) -> str:

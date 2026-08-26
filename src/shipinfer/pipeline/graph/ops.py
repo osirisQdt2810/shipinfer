@@ -35,9 +35,31 @@ import numpy as np
 from shipinfer.core.logging import get_logger
 from shipinfer.runtime.ops import ImageOps, LetterboxResult, NormalizeParams
 
-__all__ = ["ThreadLocalImageOps"]
+__all__ = ["ThreadLocalImageOps", "staging_owner"]
 
 _LOG = get_logger("pipeline.ops")
+
+
+def staging_owner(device_index: int) -> str:
+    """The pinned-staging pool key for the calling thread's ops on ``device_index``.
+
+    :meth:`~shipinfer.runtime.memory.MemoryPool.staging_for` hands one pool per owner string,
+    so this string is the whole safety argument: two live threads sharing one key share one
+    buffer, and the second one's copy overwrites the first's while its DMA is still reading
+    it. That failure has no diagnostic — one camera's crops come back under another camera's
+    tag, with plausible pixels and no error anywhere.
+
+    The thread's name alone is not unique. Two :class:`~shipinfer.pipeline.PipelineRunner`
+    instances over one server both name their workers ``pipeline-worker-0``, which is exactly
+    the collision above. The identity is therefore in the key as well, and so is the device,
+    because a pool's buffers are only useful to the device they were staged for.
+
+    A recycled identity — the interpreter hands one out again after a thread exits — is safe:
+    only one live thread can hold it at a time, and the ops synchronise every staged copy
+    before returning, so a thread that has exited left no DMA reading its buffers.
+    """
+    thread = threading.current_thread()
+    return f"ops:{thread.name}#{threading.get_ident():x}:cuda:{device_index}"
 
 
 class ThreadLocalImageOps(ImageOps):

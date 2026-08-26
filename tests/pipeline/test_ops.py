@@ -12,7 +12,7 @@ import threading
 import numpy as np
 import pytest
 
-from shipinfer.pipeline.graph.ops import ThreadLocalImageOps
+from shipinfer.pipeline.graph.ops import ThreadLocalImageOps, staging_owner
 from shipinfer.runtime.ops import NormalizeParams
 from shipinfer.runtime.ops.numpy_ops import NumpyImageOps
 
@@ -124,6 +124,60 @@ class TestPreprocessingIsSpreadAcrossDevices:
         ops = ThreadLocalImageOps(CountingOps, devices=())
         assert ops.on_device is False
         assert ops.assignments() == {0: 1}
+
+
+class TestStagingOwners:
+    """The pinned pool is keyed by this string, so two live threads must never produce one.
+
+    A shared key is a shared buffer, and a shared buffer is one worker's crops overwritten by
+    another's mid-DMA: plausible pixels under the wrong camera's tag, with no error to notice.
+    """
+
+    def test_every_worker_gets_its_own_key(self):
+        """The barrier is the test, not scenery: keys only have to differ between threads
+        that are *alive together*, and without it these eight are short enough that the
+        interpreter hands the same identity to the next one."""
+        owners: list[str] = []
+        lock = threading.Lock()
+        together = threading.Barrier(8)
+
+        def work(_shared) -> None:
+            together.wait(5.0)
+            with lock:
+                owners.append(staging_owner(2))
+
+        run_in_threads(ThreadLocalImageOps(CountingOps), 8, work)
+
+        assert len(owners) == 8
+        assert len(set(owners)) == 8
+        assert all("cuda:2" in owner for owner in owners)
+
+    def test_two_live_threads_with_the_same_name_still_differ(self):
+        """Two ``PipelineRunner`` instances over one server both name their workers
+        ``pipeline-worker-0``; the name alone would collide, which is why the identity is in
+        the key as well."""
+        owners: list[str] = []
+        lock = threading.Lock()
+        together = threading.Barrier(2)
+
+        def record() -> None:
+            together.wait(5.0)
+            with lock:
+                owners.append(staging_owner(0))
+
+        threads = [threading.Thread(target=record, name="pipeline-worker-0") for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(5.0)
+
+        assert len(set(owners)) == 2
+
+    def test_one_thread_keeps_one_key(self):
+        """The pool is looked up per instance, not cached — the same thread asking twice has
+        to get the same buffer back, or reuse is not reuse."""
+        assert staging_owner(1) == staging_owner(1)
+        assert staging_owner(1) != staging_owner(3), "the device belongs in the key"
 
 
 class TestItIsStillAnImageOps:
