@@ -25,6 +25,7 @@ namespace shipinfer {
             if (it == by_key_.end()) {
                 it = by_key_.emplace(key, std::deque<T>{}).first;
                 order_.push_back(key);
+                seen_.push_back(key);
             }
             it->second.push_back(std::move(item));
             ++size_;
@@ -42,6 +43,7 @@ namespace shipinfer {
                 order_.push_back(key);
             } else {
                 by_key_.erase(it);
+                forget(key);
             }
             --size_;
             return item;
@@ -59,14 +61,16 @@ namespace shipinfer {
         // Drop the **oldest** request of whichever key is hogging this lane. Deliberately not
         // "the globally oldest": the request that has waited longest is usually the victim of
         // a flood, not its cause; penalising the loudest camera is what keeps a quiet camera's
-        // frames alive. Ties go to the key that entered the rotation first — the same answer
-        // Python's `max()` over insertion-ordered keys gives, so the two planes evict the same
-        // item on the same trace.
+        // frames alive. Ties go to the key that was first *seen* — Python scans `by_key` in
+        // insertion order (`max()` over a dict), which `pop()` never reorders. The rotation
+        // deque does get reordered by every `pop()`, so scanning it gave a different victim
+        // after a single serve (review of #19, round 3); `seen_` is the insertion order kept
+        // for exactly this scan, so the two planes evict the same item on the same trace.
         std::optional<T> evict_from_longest() {
             if (by_key_.empty()) return std::nullopt;
             std::string worst;
             size_t deepest = 0;
-            for (const std::string& key : order_) {
+            for (const std::string& key : seen_) {
                 const size_t depth = by_key_.find(key)->second.size();
                 if (depth > deepest) {
                     deepest = depth;
@@ -85,6 +89,7 @@ namespace shipinfer {
                         break;
                     }
                 }
+                forget(worst);
             }
             return item;
         }
@@ -99,6 +104,7 @@ namespace shipinfer {
             }
             by_key_.clear();
             order_.clear();
+            seen_.clear();
             size_ = 0;
             return items;
         }
@@ -109,6 +115,18 @@ namespace shipinfer {
       private:
         std::unordered_map<std::string, std::deque<T>> by_key_;
         std::deque<std::string> order_;
+        // Keys in first-seen order, the order Python's dict scan uses; a key leaves when its
+        // bucket empties and re-enters at the back when it pushes again, as a dict key would.
+        std::vector<std::string> seen_;
+
+        void forget(const std::string& key) {
+            for (auto it = seen_.begin(); it != seen_.end(); ++it) {
+                if (*it == key) {
+                    seen_.erase(it);
+                    return;
+                }
+            }
+        }
         size_t size_ = 0;
     };
 

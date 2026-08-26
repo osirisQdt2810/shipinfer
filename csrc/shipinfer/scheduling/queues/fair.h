@@ -120,8 +120,10 @@ namespace shipinfer {
         }
 
         // -- lifecycle --------------------------------------------------------------------
-        // Close and return everything still queued, so the caller can fail exactly that much
-        // work and report it. A shutdown that silently discards 400 requests is not orderly.
+        // Close. Everything still queued is handed to the drop handler as `Closed` when one
+        // is set, and returned to the caller otherwise — either way the caller can fail
+        // exactly that much work and report it. A shutdown that silently discards 400
+        // requests is not orderly.
         std::vector<T> close() {
             std::vector<T> drained;
             {

@@ -42,9 +42,12 @@ namespace shipinfer {
         WorkerScratch& operator=(const WorkerScratch&) = delete;
         Device device() const { return device_; }
         gpuStream_t stream() const { return stream_; }
-        // A device buffer of at least `bytes` nobody else holds, by name. Reuses a released
-        // buffer, allocates while fewer than `kMaxHeldPerName` are outstanding, and refuses
-        // beyond that: unbounded growth under timeouts would be a leak wearing a pool's coat.
+        // A device buffer of at least `bytes` nobody else holds, by name. The pool holds
+        // exactly one reference to each buffer, so `use_count() == 1` means nobody else does —
+        // that is the whole arbitration, and why the pool never hands out a copy of its own
+        // handle. Reuses a released buffer, allocates while fewer than `kMaxHeldPerName` are
+        // outstanding, and refuses beyond that: unbounded growth under timeouts would be a leak
+        // wearing a pool's coat.
         std::shared_ptr<DeviceBuffer> acquire(const std::string& name, size_t bytes);
         size_t held(const std::string& name) const;
         static constexpr size_t kMaxHeldPerName = 16;

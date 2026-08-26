@@ -301,6 +301,30 @@ namespace {
         check(lane.size() == 3, "one item gone");
     }
 
+    void test_a_serve_does_not_change_who_is_evicted_next() {
+        // The trace from review round 3: push A, A, B; serve one (A's oldest); now A and B
+        // are tied at one each. Python scans `by_key` in insertion order and evicts A's
+        // remaining request; a scan of the *rotation* — reordered by the serve — evicted B's.
+        Lane<Item> lane;
+        lane.push(Item{"first", 1});
+        lane.push(Item{"first", 2});
+        lane.push(Item{"second", 3});
+        const Item served = lane.pop();
+        check(served.cam == "first" && served.id == 1, "round-robin serves first's oldest");
+        const std::optional<Item> victim = lane.evict_from_longest();
+        check(victim.has_value() && victim->cam == "first" && victim->id == 2,
+              "the tie goes to the key seen first, not to the key at the front of the "
+              "rotation — the same item Python evicts on this trace");
+        check(lane.size() == 1, "second's request survives");
+        // A key that empties and returns re-enters at the back, as a dict key would.
+        lane.push(Item{"first", 4});
+        lane.push(Item{"first", 5});
+        lane.push(Item{"second", 6});
+        const std::optional<Item> next = lane.evict_from_longest();
+        check(next.has_value() && next->cam == "second" && next->id == 3,
+              "second (seen earlier, tied at two) is the greediest by insertion order");
+    }
+
     // -- the policies (tests/scheduling/test_policies.py) -------------------------------------
 
     // A `Placeable` with no machinery behind it. The policies are given exactly four attributes
@@ -584,6 +608,7 @@ int main() {
     test_a_request_larger_than_the_budget_is_still_dequeued();
 
     test_a_tie_between_greedy_cameras_goes_to_the_one_that_entered_first();
+    test_a_serve_does_not_change_who_is_evicted_next();
 
     test_round_robin_rotates();
     test_join_shortest_queue_picks_the_shortest();
