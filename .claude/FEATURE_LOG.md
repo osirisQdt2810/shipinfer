@@ -5,6 +5,36 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-25 — The port, steps P1a–P1d: the C++ plane takes the Python plane's shape
+
+**What it is.** The operator read `csrc/` against `src/shipinfer/` and saw a different program
+(V79); the decision (V80) was to port for real, seam for seam, with the Python plane's tests as
+the specification. Four steps, one branch: the queue seam (`FairPriorityQueue`, `Lane`, `FifoQueue`,
+`BatchWindow` — `fair.py`, `lanes.py`, `fifo.py`); the five placement policies with their registry
+and the `Dispatcher` with its spill; `ModelInstance` (one thread, one bounded queue, bind once,
+assemble, execute, scatter) and `Model` over a `Dispatcher`, behind an `Engine` contract that
+`TrtInstance` implements through an adapter; and the graph as stages — `Dag`, `DetectStage`,
+`CropStage`, `ObjectStage` over `Model::infer`, planned from the frame's state, with the collector
+as observer. `cli/bench.cpp` runs that shape; the pool graph (`ModelPool`, `PipelineGraph`) is gone.
+
+**What changed in behaviour.** The C++ queue evicts the greediest camera's *oldest* frame, as
+Python does (ADR-014's one recorded divergence, closed); a detector batches in its own instance
+queue under a window instead of the drain loop assembling detector-sized batches; a partial batch
+is padded to a static plan's batch; a spilled row is peer-copied, as the Python plane copies.
+
+**Tested how.** 62 + 24 + 9 checks named after `tests/scheduling/*.py`, `tests/server/*.py` and
+`tests/pipeline/test_graph.py`, over an identity engine in host memory and fake stages — no device;
+46 data-plane checks unchanged. The parity harness that drives both planes with one trace (P6) is
+the gate the sync rule refers to, and is next.
+
+**Measured.** 50 cameras × 20 fps, GPUs 2–5, 40 s: ~390 img/s at 48 workers, ~470 at 96, balanced
+across the four GPUs to 1%, 0 failed, 0 timeouts, against the pool graph's ~470 at 48. A worker is
+one frame in flight and waits on each stage in turn — the Python runner's shape — so the lever is
+workers and the batch window, and the algo tier's per-stage profile on this shape decides the next
+step rather than guesswork.
+
+---
+
 ## 2026-08-25 — The topology seam, and the fleet behind it (Phase 7, T1–T2)
 
 **What it is.** The operator's target is topology C — decode shards per GPU and a
