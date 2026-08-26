@@ -67,6 +67,11 @@ def build_app() -> typer.Typer:
         """List registered request queues."""
         raise typer.Exit(commands.list_queues())
 
+    @app.command()
+    def topologies() -> None:
+        """List registered process topologies."""
+        raise typer.Exit(commands.list_topologies())
+
     @repo_app.command("ls")
     def repo_ls(repository: Path = repo_option) -> None:
         """List the models in a repository."""
@@ -96,6 +101,44 @@ def build_app() -> typer.Typer:
                 http=http,
                 host=host,
                 port=port,
+                log_level=log_level,
+            )
+        )
+
+    @app.command()
+    def fleet(
+        repository: Path = repo_option,
+        shards: int | None = typer.Option(
+            None,
+            "--shards",
+            "-n",
+            help="How many processes to split the fleet across (default: one per visible GPU).",
+        ),
+        gpus: str = gpus_option,
+        policy: str = policy_option,
+        topology: str | None = typer.Option(
+            None,
+            "--topology",
+            help="Which topology to run: a name from `shipinfer topologies` (default: settings).",
+        ),
+        dry_run: bool = typer.Option(
+            False, "--dry-run", help="Print the plan and stop, without spawning anything."
+        ),
+        drain_s: float | None = typer.Option(
+            None, "--drain", help="Seconds a shard gets to drain before it is killed."
+        ),
+        log_level: str = log_option,
+    ) -> None:
+        """Split the fleet across several processes, under one topology, and supervise them."""
+        raise typer.Exit(
+            commands.fleet(
+                repository,
+                shards=shards,
+                gpus=gpus,
+                policy=policy,
+                topology=topology,
+                dry_run=dry_run,
+                drain_s=drain_s,
                 log_level=log_level,
             )
         )

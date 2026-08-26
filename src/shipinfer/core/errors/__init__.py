@@ -29,6 +29,7 @@ from shipinfer.core.errors.ingest import (
     SourceUnavailableError,
 )
 from shipinfer.core.errors.sink import SinkDeliveryError
+from shipinfer.core.errors.topology import ShardExitedError
 from shipinfer.core.errors.tracking import TrackingError
 
 __all__ = [
@@ -48,6 +49,7 @@ __all__ = [
     "RequestCancelledError",
     "RequestTimeoutError",
     "ServerStateError",
+    "ShardExitedError",
     "ShipInferError",
     "SinkDeliveryError",
     "SourceOpenError",
