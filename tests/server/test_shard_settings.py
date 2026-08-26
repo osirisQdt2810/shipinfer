@@ -17,7 +17,7 @@ import pytest
 
 from shipinfer.cli.common import build_settings
 from shipinfer.core.errors import ConfigurationError
-from shipinfer.server.launcher import SHARD_CAMERAS_ENV
+from shipinfer.core.settings.topology import SHARD_CAMERAS_ENV, SHARED_BY_ENV
 
 FLEET = [
     {"camera_id": "quay-1", "uri": "rtsp://host/1"},
@@ -116,3 +116,19 @@ class TestADisagreementIsRefused:
     def test_a_variable_of_only_separators_is_refused_too(self, monkeypatch) -> None:
         with pytest.raises(ConfigurationError, match="still loads engines"):
             settings_for(monkeypatch, " , , ")
+
+
+class TestTheSharingRidesBesideTheCameras:
+    def test_shared_by_is_read_from_the_environment(self, monkeypatch) -> None:
+        monkeypatch.setenv(SHARED_BY_ENV, "[2, 1]")
+        settings = settings_for(monkeypatch, None)
+        assert settings.devices.shared_by == [2, 1]
+
+    def test_unset_means_one_process_per_device(self, monkeypatch) -> None:
+        monkeypatch.delenv(SHARED_BY_ENV, raising=False)
+        assert settings_for(monkeypatch, None).devices.shared_by == []
+
+    def test_a_zero_share_is_refused(self, monkeypatch) -> None:
+        monkeypatch.setenv(SHARED_BY_ENV, "[0]")
+        with pytest.raises(Exception, match="at least 1"):
+            settings_for(monkeypatch, None)

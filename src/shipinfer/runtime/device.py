@@ -86,6 +86,24 @@ class DeviceManager:
         return self._visible
 
     @property
+    def shared_by(self) -> dict[int, int]:
+        """Processes sharing each visible device, keyed by device index; absent means one.
+
+        Raises:
+            ConfigurationError: ``shared_by`` was given for a different number of devices than
+                are visible — a misaligned list would silently halve the wrong device.
+        """
+        sharing = self._settings.shared_by
+        if not sharing:
+            return {}
+        if len(sharing) != len(self._visible):
+            raise ConfigurationError(
+                f"devices.shared_by has {len(sharing)} entr(y/ies) but {len(self._visible)} "
+                f"device(s) are visible; the two lists must align"
+            )
+        return dict(zip(self._visible, sharing, strict=True))
+
+    @property
     def has_accelerator(self) -> bool:
         return bool(self._visible)
 

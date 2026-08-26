@@ -43,16 +43,19 @@ be reintroducing the single process this exists to escape.
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from shipinfer.core.errors import ConfigurationError
+from shipinfer.core.errors import ConfigurationError, ShardExitedError
 from shipinfer.core.logging import get_logger
+from shipinfer.core.settings.topology import SHARD_CAMERAS_ENV, SHARED_BY_ENV, VISIBLE_GPUS_ENV
 from shipinfer.scheduling.sharding import Shard, ShardPlan
 
 __all__ = ["Fleet", "ShardExitedError", "ShardProcess", "forward_signals", "serve_command"]
@@ -62,16 +65,6 @@ _LOG = get_logger(__name__)
 #: How long a shard gets to drain after SIGTERM before it is killed. Longer than a request,
 #: shorter than a deploy's patience: a shard mid-batch has one batch to finish, not one video.
 DEFAULT_DRAIN_S = 20.0
-
-
-class ShardExitedError(RuntimeError):
-    """A shard exited when it should have been serving.
-
-    A distinct type because the correct reaction is distinct. A shard is a *slice of the
-    fleet*, so one dying is not a degraded service — it is a set of cameras that has gone dark
-    with everything else still reporting healthy. Silently continuing would leave a deployment
-    whose dashboards are green and whose quay is unwatched.
-    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +107,13 @@ class Fleet:
     env: Mapping[str, str] = field(default_factory=dict)
     drain_s: float = DEFAULT_DRAIN_S
     _running: list[ShardProcess] = field(default_factory=list, init=False, repr=False)
+    #: Set by :meth:`stop`, cleared by :meth:`start`. :meth:`supervise` returns when it is set —
+    #: a signal handler that stops the fleet must also end the loop that was watching it.
+    _stopped: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
+    #: `stop` may be called from a signal handler or another thread while `supervise` is
+    #: running; the lock makes the second caller wait for the first to finish rather than
+    #: terminate the same processes twice.
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.drain_s <= 0:
@@ -135,6 +135,7 @@ class Fleet:
             raise ConfigurationError("this fleet is already running")
 
         _LOG.info("starting fleet\n%s", self.plan.describe())
+        self._stopped.clear()
         try:
             for shard in self.plan.shards:
                 self._running.append(self._spawn(shard))
@@ -152,6 +153,13 @@ class Fleet:
         # module owns outright.
         child_env = {**os.environ, **self.env}
         child_env["CUDA_VISIBLE_DEVICES"] = shard.cuda_visible_devices
+        # The remap above renumbers the child's devices to 0..n-1, so an inherited
+        # `SHIPINFER_DEVICES__VISIBLE_GPUS` naming *physical* ordinals — the documented way to
+        # configure a single-process `serve` — would now name devices the child cannot see and
+        # fail it at start-up. The child's logical view replaces it, and the sharing rides
+        # beside it so a shard loads its share of every model's instances, not the whole count.
+        child_env[VISIBLE_GPUS_ENV] = json.dumps(list(range(len(shard.gpus))))
+        child_env[SHARED_BY_ENV] = json.dumps(list(self.plan.sharing_for(shard)))
         child_env[SHARD_CAMERAS_ENV] = ",".join(shard.cameras)
         # Its own process group, so a Ctrl-C in the parent's terminal does not deliver SIGINT
         # to every shard at once and race this class's own orderly shutdown.
@@ -168,26 +176,28 @@ class Fleet:
         deadline is shared across all shards rather than per shard, so stopping N of them takes
         ``drain_s``, not ``N * drain_s``.
         """
-        if not self._running:
-            return
-        deadline = time.monotonic() + (self.drain_s if drain_s is None else drain_s)
+        self._stopped.set()
+        with self._lock:
+            if not self._running:
+                return
+            deadline = time.monotonic() + (self.drain_s if drain_s is None else drain_s)
 
-        for running in self._running:
-            if running.alive:
-                running.process.terminate()
+            for running in self._running:
+                if running.alive:
+                    running.process.terminate()
 
-        for running in self._running:
-            remaining = max(0.0, deadline - time.monotonic())
-            try:
-                running.process.wait(timeout=remaining)
-            except subprocess.TimeoutExpired:
-                _LOG.warning("%s did not drain in time; killing", running)
-                running.process.kill()
-                # Reaped unconditionally: a killed child that is never waited for is a zombie,
-                # and a supervisor that leaks those is worse than one that never ran.
-                running.process.wait()
+            for running in self._running:
+                remaining = max(0.0, deadline - time.monotonic())
+                try:
+                    running.process.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    _LOG.warning("%s did not drain in time; killing", running)
+                    running.process.kill()
+                    # Reaped unconditionally: a killed child that is never waited for is a zombie,
+                    # and a supervisor that leaks those is worse than one that never ran.
+                    running.process.wait()
 
-        self._running.clear()
+            self._running.clear()
 
     # -- supervision ---------------------------------------------------------------------
 
@@ -202,7 +212,11 @@ class Fleet:
     def supervise(
         self, *, poll_s: float = 1.0, until: Callable[[], bool] | None = None
     ) -> None:
-        """Block until a shard dies or ``until()`` says to stop.
+        """Block until a shard dies, :meth:`stop` is called, or ``until()`` says to stop.
+
+        Returning on :meth:`stop` is what makes a signal handler work: Ctrl-C stops the fleet
+        from the handler, and the loop that was watching it has to notice — otherwise the
+        parent spins over an empty fleet forever, and only SIGKILL ends it.
 
         Raises:
             ShardExitedError: a shard exited. Its cameras are dark, and the rest of the fleet is
@@ -210,9 +224,15 @@ class Fleet:
                 refuse to sit in. The fleet is stopped before this is raised, so the caller
                 does not have to remember to.
         """
-        if not self._running:
-            raise ConfigurationError("supervise() called on a fleet that is not running")
+        if not self._running and not self._stopped.is_set():
+            raise ConfigurationError("supervise() called on a fleet that was never started")
         while True:
+            if self._stopped.is_set() or not self._running:
+                # `stop()` may still be draining on the thread that called it; joining it here
+                # means "supervise returned" implies "the fleet is down", which is what the
+                # CLI's `finally: stop()` and the operator both assume.
+                self.stop()
+                return
             casualties = self.dead()
             if casualties:
                 detail = ", ".join(
@@ -249,9 +269,6 @@ class Fleet:
 #: A comma-separated list of ids, not a JSON fleet: the child already has the whole fleet from
 #: its own configuration, and sending the full camera objects would mean two descriptions of
 #: one camera that can disagree.
-SHARD_CAMERAS_ENV = "SHIPINFER_SHARD_CAMERAS"
-
-
 def serve_command(
     shard: Shard,  # noqa: ARG001 - part of the Fleet.command contract; see below
     *,

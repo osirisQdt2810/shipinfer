@@ -67,6 +67,11 @@ def build_app() -> typer.Typer:
         """List registered request queues."""
         raise typer.Exit(commands.list_queues())
 
+    @app.command()
+    def topologies() -> None:
+        """List registered process topologies."""
+        raise typer.Exit(commands.list_topologies())
+
     @repo_app.command("ls")
     def repo_ls(repository: Path = repo_option) -> None:
         """List the models in a repository."""
@@ -114,7 +119,7 @@ def build_app() -> typer.Typer:
         topology: str | None = typer.Option(
             None,
             "--topology",
-            help="Which topology to run: a name from `shipinfer registries` (default: settings).",
+            help="Which topology to run: a name from `shipinfer topologies` (default: settings).",
         ),
         dry_run: bool = typer.Option(
             False, "--dry-run", help="Print the plan and stop, without spawning anything."

@@ -5,9 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from shipinfer.cli.common import build_settings, console
-from shipinfer.core.errors import ConfigurationError
+from shipinfer.core.errors import ConfigurationError, ShardExitedError
 from shipinfer.runtime.containment import require_container
-from shipinfer.server.launcher import Fleet, ShardExitedError, forward_signals
+from shipinfer.server.launcher import Fleet, forward_signals
 from shipinfer.server.topology import build_topology
 
 __all__ = ["fleet"]
@@ -88,8 +88,11 @@ def fleet(
         env=chosen.environment(settings),
         drain_s=drain,
     )
-    running.start()
+    # The handler goes in before the first child exists: a signal in the window between
+    # `start()` and the install would escape as KeyboardInterrupt and orphan children that
+    # `start_new_session=True` has already detached from the terminal.
     forward_signals(running)
+    running.start()
     try:
         running.supervise()
     except ShardExitedError as exc:

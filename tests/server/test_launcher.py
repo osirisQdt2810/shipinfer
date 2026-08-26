@@ -58,6 +58,18 @@ def ignores_sigterm():
     ]
 
 
+def reports_env_json(path_for):
+    """A child that writes every variable the launcher owns, as JSON, where the test can read it."""
+    return lambda shard: [
+        sys.executable,
+        "-c",
+        "import json, os, sys; names = ['CUDA_VISIBLE_DEVICES', 'SHIPINFER_DEVICES__VISIBLE_GPUS',"
+        " 'SHIPINFER_DEVICES__SHARED_BY', 'SHIPINFER_SHARD_CAMERAS'];"
+        " open(sys.argv[1], 'w').write(json.dumps({n: os.environ.get(n) for n in names}))",
+        str(path_for(shard)),
+    ]
+
+
 def reports_env(path_for):
     """A child that writes its own ``CUDA_VISIBLE_DEVICES`` where the test can read it."""
     return lambda shard: [
@@ -216,7 +228,7 @@ class TestADeadShardTakesTheFleetDown:
         assert calls["n"] == 2
 
     def test_supervising_a_fleet_that_never_started_is_refused(self) -> None:
-        with pytest.raises(ConfigurationError, match="not running"):
+        with pytest.raises(ConfigurationError, match="never started"):
             Fleet(plan=plan(), command=sleeps()).supervise()
 
 
@@ -421,3 +433,131 @@ class TestTheDefaultCommand:
         )
 
         assert argv[-1] == "--http"
+
+
+class TestTheChildsDeviceViewIsCoherent:
+    """`CUDA_VISIBLE_DEVICES` renumbers the child's GPUs to 0..n-1, so every other device
+    setting it inherits must describe *that* view: an inherited
+    `SHIPINFER_DEVICES__VISIBLE_GPUS` naming physical ordinals would fail the child at start-up
+    (`visible_gpus names device(s) [3, 4, 5] but torch reports [0]`) with a configuration that
+    is correct for a single-process `serve`."""
+
+    def _spawn_and_read(self, tmp_path, monkeypatch, shards: int, gpus: tuple[int, ...]):
+        import json
+
+        # The operator's compose file exports the physical list; the child must not see it.
+        monkeypatch.setenv("SHIPINFER_DEVICES__VISIBLE_GPUS", "[2, 3, 4, 5]")
+        written = {}
+
+        def path_for(shard):
+            written[shard.index] = tmp_path / f"shard{shard.index}.json"
+            return written[shard.index]
+
+        fleet = Fleet(plan=plan(shards=shards, gpus=gpus), command=reports_env_json(path_for))
+        fleet.start()
+        for running in fleet.running:
+            running.process.wait(timeout=30)
+        fleet.stop()
+        return fleet.plan, {i: json.loads(path.read_text()) for i, path in written.items()}
+
+    def test_the_logical_view_replaces_the_inherited_physical_one(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        _plan, seen = self._spawn_and_read(tmp_path, monkeypatch, shards=2, gpus=(2, 3, 4, 5))
+
+        assert seen[0]["CUDA_VISIBLE_DEVICES"] == "2,3"
+        assert seen[0]["SHIPINFER_DEVICES__VISIBLE_GPUS"] == "[0, 1]"
+        assert seen[1]["CUDA_VISIBLE_DEVICES"] == "4,5"
+        assert seen[1]["SHIPINFER_DEVICES__VISIBLE_GPUS"] == "[0, 1]"
+
+    def test_an_unshared_device_is_shared_by_one(self, tmp_path, monkeypatch) -> None:
+        _plan, seen = self._spawn_and_read(tmp_path, monkeypatch, shards=2, gpus=(2, 3, 4, 5))
+
+        assert seen[0]["SHIPINFER_DEVICES__SHARED_BY"] == "[1, 1]"
+
+    def test_shards_sharing_a_gpu_are_told_so(self, tmp_path, monkeypatch) -> None:
+        """Six shards over four GPUs: two shards each on GPUs 2 and 3. Each is told `[2]`, so
+        each loads half of every model's configured instances — not the whole count twice."""
+        fleet_plan, seen = self._spawn_and_read(
+            tmp_path, monkeypatch, shards=6, gpus=(2, 3, 4, 5)
+        )
+
+        for shard in fleet_plan.shards:
+            expected = list(fleet_plan.sharing_for(shard))
+            assert seen[shard.index]["SHIPINFER_DEVICES__SHARED_BY"] == str(expected)
+            assert seen[shard.index]["SHIPINFER_DEVICES__VISIBLE_GPUS"] == "[0]"
+        assert sorted(seen[i]["SHIPINFER_DEVICES__SHARED_BY"] for i in seen) == [
+            "[1]",
+            "[1]",
+            "[2]",
+            "[2]",
+            "[2]",
+            "[2]",
+        ]
+
+    def test_the_cameras_still_ride_beside_the_devices(self, tmp_path, monkeypatch) -> None:
+        fleet_plan, seen = self._spawn_and_read(tmp_path, monkeypatch, shards=2, gpus=(2, 3))
+
+        for shard in fleet_plan.shards:
+            assert seen[shard.index]["SHIPINFER_SHARD_CAMERAS"] == ",".join(shard.cameras)
+
+
+class TestStopEndsSupervision:
+    """`stop()` from anywhere — a signal handler, another thread — must end `supervise()`.
+    The first version only consulted `dead()`, which iterates the now-empty fleet and returns
+    nothing, so after Ctrl-C the parent spun over an empty fleet forever and only SIGKILL
+    ended it; under `docker stop` the 10 s SIGKILL masked it."""
+
+    def test_stop_from_another_thread_returns_supervise(self) -> None:
+        import threading
+
+        fleet = Fleet(plan=plan(shards=2), command=sleeps())
+        fleet.start()
+        threading.Timer(0.1, fleet.stop).start()
+
+        fleet.supervise(poll_s=0.01)  # returns; a hang here is the bug
+
+        assert fleet.running == ()
+
+    def test_a_second_stop_is_still_idempotent(self) -> None:
+        fleet = Fleet(plan=plan(shards=1, gpus=(2,)), command=sleeps())
+        fleet.start()
+        fleet.stop()
+        fleet.stop()
+
+        fleet.supervise(poll_s=0.01)
+
+    def test_start_after_stop_supervises_again(self) -> None:
+        """The event is per run, not per object: a restarted fleet is watched again."""
+        fleet = Fleet(plan=plan(shards=1, gpus=(2,)), command=exits(code=3, after=0.05))
+        fleet.start()
+        fleet.stop()
+        fleet.supervise(poll_s=0.01)  # stopped: returns at once
+
+        fleet.start()
+        with pytest.raises(ShardExitedError, match="exited with 3"):
+            fleet.supervise(poll_s=0.02)
+
+    def test_ctrl_c_through_forward_signals_ends_the_command(self) -> None:
+        """The caller shape the CLI actually uses: `forward_signals`, then `supervise()` with
+        no `until`. SIGINT is delivered to this process by a timer thread."""
+        import os
+        import signal
+        import threading
+
+        from shipinfer.server.launcher import forward_signals
+
+        previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+        fleet = Fleet(plan=plan(shards=2), command=sleeps())
+        try:
+            forward_signals(fleet)
+            fleet.start()
+            threading.Timer(0.1, os.kill, [os.getpid(), signal.SIGINT]).start()
+
+            fleet.supervise(poll_s=0.01)  # returns instead of spinning or raising
+
+            assert fleet.running == ()
+        finally:
+            fleet.stop()
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)

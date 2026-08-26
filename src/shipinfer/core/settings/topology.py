@@ -34,3 +34,21 @@ class TopologySettings(BaseModel):
     shards: int | None = Field(default=None, ge=1)
     #: Seconds a shard gets after SIGTERM before SIGKILL.
     drain_s: float = Field(default=20.0, gt=0.0)
+
+
+#: The environment a fleet launcher hands each shard process. Defined here, beside the
+#: settings, because both sides — the launcher that sets them and the settings loader that
+#: reads them — must agree on the spelling, and a constant reached through
+#: ``shipinfer.server`` drags the whole server import into every ``build_settings()`` call.
+#:
+#: Which cameras are this shard's: a comma-separated list of ``camera_id``.
+SHARD_CAMERAS_ENV = "SHIPINFER_SHARD_CAMERAS"
+#: The shard's *logical* device list after ``CUDA_VISIBLE_DEVICES`` renumbered its GPUs —
+#: ``[0, 1]`` for a two-GPU shard, whatever the physical ordinals. Set by the launcher so an
+#: inherited ``SHIPINFER_DEVICES__VISIBLE_GPUS`` naming physical ordinals cannot survive the
+#: remap and fail the child at start-up.
+VISIBLE_GPUS_ENV = "SHIPINFER_DEVICES__VISIBLE_GPUS"
+#: How many shard processes share each of the shard's devices, aligned with the logical
+#: ordinals. Two shards on one GPU must each load *half* the configured instances, or the
+#: device holds twice the engines and twice the VRAM for the same total throughput.
+SHARED_BY_ENV = "SHIPINFER_DEVICES__SHARED_BY"

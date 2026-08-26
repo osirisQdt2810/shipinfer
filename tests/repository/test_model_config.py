@@ -61,6 +61,30 @@ class TestInstanceGroupExpansion:
         assert len(placements) == 4
         assert sorted(p.device.index for p in placements) == [0, 0, 1, 1]
 
+    def test_a_shared_device_gets_the_share_not_the_count(self) -> None:
+        """A fleet shard that shares its GPU loads count // sharing there. Two shards each
+        loading the full count would double the device's engines and VRAM for the same total
+        throughput — TensorRT contexts are per-process, so nothing saves it."""
+        group = InstanceGroup(kind=InstanceKind.GPU, count=4, gpus=[0, 1])
+        placements = group.expand(visible_gpus=(0, 1), shared_by={0: 2})
+        assert sorted(p.device.index for p in placements) == [0, 0, 1, 1, 1, 1]
+
+    def test_a_share_that_rounds_to_zero_is_refused(self) -> None:
+        # Silently rounding to zero produces a process that accepts frames and can never
+        # execute one — which reads as a throughput result, not a misconfiguration.
+        group = InstanceGroup(kind=InstanceKind.GPU, count=1, gpus=[0])
+        with pytest.raises(
+            ConfigurationError, match=r"2 processes share gpu 0 .* Use at most 1"
+        ):
+            group.expand(visible_gpus=(0,), shared_by={0: 2})
+
+    def test_placements_pass_the_sharing_through(self) -> None:
+        config = ModelConfig(
+            **{**BASE, "instance_groups": [InstanceGroup(kind=InstanceKind.GPU, count=2)]}
+        )
+        assert len(config.placements((0, 1), shared_by={0: 2, 1: 2})) == 2
+        assert len(config.placements((0, 1))) == 4
+
     def test_empty_gpus_means_every_visible_device(self) -> None:
         """The property that lets one config run on 2 GPUs and on 16 unchanged."""
         group = InstanceGroup(kind=InstanceKind.GPU, count=1)

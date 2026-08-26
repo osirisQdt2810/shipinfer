@@ -9,6 +9,7 @@ from typing import Any
 from shipinfer.core.errors import ConfigurationError
 from shipinfer.core.logging import configure
 from shipinfer.core.settings import ServerSettings
+from shipinfer.core.settings.topology import SHARD_CAMERAS_ENV
 
 __all__ = ["build_settings", "console", "print_table"]
 
@@ -53,8 +54,6 @@ def _narrow_to_shard(settings: ServerSettings) -> ServerSettings:
     plan and the config are two views of one fleet; if they disagree, some camera is going
     unread, and the shard that would have read it is the only thing that can notice.
     """
-    from shipinfer.server.launcher import SHARD_CAMERAS_ENV
-
     raw = os.environ.get(SHARD_CAMERAS_ENV)
     if raw is None:
         return settings

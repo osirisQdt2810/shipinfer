@@ -59,9 +59,10 @@ Two decisions, both pure, both here:
 2. **Which GPUs.** Round-robin, and deliberately **not** one shard per GPU. The bottleneck
    measured above is CPU, not GPU, so the useful number of shards is set by cores and by
    per-frame Python cost — it can exceed the GPU count, and then several shards share a
-   device. That is why :meth:`ShardPlan.instances_for` exists: two shards on one GPU must
-   each load *half* the instances, or the device ends up with twice the engines and twice the
-   VRAM for the same total throughput.
+   device. That is why :meth:`ShardPlan.sharing_for` exists: the launcher tells each child how
+   many shards share its GPUs, and the child loads its *share* of every model's instances —
+   two shards on one GPU each loading the full count would give the device twice the engines
+   and twice the VRAM for the same total throughput.
 """
 
 from __future__ import annotations
@@ -126,29 +127,18 @@ class ShardPlan:
         high = max(loads)
         return 0.0 if high <= 0 else (high - min(loads)) / high
 
-    def instances_for(self, configured_per_gpu: int, gpu: int) -> int:
-        """How many instances of a model *one shard* should load on ``gpu``.
+    def sharing_for(self, shard: Shard) -> tuple[int, ...]:
+        """How many shards share each of ``shard``'s GPUs, in the shard's device order.
 
-        Divided, not repeated. Two shards on one device each loading the configured count
-        would double that device's engines and its VRAM for the same total, and TensorRT
-        contexts are per-process so there is no sharing to save it.
-
-        Raises:
-            ConfigurationError: the division would give a shard zero instances of a model it
-                is expected to run. Failing here is the point — silently rounding to zero
-                produces a shard that accepts frames and can never execute one, which looks
-                like a throughput result rather than a misconfiguration.
+        What the launcher hands the child as ``SHIPINFER_DEVICES__SHARED_BY``, aligned with
+        the logical ordinals the child sees after ``CUDA_VISIBLE_DEVICES`` renumbers its
+        devices. The child divides every model's configured instance count by it where the
+        instance groups expand (``InstanceGroup.expand``): two shards on one GPU must each
+        load *half* the instances, or the device ends up with twice the engines and twice the
+        VRAM for the same total throughput. The division — and the refusal when a share
+        rounds to zero — lives there, at the one place that knows the per-model count.
         """
-        sharing = self.shards_per_gpu.get(gpu, 1)
-        share = configured_per_gpu // sharing
-        if share < 1:
-            raise ConfigurationError(
-                f"{sharing} shards share gpu {gpu} but only {configured_per_gpu} "
-                f"instance(s) per gpu are configured, so each shard would get "
-                f"{share}. Use at most {configured_per_gpu} shards per gpu, or raise "
-                f"the instance count."
-            )
-        return share
+        return tuple(self.shards_per_gpu.get(gpu, 1) for gpu in shard.gpus)
 
     def describe(self) -> str:
         """One line per shard — what the launcher prints before it spawns anything."""

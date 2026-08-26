@@ -12,7 +12,7 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from shipinfer.core.errors import ConfigurationError
-from shipinfer.scheduling.sharding import Shard, plan_shards
+from shipinfer.scheduling.sharding import Shard, ShardPlan, plan_shards
 
 #: A few busy cameras and many quiet ones — the shape the fleet actually has. Four at 30 fps
 #: and twelve at 5 fps: 180 fps total, so a perfect two-way split is 90 each.
@@ -197,31 +197,36 @@ class TestGpusAreHandedOutWithoutLeavingOneIdle:
         assert [s.gpus for s in plan.shards] == [(5, 4), (3, 2)]
 
 
-class TestInstancesAreDividedBetweenShardsSharingAGpu:
-    def test_a_sole_owner_gets_the_configured_count(self) -> None:
+class TestTheLauncherIsToldHowManyShardsShareEachGpu:
+    """`sharing_for` is what rides to the child as `SHIPINFER_DEVICES__SHARED_BY`; the child
+    divides every model's configured instance count by it where the instance groups expand."""
+
+    def test_a_sole_owner_shares_with_nobody(self) -> None:
         plan = plan_shards(SKEWED, shards=4, gpus=[2, 3, 4, 5])
 
-        assert plan.instances_for(2, gpu=2) == 2
+        assert all(plan.sharing_for(shard) == (1,) for shard in plan.shards)
 
-    def test_two_shards_on_one_gpu_each_load_half(self) -> None:
+    def test_two_shards_on_one_gpu_are_each_told_two(self) -> None:
         plan = plan_shards(SKEWED, shards=6, gpus=[2, 3, 4, 5])
 
         assert plan.shards_per_gpu[2] == 2
-        assert plan.instances_for(4, gpu=2) == 2
-        assert plan.instances_for(4, gpu=4) == 4, "an unshared device is unaffected"
+        sharing = [s for s in plan.shards if tuple(s.gpus) == (2,)]
+        alone = [s for s in plan.shards if tuple(s.gpus) == (4,)]
+        assert len(sharing) == 2 and all(plan.sharing_for(s) == (2,) for s in sharing)
+        assert alone and plan.sharing_for(alone[0]) == (1,), "an unshared device is unaffected"
 
-    def test_a_share_that_rounds_to_zero_is_a_configuration_error(self) -> None:
-        # Silently rounding to zero produces a shard that accepts frames and can never
-        # execute one — which reads as a throughput result, not a misconfiguration.
-        plan = plan_shards(SKEWED, shards=6, gpus=[2, 3, 4, 5])
+    def test_the_answer_is_aligned_with_the_shards_device_order(self) -> None:
+        plan = plan_shards(SKEWED, shards=2, gpus=[2, 3, 4, 5])
 
-        with pytest.raises(ConfigurationError, match="2 shards share gpu 2"):
-            plan.instances_for(1, gpu=2)
+        for shard in plan.shards:
+            assert len(shard.gpus) == 2
+            assert plan.sharing_for(shard) == (1, 1)
 
     def test_an_unplanned_gpu_is_treated_as_unshared(self) -> None:
         plan = plan_shards(SKEWED, shards=2, gpus=[2, 3])
+        bare = ShardPlan(shards=plan.shards, shards_per_gpu={})
 
-        assert plan.instances_for(3, gpu=7) == 3
+        assert bare.sharing_for(plan.shards[0]) == (1,)
 
 
 class TestAnImpossiblePlanFailsAtPlanTime:
