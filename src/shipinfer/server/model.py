@@ -375,6 +375,7 @@ class Model:
             return 0.0
         return sum(i.ewma_latency_us for i in self._instances) / len(self._instances)
 
+    @property
     def total_depth(self) -> int:
         return sum(i.depth for i in self._instances)
 

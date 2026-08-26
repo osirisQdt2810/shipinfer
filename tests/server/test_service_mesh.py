@@ -64,6 +64,7 @@ class FakeModel:
         threading.Thread(target=work, daemon=True).start()
         return future
 
+    @property
     def total_depth(self) -> int:
         return self._depth
 

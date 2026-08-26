@@ -57,6 +57,7 @@ class _SharedModel(Protocol):
 
     def infer_local(self, request: Any) -> Any: ...
 
+    @property
     def total_depth(self) -> int: ...
 
     @property
@@ -234,6 +235,6 @@ class ServiceMesh:
 
 def _load_of(model: _SharedModel) -> Callable[[], tuple[int, float]]:
     def load() -> tuple[int, float]:
-        return model.total_depth(), float(model.ewma_latency_us)
+        return int(model.total_depth), float(model.ewma_latency_us)
 
     return load
