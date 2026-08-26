@@ -676,18 +676,32 @@ that exposes the four attributes a policy reads.
       operator — slot size per model, never share the detector, the pinned budget.)* **Step 1 built** on
       `/tmp/t3a` (`feat/shared-ring`): `runtime/memory/shared_ring.py` — `RingLayout`, the four-state
       single-writer protocol, the header as the load signal, `RingFullError` / `PeerLostError` /
-      `RingProtocolError` — 17 offline tests with a thread as the peer; queued behind the docs snapshot,
+      `RingProtocolError` — 19 offline tests with a thread as the peer; queued behind the docs snapshot,
       `chore/shipvision-mot`, `fix/rtsp-headless-decode` and `fix/letterbox-extents`.
-      **Step 2 in progress** on `/tmp/t3b` (`feat/remote-instance`, stacked): the wire format
+      **Step 2 built** on `/tmp/t3b` (`feat/remote-instance`, stacked on the ring): the wire format
       (`server/remote_wire.py`: request and response heads, host tensors only, a failure form, 12 tests) and
       `server/remote_instance.py` — `RemoteInstance` as a `Placeable` (`device` is `cpu`: a proxy is *not
       here*), `ResultReader` (one per process, heartbeat watch → `PeerLostError` with the tags), `RingIngress`
-      (owner side: through the model's own `infer`, slot held until the future settles). Tests run two
-      "processes" as objects over real rings — **37 tests green** across the ring, the wire and the proxy;
-      found and fixed on the way: a ring closed under a live view raised `BufferError` and skipped its
-      unlink, and a closed handle raised from a released view instead of answering "closed". Step 3
-      (the `service` topology itself: settings, ring management per shard pair, `Topology.attach`, the
-      ingress and reader threads started with the server) is next. `fleet` plus a cross-process inference tier, symmetric — every shard
+      (owner side: through the model's own `infer`, slot held until the future settles); 7 tests run two
+      "processes" as objects over real rings. Found and fixed on the way: a ring closed under a live
+      zero-copy view raised `BufferError` and skipped its unlink, a closed handle raised from a released
+      view instead of answering "closed", and the handle's finaliser failed noisily later — the ring now
+      drops its own export on close and parks an unclosable handle for `reap_pending_closes` (19 ring tests).
+      **Step 3 built** (26 Aug, same branch): `ServiceSettings` (`shared_models`, `slots_per_pair=8`,
+      `slot_bytes=1.5 MiB`, timeouts, `shard`/`peers`/`run_id` set by the launcher through
+      `SHIPINFER_TOPOLOGY__SERVICE__{SHARD,PEERS,RUN_ID}`), `Topology.shard_environment(shard)` as the one
+      new seam method (the plan's `attach()` turned out to be this: what a *child* is told, not what the
+      parent attaches) carried by `Fleet.shard_env`, `ServiceTopology` registered as `service`,
+      `server/service_mesh.py` (create the rings this shard reads, open the peers' with retry, one ingress
+      per (peer, model), one reader, `Model.attach_remote` rebuilding the dispatcher with the proxies),
+      `InferenceServer` joining the tier after the models load and leaving it *first* on stop; 7 mesh tests
+      (two shards' meshes in one process: a request leaves shard 0's dispatcher and returns from shard 1 as
+      `cuda:1`; the deep shard borrows the quiet one; stop takes the rings down; a peer that never appears)
+      + 9 contract tests; ADR-015 and the feature-log entry on the branch. **Not yet:** the multigpu evidence
+      run — `--topology` on the harness with the fleet driving the shards (PR-cut item 4). Queue: docs
+      snapshot #21 (review round 1 answered) → `chore/shipvision-mot` → `fix/rtsp-headless-decode` →
+      `fix/letterbox-extents` → `feat/shared-ring` → `feat/remote-instance` → `ci/cpp-offline-and-prompt`.
+      Original sketch: `fleet` plus a cross-process inference tier, symmetric — every shard
       process serves its own GPU's crop-stage instances to its peers, so a dead process loses its K
       cameras and its capacity, nothing else. Pieces: (a) `runtime/memory/shared_ring.py` — a
       `multiprocessing.shared_memory` ring pinned in each process via `torch.cuda.cudart()

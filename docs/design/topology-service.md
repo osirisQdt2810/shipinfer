@@ -19,13 +19,14 @@ instances as proxies. Who routes: the existing `Dispatcher` with the existing
 peer when it is not. Who publishes load: each proxy reads the owner's queue depth and EWMA
 latency from a shared-memory header the owner writes on every enqueue/dequeue (vLLM publishes
 `lb_engines` counts back through `process_engine_outputs`; ours are plain shared counters,
-because the reader is in the same box). How work crosses: one pinned shared-memory **ring per
-(owner process, model)** — vLLM's `ShmRingBuffer` discipline (fixed chunk, written flag +
-reader flags, `memory_fence`, spin then `sched_yield`, timeout) — with one writer per slot
-claim rather than one writer per ring, since every peer may submit. How results come back:
-each **submitter** owns a response ring (vLLM's `worker_response_mq` per worker); the owner's
-instance writes the output rows into the submitter's slot and flips its flag; the submitter's
-reader thread resolves the `ResponseFuture`. Nothing crosses a GPU boundary except through
+because the reader is in the same box). How work crosses: one pinned shared-memory **ring per (submitter, owner, model)** — vLLM's
+`ShmRingBuffer` discipline (fixed slots, a state byte each, spin then `sched_yield`, timeout)
+— with exactly one writer per ring, the submitter, which is why the rings are pairwise rather
+than one per owner (§2: Python has no compare-and-swap on shared memory). How results come
+back: the same pair has a **response ring** in the other direction (vLLM's
+`worker_response_mq` per worker, made pairwise so it too has one writer — the owner); the
+owner's instance writes the output rows into that ring's slot and publishes it; the
+submitter's reader thread resolves the `ResponseFuture`. Nothing crosses a GPU boundary except through
 host pinned memory: D2H on the owner side of the copy, H2D on the other — the ledger's
 ~125 µs per 1.5 MB on PCIe 4 — because opening CUDA IPC handles on other GPUs would cost G
 contexts per process (G² × ~300 MiB on the box).
@@ -53,7 +54,7 @@ class ServiceSettings(BaseModel):
     """`service`: the fleet plus a cross-process tier for the crop-stage models."""
     shared_models: list[str] = ["person_embedder", "ship_embedder", "ship_segmenter"]  # crops, not frames
     slots_per_pair: int = 8       # per (submitter, owner, model) ring — single writer each; 8 × slot_bytes pinned per ring
-    slot_bytes: int = 1_572_864   # 1.5 MiB: one crop batch (32 × 3 × 128 × 64 fp16 fits; letterboxed full frames do not, by design)
+    slot_bytes: int = 1_638_400   # 1.5 MiB + 64 KiB (400 pages): one crop batch (32 × 3 × 128 × 64 fp16 is exactly 1.5 MiB) plus the request head and the per-tensor heads, which travel in the slot ahead of the bytes; letterboxed full frames do not fit, by design
     submit_timeout_ms: int = 5    # a full ring refuses after this; the policy then picks another candidate
     heartbeat_ms: int = 200       # an owner that has not stamped its header in 5 × this is lost
     spill_threshold: int = 4      # forwarded to locality_spillover for the shared models
@@ -98,11 +99,18 @@ page is pinned for *this* process's DMA engine; the ring exists once. Slot claim
 compare-and-swap on the slot's `claimed` byte — Python has no CAS on shared memory, so the
 claim is a per-slot `multiprocessing` lock-free trick vLLM avoids by having one writer; we
 have N writers, so: **one submit ring per (submitter, owner, model)**, single writer each,
-which restores vLLM's discipline exactly and costs `N × (N−1) × models` small rings (for 4
-shards and 3 models: 36 rings × 64 × 1.5 MiB = 3.4 GiB pinned — too much). Hence
-the setting is `slots_per_pair`, sized 8 by default in the pair layout (0.4 GiB pinned for 4
-shards), and the block above says so. **This is the first design decision the
-coder must not silently re-make**: single writer per ring, pairwise rings, small slot counts.
+which restores vLLM's discipline exactly. **The budget, derived once and cited everywhere
+else:** a directed pair (A → B) has two rings — requests (A writes, B reads) and results (B
+writes, A reads) — so the box holds `N × (N−1) × models × 2` rings of `slots × slot_bytes`,
+each existing once as one `shared_memory` block. Every ring is mapped by exactly two processes
+(its writer and its reader) and each registers its own mapping, so a process pins
+`4 × (N−1) × models` rings. For 4 shards and 3 models: 72 rings on the box; at 64 slots of
+1.5 MiB that is 6.8 GiB of shared memory — too much. Hence the setting is `slots_per_pair`,
+sized 8 by default, with 64 KiB of headroom per slot for the heads (`slot_bytes` above):
+**72 × 12.5 MiB ≈ 0.9 GiB of shared memory on the box, existing once; 36 × 12.5 MiB ≈ 0.44 GiB
+registered per process** (the same pages, pinned through each mapper's registration). **This
+is the first design decision the coder must not silently re-make**: single writer per ring,
+pairwise rings, small slot counts.
 
 ### `server/remote_instance.py` (new)
 ```python
@@ -247,6 +255,7 @@ queue's wait exceeds that, which is what `spill_threshold` encodes in queue dept
 - Should the **detector** ever be shared? The ledger says crops, not frames; a 1080p frame is
   6 MB and would triple the pinned footprint. My default: never — `shared_models` excludes it
   and a config naming it is refused.
-- Pinned budget per process: 4 shards × 3 models × 2 directions × 8 slots × 1.5 MiB ≈ 0.6 GiB
-  host memory pinned per process, 2.4 GiB on the box. Acceptable on this host (the operator's
-  box has 500+ GB), but it must be stated in the settings docstring; confirm the ceiling.
+- Pinned budget (the derivation in §2): 4 shards × 3 models → 72 rings on the box, existing once,
+  ≈ 0.9 GiB of shared memory at 8 slots × (1.5 MiB + 64 KiB); each process registers the 36 it
+  maps, ≈ 0.44 GiB. Acceptable on this host (the operator's box has 500+ GB), but it must be
+  stated in the settings docstring; confirm the ceiling.
