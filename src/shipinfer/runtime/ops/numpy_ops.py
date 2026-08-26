@@ -47,6 +47,7 @@ class NumpyImageOps(ImageOps):
         canvas = np.full((n, dst_h, dst_w, 3), pad_value, dtype=np.uint8)
         scales = np.empty(n, dtype=np.float32)
         pads = np.empty((n, 2), dtype=np.float32)
+        extents = np.empty((n, 2), dtype=np.int32)
 
         for i, image in enumerate(images):
             if image.ndim != 3 or image.shape[2] != 3:
@@ -63,6 +64,7 @@ class NumpyImageOps(ImageOps):
             )
             scales[i] = scale
             pads[i] = (pad_x, pad_y)
+            extents[i] = (new_h, new_w)
 
         if params.swap_rb:
             canvas = canvas[..., ::-1]
@@ -74,7 +76,7 @@ class NumpyImageOps(ImageOps):
         chw = np.ascontiguousarray(canvas.transpose(0, 3, 1, 2), dtype=np.float32)
         chw -= mean[None, :, None, None]
         chw /= std[None, :, None, None]
-        return LetterboxResult(tensor=chw, scales=scales, pads=pads)
+        return LetterboxResult(tensor=chw, scales=scales, pads=pads, extents=extents)
 
     def crop_batch(
         self,

@@ -47,6 +47,19 @@ class TestNumpyReference:
         assert result.scales[1] == pytest.approx(256 / 1280)
         assert result.pads[1].tolist() == [0.0, 56.0]
 
+    def test_extents_are_the_rounded_resize_not_a_re_derivation(self, frames) -> None:
+        """`(T - r) / 2` is the same pad for `r` and `r + 1` whenever `T - r` is even, so a
+        consumer that re-derived `out_h` from `scale` could be a pixel off while scale and pad
+        both still matched. The implementation says what it wrote."""
+        result = NumpyImageOps().letterbox_batch(frames, (256, 256), NormalizeParams())
+        assert result.extents.dtype == np.int32 and result.extents.shape == (len(frames), 2)
+        for image, scale, pad, extent in zip(
+            frames, result.scales, result.pads, result.extents, strict=True
+        ):
+            src_h, src_w = image.shape[:2]
+            assert tuple(extent) == (max(1, round(src_h * scale)), max(1, round(src_w * scale)))
+            assert tuple(pad) == ((256 - extent[1]) // 2, (256 - extent[0]) // 2)
+
     def test_square_input_needs_no_padding(self, frames) -> None:
         result = NumpyImageOps().letterbox_batch(frames, (256, 256), PARAMS)
         assert result.pads[2].tolist() == [0.0, 0.0]
@@ -162,6 +175,7 @@ class TestGpuParity:
                 frames, (256, 256), PARAMS
             )
             np.testing.assert_array_equal(result.scales, reference.scales)
+            np.testing.assert_array_equal(result.extents, reference.extents)
             np.testing.assert_array_equal(result.pads, reference.pads)
 
     def test_gpu_implementations_agree_with_each_other(self, frames) -> None:

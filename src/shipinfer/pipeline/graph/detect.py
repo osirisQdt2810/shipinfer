@@ -150,6 +150,7 @@ class DetectStage(ModelStage):
         # transform that was applied, and these are the numbers that were applied.
         state.scale = float(letterboxed.scales[0])
         state.pad = (float(letterboxed.pads[0][0]), float(letterboxed.pads[0][1]))
+        state.extents = (int(letterboxed.extents[0][0]), int(letterboxed.extents[0][1]))
 
         response = self._infer(state, {self.input_name: Tensor.from_numpy(letterboxed.tensor)})
         boxes_output = self.boxes_output

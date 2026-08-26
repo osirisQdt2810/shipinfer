@@ -61,7 +61,7 @@ class TorchImageOps(ImageOps):
         pad_value: int = 114,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Fill ``out`` in place, with no host round trip."""
-        scales, pads = self._letterbox(images, out, params, pad_value)
+        scales, pads, _extents = self._letterbox(images, out, params, pad_value)
         return scales, pads
 
     def letterbox_batch(
@@ -77,13 +77,19 @@ class TorchImageOps(ImageOps):
         canvas = torch.empty(
             (len(images), 3, dst_h, dst_w), dtype=torch.float32, device=self._device
         )
-        scales, pads = self._letterbox(images, canvas, params, pad_value)
-        return LetterboxResult(tensor=canvas.cpu().numpy(), scales=scales, pads=pads)
+        scales, pads, extents = self._letterbox(images, canvas, params, pad_value)
+        return LetterboxResult(
+            tensor=canvas.cpu().numpy(), scales=scales, pads=pads, extents=extents
+        )
 
     def _letterbox(
         self, images: Sequence[np.ndarray], canvas: Any, params: NormalizeParams, pad_value: int
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Shared implementation: everything happens in ``canvas``, wherever it lives."""
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Shared implementation: everything happens in ``canvas``, wherever it lives.
+
+        Returns ``(scales, pads, extents)`` — the third is the ``(new_h, new_w)`` each image
+        was resized to, the size ``interpolate`` was actually asked for.
+        """
         if not images:
             raise ValueError("letterbox needs at least one image")
         torch = self._torch
@@ -95,6 +101,7 @@ class TorchImageOps(ImageOps):
         canvas.fill_(float(pad_value))
         scales = np.empty(n, dtype=np.float32)
         pads = np.empty((n, 2), dtype=np.float32)
+        extents = np.empty((n, 2), dtype=np.int32)
 
         for i, image in enumerate(images):
             if image.ndim != 3 or image.shape[2] != 3:
@@ -105,6 +112,7 @@ class TorchImageOps(ImageOps):
             new_w = max(1, round(src_w * scale))
             pad_y = (dst_h - new_h) // 2
             pad_x = (dst_w - new_w) // 2
+            extents[i] = (new_h, new_w)
 
             # HWC uint8 -> 1CHW float on the device, then one interpolate call.
             src = (
@@ -133,7 +141,7 @@ class TorchImageOps(ImageOps):
             1, 3, 1, 1
         )
         canvas[:n].sub_(mean).div_(std)
-        return scales, pads
+        return scales, pads, extents
 
     def crop_batch(
         self,
