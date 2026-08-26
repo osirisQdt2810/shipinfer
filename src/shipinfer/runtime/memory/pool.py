@@ -66,6 +66,19 @@ class MemoryPool:
                     self._staging_pools[owner] = pool
         return pool
 
+    def release_staging(self, owner: str) -> None:
+        """Free one owner's staging pool now instead of at :meth:`close`.
+
+        Owner keys can embed a thread ident (the pipeline's do), so a runner that stops and
+        starts again mints new keys each cycle — without this, every cycle strands its
+        page-locked buffers for the life of the server. Releasing an unknown owner is a
+        no-op: the caller records what it created and this forgives a double release.
+        """
+        with self._lock:
+            pool = self._staging_pools.pop(owner, None)
+        if pool is not None:
+            pool.clear()
+
     @property
     def pinned(self) -> Allocator:
         """Page-locked host memory.

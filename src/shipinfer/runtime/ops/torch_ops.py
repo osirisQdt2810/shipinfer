@@ -79,12 +79,13 @@ class TorchImageOps(ImageOps):
     #: float32 elements one *pinned host* staging buffer may hold. Deliberately its own
     #: bound and not derived from :attr:`_CROP_CHUNK_ELEMENTS`: that one caps device memory a
     #: caching allocator hands straight back, this one caps page-locked host memory, which
-    #: the kernel can never swap and every process on the box competes for. At 8 MiB per
-    #: named buffer a worker holds about 20 MB — letterbox ``(1, 3, 640, 640)`` 4.9 MB,
-    #: person crops ``(21, 3, 256, 128)`` 8.3 MB, ship crops ``(2, 3, 512, 512)`` 6.3 MB — so
-    #: the four pipeline workers on this box cost ~80 MB. Raising it to the crop bound would
-    #: cost ~330 MB and buy nothing: the only per-chunk expense is a stream synchronise of
-    #: some tens of microseconds against a DMA of roughly half a millisecond.
+    #: the kernel can never swap and every process on the box competes for. Each name holds
+    #: a ping-pong PAIR of buffers, so at 8 MiB per buffer a worker holds about 40 MB —
+    #: letterbox ``(1, 3, 640, 640)`` 2 x 4.9 MB, person crops ``(21, 3, 256, 128)``
+    #: 2 x 8.3 MB, ship crops ``(2, 3, 512, 512)`` 2 x 6.3 MB — and the four pipeline
+    #: workers on this box cost ~160 MB. Raising it to the crop bound would double a number
+    #: that already buys the overlap: the second buffer is what lets the copy engine run
+    #: chunk *k+1*'s DMA while the host drains chunk *k*.
     _STAGE_CHUNK_ELEMENTS: ClassVar[int] = 2 * 1024 * 1024
 
     def __init__(
@@ -119,6 +120,7 @@ class TorchImageOps(ImageOps):
         # per frame for twelve floats that never change is pure latency on the worker.
         self._norm_cache: dict[tuple[Any, ...], tuple[Any, Any]] = {}
         self._channel_cache: dict[tuple[Any, ...], Any] = {}
+        self._event_cache: dict[str, tuple[Any, Any]] = {}
 
     @property
     def on_device(self) -> bool:  # type: ignore[override]
@@ -199,10 +201,13 @@ class TorchImageOps(ImageOps):
         a 64-entry pool, evict, and turn steady-state calls back into ``cudaHostAlloc`` —
         slower than the pageable copy this replaces.
 
-        The copy is serial with the compute on purpose. Real overlap needs a second stream,
-        events and a double-buffered pool, and on one stream the reused buffer's synchronise
-        would drain the compute anyway; what this buys is bandwidth, not concurrency. The
-        overlap is a separate change behind its own measurement.
+        Two buffers ping-pong on this thread's own stream: while the host copies chunk *k*
+        out of one, chunk *k+1*'s DMA is already in flight into the other — the copy engine
+        never idles behind the memcpy, and no second stream is needed (one `torch.cuda.Event`
+        per buffer orders each read; ADR-002's one-thread-one-stream discipline holds).
+        Single-chunk calls — the letterbox frame, a reid-sized crop set — degenerate to
+        exactly the serial cost; the overlap engages where the pageable tails lived, the
+        multi-chunk mask batches.
 
         Args:
             tensor: the result to bring home, batched along dimension 0.
@@ -226,7 +231,10 @@ class TorchImageOps(ImageOps):
 
         rows = self._stage_rows(shape)
         try:
-            staged = self._staging.get(name, (rows, *shape[1:]), tensor.dtype)
+            staged = (
+                self._staging.get(f"{name}:a", (rows, *shape[1:]), tensor.dtype),
+                self._staging.get(f"{name}:b", (rows, *shape[1:]), tensor.dtype),
+            )
         except (DeviceError, RuntimeError) as exc:
             # Refused because a capture is underway, or because the host is out of lockable
             # pages. Degrade once and then never ask again: the array is identical either
@@ -243,17 +251,45 @@ class TorchImageOps(ImageOps):
         host = torch.empty(shape, dtype=tensor.dtype)
         tensor = tensor.contiguous()  # a no-op for both call sites; a whole-batch copy if not
         stream = torch.cuda.current_stream(self._device)
-        for lo in range(0, shape[0], rows):
-            hi = min(lo + rows, shape[0])
-            staged[: hi - lo].copy_(tensor[lo:hi], non_blocking=True)
-            # Not optional. The buffer is reused by the next chunk and by the next call, so
-            # reading it before the DMA lands returns the *previous* frame's pixels: no
-            # error, plausible values, and invisible to anything that submits one frame. On
-            # this thread's own stream, never the device-wide `torch.cuda.synchronize()`,
-            # which would wait on every other worker sharing the GPU (ADR-002).
-            stream.synchronize()
-            host[lo:hi].copy_(staged[: hi - lo])
+        events = self._stage_events(name)
+        spans = [(lo, min(lo + rows, shape[0])) for lo in range(0, shape[0], rows)]
+        for index, (lo, hi) in enumerate(spans):
+            staged[index % 2][: hi - lo].copy_(tensor[lo:hi], non_blocking=True)
+            events[index % 2].record(stream)
+            if index:
+                # Drain the PREVIOUS chunk while this one's DMA runs on the copy engine.
+                # Waiting on the event is not optional: the buffer is reused two chunks on
+                # and by the next call, so reading it before its DMA lands returns the
+                # *previous* frame's pixels — no error, plausible values, invisible to
+                # anything that submits one frame. The event waits on this thread's own
+                # work, never the device-wide `torch.cuda.synchronize()` that would stall
+                # every other worker sharing the GPU (ADR-002). Buffer reuse is safe by
+                # host order: chunk k's memcpy-out finishes here before chunk k+2's DMA
+                # into the same buffer is ever enqueued.
+                plo, phi = spans[index - 1]
+                events[(index - 1) % 2].synchronize()
+                host[plo:phi].copy_(staged[(index - 1) % 2][: phi - plo])
+        last = len(spans) - 1
+        lo, hi = spans[last]
+        events[last % 2].synchronize()
+        host[lo:hi].copy_(staged[last % 2][: hi - lo])
         return host.numpy()
+
+    def _stage_events(self, name: str) -> tuple[Any, Any]:
+        """The two reusable CUDA events that order reads of ``name``'s ping-pong buffers.
+
+        Cached per name for the same reason the buffers are: creating an event is a driver
+        call, and this path runs per frame. An event is re-recorded only after its previous
+        recording was synchronised, so reuse cannot observe a stale completion.
+        """
+        pair = self._event_cache.get(name)
+        if pair is None:
+            torch = self._torch
+            pair = (torch.cuda.Event(), torch.cuda.Event())
+            if len(self._event_cache) > self._CACHE_LIMIT:
+                self._event_cache.clear()
+            self._event_cache[name] = pair
+        return pair
 
     # -- preprocess ---------------------------------------------------------------------
 

@@ -169,6 +169,12 @@ class PipelineRunner:
         # afternoon here — an injected queue's capacity was ignored and an injected sink
         # received nothing — and the shape of the bug is invisible at the call site.
         self._server = server
+        #: Staging-pool owners this runner's workers claimed, so stop() can release the
+        #: page-locked buffers: owner keys embed the worker thread's ident, and a runner
+        #: that stops and starts mints new keys each cycle — without the release, every
+        #: cycle strands ~tens of MB of pinned memory for the server's life.
+        self._staging_owners: list[str] = []
+        self._staging_owners_lock = threading.Lock()
         if settings is None:
             settings = getattr(server, "settings", None) or ServerSettings()
         self._settings = settings
@@ -260,7 +266,7 @@ class PipelineRunner:
             # The owner key is per *thread*, not per device: several workers share a device
             # in rotation, and one pool between two of them is one buffer between two DMAs.
             staging = (
-                memory.staging_for(staging_owner(index))
+                self._claim_staging(memory, staging_owner(index))
                 if accelerated and memory is not None
                 else None
             )
@@ -359,6 +365,17 @@ class PipelineRunner:
                 f"start with. Set ingest.target_model={entry!r} or change the graph."
             )
 
+    def _claim_staging(self, memory: Any, owner: str) -> Any:
+        """The owner's pool from the server's MemoryPool, remembered for release at stop.
+
+        Called on the worker thread that owns the key (`staging_owner` embeds its ident),
+        hence the lock around the list append.
+        """
+        pool = memory.staging_for(owner)
+        with self._staging_owners_lock:
+            self._staging_owners.append(owner)
+        return pool
+
     def stop(self, timeout_s: float = 10.0) -> None:
         """Stop the cameras, drain, and publish what was still in flight. Idempotent.
 
@@ -394,6 +411,14 @@ class PipelineRunner:
             if future.set_running_or_notify_cancel():
                 future.set_exception(RequestCancelledError("the pipeline stopped"))
         self._sink.close()
+        # Workers are joined, so no DMA is in flight into these buffers; the release keeps
+        # a stop/start cycle from stranding page-locked memory under freshly minted keys.
+        memory = getattr(self._server, "memory", None)
+        if memory is not None:
+            with self._staging_owners_lock:
+                owners, self._staging_owners = self._staging_owners, []
+            for owner in owners:
+                memory.release_staging(owner)
         self._started = False
         _LOG.info(
             "pipeline stopped: %d queued frame(s) failed, %d in-flight frame(s) published",

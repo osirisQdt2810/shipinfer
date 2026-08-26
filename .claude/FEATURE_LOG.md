@@ -5,48 +5,24 @@ edits, typo fixes and pure docs.
 
 ---
 
-## perf: the two copies home go through pinned staging (26 Aug 2026)
+## perf: the ops layer's copies home go through pinned ping-pong staging (26 Aug 2026)
 
-`TorchImageOps` ended `letterbox_batch` and `crop_batch` with `.cpu().numpy()` into a fresh
-**pageable** array, and a copy into pageable memory never DMAs — the driver moves it through
-a bounce buffer of its own, which is the ~1.4 GB/s vs ~10 GB/s difference `cudaMemcpyAsync`
-hides behind no error at all. That is not a small share of this pipeline: at the sizing in
-CLAUDE.md the two sites carry 1000 letterboxed frames a second (`(1, 3, 640, 640)` fp32 =
-4.9 MB) plus the crops of every person on them (~10 × 0.39 MB), which is **~8.85 GB/s of D2H
-by arithmetic** — not a measurement, a derivation from the sizing table, and the number a
-bench run has to confirm. The C++ plane had the same defect in NMS and it cost 30.8 ms a call
-against 1.7 ms staged (ledger C32).
+C44's lever 2. The pageable D2H tails were the ops layer, not TensorRT: letterbox_batch's
+`.cpu().numpy()` (4.92 MB × once per frame) and crop_batch's return (the ~39 ms mask-batch
+tails). Both now stage through a per-worker `PinnedStagingPool` — **two fixed-shape buffers
+per name, ping-ponged on the worker's own stream with one `torch.cuda.Event` per buffer**,
+so the copy engine runs chunk k+1's DMA while the host drains chunk k; single-chunk calls
+degenerate to the serial pinned cost. The contract is unchanged (host numpy out, exact
+bytes); a refused pinned allocation degrades once to pageable with a warning; the runner
+releases its workers' pools at stop (`MemoryPool.release_staging`) so stop/start cycles
+cannot strand page-locked memory. Pinned budget ≈40 MB per worker (a pair per name),
+released by `close()` and visible in `stats()`.
 
-Both now go through `TorchImageOps._to_host(tensor, name)` and a `PinnedStagingPool` the
-caller owns. Three rules make the reuse safe and worth having:
-
-* **The buffer is fixed-shape.** The key is `(name, rows, *shape[1:])`, never the true row
-  count, so a crowded frame's eighteen crops and a quiet one's three land in the same buffer.
-  Keying on N would give every crowd size its own entry, evict through the pool's 64-entry
-  bound, and turn the steady state into a `cudaHostAlloc` per call — slower than the pageable
-  copy it replaced. `_STAGE_CHUNK_ELEMENTS` (2 Mi fp32 = 8 MiB) is its own bound and not
-  `_CROP_CHUNK_ELEMENTS`, because this one caps page-locked host memory: ~20 MB per worker
-  across the three staged shapes, ~80 MB for four pipeline workers.
-* **Every chunk is synchronised before its buffer is read**, on the thread's own stream and
-  never `torch.cuda.synchronize()` (ADR-002). Skipping it returns the previous frame's
-  pixels: plausible, silent, and invisible to anything that submits one frame.
-* **A refusal degrades once.** A pool that will not allocate — mid-capture `DeviceError`, or
-  no lockable pages — drops the instance back to the pageable copy, logs once, and is never
-  asked again. The array is identical either way, and an optimisation must not be able to
-  take a worker down.
-
-Wiring: `get_image_ops(..., staging=)` hands the pool to `TorchImageOps` only (native has its
-own ring, numpy has no device); `PipelineRunner._build_ops` resolves it from the **server's**
-`MemoryPool` so `stats()` reports the locked bytes and `close()` releases them; the key is
-`pipeline.graph.ops.staging_owner(index)`, which carries the thread's identity as well as its
-name because two `PipelineRunner`s both call their workers `pipeline-worker-0`. `benchmarks/
-kernels.py --no-staging` reproduces the pre-pool number in the same table.
-
-This is a **bandwidth** fix, not a traffic fix. Deleting the round trip entirely is the
-dispatcher-level `letterbox_to_device` work ADR-007 defers to Phase 2, and it is untouched
-here. 53 offline tests (`tests/runtime/test_torch_ops_staging.py` + `staging_owner` in
-`tests/pipeline/test_ops.py`) plus 13 in the GPU tier; eight mutations verified red, and
-`test_torch_crop_batch.py`/`test_ops_parity.py` are byte-identical.
+Measurement framing (corrected in review round 2): Nsight's D2H rows do not count the
+staged path's host memcpy-out, so a D2H-only comparison flatters the change — the honest
+claims are the end-to-end A/B and the kernel-tier pair on one commit, both in the PR body.
+Deleting the copies entirely (`letterbox_to_device` through the dispatcher) stays the named
+ADR-007 follow-up.
 
 ## perf: crop_batch is one batched pass (26 Aug 2026)
 

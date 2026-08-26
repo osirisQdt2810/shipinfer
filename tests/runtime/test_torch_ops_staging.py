@@ -82,11 +82,37 @@ class _CountingStream:
         self.syncs += 1
 
 
+class _CountingEvent:
+    """Stands in for ``torch.cuda.Event``: offline the "DMA" is a host memcpy that is
+    complete by construction, so recording and waiting are pure bookkeeping — which is
+    exactly what these counters pin: one record per chunk, one synchronise before each read.
+    """
+
+    records = 0
+    syncs = 0
+
+    def __init__(self) -> None:
+        self.recorded = 0
+        self.synced = 0
+
+    def record(self, stream=None) -> None:
+        self.recorded += 1
+        _CountingEvent.records += 1
+
+    def synchronize(self) -> None:
+        self.synced += 1
+        _CountingEvent.syncs += 1
+
+
 @pytest.fixture()
 def stream(monkeypatch) -> _CountingStream:
-    """Make ``torch.cuda.current_stream`` answer, so the staged path can run with no device."""
+    """Make ``torch.cuda.current_stream`` and ``torch.cuda.Event`` answer, so the staged
+    path can run with no device."""
     counter = _CountingStream()
     monkeypatch.setattr(torch.cuda, "current_stream", lambda device=None: counter)
+    monkeypatch.setattr(torch.cuda, "Event", _CountingEvent)
+    _CountingEvent.records = 0
+    _CountingEvent.syncs = 0
     return counter
 
 
@@ -145,16 +171,18 @@ class TestTheStagedResultIsTheSameArray:
         np.testing.assert_array_equal(result.extents, expected.extents)
 
     def test_an_empty_batch_needs_no_buffer(self, stream) -> None:
-        """No boxes is a real case on a quiet camera, and it must not allocate a buffer for a
-        batch that does not exist."""
+        """`crop_batch` returns before staging on an empty box set; `_to_host` itself must
+        also refuse to allocate for a zero-row tensor — driven directly, because no public
+        call site can reach that branch (round 2's review caught the earlier version of
+        this test exercising only the early return)."""
         pool = PinnedStagingPool(owner="test")
         ops = _staged(pool)
-
-        result = ops.crop_batch(FRAME, np.empty((0, 4), np.float32), (8, 8), PARAMS)
-
-        assert result.shape == (0, 3, 8, 8)
-        assert result.dtype == np.float32
-        assert pool.stats()["entries"] == 0
+        out = ops.crop_batch(FRAME, np.empty((0, 4), dtype=np.float32), (8, 8), PARAMS)
+        assert out.shape == (0, 3, 8, 8) and pool.stats()["misses"] == 0
+        empty = ops._to_host(torch.empty((0, 3, 8, 8)), "crop")
+        assert empty.shape == (0, 3, 8, 8) and empty.dtype == np.float32
+        assert pool.stats()["misses"] == 0, "a zero-row copy must not allocate a buffer"
+        assert _CountingEvent.records == 0
 
 
 class TestTheChunkLoopCoversTheBatch:
@@ -172,7 +200,9 @@ class TestTheChunkLoopCoversTheBatch:
         np.testing.assert_array_equal(
             result, plain.crop_batch(NOISE, boxes, (12, 10), IMAGENET)
         )
-        assert stream.syncs == 3, "each chunk must land before its buffer is read"
+        assert (
+            _CountingEvent.records == 3 and _CountingEvent.syncs == 3
+        ), "each chunk records its event once and is waited for once before its read"
 
     def test_a_letterbox_batch_larger_than_one_chunk_matches(self, stream, monkeypatch) -> None:
         monkeypatch.setattr(TorchImageOps, "_STAGE_CHUNK_ELEMENTS", 3 * 12 * 20)
@@ -186,7 +216,7 @@ class TestTheChunkLoopCoversTheBatch:
         np.testing.assert_array_equal(
             result.tensor, plain.letterbox_batch(images, (12, 20), IMAGENET).tensor
         )
-        assert stream.syncs == 4
+        assert _CountingEvent.records == 4 and _CountingEvent.syncs == 4
 
 
 class TestTheBufferIsFixedShape:
@@ -206,9 +236,11 @@ class TestTheBufferIsFixedShape:
         for count in (1, 5, 40):
             ops.crop_batch(NOISE, _random_boxes(count, NOISE.shape), (8, 8), PARAMS)
 
-        assert pool.stats()["entries"] == 1
-        assert pool.stats()["misses"] == 1, "a second allocation means N reached the key"
-        assert pool.stats()["hits"] == 2
+        # A ping-pong PAIR per name: two entries and two allocations however the crowd
+        # changes; anything above two means N reached the key.
+        assert pool.stats()["entries"] == 2
+        assert pool.stats()["misses"] == 2, "a third allocation means N reached the key"
+        assert pool.stats()["hits"] == 4
 
     def test_letterbox_and_crop_do_not_share_a_buffer(self, stream) -> None:
         """Two names, two buffers — the pool's own rule. One buffer between them would stage
@@ -218,13 +250,13 @@ class TestTheBufferIsFixedShape:
         ops.letterbox_batch([FRAME], (16, 16), PARAMS)
         ops.crop_batch(FRAME, _random_boxes(3, FRAME.shape), (8, 8), PARAMS)
 
-        assert pool.stats()["entries"] == 2
+        assert pool.stats()["entries"] == 4  # a ping-pong pair per name
         allocations = pool.stats()["misses"]
         letterbox = pool.get(
-            "letterbox", (TorchImageOps._stage_rows((1, 3, 16, 16)), 3, 16, 16), torch.float32
+            "letterbox:a", (TorchImageOps._stage_rows((1, 3, 16, 16)), 3, 16, 16), torch.float32
         )
         crop = pool.get(
-            "crop", (TorchImageOps._stage_rows((3, 3, 8, 8)), 3, 8, 8), torch.float32
+            "crop:a", (TorchImageOps._stage_rows((3, 3, 8, 8)), 3, 8, 8), torch.float32
         )
 
         assert pool.stats()["misses"] == allocations, "those are not the buffers the ops used"
@@ -416,12 +448,30 @@ class TestStagedCropOnCuda:
         try:
             ops.crop_batch(FRAME, _random_boxes(6, FRAME.shape), (16, 16), IMAGENET)
             rows = TorchImageOps._stage_rows((6, 3, 16, 16))
-            buffer = pool.get("crop", (rows, 3, 16, 16), torch.float32)
+            first = pool.get("crop:a", (rows, 3, 16, 16), torch.float32)
+            second = pool.get("crop:b", (rows, 3, 16, 16), torch.float32)
 
             assert pool.pinned
-            assert buffer.is_pinned()
-            assert pool.stats()["misses"] == 1
+            assert first.is_pinned() and second.is_pinned()
+            assert pool.stats()["misses"] == 2  # the ping-pong pair, nothing more
         finally:
             del ops
             pool.clear()
             torch.cuda.empty_cache()
+
+
+class TestReleaseStaging:
+    def test_release_frees_the_owner_and_forgives_a_double_release(self) -> None:
+        """Owner keys embed thread idents, so a stop/start cycle mints new keys; the
+        release is what keeps each cycle from stranding its page-locked buffers."""
+        from shipinfer.runtime.memory.pool import MemoryPool
+
+        memory = MemoryPool()
+        pool = memory.staging_for("ops:test#1:cuda:0")
+        pool.get("crop:a", (2, 3, 8, 8), torch.float32)
+        assert pool.stats()["entries"] == 1
+        memory.release_staging("ops:test#1:cuda:0")
+        assert pool.stats()["entries"] == 0, "released pools are cleared"
+        assert memory.staging_for("ops:test#1:cuda:0") is not pool, "a new claim is fresh"
+        memory.release_staging("ops:test#1:cuda:0")
+        memory.release_staging("never-claimed")  # both must be quiet no-ops

@@ -241,8 +241,16 @@ def _bind(registry: Any, name: str, device: int | None, *, staging: str | None =
     try:
         return registry.create(name, **options)
     except TypeError:
-        # A host-only implementation takes no device. numpy is the case; it is not an error.
-        return registry.create(name)
+        # An implementation that predates a keyword must still get the ones it knows —
+        # falling straight to a bare create would silently benchmark CPU ops the moment a
+        # device implementation rejected any option, which is the mistake _bind exists to
+        # prevent. Only when the device itself is refused is this a host-only
+        # implementation; numpy is the case, and it is not an error.
+        try:
+            trimmed = {key: value for key, value in options.items() if key != "staging"}
+            return registry.create(name, **trimmed)
+        except TypeError:
+            return registry.create(name)
 
 
 def _to_device_case(
