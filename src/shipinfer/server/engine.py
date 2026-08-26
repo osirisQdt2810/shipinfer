@@ -7,7 +7,12 @@ import time
 from collections.abc import Iterator
 from typing import Any
 
-from shipinfer.core.errors import ModelControlError, ModelNotFoundError, ServerStateError
+from shipinfer.core.errors import (
+    ConfigurationError,
+    ModelControlError,
+    ModelNotFoundError,
+    ServerStateError,
+)
 from shipinfer.core.logging import get_logger
 from shipinfer.core.metrics import EXPORTERS, ServerMetrics
 from shipinfer.core.request import InferenceRequest, InferenceResponse, ResponseFuture
@@ -193,6 +198,12 @@ class InferenceServer:
             for name in topology.service.shared_models
             if name in self._models
         }
+        for name, candidate in shared.items():
+            if not hasattr(candidate, "infer_local"):
+                raise ConfigurationError(
+                    f"shared model {name!r} is an ensemble; only plain models cross the tier "
+                    f"— share the models it composes instead"
+                )
         if not shared:
             _LOG.warning(
                 "service topology: none of the shared models %s is loaded here; no tier joined",

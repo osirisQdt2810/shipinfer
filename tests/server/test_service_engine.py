@@ -125,3 +125,21 @@ class TestAFailedConnectLeaksNothing:
         with pytest.raises(RingClosedError):
             SharedRing.open(created, RingLayout(slots=4, slot_bytes=64 * 1024))
         server.stop()
+
+
+class TestAnEnsembleCannotCrossTheTier:
+    def test_the_join_refuses_it_by_name_before_any_ring_exists(
+        self, tmp_repository: Path
+    ) -> None:
+        """Round 2: the wire carries one request to one model; an ensemble's DAG references
+        local models by identity, so offering it to peers can only fail later and worse."""
+        from types import SimpleNamespace
+
+        from shipinfer.core.errors import ConfigurationError
+
+        settings = _settings(tmp_repository, uuid.uuid4().hex[:8], 0)
+        settings.topology.service.shared_models = ["fused"]
+        server = InferenceServer(settings)
+        server._models["fused"] = SimpleNamespace(name="fused")  # ensembles have no infer_local
+        with pytest.raises(ConfigurationError, match="'fused' is an ensemble"):
+            server._join_service_tier()

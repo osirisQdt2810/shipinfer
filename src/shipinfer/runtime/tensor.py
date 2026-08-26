@@ -99,6 +99,10 @@ class _DeviceSpan:
     """
 
     def __init__(self, tensor: Tensor) -> None:
+        # torch retains this provider object for the view's life — so the provider must
+        # retain the tensor (and through it the handle that owns the device memory), or the
+        # caller dropping its `core.Tensor` frees the buffer under a live torch view.
+        self._tensor = tensor
         # Interface v2: no `stream` key, so a consumer synchronises on the *current* stream.
         # The wire's D2H path only hands this host-bound, already-synchronised tensors; a
         # caller bridging a stream-resident tensor must order the streams itself first.

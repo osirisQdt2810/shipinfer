@@ -46,6 +46,7 @@ from dataclasses import dataclass
 
 from shipinfer.core.errors import (
     PeerLostError,
+    QueueFullError,
     RequestTimeoutError,
     RingClosedError,
     RingFullError,
@@ -203,9 +204,15 @@ class ResultReader(threading.Thread):
 
     def run(self) -> None:
         idle = 0
+        last_bookkeeping = 0
         while not self._stopping.is_set():
             busy = self._drain_results()
-            self._check_heartbeats()
+            now = time.monotonic_ns()
+            # Liveness and expiry decide on second-scale windows; checking them thousands of
+            # times a second only contends `_lock` with the dispatch path's `expect`.
+            if now - last_bookkeeping >= self._lost_after_ns // 4:
+                self._check_heartbeats()
+                last_bookkeeping = now
             if busy:
                 idle = 0
                 continue
@@ -367,6 +374,9 @@ class RingIngress(threading.Thread):
         self._idle_after = idle_after
         self._stopping = threading.Event()
         self._replies: deque[_Reply] = deque()
+        #: Requests the owner's model queue refused: retried next sweep with their inbound
+        #: slots still claimed, so the ring fills and the submitter spills locally (ADR-005).
+        self._deferred: deque[tuple[IngressLane, int, InferenceRequest, float]] = deque()
         self._last_stamp_ns = 0
         self.served = 0
         self.failed = 0
@@ -384,18 +394,27 @@ class RingIngress(threading.Thread):
             idle = 0
             while not self._stopping.is_set():
                 busy = self._drain_replies()
-                self._stamp()
+                busy = self._retry_deferred() or busy
+                # A sweep that landed replies or requeued work changed the depths it reads;
+                # peers place on those numbers, so they go out now, not at the next timer tick.
+                self._stamp(force=busy)
+                deferred_lanes = {id(lane) for lane, *_ in self._deferred}
                 open_lanes = 0
                 for lane in self._lanes:
                     if lane.inbound.is_closed:
                         continue
                     open_lanes += 1
+                    if id(lane) in deferred_lanes:
+                        # This lane's model is saturated; taking more would only queue more
+                        # refusals. Leaving the ring full is the back-pressure.
+                        continue
                     index = lane.inbound.take(timeout_s=0)
                     if index is None:
                         continue
                     busy = True
                     self._serve(lane, index)
-                if open_lanes == 0 and not self._replies:
+                    self._stamp(force=True)  # the depth just changed; peers decide on it
+                if open_lanes == 0 and not self._replies and not self._deferred:
                     return
                 if busy:
                     idle = 0
@@ -409,6 +428,10 @@ class RingIngress(threading.Thread):
                 reply = self._replies.popleft()
                 self.dropped += 1
                 reply.lane.inbound.release(reply.inbound_index)
+            while self._deferred:
+                lane, index, _request, _cap = self._deferred.popleft()
+                self.dropped += 1
+                lane.inbound.release(index)
             for lane in self._lanes:
                 lane.inbound.close()
 
@@ -423,8 +446,36 @@ class RingIngress(threading.Thread):
             self.failed += 1
             self._replies.append(self._failure_reply(lane, index, request_id, "?", exc))
             return
+        self._start(lane, index, request, time.monotonic() + self._result_patience_s)
+
+    def _start(
+        self, lane: IngressLane, index: int, request: InferenceRequest, cap: float
+    ) -> None:
         try:
             future = lane.infer(request)
+        except QueueFullError:
+            # The owner's own model queue refused — saturation, not death. Failing the frame
+            # here inverts ADR-005: the submitter (depth 5) could have run what it sent to a
+            # peer whose header was 200 ms stale. Keep the inbound slot claimed and retry the
+            # request next sweep; the ring fills, the submitter's next enqueue raises
+            # RingFullError, and the dispatcher spills back to a local instance — the same
+            # pressure propagation a full result ring already applies to replies.
+            if time.monotonic() >= cap:
+                self.failed += 1
+                self._replies.append(
+                    self._failure_reply(
+                        lane,
+                        index,
+                        request.request_id,
+                        request.model_name,
+                        QueueFullError(
+                            f"{request.model_name} at {lane.submitter}'s peer", 0, 0
+                        ),
+                    )
+                )
+                return
+            self._deferred.append((lane, index, request, cap))
+            return
         except Exception as exc:
             self.failed += 1
             self._replies.append(
@@ -475,6 +526,19 @@ class RingIngress(threading.Thread):
         )
 
     # -- the replies -----------------------------------------------------------------------
+
+    def _retry_deferred(self) -> bool:
+        """Requests an earlier sweep could not hand to a saturated model: try again, once
+        each, keeping their slots claimed. Never blocks."""
+        busy = False
+        for _ in range(len(self._deferred)):
+            try:
+                lane, index, request, cap = self._deferred.popleft()
+            except IndexError:
+                break
+            busy = True
+            self._start(lane, index, request, cap)
+        return busy
 
     def _drain_replies(self) -> bool:
         """Land what can land; requeue what is back-pressured; drop what expired or lost its
@@ -531,6 +595,10 @@ class RingIngress(threading.Thread):
     # -- the heartbeat -----------------------------------------------------------------------
 
     def _stamp(self, *, force: bool = False) -> None:
+        """The timer is the *liveness* cadence; activity re-stamps immediately (`force`), so
+        the depth a peer reads tracks queue transitions rather than the heartbeat interval —
+        a placement decision made on a 200 ms-old depth herds bursts onto whichever peer
+        stamped last."""
         now = time.monotonic_ns()
         if not force and now - self._last_stamp_ns < self._stamp_every_ns:
             return

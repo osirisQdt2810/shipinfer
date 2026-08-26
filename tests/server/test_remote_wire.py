@@ -239,3 +239,43 @@ class TestDeviceTensorsCrossForReal:
         back = wire.decode_request(slot, copy=True)
         np.testing.assert_array_equal(back.inputs["images"].numpy(), source.cpu().numpy())
         del source  # the core.Tensor's holder kept it alive until here, as the bridge requires
+
+    def test_the_bridge_survives_the_callers_tensor_going_away(self) -> None:
+        """Round 2: torch retains only the provider object, so the provider retains the rest.
+
+        Bridge, drop the ``core.Tensor``, collect, and read the view again — with the
+        retention missing this is a use-after-free the allocator may or may not expose, so
+        the weakref assertion carries the property and the re-read makes it observable.
+        """
+        import gc
+        import types
+        import weakref
+
+        import torch
+
+        from shipinfer.core.types import MemoryKind
+        from shipinfer.runtime.tensor import to_torch
+
+        source = torch.arange(16, dtype=torch.float32, device="cuda:0") * 7.0
+        torch.cuda.synchronize()
+        expected = source.cpu().numpy().copy()
+
+        class Handle(types.SimpleNamespace):
+            """``SimpleNamespace`` refuses weakrefs; the retention probe needs one."""
+
+        handle = Handle(
+            ptr=source.data_ptr(),
+            nbytes=source.numel() * 4,
+            device=Device.cuda(0),
+            kind=MemoryKind.DEVICE,
+            owner=source,  # the handle owns the allocation, as a real DeviceBuffer does
+        )
+        tensor = Tensor.from_handle(handle, DataType.FP32, (16,))
+        del source, handle
+        view = to_torch(tensor)
+        # ``Tensor`` is slotted; the handle lives exactly as long as the tensor, so probe it.
+        ref = weakref.ref(tensor.handle)
+        del tensor
+        gc.collect()
+        assert ref() is not None, "the torch view keeps the core.Tensor alive through the span"
+        np.testing.assert_array_equal(view.cpu().numpy(), expected)

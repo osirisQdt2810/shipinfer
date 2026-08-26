@@ -388,3 +388,118 @@ class TestPendingEntriesExpire:
             reader.join(timeout=2)
             submit_writer.close()
             submit_owner.close()
+
+
+class TestASaturatedOwnerPushesBack:
+    class SaturatedThenWilling:
+        """Refuses the first N infers with QueueFullError, then serves normally."""
+
+        def __init__(self, refusals: int) -> None:
+            self.refusals = refusals
+            self.inner = FakeModel()
+
+        def infer(self, request: InferenceRequest) -> Future:
+            if self.refusals > 0:
+                self.refusals -= 1
+                raise QueueFullError("emb", 64, 64)
+            return self.inner.infer(request)
+
+    def test_a_refused_request_is_retried_and_succeeds_not_failed_as_text(self) -> None:
+        """Round 2: the owner's model-queue saturation must not leave the process as a text
+        failure — the request waits with its slot held and runs when the queue drains."""
+        layout = RingLayout(slots=4, slot_bytes=64 * 1024)
+        inbound_owner = SharedRing.create(_name("sat"), layout, owner="B")
+        inbound_writer = SharedRing.open(inbound_owner.name, layout)
+        results_owner = SharedRing.create(_name("satr"), layout, owner="A")
+        results_writer = SharedRing.open(results_owner.name, layout)
+        model = self.SaturatedThenWilling(refusals=3)
+        reader = ResultReader(lost_after_s=5.0)
+        reader.add_result_ring("B", results_owner)
+        proxy = RemoteInstance(
+            owner="B", model_name="m", submit=inbound_writer, reader=reader, lost_after_s=5.0
+        )
+        ingress = RingIngress(
+            [
+                IngressLane(
+                    submitter="A",
+                    inbound=inbound_owner,
+                    results=results_writer,
+                    infer=model.infer,
+                    load=lambda: (0, 0.0),
+                )
+            ],
+            stamp_every_s=0.05,
+            result_patience_s=5.0,
+        )
+        ingress.start()
+        reader.start()
+        try:
+            request = _request("quay-5", 11)
+            future = ResponseFuture(request)
+            proxy.enqueue(WorkItem(request, future))
+            response = future.result(timeout=5.0)
+            assert response.context.frame_id == 11, "retried until the queue drained — not text"
+            assert ingress.failed == 0
+        finally:
+            reader.stop()
+            ingress.stop()
+            ingress.join(timeout=2)
+            reader.join(timeout=2)
+            model.inner.close()
+            inbound_writer.close()
+            results_owner.close()
+            results_writer.close()
+
+    def test_persistent_saturation_fills_the_ring_and_the_submitter_spills(self) -> None:
+        """While the owner stays saturated the slots stay claimed, the ring fills, and the
+        submitter's next enqueue raises RingFullError — the dispatcher's spill signal."""
+        layout = RingLayout(slots=2, slot_bytes=64 * 1024)
+        inbound_owner = SharedRing.create(_name("satf"), layout, owner="B")
+        inbound_writer = SharedRing.open(inbound_owner.name, layout)
+        results_owner = SharedRing.create(_name("satfr"), layout, owner="A")
+        results_writer = SharedRing.open(results_owner.name, layout)
+        model = self.SaturatedThenWilling(refusals=10_000)
+        reader = ResultReader(lost_after_s=5.0)
+        reader.add_result_ring("B", results_owner)
+        proxy = RemoteInstance(
+            owner="B", model_name="m", submit=inbound_writer, reader=reader, lost_after_s=5.0
+        )
+        ingress = RingIngress(
+            [
+                IngressLane(
+                    submitter="A",
+                    inbound=inbound_owner,
+                    results=results_writer,
+                    infer=model.infer,
+                    load=lambda: (64, 9000.0),
+                )
+            ],
+            stamp_every_s=0.05,
+            result_patience_s=30.0,
+        )
+        ingress.start()
+        reader.start()
+        try:
+            deadline = time.monotonic() + 5.0
+            spilled = False
+            submitted = 0
+            while time.monotonic() < deadline:
+                request = _request("quay-6", submitted)
+                try:
+                    proxy.enqueue(WorkItem(request, ResponseFuture(request)))
+                    submitted += 1
+                except RingFullError:
+                    spilled = True
+                    break
+                time.sleep(0.01)
+            assert spilled, "the held slots filled the ring; the submitter got its spill signal"
+            assert ingress.failed == 0, "nothing was failed as text while merely saturated"
+        finally:
+            reader.stop()
+            ingress.stop()
+            ingress.join(timeout=2)
+            reader.join(timeout=2)
+            model.inner.close()
+            inbound_writer.close()
+            results_owner.close()
+            results_writer.close()
