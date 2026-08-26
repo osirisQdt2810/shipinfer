@@ -61,6 +61,45 @@ class TestInstanceGroupExpansion:
         assert len(placements) == 4
         assert sorted(p.device.index for p in placements) == [0, 0, 1, 1]
 
+    def test_a_shared_device_gets_the_share_not_the_count(self) -> None:
+        """A fleet shard that shares its GPU loads count // sharing there. Two shards each
+        loading the full count would double the device's engines and VRAM for the same total
+        throughput — TensorRT contexts are per-process, so nothing saves it."""
+        group = InstanceGroup(kind=InstanceKind.GPU, count=4, gpus=[0, 1])
+        placements = group.expand(visible_gpus=(0, 1), shared_by={0: 2})
+        assert sorted(p.device.index for p in placements) == [0, 0, 1, 1, 1, 1]
+
+    def test_a_count_that_does_not_divide_gives_its_remainder_to_the_lowest_ranks(self) -> None:
+        """`count: 3` over two processes is 2 + 1 — the device still carries the three the
+        config asked for, not the two floor division would leave it."""
+        group = InstanceGroup(kind=InstanceKind.GPU, count=3, gpus=[0])
+        first = group.expand(visible_gpus=(0,), shared_by={0: 2}, share_rank={0: 0})
+        second = group.expand(visible_gpus=(0,), shared_by={0: 2}, share_rank={0: 1})
+        assert (len(first), len(second)) == (2, 1)
+
+    def test_an_absent_rank_is_rank_zero(self) -> None:
+        group = InstanceGroup(kind=InstanceKind.GPU, count=3, gpus=[0])
+        assert len(group.expand(visible_gpus=(0,), shared_by={0: 2})) == 2
+
+    def test_a_rank_that_would_get_nothing_is_refused(self) -> None:
+        group = InstanceGroup(kind=InstanceKind.GPU, count=1, gpus=[0])
+        with pytest.raises(ConfigurationError, match="ranked 1 would get none"):
+            group.expand(visible_gpus=(0,), shared_by={0: 2}, share_rank={0: 1})
+
+    def test_a_single_instance_shared_by_two_goes_to_rank_zero(self) -> None:
+        # Rank 0 takes the remainder; rank 1 is the one refused (next test) — silently
+        # rounding to zero would produce a process that accepts frames and can never execute
+        # one, which reads as a throughput result rather than a misconfiguration.
+        group = InstanceGroup(kind=InstanceKind.GPU, count=1, gpus=[0])
+        assert len(group.expand(visible_gpus=(0,), shared_by={0: 2})) == 1
+
+    def test_placements_pass_the_sharing_through(self) -> None:
+        config = ModelConfig(
+            **{**BASE, "instance_groups": [InstanceGroup(kind=InstanceKind.GPU, count=2)]}
+        )
+        assert len(config.placements((0, 1), shared_by={0: 2, 1: 2})) == 2
+        assert len(config.placements((0, 1))) == 4
+
     def test_empty_gpus_means_every_visible_device(self) -> None:
         """The property that lets one config run on 2 GPUs and on 16 unchanged."""
         group = InstanceGroup(kind=InstanceKind.GPU, count=1)

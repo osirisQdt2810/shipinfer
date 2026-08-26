@@ -136,3 +136,44 @@ class TestDeviceAffinity:
                 buffer.free()
         finally:
             pool.close()
+
+
+class TestSharingIsKeyedByDevice:
+    """`DeviceSettings.shared_by` is aligned with the visible devices; the manager turns it into
+    the mapping `InstanceGroup.expand` divides by. Offline: the driver is a stub."""
+
+    @pytest.fixture()
+    def two_devices(self, monkeypatch):
+        import shipinfer.runtime.device as device_module
+
+        monkeypatch.setattr(device_module, "device_count", lambda: 2)
+
+    def test_aligned_with_the_visible_devices(self, two_devices) -> None:
+        manager = DeviceManager(DeviceSettings(shared_by=[2, 1], validate_on_start=False))
+        assert manager.shared_by == {0: 2, 1: 1}
+
+    def test_aligned_with_an_explicit_visible_list(self, two_devices) -> None:
+        manager = DeviceManager(
+            DeviceSettings(visible_gpus=[1], shared_by=[3], validate_on_start=False)
+        )
+        assert manager.shared_by == {1: 3}
+
+    def test_empty_means_nobody_shares(self, two_devices) -> None:
+        assert DeviceManager(DeviceSettings(validate_on_start=False)).shared_by == {}
+
+    def test_a_misaligned_list_is_refused(self, two_devices) -> None:
+        manager = DeviceManager(DeviceSettings(shared_by=[2], validate_on_start=False))
+        with pytest.raises(ConfigurationError, match="must align"):
+            _ = manager.shared_by
+
+    def test_the_rank_is_keyed_the_same_way(self, two_devices) -> None:
+        manager = DeviceManager(
+            DeviceSettings(shared_by=[2, 2], share_rank=[1, 0], validate_on_start=False)
+        )
+        assert manager.share_rank == {0: 1, 1: 0}
+        assert DeviceManager(DeviceSettings(validate_on_start=False)).share_rank == {}
+
+    def test_a_misaligned_rank_list_is_refused(self, two_devices) -> None:
+        manager = DeviceManager(DeviceSettings(share_rank=[0], validate_on_start=False))
+        with pytest.raises(ConfigurationError, match="must align"):
+            _ = manager.share_rank

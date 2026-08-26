@@ -16,6 +16,7 @@ from shipinfer.core.settings.memory import MemorySettings
 from shipinfer.core.settings.observability import ObservabilitySettings
 from shipinfer.core.settings.pipeline import PipelineSettings
 from shipinfer.core.settings.scheduler import SchedulerSettings
+from shipinfer.core.settings.topology import TopologySettings
 
 __all__ = ["ServerSettings"]
 
@@ -58,6 +59,7 @@ class ServerSettings(BaseSettings):
     pipeline: PipelineSettings = Field(default_factory=PipelineSettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     http: HttpSettings = Field(default_factory=HttpSettings)
+    topology: TopologySettings = Field(default_factory=TopologySettings)
 
     @model_validator(mode="after")
     def _startup_models_need_selection(self) -> ServerSettings:

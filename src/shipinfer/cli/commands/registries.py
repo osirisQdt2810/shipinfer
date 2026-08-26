@@ -1,4 +1,4 @@
-"""``shipinfer backends|policies|queues`` — what is pluggable, and what is plugged in."""
+"""``shipinfer backends|policies|queues|topologies`` — what is pluggable, and what is plugged in."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any
 from shipinfer.cli.common import print_table
 from shipinfer.core.registry import Registry
 
-__all__ = ["list_backends", "list_policies", "list_queues"]
+__all__ = ["list_backends", "list_policies", "list_queues", "list_topologies"]
 
 
 def _render(title: str, registry: Registry[Any]) -> int:
@@ -35,3 +35,10 @@ def list_queues() -> int:
     from shipinfer.scheduling.queues import QUEUES
 
     return _render("Request queues", QUEUES)
+
+
+def list_topologies() -> int:
+    """Every registered process topology — the names `shipinfer fleet --topology` accepts."""
+    from shipinfer.server.topology import TOPOLOGIES
+
+    return _render("Topologies", TOPOLOGIES)

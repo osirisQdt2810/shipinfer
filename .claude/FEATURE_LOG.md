@@ -5,6 +5,48 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-25 — The topology seam, and the fleet behind it (Phase 7, T1–T2)
+
+**What it is.** The operator's target is topology C — decode shards per GPU and a
+cross-process inference tier balanced like Triton's — and there are three deployments that
+should share one abstraction for "how the deployment is laid out into processes": the fleet
+of shards (B), C itself, and a DeepStream competitor. `server/topology/` is that seam.
+`Topology` is a registry-backed contract with four methods — `plan` (cameras + GPUs → a
+`ShardPlan`), `command` (the argv one shard runs), `environment` (what every child inherits),
+`describe` — and `TOPOLOGIES` is the switch: `SHIPINFER_TOPOLOGY__KIND` / `shipinfer fleet
+--topology`. Unknown names fail at configuration time with the known list. The contract is
+small on purpose and a test says so (`TestTheContractIsSmallOnPurpose`): a topology decides
+*placement of processes*, not scheduling inside one.
+
+**`scheduling/sharding.py` — the plan.** Pure. Longest-processing-time over offered fps
+(`fps or 1.0`, because `fps=0` means "whatever the source delivers"), so balance is by load,
+not by camera count: four 30 fps cameras and forty 5 fps ones split evenly in *frames*, which
+is the failure this project exists to fix seen one level up. Stable across restarts (sorted
+input, deterministic ties) so a camera keeps its GPU across a redeploy; GPUs handed out
+without leaving one idle; when shards share a GPU the configured per-GPU instances are divided
+between them (`instances_for`); an impossible plan (more shards than cameras or than GPUs,
+zero of either) fails at plan time. `describe()` is what the launcher prints and what
+`--dry-run` shows.
+
+**`server/launcher.py` — one OS process per shard.** `Fleet.start` is all-or-nothing: a shard
+that dies during start-up takes the others down before anything is reported running. Each
+child gets `CUDA_VISIBLE_DEVICES` for its GPUs alone and `SHIPINFER_SHARD_CAMERAS` for its
+cameras; `cli/common.py::_narrow_to_shard` makes `serve` read only its slice, and refuses a
+slice naming a camera the configuration does not have. `supervise` turns a dead shard into
+`ShardExitedError` for the whole fleet — a fleet that silently keeps running on three of four
+GPUs is the imbalance bug wearing a new coat. `stop` drains for `--drain` seconds, then kills,
+and leaves nothing behind (tested with real subprocesses on a stand-in command).
+
+**`shipinfer fleet`.** `--shards` (default one per visible GPU), `--gpus`, `--policy`,
+`--topology`, `--dry-run`, `--drain`. The dry run prints the plan and exits without spawning.
+
+**What is deliberately not here.** No live multi-GPU run in the PR: the demo repository in
+git carries no engines, and the fleet's children are `shipinfer serve`, so the process
+semantics are proven with a stand-in command and the plan with a dry run. T3 (`service`, the
+cross-process inference tier) and T4 (DeepStream) register against the same contract.
+
+---
+
 ## 2026-08-25 — The benchmark's other two tiers, and an RTSP source
 
 **What it is.** R44 asks for three benchmark tiers — system, algo, kernel — and only the
