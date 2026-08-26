@@ -936,3 +936,73 @@ class TestADroppedWriterHandleReleasesItsClaim:
         gc.collect()
         again = SharedRing.open(ring.name, ring.layout)  # not "already open in this process"
         again.close()
+
+
+class TestManySubmittingThreads:
+    def test_two_hundred_claims_from_two_threads_land_exactly_once_each(self) -> None:
+        """Round 10: the dispatcher drives a proxy from many request threads, so claim's
+        test-and-set must be one critical section — two threads that both saw FREE used to
+        both take the same slot, and one camera's payload shipped under another's framing."""
+        layout = RingLayout(slots=2, slot_bytes=4096)
+        owner = SharedRing.create(_name(), layout, owner="A")
+        writer = SharedRing.open(owner.name, layout)
+        received: list[bytes] = []
+        surprises: list[BaseException] = []
+
+        def drain() -> None:
+            while True:
+                index = owner.take(timeout_s=0.05)
+                if index is None:
+                    if owner.is_closed:
+                        return
+                    continue
+                received.append(bytes(owner.payload(index)[:12]))
+                owner.release(index)
+
+        def submit(prefix: bytes) -> None:
+            try:
+                for i in range(200):
+                    while True:
+                        try:
+                            index = writer.claim(timeout_s=1.0)
+                            break
+                        except RingFullError:
+                            time.sleep(0)
+                    writer.payload(index)[:12] = prefix + i.to_bytes(4, "little")
+                    writer.publish(index)
+            except BaseException as exc:
+                surprises.append(exc)
+
+        reader = threading.Thread(target=drain)
+        reader.start()
+        submitters = [
+            threading.Thread(target=submit, args=(b"cam07-mk",)),
+            threading.Thread(target=submit, args=(b"cam41-mk",)),
+        ]
+        for thread in submitters:
+            thread.start()
+        for thread in submitters:
+            thread.join(timeout=30)
+        deadline = time.monotonic() + 5.0
+        while len(received) < 400 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        owner.close()
+        reader.join(timeout=5.0)
+        writer.close()
+        assert surprises == [], surprises[:3]
+        assert len(received) == 400 and len(set(received)) == 400, (
+            f"{len(received)} received, {len(set(received))} unique — a shared slot "
+            f"published one camera's payload over another's"
+        )
+
+
+class TestThePendingLockIsReentrant:
+    def test_a_finalizer_firing_inside_the_critical_section_returns(self) -> None:
+        """Round 10, the round-9 mechanism on the other lock: `_finalize_handle` runs
+        synchronously in the collecting thread, which may already hold `_PENDING_LOCK`
+        (reap's own list mutations allocate). Re-entry must return, not self-deadlock."""
+        from shipinfer.runtime.memory import shared_ring as module
+
+        with module._PENDING_LOCK:
+            module._finalize_handle(memoryview(b""), "never-opened-name")  # re-enters, returns
+        assert True

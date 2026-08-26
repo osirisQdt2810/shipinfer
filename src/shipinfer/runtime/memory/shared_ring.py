@@ -190,7 +190,12 @@ class RingHeader:
     owner: str
 
 
-_PENDING_LOCK = threading.Lock()
+# Reentrant for the same reason `_pin_lock` is: `_finalize_handle` and `_pinned_view_died`
+# are weakref.finalize callbacks, which run synchronously in whatever thread triggers the
+# collection — including a gc landing on the allocations *inside* these critical sections
+# (reap's list mutations, open's set add). Re-entry is benign at every site: each mutates its
+# own structure and none re-reads a value computed before a possible re-entry.
+_PENDING_LOCK = threading.RLock()
 _PENDING_CLOSE: list[shared_memory.SharedMemory] = []
 #: Names this process has opened (not created): the one-writer discipline means a second
 #: open is a wiring bug, and letting it through unbalances the resource tracker's set.
@@ -292,6 +297,11 @@ class SharedRing:
         # tens of nanoseconds against a ~125 us slot copy; slices already handed out stay
         # valid regardless — they export the mapping itself, not this object.
         self._view_lock = threading.Lock()
+        # The submitter's state machine (claim's test-and-set, publish, abandon) is driven
+        # from many request threads by the dispatcher — the same reason the local queue wraps
+        # its put in a lock. Plain, not reentrant: no finalizer touches it. Never held across
+        # a backoff sleep. Ordering: _submit_lock -> _view_lock, never the reverse.
+        self._submit_lock = threading.Lock()
         # A handle dropped without close() must not strand the mapping: the finalizer lets
         # `SharedMemory.__del__` succeed instead of printing an ignored BufferError.
         weakref.finalize(self, _finalize_handle, self._view, None if is_owner else name)
@@ -550,12 +560,17 @@ class SharedRing:
         while True:
             if self.is_closed:
                 raise RingClosedError(self._owner, self._name)
-            for _ in range(self._layout.slots):
-                index = self._next
-                self._next = (index + 1) % self._layout.slots
-                if self.state(index) == SlotState.FREE:
-                    self._set_state(index, SlotState.CLAIMED)
-                    return index
+            with self._submit_lock:
+                # The test-and-set and the cursor bump are one critical section: two request
+                # threads that both saw FREE used to both claim the same slot, and one
+                # camera's payload was published over another's — the misattribution ADR-002's
+                # tag rule exists to prevent, silent on the side that shipped.
+                for _ in range(self._layout.slots):
+                    index = self._next
+                    self._next = (index + 1) % self._layout.slots
+                    if self.state(index) == SlotState.FREE:
+                        self._set_state(index, SlotState.CLAIMED)
+                        return index
             if time.monotonic() >= deadline:
                 raise RingFullError(self._owner, self._name, self.depth, self._layout.slots)
             spins = _backoff(spins)
@@ -579,9 +594,18 @@ class SharedRing:
 
         Inert on a closed handle: the reader is gone with the ring, so there is nobody to
         see the slot, and a writer racing `close()` must not crash on the released view.
+        **Publishing into a ring whose owner closed between `claim` and here succeeds
+        silently** — the write is harmless, but nobody will take it. A submitter that must
+        not lose the batch re-checks `is_closed` after publishing, or relies on its
+        heartbeat watcher failing the pending future (`PeerLostError`), which is what the
+        proxy layer does.
         """
         if self._detached:
             return
+        with self._submit_lock:
+            self._publish_locked(index)
+
+    def _publish_locked(self, index: int) -> None:
         if self.state(index) != SlotState.CLAIMED:
             raise RingProtocolError(
                 f"ring {self._name!r}: slot {index} is not claimed (state {self.state(index)})"
@@ -598,6 +622,10 @@ class SharedRing:
         """
         if self._detached:
             return
+        with self._submit_lock:
+            self._abandon_locked(index)
+
+    def _abandon_locked(self, index: int) -> None:
         if self.state(index) != SlotState.CLAIMED:
             raise RingProtocolError(
                 f"ring {self._name!r}: slot {index} is not claimed (state {self.state(index)})"
