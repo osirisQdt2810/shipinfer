@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "shipinfer/core/buffers.h"
 #include "shipinfer/core/platform.h"
 #include "shipinfer/core/types.h"
 #include "shipinfer/pipeline/graph/stage.h"

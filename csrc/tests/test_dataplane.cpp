@@ -25,6 +25,7 @@
 #include "shipinfer/pipeline/graph/shapes.h"
 #include "shipinfer/pipeline/graph/state.h"
 #include "shipinfer/pipeline/reassembly/collector.h"
+#include "shipinfer/runtime/containment.h"
 #include "shipinfer/runtime/ops.h"
 
 using namespace shipinfer;
@@ -573,6 +574,9 @@ namespace {
 }  // namespace
 
 int main() {
+    // This binary opens devices, so it consults the container rule itself — the hook
+    // knows its name, but a rule only the hook enforces is not a rule (CLAUDE.md).
+    shipinfer::runtime::require_container("csrc test_dataplane");
     test_a_plan_whose_shape_disagrees_with_the_config_is_refused_at_construction();
     test_a_plan_with_non_float32_io_is_refused();
     test_a_frame_with_more_objects_than_the_batch_keeps_every_chunk();
