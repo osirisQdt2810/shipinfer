@@ -7,7 +7,12 @@ import time
 from collections.abc import Iterator
 from typing import Any
 
-from shipinfer.core.errors import ModelControlError, ModelNotFoundError, ServerStateError
+from shipinfer.core.errors import (
+    ConfigurationError,
+    ModelControlError,
+    ModelNotFoundError,
+    ServerStateError,
+)
 from shipinfer.core.logging import get_logger
 from shipinfer.core.metrics import EXPORTERS, ServerMetrics
 from shipinfer.core.request import InferenceRequest, InferenceResponse, ResponseFuture
@@ -44,6 +49,7 @@ class InferenceServer:
         self._memory = MemoryPool(self._settings.memory)
         self._repository: ModelRepository | None = None
         self._models: dict[str, Model | EnsembleModel] = {}
+        self._mesh: Any = None  # a ServiceMesh under the `service` topology
         self._lock = threading.Lock()
         # A second lock, and the two are not interchangeable. `_lock` guards the model table
         # for the microseconds a lookup takes; `_control_lock` serialises whole load/unload
@@ -169,11 +175,66 @@ class InferenceServer:
         ensembles = [n for n in names if self._repository.entry(n).config.is_ensemble]
         for name in (*plain, *ensembles):
             self._load(name)
+        self._mesh = self._join_service_tier()
 
         self._started = True
         self._started_at = time.monotonic()
         _LOG.info("shipinfer ready: %d model(s) — %s", len(self._models), self.models())
         return self
+
+    def _join_service_tier(self) -> Any:
+        """Under the `service` topology, offer the shared models to the peers and take theirs.
+
+        Only when the launcher said which shard this is: a single-process `serve` has no tier
+        to join, and `fleet` has none by design.
+        """
+        topology = self._settings.topology
+        if topology.kind != "service" or topology.service.shard is None:
+            return None
+        from shipinfer.server.service_mesh import ServiceMesh, wire_slot_bytes
+
+        shared = {
+            name: self._models[name]
+            for name in topology.service.shared_models
+            if name in self._models
+        }
+        for name, candidate in shared.items():
+            if not hasattr(candidate, "admit_local"):
+                raise ConfigurationError(
+                    f"shared model {name!r} is an ensemble; only plain models cross the tier "
+                    f"— share the models it composes instead"
+                )
+        if not shared:
+            _LOG.warning(
+                "service topology: none of the shared models %s is loaded here; no tier joined",
+                topology.service.shared_models,
+            )
+            return None
+        assert self._repository is not None  # start() loaded it before any model
+        sizes = {
+            name: wire_slot_bytes(
+                self._repository.entry(name).config, topology.service.slot_bytes
+            )
+            for name in shared
+        }
+        mesh = ServiceMesh(
+            topology.service, topology.service.shard, shared, slot_bytes_by_model=sizes
+        )
+        mesh.create()
+        try:
+            mesh.connect()
+        except BaseException:
+            # A peer that never appeared (or a failed open) must not leak the rings this
+            # shard already created: close and unlink them so a restart can recreate the
+            # names, then let the start fail with the connect error.
+            mesh.stop()
+            raise
+        return mesh
+
+    @property
+    def service_mesh(self) -> Any:
+        """The tier this process joined, or ``None`` outside the `service` topology."""
+        return self._mesh
 
     def _startup_names(self) -> list[str]:
         """Which models to load at start-up.
@@ -241,6 +302,11 @@ class InferenceServer:
         if not self._started:
             return
         _LOG.info("stopping shipinfer (%d model(s))", len(self._models))
+        if self._mesh is not None:
+            # Leave the tier first: peers see the closed rings and fail their in-flight
+            # requests to us with the tags, instead of waiting on a model that is stopping.
+            self._mesh.stop()
+            self._mesh = None
         with self._lock:
             models = list(self._models.values())
             self._models.clear()

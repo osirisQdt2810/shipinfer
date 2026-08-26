@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from shipinfer import envs
@@ -29,6 +30,7 @@ from shipinfer.scheduling.batching import StackingBatcher
 from shipinfer.scheduling.dispatcher import Dispatcher
 from shipinfer.scheduling.limits import RateLimiter, build_rate_limiter
 from shipinfer.scheduling.policies import build_policy
+from shipinfer.scheduling.policies.base import Placeable
 from shipinfer.scheduling.queues import QUEUES, BatchWindow
 from shipinfer.scheduling.work import WorkItem
 from shipinfer.server.cache import RESPONSE_CACHES, NullResponseCache, ResponseCache
@@ -122,6 +124,9 @@ class Model:
             ),
             on_spill=self._on_spill,
         )
+        # What `infer_local` dispatches over: this process's instances and nothing else.
+        # `attach_remote` widens `_dispatcher`, never this one.
+        self._local_dispatcher = self._dispatcher
         self._started = False
 
     # -- construction --------------------------------------------------------------------
@@ -348,6 +353,36 @@ class Model:
     def is_ready(self) -> bool:
         return self._started and any(i.is_ready for i in self._instances)
 
+    def attach_remote(self, candidates: Sequence[Placeable]) -> None:
+        """Add a peer's instances to this model's dispatcher (the `service` topology).
+
+        The dispatcher sees `Placeable`s and nothing else, so a proxy joins the candidate set
+        like a local instance; the policy decides when work leaves the process.
+        """
+        if not candidates:
+            return
+        self._dispatcher = Dispatcher(
+            model_name=self._artifact.name,
+            instances=[*self._instances, *candidates],
+            policy=self._dispatcher.policy,
+            on_spill=self._on_spill,
+        )
+
+    @property
+    def ewma_latency_us(self) -> float:
+        """The mean of the instances' EWMAs — what this model publishes to its peers."""
+        if not self._instances:
+            return 0.0
+        return sum(i.ewma_latency_us for i in self._instances) / len(self._instances)
+
+    @property
+    def advertised_depth(self) -> int:
+        """What this model tells its peers: the shallowest instance queue — the one its own
+        dispatcher would pick. The *sum* (`total_depth`) is on a different scale from a local
+        candidate's single-queue depth, and publishing it made a peer look `count x` deeper
+        than it was, so the tier under-spilled exactly when it mattered."""
+        return min((instance.depth for instance in self._instances), default=0)
+
     @property
     def total_depth(self) -> int:
         return sum(i.depth for i in self._instances)
@@ -389,6 +424,22 @@ class Model:
     # -- inference -----------------------------------------------------------------------
 
     def infer(self, request: InferenceRequest) -> ResponseFuture:
+        """Validate, check the cache, then dispatch over every candidate — local instances and,
+        under the `service` topology, the peers' proxies. See :meth:`_infer` for the contract.
+        """
+        return self._infer(request, self._dispatcher)
+
+    def infer_local(self, request: InferenceRequest) -> ResponseFuture:
+        """:meth:`infer`, over this process's instances only.
+
+        The entry point for work that arrived from a peer: a request that has crossed a process
+        boundary once is executed here, whatever the local depth — handing it back to the
+        candidate set could bounce it between two deep shards on stale headers, and every hop is
+        two copies. Outside the `service` topology this is :meth:`infer`.
+        """
+        return self._infer(request, self._local_dispatcher)
+
+    def _infer(self, request: InferenceRequest, dispatcher: Dispatcher) -> ResponseFuture:
         """Validate, check the cache, then dispatch.
 
         Returns:
@@ -402,10 +453,60 @@ class Model:
                 that the *pool* cannot keep up, not that one GPU is unlucky.
             ServerStateError: when no instance is ready.
         """
+        item = self._admit(request)
+        if item.future.done():
+            return item.future
+        try:
+            dispatcher.dispatch(item, _enqueue)
+        except QueueFullError:
+            self.count_local_rejection()
+            raise
+        return item.future
+
+    def admit_local(self, request: InferenceRequest) -> WorkItem:
+        """The first-entry work of `infer_local`, without the dispatch.
+
+        The service tier admits once and then retries *dispatch alone*
+        (`try_dispatch_local`), so a saturated queue cannot re-run validation or inflate
+        `requests_total` per retry — first-entry work is first-entry by contract. On a
+        cache hit the returned item's future is already resolved.
+        """
+        return self._admit(request)
+
+    def try_dispatch_local(self, item: WorkItem) -> bool:
+        """One dispatch attempt over the local instances for an already-admitted item.
+
+        Returns False when every local queue refuses — with **no accounting**, because the
+        tier defers and retries; a rejection is recorded only when the tier finally gives
+        up (`count_local_rejection`). Anything other than saturation still raises.
+        """
+        if item.future.done():
+            return True
+        try:
+            self._local_dispatcher.dispatch(item, _enqueue)
+        except QueueFullError:
+            return False
+        return True
+
+    def count_local_rejection(self) -> None:
+        """The tier gave up on an admitted item: record exactly what a refusal records.
+
+        In the per-model statistics too, which is where Triton counts a rejection. Without
+        this `/v2/models/{n}/stats` reported `fail: 0` while the pool was shedding — the
+        endpoint says the model is perfectly healthy at the exact moment it is refusing
+        work, which is the reading an operator acts on.
+        """
+        self._metrics.requests_rejected.inc(model=self.name)
+        self._statistics.record_failure(1)
+
+    def _admit(self, request: InferenceRequest) -> WorkItem:
         if not self._started:
             raise ServerStateError(f"model {self.name!r} has not been started")
 
-        request.timings.received_ns = time.monotonic_ns()
+        # The wire carries the submitter's stamp; overwriting it here would make a borrowed
+        # request's end-to-end latency read as owner-side latency only.
+        if not request.timings.received_ns:
+            request.timings.received_ns = time.monotonic_ns()
         try:
             validate_against(request.inputs, self._batcher_input_specs(), what="input")
         except ValueError as exc:
@@ -426,22 +527,12 @@ class Model:
             if cached is not None:
                 self._metrics.cache_hits.inc(model=self.name)
                 self._statistics.record_cache_hit()
-                return _completed(future, self._response_from(request, cached))
+                _completed(future, self._response_from(request, cached))
+                return WorkItem(request, future)
             self._metrics.cache_misses.inc(model=self.name)
             self._statistics.record_cache_miss()
             self._store_when_done(key, future)
-
-        try:
-            self._dispatcher.dispatch(WorkItem(request, future), _enqueue)
-        except QueueFullError:
-            self._metrics.requests_rejected.inc(model=self.name)
-            # And in the per-model statistics, which is where Triton counts a rejection.
-            # Without this `/v2/models/{n}/stats` reported `fail: 0` while the pool was
-            # shedding — the endpoint says the model is perfectly healthy at the exact moment
-            # it is refusing work, which is the reading an operator acts on.
-            self._statistics.record_failure(1)
-            raise
-        return future
+        return WorkItem(request, future)
 
     def _batcher_input_specs(self) -> tuple[TensorSpec, ...]:
         return self._artifact.config.input_specs

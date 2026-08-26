@@ -14,6 +14,7 @@ __all__ = [
     "RingFullError",
     "RingProtocolError",
     "ShardExitedError",
+    "WireRefusedError",
 ]
 
 
@@ -41,6 +42,26 @@ class RingFullError(QueueFullError):
         self.ring = ring
         self.depth = depth
         self.capacity = capacity
+
+
+class WireRefusedError(QueueFullError):
+    """The wire cannot carry this request to this peer — so this *candidate* refuses it.
+
+    A ``QueueFullError`` subclass for the same reason as the other two: the dispatcher's
+    spill loop must treat a proxy that cannot take the item as a refusal and try the next
+    candidate — a 70-byte camera_id or a payload past the slot size must not fail a frame
+    that a local instance with room would have run (#26 round 4). The true cause rides as
+    ``__cause__`` and in the message, so the operator still sees the config bug.
+    """
+
+    def __init__(self, owner: str, model_name: str, cause: BaseException) -> None:
+        # QueueFullError's own message says "is full", which this is not — same bypass as
+        # RingClosedError below: build the message here, hand-set the attributes it promises.
+        ShipInferError.__init__(self, f"the wire to {owner!r} refuses {model_name!r}: {cause}")
+        self.owner = owner
+        self.model_name = model_name
+        self.depth = 0
+        self.capacity = 0
 
 
 class RingClosedError(QueueFullError):

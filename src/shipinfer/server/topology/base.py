@@ -61,8 +61,14 @@ class Topology(abc.ABC):
         """Who owns which cameras and which GPUs. Pure; printed before anything is spawned."""
 
     @abc.abstractmethod
-    def command(self, shard: Shard, *, repository: str) -> Sequence[str]:
-        """The argv for ``shard``'s process."""
+    def command(
+        self, shard: Shard, *, repository: str, http_port_base: int | None = None
+    ) -> Sequence[str]:
+        """The argv for ``shard``'s process.
+
+        ``http_port_base`` set means every shard also serves HTTP, on ``base + shard.index``;
+        unset means a warm shard with no ingress, which is `serve`'s own default.
+        """
 
     def environment(self, settings: ServerSettings) -> Mapping[str, str]:
         """Extra environment for every child, on top of what `Fleet` sets per shard.
@@ -72,6 +78,15 @@ class Topology(abc.ABC):
         names, a coordinator address — extends this.
         """
         return {TOPOLOGY_ENV: self.name}
+
+    def shard_environment(self, shard: Shard) -> Mapping[str, str]:
+        """Extra environment for *one* child, on top of :meth:`environment`.
+
+        The default is nothing: `fleet` tells a shard everything it needs through the plan
+        (`Fleet` sets the devices and the cameras). A topology whose children must find each
+        other — `service` names its rings by shard index — extends this.
+        """
+        return {}
 
     def describe(self) -> str:
         """One line for the operator, printed above the plan."""
