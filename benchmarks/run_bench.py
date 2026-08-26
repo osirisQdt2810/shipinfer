@@ -88,6 +88,7 @@ occupancy JSONL, its console capture, and ``summary.json``.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -439,12 +440,40 @@ def measure_baseline(cfg: BenchConfig, out_dir: Path) -> tuple[RunAnalysis, Syst
     return run, system_throughput(run)
 
 
-def measure_shipinfer(cfg: BenchConfig, out_dir: Path) -> tuple[RunAnalysis, SystemThroughput]:
-    """One ShipInfer run at one offered rate, with every guard the harness has."""
-    print("\n=== shipinfer (ingest -> scheduler -> engines -> reassembly) ===", flush=True)
+def measure_shipinfer(
+    cfg: BenchConfig, out_dir: Path
+) -> tuple[RunAnalysis | list[RunAnalysis], SystemThroughput]:
+    """One ShipInfer measurement at one offered rate, in the shape ``cfg.topology`` asks for.
+
+    ``single`` is one process over every GPU. ``fleet`` and ``service`` are one process per
+    shard through the real launcher (:mod:`benchmarks.harness.shards`), and then the analysis
+    is one entry per shard — a shard is a GPU, so that *is* the per-device table.
+    """
+    if cfg.topology != "single":
+        return measure_sharded(cfg, out_dir)
+    run, ours, _result, _offered, _capacity = measure_shipinfer_in_full(cfg, out_dir)
+    return run, ours
+
+
+def measure_shipinfer_in_full(
+    cfg: BenchConfig,
+    out_dir: Path,
+    *,
+    serve_rtsp: bool = True,
+    label: str = "shipinfer",
+) -> tuple[
+    RunAnalysis, SystemThroughput, shipinfer.ShipInferResult, dict[str, float | None], Any
+]:
+    """One single-process ShipInfer run at one offered rate, with every guard the harness has.
+
+    Returns everything the run produced, not only the analysis: a shard child writes the
+    result's counters into its summary for the parent. ``serve_rtsp=False`` is for that child —
+    the parent serves RTSP once for the whole fleet.
+    """
+    print(f"\n=== {label} (ingest -> scheduler -> engines -> reassembly) ===", flush=True)
     # The RTSP server, when this is an RTSP run, for exactly the duration of the run. A
     # no-op for a replay run, so there is one code path rather than two.
-    with rtsp.serving(cfg):
+    with rtsp.serving(cfg) if serve_rtsp else contextlib.nullcontext():
         result = shipinfer.run_shipinfer(cfg, out_dir / "shipinfer")
     # Refuse before analysing. A run whose generator never delivered the load is not a
     # slower measurement, it is a different experiment, and reporting it against the
@@ -474,9 +503,77 @@ def measure_shipinfer(cfg: BenchConfig, out_dir: Path) -> tuple[RunAnalysis, Sys
     if result.per_device:
         print("\nper-device execution (the balancing evidence):")
         for model, devices in sorted(result.per_device.items()):
-            spread = "  ".join(f"gpu{d}={n}" for d, n in sorted(devices.items()))
+            # `d` is already a device string (`cuda:0`), and inside a shard child it is the
+            # child's logical ordinal; the parent's table relabels to physical GPUs.
+            spread = "  ".join(f"{d}={n}" for d, n in sorted(devices.items()))
             print(f"  {model:<18} {spread}")
-    return run, ours
+    offered = shipinfer.offered_rates(cfg, result)
+    capacity = shipinfer.per_module_capacity(cfg, instances=result.instances)
+    return run, ours, result, offered, capacity
+
+
+def measure_sharded(
+    cfg: BenchConfig, out_dir: Path
+) -> tuple[list[RunAnalysis], SystemThroughput]:
+    """One process per shard, the topology's own launcher between them; one analysis per shard.
+
+    The parent serves RTSP (when this is an RTSP run) once for the whole fleet, starts the
+    children, and re-analyses each shard's occupancy log with the offered rates and capacities
+    the child recorded. The system's throughput is the sum over shards, and its verdict the
+    worst shard's (:func:`benchmarks.harness.shards.aggregate`).
+    """
+    from benchmarks.harness import shards
+
+    print(
+        f"\n=== shipinfer, topology {cfg.topology}: one process per shard "
+        f"(ingest -> scheduler -> engines -> reassembly, per shard) ===",
+        flush=True,
+    )
+    with rtsp.serving(cfg):
+        summaries = shards.run_sharded(cfg, out_dir / "shipinfer")
+    runs: list[RunAnalysis] = []
+    for summary in summaries:
+        gpus = ",".join(str(g) for g in summary["gpus"])
+        runs.append(
+            _analyse(
+                f"shipinfer[shard{summary['shard']}:gpu{gpus}]",
+                Path(summary["log"]),
+                cfg,
+                offered=summary["offered"],
+                entries=(shipinfer.PIPELINE_MODULE,),
+                capacity=summary["capacity"],
+            )
+        )
+    agg = shards.aggregate(summaries)
+    print("\nper-shard (a shard is a GPU):")
+    for row in agg["shards"]:
+        rate = "—" if row["images_per_s"] is None else f"{row['images_per_s']:.1f} img/s"
+        print(
+            f"  shard {row['shard']}  gpu {row['gpus']}  {row['cameras']:>3} cameras  "
+            f"offered {row['offered_total']:g}  achieved {row['achieved']:.1f}  {rate}  "
+            f"{row['verdict']}"
+        )
+    if agg["per_device"]:
+        print("\nper-device execution (the balancing evidence; under `service` a request that")
+        print("left its shard is counted where it ran):")
+        for model, devices in sorted(agg["per_device"].items()):
+            spread = "  ".join(f"{d}={n}" for d, n in sorted(devices.items()))
+            print(f"  {model:<18} {spread}")
+    detail = "; ".join(
+        f"shard {r['shard']} gpu{r['gpus']}: "
+        + ("no number" if r["images_per_s"] is None else f"{r['images_per_s']:.1f} img/s")
+        + f" {r['verdict']}"
+        for r in agg["shards"]
+    )
+    ours = SystemThroughput(
+        "shipinfer",
+        agg["images_per_s"],
+        agg["saturated"],
+        agg["binding_module"],
+        f"{len(summaries)} shard(s), {cfg.topology}: {detail}",
+        verdict=agg["verdict"],
+    )
+    return runs, ours
 
 
 #: One entry per system, so the sweep and the single-point path cannot drift apart.
@@ -517,7 +614,7 @@ def sweep_system(
             print(f"    x{multiplier:g} produced no measurement: {exc}")
             print("    keeping the rungs already measured and stopping the climb.")
             break
-        runs.append(run)
+        runs.extend(run if isinstance(run, list) else [run])
         if throughput.kind == CAPACITY:
             print(f"    {system} saturated at x{multiplier:g}; the ladder stops here.")
             return runs, throughput
@@ -594,6 +691,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "saturate harder."
         ),
     )
+    p.add_argument(
+        "--topology",
+        choices=("single", "fleet", "service"),
+        default="single",
+        help=(
+            "how the ShipInfer side is laid out: one process over every GPU (single), one "
+            "process per shard through the real launcher (fleet), or the same plus the "
+            "cross-process tier for the crop-stage models (service). The baseline is unaffected"
+        ),
+    )
+    p.add_argument("--shards", type=int, default=0, help="shard processes; 0 = one per GPU")
+    p.add_argument(
+        "--shard-cameras",
+        default=None,
+        metavar="N,N,...",
+        help=(
+            "an explicit cameras-per-shard split in camera order, one GPU per shard — e.g. "
+            "20,10,10,10 for a crowded shard next to quiet ones (the case fleet cannot fix and "
+            "service exists for). Default: the launcher's own balanced plan"
+        ),
+    )
     p.add_argument("--out-dir", type=Path, default=None)
     p.add_argument("--label", default=None, help="names the output directory")
     return p.parse_args(argv)
@@ -635,6 +753,13 @@ def main(argv: list[str] | None = None) -> int:
         source=args.source,
         rtsp_port=args.rtsp_port,
         omp_threads=args.omp_threads,
+        topology=args.topology,
+        shards=args.shards,
+        shard_cameras=(
+            tuple(int(n) for n in args.shard_cameras.split(",") if n.strip())
+            if args.shard_cameras
+            else ()
+        ),
         **(
             {"pipeline_workers": args.pipeline_workers}
             if args.pipeline_workers is not None
@@ -684,7 +809,7 @@ def main(argv: list[str] | None = None) -> int:
                 runs.extend(rung_runs)
             else:
                 run, throughput = MEASURE[system](cfg, out_dir)
-                runs.append(run)
+                runs.extend(run if isinstance(run, list) else [run])
         except (RuntimeError, ValueError) as exc:
             # `ValueError` too: `analyse` raises it when the steady window holds fewer
             # samples than a fit needs, which is a bad configuration rather than a crash.

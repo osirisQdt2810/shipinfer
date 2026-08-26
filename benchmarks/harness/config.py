@@ -47,7 +47,7 @@ from __future__ import annotations
 import hashlib
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +56,9 @@ __all__ = ["BenchConfig", "Resolution"]
 #: The frame sets that ship with ``benchmarks/baseline``. Both are 1920x1080 JPEGs; ``4k``
 #: is the same content upscaled by the baseline's own ``change_image_resolution.py``.
 Resolution = str
+
+#: The shapes the ShipInfer side can take; see :attr:`BenchConfig.topology`.
+TOPOLOGIES = ("single", "fleet", "service")
 
 _RESOLUTION_FOLDERS: dict[str, tuple[str, str]] = {
     "2k": ("person_2K", "ship_2K"),
@@ -142,6 +145,22 @@ class BenchConfig:
     source: str = "replay"
     #: The port `rtsp_serve` listens on when ``source == "rtsp"``.
     rtsp_port: int = 8554
+    #: How the ShipInfer side is laid out across processes. ``single`` is one process over
+    #: every GPU (the in-process server this harness always ran); ``fleet`` and ``service`` are
+    #: one process per shard through the real launcher, the latter with the cross-process tier
+    #: for the crop-stage models (T3). The baseline is unaffected: it has one shape.
+    topology: str = "single"
+    #: Shard processes under ``fleet``/``service``; 0 means one per GPU.
+    shards: int = 0
+    #: An explicit cameras-per-shard split, in camera order, one GPU per shard. Empty means the
+    #: launcher's own plan (LPT by offered fps, which is balanced by construction). The split is
+    #: how the harness models *the plan was right when it was made and the crowd moved*: a
+    #: crowded shard next to quiet ones, which is the case `fleet` cannot fix and `service`
+    #: exists for.
+    shard_cameras: tuple[int, ...] = ()
+    #: This process's slice of the cameras, by id. Empty means all of them. A shard child is
+    #: given its slice here and offers exactly ``len(camera_ids) x fps``.
+    camera_ids: tuple[str, ...] = ()
 
     #: Where the frames come from. Defaults resolve under ``benchmarks/baseline/data``.
     person_frames: Path | None = None
@@ -177,6 +196,35 @@ class BenchConfig:
             raise ValueError(
                 f"warmup_s={self.warmup_s} leaves no steady tail in a {self.seconds}s run"
             )
+        if self.topology not in TOPOLOGIES:
+            raise ValueError(
+                f"topology must be one of {sorted(TOPOLOGIES)}, got {self.topology!r}"
+            )
+        if self.shards < 0:
+            raise ValueError(f"shards must be >= 0, got {self.shards}")
+        if self.shard_cameras:
+            if self.topology == "single":
+                raise ValueError(
+                    "shard_cameras needs a multi-process topology (fleet or service)"
+                )
+            if any(n <= 0 for n in self.shard_cameras):
+                raise ValueError(
+                    f"every shard needs at least one camera, got {self.shard_cameras}"
+                )
+            if sum(self.shard_cameras) != self.cameras:
+                raise ValueError(
+                    f"shard_cameras {self.shard_cameras} sums to {sum(self.shard_cameras)}, "
+                    f"not the {self.cameras} cameras of the run"
+                )
+            if self.shards and len(self.shard_cameras) != self.shards:
+                raise ValueError(
+                    f"shard_cameras names {len(self.shard_cameras)} shards but shards={self.shards}"
+                )
+            if len(self.shard_cameras) > len(self.gpus):
+                raise ValueError(
+                    f"{len(self.shard_cameras)} shards on {len(self.gpus)} GPUs: an explicit split "
+                    f"gives each shard one GPU"
+                )
 
     def workers_for(self, module: str) -> int:
         """Baseline inference threads for one module: instances per GPU x GPUs.
@@ -205,9 +253,15 @@ class BenchConfig:
         return self.sources_per_module * self.fps
 
     @property
+    def camera_count(self) -> int:
+        """Cameras *this process* drives: its slice under a sharded run, all of them otherwise."""
+        return len(self.camera_ids) if self.camera_ids else self.cameras
+
+    @property
     def offered_total(self) -> float:
-        """Images per second offered to the whole system, on either side."""
-        return self.cameras * self.fps
+        """Images per second offered to the whole system, on either side — or, for a shard
+        child, to this process: its slice of the cameras times the frame rate."""
+        return self.camera_count * self.fps
 
     @property
     def steady_seconds(self) -> float:
@@ -355,6 +409,12 @@ class BenchConfig:
             "pipeline_workers": self.pipeline_workers,
             "resolution": self.resolution,
             "source": self.source,
+            "rtsp_port": self.rtsp_port,
+            "topology": self.topology,
+            "shards": self.shards,
+            "shard_cameras": list(self.shard_cameras),
+            "camera_ids": list(self.camera_ids),
+            "out_dir": str(self.out_dir),
             "sources_per_module": self.sources_per_module,
             "offered_per_module": self.offered_per_module,
             "offered_total": self.offered_total,
@@ -372,3 +432,36 @@ class BenchConfig:
             "load_average": [round(v, 2) for v in os.getloadavg()],
             "cpu_count": os.cpu_count(),
         }
+
+    _PATH_FIELDS = (
+        "person_frames",
+        "ship_frames",
+        "det_engine",
+        "seg_engine",
+        "model_repository",
+        "out_dir",
+    )
+    _TUPLE_FIELDS = ("gpus", "shard_cameras", "camera_ids")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> BenchConfig:
+        """The inverse of :meth:`as_dict` for the fields that are configuration.
+
+        Derived keys (``offered_total``, ``baseline_workers``, the host facts) are ignored: a
+        shard child rebuilds its parent's configuration from the JSON the parent wrote, then
+        narrows it to its own slice.
+        """
+        names = {f.name for f in fields(cls)}
+        kwargs: dict[str, Any] = {}
+        for key, value in data.items():
+            if key not in names or value is None:
+                continue
+            if key in cls._PATH_FIELDS:
+                kwargs[key] = Path(value)
+            elif key in cls._TUPLE_FIELDS:
+                kwargs[key] = tuple(value)
+            elif key == "instances_per_gpu":
+                kwargs[key] = dict(value)
+            else:
+                kwargs[key] = value
+        return cls(**kwargs)

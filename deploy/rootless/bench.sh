@@ -114,7 +114,9 @@ if [ -f "$REPO/3rdparty/shipvision/pyproject.toml" ]; then
   shipvision_path=":/work/3rdparty/shipvision"
 fi
 
-exec docker run --rm --pid=host --device nvidia.com/gpu=all \
+# --shm-size: the `service` topology's rings are shared memory, ~0.9 GiB at the defaults for
+# four shards (ADR-015); Docker's 64 MiB default would refuse the second ring.
+exec docker run --rm --pid=host --device nvidia.com/gpu=all --shm-size=2g \
   -e LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/tensorrt/lib:/baseline-libs" \
   -e PYTHONPATH="/work/src:/work${shipvision_path}" \
   -e PYTHONDONTWRITEBYTECODE=1 \

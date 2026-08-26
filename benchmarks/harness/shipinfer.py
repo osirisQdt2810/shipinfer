@@ -158,6 +158,23 @@ class ShipInferResult:
 
 
 def _cameras(config: BenchConfig) -> list[dict[str, Any]]:
+    """The cameras this process drives: all of them, or — for a shard child — its slice.
+
+    The full list is always built first, so a slice keeps the parent's naming and the
+    parent's person/ship split; the child merely drives fewer of the same cameras.
+    """
+    cameras = _all_cameras(config)
+    if not config.camera_ids:
+        return cameras
+    wanted = set(config.camera_ids)
+    chosen = [c for c in cameras if c["camera_id"] in wanted]
+    missing = wanted - {c["camera_id"] for c in chosen}
+    if missing:
+        raise ValueError(f"camera_ids names cameras this run does not have: {sorted(missing)}")
+    return chosen
+
+
+def _all_cameras(config: BenchConfig) -> list[dict[str, Any]]:
     """One camera per source, half on person frames and half on ship frames.
 
     The split mirrors the baseline exactly: it pushes ``person_2K`` through the detector and
