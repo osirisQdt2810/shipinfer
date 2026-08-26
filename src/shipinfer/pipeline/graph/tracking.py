@@ -78,8 +78,8 @@ MIXED_CLASS = "any"
 _STATE_DTYPE = "<U9"
 
 try:  # the kernels + algorithms submodule is optional, and CI does not check it out
-    from shipvision.tracking import TRACKERS as _TRACKERS
-    from shipvision.tracking.association import associate as _associate
+    from shipvision.mot import TRACKERS as _TRACKERS
+    from shipvision.mot.association import associate as _associate
     from shipvision.types import Detection as _VisionDetection
     from shipvision.types import Detections as _VisionDetections
     from shipvision.types import FrameTag as _FrameTag
@@ -97,7 +97,7 @@ except ImportError as exc:  # pragma: no cover - exercised on a checkout without
 
 
 def tracking_available() -> bool:
-    """Whether ``shipvision.tracking`` can be imported on this host.
+    """Whether ``shipvision.mot`` can be imported on this host.
 
     Asked rather than assumed because ``3rdparty/shipvision`` is a submodule and CI
     deliberately does not check it out — that non-checkout is what keeps "every native
@@ -141,7 +141,7 @@ class TrackerShard:
     worker threads.
 
     Args:
-        algorithm: a name registered in ``shipvision.tracking.TRACKERS`` (``sort``,
+        algorithm: a name registered in ``shipvision.mot.TRACKERS`` (``sort``,
             ``bytetrack``, ``ocsort``, ``botsort``, ``deepsortv2``). Resolved through that
             registry, so adding a tracker there needs no edit here — an ``if/elif`` on this
             string is exactly what the registry exists to replace.
@@ -166,7 +166,7 @@ class TrackerShard:
     ) -> None:
         if _TRACKERS is None:
             raise ConfigurationError(
-                f"tracking is enabled but shipvision.tracking cannot be imported "
+                f"tracking is enabled but shipvision.mot cannot be imported "
                 f"({_IMPORT_ERROR}). Check out the submodule and install it — "
                 f"`git submodule update --init 3rdparty/shipvision && "
                 f"pip install -e 3rdparty/shipvision` — or set pipeline.tracking.enabled=false"
@@ -450,7 +450,7 @@ class TrackStage(PipelineStage):
         guess.
 
         One-to-one and globally optimal, via the same solver the trackers themselves use
-        (:func:`shipvision.tracking.association.associate`). Greedy per-track argmax was the
+        (:func:`shipvision.mot.association.associate`). Greedy per-track argmax was the
         obvious alternative and it is wrong in exactly the case that matters: two people
         walking close together each have high overlap with the other's box, and a greedy pass
         can give both track ids to one detection and none to the other — which reads

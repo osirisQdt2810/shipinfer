@@ -53,7 +53,7 @@ from shipinfer.pipeline.schema import ObjectRecord
 #: threading correctness argument was tested nowhere.
 needs_tracking = pytest.mark.skipif(
     not tracking_available(),
-    reason="shipvision.tracking is not importable; the submodule is not checked out",
+    reason="shipvision.mot is not importable; the submodule is not checked out",
 )
 
 pytestmark = [pytest.mark.timeout(60)]

@@ -85,7 +85,7 @@ class TrackingSettings(BaseModel):
 
     #: Off unless an operator says otherwise. See the class docstring.
     enabled: bool = False
-    #: A name registered in ``shipvision.tracking.TRACKERS`` — ``sort``, ``bytetrack``,
+    #: A name registered in ``shipvision.mot.TRACKERS`` — ``sort``, ``bytetrack``,
     #: ``ocsort``, ``botsort``, ``deepsortv2``. Resolved through that registry rather than
     #: matched here, so adding a tracker there needs no edit in this repository.
     #:
