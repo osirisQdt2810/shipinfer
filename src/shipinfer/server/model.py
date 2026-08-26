@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from shipinfer import envs
@@ -29,6 +30,7 @@ from shipinfer.scheduling.batching import StackingBatcher
 from shipinfer.scheduling.dispatcher import Dispatcher
 from shipinfer.scheduling.limits import RateLimiter, build_rate_limiter
 from shipinfer.scheduling.policies import build_policy
+from shipinfer.scheduling.policies.base import Placeable
 from shipinfer.scheduling.queues import QUEUES, BatchWindow
 from shipinfer.scheduling.work import WorkItem
 from shipinfer.server.cache import RESPONSE_CACHES, NullResponseCache, ResponseCache
@@ -349,6 +351,28 @@ class Model:
         return self._started and any(i.is_ready for i in self._instances)
 
     @property
+    def attach_remote(self, candidates: Sequence[Placeable]) -> None:
+        """Add a peer's instances to this model's dispatcher (the `service` topology).
+
+        The dispatcher sees `Placeable`s and nothing else, so a proxy joins the candidate set
+        like a local instance; the policy decides when work leaves the process.
+        """
+        if not candidates:
+            return
+        self._dispatcher = Dispatcher(
+            model_name=self._artifact.name,
+            instances=[*self._instances, *candidates],
+            policy=self._dispatcher.policy,
+            on_spill=self._on_spill,
+        )
+
+    @property
+    def ewma_latency_us(self) -> float:
+        """The mean of the instances' EWMAs — what this model publishes to its peers."""
+        if not self._instances:
+            return 0.0
+        return sum(i.ewma_latency_us for i in self._instances) / len(self._instances)
+
     def total_depth(self) -> int:
         return sum(i.depth for i in self._instances)
 

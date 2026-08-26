@@ -94,6 +94,7 @@ def fleet(
         plan=plan,
         command=lambda shard: chosen.command(shard, repository=str(repository)),
         env=chosen.environment(settings),
+        shard_env=chosen.shard_environment,
         drain_s=drain,
     )
     # The handler goes in before the first child exists: a signal in the window between

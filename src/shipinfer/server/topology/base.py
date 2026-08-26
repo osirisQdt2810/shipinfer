@@ -73,6 +73,15 @@ class Topology(abc.ABC):
         """
         return {TOPOLOGY_ENV: self.name}
 
+    def shard_environment(self, shard: Shard) -> Mapping[str, str]:
+        """Extra environment for *one* child, on top of :meth:`environment`.
+
+        The default is nothing: `fleet` tells a shard everything it needs through the plan
+        (`Fleet` sets the devices and the cameras). A topology whose children must find each
+        other — `service` names its rings by shard index — extends this.
+        """
+        return {}
+
     def describe(self) -> str:
         """One line for the operator, printed above the plan."""
         return (self.__doc__ or self.name).strip().split("\n")[0]

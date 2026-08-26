@@ -106,6 +106,9 @@ class Fleet:
     plan: ShardPlan
     command: Callable[[Shard], Sequence[str]]
     env: Mapping[str, str] = field(default_factory=dict)
+    #: Extra environment for one shard, decided by the topology (the `service` tier's shard
+    #: index). Injected as a callable so `Fleet` keeps depending on nothing above the plan.
+    shard_env: Callable[[Shard], Mapping[str, str]] | None = None
     drain_s: float = DEFAULT_DRAIN_S
     _running: list[ShardProcess] = field(default_factory=list, init=False, repr=False)
     #: Set by :meth:`stop`, cleared by :meth:`start`. :meth:`supervise` returns when it is set —
@@ -163,6 +166,8 @@ class Fleet:
         child_env[SHARED_BY_ENV] = json.dumps(list(self.plan.sharing_for(shard)))
         child_env[SHARE_RANK_ENV] = json.dumps(list(self.plan.rank_for(shard)))
         child_env[SHARD_CAMERAS.name] = ",".join(shard.cameras)
+        if self.shard_env is not None:
+            child_env.update(self.shard_env(shard))
         # Its own process group, so a Ctrl-C in the parent's terminal does not deliver SIGINT
         # to every shard at once and race this class's own orderly shutdown.
         process = subprocess.Popen(argv, env=child_env, start_new_session=True)

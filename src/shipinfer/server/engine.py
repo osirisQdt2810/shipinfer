@@ -44,6 +44,7 @@ class InferenceServer:
         self._memory = MemoryPool(self._settings.memory)
         self._repository: ModelRepository | None = None
         self._models: dict[str, Model | EnsembleModel] = {}
+        self._mesh: Any = None  # a ServiceMesh under the `service` topology
         self._lock = threading.Lock()
         # A second lock, and the two are not interchangeable. `_lock` guards the model table
         # for the microseconds a lookup takes; `_control_lock` serialises whole load/unload
@@ -169,11 +170,44 @@ class InferenceServer:
         ensembles = [n for n in names if self._repository.entry(n).config.is_ensemble]
         for name in (*plain, *ensembles):
             self._load(name)
+        self._mesh = self._join_service_tier()
 
         self._started = True
         self._started_at = time.monotonic()
         _LOG.info("shipinfer ready: %d model(s) — %s", len(self._models), self.models())
         return self
+
+    def _join_service_tier(self) -> Any:
+        """Under the `service` topology, offer the shared models to the peers and take theirs.
+
+        Only when the launcher said which shard this is: a single-process `serve` has no tier
+        to join, and `fleet` has none by design.
+        """
+        topology = self._settings.topology
+        if topology.kind != "service" or topology.service.shard is None:
+            return None
+        from shipinfer.server.service_mesh import ServiceMesh
+
+        shared = {
+            name: self._models[name]
+            for name in topology.service.shared_models
+            if name in self._models
+        }
+        if not shared:
+            _LOG.warning(
+                "service topology: none of the shared models %s is loaded here; no tier joined",
+                topology.service.shared_models,
+            )
+            return None
+        mesh = ServiceMesh(topology.service, topology.service.shard, shared)
+        mesh.create()
+        mesh.connect()
+        return mesh
+
+    @property
+    def service_mesh(self) -> Any:
+        """The tier this process joined, or ``None`` outside the `service` topology."""
+        return self._mesh
 
     def _startup_names(self) -> list[str]:
         """Which models to load at start-up.
@@ -241,6 +275,11 @@ class InferenceServer:
         if not self._started:
             return
         _LOG.info("stopping shipinfer (%d model(s))", len(self._models))
+        if self._mesh is not None:
+            # Leave the tier first: peers see the closed rings and fail their in-flight
+            # requests to us with the tags, instead of waiting on a model that is stopping.
+            self._mesh.stop()
+            self._mesh = None
         with self._lock:
             models = list(self._models.values())
             self._models.clear()
