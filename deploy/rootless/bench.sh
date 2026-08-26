@@ -60,7 +60,17 @@ fi
 # "SHIPINFER_BENCH_SCRIPT=benchmarks/stages.py" refuse to start on a checkout with no baseline
 # build, for a precondition of a different measurement.
 SCRIPT="${SHIPINFER_BENCH_SCRIPT:-benchmarks/run_bench.py}"
-if [ "$SCRIPT" = "benchmarks/run_bench.py" ] && [ ! -x "$REPO/benchmarks/build/sim_pipeline_v2" ]; then
+# ...and only when the run names the baseline: `--systems shipinfer` measures this project
+# alone, and a checkout with no baseline build must still be able to run it.
+SYSTEMS="baseline,shipinfer"   # the harness's own default
+prev=""
+for arg in "$@"; do
+  case "$arg" in --systems=*) SYSTEMS="${arg#--systems=}" ;; esac
+  [ "$prev" = "--systems" ] && SYSTEMS="$arg"
+  prev="$arg"
+done
+case ",$SYSTEMS," in *,baseline,*) NEEDS_BASELINE=1 ;; *) NEEDS_BASELINE=0 ;; esac
+if [ "$SCRIPT" = "benchmarks/run_bench.py" ] && [ "$NEEDS_BASELINE" = 1 ] && [ ! -x "$REPO/benchmarks/build/sim_pipeline_v2" ]; then
   echo "baseline binary missing. Build it on the host first:" >&2
   echo "  python -c 'from benchmarks.harness import baseline; baseline.build_binary()'" >&2
   exit 1
