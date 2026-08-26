@@ -28,7 +28,7 @@ from typing import Any, Protocol
 from shipinfer.core.errors import ConfigurationError
 from shipinfer.core.logging import get_logger
 from shipinfer.core.settings.topology import ServiceSettings
-from shipinfer.runtime.memory.shared_ring import RingLayout, SharedRing
+from shipinfer.runtime.memory.shared_ring import RingLayout, SharedRing, reap_pending_closes
 from shipinfer.server.remote_instance import RemoteInstance, ResultReader, RingIngress
 
 __all__ = ["ServiceMesh", "ring_name", "wire_slot_bytes"]
@@ -274,6 +274,9 @@ class ServiceMesh:
         self._ingresses.clear()
         self._opened.clear()
         self._owned.clear()
+        # Sweep any mapping a zero-copy payload view kept alive past its ring's close: by
+        # now the threads are joined, so the views are dead and the mappings can go.
+        reap_pending_closes()
 
 
 def _load_of(model: _SharedModel) -> Callable[[], tuple[int, float]]:
