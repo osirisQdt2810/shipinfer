@@ -217,7 +217,7 @@ def _attach(name: str) -> shared_memory.SharedMemory:
         except TypeError:
             block = shared_memory.SharedMemory(name=name, create=False)
     except FileNotFoundError as exc:
-        raise RingClosedError("unknown", name) from exc
+        raise RingClosedError("unknown", name, reason="absent") from exc
     from multiprocessing import resource_tracker
 
     resource_tracker.unregister(block._name, "shared_memory")
@@ -310,7 +310,7 @@ class SharedRing:
             # both are "not ready" — retryable — not a build mismatch. The connect loop
             # retries on RingClosedError and turns a persistent one into its own error.
             block.close()
-            raise RingClosedError("unknown", name)
+            raise RingClosedError("unknown", name, reason="unborn")
         owner = fields[9].rstrip(b"\0").decode(errors="replace")
         if magic != _MAGIC or version != RING_VERSION:
             block.close()
@@ -403,8 +403,13 @@ class SharedRing:
         with self._view_lock:
             if self._detached:
                 return
-            _STAMP.pack_into(
-                self._view, _STAMP_OFFSET, depth, 0, float(ewma_latency_us), time.monotonic_ns()
+            # `pack_into` memsets its whole target region to zero *before* packing, so a
+            # lock-free reader in another process can observe depth == 0 on a saturated ring
+            # or heartbeat_ns == 0 on a healthy one (measured: ~24% of colliding reads torn).
+            # Packing to bytes first makes the write one memcpy of naturally aligned fields:
+            # a reader can see an old field next to a new one — stale, harmless — never zero.
+            self._view[_STAMP_OFFSET : _STAMP_OFFSET + _STAMP.size] = _STAMP.pack(
+                depth, 0, float(ewma_latency_us), time.monotonic_ns()
             )
 
     def _write_header(
@@ -413,9 +418,9 @@ class SharedRing:
         with self._view_lock:
             if self._detached:
                 return
-            _HEADER.pack_into(
-                self._view,
-                0,
+            # Pack first, one memcpy: see `stamp` — `pack_into` memsets the region, and a
+            # peer's `header()` mid-write would read slots == 0, slot_bytes == 0.
+            self._view[: _HEADER.size] = _HEADER.pack(
                 _MAGIC,
                 RING_VERSION,
                 self._layout.slots,
@@ -468,6 +473,11 @@ class SharedRing:
             RingFullError: no slot came free within ``timeout_s``. The request is still with
                 the caller; the dispatcher's spill loop excludes this peer and re-selects.
         """
+        if self._is_owner:
+            raise RingProtocolError(
+                f"ring {self._name!r}: the owner reads; claiming is the submit handle's — an "
+                f"owner-claimed slot would come back through its own take as a real payload"
+            )
         deadline = time.monotonic() + timeout_s
         spins = 0
         while True:
@@ -667,6 +677,7 @@ class SharedRing:
                 closed=True,
             )
         unregister = None
+        parked_for_finalizer = False
         if self._pinned is not None:
             torch_module, pinned_ptr = self._pinned, self._pinned_ptr
             self._pinned = None
@@ -698,9 +709,10 @@ class SharedRing:
                 else:
                     # Pinned views are still held; the last one's finalizer unpins and closes.
                     self._parked_unregister = unregister
-                    unregister = "parked"
+                    unregister = None
+                    parked_for_finalizer = True
         closed_now = False
-        if unregister is None:
+        if not parked_for_finalizer:
             try:
                 self._block.close()
                 closed_now = True

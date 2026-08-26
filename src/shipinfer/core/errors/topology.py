@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import ClassVar
 
 from shipinfer.core.errors.base import ShipInferError
 from shipinfer.core.errors.inference import QueueFullError
@@ -52,17 +53,25 @@ class RingClosedError(QueueFullError):
     to know why the peer left.
     """
 
-    def __init__(self, owner: str, ring: str) -> None:
+    _MESSAGES: ClassVar[dict[str, str]] = {
+        "closed": "ring {ring} to {owner} is closed - its owner is gone or leaving",
+        "absent": "ring {ring} does not exist - never created, or its owner unlinked it",
+        "unborn": "ring {ring} is mid-birth - created, its header not yet written",
+    }
+
+    def __init__(self, owner: str, ring: str, reason: str = "closed") -> None:
         # Not QueueFullError.__init__: its message says "is full", and closed is exactly not
         # that. The base's attributes are still set so shape-generic handlers read zeros.
-        ShipInferError.__init__(
-            self, f"ring {ring} to {owner} is closed - its owner is gone or leaving"
-        )
+        ShipInferError.__init__(self, self._MESSAGES[reason].format(ring=ring, owner=owner))
         self.queue_name = ring
         self.depth = 0
         self.capacity = 0
         self.owner = owner
         self.ring = ring
+        #: Why: ``closed`` (the owner marked it), ``absent`` (no such name — retry during a
+        #: connect window, terminal after it), ``unborn`` (created, header not yet written —
+        #: always retryable). A connect loop keys on this, never on the message.
+        self.reason = reason
 
 
 class PeerLostError(ShipInferError):

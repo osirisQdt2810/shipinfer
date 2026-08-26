@@ -108,7 +108,7 @@ class TestCreateAndOpen:
 
         with pytest.raises(FileNotFoundError):
             shared_memory.SharedMemory(name=name, create=False)  # the raw name is gone
-        with pytest.raises(RingClosedError, match="gone or leaving"):
+        with pytest.raises(RingClosedError, match="does not exist"):
             SharedRing.open(name, layout)  # and the ring API says so in its own vocabulary
 
 
@@ -272,7 +272,7 @@ class TestClosingUnderALiveView:
 
         writer.close()
         owner.close()  # neither raises
-        with pytest.raises(RingClosedError, match="gone or leaving"):
+        with pytest.raises(RingClosedError, match="does not exist"):
             SharedRing.open(owner.name, layout)  # the name is gone regardless
         waiting = module.reap_pending_closes()
         assert waiting >= 1, "the owner's handle waits for the view"
@@ -383,8 +383,12 @@ class TestAClosedHandleIsInert:
                 # is a wiring mistake and fails loudly whatever the ring's state.
                 with pytest.raises(RingProtocolError, match="only the owner takes"):
                     handle.take(timeout_s=0.01)
-            with pytest.raises(RingClosedError):
-                handle.claim(timeout_s=0.01)
+            if handle is ring:
+                with pytest.raises(RingProtocolError, match="the owner reads"):
+                    handle.claim(timeout_s=0.01)
+            else:
+                with pytest.raises(RingClosedError):
+                    handle.claim(timeout_s=0.01)
             with pytest.raises(RingClosedError):
                 handle.payload(0)
             with pytest.raises(RingClosedError):
@@ -428,11 +432,11 @@ class TestPinnedForReal:
             assert torch.equal(back, source)
             del slot, device, back
         finally:
-            ring.close()  # a pinned ring is parked; the reap below unregisters and closes
+            ring.close()  # no views out, so close() unpins and unmaps inline
         from shipinfer.runtime.memory.shared_ring import reap_pending_closes
 
-        assert reap_pending_closes() == 0, "the views are gone, so unregister + close ran"
-        with pytest.raises(RingClosedError, match="gone or leaving"):
+        assert reap_pending_closes() == 0, "nothing was parked: close freed inline"
+        with pytest.raises(RingClosedError, match="does not exist"):
             SharedRing.open(ring.name, layout)
 
 
@@ -644,8 +648,55 @@ class TestARingMidBirth:
             with pytest.raises(RingClosedError):
                 SharedRing.open(name, layout)
         finally:
-            resource_tracker.register(
-                bare._name, "shared_memory"
-            )
+            resource_tracker.register(bare._name, "shared_memory")
             bare.close()
             bare.unlink()
+
+
+def _stamp_forever(name: str, slots: int, slot_bytes: int, seconds: float) -> None:
+    """The owner process under test: stamp a fixed load as fast as the loop turns."""
+    from shipinfer.runtime.memory.shared_ring import RingLayout, SharedRing
+
+    ring = SharedRing.create(name, RingLayout(slots=slots, slot_bytes=slot_bytes), owner="A")
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        ring.stamp(depth=7, ewma_latency_us=123.0)
+    ring.close()
+
+
+class TestAStampIsNeverTorn:
+    def test_a_cross_process_reader_never_observes_the_memset_window(self) -> None:
+        """`pack_into` memsets its region before packing, so a lock-free reader in another
+        process could catch depth == 0 on a saturated ring or heartbeat_ns == 0 on a healthy
+        one (~24% of colliding reads, measured). The write is pack-then-memcpy now: a reader
+        may see stale fields, never zeroed ones."""
+        import multiprocessing
+
+        name = _name()
+        layout = RingLayout(slots=2, slot_bytes=4096)
+        context = multiprocessing.get_context("spawn")
+        child = context.Process(target=_stamp_forever, args=(name, 2, 4096, 1.5))
+        child.start()
+        try:
+            deadline = time.monotonic() + 10.0
+            reader = None
+            while reader is None and time.monotonic() < deadline:
+                try:
+                    reader = SharedRing.open(name, layout)
+                except RingClosedError:
+                    time.sleep(0.005)
+            assert reader is not None, "the child never created the ring"
+            reads = 0
+            while not reader.is_closed and reads < 200_000:
+                header = reader.header()
+                if header.closed:
+                    break
+                reads += 1
+                assert header.depth == 7, f"read {reads}: torn depth {header.depth}"
+                assert header.heartbeat_ns != 0, f"read {reads}: torn heartbeat"
+                assert header.ewma_latency_us == 123.0, f"read {reads}: torn ewma"
+            assert reads > 1_000, "the window overlapped the child's stamping"
+            reader.close()
+        finally:
+            child.join(timeout=30)
+            assert child.exitcode == 0
