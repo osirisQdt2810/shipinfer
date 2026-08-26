@@ -99,6 +99,9 @@ class _DeviceSpan:
     """
 
     def __init__(self, tensor: Tensor) -> None:
+        # Interface v2: no `stream` key, so a consumer synchronises on the *current* stream.
+        # The wire's D2H path only hands this host-bound, already-synchronised tensors; a
+        # caller bridging a stream-resident tensor must order the streams itself first.
         self.__cuda_array_interface__ = {
             "shape": tuple(tensor.shape),
             "typestr": tensor.dtype.numpy_dtype.str,

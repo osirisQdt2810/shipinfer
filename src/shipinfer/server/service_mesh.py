@@ -29,7 +29,12 @@ from shipinfer.core.errors import ConfigurationError, RingClosedError
 from shipinfer.core.logging import get_logger
 from shipinfer.core.settings.topology import ServiceSettings
 from shipinfer.runtime.memory.shared_ring import RingLayout, SharedRing, reap_pending_closes
-from shipinfer.server.remote_instance import RemoteInstance, ResultReader, RingIngress
+from shipinfer.server.remote_instance import (
+    IngressLane,
+    RemoteInstance,
+    ResultReader,
+    RingIngress,
+)
 
 __all__ = ["ServiceMesh", "ring_name", "wire_slot_bytes"]
 
@@ -96,7 +101,7 @@ class _SharedModel(Protocol):
     def infer_local(self, request: Any) -> Any: ...
 
     @property
-    def total_depth(self) -> int: ...
+    def advertised_depth(self) -> int: ...
 
     @property
     def ewma_latency_us(self) -> float: ...
@@ -115,7 +120,7 @@ class ServiceMesh:
     slot_bytes_by_model: Mapping[str, tuple[int, int]] = field(default_factory=dict)
     _owned: list[SharedRing] = field(default_factory=list, init=False, repr=False)
     _opened: list[SharedRing] = field(default_factory=list, init=False, repr=False)
-    _ingresses: list[RingIngress] = field(default_factory=list, init=False, repr=False)
+    _ingress: RingIngress | None = field(default=None, init=False, repr=False)
     _reader: ResultReader | None = field(default=None, init=False, repr=False)
     _proxies: dict[str, list[RemoteInstance]] = field(
         default_factory=dict, init=False, repr=False
@@ -184,6 +189,7 @@ class ServiceMesh:
         reader = ResultReader(lost_after_s=self.settings.lost_after_ms / 1000.0)
         self._reader = reader
         owned = {ring.name: ring for ring in self._owned}
+        lanes: list[IngressLane] = []
         for peer in self.peers:
             for name, model in self.models.items():
                 # The result ring for my requests to `peer`: I created it, I read it.
@@ -212,27 +218,29 @@ class ServiceMesh:
                 )
                 self._proxies.setdefault(name, []).append(proxy)
                 inbound = owned[ring_name(self.settings.run_id, peer, self.shard, name, "req")]
-                self._ingresses.append(
-                    RingIngress(
+                lanes.append(
+                    IngressLane(
                         submitter=str(peer),
                         inbound=inbound,
                         results=answers,
                         # Local only: work that crossed once is done here, never re-routed.
                         infer=model.infer_local,
                         load=_load_of(model),
-                        stamp_every_s=self.settings.heartbeat_ms / 1000.0,
                     )
                 )
-        for ingress in self._ingresses:
-            ingress.start()
+        # ONE sweeper over every lane — the consumer shape the ring's docstring prescribes.
+        # A thread per (peer, model) was a hot spinner each: 6 busy cores on an idle 4-shard
+        # fleet, 30 at the box's ceiling.
+        self._ingress = RingIngress(lanes, stamp_every_s=self.settings.heartbeat_ms / 1000.0)
+        self._ingress.start()
         reader.start()
         for name, proxies in self._proxies.items():
             self.models[name].attach_remote(proxies)
         _LOG.info(
-            "service mesh: shard %d joined the tier — %d proxy(ies), %d ingress(es)",
+            "service mesh: shard %d joined the tier — %d proxy(ies), one sweeper over %d lane(s)",
             self.shard,
             sum(len(v) for v in self._proxies.values()),
-            len(self._ingresses),
+            len(lanes),
         )
 
     def _open(self, name: str, layout: RingLayout, deadline: float) -> SharedRing:
@@ -258,22 +266,21 @@ class ServiceMesh:
         return self._proxies
 
     def stop(self) -> None:
-        for ingress in self._ingresses:
-            ingress.stop()
+        if self._ingress is not None:
+            self._ingress.stop()
         if self._reader is not None:
             self._reader.stop()
         # `connect` can fail before the threads start (a peer that never came up), and an
         # unstarted thread cannot be joined.
-        for ingress in self._ingresses:
-            if ingress.is_alive():
-                ingress.join(timeout=2.0)
+        if self._ingress is not None and self._ingress.is_alive():
+            self._ingress.join(timeout=2.0)
         if self._reader is not None and self._reader.is_alive():
             self._reader.join(timeout=2.0)
         for ring in self._opened:
             ring.close()
         for ring in self._owned:
             ring.close()
-        self._ingresses.clear()
+        self._ingress = None
         self._opened.clear()
         self._owned.clear()
         # Sweep any mapping a zero-copy payload view kept alive past its ring's close: by
@@ -283,6 +290,10 @@ class ServiceMesh:
 
 def _load_of(model: _SharedModel) -> Callable[[], tuple[int, float]]:
     def load() -> tuple[int, float]:
-        return int(model.total_depth), float(model.ewma_latency_us)
+        # Per-instance, not the sum over instances: every local candidate reports one
+        # queue's depth, and a peer advertised as `count x` deeper than it is declines the
+        # borrow in exactly the crowded-shard case the tier exists for. `min` is the queue
+        # the owner's own dispatcher would hand the work to.
+        return int(model.advertised_depth), float(model.ewma_latency_us)
 
     return load

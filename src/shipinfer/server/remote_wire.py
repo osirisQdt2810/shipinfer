@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from shipinfer.core.errors import RingProtocolError
+from shipinfer.core.errors import RingProtocolError, ValidationError
 from shipinfer.core.request import InferenceRequest, InferenceResponse, Priority, RequestContext
 from shipinfer.core.request.timings import Timings
 from shipinfer.core.types import DataType, Device, Tensor
@@ -89,7 +89,7 @@ class _TensorHead:
 def _fixed(text: str, width: int, what: str) -> bytes:
     raw = text.encode()
     if len(raw) >= width:
-        raise ValueError(f"{what} {text!r} does not fit in {width - 1} bytes")
+        raise ValidationError(f"{what} {text!r} does not fit in {width - 1} bytes")
     return raw
 
 
@@ -121,7 +121,7 @@ def _tensor_heads(tensors: Mapping[str, Tensor]) -> list[tuple[_TensorHead, np.n
     for name in sorted(tensors):
         array = _host(tensors[name], name)
         if array.ndim > _MAX_DIMS:
-            raise ValueError(
+            raise ValidationError(
                 f"tensor {name!r} has {array.ndim} dims; the wire carries at most {_MAX_DIMS}"
             )
         heads.append(
@@ -163,7 +163,9 @@ def _write_tensors(
         view[offset : offset + _TENSOR_HEAD.size] = _pack_tensor_head(head)
         offset += _TENSOR_HEAD.size
     for head, array in heads:
-        view[offset : offset + head.nbytes] = array.reshape(-1).view(np.uint8).tobytes()
+        # One memcpy straight into the slot: `.tobytes()` here materialised a third full
+        # copy of the payload on the dispatch path (6.29 MB per embedder batch).
+        view[offset : offset + head.nbytes] = array.reshape(-1).view(np.uint8)
         offset += head.nbytes
     return offset
 
@@ -219,7 +221,7 @@ def encode_request(request: InferenceRequest, view: memoryview) -> int:
         _REQUEST_HEAD.size + len(heads) * _TENSOR_HEAD.size + sum(h.nbytes for h, _ in heads)
     )
     if needed > len(view):
-        raise ValueError(
+        raise ValidationError(
             f"request {request.request_id} needs {needed} bytes but the slot holds {len(view)}; "
             f"size the ring's slots from the model's max batch"
         )
@@ -294,7 +296,7 @@ def encode_response(response: InferenceResponse, view: memoryview) -> int:
         _RESPONSE_HEAD.size + len(heads) * _TENSOR_HEAD.size + sum(h.nbytes for h, _ in heads)
     )
     if needed > len(view):
-        raise ValueError(
+        raise ValidationError(
             f"response {response.request_id} needs {needed} bytes but the slot holds {len(view)}"
         )
     t = response.timings
@@ -330,7 +332,7 @@ def encode_failure(
     waiting out the stage timeout.
     """
     if len(view) < _RESPONSE_HEAD.size:
-        raise ValueError(
+        raise ValidationError(
             f"a failure needs {_RESPONSE_HEAD.size} bytes but the slot holds {len(view)}"
         )
     message = f"{type(error).__name__}: {error}".encode(errors="replace")[:191]

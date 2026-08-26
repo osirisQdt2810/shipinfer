@@ -39,11 +39,14 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable
+from collections import deque
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future
+from dataclasses import dataclass
 
 from shipinfer.core.errors import (
     PeerLostError,
+    RequestTimeoutError,
     RingClosedError,
     RingFullError,
     ServerStateError,
@@ -102,18 +105,19 @@ class RemoteInstance:
 
     @property
     def depth(self) -> int:
-        return self._submit.header().depth
+        return self._submit.load_signal()[0]
 
     @property
     def ewma_latency_us(self) -> float:
-        return self._submit.header().ewma_latency_us
+        return self._submit.load_signal()[1]
 
     @property
     def is_ready(self) -> bool:
-        header = self._submit.header()
-        if header.closed:
+        # `is_closed` is a one-byte read and `load_signal` one unpack: the dispatcher touches
+        # every candidate's `is_ready` per request, so no header dataclass on this path.
+        if self._submit.is_closed:
             return False
-        return time.monotonic_ns() - header.heartbeat_ns < self._lost_after_ns
+        return time.monotonic_ns() - self._submit.load_signal()[2] < self._lost_after_ns
 
     # -- the submit ------------------------------------------------------------------------
 
@@ -151,16 +155,24 @@ class ResultReader(threading.Thread):
     """
 
     def __init__(
-        self, *, poll_s: float = 0.0005, lost_after_s: float = DEFAULT_LOST_AFTER_S
+        self,
+        *,
+        poll_s: float = 0.0005,
+        lost_after_s: float = DEFAULT_LOST_AFTER_S,
+        pending_timeout_s: float = 60.0,
     ) -> None:
         super().__init__(name="shipinfer-result-reader", daemon=True)
         self._results: dict[str, SharedRing] = {}
         self._heartbeats: dict[str, SharedRing] = {}
-        self._pending: dict[int, tuple[WorkItem, str]] = {}
+        self._pending: dict[int, tuple[WorkItem, str, int]] = {}
         self._lock = threading.Lock()
         self._stopping = threading.Event()
         self._poll_s = poll_s
         self._lost_after_ns = int(lost_after_s * 1e9)
+        #: A live owner that *dropped* one reply (its patience ran out on a full result
+        #: ring) never closes and never misses a heartbeat — without a deadline the pending
+        #: entry would pin the WorkItem (and its ~6 MB of inputs) for the process's life.
+        self._pending_deadline_ns = int(pending_timeout_s * 1e9)
         self._lost: set[str] = set()
 
     def add_result_ring(self, owner: str, ring: SharedRing) -> None:
@@ -175,7 +187,11 @@ class ResultReader(threading.Thread):
 
     def expect(self, item: WorkItem, owner: str) -> None:
         with self._lock:
-            self._pending[item.request.request_id] = (item, owner)
+            self._pending[item.request.request_id] = (
+                item,
+                owner,
+                time.monotonic_ns() + self._pending_deadline_ns,
+            )
 
     @property
     def pending(self) -> int:
@@ -223,7 +239,7 @@ class ResultReader(threading.Thread):
         if entry is None:
             _LOG.warning("result for unknown request %d from %s; dropped", request_id, owner)
             return
-        item, _ = entry
+        item, _, _ = entry
         try:
             response = wire.decode_response(payload, item.request.context)
         except wire.RemoteFailureError as exc:
@@ -241,8 +257,7 @@ class ResultReader(threading.Thread):
         with self._lock:
             watched = list(self._heartbeats.items())
         for owner, submit in watched:
-            header = submit.header()
-            alive = not header.closed and now - header.heartbeat_ns < self._lost_after_ns
+            alive = not submit.is_closed and now - submit.load_signal()[2] < self._lost_after_ns
             if alive:
                 self._lost.discard(owner)
                 continue
@@ -250,11 +265,30 @@ class ResultReader(threading.Thread):
                 continue
             self._lost.add(owner)
             self._fail_owner(owner)
+        self._expire_pending(now)
+
+    def _expire_pending(self, now: int) -> None:
+        """Fail entries whose owner is alive but never answered: a dropped reply (the owner's
+        patience ran out on a full result ring) must not pin the WorkItem forever."""
+        with self._lock:
+            expired = [
+                (rid, item, who)
+                for rid, (item, who, deadline) in self._pending.items()
+                if now > deadline
+            ]
+            for rid, _, _ in expired:
+                del self._pending[rid]
+        for rid, item, who in expired:
+            item.fail(
+                RequestTimeoutError(
+                    f"remote {who!r} never answered request {rid} within the pending deadline"
+                )
+            )
 
     def _fail_owner(self, owner: str) -> None:
         with self._lock:
             stranded = [
-                (rid, item) for rid, (item, who) in self._pending.items() if who == owner
+                (rid, item) for rid, (item, who, _) in self._pending.items() if who == owner
             ]
             for rid, _ in stranded:
                 del self._pending[rid]
@@ -270,46 +304,75 @@ class ResultReader(threading.Thread):
             item.fail(error)
 
 
-class RingIngress(threading.Thread):
-    """The owner's side of one inbound ring: requests in, responses out.
+@dataclass
+class IngressLane:
+    """One (submitter, model) pair the sweeper serves: its rings and its model's doors."""
 
-    Requests go through ``infer`` — the local model's own entry point — so they are validated,
-    counted, dispatched and queued exactly as a local caller's would be, under the submitter's
-    camera id. The inbound slot stays claimed until the future settles, so the request's tensors
-    view the slot rather than copy it; the response (or the failure) is written into the
-    submitter's result ring and the slot is released.
+    submitter: str
+    inbound: SharedRing
+    results: SharedRing
+    infer: Callable[[InferenceRequest], Future[InferenceResponse]]
+    load: Callable[[], tuple[int, float]]
+
+
+@dataclass
+class _Reply:
+    """A settled request waiting for a slot in its submitter's result ring.
+
+    Holding it here (with its inbound slot still claimed) is the back-pressure: the GPU
+    worker thread that settled the future appended this and returned — it never touches a
+    ring, never waits, never stops draining its own queue.
+    """
+
+    lane: IngressLane
+    inbound_index: int
+    response: InferenceResponse | None
+    request_id: int
+    model_name: str
+    error: BaseException | None
+    deadline: float
+
+
+class RingIngress(threading.Thread):
+    """The owner's side of the tier: ONE thread sweeping every inbound ring.
+
+    The shape `shared_ring`'s docstring prescribes — `take(timeout_s=0)` round-robin over all
+    lanes with a backoff once a whole sweep is idle — so an idle fleet costs one mostly
+    sleeping thread per process, not a hot spinner per (peer, model). Requests go through each
+    lane's `infer` (the model's own local entry point) exactly as a local caller's would.
+
+    **The GPU worker thread never touches a ring.** A future's completion callback runs on
+    the instance's single worker thread; here it only appends the settled result to an
+    internal queue and returns. This thread claims the result slot, encodes, publishes and
+    releases the inbound slot — retrying a full result ring between sweeps (the submitter's
+    reader back-pressure) until the reply's patience runs out, and dropping quietly when the
+    ring is closed (the submitter is gone; its own machinery failed the future). Stamping
+    continues every interval regardless, so a slow reply can never read as a dead owner.
     """
 
     def __init__(
         self,
+        lanes: Sequence[IngressLane],
         *,
-        submitter: str,
-        inbound: SharedRing,
-        results: SharedRing,
-        infer: Callable[[InferenceRequest], Future[InferenceResponse]],
-        load: Callable[[], tuple[int, float]],
         stamp_every_s: float = 0.2,
-        result_timeout_s: float = 1.0,
         result_patience_s: float = 30.0,
-        poll_s: float = 0.0005,
+        idle_sleep_s: float = 0.0005,
+        idle_after: int = 50,
     ) -> None:
-        super().__init__(name=f"shipinfer-ring-ingress-{submitter}", daemon=True)
-        self._submitter = submitter
-        self._inbound = inbound
-        self._results = results
-        self._infer = infer
-        self._load = load
+        super().__init__(name="shipinfer-ring-ingress", daemon=True)
+        self._lanes = list(lanes)
         self._stamp_every_ns = int(stamp_every_s * 1e9)
-        self._result_timeout_s = result_timeout_s
         self._result_patience_s = result_patience_s
-        self._poll_s = poll_s
+        self._idle_sleep_s = idle_sleep_s
+        self._idle_after = idle_after
         self._stopping = threading.Event()
+        self._replies: deque[_Reply] = deque()
         self._last_stamp_ns = 0
         self.served = 0
         self.failed = 0
         #: Replies that could not land: the submitter's result ring stayed full past
-        #: `result_patience_s`, or was already closed (the submitter is gone). The submitter's
-        #: own timeout/heartbeat machinery fails the future; this counter says it was us.
+        #: `result_patience_s`, or was closed (the submitter is gone). The submitter's own
+        #: deadline machinery fails the future; this counter says it was us.
         self.dropped = 0
 
     def stop(self) -> None:
@@ -318,110 +381,160 @@ class RingIngress(threading.Thread):
     def run(self) -> None:
         try:
             self._stamp(force=True)
+            idle = 0
             while not self._stopping.is_set():
+                busy = self._drain_replies()
                 self._stamp()
-                index = self._inbound.take(timeout_s=self._poll_s)
-                if index is None:
-                    if self._inbound.is_closed:
-                        return
-                    continue
-                try:
-                    self._serve(index)
-                except RingClosedError:
-                    # The ring closed between take and the payload read: shutdown, not work.
+                open_lanes = 0
+                for lane in self._lanes:
+                    if lane.inbound.is_closed:
+                        continue
+                    open_lanes += 1
+                    index = lane.inbound.take(timeout_s=0)
+                    if index is None:
+                        continue
+                    busy = True
+                    self._serve(lane, index)
+                if open_lanes == 0 and not self._replies:
                     return
+                if busy:
+                    idle = 0
+                    continue
+                idle += 1
+                time.sleep(self._idle_sleep_s if idle > self._idle_after else 0)
         finally:
-            # Closing tells every writer to stop claiming and every reader that the owner is
-            # gone — and it must happen however this loop ends.
-            self._inbound.close()
+            # However the loop ends: drop what could not be delivered, free the slots (inert
+            # on closed rings), and close every inbound so writers stop and readers know.
+            while self._replies:
+                reply = self._replies.popleft()
+                self.dropped += 1
+                reply.lane.inbound.release(reply.inbound_index)
+            for lane in self._lanes:
+                lane.inbound.close()
 
-    def _stamp(self, *, force: bool = False) -> None:
-        now = time.monotonic_ns()
-        if not force and now - self._last_stamp_ns < self._stamp_every_ns:
-            return
-        depth, ewma = self._load()
-        self._inbound.stamp(depth=depth, ewma_latency_us=ewma)
-        self._last_stamp_ns = now
+    # -- the owner side of one request ---------------------------------------------------
 
-    def _serve(self, index: int) -> None:
-        payload = self._inbound.payload(index)
+    def _serve(self, lane: IngressLane, index: int) -> None:
+        payload = lane.inbound.payload(index)
         try:
             request = wire.decode_request(payload, copy=False)
         except Exception as exc:
             request_id = wire.peek_request_id(payload) if len(payload) >= 16 else 0
-            self._reply_failure(request_id, "?", exc)
-            self._inbound.release(index)
+            self.failed += 1
+            self._replies.append(self._failure_reply(lane, index, request_id, "?", exc))
             return
         try:
-            future = self._infer(request)
+            future = lane.infer(request)
         except Exception as exc:
-            self._reply_failure(request.request_id, request.model_name, exc)
-            self._inbound.release(index)
+            self.failed += 1
+            self._replies.append(
+                self._failure_reply(lane, index, request.request_id, request.model_name, exc)
+            )
             return
 
         def done(
             settled: Future[InferenceResponse],
             *,
+            lane: IngressLane = lane,
             index: int = index,
             request: InferenceRequest = request,
         ) -> None:
-            try:
-                error = settled.exception()
-                if error is not None:
-                    self._reply_failure(request.request_id, request.model_name, error)
-                else:
-                    self._reply(settled.result())
-            finally:
-                self._inbound.release(index)
+            # Runs on the instance's worker thread: append and return. Anything slower —
+            # claiming a slot, waiting out a full ring — would stall the GPU it serves.
+            error = settled.exception()
+            self._replies.append(
+                _Reply(
+                    lane=lane,
+                    inbound_index=index,
+                    response=None if error is not None else settled.result(),
+                    request_id=request.request_id,
+                    model_name=request.model_name,
+                    error=error,
+                    deadline=time.monotonic() + self._result_patience_s,
+                )
+            )
 
         future.add_done_callback(done)
 
-    def _reply(self, response: InferenceResponse) -> None:
-        index = self._claim_result_slot(response.request_id)
-        if index is None:
-            return
-        try:
-            wire.encode_response(response, self._results.payload(index))
-        except Exception as exc:
-            wire.encode_failure(
-                response.request_id, response.model_name, exc, self._results.payload(index)
-            )
-            self.failed += 1
-        else:
-            self.served += 1
-        self._results.publish(index)
+    def _failure_reply(
+        self,
+        lane: IngressLane,
+        index: int,
+        request_id: int,
+        model_name: str,
+        error: BaseException,
+    ) -> _Reply:
+        return _Reply(
+            lane=lane,
+            inbound_index=index,
+            response=None,
+            request_id=request_id,
+            model_name=model_name,
+            error=error,
+            deadline=time.monotonic() + self._result_patience_s,
+        )
 
-    def _reply_failure(self, request_id: int, model_name: str, error: BaseException) -> None:
-        self.failed += 1
-        index = self._claim_result_slot(request_id)
-        if index is None:
-            return
-        wire.encode_failure(request_id, model_name, error, self._results.payload(index))
-        self._results.publish(index)
+    # -- the replies -----------------------------------------------------------------------
 
-    def _claim_result_slot(self, request_id: int) -> int | None:
-        """A slot in the submitter's result ring — waiting out a burst, never a corpse.
-
-        A full result ring is back-pressure from the submitter's reader: hold the reply (and,
-        upstream, the inbound slot) and retry, up to ``result_patience_s`` — the pressure is
-        the design (ADR-005), and a reply must not be dropped for a burst. A *closed* ring is
-        the submitter gone: drop quietly, because its own heartbeat machinery has already
-        failed every future it was waiting on. Both outcomes count in ``dropped``.
-        """
-        deadline = time.monotonic() + self._result_patience_s
-        while True:
+    def _drain_replies(self) -> bool:
+        """Land what can land; requeue what is back-pressured; drop what expired or lost its
+        submitter. Never blocks: a full ring is retried on the next sweep."""
+        busy = False
+        for _ in range(len(self._replies)):
             try:
-                return self._results.claim(self._result_timeout_s)
+                reply = self._replies.popleft()
+            except IndexError:
+                break
+            if reply.lane.results.is_closed:
+                # The submitter left; its reader failed every pending future already.
+                self.dropped += 1
+                reply.lane.inbound.release(reply.inbound_index)
+                busy = True
+                continue
+            try:
+                slot = reply.lane.results.claim(timeout_s=0)
             except RingClosedError:
                 self.dropped += 1
-                return None
+                reply.lane.inbound.release(reply.inbound_index)
+                busy = True
+                continue
             except RingFullError:
-                if self._stopping.is_set() or time.monotonic() >= deadline:
+                if time.monotonic() >= reply.deadline:
                     self.dropped += 1
                     _LOG.error(
                         "result ring to %s stayed full for %.0fs; reply for request %d dropped",
-                        self._submitter,
+                        reply.lane.submitter,
                         self._result_patience_s,
-                        request_id,
+                        reply.request_id,
                     )
-                    return None
+                    reply.lane.inbound.release(reply.inbound_index)
+                    busy = True
+                else:
+                    self._replies.append(reply)  # back-pressure: retry next sweep
+                continue
+            view = reply.lane.results.payload(slot)
+            if reply.error is not None:
+                wire.encode_failure(reply.request_id, reply.model_name, reply.error, view)
+            else:
+                assert reply.response is not None
+                try:
+                    wire.encode_response(reply.response, view)
+                    self.served += 1
+                except Exception as exc:
+                    wire.encode_failure(reply.request_id, reply.model_name, exc, view)
+                    self.failed += 1
+            reply.lane.results.publish(slot)
+            reply.lane.inbound.release(reply.inbound_index)
+            busy = True
+        return busy
+
+    # -- the heartbeat -----------------------------------------------------------------------
+
+    def _stamp(self, *, force: bool = False) -> None:
+        now = time.monotonic_ns()
+        if not force and now - self._last_stamp_ns < self._stamp_every_ns:
+            return
+        for lane in self._lanes:
+            depth, ewma = lane.load()
+            lane.inbound.stamp(depth=depth, ewma_latency_us=ewma)
+        self._last_stamp_ns = now

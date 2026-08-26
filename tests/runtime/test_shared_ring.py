@@ -24,6 +24,17 @@ from shipinfer.core.errors import (
 from shipinfer.runtime.memory.shared_ring import RingLayout, SharedRing, SlotState
 
 
+@pytest.fixture(autouse=True)
+def _a_clean_pending_list():
+    """`_PENDING_CLOSE` is process-global: another file's rings, closed under views that have
+    since died, would otherwise make this file's `reap() == 0` asserts order-dependent."""
+    from shipinfer.runtime.memory.shared_ring import reap_pending_closes
+
+    gc.collect()
+    reap_pending_closes()
+    yield
+
+
 def _name() -> str:
     return f"shipinfer-test-{uuid.uuid4().hex[:12]}"
 
@@ -526,9 +537,10 @@ class TestTheUnpinWaitsForTheViews:
         view = ring.pinned_tensor(0)
         del view
         gc.collect()
+        leftover = module.reap_pending_closes()  # other files' rings under still-live views
         ring.close()
         assert calls == [0xDEAD], "unpinned inside close(), nothing deferred"
-        assert module.reap_pending_closes() == 0, "and nothing was parked"
+        assert module.reap_pending_closes() <= leftover, "and THIS ring parked nothing"
 
     def test_a_reap_never_unpins_and_the_last_finalizer_does(self, ring) -> None:
         """Round 3's finding 1: another ring's close reaps microseconds after a park — the
@@ -538,6 +550,7 @@ class TestTheUnpinWaitsForTheViews:
         calls: list[int] = []
         self._pinned_ring(ring, calls)
         held = ring.pinned_tensor(0)
+        leftover = module.reap_pending_closes()  # other files' rings under still-live views
         ring.close()
         assert calls == [], "close under a live pinned view unpins nothing"
         module.reap_pending_closes()
@@ -545,7 +558,7 @@ class TestTheUnpinWaitsForTheViews:
         del held
         gc.collect()
         assert calls == [0xDEAD], "the last finalizer unpinned, exactly once"
-        assert module.reap_pending_closes() == 0
+        assert module.reap_pending_closes() <= leftover
 
 
 class TestPeerLostSpeaksItsTags:
@@ -654,12 +667,13 @@ class TestCloseIsConcurrentByDesign:
         from shipinfer.runtime.memory import shared_ring as module
 
         ring = SharedRing.create(_name(), RingLayout(slots=1, slot_bytes=8), owner="A")
+        leftover = module.reap_pending_closes()  # other files' rings under still-live views
         ring.close()
         ring.close()
         with ring:  # __exit__ closes a third time
             pass
         assert ring.is_closed
-        assert module.reap_pending_closes() == 0
+        assert module.reap_pending_closes() <= leftover
 
 
 class TestARingMidBirth:

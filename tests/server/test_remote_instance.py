@@ -7,6 +7,7 @@ The rings are real shared memory, so a thread here sees exactly what a peer proc
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
 import uuid
@@ -18,6 +19,7 @@ import pytest
 from shipinfer.core.errors import (
     PeerLostError,
     QueueFullError,
+    RequestTimeoutError,
     RingClosedError,
     RingFullError,
     ServerStateError,
@@ -29,7 +31,12 @@ from shipinfer.runtime.memory.shared_ring import RingLayout, SharedRing
 from shipinfer.scheduling.dispatcher import Dispatcher
 from shipinfer.scheduling.policies.locality_spillover import LocalityAwareSpilloverPolicy
 from shipinfer.scheduling.work import WorkItem
-from shipinfer.server.remote_instance import RemoteInstance, ResultReader, RingIngress
+from shipinfer.server.remote_instance import (
+    IngressLane,
+    RemoteInstance,
+    ResultReader,
+    RingIngress,
+)
 
 
 def _name(tag: str) -> str:
@@ -37,21 +44,41 @@ def _name(tag: str) -> str:
 
 
 class FakeModel:
-    """Doubles every input in a worker thread; fails when told to."""
+    """Serves every request on ONE long-lived worker thread, like a real instance.
+
+    The single worker is the property that matters (round 1's review): a completion callback
+    that blocks on a ring blocks *this* thread, and the next request never settles — a fake
+    that spawned a thread per request could never see that.
+    """
 
     def __init__(self, *, fail: bool = False, delay_s: float = 0.0) -> None:
         self.fail = fail
         self.delay_s = delay_s
         self.seen: list[str] = []
+        self.completed = 0
         self.depth = 0
+        self._work: queue.Queue = queue.Queue()
+        self._worker = threading.Thread(target=self._run, daemon=True)
+        self._worker.start()
 
     def infer(self, request: InferenceRequest) -> Future:
         self.seen.append(request.context.camera_id)
-        future: Future = Future()
         if self.fail:
             raise ValueError("engine refused the batch")
+        future: Future = Future()
+        self._work.put((request, future))
+        return future
 
-        def work() -> None:
+    def close(self) -> None:
+        self._work.put(None)
+        self._worker.join(timeout=2)
+
+    def _run(self) -> None:
+        while True:
+            item = self._work.get()
+            if item is None:
+                return
+            request, future = item
             time.sleep(self.delay_s)
             outputs = {
                 name: Tensor.from_numpy(t.numpy() * 2) for name, t in request.inputs.items()
@@ -65,10 +92,8 @@ class FakeModel:
                 timings=request.timings,
                 executed_on=Device.cuda(3),
             )
-            future.set_result(response)
-
-        threading.Thread(target=work, daemon=True).start()
-        return future
+            self.completed += 1
+            future.set_result(response)  # the done callback runs HERE, on the worker
 
 
 class FakeLocal:
@@ -104,11 +129,15 @@ def pair():
     result_ring_writer = SharedRing.open(result_ring_owner.name, layout)
     model = FakeModel()
     ingress = RingIngress(
-        submitter="A",
-        inbound=request_ring_owner,
-        results=result_ring_writer,
-        infer=model.infer,
-        load=lambda: (model.depth, 500.0),
+        [
+            IngressLane(
+                submitter="A",
+                inbound=request_ring_owner,
+                results=result_ring_writer,
+                infer=model.infer,
+                load=lambda: (model.depth, 500.0),
+            )
+        ],
         stamp_every_s=0.05,
     )
     reader = ResultReader(lost_after_s=0.5)
@@ -126,6 +155,7 @@ def pair():
         ingress.stop()
         ingress.join(timeout=2)
         reader.join(timeout=2)
+        model.close()
         for ring in (request_ring_writer, result_ring_writer, result_ring_owner):
             ring.close()
         with pytest.raises(RingClosedError):  # the ingress closed and unlinked its inbound ring
@@ -259,45 +289,102 @@ class TestBackpressureAndLoss:
 
 
 class TestRepliesThatCannotLand:
-    """A reply is held through a burst and dropped only for a corpse — never lost silently."""
+    """A reply is held through a burst and dropped only for a corpse — and the worker thread
+    that settled the future never waits on a ring either way."""
 
-    def _ingress(self, results_slots: int = 1, patience_s: float = 0.05):
+    def _lane(self, results_slots: int = 1, patience_s: float = 0.15):
         layout = RingLayout(slots=4, slot_bytes=64 * 1024)
-        inbound = SharedRing.create(_name("inb"), layout, owner="B")
+        inbound_owner = SharedRing.create(_name("inb"), layout, owner="B")
+        inbound_writer = SharedRing.open(inbound_owner.name, layout)
         results_owner = SharedRing.create(
             _name("res"), RingLayout(slots=results_slots, slot_bytes=64 * 1024), owner="A"
         )
         results_writer = SharedRing.open(results_owner.name, results_owner.layout)
-        ingress = RingIngress(
+        model = FakeModel()
+        lane = IngressLane(
             submitter="A",
-            inbound=inbound,
+            inbound=inbound_owner,
             results=results_writer,
-            infer=FakeModel().infer,
+            infer=model.infer,
             load=lambda: (0, 0.0),
-            result_timeout_s=0.01,
-            result_patience_s=patience_s,
         )
-        return ingress, inbound, results_owner, results_writer
+        ingress = RingIngress([lane], stamp_every_s=0.05, result_patience_s=patience_s)
+        return ingress, model, inbound_writer, results_owner, results_writer
+
+    def _submit(self, writer, camera: str, frame: int) -> None:
+        index = writer.claim(timeout_s=1.0)
+        wire_request = _request(camera, frame)
+        from shipinfer.server import remote_wire
+
+        remote_wire.encode_request(wire_request, writer.payload(index))
+        writer.publish(index)
 
     def test_a_closed_result_ring_means_the_submitter_is_gone(self) -> None:
-        ingress, inbound, results_owner, results_writer = self._ingress()
+        ingress, model, inbound_writer, results_owner, results_writer = self._lane()
         results_owner.close()  # the submitter left; its reader failed its futures already
-        ingress._reply_failure(7, "m", ValueError("late"))
+        self._submit(inbound_writer, "cam", 1)
+        ingress.start()
+        deadline = time.monotonic() + 5.0
+        while ingress.dropped < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
         assert ingress.dropped == 1, "counted, not raised"
-        inbound.close()
+        ingress.stop()
+        ingress.join(timeout=2)
+        model.close()
+        inbound_writer.close()
         results_writer.close()
 
-    def test_a_full_result_ring_is_waited_out_then_given_up_with_a_count(self) -> None:
-        ingress, inbound, results_owner, results_writer = self._ingress(
-            results_slots=1, patience_s=0.05
+    def test_a_full_result_ring_never_blocks_the_worker_and_expires_with_a_count(self) -> None:
+        """Round 1's central scenario: the result ring is full, and the GPU worker thread —
+        the one that settles futures — must keep serving anyway. The reply waits on the
+        sweeper's queue and is dropped with a count when its patience runs out."""
+        ingress, model, inbound_writer, results_owner, results_writer = self._lane(
+            results_slots=1, patience_s=0.15
         )
-        blocker = results_writer.claim(timeout_s=0.1)  # the one slot, held for the whole test
-        started = time.monotonic()
-        ingress._reply_failure(9, "m", ValueError("burst"))
-        waited = time.monotonic() - started
-        assert ingress.dropped == 1
-        assert waited >= 0.05, "the patience was actually spent waiting, not skipped"
+        blocker = results_writer.claim(timeout_s=1.0)  # the one result slot, held throughout
+        self._submit(inbound_writer, "cam", 1)
+        self._submit(inbound_writer, "cam", 2)
+        ingress.start()
+        settle_deadline = time.monotonic() + 2.0
+        while model.completed < 2 and time.monotonic() < settle_deadline:
+            time.sleep(0.005)
+        assert model.completed == 2, (
+            "the single worker settled BOTH futures while the result ring was full — "
+            "a blocking reply would have wedged it after the first"
+        )
+        drop_deadline = time.monotonic() + 5.0
+        while ingress.dropped < 2 and time.monotonic() < drop_deadline:
+            time.sleep(0.01)
+        assert ingress.dropped == 2, "both replies expired with a count"
         results_writer.abandon(blocker)
+        ingress.stop()
+        ingress.join(timeout=2)
+        model.close()
+        inbound_writer.close()
         results_owner.close()
-        inbound.close()
         results_writer.close()
+
+
+class TestPendingEntriesExpire:
+    def test_a_live_owner_that_never_answers_does_not_pin_the_work_item(self) -> None:
+        """The owner is alive (fresh heartbeats) but dropped one reply: without a deadline
+        the pending entry pins the request's arrays for the process's life."""
+        layout = RingLayout(slots=2, slot_bytes=8192)
+        submit_owner = SharedRing.create(_name("hb"), layout, owner="B")
+        submit_writer = SharedRing.open(submit_owner.name, layout)
+        reader = ResultReader(lost_after_s=10.0, pending_timeout_s=0.1)
+        request = _request("quay-9", 4)
+        item = WorkItem(request, ResponseFuture(request))
+        reader.expect(item, "B")
+        reader.watch("B", submit_writer)
+        submit_owner.stamp(depth=0, ewma_latency_us=1.0)  # alive, just silent
+        reader.start()
+        try:
+            with pytest.raises(RequestTimeoutError, match="never answered"):
+                item.future.result(timeout=3.0)
+            assert reader.pending == 0
+        finally:
+            reader.stop()
+            reader.join(timeout=2)
+            submit_writer.close()
+            submit_owner.close()

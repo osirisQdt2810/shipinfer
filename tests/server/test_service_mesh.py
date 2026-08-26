@@ -69,6 +69,10 @@ class FakeModel:
         return self._depth
 
     @property
+    def advertised_depth(self) -> int:
+        return self._depth
+
+    @property
     def ewma_latency_us(self) -> float:
         return 100.0 * (self.shard + 1)
 
@@ -255,3 +259,20 @@ class TestSlotSizing:
         assert mesh.layout_for("emb", "req").slot_bytes == 200_704
         assert mesh.layout_for("emb", "res").slot_bytes == 8_192
         assert mesh.layout_for("other", "req").slot_bytes == mesh.settings.slot_bytes
+
+
+class TestTheAdvertisedDepthIsPerInstance:
+    def test_the_peer_hears_the_shallowest_queue_not_the_sum(self) -> None:
+        """`count: 2` made a peer look twice as deep as it is, and the tier under-spilled in
+        exactly the crowded-shard case it exists for: local candidates report one queue's
+        depth, so the wire must too."""
+        from types import SimpleNamespace
+
+        from shipinfer.server.model import Model
+
+        model = Model.__new__(Model)
+        model._instances = [SimpleNamespace(depth=5), SimpleNamespace(depth=3)]
+        assert model.advertised_depth == 3, "the queue the owner's own dispatcher would pick"
+        assert model.total_depth == 8, "the sum stays what it is — a different scale"
+        model._instances = []
+        assert model.advertised_depth == 0

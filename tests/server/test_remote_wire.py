@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from shipinfer.core.errors import RingProtocolError
+from shipinfer.core.errors import RingProtocolError, ValidationError
 from shipinfer.core.request import InferenceRequest, InferenceResponse, Priority, RequestContext
 from shipinfer.core.request.timings import Timings
 from shipinfer.core.types import DataType, Device, Tensor
@@ -102,7 +102,7 @@ class TestWhatIsRefused:
     def test_a_slot_too_small_is_refused_before_a_byte_is_written(self) -> None:
         request = _request()
         slot = memoryview(bytearray(wire.encoded_request_size(request) - 1))
-        with pytest.raises(ValueError, match="size the ring's slots"):
+        with pytest.raises(ValidationError, match="size the ring's slots"):
             wire.encode_request(request, slot)
         assert bytes(slot[:4]) == b"\0\0\0\0", "nothing written"
 
@@ -144,7 +144,7 @@ class TestWhatIsRefused:
 
     def test_a_name_that_does_not_fit_is_refused(self) -> None:
         request = _request(context=RequestContext(camera_id="c" * 70, frame_id=1))
-        with pytest.raises(ValueError, match="camera_id"):
+        with pytest.raises(ValidationError, match="camera_id"):
             wire.encode_request(
                 request, memoryview(bytearray(wire.encoded_request_size(request)))
             )

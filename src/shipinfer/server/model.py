@@ -376,6 +376,14 @@ class Model:
         return sum(i.ewma_latency_us for i in self._instances) / len(self._instances)
 
     @property
+    def advertised_depth(self) -> int:
+        """What this model tells its peers: the shallowest instance queue — the one its own
+        dispatcher would pick. The *sum* (`total_depth`) is on a different scale from a local
+        candidate's single-queue depth, and publishing it made a peer look `count x` deeper
+        than it was, so the tier under-spilled exactly when it mattered."""
+        return min((instance.depth for instance in self._instances), default=0)
+
+    @property
     def total_depth(self) -> int:
         return sum(i.depth for i in self._instances)
 
