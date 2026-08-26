@@ -5,6 +5,49 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-26 — Topology C, `service`: the crop-stage models served across the fleet's shards
+
+**What it is.** The fleet (topology B, #18) fixed the placement failure the project exists to fix —
+every stage of a frame on the GPU that decoded it — and gave up global balance to do it: a crowded
+shard's embedder saturates while a quiet shard's idles, which is the uneven-camera case in another
+coat. `service` keeps the fleet's shape and adds a cross-process tier for the stateless crop-stage
+models (`topology.service.shared_models`: the two embedders and the segmenter — crops, never
+frames, never the detector). Every shard keeps serving its own GPU's instances and also offers
+them to its peers through pinned shared-memory rings: one single-writer ring per (submitter,
+owner, model) each way, vLLM's `ShmRingBuffer` discipline (FREE → CLAIMED → WRITTEN → TAKEN),
+header = depth / EWMA / heartbeat / closed, read without a lock as the load signal. Three seams,
+three PRs: the ring (`runtime/memory/shared_ring.py`), the wire and the proxy
+(`server/remote_wire.py`, `server/remote_instance.py`: `RemoteInstance` is a `Placeable` with
+`device = cpu`, so `scheduling/` is untouched and a proxy never wins a locality tie;
+`RingIngress` and `ResultReader` are the two threads that serve it), and the topology
+(`server/topology/service.py`, `server/service_mesh.py`, `Topology.shard_environment`,
+`Model.attach_remote`, `InferenceServer` joining the tier on start and leaving it first on stop).
+
+**What changed in behaviour.** Under `service`, a shared model's dispatcher sees its local
+instances plus one proxy per peer; `locality_spillover` keeps work home while the local queue is
+shallow and borrows a quiet peer when it is not. A full ring is `RingFullError(depth, capacity)`
+— a `QueueFullError`, so the dispatcher spills on it like any other (ADR-005). A peer whose
+heartbeat stops fails its in-flight requests with `PeerLostError(owner, tags)` and drops out of
+the candidate set until it stamps again. The owner's failure crosses the wire as the owner's
+error text. `serve` without a shard index and `fleet` build no mesh. Nothing else changed.
+
+**Tested how.** Offline, over real shared memory: 19 ring checks (layout arithmetic, the
+protocol, backpressure, the header as load signal, close under a live zero-copy view), 12 wire
+checks (round trips, dtypes, the failure form, size accounting), 7 proxy checks (a `Placeable`,
+end to end through a real `Dispatcher`, twenty in flight over four slots, the owner's error,
+the lost owner with its tags), 7 mesh checks (two shards' meshes in one process, a request that
+leaves shard 0's dispatcher and returns from shard 1 as `cuda:1`, stop taking the rings down, a
+peer that never appears), 9 topology-contract checks. Suite: 1121 passed, 43 skipped.
+
+**Measured.** Not yet — the multigpu evidence run ("C beats B": per-device retired counts within
+10% under `--skew 8`, lower p99 on the busy cameras, no new `frames_failed`) is PR-cut item 4 and
+needs `--topology` on the harness with the fleet driving the shards. Until it exists, `service`
+is built and tested, not proven.
+
+**Open for the operator** (asked in the topology PR): slot size per model or one size for all;
+the detector is never shared — confirm; the pinned budget is `pairs × slots × slot_bytes` per
+process (4 shards, 3 models, 8 × 1.5 MiB: ~0.4 GiB), acceptable or not.
+
 ## 2026-08-25 — The port, steps P1a–P1d: the C++ plane takes the Python plane's shape
 
 **What it is.** The operator read `csrc/` against `src/shipinfer/` and saw a different program

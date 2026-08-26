@@ -435,3 +435,54 @@ binary you start, not a provider string.
   other and the Python names reused, so a reader who knows one tree can navigate the other.
 - The Python data plane stays. It is the reference implementation, it is what the offline tier
   tests, and it is what makes a claim about the C++ side falsifiable.
+
+## ADR-015 — Inference crosses processes through pinned host memory, never CUDA IPC
+
+**Status:** Accepted · 2026-08-26 · builds on ADR-002 (spills cross through the host), ADR-005
+(backpressure is typed and carried), ADR-006 (one process per shard) and the topology seam (#18).
+
+**Context.** The fleet gives every shard its own process, its own GPU and its own cameras, and
+so cannot balance a crowded shard against a quiet one: the crop-stage models — the two embedders
+and the segmenter, stateless, one crop batch per request — saturate on one GPU while idling on
+the next. Sharing them across processes needs a transport for ~15 000 crops/s of small batches
+with a result each, and a load signal the dispatcher can read without asking.
+
+Three transports were weighed. **CUDA IPC** (`cudaIpcGetMemHandle` / `OpenMemHandle`) would keep
+crops on the device, but opening a peer's device memory needs a CUDA context on that device in
+the opening process — one per peer GPU per shard, which is the per-process context cost the
+fleet exists to avoid — and the handle lifecycle (open once, never close under a live kernel)
+is a second protocol on top of the first. **gRPC/HTTP** serialises every batch twice and puts
+the kernel's network stack on the hot path for a transfer that never leaves the machine.
+**Shared host memory**, pinned, is what the spill path already does (ADR-002): the owner's H2D is
+a DMA from the slot, the submitter's D2H lands in it, nothing is serialised beyond a fixed-size
+header per tensor.
+
+**Decision.** Cross-process inference is a **pinned shared-memory ring per (submitter, owner,
+model), single writer each**, requests one way and results the other, in the shape of vLLM's
+`ShmRingBuffer`: a slot is FREE → CLAIMED (writer) → WRITTEN (published) → TAKEN (reader) →
+FREE (released after the result is written), and the ring header — depth, EWMA latency,
+heartbeat, closed — is the load signal, read lock-free like a local instance's depth. A peer's
+model appears to the dispatcher as a `Placeable` (`RemoteInstance`) whose `device` is `cpu`, so
+the scheduler is untouched and a proxy never equals a request's resident device. Only crops
+cross; the detector is never shared; a request that would not fit a slot is refused, not
+split. Failures are typed on the wire: a full ring is a `QueueFullError` the dispatcher spills
+on; a silent peer fails its in-flight requests with `PeerLostError` carrying the (camera, frame)
+tags; the owner's exception crosses as text.
+
+**Consequences.**
+
+- **A pinned budget per process:** `pairs × slots × slot_bytes` — for 4 shards, 3 shared models
+  and 8 × 1.5 MiB slots, ~0.4 GiB. It is set once at start (`topology.service`) and is why the
+  rings are *pairwise and small* rather than one big ring per owner: N writers on one ring
+  would need a compare-and-swap Python does not have on shared memory.
+- **Two copies per remote request** (D2H into the slot, H2D out of it) against zero for a local
+  one. That is the price of not opening peer contexts; the policy only pays it when the local
+  queue is past its spill threshold, and the per-device counters show how often.
+- **Loss is bounded and named.** A dead shard loses its cameras and its capacity; the requests
+  it held for peers fail with their tags within `lost_after_ms`; nothing hangs. The fleet
+  supervisor still treats a dead shard as a fleet failure (ADR-006) — `service` changes *what is
+  lost*, not whether a dead shard is a failure.
+- **The protocol is versioned** (`RING_VERSION`, `WIRE_VERSION`); a mismatch at `open` is a
+  `RingProtocolError` naming both, so two builds cannot talk past each other.
+- **Not decided here:** slot size per model, and whether the tier should ever carry frames. Both
+  are asked of the operator in the topology PR.
