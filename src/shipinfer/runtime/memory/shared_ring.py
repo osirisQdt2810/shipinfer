@@ -52,6 +52,15 @@ here. The intended consumer shape (the proxy layer implements it) is one thread 
 rings round-robin with ``take(timeout_s=0)`` and a backoff when a whole sweep is idle — at the
 box's ceiling (16 GPUs x 3 shared models is ~48 rings) a sweep is 48 one-byte state scans, and
 ``is_closed`` is a single byte read, so an idle sweep allocates nothing.
+
+Memory ordering: the state-byte-after-payload discipline assumes stores are not reordered
+(x86-TSO), the same assumption vLLM's ring carries. On a weakly ordered ISA (aarch64) a
+reader could observe WRITTEN before the payload stores land; accepted for now — this box and
+the deployment are x86 — and recorded here so a port knows where to add the fence.
+
+`_PENDING_CLOSE` is process-wide and reaped on every close; if the *last* ring in a process
+closes under a live view, its mapping stays until exit. Rings are few and long-lived, so
+that is accepted rather than threaded through a finalizer.
 """
 
 from __future__ import annotations
@@ -141,6 +150,9 @@ class RingLayout:
 #: magic u32 | version u32 | slots u32 | slot_bytes u32 | depth u32 | pad u32 |
 #: ewma_latency_us f64 | heartbeat_ns u64 | closed u8 | owner (63 bytes, NUL-padded)
 _HEADER = struct.Struct("<IIIIIIdQB63s")
+#: The stamp's in-place window: depth u32, reserved u32, ewma f64, heartbeat u64 at offset 16
+#: — everything before it (magic, version, layout) and after it (closed, owner) untouched.
+_STAMP = struct.Struct("<IIdQ")
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +220,15 @@ class SharedRing:
     releases them, and closes it. The one **writer** opens it by name (:meth:`open`), claims a
     free slot, fills the payload, publishes. Both sides may pin the block in their own process
     (:meth:`pinned_tensor`); the block itself exists once.
+
+    **The closed-handle rule, applied to the whole surface:** a closed (or detached) handle
+    answers questions honestly, refuses to hand out data, and treats late transitions as
+    no-ops. Questions: ``is_closed`` is True, ``header()`` answers a synthetic closed header,
+    ``depth`` is 0, ``state(i)`` is FREE. Data: ``payload`` and ``pinned_tensor`` raise
+    :class:`RingClosedError`. Work: ``claim`` raises :class:`RingClosedError`, ``take``
+    returns ``None``. Transitions: ``publish``, ``release``, ``abandon`` and ``stamp`` return
+    without effect — a completion callback or metrics thread settling after ``close()`` is an
+    ordinary shutdown event, not a crash.
     """
 
     def __init__(
@@ -226,6 +247,7 @@ class SharedRing:
         self._is_owner = is_owner
         self._view = memoryview(block.buf)
         self._next = 0
+        self._take_next = 0
         self._pinned: Any = None
         self._pinned_ptr = 0
         self._closed_here = False
@@ -269,6 +291,12 @@ class SharedRing:
                 f"ring {name!r}: header version {version} (magic {magic:#x}), this process "
                 f"speaks version {RING_VERSION}; the two processes are not the same build"
             )
+        if block.size < layout.total_bytes:
+            block.close()
+            raise RingProtocolError(
+                f"ring {name!r}: block is {block.size} bytes, layout needs "
+                f"{layout.total_bytes} — a short block would clamp payloads silently"
+            )
         if (slots, slot_bytes) != (layout.slots, layout.slot_bytes):
             block.close()
             raise RingProtocolError(
@@ -305,7 +333,7 @@ class SharedRing:
             owner=f[9].rstrip(b"\0").decode(errors="replace"),
         )
 
-    _CLOSED_OFFSET = 40  # <IIIIII d Q B...: six u32 (24) + f64 (32) + u64 (40), then the byte
+    _CLOSED_OFFSET = _HEADER.size - 64  # the byte before the 63-byte owner name and its NUL
 
     @property
     def is_closed(self) -> bool:
@@ -321,17 +349,18 @@ class SharedRing:
         """The owner publishes its load. Called on every enqueue and dequeue; cheap on purpose.
 
         This is what a remote proxy's ``depth`` and ``ewma_latency_us`` read, and the
-        heartbeat is what tells a peer the owner is alive. On a closed handle it is a no-op:
-        a metrics thread stamping during shutdown must not crash on the released view.
+        heartbeat is what tells a peer the owner is alive. Owner-only: a peer holds the other
+        end to *read*, and a stamp that re-packed the header from a non-owner would clear the
+        ``closed`` flag the owner set. Writes exactly its three fields in place — magic,
+        version and layout stay whatever ``open()`` validated. On a closed handle: a no-op.
         """
         if self._detached:
             return
-        self._write_header(
-            depth=depth,
-            ewma_latency_us=ewma_latency_us,
-            heartbeat_ns=time.monotonic_ns(),
-            closed=self._closed_here,
-        )
+        if not self._is_owner:
+            raise RingProtocolError(
+                f"ring {self._name!r}: only the owner stamps; this handle merely reads"
+            )
+        _STAMP.pack_into(self._view, 16, depth, 0, float(ewma_latency_us), time.monotonic_ns())
 
     def _write_header(
         self, *, depth: int, ewma_latency_us: float, heartbeat_ns: int, closed: bool
@@ -366,6 +395,8 @@ class SharedRing:
         return self._owner
 
     def state(self, index: int) -> int:
+        if self._detached:
+            return int(SlotState.FREE)
         return self._view[self._layout.state_offset(index)]
 
     def _set_state(self, index: int, value: int) -> None:
@@ -374,6 +405,8 @@ class SharedRing:
     @property
     def depth(self) -> int:
         """Slots not currently free — what a writer sees as the ring's backlog."""
+        if self._detached:
+            return 0
         return sum(1 for i in range(self._layout.slots) if self.state(i) != SlotState.FREE)
 
     def claim(self, timeout_s: float) -> int:
@@ -399,7 +432,15 @@ class SharedRing:
             spins = _backoff(spins)
 
     def payload(self, index: int) -> memoryview:
-        """The slot's bytes, ``slot_bytes`` long, as a writable view."""
+        """The slot's bytes, ``slot_bytes`` long, as a writable view.
+
+        Raises:
+            RingClosedError: on a closed handle. ``memoryview`` slicing clamps, so without
+                the guard this would answer a 0-byte view — and an empty buffer read as "no
+                detections" is the silent-wrong-answer the house rules name as blocking.
+        """
+        if self._detached:
+            raise RingClosedError(self._owner, self._name)
         start = self._layout.slot_offset(index)
         return self._view[start : start + self._layout.slot_bytes]
 
@@ -434,7 +475,13 @@ class SharedRing:
         self._set_state(index, SlotState.FREE)
 
     def take(self, timeout_s: float | None) -> int | None:
-        """Owner: the next written slot, or ``None`` for "no work in this window".
+        """Owner: a written slot, or ``None`` for "no work in this window".
+
+        **The ring does not preserve submission order.** ``claim`` skips busy slots, so a
+        late message can land in a lower slot than an earlier one; the rotating scan here
+        bounds the damage — every written slot is taken within one rotation, so displacement
+        is at most the slot count and nothing starves — but consumers must key on the payload
+        (the request id, the ``(camera_id, frame_id)`` tag), never on arrival order.
 
         ``None`` means only that — an idle window is an ordinary event, and a loop that
         breaks on it dies the first quiet 50 ms. The loop to write is::
@@ -452,9 +499,11 @@ class SharedRing:
         while True:
             if self._detached:
                 return None
-            for index in range(self._layout.slots):
+            for step in range(self._layout.slots):
+                index = (self._take_next + step) % self._layout.slots
                 if self.state(index) == SlotState.WRITTEN:
                     self._set_state(index, SlotState.TAKEN)
+                    self._take_next = (index + 1) % self._layout.slots
                     return index
             if self.is_closed:
                 return None
@@ -485,6 +534,8 @@ class SharedRing:
         mapping with *this* process's DMA engine; the block exists once. Requires torch and a
         device — the one method here that does, kept apart so everything else runs offline.
         """
+        if self._detached:
+            raise RingClosedError(self._owner, self._name)
         torch = self._torch_with_registration()
         start = self._layout.slot_offset(index)
         return torch.frombuffer(
@@ -539,33 +590,30 @@ class SharedRing:
         # releasing under it would raise `BufferError` and skip the unlink. The mapping then
         # lives until the last view dies, which is the right lifetime — the *name* goes now.
         self._detached = True
-        quiesced = True
-        try:
+        with contextlib.suppress(BufferError):
+            # Slices taken from `_view` hold the *underlying* buffer, not this object, so a
+            # clean release here proves nothing about in-flight views — it only drops our own
+            # export so the mapping can close the moment the callers' slices die.
             self._view.release()
-        except BufferError:
-            quiesced = False
-        # Whether or not that worked, drop our export: the callers' slices are then the only
-        # thing keeping the mapping, and the handle can close the moment the last one dies.
         self._view = memoryview(b"")
+        # Reap earlier leftovers *before* deciding this handle's fate: the reap unregisters
+        # and closes, and running it after the append would unpin this ring's pages in the
+        # very call that may have just decided an in-flight view makes that unsafe.
+        reap_pending_closes()
         closed_now = False
-        if quiesced:
-            # Nothing views the block through this handle, so no copy through it can be in
-            # flight: unregister now, while the mapping is certainly alive, then try to close.
-            if unregister is not None:
-                unregister()
-                unregister = None
+        if unregister is None:
             try:
                 self._block.close()
                 closed_now = True
             except BufferError:
-                pass  # a pinned_tensor is still held somewhere; parked below
+                pass  # a zero-copy payload is still in flight; parked below
+        # A *pinned* ring is always parked: there is no reliable way to see the callers'
+        # in-flight views from here, unregistering under a live DMA is undefined, and the
+        # unregister must precede the close that unmaps — so both wait for a later reap,
+        # by which time the close-era copies have long completed.
         if not closed_now:
-            # Keep the handle: its finaliser would retry the close under the same view and
-            # fail noisily at an arbitrary later point. It is closed at the next opportunity,
-            # and an unregister that could not run safely yet rides along with it.
             with _PENDING_LOCK:
                 _PENDING_CLOSE.append((self._block, unregister))
-        reap_pending_closes()
         if self._is_owner:
             # `_attach` unregisters on open; in one process (the tests, and any same-process
             # pair) that removes the create-time entry too, because the tracker's cache is a

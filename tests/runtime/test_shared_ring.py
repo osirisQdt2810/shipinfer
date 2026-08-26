@@ -158,7 +158,7 @@ class TestTheProtocol:
         finally:
             writer.close()
 
-    def test_a_reader_thread_receives_every_payload_in_order(self, ring) -> None:
+    def test_a_reader_thread_receives_every_payload_with_bounded_reordering(self, ring) -> None:
         received: list[bytes] = []
 
         def reader() -> None:
@@ -181,7 +181,15 @@ class TestTheProtocol:
             ring.close()  # closes the reader's loop: take() returns None
             thread.join(timeout=2.0)
             writer.close()
-        assert [int.from_bytes(b, "little") for b in received] == list(range(50))
+        values = [int.from_bytes(b, "little") for b in received]
+        assert sorted(values) == list(range(50)), "every payload is delivered exactly once"
+        # The ring does not preserve submission order: `claim` skips busy slots, so a late
+        # message can land in a lower slot. The rotating take bounds the displacement to the
+        # slot count and nothing starves — that bound, not order, is the guarantee.
+        displacement = max(abs(position - value) for position, value in enumerate(values))
+        assert (
+            displacement <= ring.layout.slots
+        ), f"displacement {displacement} exceeds a rotation"
 
     def test_a_closed_handle_answers_closed_instead_of_raising(self) -> None:
         """A reader thread that wakes after `close()` must see a closed ring, not a ValueError
@@ -347,6 +355,30 @@ class TestIsClosedIsTheLoopCondition:
 
 
 class TestAClosedHandleIsInert:
+    def test_the_whole_surface_follows_the_closed_rule(self, ring) -> None:
+        """Questions answer honestly, data access refuses, transitions are no-ops — one rule,
+        every public method, because the round-2 review found the guard applied piecemeal."""
+        writer = SharedRing.open(ring.name, ring.layout)
+        index = writer.claim(timeout_s=0.1)
+        ring.close()
+        writer.close()
+        for handle in (ring, writer):
+            assert handle.is_closed
+            assert handle.depth == 0
+            assert handle.state(0) == SlotState.FREE
+            assert handle.header().closed
+            assert handle.take(timeout_s=0.01) is None
+            with pytest.raises(RingClosedError):
+                handle.claim(timeout_s=0.01)
+            with pytest.raises(RingClosedError):
+                handle.payload(0)
+            with pytest.raises(RingClosedError):
+                handle.pinned_tensor(0)
+            handle.stamp(depth=9, ewma_latency_us=9.0)
+            handle.publish(index)
+            handle.release(index)
+            handle.abandon(index)
+
     def test_late_transitions_and_stamps_do_not_crash(self, ring) -> None:
         """The shutdown window: a completion callback or a metrics thread touching the ring
         after `close()` must be a no-op, not an IndexError from the released view — this is
@@ -381,6 +413,102 @@ class TestPinnedForReal:
             assert torch.equal(back, source)
             del slot, device, back
         finally:
-            ring.close()  # unregisters via the remembered pointer; raising here fails the test
+            ring.close()  # a pinned ring is parked; the reap below unregisters and closes
+        from shipinfer.runtime.memory.shared_ring import reap_pending_closes
+
+        assert reap_pending_closes() == 0, "the views are gone, so unregister + close ran"
         with pytest.raises(FileNotFoundError):
             SharedRing.open(ring.name, layout)
+
+
+class TestStampIsTheOwners:
+    def test_a_peer_cannot_stamp_and_cannot_clear_the_closed_flag(self, ring) -> None:
+        """A non-owner stamping would re-pack the header and wipe `closed`; a dead peer would
+        then read as back-pressure forever. The stamp is owner-only and writes in place."""
+        writer = SharedRing.open(ring.name, ring.layout)
+        try:
+            with pytest.raises(RingProtocolError, match="only the owner stamps"):
+                writer.stamp(depth=1, ewma_latency_us=1.0)
+            ring.stamp(depth=5, ewma_latency_us=123.0)
+            header = writer.header()
+            assert (header.depth, header.ewma_latency_us) == (5, 123.0)
+            assert header.slots == ring.layout.slots, "the layout fields were not re-packed"
+            assert not header.closed
+        finally:
+            writer.close()
+
+
+class TestAShortBlockIsRefused:
+    def test_open_checks_the_whole_layout_size(self) -> None:
+        """A block shorter than the layout would clamp payloads silently (memoryview slicing
+        clamps); open refuses it as the protocol error it is."""
+        from multiprocessing import resource_tracker, shared_memory
+
+        name = _name()
+        layout = RingLayout(slots=4, slot_bytes=4096)
+        small = shared_memory.SharedMemory(name=name, create=True, size=8192)
+        try:
+            _HEADER = __import__(
+                "shipinfer.runtime.memory.shared_ring", fromlist=["_HEADER"]
+            )._HEADER
+            _HEADER.pack_into(
+                small.buf,
+                0,
+                __import__("shipinfer.runtime.memory.shared_ring", fromlist=["_MAGIC"])._MAGIC,
+                1,
+                layout.slots,
+                layout.slot_bytes,
+                0,
+                0,
+                0.0,
+                0,
+                0,
+                b"A",
+            )
+            with pytest.raises(RingProtocolError, match="short block would clamp"):
+                SharedRing.open(name, layout)
+        finally:
+            # `_attach` unregistered the name before validation refused the block; pair the
+            # tracker entries back up so this unlink's own unregister finds one.
+            resource_tracker.register(small._name, "shared_memory")
+            small.close()
+            small.unlink()
+
+
+class TestTheUnpinWaitsForTheViews:
+    def test_close_under_a_live_view_parks_the_unregister_for_a_later_reap(self, ring) -> None:
+        """Round 2's finding 4: the reap that runs inside close() must not unpin the pages the
+        same call just decided were unsafe to unpin. The unregister runs at a later reap."""
+        from types import SimpleNamespace
+
+        from shipinfer.runtime.memory import shared_ring as module
+
+        calls: list[int] = []
+        fake_torch = SimpleNamespace(
+            cuda=SimpleNamespace(
+                cudart=lambda: SimpleNamespace(cudaHostUnregister=lambda ptr: calls.append(ptr))
+            )
+        )
+        ring._pinned = fake_torch
+        ring._pinned_ptr = 0xDEAD
+        writer = SharedRing.open(ring.name, ring.layout)
+        index = writer.claim(timeout_s=0.1)
+        writer.publish(index)
+        taken = ring.take(timeout_s=0.5)
+        view = ring.payload(taken)  # the in-flight zero-copy hold
+        ring.close()
+        assert calls == [], "unpinning under the live view would corrupt an in-flight DMA"
+        del view
+        module.reap_pending_closes()
+        assert calls == [0xDEAD], "the parked unregister ran at the later reap, once"
+        writer.close()
+
+
+class TestPeerLostSpeaksItsTags:
+    def test_the_message_names_the_first_tags_and_counts_the_rest(self) -> None:
+        from shipinfer.core.errors import PeerLostError
+
+        tags = [(f"cam{i:02d}", i) for i in range(11)]
+        error = PeerLostError("2:person_embedder", tags)
+        assert error.owner == "2:person_embedder" and len(error.tags) == 11
+        assert "('cam00', 0)" in str(error) and "and 3 more" in str(error)
