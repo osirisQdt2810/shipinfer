@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "shipinfer/core/buffers.h"
 #include "shipinfer/core/device.h"
 #include "shipinfer/core/types.h"
 

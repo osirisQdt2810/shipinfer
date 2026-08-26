@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "shipinfer/core/buffers.h"
 #include "shipinfer/core/platform.h"
 #include "shipinfer/pipeline/graph/dag.h"
 #include "shipinfer/pipeline/graph/stage.h"
