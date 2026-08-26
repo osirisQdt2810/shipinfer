@@ -44,6 +44,7 @@ __all__ = [
     "encode_response",
     "encoded_request_size",
     "encoded_response_size",
+    "peek_request_id",
 ]
 
 WIRE_VERSION = 1
@@ -176,6 +177,14 @@ def _read_tensors(
         out[head.name] = Tensor.from_numpy(raw.copy() if copy else raw)
         offset += head.nbytes
     return out
+
+
+def peek_request_id(view: memoryview) -> int:
+    """The request id of whatever head is in ``view`` — request and response heads agree on
+    where it sits, so the reader can find the pending future before decoding the rest."""
+    if len(view) < 16:
+        raise RingProtocolError(f"slot of {len(view)} bytes holds no head")
+    return struct.unpack_from("<Q", view, 8)[0]
 
 
 # -- requests -----------------------------------------------------------------------------
