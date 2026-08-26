@@ -106,15 +106,29 @@ class TestWhatIsRefused:
             wire.encode_request(request, slot)
         assert bytes(slot[:4]) == b"\0\0\0\0", "nothing written"
 
-    def test_a_device_resident_input_is_refused(self) -> None:
+    def test_a_device_resident_input_is_copied_to_host_on_the_way_in(self, monkeypatch) -> None:
+        """The submitter's D2H (ADR-002: the payload crosses through the host). The copy itself
+        is torch's and runs on a device; here the hook is observed and the bytes round-trip."""
         import types
 
+        copied = np.arange(16, dtype=np.float32)
+        seen: list[str] = []
+
+        def fake_d2h(tensor, name):
+            seen.append(name)
+            return copied
+
+        monkeypatch.setattr(wire, "_device_to_host", fake_d2h)
         handle = types.SimpleNamespace(ptr=1, nbytes=64, device=Device.cuda(0))
         request = _request(
             inputs={"images": Tensor(dtype=DataType.FP32, shape=(16,), handle=handle)}
         )
-        with pytest.raises(ValueError, match="device-resident"):
-            wire.encoded_request_size(request)
+        slot = memoryview(bytearray(wire.encoded_request_size(request)))
+        wire.encode_request(request, slot)
+        back = wire.decode_request(slot, copy=True)
+        np.testing.assert_array_equal(back.inputs["images"].numpy(), copied)
+        assert back.inputs["images"].host is not None, "what crosses is host bytes"
+        assert seen and set(seen) == {"images"}
 
     def test_garbage_is_not_a_request(self) -> None:
         with pytest.raises(RingProtocolError, match="not a version"):
@@ -197,3 +211,31 @@ class TestAResponseSurvivesTheRoundTrip:
             wire.RemoteFailureError, match="ValueError: engine refused the batch"
         ):
             wire.decode_response(slot, context)
+
+
+@pytest.mark.gpu
+class TestDeviceTensorsCrossForReal:
+    """The real D2H: a CUDA-resident core.Tensor, bridged by raw pointer, crosses as its bytes."""
+
+    def test_a_cuda_tensor_crosses_as_its_host_bytes(self) -> None:
+        import types
+
+        import torch
+
+        from shipinfer.core.types import MemoryKind
+
+        source = torch.arange(16, dtype=torch.float32, device="cuda:0") * 3.0
+        torch.cuda.synchronize()
+        handle = types.SimpleNamespace(
+            ptr=source.data_ptr(),
+            nbytes=source.numel() * 4,
+            device=Device.cuda(0),
+            kind=MemoryKind.DEVICE,
+        )
+        tensor = Tensor.from_handle(handle, DataType.FP32, (16,))
+        request = _request(inputs={"images": tensor})
+        slot = memoryview(bytearray(wire.encoded_request_size(request)))
+        wire.encode_request(request, slot)
+        back = wire.decode_request(slot, copy=True)
+        np.testing.assert_array_equal(back.inputs["images"].numpy(), source.cpu().numpy())
+        del source  # the core.Tensor's holder kept it alive until here, as the bridge requires

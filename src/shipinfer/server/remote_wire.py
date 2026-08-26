@@ -98,12 +98,22 @@ def _unfixed(raw: bytes) -> str:
 
 
 def _host(tensor: Tensor, name: str) -> np.ndarray:
-    if tensor.host is None:
-        raise ValueError(
-            f"tensor {name!r} is device-resident; only host tensors cross a ring — the owner's "
-            f"backend stages host -> device itself"
-        )
-    return np.ascontiguousarray(tensor.host)
+    """The tensor's bytes on the host — copying them there when they live on a device.
+
+    Only host bytes cross a ring; a device-resident tensor is D2H'd here, on the caller's
+    thread, which is the submitter's (or the owner's) side of the copy ADR-002 routes through
+    the host. Synchronous by design: the bytes must be complete before the slot is published.
+    """
+    if tensor.host is not None:
+        return np.ascontiguousarray(tensor.host)
+    return _device_to_host(tensor, name)
+
+
+def _device_to_host(tensor: Tensor, name: str) -> np.ndarray:  # noqa: ARG001 - name aids errors
+    from shipinfer.runtime.tensor import to_torch
+
+    view = to_torch(tensor)
+    return np.ascontiguousarray(view.detach().to("cpu", non_blocking=False).numpy())
 
 
 def _tensor_heads(tensors: Mapping[str, Tensor]) -> list[tuple[_TensorHead, np.ndarray]]:

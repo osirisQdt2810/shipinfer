@@ -442,8 +442,9 @@ binary you start, not a provider string.
 (backpressure is typed and carried), ADR-006 (one process per shard) and the topology seam (#18).
 
 **Context.** The fleet gives every shard its own process, its own GPU and its own cameras, and
-so cannot balance a crowded shard against a quiet one: the crop-stage models — the two embedders
-and the segmenter, stateless, one crop batch per request — saturate on one GPU while idling on
+so cannot balance a crowded shard against a quiet one: the crop-stage models — by default the two
+embedders; the segmenter's 39 MB batches are the operator's call (its rings would dwarf
+theirs) — stateless, one crop batch per request, saturate on one GPU while idling on
 the next. Sharing them across processes needs a transport for ~15 000 crops/s of small batches
 with a result each, and a load signal the dispatcher can read without asking.
 

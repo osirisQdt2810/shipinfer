@@ -209,3 +209,49 @@ class TestConnectWaitsForPeers:
                 lonely.connect(timeout_s=0.3)
         finally:
             lonely.stop()
+
+
+class TestSlotSizing:
+    """Both processes derive a ring's slot size from the model's own config — no negotiation."""
+
+    def test_a_static_model_gets_batch_times_bytes_plus_heads_per_direction(self) -> None:
+        from types import SimpleNamespace
+
+        from shipinfer.core.types import DataType
+        from shipinfer.server.service_mesh import wire_slot_bytes
+
+        embedder = SimpleNamespace(
+            max_batch_size=16,
+            input_specs=[SimpleNamespace(shape=(3, 256, 128), dtype=DataType.FP32)],
+            output_specs=[SimpleNamespace(shape=(2048,), dtype=DataType.FP32)],
+        )
+        req, res = wire_slot_bytes(embedder, fallback=1_638_400)
+        assert req == 6_356_992, "16 x 3x256x128 fp32 + 64 KiB heads, page-rounded"
+        assert res == 196_608, "16 x 2048 fp32 + heads — the directions differ"
+        assert req % 4096 == 0 and res % 4096 == 0
+
+    def test_a_dynamic_extent_falls_back_to_the_setting(self) -> None:
+        from types import SimpleNamespace
+
+        from shipinfer.core.types import DataType
+        from shipinfer.server.service_mesh import wire_slot_bytes
+
+        dyn = SimpleNamespace(
+            max_batch_size=8,
+            input_specs=[SimpleNamespace(shape=(3, -1, -1), dtype=DataType.FP32)],
+            output_specs=[SimpleNamespace(shape=(300, 6), dtype=DataType.FP32)],
+        )
+        req, res = wire_slot_bytes(dyn, fallback=999_424)
+        assert req == 999_424, "unsizeable side: the setting"
+        assert res != 999_424, "the sizeable side is still computed"
+
+    def test_the_mesh_lays_out_each_direction_with_its_own_size(self) -> None:
+        mesh = ServiceMesh(
+            _settings("run", 0, [0, 1]),
+            0,
+            {"emb": FakeModel("emb", 0)},
+            slot_bytes_by_model={"emb": (200_704, 8_192)},
+        )
+        assert mesh.layout_for("emb", "req").slot_bytes == 200_704
+        assert mesh.layout_for("emb", "res").slot_bytes == 8_192
+        assert mesh.layout_for("other", "req").slot_bytes == mesh.settings.slot_bytes

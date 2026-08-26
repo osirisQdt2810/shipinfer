@@ -79,11 +79,33 @@ def to_torch(tensor: Tensor, device: Device | None = None, *, non_blocking: bool
     """
     torch = require_torch()
     if tensor.host is None:
-        raise ValueError("cannot bridge a device-resident core.Tensor without a host view")
-    result = torch.from_numpy(tensor.host)
+        assert tensor.handle is not None  # Tensor.__post_init__ guarantees exactly one
+        result = torch.as_tensor(_DeviceSpan(tensor), device=to_torch_device(tensor.device))
+    else:
+        result = torch.from_numpy(tensor.host)
     if device is None or device.kind == "cpu":
         return result
     return result.to(to_torch_device(device), non_blocking=non_blocking)
+
+
+class _DeviceSpan:
+    """A device-resident ``core.Tensor`` as torch sees it: the CUDA array interface.
+
+    ``torch.as_tensor`` accepts any object carrying ``__cuda_array_interface__`` and builds a
+    zero-copy view over the raw pointer — no dependence on who allocated it or what object owns
+    it. The caller keeps the ``core.Tensor`` (and with it the handle) alive for the view's
+    lifetime, exactly as with ``torch.from_numpy`` and its array. Works on ROCm builds of torch
+    too, which accept the same interface.
+    """
+
+    def __init__(self, tensor: Tensor) -> None:
+        self.__cuda_array_interface__ = {
+            "shape": tuple(tensor.shape),
+            "typestr": tensor.dtype.numpy_dtype.str,
+            "data": (tensor.handle.ptr, False),
+            "strides": None,
+            "version": 2,
+        }
 
 
 def from_torch(tensor: Any, *, copy_to_host: bool = True) -> Tensor:

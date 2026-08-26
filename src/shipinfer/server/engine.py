@@ -186,7 +186,7 @@ class InferenceServer:
         topology = self._settings.topology
         if topology.kind != "service" or topology.service.shard is None:
             return None
-        from shipinfer.server.service_mesh import ServiceMesh
+        from shipinfer.server.service_mesh import ServiceMesh, wire_slot_bytes
 
         shared = {
             name: self._models[name]
@@ -199,7 +199,16 @@ class InferenceServer:
                 topology.service.shared_models,
             )
             return None
-        mesh = ServiceMesh(topology.service, topology.service.shard, shared)
+        assert self._repository is not None  # start() loaded it before any model
+        sizes = {
+            name: wire_slot_bytes(
+                self._repository.entry(name).config, topology.service.slot_bytes
+            )
+            for name in shared
+        }
+        mesh = ServiceMesh(
+            topology.service, topology.service.shard, shared, slot_bytes_by_model=sizes
+        )
         mesh.create()
         mesh.connect()
         return mesh

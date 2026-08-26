@@ -21,7 +21,7 @@ mesh is not built at all.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -31,7 +31,7 @@ from shipinfer.core.settings.topology import ServiceSettings
 from shipinfer.runtime.memory.shared_ring import RingLayout, SharedRing
 from shipinfer.server.remote_instance import RemoteInstance, ResultReader, RingIngress
 
-__all__ = ["ServiceMesh", "ring_name"]
+__all__ = ["ServiceMesh", "ring_name", "wire_slot_bytes"]
 
 _LOG = get_logger(__name__)
 
@@ -45,6 +45,44 @@ def ring_name(run_id: str, submitter: int, owner: int, model: str, kind: str) ->
     if kind not in ("req", "res"):
         raise ValueError(f"ring kind must be 'req' or 'res', got {kind!r}")
     return f"shipinfer-{run_id}-{submitter}-to-{owner}-{model}-{kind}"
+
+
+#: Head room per slot for the request/response head and the per-tensor heads, which travel in
+#: the slot ahead of the bytes.
+_HEAD_ROOM = 64 * 1024
+_PAGE = 4096
+
+
+def wire_slot_bytes(config: Any, fallback: int) -> tuple[int, int]:
+    """``(request, response)`` slot bytes for one model, from its own config.
+
+    A request slot holds one full batch of the model's inputs, a response slot one batch of its
+    outputs — plus the heads, rounded to pages. Both processes derive the same numbers from the
+    same repository, which is what lets them open each other's rings without negotiating. A
+    dynamic extent (``-1``) makes a side unsizeable, and that side gets ``fallback``
+    (``ServiceSettings.slot_bytes``).
+    """
+
+    def side(specs: Any) -> int:
+        total = 0
+        for spec in specs:
+            count = 1
+            for dim in spec.shape:
+                if dim < 0:
+                    return -1
+                count *= dim
+            total += count * spec.dtype.itemsize
+        return total
+
+    batch = max(1, int(getattr(config, "max_batch_size", 0) or 1))
+
+    def slot(nbytes: int) -> int:
+        if nbytes < 0:
+            return fallback
+        raw = batch * nbytes + _HEAD_ROOM
+        return ((raw + _PAGE - 1) // _PAGE) * _PAGE
+
+    return slot(side(config.input_specs)), slot(side(config.output_specs))
 
 
 class _SharedModel(Protocol):
@@ -73,6 +111,8 @@ class ServiceMesh:
     settings: ServiceSettings
     shard: int
     models: dict[str, _SharedModel]
+    #: Per-model ``(request, response)`` slot bytes (`wire_slot_bytes`); the setting when absent.
+    slot_bytes_by_model: Mapping[str, tuple[int, int]] = field(default_factory=dict)
     _owned: list[SharedRing] = field(default_factory=list, init=False, repr=False)
     _opened: list[SharedRing] = field(default_factory=list, init=False, repr=False)
     _ingresses: list[RingIngress] = field(default_factory=list, init=False, repr=False)
@@ -95,30 +135,34 @@ class ServiceMesh:
     def peers(self) -> list[int]:
         return [p for p in self.settings.peers if p != self.shard]
 
-    def layout(self) -> RingLayout:
-        return RingLayout(
-            slots=self.settings.slots_per_pair, slot_bytes=self.settings.slot_bytes
-        )
+    def layout_for(self, model: str, kind: str) -> RingLayout:
+        """One (model, direction) ring's layout: request slots sized from the model's inputs,
+        response slots from its outputs, the setting when the model's shapes are dynamic."""
+        sizes = self.slot_bytes_by_model.get(model)
+        if sizes is None:
+            nbytes = self.settings.slot_bytes
+        else:
+            nbytes = sizes[0] if kind == "req" else sizes[1]
+        return RingLayout(slots=self.settings.slots_per_pair, slot_bytes=nbytes)
 
     # -- phase 1: what this shard owns ---------------------------------------------------
 
     def create(self) -> None:
         """Create the rings this shard reads: requests from each peer, results for each peer."""
-        layout = self.layout()
         me = str(self.shard)
         for peer in self.peers:
             for model in self.models:
                 self._owned.append(
                     SharedRing.create(
                         ring_name(self.settings.run_id, peer, self.shard, model, "req"),
-                        layout,
+                        self.layout_for(model, "req"),
                         owner=me,
                     )
                 )
                 self._owned.append(
                     SharedRing.create(
                         ring_name(self.settings.run_id, self.shard, peer, model, "res"),
-                        layout,
+                        self.layout_for(model, "res"),
                         owner=me,
                     )
                 )
@@ -134,7 +178,6 @@ class ServiceMesh:
     def connect(self, timeout_s: float | None = None) -> None:
         """Open the peers' rings, start the threads, attach the proxies. Blocks until every
         peer's rings exist or ``timeout_s`` passes — peers start in no particular order."""
-        layout = self.layout()
         deadline = time.monotonic() + (
             self.settings.connect_timeout_s if timeout_s is None else timeout_s
         )
@@ -151,12 +194,12 @@ class ServiceMesh:
                 # Their request ring for my submits, and their result ring for my answers.
                 submit = self._open(
                     ring_name(self.settings.run_id, self.shard, peer, name, "req"),
-                    layout,
+                    self.layout_for(name, "req"),
                     deadline,
                 )
                 answers = self._open(
                     ring_name(self.settings.run_id, peer, self.shard, name, "res"),
-                    layout,
+                    self.layout_for(name, "res"),
                     deadline,
                 )
                 proxy = RemoteInstance(

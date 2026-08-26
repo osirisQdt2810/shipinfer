@@ -11,8 +11,8 @@ edits, typo fixes and pure docs.
 every stage of a frame on the GPU that decoded it — and gave up global balance to do it: a crowded
 shard's embedder saturates while a quiet shard's idles, which is the uneven-camera case in another
 coat. `service` keeps the fleet's shape and adds a cross-process tier for the stateless crop-stage
-models (`topology.service.shared_models`: the two embedders and the segmenter — crops, never
-frames, never the detector). Every shard keeps serving its own GPU's instances and also offers
+models (`topology.service.shared_models`: the two embedders by default — crops, never frames,
+never the detector; the segmenter's 39 MB batches make sharing it the operator's call). Every shard keeps serving its own GPU's instances and also offers
 them to its peers through pinned shared-memory rings: one single-writer ring per (submitter,
 owner, model) each way, vLLM's `ShmRingBuffer` discipline (FREE → CLAIMED → WRITTEN → TAKEN),
 header = depth / EWMA / heartbeat / closed, read without a lock as the load signal. Three seams,

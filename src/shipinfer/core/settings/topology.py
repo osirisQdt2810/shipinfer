@@ -31,9 +31,11 @@ class ServiceSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     #: The models a shard offers to its peers: crops, never frames — a 1080p frame is 6 MB and
-    #: would triple the pinned footprint; the detector stays local by design.
+    #: would triple the pinned footprint; the detector stays local by design. The segmenter is
+    #: not in the default either: its batch is 8 x 3 x 640 x 640 fp32 = 39 MB, so its rings would
+    #: dwarf the embedders' — whether to pay that is the operator's call (T3's open question).
     shared_models: list[str] = Field(
-        default_factory=lambda: ["person_embedder", "ship_embedder", "ship_segmenter"]
+        default_factory=lambda: ["person_embedder", "ship_embedder"]
     )
     #: Slots per (submitter, owner, model) ring. Small on purpose: the rings are pairwise, so
     #: four shards and three models are 24 rings each way, and every slot is pinned.

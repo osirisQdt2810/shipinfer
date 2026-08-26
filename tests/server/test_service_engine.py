@@ -71,6 +71,10 @@ class TestTheEngineJoinsTheTier:
     def test_each_server_holds_a_mesh_and_a_proxy_for_the_other(self, two_servers) -> None:
         for shard, server in enumerate(two_servers):
             assert server.service_mesh is not None
+            # The engine sized the rings from the model's own config: echo is max_batch 8 of
+            # one FP32 [4] input and output, so both directions are 8 x 16 B + 64 KiB heads,
+            # page-rounded.
+            assert server.service_mesh.slot_bytes_by_model["echo"] == (69_632, 69_632)
             proxies = [
                 p
                 for p in server.model("echo")._dispatcher.instances
