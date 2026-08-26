@@ -229,6 +229,18 @@ def _load_gst() -> tuple[Any, Any]:
 
             gi.require_version("Gst", "1.0")
             from gi.repository import GLib, Gst
+
+            # The appsink's *methods* (`try_pull_sample`) exist on the Python side only when the
+            # GstApp typelib has been loaded; without it `get_by_name` returns a bare element
+            # whose Python type knows the signals but not the methods, and every read failed
+            # with "'GstAppSink' object has no attribute 'try_pull_sample'" on the first
+            # containerised RTSP run that reached a read. Loaded here, once; `_do_read` still
+            # falls back to the signal when the typelib is absent.
+            try:
+                gi.require_version("GstApp", "1.0")
+                from gi.repository import GstApp  # noqa: F401 - loading it is the effect
+            except (ImportError, ValueError):
+                pass
         except (ImportError, ValueError) as exc:
             raise SourceUnavailableError(
                 "gstreamer",
@@ -240,6 +252,19 @@ def _load_gst() -> tuple[Any, Any]:
         if not Gst.is_initialized():
             Gst.init(None)
         return Gst, GLib
+
+
+def _try_pull_sample(appsink: Any, timeout_ns: int) -> Any:
+    """``appsink.try_pull_sample``, or the same call through its signal.
+
+    The method exists on the Python object only when the GstApp typelib is loaded; the signal
+    is always there. One place for the fallback, so a read never depends on which typelibs an
+    image happens to ship.
+    """
+    pull = getattr(appsink, "try_pull_sample", None)
+    if pull is not None:
+        return pull(timeout_ns)
+    return appsink.emit("try-pull-sample", timeout_ns)
 
 
 @SOURCES.register("gstreamer", "gst")
@@ -361,7 +386,7 @@ class GStreamerSource(FrameSource):
 
     def _do_read(self) -> np.ndarray | None:
         gst = self._gst
-        sample = self._appsink.try_pull_sample(int(self.read_timeout_s * gst.SECOND))
+        sample = _try_pull_sample(self._appsink, int(self.read_timeout_s * gst.SECOND))
         if sample is None:
             # Nothing within the timeout. Distinguish "quiet" from "over" by asking the bus:
             # an EOS or ERROR message means reconnect, a timeout means keep waiting.

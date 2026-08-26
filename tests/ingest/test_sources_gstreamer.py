@@ -279,3 +279,28 @@ class TestInitialisationIsSerialised:
         monkeypatch.setenv("GIO_USE_PROXY_RESOLVER", "gnome")  # an operator's real choice stays
         gstreamer._load_gst()
         assert os.environ["GIO_USE_PROXY_RESOLVER"] == "gnome"
+
+
+class TestPullingASampleDoesNotDependOnTheTypelib:
+    """`GstApp.AppSink.try_pull_sample` is a method only when the GstApp typelib is loaded;
+    the `try-pull-sample` signal always exists. The first containerised RTSP run that reached
+    a read failed on every camera with "'GstAppSink' object has no attribute 'try_pull_sample'".
+    """
+
+    def test_the_method_is_used_when_present(self):
+        from shipinfer.ingest.sources.gstreamer import _try_pull_sample
+
+        class Sink:
+            def try_pull_sample(self, timeout):
+                return ("method", timeout)
+
+        assert _try_pull_sample(Sink(), 5) == ("method", 5)
+
+    def test_the_signal_is_the_fallback(self):
+        from shipinfer.ingest.sources.gstreamer import _try_pull_sample
+
+        class BareElement:
+            def emit(self, name, *args):
+                return (name, args)
+
+        assert _try_pull_sample(BareElement(), 7) == ("try-pull-sample", (7,))
