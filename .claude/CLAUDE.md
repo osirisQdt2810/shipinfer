@@ -218,11 +218,25 @@ or not it gets mentioned.
 - **GPU (opt-in, run before every release and after touching `runtime/`, `backends/` or the
   kernels submodule):** `pytest -m gpu`, and `-m multigpu` for the balancing evidence.
 
-Plus one operator command that produces the evidence a PR needs:
+Plus one operator command that produces the evidence a PR needs — the benchmark harness,
+inside the container, for at least the analysis's 10 s warm-up plus a steady window. It
+needs the host-built baseline binary first (`benchmarks/build/sim_pipeline_v2`, built with
+`python -c 'from benchmarks.harness import baseline; baseline.build_binary()'`): the script
+refuses to start without it, today even when `--systems shipinfer` names no baseline at all
+(ledger C48 relaxes that gate):
 
 ```bash
-shipinfer bench person_embedder --cameras 50 --fps 20 --seconds 5 --skew 8
+deploy/rootless/bench.sh --systems shipinfer --seconds 40      # the system tier, per-device table
+SHIPINFER_BENCH_SCRIPT=benchmarks/stages.py  deploy/rootless/bench.sh <run.json>   # algo tier
+SHIPINFER_BENCH_SCRIPT=benchmarks/kernels.py deploy/rootless/bench.sh --op letterbox  # kernel tier
 ```
+
+The harness takes `--cameras --fps --gpus --seconds --warmup --source replay|rtsp --systems
+--sweep`; it has no `--skew`. `shipinfer bench <model> --cameras 50 --fps 20 --skew 8` is the
+in-process scheduler demonstration (one model, synthetic load, skewed cameras), not the
+system measurement. The design load — 50 cameras × 20 fps — is more than one interpreter can
+generate or serve: it needs the multi-process generator, which is `shipinfer fleet` (one process
+per shard) with the harness driving each shard's cameras.
 
 "The offline suite is green" is **not** evidence that the server balances load. A bench run
 with a per-device breakdown is.
@@ -237,6 +251,29 @@ with a per-device breakdown is.
 4. **Co-author trailer:** add `Co-Authored-By: Claude …` only to large feature commits.
    Small incidental commits do not carry it.
 5. **All remotes are SSH** (`git@github.com:…`), never HTTPS.
+
+### Three rules from one afternoon of review rounds (V80 follow-through)
+
+- **A push is `&&`-chained to the check that gates it.** Twice in one hour a branch was pushed
+  after its own check had just failed, because the push was on the next line. `test && commit
+  && push` — a red check cannot be followed by a push.
+- **Before opening or pushing a PR, grep every test name and every claim in the body against
+  `git diff origin/main`.** Three bodies in one day described tests that were not in the diff:
+  written from the plan, or from a sibling branch where the tests actually lived. The body is
+  written *after* the diff, from the diff, and each `Test*` class it names must appear in
+  `git diff --name-only`/`git diff` output.
+- **A hook that rewrites files "passes" on its second run.** shipvision's PR pipeline runs
+  `pre-commit run --show-diff-on-failure` (black, isort, ruff, pinned). Black *modifies* the
+  files and reports Failed; a second run reports Passed on the rewritten tree — and a push at
+  that point ships a commit that does not match the working tree. After `pre-commit`, run
+  `git status`; if it is dirty, amend first.
+
+- **Format only the files in the diff, with the formatter CI runs.** shipvision's PR pipeline
+  runs `pre-commit run --from-ref <base> --to-ref HEAD` with pinned **black**; a whole-tree
+  `ruff format` on a scoped branch dragged two unrelated files into #4 and failed lint on a PR
+  that was already APPROVEd. Before pushing a shipvision branch, run exactly that command.
+  Old split branches compared against a *newer* main show the merged packages as "changed";
+  that is not contamination — rebuild each branch from the current main at its turn.
 
 ### PR description format (MANDATORY)
 Every PR body follows `.github/pull_request_template.md`: **Context → Content / Changes →
@@ -268,14 +305,58 @@ before fixing it**: fix and push if it is real, comment with the evidence if it 
 re-trigger either way — a push fires `synchronize`, and toggling the `automerge` label fires
 `labeled`, which re-runs the review without an empty commit. Loop until merged.
 
-**Keep a PR small.** Few commits, few files, one seam. PR #3 reached ~100 commits and 20k+
-lines, past GitHub's diff API limit, so the reviewer had to check the branch out rather than
-read a diff — and six review rounds followed. Past ~15 commits, open the next PR instead.
+**Keep a PR small — this is a hard limit, not a preference (V80).**
+
+> **At most ~15 commits and ~25 files changed.** Measure before opening:
+> `git diff <base> --stat | tail -1` and `git log --oneline <base>..HEAD | wc -l`.
+> Over either number, **split and push the pieces one at a time** — do not open it.
+
+PR #3 reached ~100 commits and 20k+ lines, past GitHub's diff API limit, so the reviewer had
+to check the branch out rather than read a diff, and six review rounds followed. shipvision
+PR #2 then repeated it at 45 commits / 290 files.
+
+**Writing "this PR is too big" in the description is not splitting it.** That happened on
+shipvision #2 and the operator had to ask again. The paragraph explaining why a split would be
+expensive is the paragraph that should have been the split.
+
+**How to split when the commits interleave.** Cherry-picking is usually not needed: packages
+are file-disjoint, so build each branch by taking *paths* from the big branch onto `main`
+(`git checkout <big-branch> -- <paths>`) rather than by replaying commits. Order the pieces by
+dependency, and merge each before opening the next.
+
+**Open them one at a time, in order.** When work splits into several PRs, push the first and
+carry it to merged before opening the second. Two reasons, and the second is the one that
+bites: a review that comes back BLOCKING has to be fixed, and if PR #2 is already stacked on
+#1's branch the fix has to be threaded through both — while a reviewer looking at four open
+PRs from the same session reviews none of them well.
 
 ## Documentation Language
 All documentation (README, `docs/`, any `.md`, docstrings, comments, commit messages, PR
 bodies, ADRs) **must be in English**, regardless of the conversation language. Exception:
 only when the user explicitly asks for Vietnamese in a specific file.
+
+## Two planes, one architecture (RULE — V88, V89)
+`csrc/` is a **port** of the Python data plane, not a second design. Every per-frame seam
+exists twice and must be the *same* seam: one thread per instance with its own bounded queue,
+a dispatcher and a placement policy chosen by name, the batch window with `max_queue_delay`,
+the fair queue with the same eviction order, the perception graph, reassembly with the same
+event schema, and real ingest. The control plane — settings, the model repository, registries,
+the CLI, the HTTP surface — stays Python (ADR-014) and hands the C++ plane a resolved config.
+
+**Sync rule:** a change to a Python data-plane seam is not finished until the C++ seam carries
+the same change and the cross-plane parity harness agrees (same inputs → same events, same
+eviction counts per camera, same batches). A PR that changes one plane and not the other says
+so in its body and opens the ledger item for the other; it does not merge as "done".
+
+## Reference implementations first (RULE — V86)
+When the way to build something is not clear, **read how Triton Inference Server or vLLM does
+it before inventing.** Their shape is the default: Triton for the model repository, instance
+groups, the per-model queue that instances on several GPUs pull from, model control and
+metrics; vLLM for process-per-GPU data parallelism, the coordinator that publishes per-engine
+load, the router that picks the least-loaded engine, and the CUDA-graph / allocator plumbing.
+A departure from their shape is fine when it is stated with its reason in the ADR or the PR;
+an unexplained departure is a reinvention. Reference checkouts live outside the repository
+(the scratchpad), never as a dependency.
 
 ## Coding Conventions
 Standards live in **`.claude/CONVENTIONS.md`** — read it in full before non-trivial work.
