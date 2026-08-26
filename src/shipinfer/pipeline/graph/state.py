@@ -211,6 +211,10 @@ class FrameState:
     #: the numbers pre-processing *reported* rather than recomputed ones.
     scale: float = 1.0
     pad: tuple[float, float] = (0.0, 0.0)
+    #: The resized extent ``(out_h, out_w)`` pre-processing actually wrote, before padding —
+    #: what the resize divided by. Kept so nothing downstream re-derives it from ``scale``,
+    #: which can disagree by a pixel while scale and pad both still match.
+    extents: tuple[int, int] = (0, 0)
     batches: dict[str, ObjectBatch] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
