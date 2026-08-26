@@ -60,8 +60,11 @@ class ServiceTopology(Topology):
         shards: int,
     ) -> ShardPlan:
         plan = plan_shards(cameras, shards=shards, gpus=gpus)
-        self._shards = len(plan)
+        self.adopt(plan)
         return plan
+
+    def adopt(self, plan: ShardPlan) -> None:
+        self._shards = len(plan)
 
     def command(
         self, shard: Shard, *, repository: str, http_port_base: int | None = None
