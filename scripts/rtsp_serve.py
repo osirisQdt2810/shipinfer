@@ -175,17 +175,22 @@ class RtspFixtureServer:
         endless: multifilesrc re-reads the same file forever, so the ten real frames repeat
         like a camera pointed at a slowly changing scene.
 
-        Pacing is ``identity sync=true``, not the caps alone. ``h264parse`` gives each access
-        unit a timestamp from the framerate in the caps, and ``identity sync=true`` holds a
-        buffer until the pipeline clock reaches that timestamp — so the stream runs at ``fps``
-        by the clock. Without it the packetiser pushes the file as fast as the socket accepts,
+        Pacing is ``identity single-segment=true sync=true``, not the caps alone. ``h264parse``
+        gives each access unit a timestamp from the framerate in the caps, and ``identity
+        sync=true`` holds a buffer until the pipeline clock reaches that timestamp — so the
+        stream runs at ``fps`` by the clock. ``single-segment`` is what makes that hold across
+        the loop: each pass of ``multifilesrc loop=true`` starts a new segment whose timestamps
+        restart at zero, and against a clock already seconds in, every buffer of the second
+        pass is "late" and goes out unpaced — the 127% run. One segment, continuous running
+        time, every pass paced. Without it the packetiser pushes the file as fast as the socket accepts,
         and the first containerised RTSP measurement offered 170% of its target: twelve "5 fps"
         cameras delivered 101.8 img/s, limited only by how fast the client could decode.
         """
         return (
             f"( multifilesrc location={self.fixture} loop=true "
             f"caps=video/x-h264,framerate={self.fps}/1,stream-format=byte-stream,alignment=au "
-            f"! h264parse config-interval=1 ! identity sync=true ! rtph264pay name=pay0 pt=96 )"
+            f"! h264parse config-interval=1 ! identity single-segment=true sync=true "
+            f"! rtph264pay name=pay0 pt=96 )"
         )
 
     def start(self) -> None:
