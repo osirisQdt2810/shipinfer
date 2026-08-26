@@ -17,6 +17,8 @@ this one can use the video engine when it is there and still start when it is no
 
 from __future__ import annotations
 
+import os
+import threading
 from typing import Any, ClassVar
 
 import numpy as np
@@ -64,6 +66,12 @@ _SW_DECODERS: dict[str, tuple[str, ...]] = {
 }
 
 #: Colour-space converters, in preference order. The first two are NVIDIA's and can take
+#: Serialises GStreamer's one-time initialisation across camera threads (see `_load_gst`).
+_GST_INIT_LOCK = threading.Lock()
+
+#: Decoders that can output GL memory and open a GL display to do it. See `build_pipeline`.
+_GL_CAPABLE_DECODERS: frozenset[str] = frozenset({"nvh264dec", "nvh265dec"})
+
 #: NVMM/CUDA memory straight out of a hardware decoder; ``videoconvert`` is the portable
 #: system-memory fallback and is always present.
 _CONVERTERS: tuple[str, ...] = ("nvvideoconvert", "nvvidconv", "videoconvert")
@@ -127,6 +135,15 @@ def build_pipeline(
     else:
         element = decoder or _SW_DECODERS[codec][0]
         decode = f"{_DEPAY[codec]} ! {_PARSE[codec]} ! {element}"
+    if codec == "auto" or (decoder or "") in _GL_CAPABLE_DECODERS:
+        # System memory, stated. nvcodec's `nvh264dec` / `nvh265dec` can output GL memory,
+        # and when downstream leaves the choice open they create a GL display first — which
+        # a headless container does not have: `gst_gl_display_gbm_new: could not find or open
+        # DRM device`, then a segfault, on the first RTSP benchmark run. A `video/x-raw`
+        # filter with no memory feature makes the decoder negotiate plain system memory and
+        # never touch GL. Not applied to the DeepStream pair (`nvv4l2decoder` +
+        # `nvvideoconvert`), whose NVMM hand-off is the point of choosing them.
+        decode = f"{decode} ! video/x-raw"
 
     caps = "video/x-raw,format=BGR"
     if width is not None and height is not None:
@@ -188,22 +205,66 @@ def _load_gst() -> tuple[Any, Any]:
     Deliberately inside a function: importing this module must work on a host with no
     PyGObject, so the whole offline test tier can exercise the pipeline builder and the
     camera actor.
-    """
-    try:
-        import gi
 
-        gi.require_version("Gst", "1.0")
-        from gi.repository import GLib, Gst
-    except (ImportError, ValueError) as exc:
-        raise SourceUnavailableError(
-            "gstreamer",
-            "PyGObject with GStreamer 1.0 typelibs is not importable "
-            f"({redact_in(str(exc))}). Install python3-gi and gstreamer1.0-plugins-{{base,good,bad}}, "
-            "or select the 'pyav' backend with SHIPINFER_INGEST_BACKEND=pyav",
-        ) from exc
-    if not Gst.is_initialized():
-        Gst.init(None)
-    return Gst, GLib
+    The whole body runs under one lock. Fifty camera actors call this from fifty threads at
+    start-up, and neither half is safe to race: PyGObject resolves ``gi.repository`` members
+    lazily and a concurrent first touch has come back as ``'GLib' object has no attribute
+    'Idle'``; and ``Gst.is_initialized()`` turns true as soon as *some* thread has begun
+    initialising, before the plugin registry is populated — a thread that saw "initialised"
+    and probed the registry found no decoder and gave its camera up as "no h264 decoder
+    found" on an image that has three. One lock, one import, one init, and every caller
+    returns only after the registry exists.
+    """
+    with _GST_INIT_LOCK:
+        # `rtspsrc` asks GIO for a proxy resolver before it connects, and GIO's default on a
+        # desktop-less system is libproxy, which throws a C++ `std::runtime_error("Unable to
+        # read configuration")` when it finds no GSettings or D-Bus to read — uncaught across
+        # the C boundary, that is `terminate` for the whole process, which is how the first
+        # RTSP run inside the container died with fifty cameras connected and zero frames
+        # decoded. GIO's documented override selects its no-op resolver instead; `setdefault`
+        # so an operator who has configured a real proxy keeps it.
+        os.environ.setdefault("GIO_USE_PROXY_RESOLVER", "dummy")
+        try:
+            import gi
+
+            gi.require_version("Gst", "1.0")
+            from gi.repository import GLib, Gst
+
+            # The appsink's *methods* (`try_pull_sample`) exist on the Python side only when the
+            # GstApp typelib has been loaded; without it `get_by_name` returns a bare element
+            # whose Python type knows the signals but not the methods, and every read failed
+            # with "'GstAppSink' object has no attribute 'try_pull_sample'" on the first
+            # containerised RTSP run that reached a read. Loaded here, once; `_do_read` still
+            # falls back to the signal when the typelib is absent.
+            try:
+                gi.require_version("GstApp", "1.0")
+                from gi.repository import GstApp  # noqa: F401 - loading it is the effect
+            except (ImportError, ValueError):
+                pass
+        except (ImportError, ValueError) as exc:
+            raise SourceUnavailableError(
+                "gstreamer",
+                "PyGObject with GStreamer 1.0 typelibs is not importable "
+                f"({redact_in(str(exc))}). Install python3-gi and "
+                "gstreamer1.0-plugins-{base,good,bad}, or select the 'pyav' backend with "
+                "SHIPINFER_INGEST_BACKEND=pyav",
+            ) from exc
+        if not Gst.is_initialized():
+            Gst.init(None)
+        return Gst, GLib
+
+
+def _try_pull_sample(appsink: Any, timeout_ns: int) -> Any:
+    """``appsink.try_pull_sample``, or the same call through its signal.
+
+    The method exists on the Python object only when the GstApp typelib is loaded; the signal
+    is always there. One place for the fallback, so a read never depends on which typelibs an
+    image happens to ship.
+    """
+    pull = getattr(appsink, "try_pull_sample", None)
+    if pull is not None:
+        return pull(timeout_ns)
+    return appsink.emit("try-pull-sample", timeout_ns)
 
 
 @SOURCES.register("gstreamer", "gst")
@@ -325,7 +386,7 @@ class GStreamerSource(FrameSource):
 
     def _do_read(self) -> np.ndarray | None:
         gst = self._gst
-        sample = self._appsink.try_pull_sample(int(self.read_timeout_s * gst.SECOND))
+        sample = _try_pull_sample(self._appsink, int(self.read_timeout_s * gst.SECOND))
         if sample is None:
             # Nothing within the timeout. Distinguish "quiet" from "over" by asking the bus:
             # an EOS or ERROR message means reconnect, a timeout means keep waiting.
