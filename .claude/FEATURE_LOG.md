@@ -5,6 +5,22 @@ edits, typo fixes and pure docs.
 
 ---
 
+## perf: crop_batch is one batched pass (26 Aug 2026)
+
+C44's Nsight timeline said the crop stage's ~150 ms/frame was host-side wait — GPUs ~14%
+kernel-busy, ~13 k launches/s, and the largest kernel population (`generatedNativePointwise`,
+~74 instances/frame) was the per-box loop inside `TorchImageOps.crop_batch`. The loop is now
+one batched pass: `_bilinear_axis` builds patch-coordinate `align_corners=False` index/weight
+tables on the host (the far neighbour clamped inside the patch — the C45 cross-plane
+contract, and the reason `grid_sample`/`roi_align` were rejected, argued in the module
+docstring), two gathers + three `torch.lerp`s per chunk, ~10 kernels per crop set constant in
+N. The frame crosses as uint8 (no full-frame float32), `swap_rb` rides the transpose gather,
+mean/std are cached per (values, device) and shared with `_letterbox`, and the pass is
+chunked (8 Mi output elements) so mask-sized batches cannot balloon. Same contract, same
+outputs: a frozen copy of the old loop is the test reference (98 offline tests + a CUDA
+class; mutation-verified both ways), and `test_ops_parity.py` is byte-identical. The C++
+plane already had this shape (C45), so no csrc sync is owed.
+
 ## bench: the harness drives the shards (26 Aug 2026)
 
 `--topology fleet|service --shards N --shard-cameras A,B,C` on `run_bench.py`: the parent

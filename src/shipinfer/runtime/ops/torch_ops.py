@@ -1,9 +1,30 @@
 """Image operations on torch — the default when an accelerator is present.
 
 Every op here maps onto a torch primitive that is already a tuned CUDA kernel:
-``F.interpolate`` for resize, ``roi_align``-style indexing for crops, fused arithmetic for
-normalisation, and ``torchvision.ops.nms`` for suppression. Writing any of those by hand
-would be slower and would need maintaining for both CUDA and ROCm (ADR-003).
+``F.interpolate`` for resize, fused arithmetic for normalisation, and
+``torchvision.ops.nms`` for suppression. Writing any of those by hand would be slower and
+would need maintaining for both CUDA and ROCm (ADR-003).
+
+Cropping is the one op with no torch primitive behind it, and the reason is worth writing
+down so the next reader does not "simplify" it back into a loop or into a library call that
+computes something else:
+
+* ``F.interpolate`` resizes **one** source extent per call, and fifteen boxes on a frame
+  have fifteen different extents. That is why this class used to run a Python loop with one
+  launch per box — a cost that grew with the crowd, on the hot path of the embedder.
+* ``F.grid_sample`` batches, but it clamps the far bilinear neighbour to the **frame**
+  where this contract clamps it inside the **patch**: a 2-pixel-wide box upsampled to 4
+  columns must end on exactly ``p[x1 + 1]``, and ``grid_sample`` returns
+  ``0.75 * p[x1 + 1] + 0.25 * p[x2]`` — a real pixel from outside the box, so the error is
+  plausible rather than obvious. Its ``[-1, 1]`` coordinate round trip also costs precision
+  a direct index does not: one float32 ULP near 1.0 is ~1e-4 px on a 1920-wide frame.
+* ``torchvision.ops.roi_align`` clamps to the feature map for the same reason, takes float
+  extents, and zeroes outside the map instead of holding the edge. torchvision is an
+  optional extra here, so the offline tier could not even import it.
+
+So :meth:`TorchImageOps.crop_batch` composes the gather itself out of torch ops — index
+tables, ``lerp``, and nothing hand-written per element — for a launch count that is
+constant per pass instead of linear in the box count.
 
 What torch *cannot* do in one pass is the fusion:
 :class:`~shipinfer.runtime.ops.native_ops.NativeImageOps` runs resize + colour convert +
@@ -14,11 +35,12 @@ library.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Iterator, Sequence
+from typing import Any, ClassVar
 
 import numpy as np
 
+from shipinfer.core.errors import ConfigurationError
 from shipinfer.core.logging import get_logger
 from shipinfer.runtime.ops.base import ImageOps, LetterboxResult, NormalizeParams
 from shipinfer.runtime.ops.registry import IMAGE_OPS
@@ -35,6 +57,21 @@ class TorchImageOps(ImageOps):
 
     name = "torch"
 
+    #: float32 output elements one crop pass may produce. The pass holds four gathered
+    #: corners and two interpolated rows, so the transient working set is about four times
+    #: this — ~128 MiB at the value below. The bound is explicit because the per-box loop
+    #: this replaced was O(1) in memory and a batched gather is not: 15 person crops at
+    #: 256x128 (1.5M elements) run in one pass, while 40 ship crops at 512x512 (31M) run in
+    #: four rather than asking the allocator for half a gigabyte at once.
+    _CROP_CHUNK_ELEMENTS: ClassVar[int] = 8 * 1024 * 1024
+
+    #: Entries a lookup table keeps before it is dropped whole. Keys come from model
+    #: configs — a handful of ``(mean, std, device)`` and ``(swap_rb, device)`` tuples that
+    #: live for the process — so this never trips in practice. It is here so that a caller
+    #: synthesising :class:`NormalizeParams` per request turns a cache into a rebuild rather
+    #: than into a leak on a 24/7 server.
+    _CACHE_LIMIT: ClassVar[int] = 32
+
     def __init__(
         self, device_index: int | None = None, *, interpolation: str = "bilinear"
     ) -> None:
@@ -45,10 +82,62 @@ class TorchImageOps(ImageOps):
             else self._torch.device("cpu")
         )
         self._interpolation = interpolation
+        # Small constant tensors that depend only on the config, cached because building
+        # them is a host-to-device copy: at 1000 frames a second, four synchronous copies
+        # per frame for twelve floats that never change is pure latency on the worker.
+        self._norm_cache: dict[tuple[Any, ...], tuple[Any, Any]] = {}
+        self._channel_cache: dict[tuple[Any, ...], Any] = {}
 
     @property
     def on_device(self) -> bool:  # type: ignore[override]
         return self._device.type == "cuda"
+
+    # -- constant tables ----------------------------------------------------------------
+
+    def _normalization(self, params: NormalizeParams, device: Any) -> tuple[Any, Any]:
+        """The broadcastable ``(mean, std)`` pair for ``params`` on ``device``.
+
+        Keyed on the values rather than on the ``NormalizeParams`` object so two equal
+        configs share one pair; the device is in the key because a tensor is only usable on
+        the device it was built for, and this class is constructed per worker thread.
+        """
+        key = (tuple(params.mean), tuple(params.std), device)
+        pair = self._norm_cache.get(key)
+        if pair is None:
+            torch = self._torch
+            pair = (
+                torch.tensor(params.mean, dtype=torch.float32, device=device).view(1, 3, 1, 1),
+                torch.tensor(params.std, dtype=torch.float32, device=device).view(1, 3, 1, 1),
+            )
+            self._remember(self._norm_cache, key, pair)
+        return pair
+
+    def _channel_order(self, swap_rb: bool, device: Any) -> Any:
+        """The channel permutation as an index tensor.
+
+        As an index it composes with the transpose out of the crop's channels-first layout,
+        so BGR->RGB costs nothing beyond the copy that layout already needs — where ``flip``
+        would be a second full pass over the batch.
+        """
+        key = (swap_rb, device)
+        order = self._channel_cache.get(key)
+        if order is None:
+            torch = self._torch
+            order = torch.tensor(
+                [2, 1, 0] if swap_rb else [0, 1, 2], dtype=torch.long, device=device
+            )
+            self._remember(self._channel_cache, key, order)
+        return order
+
+    def _remember(self, cache: dict[Any, Any], key: Any, value: Any) -> None:
+        """Insert, dropping the whole table first if it has grown past the bound.
+
+        Dropping everything rather than evicting one entry: there is no useful recency order
+        over a handful of config-derived tensors, and rebuilding them is two small copies.
+        """
+        if len(cache) >= self._CACHE_LIMIT:
+            cache.clear()
+        cache[key] = value
 
     # -- preprocess ---------------------------------------------------------------------
 
@@ -134,12 +223,7 @@ class TorchImageOps(ImageOps):
             # point of writing into a caller-owned buffer is that nothing else is allocated.
             canvas[:n] = canvas[:n].flip(1)
 
-        mean = torch.tensor(params.mean, dtype=torch.float32, device=canvas.device).view(
-            1, 3, 1, 1
-        )
-        std = torch.tensor(params.std, dtype=torch.float32, device=canvas.device).view(
-            1, 3, 1, 1
-        )
+        mean, std = self._normalization(params, canvas.device)
         canvas[:n].sub_(mean).div_(std)
         return scales, pads, extents
 
@@ -150,43 +234,102 @@ class TorchImageOps(ImageOps):
         dst_size: tuple[int, int],
         params: NormalizeParams,
     ) -> np.ndarray:
+        """Every box in a constant number of launches, whatever the crowd looks like.
+
+        Two gathers over the whole set — one per bracketing source row, each fetching both
+        bracketing columns — driven by index and weight tables built on the host, then two
+        blends across and one down. The geometry is identical to the ``F.interpolate`` call
+        this replaced — ``align_corners=False`` half-pixel centres, the far neighbour
+        clamped inside the patch, a degenerate box blacked out before normalisation — see
+        :func:`_bilinear_axis` and the module docstring for why no torch primitive does it.
+
+        Raises:
+            ConfigurationError: if this instance was built for an interpolation mode other
+                than bilinear. The tables encode bilinear sampling, and silently cropping
+                bilinearly for an operator who asked for nearest is the kind of mismatch
+                that shows up as a slightly worse embedding and never as an error.
+        """
         torch = self._torch
         dst_h, dst_w = dst_size
         if boxes.size == 0:
             return np.empty((0, 3, dst_h, dst_w), dtype=np.float32)
+        if self._interpolation != "bilinear":
+            raise ConfigurationError(
+                f"crop_batch samples bilinearly, but these ops were built with "
+                f"interpolation={self._interpolation!r}. Use a bilinear TorchImageOps for "
+                f"crops, or the numpy implementation for nearest."
+            )
 
         src_h, src_w = image.shape[:2]
-        frame = (
-            torch.from_numpy(np.ascontiguousarray(image))
-            .to(self._device, non_blocking=True)
-            .permute(2, 0, 1)
-            .float()
-        )
+        device = self._device
+        # uint8 on the wire and a *view* for the transpose: only the gathered corners are
+        # widened, so the frame crosses PCIe at a third of what a float32 copy would cost.
+        # Pageable source, so the copy is synchronous whatever we ask; `non_blocking` would
+        # claim an overlap that cannot happen (CONVENTIONS 2.4).
+        planes = torch.from_numpy(np.ascontiguousarray(image)).to(device).permute(2, 0, 1)
         clipped = np.empty_like(boxes, dtype=np.int64)
         clipped[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, src_w - 1)
         clipped[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, src_h - 1)
+        widths = clipped[:, 2] - clipped[:, 0]
+        heights = clipped[:, 3] - clipped[:, 1]
 
-        out = torch.zeros(
-            (boxes.shape[0], 3, dst_h, dst_w), dtype=torch.float32, device=self._device
-        )
-        for i, (x1, y1, x2, y2) in enumerate(clipped):
-            if x2 <= x1 or y2 <= y1:
-                continue  # degenerate box -> zeros, never an exception
-            patch = frame[:, y1:y2, x1:x2].unsqueeze(0)
-            out[i] = torch.nn.functional.interpolate(
-                patch, size=(dst_h, dst_w), mode=self._interpolation, align_corners=False
-            )[0]
+        col0, col1, weight_x = _bilinear_axis(clipped[:, 0], widths, dst_w)
+        row0, row1, weight_y = _bilinear_axis(clipped[:, 1], heights, dst_h)
+        columns = torch.from_numpy(np.stack((col0, col1))).to(device)
+        rows = torch.from_numpy(np.stack((row0, row1))).to(device)
+        across = torch.from_numpy(weight_x).to(device)
+        down = torch.from_numpy(weight_y).to(device)
 
-        if params.swap_rb:
-            out = out.flip(1)
-        mean = torch.tensor(params.mean, dtype=torch.float32, device=self._device).view(
-            1, 3, 1, 1
-        )
-        std = torch.tensor(params.std, dtype=torch.float32, device=self._device).view(
-            1, 3, 1, 1
-        )
-        out.sub_(mean).div_(std)
-        return out.cpu().numpy()
+        # Channels lead because the gather leaves them there: indexing dimensions 1 and 2
+        # of a CHW frame puts the broadcast index shape where those dimensions were.
+        count = int(boxes.shape[0])
+        out = torch.empty((3, count, dst_h, dst_w), dtype=torch.float32, device=device)
+        for lo, hi in self._crop_chunks(count, dst_h, dst_w):
+            span = slice(lo, hi)
+            column = columns[:, span].unsqueeze(2)  # (2, n, 1, dst_w)
+            weight = across[span].unsqueeze(1)  # (n, 1, dst_w)
+            top = self._sample_rows(planes, rows[0, span], column, weight)
+            bottom = self._sample_rows(planes, rows[1, span], column, weight)
+            torch.lerp(top, bottom, down[span].unsqueeze(2), out=out[:, span])
+
+        degenerate = np.nonzero((widths <= 0) | (heights <= 0))[0]
+        if degenerate.size:
+            # Zeroed *before* normalisation, which is where the loop's untouched row sat: a
+            # degenerate crop reads `(0 - mean) / std`. Blacking it out afterwards would
+            # silently change the value for every model with a non-zero mean.
+            out[:, torch.from_numpy(degenerate).to(device)] = 0.0
+
+        # The transpose to NCHW and the BGR->RGB swap are one gather, and it is also what
+        # makes the result contiguous — which `.numpy()` would otherwise not be.
+        result = out.permute(1, 0, 2, 3)[:, self._channel_order(params.swap_rb, device)]
+        mean, std = self._normalization(params, device)
+        result.sub_(mean).div_(std)
+        return result.cpu().numpy()
+
+    def _sample_rows(self, planes: Any, rows: Any, column: Any, weight: Any) -> Any:
+        """One bilinearly interpolated row per crop: gather both columns, blend across.
+
+        A method rather than four inline lines so the two gathered corners die when it
+        returns; holding all four alive at once would double the pass's peak footprint.
+
+        Args:
+            planes: the frame as a ``(3, H, W)`` view, any dtype the gather can widen.
+            rows: ``(n, dst_h)`` int64 frame rows to read.
+            column: ``(2, n, 1, dst_w)`` int64 left/right frame columns.
+            weight: ``(n, 1, dst_w)`` float32 weight of the right column.
+        """
+        pair = planes[:, rows.unsqueeze(2), column].float()
+        return self._torch.lerp(pair[:, 0], pair[:, 1], weight)
+
+    def _crop_chunks(self, count: int, dst_h: int, dst_w: int) -> Iterator[tuple[int, int]]:
+        """Half-open crop ranges whose output fits :attr:`_CROP_CHUNK_ELEMENTS`.
+
+        At least one crop per range even when a single crop exceeds the budget: refusing a
+        512x512 mask because it is large is a worse failure than a large allocation.
+        """
+        rows = max(1, self._CROP_CHUNK_ELEMENTS // (3 * dst_h * dst_w))
+        for lo in range(0, count, rows):
+            yield lo, min(lo + rows, count)
 
     # -- postprocess --------------------------------------------------------------------
 
@@ -247,3 +390,46 @@ class TorchImageOps(ImageOps):
 
     def describe(self) -> str:
         return f"torch kernels on {self._device}"
+
+
+def _bilinear_axis(
+    origin: np.ndarray, extent: np.ndarray, dst: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The bilinear sample table for one axis of every box at once, in frame coordinates.
+
+    This is ATen's ``align_corners=False`` source index — ``scale * (d + 0.5) - 0.5`` in
+    float32, clamped at zero, with ``scale = extent / dst`` — evaluated for the whole set
+    and then shifted into frame coordinates by an integer add. Doing the arithmetic in
+    *patch* coordinates is the point: the far neighbour is clamped to the patch's last
+    row/column, so a 2-pixel box upsampled to 4 columns finishes on ``p[origin + 1]`` and
+    never reads the pixel beyond the box the detector gave us. Sampling in frame
+    coordinates instead — which is what ``grid_sample`` and ``roi_align`` do — bleeds the
+    neighbouring object into the crop's edge.
+
+    A non-positive extent (an empty or reversed box) collapses to ``origin`` instead of
+    raising. The caller blacks those crops out, but the indices still have to be legal:
+    an out-of-range gather on CUDA is a device-side assert, and that poisons the context for
+    every later launch on the thread rather than failing this one call.
+
+    Args:
+        origin: ``(N,)`` int64 first row/column of each patch, already clipped to the frame.
+        extent: ``(N,)`` int64 patch size along this axis, ``x2 - x1`` as the slice took it.
+        dst: destination size along this axis.
+
+    Returns:
+        ``(i0, i1, w1)`` — two ``(N, dst)`` int64 frame indices bracketing each destination
+        pixel, and the ``(N, dst)`` float32 weight of ``i1``.
+    """
+    extent_safe = np.maximum(extent, 1).astype(np.int64)
+    scale = extent_safe.astype(np.float32) / np.float32(dst)
+    centres = np.arange(dst, dtype=np.float32) + np.float32(0.5)
+    src = scale[:, None] * centres[None, :] - np.float32(0.5)
+    np.maximum(src, np.float32(0.0), out=src)
+
+    last = (extent_safe - 1)[:, None]
+    # The clamp is defensive on i0 — `floor(src) <= extent - 1` already holds for every
+    # scale — and load-bearing on i1, which is where the patch clamp actually lives.
+    i0 = np.minimum(src.astype(np.int64), last)
+    w1 = (src - i0.astype(np.float32)).astype(np.float32)
+    i1 = np.minimum(i0 + 1, last)
+    return origin[:, None] + i0, origin[:, None] + i1, w1
