@@ -178,17 +178,21 @@ hook down, for when the operator asked to see something before it is executed.
       model-table iteration in `server/engine.py`; 6 a Kafka delivery failure charged to the
       wrong `(camera_id, frame_id)`; 7 the missing `-m gpu` evidence and the submodule pointer
       riding along with 13k lines — which is the reviewer making the operator's point.
-- [ ] **B4 · The `platform.hpp` -> `core/platform.h` rename in the review prompt** needs its
-      own PR. Reverted on `feat/cpp-data-plane` because a branch whose
+- [x] **B4 · DONE — #28 merged 26 Aug 18:06 UTC** (self-merged under the V109 standing
+      grant, after tests passed on 3.10 and 3.12 and the review job failed with exactly the
+      documented validation error). The prompt names `core/platform.h`.
+      **Original entry:** the `platform.hpp` -> `core/platform.h` rename in the review
+      prompt needs its own PR. Reverted on `feat/cpp-data-plane` because a branch whose
       `.github/workflows/**` differs from `main` cannot run the review job at all — "Workflow
       validation failed. The workflow file must exist and have identical content to the
       version on the repository's default branch." That is the documented permanent exception
       in CLAUDE.md, and it cost PR #8 a review round. A one-line prompt fix is not worth
       blocking a PR's automation; it goes in a workflow-only PR that is merged by hand.
 
-- [ ] **B5 · A `csrc` compile job in CI** — ~2 000 lines of data plane are green on one box
-      only. Needs its own PR with B4, since both edit `.github/workflows/**` and a branch that
-      does cannot run the review job.
+- [x] **B5 · DONE — #28 merged 26 Aug 18:06 UTC.** CI's `cpp-offline` job builds the
+      CUDA-free binaries with g++ alone and runs them (66/24/17 checks locally; the job is
+      the same steps on `ubuntu-latest`). The C++ fairness invariants now run on every push
+      to main, on a machine with no driver.
 
 - [x] **D1 · The integration review's three blocking findings** — all real, all reproduced,
       all fixed with a test verified red against the unfixed code: `native_version()` called
@@ -592,8 +596,11 @@ hook down, for when the operator asked to see something before it is executed.
         pixel while scale and pad both still match. The parent should *use* it, not drop it.
       Both went unnoticed because the path was unreachable (C22): a dead path is where a
       breaking change is invisible.
-- [ ] **C28 · Carry `extents` through the ABC** for all three implementations and have
-      `detect.py` read it rather than ever re-deriving `out_h` from `scale`. Small, its own PR.
+- [x] **C28 · DONE — #24 merged 26 Aug** (`fix/letterbox-extents`): `extents` through the
+      ABC for all three implementations, `detect.py` reads it.
+      **Original entry:** carry `extents` through the ABC for all three implementations and
+      have `detect.py` read it rather than ever re-deriving `out_h` from `scale`. Small, its
+      own PR.
 - [ ] **C48 · `bench.sh` refuses to start without the baseline binary even for `--systems
       shipinfer`**, which measures this project alone — so the documented evidence command exits 1
       on a clean checkout. The gate now reads `--systems` and fires only when the list names
@@ -669,7 +676,20 @@ that exposes the four attributes a policy reads.
       Behaviour unchanged, tests move; the operator asked "chỉ chỉnh 1 chút" and the answer is yes —
       this is registration and interface conformance only. Then the skew bench on B (needs C41's
       `--skew`): per-device queue depth and p99 end-to-end are the numbers that size T3.
-- [ ] **T3 · C = `service`.** *(Plan written 26 Aug, main session — the planner agent was cut off by
+- [x] **T3 · C = `service` — complete 26 Aug** (#25 the ring, 13 rounds; #26 the tier,
+      5 rounds; #27 the harness + the B-against-C evidence, round 1). The crowd fan-out
+      measurement (10–20 crops/frame) stays open below as its own line.
+      **V110 addendum (26 Aug, after the entry below was written):** sharing must hold for the
+      full DAG — segment, reid (person & ship), OCR, MTMC beside detect and track — not the
+      simple detect→reid→track chain. The seam already answers the *shape*: sharing is
+      per-model at the dispatcher (`Model.attach_remote`), so every stateless crop-stage model
+      gets it independently and the DAG never crosses (the #26 round-2 guard refuses ensembles
+      by construction); stateful stages (track, MTMC) stay pinned. The *cost* scales with it:
+      rings = pairs × shared-models × 2 directions with per-model slot sizes (`wire_slot_bytes`),
+      so M=4–5 shared models doubles-plus the pinned budget the design doc derives — the
+      segmenter's 39 MB request slot is the live example, and OCR joins that list. Record the
+      budget per added model in `docs/design/topology-service.md` when each is shared.
+      **T3 · original entry:** *(Plan written 26 Aug, main session — the planner agent was cut off by
       the spend limit — at the scratchpad `plan-t3.md`, to land as `docs/design/topology-service.md` with
       T3's first PR: pairwise single-writer pinned rings (vLLM `ShmRingBuffer` discipline), `RemoteInstance`
       as a `Placeable`, `Topology.attach()` as the one new seam method, four PRs, three questions for the
@@ -708,10 +728,108 @@ that exposes the four attributes a policy reads.
       owner's ring at exit). **Evidence (26 Aug, container, GPUs 3,4):** `tests/server/test_service_multigpu.py`
       — two real `serve` processes through the real `ServiceTopology` + `Fleet`, 24 requests posted to
       shard 0 over HTTP → *19 executed there, 5 executed by shard 1 through the ring*, every tag back on
-      its own response, both processes gone after `stop` (GPUs back to 15 MiB). **Not yet:** the bench-scale
+      its own response, both processes gone after `stop` (GPUs back to 15 MiB). **Step 4 (in progress, 26 Aug, `/tmp/t3c` `bench/topology`, stacked on step 3) — the harness drives the
+      shards:** `BenchConfig` gains `topology` (single | fleet | service), `shards`, `shard_cameras` (an explicit
+      cameras-per-shard split — the way to model *the plan was right when made and the crowd moved*, which
+      is the case B cannot fix and C exists for) and `camera_ids` (this process's slice; `offered_total`
+      follows it). `benchmarks/harness/shards.py`: the parent plans (LPT or the explicit split), starts one
+      child per shard through the real `Fleet` with the topology's environment (so `service` children join
+      the tier), each child runs today's `run_shipinfer` on its cameras and its GPU and writes its own
+      occupancy log + `summary.json` (offered, achieved, images/s, verdict, per-device executions), the parent
+      waits for all to exit, sums the throughput and prints the per-shard/per-device table. `run_bench.py`:
+      `--topology --shards --shard-cameras`; `bench.sh`: `--shm-size` for the rings (ADR-015). Gate: the same
+      split under `fleet` and `service`; C must show the crowded shard's crop-stage work landing on its
+      peers' devices, lower p99 on the crowded cameras, no new `frames_failed`. **Built and run once (26 Aug,
+      container, GPUs 3–5, `--topology fleet --shard-cameras 10,5,5` at 20 × 6 fps):** the three children
+      started through the real `Fleet`, planned, ran and reported — and the run failed on the harness's own
+      guards, which is the harness working: the two ship shards (30 fps each on one GPU) had the scheduler
+      refuse 15–18% of requests, the person shard (60 fps on one GPU) timed its embedder requests out at
+      5 s, and no shard had a single occupancy sample — because the same edit that had made
+      `attach_remote` a property had made `Model.total_depth` a *method* (the decorator moved, then was
+      deleted), and the probe that reads it as main declares it fed a bound method to `json.dumps` and
+      the sampler thread died. Property restored, mesh reads it as one, fix committed on the topology
+      branch. Lesson recorded: one A5000 does not carry 30 ship fps or 60 person fps through the fp32
+      pipeline, so B's capacity under the split is found by the sweep (`--sweep 1,1.5,2,3` from 12 × 2 fps),
+      and C is measured at the same rungs. **The sweeps ran (26 Aug):** B (fleet, split 6/3/3 from
+      12 × 2 fps): x1–x3 all SUSTAINED to 72 img/s, per-device tables showing perfect locality (every
+      person crop on GPU 3). C (service, same split, same rungs) — after three more fixes the fakes
+      could not see: the wire refused the pipeline's device-resident tensors (now D2H'd on the
+      caller's thread via a CUDA-array-interface bridge in `to_torch`); `SharedRing.abandon` did not
+      exist though the proxy called it; and the 1.5 MiB slot could not hold one real batch (slots now
+      sized per model *and direction* from config — `wire_slot_bytes`; the segmenter leaves the
+      default `shared_models` at 39 MB/request-slot, the operator's open question). C first ran
+      x1–x2 SUSTAINED but lost x3 to its own noise (replies erroring out of completion callbacks on
+      a full result ring; IndexError on closed rings at teardown). After the fixes — inert
+      transitions + `RingClosedError` on the ring, bounded `_claim_result_slot` patience on the
+      ingress (back-pressure held, never a lost reply) — **the confirmation sweep is clean: C
+      sustains x1–x3 to 72 img/s, matching B's ceiling, zero errors, with the borrow visible at
+      every rung** (x3: person_embedder 742/377/389 across GPUs 3/4/5 where B had 1582/0/0;
+      ship_embedder shared back; the segmenter and detector local by design). With ~1 person crop
+      per frame in `person_2K` the crop stage is not the bottleneck, so C ≈ B on throughput here —
+      C's win case needs the crowd fan-out the sizing assumes (10–20 crops/frame), which this
+      dataset cannot produce; recorded, not overclaimed. **Not yet:** the bench-scale
       run — `--topology` on the harness with the fleet driving the shards (PR-cut item 4). Queue: docs
-      snapshot #21 (review round 1 answered) → `chore/shipvision-mot` → `fix/rtsp-headless-decode` →
-      `fix/letterbox-extents` → `feat/shared-ring` → `feat/remote-instance` → `ci/cpp-offline-and-prompt`.
+      snapshot #21 (merged after three review rounds: the request log's numbering, the design doc's budget
+      and error hierarchy), `chore/shipvision-mot` #22 (merged) → `fix/rtsp-headless-decode` #23 (open) →
+      `fix/letterbox-extents` → `feat/shared-ring` #25 (**MERGED 26 Aug 14:29 UTC after thirteen review rounds — every finding real and fixed**:
+      round 1 the vocabulary and the inert shutdown window; round 2 one lifecycle rule for the whole
+      closed surface, owner-only in-place stamp, no order claim the protocol cannot keep; round 3
+      pinned-view liveness *tracked* — `pinned_tensor` counts its handouts via `weakref.finalize`,
+      close unpins at zero, the last finalizer frees otherwise, a reap structurally cannot unpin;
+      round 4 the closer and the consumer are concurrent by design so one lock arbitrates the view
+      (200-race test), an absent ring is typed `RingClosedError`, and the reviewer's reproduction
+      style flushed a real mid-birth race — the shm name is visible before the header is written,
+      so a fast peer read magic 0 as a build mismatch; now retryable. Rounds 5–13 kept finding real
+      ones: the torn stamp (pack_into memsets before packing — a lock-free peer read depth 0 on a
+      saturated ring), readiness published before the slot states (a peer's published payload
+      stamped back to FREE by the creator), the pinned handout unserialised against close, the pin
+      lock and pending lock needing reentrancy (finalizers run in the collecting thread), the
+      writer's test-and-set split across two lock acquisitions (two cameras claiming one slot),
+      transitions racing close into fake build-mismatch errors, the name-keyed one-writer claim
+      released by a dead handle after its successor opened (the reconnect shape), and the unpin
+      escaping the pin lock so a concurrent closer could munmap first. Final: 51 offline + 1 gpu
+      ring tests, tier 1134; the engine also stops its mesh when a connect fails so no named rings
+      leak) →
+      `feat/remote-instance` #26 (**MERGED 26 Aug 17:39 UTC after five review rounds**; **round 1** answered 26 Aug ~15:0x —
+      the owner threading rewritten: ONE `RingIngress` sweeping every lane, done-callbacks only
+      append, `_drain_replies` lands/requeues/drops with per-reply patience, `ResultReader`
+      expires pending entries, `advertised_depth` = the shallowest instance queue, the wire
+      loses a copy — `53b7d4a`; **round 2** answered 26 Aug ~16:5x — both blockers real:
+      `_DeviceSpan` retained nothing (now `self._tensor = tensor`, offline retention regression
+      + gpu del-and-reread) and owner-queue saturation crossed as text (now the slot stays
+      claimed and the lane defers/retries until the ring fills and the submitter spills locally,
+      capped by `result_patience_s`); non-blockings: stamp-on-activity with the timer as
+      liveness floor (full local-transition stamping deferred to the bench PR, said so in the
+      reply), reader bookkeeping at `lost_after/4`, ensembles refused from `shared_models` by
+      name, evidence re-pasted — `c30c9dc`, 15 commits / 28 files, tier 1321, container
+      re-proofs 20-local/4-ring and 2-passed wire, body v5, per-finding reply posted;
+      **round 3** answered 26 Aug ~17:4x — the blocker real and embarrassing in the right way
+      (the round-2 saturation test passed *because* of the spin): the deferred retry pinned a
+      core and re-entered `Model._infer` per retry, inflating requests_total/rejected/fail at
+      spin rate. Fixed with the narrow seam the reviewer named: `Model.admit_local` /
+      `try_dispatch_local` / `count_local_rejection` (first-entry work once by contract;
+      retries record nothing; the give-up records once), the ingress probing a saturated lane
+      on `retry_backoff_s` (5 ms) with progress-only busy. Should-fixes: proxy depth += its
+      own in-ring backlog (`SharedRing.depth`); the reader fails stranded futures at stop with
+      the tag (ADR-002). Notes: wire-stamped `received_ns` survives admission; `_device_to_host`
+      drains the device (CAI v2 has no stream key). — `c5b8936`, 16 commits / 29 files, tier
+      1327, T3 set 105, container 20/4 + 2-passed wire, hygiene clean, body v6, per-finding
+      reply posted; **round 4** answered 26 Aug ~18:2x — both blockers real again: an
+      unencodable request (64-byte camera_id, oversized payload) aborted the dispatcher's
+      spill loop past local instances with room — a per-camera outage — now
+      `WireRefusedError(QueueFullError)` raised from `enqueue` after abandoning the slot,
+      warned once per cause; and the per-serve `_stamp(force=True)` re-stamped every lane per
+      request (O(lanes²)/sweep on the single sweeper) — now one stamp for the served lane and
+      a full-sweep stamp memoized per model (the mesh builds one load closure per model).
+      Non-blockings all taken: D2H before claim (`wire.request_on_host`) with a
+      current-stream sync (ADR-002: the submitter is the producer); status codes
+      QUEUE_FULL/INVALID rehydrate typed errors at the submitter (the give-up arrives as
+      QueueFullError); proxy depth = plain in-flight int settled by the future callback;
+      reader ring snapshot on a generation counter; `pending_timeout_ms` in settings. —
+      `7c76b78`, 17 commits / 30 files, tier 1331, T3 set 109, container 20/4 + 2-passed
+      wire, hygiene clean, body v7, per-finding reply posted; **round 5: APPROVE — MERGED
+      26 Aug 17:39 UTC** as `464c499`, five rounds, every finding real) →
+      `bench/topology` (**#27 MERGED 26 Aug 18:00 UTC, APPROVE on round 1**, 1 commit / 11 files, tier 1354 on the rebase, both sweeps re-run on the merged tree — B 1572/0/0 vs C 847/345/382 on person_embedder at x3, all rungs SUSTAINED; stray absolute-path symlink `benchmarks/build` dropped from the commit and gitignored, feature-log entry added) → `ci/cpp-offline-and-prompt` (self-merge granted, V109).
       Original sketch: `fleet` plus a cross-process inference tier, symmetric — every shard
       process serves its own GPU's crop-stage instances to its peers, so a dead process loses its K
       cameras and its capacity, nothing else. Pieces: (a) `runtime/memory/shared_ring.py` — a
@@ -724,15 +842,48 @@ that exposes the four attributes a policy reads.
       default policy `locality_spillover`. (c) Reassembly waits on remote results; camera id rides
       with the request so the fair queue stays per-camera across processes. (d) A closed ring drops
       its proxy from the candidate set. Gate: same skew bench as T2, B against C, on a quiet box.
-- [ ] **T4 · DeepStream = the competitor tier.** `benchmarks/harness/deepstream.py`,
-      `deploy/deepstream/Dockerfile` (DeepStream base image, `pyds` — a bench dependency, never in
-      the wheel), Triton `config.pbtxt` per model with `instance_group` across the GPUs — the one
-      setting that makes the sketch C rather than B — and the operator's `mtmc_deepstream.py`
-      moved under `benchmarks/deepstream/` and completed: `output_tensor_meta: true` with the probe
-      reading `NvDsInferTensorMeta` from `obj_user_meta_list`, a bus watch, the same RTSP source as
-      the system tier, the same result table. Parallel lane; file-disjoint from T1–T3.
+- [ ] **T3b · C's win case under crowd fan-out** — the dataset yields ~1 person crop per
+      frame, so C ≈ B on throughput at every rung; the sizing assumes 10–20 crops/frame at
+      50 × 20 fps, and that measurement needs crowded footage (or a synthetic multi-crop
+      source). Recorded in #27's body as the open measurement, not overclaimed.
+- [ ] **T4 · DeepStream = the fourth topology, not a competitor benchmark** (re-scoped by
+      **V108**; the earlier "competitor tier" framing was my misreading — `mtmc_deepstream.py`
+      was reference material showing the target shape, not a deliverable to finish). The
+      operator's taxonomy, verbatim in spirit: one abstract backbone — API server / offline
+      engine takes camera URLs or video → ingest (gstreamer, cv, …) → pipeline → output — with
+      four topologies under it: **threading** (today's single-process default), **fleet**
+      (shards, nothing shared — #18), **service** (shards sharing an instance pool against
+      imbalance — #25/#26), and **deepstream**. So T4 is `@TOPOLOGIES.register("deepstream")`
+      (the settings vocabulary already reserves the kind): a topology whose ingest+pipeline is a
+      DeepStream graph (`nvurisrcbin → nvstreammux → nvinfer/pgie → nvtracker → sgies`, tensor
+      meta out of probes), emitting the same event schema (`pipeline/schema.py`) so one sink
+      serves every topology, engines from the same model repository, `pyds` an optional extra,
+      `deploy/deepstream/Dockerfile` the runtime image. The bench then measures it like any
+      topology (`--topology deepstream`) — a consequence, not the point. **V110 applies here
+      too**: the DAG is detect + segment + reid (person & ship) + track + OCR + MTMC, not
+      detect→reid→track — the sgie fan-out and the tracker/MTMC placement must carry the full
+      graph. Parallel lane; file-disjoint from T1–T3.
 
-- [ ] **C44 · The algo tier's first exact profile says `crop` is the largest per-frame cost.**
+- [x] **C44 · ANSWERED by the Nsight timeline (26 Aug 18:30, container, 12×5 on GPUs 3–5,
+      30 s, merged main; report `.artifacts/profile/run.nsys-rep` on the t3c tree, stats at
+      the scratchpad `c44-nsys-stats.txt`).** The crop stage's ~150 ms/frame is **wait, not
+      work** — and the waits are host-side:
+      * The GPUs are ~14% busy on kernels (~12.5 s of kernel time over 3 × 30 device-seconds).
+        No device is the bottleneck at this load.
+      * The host threads' time sits inside the CUDA API: `cudaMemcpyAsync` **22.9 s** of host
+        blocking (12 754 calls, median 40 µs, **max 116 ms**) and the three launch entry
+        points **~31 s** across ~400 k launches (median 8–9 µs — the tail is queue-blocking,
+        avg 282 µs on `cudaLaunchKernel`). A copy-and-launch storm: ~13 k launches/s.
+      * Both C44 suspects confirmed: the per-object host loop shows as
+        `generatedNativePointwise` — **133 k instances ≈ 74 pointwise launches per frame**
+        (torch per-crop slice/normalize); and the D2H on the crop path shows as pageable-tail
+        copies — device-side D2H median 8.7 µs but **max 39 ms** (11.4 GB total; the big ones
+        are segmenter masks / letterbox copy-home).
+      **The levers this hands C1** (in order): (1) route the crop stage through the fused
+      `crop_batch` (one launch per batch instead of ~74; the kernel tier already measured it
+      3.87×); (2) pin the large-output D2H paths through the staging pool (a 39 ms pageable
+      copy serialises the device and blocks the worker 116 ms); (3) the batch window bounds
+      latency at low fps but is not the throughput wall — the storm is. **Original entry:**
       12 cameras x 5 fps on GPUs 2–5, kept up (60.0 of 60), steady window, host load 22/48 with
       another user's 21 GiB job on GPU 0: per-frame cost crop 149.6 ms (46%), detect 98.6 ms
       (30%), ship_segmenter 41.5 ms, the two embedders ~17 ms each; serial 324 ms against wall
