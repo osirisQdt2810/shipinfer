@@ -473,13 +473,17 @@ tags; the owner's exception crosses as text.
 **Consequences.**
 
 - **A pinned budget, derived once.** A directed pair has two rings (requests one way, results
-  the other), so the box holds `N × (N−1) × models × 2` rings of `slots × slot_bytes`, each
-  existing once; every ring is mapped by its writer and its reader, and each registers its own
-  mapping, so a process pins `4 × (N−1) × models` rings. For 4 shards and 3 models at the
-  defaults (8 slots of 1.5 MiB + 64 KiB for the heads): 72 rings ≈ 0.9 GiB of shared memory
-  on the box, ≈ 0.44 GiB registered per process. Set once at start (`topology.service`), and
-  the reason the rings are *pairwise and small* rather than one big ring per owner: N writers
-  on one ring would need a compare-and-swap Python does not have on shared memory.
+  the other), so the box holds `N × (N−1) × models × 2` rings, each existing once; every ring
+  is mapped by its writer and its reader, and each registers its own mapping, so a process pins
+  `4 × (N−1) × models` rings. Slots are sized **per model and per direction** from the model's
+  own config (`wire_slot_bytes`: max_batch × the tensors' bytes + 64 KiB for the heads,
+  page-rounded; `slot_bytes` only when an extent is dynamic) — both processes derive the same
+  numbers from one repository, so nothing is negotiated. For 4 shards and the repository's two
+  embedders at 8 slots: request slots are 6.36 MB (16 × 3 × 256 × 128 fp32) and response slots
+  0.2 MB, so **48 rings ≈ 1.26 GB of shared memory on the box, existing once; ≈ 0.63 GB mapped
+  and registered per process** — the request rings dominate. The rings stay *pairwise and
+  small* rather than one big ring per owner: N writers on one ring would need a
+  compare-and-swap Python does not have on shared memory.
 - **Two copies per remote request** (D2H into the slot, H2D out of it) against zero for a local
   one. That is the price of not opening peer contexts; the policy only pays it when the local
   queue is past its spill threshold, and the per-device counters show how often.

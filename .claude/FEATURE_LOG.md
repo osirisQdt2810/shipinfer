@@ -52,9 +52,10 @@ needs `--topology` on the harness with the fleet driving the shards. Until it ex
 is built and tested, not proven.
 
 **Open for the operator** (asked in the topology PR): slot size per model or one size for all;
-the detector is never shared — confirm; the pinned budget (ADR-015's derivation: 4 shards, 3
-models → 72 rings ≈ 0.9 GiB of shared memory on the box, 36 registered per process ≈ 0.44 GiB),
-acceptable or not.
+the detector is never shared — confirm; the pinned budget (ADR-015's derivation, slots per
+model and direction: 4 shards × 2 embedders → 48 rings ≈ 1.26 GB of shared memory on the box
+existing once, ≈ 0.63 GB registered per process; the 6.36 MB request slots dominate),
+acceptable or not; and whether the segmenter joins `shared_models` at 39 MB request slots.
 
 ## 2026-08-25 — The port, steps P1a–P1d: the C++ plane takes the Python plane's shape
 

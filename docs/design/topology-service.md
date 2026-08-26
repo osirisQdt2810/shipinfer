@@ -55,13 +55,14 @@ class ServiceSettings(BaseModel):
 
     `shared_models` are crops, never frames: a letterboxed frame does not fit a slot, by design.
     `slots_per_pair` is per (submitter, owner, model) ring — single writer each — so the pinned
-    budget is the derivation in the text below. `slot_bytes` is one crop batch *plus its heads*:
-    32 × 3 × 128 × 64 fp16 is exactly 1.5 MiB, and the request head and the per-tensor heads
-    travel in the slot ahead of the bytes, hence 64 KiB of headroom (400 pages in all).
+    budget is the derivation in the text below. Slots are sized per model *and per direction*
+    from the model's own config (`wire_slot_bytes`: max_batch × the tensors' bytes + 64 KiB for
+    the heads, which travel in the slot ahead of the bytes, page-rounded); `slot_bytes` is the
+    fallback when a model declares a dynamic extent.
     """
     shared_models: list[str] = ["person_embedder", "ship_embedder", "ship_segmenter"]
     slots_per_pair: int = 8       # rings are pairwise and small; see the budget below
-    slot_bytes: int = 1_638_400   # 1.5 MiB + 64 KiB: the batch plus its heads
+    slot_bytes: int = 1_638_400   # the fallback when a model declares a dynamic extent; otherwise slots are sized per model and direction from its config (`wire_slot_bytes`)
     submit_timeout_ms: int = 5    # a full ring refuses after this; the policy then picks another candidate
     heartbeat_ms: int = 200       # an owner that has not stamped its header in 5 × this is lost
     spill_threshold: int = 4      # forwarded to locality_spillover for the shared models
@@ -113,9 +114,11 @@ each existing once as one `shared_memory` block. Every ring is mapped by exactly
 (its writer and its reader) and each registers its own mapping, so a process pins
 `4 × (N−1) × models` rings. For 4 shards and 3 models: 72 rings on the box; at 64 slots of
 1.5 MiB that is 6.8 GiB of shared memory — too much. Hence the setting is `slots_per_pair`,
-sized 8 by default, with 64 KiB of headroom per slot for the heads (`slot_bytes` above):
-**72 × 12.5 MiB ≈ 0.9 GiB of shared memory on the box, existing once; 36 × 12.5 MiB ≈ 0.44 GiB
-registered per process** (the same pages, pinned through each mapper's registration). **This
+sized 8 by default, with slots sized per model and direction from its config (`wire_slot_bytes`):
+for the repository's two embedders across 4 shards, request slots are 6.36 MB and response slots
+0.2 MB, so **48 rings ≈ 1.26 GB of shared memory on the box, existing once; ≈ 0.63 GB mapped and
+registered per process** (the same pages, pinned through each mapper's registration; the request
+rings dominate). **This
 is the first design decision the coder must not silently re-make**: single writer per ring,
 pairwise rings, small slot counts.
 
@@ -259,13 +262,14 @@ queue's wait exceeds that, which is what `spill_threshold` encodes in queue dept
 
 ## 7. Open questions for the operator
 
-- Slot size: 1.5 MiB fits an embedder crop batch; the **segmenter** takes letterboxed crops that
-  may exceed it at `max_batch_size` — cap the batch for shared models, or size slots per model
-  from `config.yaml` dims (my default: per model, from dims, rounded to 64 KiB)?
+- Slot size: **decided and built** — per model and per direction, from `config.yaml` dims
+  (`wire_slot_bytes`). What remains is the **segmenter**: its request slot is 39 MB
+  (8 × 3 × 640 × 640 fp32), so it is out of the default `shared_models`; whether to pay that
+  ring budget to share it is the open half.
 - Should the **detector** ever be shared? The ledger says crops, not frames; a 1080p frame is
   6 MB and would triple the pinned footprint. My default: never — `shared_models` excludes it
   and a config naming it is refused.
-- Pinned budget (the derivation in §2): 4 shards × 3 models → 72 rings on the box, existing once,
-  ≈ 0.9 GiB of shared memory at 8 slots × (1.5 MiB + 64 KiB); each process registers the 36 it
-  maps, ≈ 0.44 GiB. Acceptable on this host (the operator's box has 500+ GB), but it must be
+- Pinned budget (the derivation in §2, slots per model and direction): 4 shards × 2 embedders →
+  48 rings ≈ 1.26 GB of shared memory on the box, existing once; each process registers the 24 it
+  maps, ≈ 0.63 GB. Acceptable on this host (the operator's box has 500+ GB), but it must be
   stated in the settings docstring; confirm the ceiling.
