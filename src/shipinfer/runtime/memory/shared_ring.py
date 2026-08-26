@@ -170,7 +170,6 @@ _HEADER = struct.Struct("<IIIIIIdQB63s")
 #: — everything before it (magic, version, layout) and after it (closed, owner) untouched.
 _STAMP = struct.Struct("<IIdQ")
 _STAMP_OFFSET = 16  # after magic, version, slots, slot_bytes — four u32
-assert _STAMP_OFFSET + _STAMP.size <= _HEADER.size - 64, "the stamp must never reach `closed`"
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +188,9 @@ class RingHeader:
 
 _PENDING_LOCK = threading.Lock()
 _PENDING_CLOSE: list[shared_memory.SharedMemory] = []
+#: Names this process has opened (not created): the one-writer discipline means a second
+#: open is a wiring bug, and letting it through unbalances the resource tracker's set.
+_OPENED_NAMES: set[str] = set()
 
 
 def reap_pending_closes() -> int:
@@ -207,6 +209,12 @@ def reap_pending_closes() -> int:
                 still.append(block)
         _PENDING_CLOSE[:] = still
         return len(still)
+
+
+def _release_view_quietly(view: memoryview) -> None:
+    """Finalizer for a handle that was never closed: drop its export so the mapping can go."""
+    with contextlib.suppress(Exception):
+        view.release()
 
 
 def _attach(name: str) -> shared_memory.SharedMemory:
@@ -272,6 +280,9 @@ class SharedRing:
         # tens of nanoseconds against a ~125 us slot copy; slices already handed out stay
         # valid regardless — they export the mapping itself, not this object.
         self._view_lock = threading.Lock()
+        # A handle dropped without close() must not strand the mapping: the finalizer lets
+        # `SharedMemory.__del__` succeed instead of printing an ignored BufferError.
+        weakref.finalize(self, _release_view_quietly, self._view)
         self._next = 0
         self._take_next = 0
         self._pinned: Any = None
@@ -293,13 +304,24 @@ class SharedRing:
         """Create the block and write the header. The caller is the owner (the reader)."""
         if len(owner.encode()) > 63:
             raise ValueError(f"owner name too long for the header: {owner!r}")
-        block = shared_memory.SharedMemory(name=name, create=True, size=layout.total_bytes)
+        try:
+            block = shared_memory.SharedMemory(name=name, create=True, size=layout.total_bytes)
+        except FileExistsError as exc:
+            raise RingProtocolError(
+                f"ring {name!r} already exists — a previous owner's segment survived its "
+                f"process; remove it or use a fresh run id"
+            ) from exc
         ring = cls(block, layout, name=name, owner=owner, is_owner=True)
+        # States first, header last: writing the magic IS the readiness signal (`open` retries
+        # until it lands), so everything a peer may touch must be final before it. POSIX shm
+        # is zero-filled and FREE == 0, so the loop is belt-and-braces, but the *order* is the
+        # contract — a peer that wins the open race and publishes must never have its slot
+        # stamped back to FREE by the creator's own initialisation.
+        for index in range(layout.slots):
+            ring._set_state(index, SlotState.FREE)
         ring._write_header(
             depth=0, ewma_latency_us=0.0, heartbeat_ns=time.monotonic_ns(), closed=False
         )
-        for index in range(layout.slots):
-            ring._set_state(index, SlotState.FREE)
         return ring
 
     @classmethod
@@ -347,6 +369,13 @@ class SharedRing:
                 f"ring {name!r}: created with {slots} slots of {slot_bytes} bytes, opened "
                 f"expecting {layout.slots} of {layout.slot_bytes}"
             )
+        with _PENDING_LOCK:
+            if name in _OPENED_NAMES:
+                block.close()
+                raise RingProtocolError(
+                    f"ring {name!r} is already open in this process — one writer per ring"
+                )
+            _OPENED_NAMES.add(name)
         return cls(block, layout, name=name, owner=owner, is_owner=False)
 
     # -- header ------------------------------------------------------------------------
@@ -689,6 +718,9 @@ class SharedRing:
         A non-owner just detaches. The owner also unlinks the block: a ring whose owner is
         gone must not be reopened by a peer that has not noticed.
         """
+        if not self._is_owner:
+            with _PENDING_LOCK:
+                _OPENED_NAMES.discard(self._name)
         if self._is_owner and not self._closed_here:
             self._closed_here = True
             header = self.header()

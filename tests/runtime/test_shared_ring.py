@@ -323,6 +323,7 @@ class TestClosedIsNotFull:
         with pytest.raises(RingClosedError, match="closed - its owner is gone") as caught:
             writer.claim(timeout_s=0.05)
         assert isinstance(caught.value, QueueFullError)
+        assert caught.value.reason == "closed"
         assert "full" not in str(caught.value)
         writer.close()
 
@@ -645,8 +646,9 @@ class TestARingMidBirth:
         layout = RingLayout(slots=2, slot_bytes=4096)
         bare = shared_memory.SharedMemory(name=name, create=True, size=layout.total_bytes)
         try:
-            with pytest.raises(RingClosedError):
+            with pytest.raises(RingClosedError) as caught:
                 SharedRing.open(name, layout)
+            assert caught.value.reason == "unborn"
         finally:
             resource_tracker.register(bare._name, "shared_memory")
             bare.close()
@@ -765,3 +767,110 @@ class TestPinningRacesClose:
 
             reap_pending_closes()
             assert len(unregisters) == len(registers), "every registration unregistered, once"
+
+
+def _publish_during_birth(name: str, slots: int, slot_bytes: int) -> None:
+    """A peer that wins the open race the instant readiness lands, and publishes at once."""
+    from shipinfer.core.errors import RingClosedError
+    from shipinfer.runtime.memory.shared_ring import RingLayout, SharedRing
+
+    deadline = time.monotonic() + 10.0
+    writer = None
+    while writer is None:
+        try:
+            writer = SharedRing.open(name, RingLayout(slots=slots, slot_bytes=slot_bytes))
+        except RingClosedError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0)
+    index = writer.claim(timeout_s=2.0)
+    writer.payload(index)[:6] = b"SURVIV"
+    writer.publish(index)
+    writer.close()
+
+
+class TestCreatePublishesReadinessLast:
+    def test_a_payload_published_the_instant_the_ring_is_ready_survives(
+        self, monkeypatch
+    ) -> None:
+        """Round 8: the magic is the readiness signal, so every byte a peer may touch must be
+        final before it lands. The creator here is slowed *after* the header write; a spawned
+        peer opens in that window and publishes — and the payload must still be WRITTEN when
+        create() returns. Against the old order (header before the state loop) the creator's
+        initialisation stamps the slot back to FREE and the frame is silently gone."""
+        import multiprocessing
+
+        real = SharedRing._write_header
+
+        def slow_header(self, **kwargs) -> None:
+            real(self, **kwargs)
+            time.sleep(0.08)
+
+        monkeypatch.setattr(SharedRing, "_write_header", slow_header)
+        name = _name()
+        layout = RingLayout(slots=2, slot_bytes=4096)
+        context = multiprocessing.get_context("spawn")
+        child = context.Process(target=_publish_during_birth, args=(name, 2, 4096))
+        child.start()
+        try:
+            ring = SharedRing.create(name, layout, owner="A")
+        finally:
+            child.join(timeout=30)
+        assert child.exitcode == 0, "the peer opened and published"
+        monkeypatch.undo()
+        taken = ring.take(timeout_s=5.0)
+        assert taken is not None, "the published slot survived the creator's initialisation"
+        assert bytes(ring.payload(taken)[:6]) == b"SURVIV"
+        ring.release(taken)
+        ring.close()
+
+
+class TestTheTypedCreateAndOpenEdges:
+    def test_a_never_created_name_is_absent(self) -> None:
+        with pytest.raises(RingClosedError, match="does not exist") as caught:
+            SharedRing.open(_name(), RingLayout(slots=1, slot_bytes=8))
+        assert caught.value.reason == "absent"
+
+    def test_a_surviving_segment_makes_create_speak_the_vocabulary(self) -> None:
+        from multiprocessing import shared_memory
+
+        name = _name()
+        stale = shared_memory.SharedMemory(name=name, create=True, size=8192)
+        try:
+            with pytest.raises(RingProtocolError, match="already exists"):
+                SharedRing.create(name, RingLayout(slots=1, slot_bytes=8), owner="A")
+        finally:
+            stale.close()
+            stale.unlink()
+
+    def test_one_open_per_ring_per_process(self, ring) -> None:
+        """The one-writer discipline enforced at the seam, not discovered as a tracker
+        KeyError at exit."""
+        first = SharedRing.open(ring.name, ring.layout)
+        try:
+            with pytest.raises(RingProtocolError, match="already open in this process"):
+                SharedRing.open(ring.name, ring.layout)
+        finally:
+            first.close()
+        second = SharedRing.open(ring.name, ring.layout)  # the close released the claim
+        second.close()
+
+    def test_a_handle_dropped_without_close_is_quiet_and_reclaimable(self) -> None:
+        from multiprocessing import resource_tracker, shared_memory
+
+        name = _name()
+        ring = SharedRing.create(name, RingLayout(slots=1, slot_bytes=8), owner="A")
+        del ring
+        gc.collect()  # the finalizer releases the view; SharedMemory.__del__ can close
+        leaked = shared_memory.SharedMemory(name=name, create=False)
+        resource_tracker.register(leaked._name, "shared_memory")
+        leaked.close()
+        leaked.unlink()
+
+
+class TestTheStampWindow:
+    def test_the_stamp_stays_short_of_the_closed_byte(self) -> None:
+        """The import-time assert was stripped under -O; the invariant lives here instead."""
+        from shipinfer.runtime.memory import shared_ring as module
+
+        assert module._STAMP_OFFSET + module._STAMP.size <= module.SharedRing._CLOSED_OFFSET
