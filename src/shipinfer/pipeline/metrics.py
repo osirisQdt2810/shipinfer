@@ -21,6 +21,7 @@ __all__ = ["PipelineMetrics"]
 #: End-to-end frame latency in microseconds. The interesting range for this pipeline is
 #: 10 ms (detect only, warm) to 2 s (the reassembly timeout), so the default request
 #: buckets — shaped for a single inference — bottom out too early to be readable.
+
 _E2E_BUCKETS_US = (
     5_000.0,
     10_000.0,
@@ -32,6 +33,37 @@ _E2E_BUCKETS_US = (
     1_000_000.0,
     2_000_000.0,
     5_000_000.0,
+)
+
+#: Per-stage spans, from a sub-millisecond crop to a stage that has clearly stalled. Explicit
+#: rather than the registry default. `Histogram.quantile` reports the *upper edge* of the bucket
+#: the quantile falls in, and the default edges step by 2-2.5x (25 000, 50 000, 100 000,
+#: 250 000 us in the range stage costs live) — so the first complete algo-tier run reported
+#: every stage's p50 as one of those numbers, and "100 000" meant only "somewhere in 50-100 ms".
+#: That is a real span, not a rounding artefact: submit-to-result includes the batch window and
+#: the model queue. But a tier whose answer is uncertain by 2x cannot say whether a change
+#: helped. ~1.6x apart, so a reported quantile is within a factor of 1.6 of the truth.
+_STAGE_BUCKETS_US = (
+    250.0,
+    400.0,
+    630.0,
+    1_000.0,
+    1_600.0,
+    2_500.0,
+    4_000.0,
+    6_300.0,
+    10_000.0,
+    16_000.0,
+    25_000.0,
+    40_000.0,
+    63_000.0,
+    100_000.0,
+    160_000.0,
+    250_000.0,
+    400_000.0,
+    630_000.0,
+    1_000_000.0,
+    2_000_000.0,
 )
 
 #: Detections (and therefore crops) per frame. The reference deployment saw 2 on a corridor
@@ -139,6 +171,7 @@ class PipelineMetrics:
         self.stage_latency_us = r.histogram(
             "shipinfer_pipeline_stage_latency_us",
             "Submit to result for one stage, microseconds.",
+            _STAGE_BUCKETS_US,
         )
         self.objects_per_frame = r.histogram(
             "shipinfer_pipeline_objects_per_frame",

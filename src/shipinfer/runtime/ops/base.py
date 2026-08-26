@@ -58,6 +58,16 @@ class LetterboxResult:
     scales: np.ndarray
     #: Per-image ``(pad_x, pad_y)`` in destination pixels.
     pads: np.ndarray
+    #: Per-image ``(out_h, out_w)`` — the resized extent the kernel *actually* wrote, before
+    #: padding. Optional because only the native implementation reports it today. It exists
+    #: for the reason the submodule's review gave when it added the output: ``out_h`` is what
+    #: the kernel divides by, so it decides the sampling ratio, and a consumer re-deriving it
+    #: from ``scale`` can disagree by a pixel while scale and pad both still match —
+    #: ``pad = (T - r) / 2`` is the same for ``r`` and ``r + 1`` whenever ``T - r`` is even.
+    #: Nothing in the pipeline re-derives it yet, which is why this is optional rather than
+    #: required; when something does, it should read this and the field should become
+    #: required for every implementation.
+    extents: np.ndarray | None = None
 
 
 class ImageOps(abc.ABC):
