@@ -208,6 +208,10 @@ class ResultReader(threading.Thread):
             busy = True
             try:
                 self._resolve(owner, ring.payload(index))
+            except RingClosedError:
+                # The ring closed between take and the payload read; its owner's pending
+                # futures are the heartbeat watcher's to fail, not a reason to die.
+                continue
             finally:
                 ring.release(index)
         return busy
@@ -312,17 +316,24 @@ class RingIngress(threading.Thread):
         self._stopping.set()
 
     def run(self) -> None:
-        self._stamp(force=True)
-        while not self._stopping.is_set():
-            self._stamp()
-            index = self._inbound.take(timeout_s=self._poll_s)
-            if index is None:
-                if self._inbound.is_closed:
+        try:
+            self._stamp(force=True)
+            while not self._stopping.is_set():
+                self._stamp()
+                index = self._inbound.take(timeout_s=self._poll_s)
+                if index is None:
+                    if self._inbound.is_closed:
+                        return
+                    continue
+                try:
+                    self._serve(index)
+                except RingClosedError:
+                    # The ring closed between take and the payload read: shutdown, not work.
                     return
-                continue
-            self._serve(index)
-        # Closing tells every writer to stop claiming and every reader that the owner is gone.
-        self._inbound.close()
+        finally:
+            # Closing tells every writer to stop claiming and every reader that the owner is
+            # gone — and it must happen however this loop ends.
+            self._inbound.close()
 
     def _stamp(self, *, force: bool = False) -> None:
         now = time.monotonic_ns()
