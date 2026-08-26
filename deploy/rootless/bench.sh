@@ -4,6 +4,11 @@
 #   deploy/rootless/bench.sh                          # both systems, 50x20, 70 s
 #   deploy/rootless/bench.sh --systems baseline       # one at a time, uncontended
 #   deploy/rootless/bench.sh --systems shipinfer --seconds 40
+#   # RTSP in a headless container: nvcodec's decoder wants a GL display. Either give it a
+#   # surfaceless EGL one, or take NVDEC out of decodebin's ranking and decode in software:
+#   GST_GL_PLATFORM=egl GST_GL_WINDOW=surfaceless deploy/rootless/bench.sh --source rtsp ...
+#   SHIPINFER_INGEST_HWACCEL=0 GST_PLUGIN_FEATURE_RANK=nvh264dec:NONE,nvh265dec:NONE \
+#     deploy/rootless/bench.sh --source rtsp ...
 #
 # WHY THIS IS A SEPARATE SCRIPT FROM test.sh
 #
@@ -107,6 +112,9 @@ exec docker run --rm --pid=host --device nvidia.com/gpu=all \
   -e SHIPINFER_GST_DECODER="${SHIPINFER_GST_DECODER:-}" \
   -e SHIPINFER_INGEST_HWACCEL="${SHIPINFER_INGEST_HWACCEL:-1}" \
   -e SHIPINFER_INGEST_BACKEND="${SHIPINFER_INGEST_BACKEND:-gstreamer}" \
+  -e GST_GL_PLATFORM="${GST_GL_PLATFORM:-}" \
+  -e GST_GL_WINDOW="${GST_GL_WINDOW:-}" \
+  -e GST_PLUGIN_FEATURE_RANK="${GST_PLUGIN_FEATURE_RANK:-}" \
   -e SHIPINFER_CUDA_GRAPHS="${SHIPINFER_CUDA_GRAPHS:-off}" \
   -e SHIPINFER_BENCH_SCRIPT="${SHIPINFER_BENCH_SCRIPT:-benchmarks/run_bench.py}" \
   -v "$REPO:/work" \

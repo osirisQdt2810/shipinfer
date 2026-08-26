@@ -17,6 +17,7 @@ this one can use the video engine when it is there and still start when it is no
 
 from __future__ import annotations
 
+import threading
 from typing import Any, ClassVar
 
 import numpy as np
@@ -64,6 +65,9 @@ _SW_DECODERS: dict[str, tuple[str, ...]] = {
 }
 
 #: Colour-space converters, in preference order. The first two are NVIDIA's and can take
+#: Serialises GStreamer's one-time initialisation across camera threads (see `_load_gst`).
+_GST_INIT_LOCK = threading.Lock()
+
 #: Decoders that can output GL memory and open a GL display to do it. See `build_pipeline`.
 _GL_CAPABLE_DECODERS: frozenset[str] = frozenset({"nvh264dec", "nvh265dec"})
 
@@ -213,8 +217,15 @@ def _load_gst() -> tuple[Any, Any]:
             f"({redact_in(str(exc))}). Install python3-gi and gstreamer1.0-plugins-{{base,good,bad}}, "
             "or select the 'pyav' backend with SHIPINFER_INGEST_BACKEND=pyav",
         ) from exc
-    if not Gst.is_initialized():
-        Gst.init(None)
+    # Fifty camera actors call this from fifty threads at start-up. `Gst.is_initialized()`
+    # turns true as soon as *some* thread has begun initialising, before the plugin
+    # registry is populated — so a thread that saw "initialised" and went straight to
+    # `ElementFactory.find` got `None` for every decoder and gave its camera up as
+    # "no h264 decoder found" on an image that has three. One lock, one init, and every
+    # caller returns only after the registry exists.
+    with _GST_INIT_LOCK:
+        if not Gst.is_initialized():
+            Gst.init(None)
     return Gst, GLib
 
 

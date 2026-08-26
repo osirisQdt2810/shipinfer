@@ -194,3 +194,57 @@ class TestImportSafety:
         source.close()
         source.close()
         assert source.is_open is False
+
+
+class TestInitialisationIsSerialised:
+    """Fifty camera threads call `_load_gst` at once. `Gst.is_initialized()` turns true before
+    the registry is populated, so an unguarded caller could probe an empty registry and give
+    its camera up as "no decoder found" on an image that has three."""
+
+    def test_concurrent_callers_initialise_once_and_all_see_the_registry(self, monkeypatch):
+        import sys
+        import threading
+        import time
+        import types
+
+        from shipinfer.ingest.sources import gstreamer
+
+        state = {"initialised": False, "inits": 0, "ready": False}
+
+        class FakeGst:
+            @staticmethod
+            def is_initialized():
+                return state["initialised"]
+
+            @staticmethod
+            def init(_argv):
+                state["inits"] += 1
+                state["initialised"] = True  # visible before the registry is ready...
+                time.sleep(0.05)  # ...which takes a while
+                state["ready"] = True
+
+        gi = types.ModuleType("gi")
+        gi.require_version = lambda *_a: None
+        repository = types.ModuleType("gi.repository")
+        repository.Gst = FakeGst
+        repository.GLib = object()
+        gi.repository = repository
+        monkeypatch.setitem(sys.modules, "gi", gi)
+        monkeypatch.setitem(sys.modules, "gi.repository", repository)
+
+        seen_ready: list[bool] = []
+        lock = threading.Lock()
+
+        def worker():
+            _gst, _glib = gstreamer._load_gst()
+            with lock:
+                seen_ready.append(state["ready"])
+
+        threads = [threading.Thread(target=worker) for _ in range(16)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert state["inits"] == 1, "one init, however many threads arrive at once"
+        assert all(seen_ready), "every caller returned only after the registry existed"
