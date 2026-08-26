@@ -1,229 +1,254 @@
-// The fair, bounded, per-camera queue — the part this project exists to own.
+// The default queue: priority lanes, round-robin fair within a lane.
+// `scheduling/queues/fair.py` (`FairPriorityQueue`), ported seam for seam.
 //
-// THE FAILURE THIS REPLACES
-// ------------------------
-// The previous generation funnelled every camera into one shared 1000-slot buffer that
-// evicted the *oldest* entry when full. A crowded camera therefore filled the buffer and
-// pushed out a quiet camera's frames, and the symptom was reported exactly that way:
-// "camera đông người được nhận diện đầy đủ, camera vắng người thỉnh thoảng bị miss" — the
-// crowded cameras complete, the quiet ones intermittently miss.
+// This class is the direct answer to the failure documented in the reference system's
+// `docs/flow.md`: every camera fed one shared 1000-slot buffer that evicted the *oldest* entry
+// when full, so a crowded camera silently starved a quiet one. Two choices fix it, and both
+// live here: fair queueing (requests are bucketed by camera and drained round-robin, so a
+// camera producing 30 crops per frame cannot occupy 30 consecutive batch slots) and honest
+// overflow (a full queue refuses by default; backpressure that reaches the producer is a
+// signal, a silent eviction three stages downstream is a bug that takes a week to find).
 //
-// So: one lane per camera, round-robin between lanes on drain, and when the queue is full the
-// *greediest* camera loses a frame rather than whichever frame happens to be oldest. Nothing
-// is silently dropped: a refusal is returned as `false` and counted per camera in `stats()`
-// (depth and capacity are there too), and an eviction hands the evicted item to `on_evict` so
-// it can reach the operator's event stream. The Python plane raises `QueueFullError` with the
-// same depth and capacity; that is the seam the port (ledger P1–P3) makes identical.
-//
-// ROWS, NOT ITEMS
-// ---------------
-// `drain` counts **rows**, because a per-object request carries one row per crop. Counting
-// items against a row budget overfills the batch: sixteen embedder requests each carrying a
-// frame's worth of crops assembled 24 rows against `max_batch_size: 16`, the assembler
-// refused it, and every request in it failed. That was found by running the Python version,
-// and it is the reason this signature takes a row budget rather than a count.
-//
-// An item whose own row count already exceeds the budget is returned **alone** rather than
-// refused, because refusing it would park it at the head of its lane forever and stall the
-// model. Letting it through gives the assembler a chance to name the real problem, which is a
-// request too large for the engine rather than a scheduling decision.
+// WHAT THE FIRST C++ QUEUE GOT DIFFERENT, AND WHY THIS ONE DOES NOT. It evicted the *newest*
+// frame of the greediest camera where the Python queue evicts its *oldest* — a different
+// latency profile under sustained overload, recorded in ADR-014 as the one place the planes had
+// already diverged. It had no priority lanes, no batch window (a fixed wait for the first item
+// and then whatever was there), no expiry, and an O(cameras) rotation. The parity harness
+// (ledger P6) drives both planes with one trace and expects the same batches and the same
+// evictions; that is only possible if the arithmetic is the same, so it is.
 #pragma once
 
-#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
-#include <deque>
-#include <functional>
-#include <map>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "shipinfer/core/types.h"
+#include "shipinfer/scheduling/queues/base.h"
+#include "shipinfer/scheduling/queues/lanes.h"
 
 namespace shipinfer {
 
-    enum class Overflow { Reject, Block, EvictGreediest };
-
-    // `T` needs `rows()` and `camera()`. A concept would be clearer; this has to build under
-    // the host's g++ 11 in C++17, so it is a documented duck type.
     template <typename T>
-    class FairQueue {
+    class FairPriorityQueue {
       public:
-        struct Stats {
-            size_t depth = 0;
-            size_t peak = 0;
-            uint64_t accepted = 0;
-            uint64_t rejected = 0;
-            uint64_t evicted = 0;
-            std::map<std::string, uint64_t> rejected_by_camera;
-            std::map<std::string, uint64_t> evicted_by_camera;
-        };
-
-        FairQueue(size_t capacity, Overflow overflow, int block_timeout_ms = 0,
-                  std::function<void(T&&)> on_evict = {})
-            : capacity_(capacity),
+        FairPriorityQueue(std::string name, size_t capacity,
+                          Overflow overflow = Overflow::Reject, int block_timeout_ms = 50,
+                          bool drop_expired = true, DropHandler<T> on_drop = {})
+            : name_(std::move(name)),
+              capacity_(capacity),
               overflow_(overflow),
               block_timeout_ms_(block_timeout_ms),
-              on_evict_(std::move(on_evict)) {}
-
-        // Returns false when the item was refused under Overflow::Reject; throws nothing on the
-        // hot path so a camera thread never unwinds through a lock.
-        bool put(T item) {
-            std::unique_lock<std::mutex> lock(mutex_);
-            const std::string camera = item.camera();
-            if (size_ >= capacity_) {
-                if (overflow_ == Overflow::Block) {
-                    const auto deadline = std::chrono::steady_clock::now() +
-                                          std::chrono::milliseconds(block_timeout_ms_);
-                    // Predicate form, so a spurious wake-up does not read as a timeout.
-                    if (!space_.wait_until(lock, deadline,
-                                           [this] { return size_ < capacity_ || closed_; })) {
-                        ++stats_.rejected;
-                        ++stats_.rejected_by_camera[camera];
-                        return false;
-                    }
-                    if (closed_) return false;
-                } else if (overflow_ == Overflow::EvictGreediest) {
-                    if (!evict_greediest_locked()) {
-                        ++stats_.rejected;
-                        ++stats_.rejected_by_camera[camera];
-                        return false;
-                    }
-                } else {
-                    ++stats_.rejected;
-                    ++stats_.rejected_by_camera[camera];
-                    return false;
-                }
-            }
-            // `try_emplace` tells us whether the lane is new in the same lookup that finds
-            // it, so a camera is appended to the round-robin order exactly once and `put` is
-            // O(log cameras) rather than O(cameras). The scan it replaces ran on **every**
-            // frame — a linear walk of fifty strings a thousand times a second to answer a
-            // question the map had already answered.
-            const auto [entry, is_new] = lanes_.try_emplace(camera);
-            entry->second.push_back(std::move(item));
-            if (is_new) order_.push_back(camera);
-            ++size_;
-            ++stats_.accepted;
-            stats_.peak = std::max(stats_.peak, size_);
-            work_.notify_one();
-            return true;
+              drop_expired_(drop_expired),
+              on_drop_(std::move(on_drop)) {
+            if (capacity_ < 1) throw std::invalid_argument("queue capacity must be >= 1");
         }
 
-        // Round-robin across lanes until `max_rows` rows are collected, the queue empties, or
-        // the wait expires. An empty result means "nothing to do" — the queue is closed, or the
-        // wait simply expired with the queue empty. A caller that treats empty as "closed"
-        // exits on the first idle interval, so a worker has to ask `closed()`; the two are
-        // deliberately separate questions.
-        std::vector<T> drain(size_t max_rows, int wait_ms) {
-            std::vector<T> batch;
+        const std::string& name() const { return name_; }
+        size_t capacity() const { return capacity_; }
+
+        // -- introspection ----------------------------------------------------------------
+        // Read without the lock by the placement policies: a slightly stale depth changes
+        // which of two near-equal GPUs wins, nothing more, and a lock here would be taken
+        // thousands of times a second.
+        size_t depth() const { return size_.load(std::memory_order_relaxed); }
+        bool is_closed() const {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return closed_;
+        }
+        QueueStats stats() const {
+            std::lock_guard<std::mutex> lock(mutex_);
+            QueueStats copy = stats_;
+            copy.depth = size_.load(std::memory_order_relaxed);
+            copy.capacity = capacity_;
+            return copy;
+        }
+
+        // -- producer ---------------------------------------------------------------------
+        // Takes the item only on acceptance: a refused or closed put leaves it with the caller,
+        // the way the Python queue raises before taking ownership — the dispatcher's spill
+        // depends on still holding the item after a refusal.
+        PutStatus put(T&& item) {
+            std::optional<T> evicted;
             std::unique_lock<std::mutex> lock(mutex_);
-            if (size_ == 0 && !closed_) {
-                work_.wait_for(lock, std::chrono::milliseconds(wait_ms),
-                               [this] { return size_ > 0 || closed_; });
+            if (closed_) return PutStatus::Closed;
+            if (size_.load(std::memory_order_relaxed) >= capacity_ &&
+                !make_room_locked(lock, evicted)) {
+                ++stats_.rejected;
+                ++stats_.rejected_by_camera[item.camera()];  // the one branch that needs it
+                return PutStatus::Rejected;
             }
-            size_t rows = 0;
-            // `next_` persists across calls: restarting at lane 0 every time would starve the
-            // tail of the fleet under load, which is the same bug in a different shape.
-            while (size_ > 0 && rows < max_rows) {
-                bool moved = false;
-                for (size_t step = 0; step < order_.size() && rows < max_rows; ++step) {
-                    const std::string& camera = order_[(next_ + step) % order_.size()];
-                    auto it = lanes_.find(camera);
-                    if (it == lanes_.end() || it->second.empty()) continue;
-                    const size_t head_rows = it->second.front().rows();
-                    if (!batch.empty() && rows + head_rows > max_rows) {
-                        // Full enough. Leaving the head where it is keeps the lane's order.
-                        goto done;
-                    }
-                    batch.push_back(std::move(it->second.front()));
-                    it->second.pop_front();
-                    --size_;
-                    rows += head_rows;
-                    moved = true;
+            if (closed_) return PutStatus::Closed;  // BLOCK may have waited through a close
+            const int level = clamp_priority(item.priority());
+            lanes_[level].push(std::move(item));
+            const size_t now = size_.fetch_add(1, std::memory_order_relaxed) + 1;
+            ++stats_.accepted;
+            if (now > stats_.peak) stats_.peak = now;
+            work_.notify_one();
+            lock.unlock();
+            // The drop handler runs outside the lock, as `close()` already does: a handler
+            // that settles a promise is safe either way, but the next one someone writes may
+            // touch the queue, and a callback under the queue's own mutex is a deadlock waiting
+            // for its second author.
+            if (evicted.has_value() && on_drop_)
+                on_drop_(std::move(*evicted), DropReason::Evicted);
+            return PutStatus::Accepted;
+        }
+
+        // -- consumer ---------------------------------------------------------------------
+        // Two-phase wait — the classic dynamic-batching shape. 1. Wait (indefinitely, but
+        // wake-able) for the *first* request: an idle model must not burn a core spinning.
+        // 2. Once one has arrived, wait at most `max_delay_us` more for the batch to fill,
+        // returning early the moment it reaches `max_batch_size` or a preferred size.
+        // Returns an empty batch only when the queue has been closed, which is how a worker
+        // thread learns to exit without a separate sentinel.
+        std::vector<T> get_batch(const BatchWindow& window, int poll_ms = 50) {
+            std::unique_lock<std::mutex> lock(mutex_);
+            while (size_.load(std::memory_order_relaxed) == 0) {
+                if (closed_) return {};
+                work_.wait_for(lock, std::chrono::milliseconds(poll_ms));
+            }
+            if (window.max_delay_us > 0 &&
+                size_.load(std::memory_order_relaxed) < window.max_batch_size) {
+                wait_to_fill_locked(lock, window);
+            }
+            return drain_locked(window.max_batch_size);
+        }
+
+        // -- lifecycle --------------------------------------------------------------------
+        // Close. Everything still queued is handed to the drop handler as `Closed` when one
+        // is set, and returned to the caller otherwise — either way the caller can fail
+        // exactly that much work and report it. A shutdown that silently discards 400
+        // requests is not orderly.
+        std::vector<T> close() {
+            std::vector<T> drained;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                closed_ = true;
+                for (Lane<T>& lane : lanes_) {
+                    for (T& item : lane.drain()) drained.push_back(std::move(item));
                 }
-                if (!moved) break;
-                next_ = (next_ + 1) % (order_.empty() ? 1 : order_.size());
+                size_.store(0, std::memory_order_relaxed);
             }
-        done:
-            // `notify_all` before returning, in every case. The Python version reached this
-            // only on the fall-through path, so a producer blocked on a full queue slept the
-            // entire timeout instead of waking when a slot freed — 500 ms against 50 — and when
-            // the deadline beat the drain, the drop was charged to a camera that had done
-            // nothing.
+            work_.notify_all();
+            space_.notify_all();
+            if (on_drop_) {
+                for (T& item : drained) on_drop_(std::move(item), DropReason::Closed);
+                drained.clear();
+            }
+            return drained;
+        }
+
+      private:
+        static int clamp_priority(int level) {
+            return level < 0 ? 0 : (level >= kPriorityLevels ? kPriorityLevels - 1 : level);
+        }
+
+        // Try to free one slot. True if the caller may now enqueue. An evicted item is handed
+        // back in `evicted` for the caller to fail once it has released the lock.
+        bool make_room_locked(std::unique_lock<std::mutex>& lock, std::optional<T>& evicted) {
+            if (overflow_ == Overflow::Reject) return false;
+            if (overflow_ == Overflow::Block) {
+                const auto deadline = std::chrono::steady_clock::now() +
+                                      std::chrono::milliseconds(block_timeout_ms_);
+                while (size_.load(std::memory_order_relaxed) >= capacity_ && !closed_) {
+                    if (space_.wait_until(lock, deadline) == std::cv_status::timeout &&
+                        size_.load(std::memory_order_relaxed) >= capacity_) {
+                        return false;
+                    }
+                }
+                return !closed_;
+            }
+            // DROP_OLDEST: sacrifice from the *lowest*-priority non-empty lane, so a
+            // BACKGROUND request can never displace a TRACKING_CRITICAL one.
+            for (int level = kPriorityLevels - 1; level >= 0; --level) {
+                std::optional<T> victim = lanes_[level].evict_from_longest();
+                if (victim.has_value()) {
+                    size_.fetch_sub(1, std::memory_order_relaxed);
+                    ++stats_.evicted;
+                    ++stats_.evicted_by_camera[victim->camera()];
+                    evicted = std::move(victim);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        void wait_to_fill_locked(std::unique_lock<std::mutex>& lock,
+                                 const BatchWindow& window) {
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::microseconds(window.max_delay_us);
+            // `size_` counts items and `max_batch_size` counts rows, so this is a lower bound
+            // on fullness: with multi-row requests the batch reaches its row budget before the
+            // item count does, and waiting past that only adds latency. Deliberately not made
+            // exact — summing every queued request's rows on each wake would walk the whole
+            // queue thousands of times a second to refine a wait heuristic.
+            while (size_.load(std::memory_order_relaxed) < window.max_batch_size && !closed_) {
+                if (window.preferred(size_.load(std::memory_order_relaxed))) return;
+                if (std::chrono::steady_clock::now() >= deadline) return;
+                work_.wait_until(lock, deadline);
+            }
+        }
+
+        // Pop up to `max_rows` **rows** highest-priority-first, round-robin in a lane. Rows,
+        // not items: a per-object request carries one row per crop, and counting items
+        // against a row budget overfilled the batch on the first real 50-camera run. An item
+        // whose own row count already exceeds the budget is still returned, alone — refusing
+        // to dequeue it would park it at the head of its lane forever and stall the model.
+        std::vector<T> drain_locked(size_t max_rows) {
+            const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::steady_clock::now().time_since_epoch())
+                                    .count();
+            std::vector<T> batch;
+            size_t rows = 0;
+            bool budget_hit = false;
+            for (Lane<T>& lane : lanes_) {
+                while (!lane.empty() && !budget_hit) {
+                    const T* head = lane.peek();
+                    const size_t head_rows = head->rows() == 0 ? 1 : head->rows();
+                    if (!batch.empty() && rows + head_rows > max_rows) {
+                        budget_hit = true;
+                        break;
+                    }
+                    T item = lane.pop();
+                    size_.fetch_sub(1, std::memory_order_relaxed);
+                    if (drop_expired_ && item.expired(now)) {
+                        ++stats_.expired;
+                        if (on_drop_) on_drop_(std::move(item), DropReason::Expired);
+                        continue;
+                    }
+                    batch.push_back(std::move(item));
+                    rows += head_rows;
+                    if (rows >= max_rows) budget_hit = true;
+                }
+                if (budget_hit) break;
+            }
+            // On *every* exit, not only the loop's natural end: the row-budget exit is the
+            // common one under load, and a blocked producer must wake the instant a slot frees
+            // rather than sleep out its whole timeout — measured at 500 against 50 ms in the
+            // Python plane before its `finally` fixed it.
             if (overflow_ == Overflow::Block) space_.notify_all();
             return batch;
         }
 
-        void close() {
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                closed_ = true;
-            }
-            work_.notify_all();
-            space_.notify_all();
-        }
-
-        size_t depth() const {
-            std::lock_guard<std::mutex> lock(mutex_);
-            return size_;
-        }
-
-        Stats stats() const {
-            std::lock_guard<std::mutex> lock(mutex_);
-            Stats copy = stats_;
-            copy.depth = size_;
-            return copy;
-        }
-
-        bool closed() const {
-            std::lock_guard<std::mutex> lock(mutex_);
-            return closed_;
-        }
-
-      private:
-        // ADR-005: the camera with the deepest lane loses a frame. Charging the drop to the
-        // greediest camera rather than to the oldest frame is the whole point — the victim of
-        // an eviction should be the cause of the pressure.
-        bool evict_greediest_locked() {
-            std::string worst;
-            size_t deepest = 0;
-            for (const auto& [camera, lane] : lanes_) {
-                if (lane.size() > deepest) {
-                    deepest = lane.size();
-                    worst = camera;
-                }
-            }
-            if (worst.empty()) return false;
-            // The newest of the greediest, not the oldest of anyone. (The Python queue evicts
-            // the greediest camera's *oldest*; the ported queue in P1a follows Python.)
-            T victim = std::move(lanes_[worst].back());
-            lanes_[worst].pop_back();
-            --size_;
-            ++stats_.evicted;
-            ++stats_.evicted_by_camera[worst];
-            // The evicted item reaches the caller rather than dying here with its tag: a frame
-            // that vanishes at the queue is the failure the collector exists to prevent.
-            if (on_evict_) on_evict_(std::move(victim));
-            return true;
-        }
+        std::string name_;
+        size_t capacity_;
+        Overflow overflow_;
+        int block_timeout_ms_;
+        bool drop_expired_;
+        DropHandler<T> on_drop_;
 
         mutable std::mutex mutex_;
         std::condition_variable work_;
         std::condition_variable space_;
-        std::map<std::string, std::deque<T>> lanes_;
-        std::vector<std::string> order_;
-        size_t next_ = 0;
-        size_t size_ = 0;
-        size_t capacity_;
-        Overflow overflow_;
-        int block_timeout_ms_;
-        std::function<void(T&&)> on_evict_;
+        Lane<T> lanes_[kPriorityLevels];
+        std::atomic<size_t> size_{0};
         bool closed_ = false;
-        Stats stats_;
+        QueueStats stats_;
     };
 
 }  // namespace shipinfer

@@ -15,12 +15,18 @@
 #include <thread>
 #include <vector>
 
+#include "shipinfer/backends/tensorrt/adapter.h"
+#include "shipinfer/backends/tensorrt/engine.h"
 #include "shipinfer/core/platform.h"
 #include "shipinfer/ingest/sources/replay.h"
 #include "shipinfer/obs/sampler.h"
-#include "shipinfer/pipeline/graph/graph.h"
+#include "shipinfer/pipeline/graph/dag.h"
+#include "shipinfer/pipeline/graph/shapes.h"
+#include "shipinfer/pipeline/graph/stages.h"
 #include "shipinfer/pipeline/reassembly/collector.h"
+#include "shipinfer/scheduling/policies/registry.h"
 #include "shipinfer/scheduling/queues/fair.h"
+#include "shipinfer/server/model.h"
 
 using namespace shipinfer;
 
@@ -46,6 +52,11 @@ namespace {
 
         size_t rows() const { return 1; }
         std::string camera() const { return tag.camera_id; }
+        // A frame into the detector is NORMAL priority with no deadline — what the Python
+        // pipeline submits. The lanes above and below exist for the requests that will use
+        // them.
+        int priority() const { return Priority::Normal; }
+        bool expired(int64_t) const { return false; }
     };
 
     struct Options {
@@ -62,6 +73,13 @@ namespace {
         double seconds = 40.0;
         int workers = 32;
         int queue_capacity = 65536;
+        // The detector's batch window, `dynamic_batching.max_queue_delay_us` in the demo
+        // repository's config: once one frame is in, the queue waits this long for a batch to
+        // fill.
+        int batch_delay_us = 2000;
+        // The placement policy for every model, by name — the Python plane's default.
+        std::string policy = "locality_spillover";
+        int stage_timeout_ms = 5000;
         int reassembly_capacity = 1024;
         int reassembly_timeout_ms = 1500;
         int det_instances = 2;
@@ -115,6 +133,12 @@ namespace {
                 options.workers = std::stoi(next());
             else if (flag == "--queue-capacity")
                 options.queue_capacity = std::stoi(next());
+            else if (flag == "--batch-delay-us")
+                options.batch_delay_us = std::stoi(next());
+            else if (flag == "--policy")
+                options.policy = next();
+            else if (flag == "--stage-timeout-ms")
+                options.stage_timeout_ms = std::stoi(next());
             else if (flag == "--det-instances")
                 options.det_instances = std::stoi(next());
             else if (flag == "--seg-instances")
@@ -134,7 +158,7 @@ namespace {
         return options;
     }
 
-    std::string meta_json(const Options& options, const PipelineGraph& graph) {
+    std::string meta_json(const Options& options, const std::vector<std::string>& stages) {
         std::ostringstream out;
         out << "{\"meta\": {\"system\": \"cpp\", \"config\": {";
         out << "\"cameras\": " << options.cameras;
@@ -142,12 +166,13 @@ namespace {
         out << ", \"seconds\": " << options.seconds;
         out << ", \"workers\": " << options.workers;
         out << ", \"buffer_capacity\": " << options.queue_capacity;
+        out << ", \"batch_delay_us\": " << options.batch_delay_us;
+        out << ", \"policy\": \"" << options.policy << "\"";
         out << ", \"gpus\": [";
         for (size_t i = 0; i < options.devices.size(); ++i) {
             out << (i ? ", " : "") << options.devices[i];
         }
         out << "]}, \"stages\": [";
-        const auto stages = graph.stage_names();
         for (size_t i = 0; i < stages.size(); ++i)
             out << (i ? ", " : "") << "\"" << stages[i] << "\"";
         out << "], \"note\": \"C++ data plane; tracking and fused kernels are NOT in this "
@@ -161,31 +186,72 @@ int main(int argc, char** argv) {
     try {
         const Options options = parse(argc, argv);
 
-        GraphConfig graph_config;
-        graph_config.detector_plan = options.det_plan;
-        graph_config.segmenter_plan = options.seg_plan;
-        graph_config.embedder_plan = options.emb_plan;
-        graph_config.devices = options.devices;
-        graph_config.detector_instances = options.det_instances;
-        graph_config.segmenter_instances = options.seg_instances;
-        graph_config.embedder_instances = options.emb_instances;
-        graph_config.ship_embedder_plan = options.ship_emb_plan;
-        graph_config.ship_embedder_instances = options.ship_emb_instances;
-
+        // -- the models: one Model per plan, one instance per (device x count), each behind the
+        // Engine contract — the Python plane's shape (server/model.py) replacing the pool
+        // graph.
         std::cerr << "loading engines...\n";
         const auto load_start = std::chrono::steady_clock::now();
-        PipelineGraph graph(graph_config);
-        // A frame whose object stages threw is counted by `execute`; the reason is printed for
-        // the first few, because a count with no cause is a diagnosis nobody can start.
-        graph.on_frame_error([](const FrameTag& tag, const char* what) {
-            static std::atomic<int> shouted{0};
-            if (shouted.fetch_add(1) < 5)
-                std::cerr << "frame " << tag.key() << " failed: " << what << "\n";
-        });
+        struct Spec {
+            std::string name;
+            std::string plan;
+            int per_device;
+            std::vector<int64_t> fed_row;
+        };
+        const int64_t d = 640;
+        const std::vector<Spec> specs{
+            {"ship_detector", options.det_plan, options.det_instances, {3, d, d}},
+            {"ship_segmenter", options.seg_plan, options.seg_instances, {3, d, d}},
+            {"person_embedder", options.emb_plan, options.emb_instances, {3, 256, 128}},
+            {"ship_embedder", options.ship_emb_plan, options.ship_emb_instances, {3, 256, 128}},
+        };
+        std::map<std::string, std::unique_ptr<Model>> models;
+        for (const Spec& spec : specs) {
+            if (spec.plan.empty()) continue;
+            std::vector<std::unique_ptr<ModelInstance>> instances;
+            for (int device : options.devices) {
+                // One engine per device, shared by that device's instances: the weights are
+                // paid for once per GPU rather than once per instance.
+                auto engine = TrtEngine::load(spec.plan, device);
+                if (device == options.devices.front()) {
+                    // Once per model: which `execute()` branch this plan takes. A static plan
+                    // is padded to its batch; a dynamic one runs the rows it was given.
+                    std::printf("engine %s: max_batch %d, %s plan\n", spec.name.c_str(),
+                                engine->max_batch(),
+                                engine->is_static() ? "static" : "dynamic");
+                }
+                // The config is a claim about the plan; the plan is the fact (review of #15).
+                if (engine->inputs().empty())
+                    throw ConfigError(spec.name + ": the plan declares no input");
+                expect_input_row(engine->inputs().front(), spec.fed_row, spec.name);
+                for (const TensorSpec& t : engine->inputs()) expect_float32(t, spec.name);
+                for (const TensorSpec& t : engine->outputs()) expect_float32(t, spec.name);
+                for (int i = 0; i < spec.per_device; ++i) {
+                    auto adapter = std::make_unique<TrtEngineAdapter>(
+                        std::make_unique<TrtInstance>(engine, device));
+                    const BatchWindow window(static_cast<size_t>(engine->max_batch()),
+                                             options.batch_delay_us);
+                    instances.push_back(std::make_unique<ModelInstance>(
+                        spec.name + ":" + std::to_string(device) + ":" + std::to_string(i),
+                        std::move(adapter), window, static_cast<size_t>(options.queue_capacity),
+                        Overflow::Reject,
+                        [](Device dev) { GPU_CHECK(gpuSetDevice(dev.index)); }));
+                }
+            }
+            models[spec.name] = std::make_unique<Model>(spec.name, std::move(instances),
+                                                        build_policy(options.policy));
+        }
+        if (models.count("ship_detector") == 0) throw ConfigError("--det-engine is required");
+        for (auto& [name, model] : models) model->start(std::chrono::milliseconds(120000));
         const double startup_s =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - load_start)
                 .count();
         std::cerr << "engines ready in " << startup_s << "s\n";
+
+        // The stage names, for the log's metadata and the collector's expectations.
+        std::vector<std::string> stage_names{"detect", "crop"};
+        if (models.count("ship_segmenter")) stage_names.push_back("ship_segmenter");
+        if (models.count("person_embedder")) stage_names.push_back("person_embedder");
+        if (models.count("ship_embedder")) stage_names.push_back("ship_embedder");
 
         std::atomic<uint64_t> emitted{0};
         std::atomic<uint64_t> complete{0};
@@ -203,8 +269,15 @@ int main(int argc, char** argv) {
             },
             static_cast<size_t>(options.reassembly_capacity), options.reassembly_timeout_ms);
 
-        FairQueue<FrameWork> queue(static_cast<size_t>(options.queue_capacity),
-                                   Overflow::Reject);
+        // Frames the queue still held when the run stopped are counted, not destroyed silently:
+        // frames_read - frames_accepted is otherwise a number the reader has to explain by
+        // hand.
+        std::atomic<uint64_t> unread_at_stop{0};
+        FairPriorityQueue<FrameWork> queue(
+            "pipeline", static_cast<size_t>(options.queue_capacity), Overflow::Reject, 50, true,
+            [&unread_at_stop](FrameWork&&, DropReason why) {
+                if (why == DropReason::Closed) unread_at_stop.fetch_add(1);
+            });
 
         // -- the sampler: the same log shape as the other two systems ---------------------
         OccupancySampler sampler(
@@ -215,19 +288,12 @@ int main(int argc, char** argv) {
                 // silently read as empty — which is the right refusal and cost me one run.
                 std::map<std::string, long long> row;
                 row["pipeline_buffer_size"] = static_cast<long long>(queue.depth());
-                row["ship_detector_buffer_size"] = graph.detector().waiting();
-                if (graph.segmenter() != nullptr) {
-                    row["ship_segmenter_buffer_size"] = graph.segmenter()->waiting();
-                }
-                if (graph.embedder() != nullptr) {
-                    row["person_embedder_buffer_size"] = graph.embedder()->waiting();
-                }
-                if (graph.ship_embedder() != nullptr) {
-                    row["ship_embedder_buffer_size"] = graph.ship_embedder()->waiting();
+                for (const auto& [name, model] : models) {
+                    row[name + "_buffer_size"] = static_cast<long long>(model->total_depth());
                 }
                 return row;
             },
-            options.sample_interval_s, meta_json(options, graph));
+            options.sample_interval_s, meta_json(options, stage_names));
 
         // -- workers ----------------------------------------------------------------------
         std::atomic<bool> stopping{false};
@@ -236,124 +302,101 @@ int main(int argc, char** argv) {
         std::mutex refused_mutex;
         std::map<std::string, uint64_t> open_refused_by_camera;
         std::vector<std::thread> workers;
-        // Only what runs for *every* frame. The conditional per-object stages are added by
-        // the graph once the detections are known — see `PipelineGraph::execute`. Expecting
-        // all of them up front sealed every ship-only frame as Incomplete with
-        // `missing=["person_embedder"]`, which at a 50/50 library split is most of the fleet,
-        // and made a real embedder outage emit a byte-identical event.
         const std::vector<std::string> unconditional{"detect", "crop"};
-
-        const int detector_batch = graph.detector().max_batch();
+        // The pipeline queue hands frames to workers one at a time, as the Python runner does;
+        // the batching happens in each model's own instance queue under its window, across
+        // every frame in flight.
+        const BatchWindow frame_window(1, 0);
+        std::atomic<int> failures_shouted{0};
         for (int w = 0; w < options.workers; ++w) {
-            // Pinned to one device for its whole life (ADR-002). The worker owns the copy of
-            // every frame it takes onto *its* device, so the lease it then takes is on the
-            // same device by construction.
             const int device = options.devices[static_cast<size_t>(w) % options.devices.size()];
             workers.emplace_back([&, device]() {
-                // Everything a worker does — binding its device, creating its stream, growing
-                // its staging, serving — is inside one try. A GPU_CHECK throw anywhere else
-                // escapes the thread function and calls std::terminate: a run lost with no
-                // counters and a truncated log. The first guard covered only the loop; the two
-                // calls that most plausibly fail on a shared box (materialising the context,
-                // creating a stream, both of which can return cudaErrorMemoryAllocation) sat
-                // outside it.
-                struct StreamHolder {
-                    gpuStream_t stream = nullptr;
-                    ~StreamHolder() {
-                        if (stream != nullptr) gpuStreamDestroy(stream);
-                    }
-                };
                 try {
                     GPU_CHECK(gpuSetDevice(device));
-                    DeviceBuffer staging;
-                    StreamHolder copy;
-                    GPU_CHECK(gpuStreamCreate(&copy.stream));
-                    gpuStream_t copy_stream = copy.stream;
+                    WorkerScratch scratch(Device::cuda(device));
+                    // The frame's pixels live in this worker's own device buffer; one frame at
+                    // a time, and every stage's future is awaited before the next frame
+                    // overwrites it.
+                    auto pixels = std::make_shared<DeviceBuffer>();
+
+                    Dag dag;
+                    dag.add(std::make_unique<DetectStage>(
+                        "detect", *models.at("ship_detector"), DetectConfig{}, scratch,
+                        std::chrono::milliseconds(options.stage_timeout_ms)));
+                    std::vector<CropSpec> crops;
+                    if (models.count("person_embedder"))
+                        crops.push_back({"person_crops", "person", 0, 256, 128});
+                    if (models.count("ship_segmenter"))
+                        crops.push_back({"ship_crops_640", "ship", 8, 640, 640});
+                    if (models.count("ship_embedder"))
+                        crops.push_back({"ship_crops", "ship", 8, 256, 128});
+                    if (crops.empty()) crops.push_back({"person_crops", "person", 0, 256, 128});
+                    dag.add(std::make_unique<CropStage>("crop", crops,
+                                                        DetectConfig{}.max_objects, scratch));
+                    if (models.count("ship_segmenter")) {
+                        dag.add(std::make_unique<ObjectStage>(
+                            "ship_segmenter", *models.at("ship_segmenter"), "ship_crops_640",
+                            "ship_segmenter_out",
+                            std::chrono::milliseconds(options.stage_timeout_ms)));
+                    }
+                    if (models.count("person_embedder")) {
+                        dag.add(std::make_unique<ObjectStage>(
+                            "person_embedder", *models.at("person_embedder"), "person_crops",
+                            "person_embedder_out",
+                            std::chrono::milliseconds(options.stage_timeout_ms)));
+                    }
+                    if (models.count("ship_embedder")) {
+                        dag.add(std::make_unique<ObjectStage>(
+                            "ship_embedder", *models.at("ship_embedder"), "ship_crops",
+                            "ship_embedder_out",
+                            std::chrono::milliseconds(options.stage_timeout_ms)));
+                    }
+
                     while (!stopping.load()) {
-                        // A detector-sized batch, because the plan is static at that batch and
-                        // `setInputShape` refuses anything else. Rows, not items: the queue
-                        // counts rows and one frame is one detector row.
-                        auto batch = queue.drain(static_cast<size_t>(detector_batch), 50);
-                        if (batch.empty()) continue;
-
-                        // Only the tags this iteration opened are sealed at the end. Sealing
-                        // every drained tag found the *other*, still-running frame behind a
-                        // duplicate tag and sealed it early as Incomplete — unreachable while
-                        // frame ids are monotonic, reachable the day a reconnecting camera
-                        // restarts its counter.
-                        std::vector<FrameTag> opened;
-                        try {
-                            // Grown once, never shrunk, and never freed inside the loop.
-                            // Rewritten every iteration while the previous batch's kernels read
-                            // it on a leased instance's stream — safe only because
-                            // TrtInstance::execute synchronises that stream before the lease is
-                            // released, so every reader has retired. That safety is non-local,
-                            // which is why it is written down here.
-                            size_t frame_bytes = 0;
-                            for (const auto& item : batch) {
-                                frame_bytes = std::max(frame_bytes,
-                                                       static_cast<size_t>(item.frame.height) *
-                                                           item.frame.width * 3);
+                        auto batch = queue.get_batch(frame_window);
+                        if (batch.empty()) {
+                            if (queue.is_closed()) break;
+                            continue;
+                        }
+                        for (FrameWork& item : batch) {
+                            accepted.fetch_add(1);
+                            if (!collector.open(item.state, unconditional)) {
+                                failed.fetch_add(1);
+                                std::lock_guard<std::mutex> lock(refused_mutex);
+                                ++open_refused_by_camera[item.tag.camera_id];
+                                continue;
                             }
-                            const size_t needed =
-                                frame_bytes * static_cast<size_t>(detector_batch);
-                            if (staging.bytes() < needed) staging = DeviceBuffer(needed);
-
-                            std::vector<PipelineGraph::Work> work;
-                            size_t slot = 0;
-                            for (auto& item : batch) {
-                                accepted.fetch_add(1);
-                                if (!collector.open(item.state, unconditional)) {
-                                    // Refused, counted, and attributed: ADR-005 exists so a
-                                    // camera's misses are a number, and a global counter is
-                                    // not.
-                                    failed.fetch_add(1);
-                                    std::lock_guard<std::mutex> lock(refused_mutex);
-                                    ++open_refused_by_camera[item.tag.camera_id];
-                                    continue;
-                                }
-                                opened.push_back(item.tag);
+                            try {
                                 const size_t bytes = static_cast<size_t>(item.frame.height) *
                                                      item.frame.width * 3;
-                                uint8_t* target = staging.as<uint8_t>() + slot * frame_bytes;
-                                ++slot;
-                                // Async, on this worker's own stream, out of page-locked source
-                                // pages (`ReplaySource` registers the library at load).
-                                GPU_CHECK(gpuMemcpyAsync(target, item.frame.pixels, bytes,
-                                                         gpuMemcpyHostToDevice, copy_stream));
-                                work.push_back({item.state.get(), target});
-                            }
-                            GPU_CHECK(gpuStreamSynchronize(copy_stream));
-
-                            if (!work.empty()) {
-                                try {
-                                    // Per-frame failures come back as a count; only a detector
-                                    // failure, a whole-batch fact, still arrives as a throw.
-                                    failed.fetch_add(graph.execute(work, device, collector));
-                                } catch (const std::exception& error) {
-                                    failed.fetch_add(static_cast<uint64_t>(work.size()));
-                                    static std::atomic<int> shouted{0};
-                                    if (shouted.fetch_add(1) < 5) {
-                                        std::cerr << "worker on gpu" << device
-                                                  << " failed: " << error.what() << "\n";
+                                if (pixels->bytes() < bytes) *pixels = DeviceBuffer(bytes);
+                                GPU_CHECK(gpuMemcpyAsync(pixels->get(), item.frame.pixels,
+                                                         bytes, gpuMemcpyHostToDevice,
+                                                         scratch.stream()));
+                                scratch.synchronise();
+                                item.state->set_image(pixels, device);
+                                CollectorObserver observer(collector, item.tag);
+                                for (const StageOutcome& outcome :
+                                     dag.execute(*item.state, observer)) {
+                                    if (outcome.status == StageStatus::Failed &&
+                                        failures_shouted.fetch_add(1) < 5) {
+                                        std::cerr << "frame " << item.tag.key() << " stage "
+                                                  << outcome.stage
+                                                  << " failed: " << outcome.error << "\n";
                                     }
                                 }
+                            } catch (const std::exception& error) {
+                                failed.fetch_add(1);
+                                static std::atomic<int> shouted{0};
+                                if (shouted.fetch_add(1) < 5) {
+                                    std::cerr << "worker on gpu" << device << " failed frame "
+                                              << item.tag.key() << ": " << error.what() << "\n";
+                                }
                             }
-                        } catch (const std::exception& error) {
-                            // The staging or the copy failed: every frame opened this round is
-                            // failed and sealed below, so it is reported exactly once, and the
-                            // worker keeps serving — the next batch may well succeed.
-                            failed.fetch_add(static_cast<uint64_t>(opened.size()));
-                            static std::atomic<int> shouted_staging{0};
-                            if (shouted_staging.fetch_add(1) < 5) {
-                                std::cerr << "worker on gpu" << device
-                                          << " could not stage a batch: " << error.what()
-                                          << "\n";
-                            }
+                            // Sealed on every path, so "every opened frame is reported exactly
+                            // once" holds even when a stage threw.
+                            collector.seal(item.tag);
                         }
-                        // Sealed on every path, so "every opened frame is reported exactly
-                        // once" holds even when the graph threw halfway through the batch.
-                        for (const FrameTag& tag : opened) collector.seal(tag);
                     }
                 } catch (const std::exception& error) {
                     std::cerr << "worker on gpu" << device << " exited: " << error.what()
@@ -396,7 +439,7 @@ int main(int argc, char** argv) {
                     work.frame = frame;
                     work.state =
                         std::make_shared<FrameState>(tag, frame.height, frame.width, 0.0f);
-                    return queue.put(std::move(work));
+                    return queue.put(std::move(work)) == PutStatus::Accepted;
                 }));
         }
 
@@ -411,6 +454,10 @@ int main(int argc, char** argv) {
         stopping.store(true);
         queue.close();
         for (auto& worker : workers) worker.join();
+        // After the workers: a model stopped while a worker still had a frame in hand failed
+        // that frame's embedder request as 'instance stopped' and sealed it Incomplete at
+        // shutdown.
+        for (auto& [name, model] : models) model->stop();
         sweeper.join();
         collector.drain();
         sampler.stop();
@@ -442,6 +489,7 @@ int main(int argc, char** argv) {
         }
         std::cout << "events_emitted " << emitted.load() << "\n";
         std::cout << "queue_rejected " << stats.rejected << "\n";
+        std::cout << "queue_unread_at_stop " << unread_at_stop.load() << "\n";
         for (const auto& [camera, count] : stats.rejected_by_camera) {
             std::cout << "queue_rejected_by_camera " << camera << " " << count << "\n";
         }
@@ -454,24 +502,17 @@ int main(int argc, char** argv) {
         }
         std::cout << "events_complete " << complete.load() << "\n";
         std::cout << "events_incomplete " << (emitted.load() - complete.load()) << "\n";
-        std::cout << "per_device";
-        for (const auto& [device, count] : graph.detector().per_device()) {
-            std::cout << " ship_detector:gpu" << device << "=" << count;
-        }
-        if (graph.embedder() != nullptr) {
-            for (const auto& [device, count] : graph.embedder()->per_device()) {
-                std::cout << " person_embedder:gpu" << device << "=" << count;
+        // Requests executed per model per device — the per-device breakdown a PR needs
+        // (ADR-006), now read from the instances themselves.
+        for (const auto& [name, model] : models) {
+            std::map<int, uint64_t> by_device;
+            for (const auto& instance : model->instances()) {
+                by_device[instance->device().index] += instance->stats().requests;
             }
-        }
-        if (graph.segmenter() != nullptr) {
-            for (const auto& [device, count] : graph.segmenter()->per_device()) {
-                std::cout << " ship_segmenter:gpu" << device << "=" << count;
-            }
-        }
-        if (graph.ship_embedder() != nullptr) {
-            for (const auto& [device, count] : graph.ship_embedder()->per_device()) {
-                std::cout << " ship_embedder:gpu" << device << "=" << count;
-            }
+            std::cout << "per_device " << name;
+            for (const auto& [device, count] : by_device)
+                std::cout << " " << device << ":" << count;
+            std::cout << "\n";
         }
         std::cout << "\n";
         return 0;

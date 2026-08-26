@@ -58,6 +58,10 @@ namespace shipinfer {
         nvinfer1::ICudaEngine* raw() const { return engine_; }
         int device() const { return device_; }
         int max_batch() const { return max_batch_; }
+        // A static plan states its batch and refuses any other; a dynamic one carries -1 and
+        // a profile. Read off the plan rather than assumed, so a dynamic plan keeps the batch
+        // window's whole point — running the rows it was given — instead of a padded maximum.
+        bool is_static() const { return static_batch_; }
         const std::vector<TensorSpec>& inputs() const { return inputs_; }
         const std::vector<TensorSpec>& outputs() const { return outputs_; }
         const std::string& path() const { return path_; }
@@ -69,6 +73,7 @@ namespace shipinfer {
         std::string path_;
         int device_ = 0;
         int max_batch_ = 1;
+        bool static_batch_ = true;
         nvinfer1::IRuntime* runtime_ = nullptr;
         nvinfer1::ICudaEngine* engine_ = nullptr;
         std::vector<TensorSpec> inputs_;
@@ -115,6 +120,7 @@ namespace shipinfer {
         size_t output_rows(size_t index = 0) const;
 
         int max_batch() const { return engine_->max_batch(); }
+        bool is_static() const { return engine_->is_static(); }
         int device() const { return device_; }
         uint64_t executed() const { return executed_; }
         uint64_t rows_executed() const { return rows_; }

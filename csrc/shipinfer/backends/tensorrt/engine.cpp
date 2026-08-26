@@ -111,6 +111,7 @@ namespace shipinfer {
             for (int d = 1; d < shape.nbDims; ++d) spec.dims.push_back(shape.d[d]);
 
             int batch = shape.nbDims > 0 ? static_cast<int>(shape.d[0]) : 1;
+            if (is_input && batch < 0) static_batch_ = false;
             if (batch < 0) {
                 const auto profile_max =
                     engine_->getProfileShape(name, 0, nvinfer1::OptProfileSelector::kMAX);
