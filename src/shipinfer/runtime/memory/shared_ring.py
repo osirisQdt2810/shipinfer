@@ -60,7 +60,11 @@ box's ceiling (16 GPUs x 3 shared models is ~48 rings) a sweep is 48 one-byte st
 Memory ordering: the state-byte-after-payload discipline assumes stores are not reordered
 (x86-TSO), the same assumption vLLM's ring carries. On a weakly ordered ISA (aarch64) a
 reader could observe WRITTEN before the payload stores land; accepted for now — this box and
-the deployment are x86 — and recorded here so a port knows where to add the fence.
+the deployment are x86 — and recorded here so a port knows where to add the fence. The same
+caveat covers the header stamp: a 24-byte memcpy is per-field atomic in practice on x86 for
+naturally aligned fields, not by architectural guarantee. And pinned-view liveness is the
+*Python object's*: a tensor from `pinned_tensor` must outlive every async copy it feeds — the
+ring cannot see the stream, only the handle.
 
 Pinned-view liveness is tracked, not guessed: `pinned_tensor` counts what it hands out and a
 finalizer on each tensor brings the count down, so `close()` unpins immediately when nothing
@@ -211,10 +215,18 @@ def reap_pending_closes() -> int:
         return len(still)
 
 
-def _release_view_quietly(view: memoryview) -> None:
-    """Finalizer for a handle that was never closed: drop its export so the mapping can go."""
+def _finalize_handle(view: memoryview, opened_name: str | None) -> None:
+    """Finalizer for a handle that was never closed.
+
+    Drops the view's export so ``SharedMemory.__del__`` can close quietly, and — for a writer
+    handle — releases the one-open-per-process claim, so a handle lost to an exception on the
+    connect path does not make every later ``open()`` of that ring read as terminal.
+    """
     with contextlib.suppress(Exception):
         view.release()
+    if opened_name is not None:
+        with _PENDING_LOCK:
+            _OPENED_NAMES.discard(opened_name)
 
 
 def _attach(name: str) -> shared_memory.SharedMemory:
@@ -282,12 +294,17 @@ class SharedRing:
         self._view_lock = threading.Lock()
         # A handle dropped without close() must not strand the mapping: the finalizer lets
         # `SharedMemory.__del__` succeed instead of printing an ignored BufferError.
-        weakref.finalize(self, _release_view_quietly, self._view)
+        weakref.finalize(self, _finalize_handle, self._view, None if is_owner else name)
         self._next = 0
         self._take_next = 0
         self._pinned: Any = None
         self._pinned_ptr = 0
-        self._pin_lock = threading.Lock()
+        # Reentrant, deliberately: `_pinned_view_died` is a weakref.finalize callback and
+        # those run synchronously in whatever thread triggers the collection — including a
+        # cyclic gc landing on the allocation *inside* `pinned_tensor`'s locked region. With a
+        # plain Lock that thread deadlocks on itself; re-entry here is benign (the count was
+        # already taken, and `_parked_unregister` is still None at every allocation point).
+        self._pin_lock = threading.RLock()
         self._pinned_live = 0
         #: Latched under `_pin_lock` by `close()` before anything is unpinned, so a handout
         #: racing the close is refused instead of registering pages nothing will ever free.
@@ -509,9 +526,12 @@ class SharedRing:
     @property
     def depth(self) -> int:
         """Slots not currently free — what a writer sees as the ring's backlog."""
-        if self._detached:
-            return 0
-        return sum(1 for i in range(self._layout.slots) if self.state(i) != SlotState.FREE)
+        with self._view_lock:
+            if self._detached:
+                return 0
+            offset = self._layout.state_offset(0)
+            states = self._view[offset : offset + self._layout.slots]
+            return sum(1 for value in states if value != SlotState.FREE)
 
     def claim(self, timeout_s: float) -> int:
         """Writer: take a free slot, or refuse with the numbers.
@@ -648,6 +668,13 @@ class SharedRing:
     def pinned_tensor(self, index: int) -> Any:
         """The slot as a torch uint8 tensor over pinned memory, registered once per process.
 
+        **The caller's obligation:** liveness is tracked on the *tensor object*, not on the
+        copies it feeds. torch does not extend a host source's lifetime across an async H2D
+        copy, so the caller must keep this tensor alive until every ``non_blocking`` copy from
+        it has synchronised (record the stream or event and sync before dropping it) —
+        otherwise ``close()`` may unpin pages a queued DMA is still reading, which is
+        undefined behaviour.
+
         Pinning is per process because ``cudaHostRegister`` registers *this* process's
         mapping with *this* process's DMA engine; the block exists once. Requires torch and a
         device — the one method here that does, kept apart so everything else runs offline.
@@ -764,8 +791,9 @@ class SharedRing:
         # already unpinned, so it can never unpin anything, let alone under a live DMA.
         reap_pending_closes()
         if unregister is not None:
-            # No pinned view was out at the latch, so no DMA through this ring can be in
-            # flight: unpin now, while the mapping is certainly alive.
+            # No pinned view was out at the latch — so, *provided callers honoured
+            # `pinned_tensor`'s contract* (a tensor outlives the copies it feeds), no DMA
+            # through this ring is in flight: unpin now, while the mapping is certainly alive.
             unregister()
             unregister = None
         closed_now = False

@@ -874,3 +874,65 @@ class TestTheStampWindow:
         from shipinfer.runtime.memory import shared_ring as module
 
         assert module._STAMP_OFFSET + module._STAMP.size <= module.SharedRing._CLOSED_OFFSET
+
+
+class TestTheFinalizerCannotDeadlockTheHandout:
+    class _View:
+        def data_ptr(self) -> int:
+            return 0xF00D
+
+        def numel(self) -> int:
+            return 4096
+
+    @pytest.mark.timeout(10)
+    def test_a_cyclic_gc_inside_the_locked_region_re_enters_and_returns(
+        self, ring, monkeypatch
+    ) -> None:
+        """Round 9: `weakref.finalize` callbacks run synchronously in whatever thread triggers
+        the collection — including a cyclic gc landing on the allocation *inside*
+        `pinned_tensor`'s locked region. With a plain Lock the worker thread deadlocks on
+        itself; the reentrant lock lets the finalizer's decrement through."""
+        from types import SimpleNamespace
+
+        import shipinfer.runtime.platform as platform_module
+
+        calls = {"n": 0}
+
+        def frombuffer(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] > 1:
+                gc.collect()  # collects the cycle-held first tensor -> finalizer re-enters
+            return self._View()
+
+        self_views = self._View  # noqa: F841 - keep the class referenced for clarity
+        fake_torch = SimpleNamespace(
+            uint8="uint8",
+            frombuffer=frombuffer,
+            cuda=SimpleNamespace(
+                cudart=lambda: SimpleNamespace(
+                    cudaHostRegister=lambda ptr, n, flags: 0,
+                    cudaHostUnregister=lambda ptr: None,
+                )
+            ),
+        )
+        monkeypatch.setattr(platform_module, "require_torch", lambda _ft=fake_torch: _ft)
+        first = ring.pinned_tensor(0)
+        cycle = [first]
+        cycle.append(cycle)  # reachable only through the cycle once the name is dropped
+        del first, cycle
+        second = ring.pinned_tensor(1)  # the collection fires inside the locked region
+        assert second is not None, "the handout returned instead of deadlocking"
+        del second
+        gc.collect()
+        ring.close()
+
+
+class TestADroppedWriterHandleReleasesItsClaim:
+    def test_open_works_again_after_the_handle_is_lost(self, ring) -> None:
+        """A writer lost to an exception on the connect path must not make every later open
+        of that ring read as terminal: the finalizer releases the one-open claim."""
+        writer = SharedRing.open(ring.name, ring.layout)
+        del writer
+        gc.collect()
+        again = SharedRing.open(ring.name, ring.layout)  # not "already open in this process"
+        again.close()
