@@ -39,7 +39,9 @@ def main(argv: list[str]) -> int:
         [
             sys.executable,
             "-c",
-            "import shipvision._C; assert shipvision._C.is_available()",
+            # `cuda_available` is the name the extension binds; `is_available` never existed
+            # there, and asserting it made a good build fail with advice that did not apply.
+            "import shipvision._C; assert shipvision._C.cuda_available()",
         ],
         cwd=ROOT,
     )

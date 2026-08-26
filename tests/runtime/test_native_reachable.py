@@ -7,13 +7,13 @@ reasons, and each has a test here that goes red against the old code.
 
 from __future__ import annotations
 
-import importlib
 import sys
 import types
 
 import numpy as np
 import pytest
 
+from shipinfer.core.errors import ConfigurationError
 from shipinfer.runtime import native
 from shipinfer.runtime.ops import NormalizeParams, native_ops
 
@@ -41,12 +41,10 @@ class TestTheExtensionIsImportedByItsOwnName:
         )  # no `_C` attribute, as after `import shipvision`
         extension = _extension(cuda_available=lambda: True)
         monkeypatch.setitem(sys.modules, "shipvision", package)
+        # Patch the seam, not the stdlib: `native.importlib` *is* `importlib`, so replacing its
+        # attribute would change every lazy import in the process for the test's duration.
         monkeypatch.setattr(
-            native.importlib,
-            "import_module",
-            lambda name: (
-                extension if name == "shipvision._C" else importlib.import_module(name)
-            ),
+            native, "importlib", types.SimpleNamespace(import_module=lambda name: extension)
         )
         native.native_module.cache_clear()
         try:
@@ -57,11 +55,9 @@ class TestTheExtensionIsImportedByItsOwnName:
 
     def test_an_absent_extension_is_none_not_an_error(self, monkeypatch) -> None:
         def refuse(name):
-            if name == "shipvision._C":
-                raise ImportError("no build")
-            return importlib.import_module(name)
+            raise ImportError("no build")
 
-        monkeypatch.setattr(native.importlib, "import_module", refuse)
+        monkeypatch.setattr(native, "importlib", types.SimpleNamespace(import_module=refuse))
         native.native_module.cache_clear()
         try:
             assert native.native_module() is None
@@ -80,9 +76,10 @@ class TestTheProbeIsTheNameTheExtensionBinds:
     def test_cuda_available_true_means_usable(self) -> None:
         assert native._reports_devices(_extension(cuda_available=lambda: True)) is True
 
-    def test_is_available_alone_is_not_consulted(self) -> None:
-        # An extension that only has the *wrong* name is one that does not say; the ops decide.
-        assert native._reports_devices(_extension(is_available=lambda: False)) is True
+    def test_a_build_without_the_probe_is_not_usable(self) -> None:
+        # The ops refuse such a build, so the loader must not call it usable: one answer to
+        # "is native usable", or the banner says fast path while the data plane runs torch.
+        assert native._reports_devices(_extension(is_available=lambda: True)) is False
 
     def test_a_string_attribute_is_read_not_called(self) -> None:
         assert native._describe(_extension(), "platform") == "cuda"
@@ -97,7 +94,7 @@ class TestNativeImageOpsUsesTheExtensionsSurface:
         extension.ImageOps = lambda device: object()
         self._fake(monkeypatch, extension)
 
-        with pytest.raises(RuntimeError, match="cuda_available"):
+        with pytest.raises(ConfigurationError, match="cuda_available"):
             native_ops.NativeImageOps(device_index=0)
 
     def test_a_build_with_no_usable_device_says_so(self, monkeypatch) -> None:
@@ -105,7 +102,7 @@ class TestNativeImageOpsUsesTheExtensionsSurface:
         extension.ImageOps = lambda device: object()
         self._fake(monkeypatch, extension)
 
-        with pytest.raises(RuntimeError, match="no usable GPU kernels"):
+        with pytest.raises(ConfigurationError, match="no usable GPU kernels"):
             native_ops.NativeImageOps(device_index=0)
 
     def test_letterbox_batch_carries_the_extents_the_kernel_reports(self, monkeypatch) -> None:
@@ -137,3 +134,50 @@ class TestNativeImageOpsUsesTheExtensionsSurface:
 
         assert result.tensor.shape == (1, 3, 8, 8)
         assert result.extents is not None and result.extents.tolist() == [[4, 8]]
+
+    def test_letterbox_to_device_unpacks_the_three_values_the_kernel_returns(
+        self, monkeypatch
+    ) -> None:
+        """The fast path — the one production uses. CI never checks the submodule out, so this
+        double is what keeps a change in `letterbox_into`'s return shape visible offline."""
+
+        class _Ops:
+            def __init__(self, device: int) -> None:
+                self.calls: list[tuple] = []
+
+            def letterbox_into(
+                self, images, ptr, nbytes, dst_h, dst_w, mean, std, swap_rb, pad, stream
+            ):
+                self.calls.append((ptr, nbytes, dst_h, dst_w, pad, stream))
+                n = len(images)
+                return (
+                    np.full(n, 0.5, np.float32),
+                    np.zeros((n, 2), np.float32),
+                    np.zeros((n, 2), np.int32),
+                )
+
+        class _Out:  # duck-typed CUDA tensor: what the launch actually reads off it
+            shape = (2, 3, 8, 8)
+
+            def data_ptr(self) -> int:
+                return 0x1000
+
+            def numel(self) -> int:
+                return 2 * 3 * 8 * 8
+
+            def element_size(self) -> int:
+                return 4
+
+        extension = _extension(cuda_available=lambda: True)
+        extension.ImageOps = _Ops
+        self._fake(monkeypatch, extension)
+        # The contract check wants a real CUDA tensor; it is not what this test is about.
+        monkeypatch.setattr(native_ops, "check_device_output", lambda *args, **kwargs: None)
+        ops = native_ops.NativeImageOps(device_index=0)
+
+        scales, pads = ops.letterbox_to_device(
+            [np.zeros((10, 20, 3), np.uint8)] * 2, _Out(), NormalizeParams()
+        )
+
+        assert scales.shape == (2,) and pads.shape == (2, 2)
+        assert ops._ops.calls == [(0x1000, 2 * 3 * 8 * 8 * 4, 8, 8, 114, 0)]

@@ -130,13 +130,18 @@ def _reports_devices(module: ModuleType) -> bool:
     """Does this build have GPU kernels and a device to run them on?
 
     ``cuda_available`` is the name the extension binds. It used to read ``is_available``, which
-    it never defined — and because a missing probe is treated as "assume usable" here, that
+    it never defined — and because a missing probe was treated as "assume usable" here, that
     disagreement produced no error at all on this side. It produced one two files away, in
     `runtime/ops/native_ops.py`, where the same wrong name was called directly.
+
+    A build with no probe is *not* usable: `NativeImageOps` refuses it, so saying "usable" here
+    would have the banner, `health()` and `resolve_provider(AUTO)` all report the fast path
+    while every instance construction failed over to torch — the regression the provider
+    machinery exists to prevent. One answer, given once.
     """
     probe = getattr(module, "cuda_available", None)
     if probe is None:
-        return True  # an extension that does not say assumes usable; ops will tell us
+        return False
     try:
         return bool(probe())
     except Exception:  # pragma: no cover

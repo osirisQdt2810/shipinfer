@@ -21,6 +21,20 @@ __all__ = ["PipelineMetrics"]
 #: End-to-end frame latency in microseconds. The interesting range for this pipeline is
 #: 10 ms (detect only, warm) to 2 s (the reassembly timeout), so the default request
 #: buckets — shaped for a single inference — bottom out too early to be readable.
+
+_E2E_BUCKETS_US = (
+    5_000.0,
+    10_000.0,
+    25_000.0,
+    50_000.0,
+    100_000.0,
+    200_000.0,
+    500_000.0,
+    1_000_000.0,
+    2_000_000.0,
+    5_000_000.0,
+)
+
 #: Per-stage spans, from a sub-millisecond crop to a stage that has clearly stalled. Explicit
 #: rather than the registry default. `Histogram.quantile` reports the *upper edge* of the bucket
 #: the quantile falls in, and the default edges step by 2-2.5x (25 000, 50 000, 100 000,
@@ -50,19 +64,6 @@ _STAGE_BUCKETS_US = (
     630_000.0,
     1_000_000.0,
     2_000_000.0,
-)
-
-_E2E_BUCKETS_US = (
-    5_000.0,
-    10_000.0,
-    25_000.0,
-    50_000.0,
-    100_000.0,
-    200_000.0,
-    500_000.0,
-    1_000_000.0,
-    2_000_000.0,
-    5_000_000.0,
 )
 
 #: Detections (and therefore crops) per frame. The reference deployment saw 2 on a corridor

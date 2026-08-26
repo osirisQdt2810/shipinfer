@@ -58,7 +58,7 @@ python scripts/build_native.py --hip           # ROCm
 
 Both steps are needed and they fail differently: without the editable install the server
 cannot import the package at all, and without the build it imports but reports
-`is_available() == False` and falls back to torch. `shipinfer doctor` says which.
+`cuda_available() == False` and falls back to torch. `shipinfer doctor` says which.
 
 Three failure modes worth recognising, all of which the script now handles or explains:
 

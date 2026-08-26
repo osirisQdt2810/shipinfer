@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 
-from shipinfer.core.errors import ValidationError
+from shipinfer.core.errors import ConfigurationError, ValidationError
 from shipinfer.core.logging import get_logger
 from shipinfer.runtime.native import require_native
 from shipinfer.runtime.ops.base import ImageOps, LetterboxResult, NormalizeParams
@@ -94,6 +94,13 @@ class NativeImageOps(ImageOps):
     on_device = True
 
     def __init__(self, device_index: int = 0, stream: int = 0) -> None:
+        """Bind to the extension, or say precisely why it cannot be used.
+
+        Raises:
+            ConfigurationError: the build predates the probe, or reports no usable device —
+                the same class `require_native` raises for a *missing* build, so a start-up
+                failure for a wrong build and one for no build are one operational event.
+        """
         self._native: Any = require_native()
         # `cuda_available`, which is the name the extension actually binds. This read
         # `is_available` for as long as this class has existed, and nothing caught it: the
@@ -104,14 +111,14 @@ class NativeImageOps(ImageOps):
         # `__version__` bug found in review — a defect that lives in neither file.
         probe = getattr(self._native, "cuda_available", None)
         if probe is None:
-            raise RuntimeError(
+            raise ConfigurationError(
                 f"{self._native.__name__} is built but defines no `cuda_available`, so this "
                 f"build predates the kernels or exports a different surface. Rebuild the "
                 f"submodule; if that does not fix it, the two repositories have drifted and "
                 f"`tests/runtime/test_native.py` is where the agreement is pinned"
             )
         if not probe():
-            raise RuntimeError(
+            raise ConfigurationError(
                 "shipvision is built but reports no usable GPU kernels — either it was built "
                 "without CUDA, or no device is visible to this process"
             )
