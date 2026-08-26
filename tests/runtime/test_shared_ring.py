@@ -83,15 +83,21 @@ class TestCreateAndOpen:
             SharedRing.open(ring.name, RingLayout(slots=4, slot_bytes=2000))
 
     def test_a_foreign_block_is_not_a_ring(self) -> None:
-        from multiprocessing import shared_memory
+        """Nonzero garbage where a header should be is a build/protocol disagreement — loud.
+        (An all-zero header is different: that is a ring mid-birth, covered elsewhere.)"""
+        from multiprocessing import resource_tracker, shared_memory
 
-        block = shared_memory.SharedMemory(name=_name(), create=True, size=8192)
+        name = _name()
+        layout = RingLayout(slots=2, slot_bytes=4096)
+        foreign = shared_memory.SharedMemory(name=name, create=True, size=layout.total_bytes)
         try:
-            with pytest.raises(RingProtocolError, match="version"):
-                SharedRing.open(block.name, RingLayout(slots=1, slot_bytes=8))
+            foreign.buf[:64] = b"\x7fELF" + bytes(range(60))  # anything but our magic
+            with pytest.raises(RingProtocolError, match="not the same build"):
+                SharedRing.open(name, layout)
         finally:
-            block.close()
-            block.unlink()
+            resource_tracker.register(foreign._name, "shared_memory")
+            foreign.close()
+            foreign.unlink()
 
     def test_the_owner_unlinks_on_close(self) -> None:
         name = _name()
@@ -622,3 +628,24 @@ class TestCloseIsConcurrentByDesign:
             pass
         assert ring.is_closed
         assert module.reap_pending_closes() == 0
+
+
+class TestARingMidBirth:
+    def test_a_zero_header_is_not_ready_not_a_build_mismatch(self) -> None:
+        """The shm name is visible before the creator writes the header; a fast peer must be
+        told to retry (RingClosedError, which the connect loop retries on), not that the two
+        processes are different builds."""
+        from multiprocessing import resource_tracker, shared_memory
+
+        name = _name()
+        layout = RingLayout(slots=2, slot_bytes=4096)
+        bare = shared_memory.SharedMemory(name=name, create=True, size=layout.total_bytes)
+        try:
+            with pytest.raises(RingClosedError):
+                SharedRing.open(name, layout)
+        finally:
+            resource_tracker.register(
+                bare._name, "shared_memory"
+            )
+            bare.close()
+            bare.unlink()

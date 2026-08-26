@@ -304,6 +304,13 @@ class SharedRing:
             raise RingProtocolError(f"ring {name!r} is {block.size} bytes: no header")
         fields = _HEADER.unpack_from(block.buf, 0)
         magic, version, slots, slot_bytes = fields[0], fields[1], fields[2], fields[3]
+        if magic == 0:
+            # The name becomes visible at creation, *before* the creator writes the header:
+            # an all-zero header is a ring mid-birth (or a zero-filled foreign block), and
+            # both are "not ready" — retryable — not a build mismatch. The connect loop
+            # retries on RingClosedError and turns a persistent one into its own error.
+            block.close()
+            raise RingClosedError("unknown", name)
         owner = fields[9].rstrip(b"\0").decode(errors="replace")
         if magic != _MAGIC or version != RING_VERSION:
             block.close()
