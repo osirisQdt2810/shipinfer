@@ -46,6 +46,10 @@ int main() {
           "SHIPINFER_IN_CONTAINER=1 forces the answer");
     check(!classify(true, kDockerCgroup, kOverlayMounts, "0").in_container(),
           "SHIPINFER_IN_CONTAINER=0 forces the other answer");
+    check(classify(true, kDockerCgroup, kHostMounts, "true").in_container(),
+          "any other value is ignored: the signals decide (container)");
+    check(!classify(false, kHostCgroup, kHostMounts, "true").in_container(),
+          "any other value is ignored: the signals decide (host)");
     for (const char* needle : {"containerd", "kubepods", "libpod", "podman", "lxc"}) {
         check(
             classify(false, std::string("0::/x/") + needle + "/y", kHostMounts, nullptr).cgroup,

@@ -185,10 +185,12 @@ namespace {
 }  // namespace
 
 int main(int argc, char** argv) {
-    // Before any device is opened: the rule is enforced in the process that would do the
-    // work, and this binary run directly used to be the one spelling that passed both gates.
-    shipinfer::runtime::require_container("csrc bench");
     try {
+        // Before any device is opened: the rule is enforced in the process that would do
+        // the work, and this binary run directly used to be the one spelling that passed
+        // both gates. Inside the try, so a host run reports and exits 1 like every other
+        // failure instead of terminating.
+        shipinfer::runtime::require_container("csrc bench");
         const Options options = parse(argc, argv);
 
         // -- the models: one Model per plan, one instance per (device x count), each behind the

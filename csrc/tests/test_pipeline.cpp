@@ -13,6 +13,7 @@
 #include "shipinfer/pipeline/graph/stages.h"
 #include "shipinfer/pipeline/graph/state.h"
 #include "shipinfer/pipeline/reassembly/collector.h"
+#include "shipinfer/runtime/containment.h"
 
 namespace {
 
@@ -236,6 +237,9 @@ void scratch_pool_refuses_unbounded_growth() {
 }
 
 int main() {
+    // This binary opens devices, so it consults the container rule itself — the hook
+    // knows its name, but a rule only the hook enforces is not a rule (CLAUDE.md).
+    shipinfer::runtime::require_container("csrc test_pipeline");
     // The graph tests need no device and run first; the scratch tests allocate device
     // memory and skip — counted, on stderr — where there is none, so a device-less run
     // still exercises what this binary exists for instead of terminating on the way in.

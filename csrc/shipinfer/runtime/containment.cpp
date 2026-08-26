@@ -55,7 +55,11 @@ namespace shipinfer::runtime {
     }  // namespace
 
     bool Containment::in_container() const {
-        if (forced.has_value()) return *forced == "1";
+        // Mirrors `containment.py`: only "1" and "0" assert anything; any other value falls
+        // through to the signals, so `SHIPINFER_IN_CONTAINER=true` inside a real container
+        // does not refuse here while the Python gate lets it run.
+        if (forced.has_value() && *forced == "1") return true;
+        if (forced.has_value() && *forced == "0") return false;
         // Two of three. One is not enough: the marker is a file, and `touch /.dockerenv` once
         // let a host run certify itself.
         return signals() >= 2;

@@ -85,7 +85,12 @@ def include_closure(app: Path) -> set[Path]:
 
 
 def needs_accelerator(closure: set[Path]) -> bool:
-    """Whether any unit in the closure includes the driver's headers (through ``platform.h``)."""
+    """Whether any unit in the closure includes the driver's headers (through ``platform.h``).
+
+    Keyed on ``core/platform.h`` alone because that is the one header allowed to name a
+    vendor runtime (the architecture test enforces it). A header that included ``<NvInfer.h>``
+    without ``platform.h`` would be misclassified — and fail loudly at link, not silently.
+    """
     return any(p.name == "platform.h" and p.parent.name == "core" for p in closure)
 
 
@@ -146,11 +151,16 @@ def main() -> int:
     objects: list[str] = []
     object_of: dict[Path, str] = {}
     nvcc = str(CUDA / "bin" / "nvcc") if (CUDA / "bin" / "nvcc").is_file() else "nvcc"
+    # The CUDA-free *units*: every translation unit whose own include closure never reaches
+    # `core/platform.h`. A CUDA-free binary links all of them, not just the ones its own
+    # closure names — policies register through file-scope `PolicyRegistrar`s, so a unit
+    # left off the link line is a policy missing from that binary's registry, and two
+    # binaries would then answer `build_policy("power_of_two")` differently.
+    free_units = {q for q in sources if not needs_accelerator(include_closure(q))}
     if args.offline:
-        # Every translation unit any requested app's closure reaches, and nothing else — a
-        # CUDA-free app must not even *compile* a unit that includes the driver's headers.
-        wanted = set().union(*(closures[app] for app in apps))
-        sources = [q for q in sources if q in wanted]
+        # Only CUDA-free units are compiled: the offline build must not even *compile* a
+        # unit that includes the driver's headers.
+        sources = [q for q in sources if q in free_units]
         cuda_sources = []
     for source in cuda_sources:
         # Named by the path under csrc/, not the stem: two files with one stem in different
@@ -179,7 +189,11 @@ def main() -> int:
         objects.append(str(obj))
         object_of[source] = str(obj)
 
-    cv_flags = opencv_flags()
+    # OpenCV is reached only through `ingest/sources/replay.*`, which no CUDA-free closure
+    # contains — so the offline build must not even ask for it: `pkg-config` refusing on a
+    # runner with no OpenCV was the third undeclared prerequisite of a flag that promised
+    # "g++ alone".
+    cv_flags = [] if args.offline else opencv_flags()
     for source in sources:
         obj = BUILD / (str(source.relative_to(CSRC)).replace("/", "__") + ".o")
         print(f"g++   {source.name}")
@@ -203,8 +217,10 @@ def main() -> int:
         objects.append(str(obj))
         object_of[source] = str(obj)
 
-    # One library of shared objects, then one binary per entry point. The test binary links
-    # the same objects the pipeline does, so a test cannot pass against different code.
+    # One library of shared objects, then one binary per entry point. A CUDA binary links
+    # every object; a CUDA-free binary links every CUDA-free object — so a registrar's unit is
+    # always on the line of any binary that can link it, and the registry is the same in
+    # every binary. A test cannot pass against different code than the binary runs.
     for app in apps:
         obj = BUILD / f"{app.stem}.o"
         print(f"g++   {app.name}")
@@ -228,10 +244,11 @@ def main() -> int:
         binary = BUILD / app.stem
         print(f"link  {binary.name}" + ("  (CUDA-free)" if app in cuda_free else ""))
         if app in cuda_free:
-            # Only the closure's objects, and no accelerator library: `ldd` on the result
-            # must show neither libcuda nor libnvinfer, which is what makes it runnable — and
-            # meaningful — on a machine with no driver.
-            link_objects = [object_of[q] for q in sorted(closures[app]) if q in object_of]
+            # Every CUDA-free object, and no accelerator library: `ldd` on the result must
+            # show neither libcuda nor libnvinfer, which is what makes it runnable — and
+            # meaningful — on a machine with no driver; every CUDA-free registrar is linked,
+            # which is what makes its registry the production one.
+            link_objects = [object_of[q] for q in sorted(free_units) if q in object_of]
             link_libs = ["-pthread"]
         else:
             link_objects = objects
