@@ -263,7 +263,9 @@ class Model:
         scheduler = self._settings.scheduler
         execution = self._settings.execution
         placements = config.placements(
-            self._devices.visible_gpus, shared_by=self._devices.shared_by
+            self._devices.visible_gpus,
+            shared_by=self._devices.shared_by,
+            share_rank=self._devices.share_rank,
         )
 
         instances: list[ModelInstance] = []

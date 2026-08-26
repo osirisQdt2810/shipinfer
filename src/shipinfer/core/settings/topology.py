@@ -7,8 +7,10 @@ are and *how* a crop reaches an instance on another GPU is the **topology**, and
 registry (`shipinfer.server.topology.TOPOLOGIES`) for the same reason a placement policy is:
 adding one is a new file and a decorator, never a branch.
 
-This section is the switch. There is no `envs.py`: the settings tree is how every other choice
-in this project is made, and it is env-overridable like the rest — ``SHIPINFER_TOPOLOGY__KIND``.
+This section is the switch, env-overridable like the rest of the tree — ``SHIPINFER_TOPOLOGY__KIND``.
+The one per-child value that is *not* a setting — which cameras a shard reads — is declared in
+`shipinfer.envs` (``SHARD_CAMERAS``) with the other non-settings variables, so it has a typed
+parse and a `describe()` entry for ``shipinfer doctor``.
 """
 
 from __future__ import annotations
@@ -36,13 +38,10 @@ class TopologySettings(BaseModel):
     drain_s: float = Field(default=20.0, gt=0.0)
 
 
-#: The environment a fleet launcher hands each shard process. Defined here, beside the
+#: The settings-tree keys a fleet launcher sets for each shard process. Defined here, beside the
 #: settings, because both sides — the launcher that sets them and the settings loader that
-#: reads them — must agree on the spelling, and a constant reached through
-#: ``shipinfer.server`` drags the whole server import into every ``build_settings()`` call.
+#: reads them — must agree on the spelling.
 #:
-#: Which cameras are this shard's: a comma-separated list of ``camera_id``.
-SHARD_CAMERAS_ENV = "SHIPINFER_SHARD_CAMERAS"
 #: The shard's *logical* device list after ``CUDA_VISIBLE_DEVICES`` renumbered its GPUs —
 #: ``[0, 1]`` for a two-GPU shard, whatever the physical ordinals. Set by the launcher so an
 #: inherited ``SHIPINFER_DEVICES__VISIBLE_GPUS`` naming physical ordinals cannot survive the
@@ -52,3 +51,6 @@ VISIBLE_GPUS_ENV = "SHIPINFER_DEVICES__VISIBLE_GPUS"
 #: ordinals. Two shards on one GPU must each load *half* the configured instances, or the
 #: device holds twice the engines and twice the VRAM for the same total throughput.
 SHARED_BY_ENV = "SHIPINFER_DEVICES__SHARED_BY"
+#: The shard's rank among the processes sharing each device, aligned with the ordinals. The
+#: remainder of a count that does not divide evenly goes to the lowest ranks.
+SHARE_RANK_ENV = "SHIPINFER_DEVICES__SHARE_RANK"

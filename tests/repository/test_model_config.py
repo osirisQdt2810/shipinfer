@@ -69,14 +69,29 @@ class TestInstanceGroupExpansion:
         placements = group.expand(visible_gpus=(0, 1), shared_by={0: 2})
         assert sorted(p.device.index for p in placements) == [0, 0, 1, 1, 1, 1]
 
-    def test_a_share_that_rounds_to_zero_is_refused(self) -> None:
-        # Silently rounding to zero produces a process that accepts frames and can never
-        # execute one — which reads as a throughput result, not a misconfiguration.
+    def test_a_count_that_does_not_divide_gives_its_remainder_to_the_lowest_ranks(self) -> None:
+        """`count: 3` over two processes is 2 + 1 — the device still carries the three the
+        config asked for, not the two floor division would leave it."""
+        group = InstanceGroup(kind=InstanceKind.GPU, count=3, gpus=[0])
+        first = group.expand(visible_gpus=(0,), shared_by={0: 2}, share_rank={0: 0})
+        second = group.expand(visible_gpus=(0,), shared_by={0: 2}, share_rank={0: 1})
+        assert (len(first), len(second)) == (2, 1)
+
+    def test_an_absent_rank_is_rank_zero(self) -> None:
+        group = InstanceGroup(kind=InstanceKind.GPU, count=3, gpus=[0])
+        assert len(group.expand(visible_gpus=(0,), shared_by={0: 2})) == 2
+
+    def test_a_rank_that_would_get_nothing_is_refused(self) -> None:
         group = InstanceGroup(kind=InstanceKind.GPU, count=1, gpus=[0])
-        with pytest.raises(
-            ConfigurationError, match=r"2 processes share gpu 0 .* Use at most 1"
-        ):
-            group.expand(visible_gpus=(0,), shared_by={0: 2})
+        with pytest.raises(ConfigurationError, match="ranked 1 would get none"):
+            group.expand(visible_gpus=(0,), shared_by={0: 2}, share_rank={0: 1})
+
+    def test_a_single_instance_shared_by_two_goes_to_rank_zero(self) -> None:
+        # Rank 0 takes the remainder; rank 1 is the one refused (next test) — silently
+        # rounding to zero would produce a process that accepts frames and can never execute
+        # one, which reads as a throughput result rather than a misconfiguration.
+        group = InstanceGroup(kind=InstanceKind.GPU, count=1, gpus=[0])
+        assert len(group.expand(visible_gpus=(0,), shared_by={0: 2})) == 1
 
     def test_placements_pass_the_sharing_through(self) -> None:
         config = ModelConfig(

@@ -55,7 +55,8 @@ from dataclasses import dataclass, field
 
 from shipinfer.core.errors import ConfigurationError, ShardExitedError
 from shipinfer.core.logging import get_logger
-from shipinfer.core.settings.topology import SHARD_CAMERAS_ENV, SHARED_BY_ENV, VISIBLE_GPUS_ENV
+from shipinfer.core.settings.topology import SHARE_RANK_ENV, SHARED_BY_ENV, VISIBLE_GPUS_ENV
+from shipinfer.envs import SHARD_CAMERAS
 from shipinfer.scheduling.sharding import Shard, ShardPlan
 
 __all__ = ["Fleet", "ShardExitedError", "ShardProcess", "forward_signals", "serve_command"]
@@ -160,13 +161,25 @@ class Fleet:
         # beside it so a shard loads its share of every model's instances, not the whole count.
         child_env[VISIBLE_GPUS_ENV] = json.dumps(list(range(len(shard.gpus))))
         child_env[SHARED_BY_ENV] = json.dumps(list(self.plan.sharing_for(shard)))
-        child_env[SHARD_CAMERAS_ENV] = ",".join(shard.cameras)
+        child_env[SHARE_RANK_ENV] = json.dumps(list(self.plan.rank_for(shard)))
+        child_env[SHARD_CAMERAS.name] = ",".join(shard.cameras)
         # Its own process group, so a Ctrl-C in the parent's terminal does not deliver SIGINT
         # to every shard at once and race this class's own orderly shutdown.
         process = subprocess.Popen(argv, env=child_env, start_new_session=True)
         running = ShardProcess(shard=shard, process=process)
         _LOG.info("spawned %s: CUDA_VISIBLE_DEVICES=%s", running, shard.cuda_visible_devices)
         return running
+
+    def request_stop(self) -> None:
+        """Ask :meth:`supervise` to stop the fleet, without doing any of the stopping here.
+
+        The signal handler's whole job. `stop()` blocks up to `drain_s` under a lock, and a
+        handler that calls it directly wedges the process the moment a second Ctrl-C arrives
+        while the first is still draining — the handler re-enters the frame that holds the
+        lock and waits on itself, and the `kill()` that follows the wait never runs, so the
+        shards it was meant to end keep their CUDA contexts. Setting an event cannot block.
+        """
+        self._stopped.set()
 
     def stop(self, *, drain_s: float | None = None) -> None:
         """SIGTERM every shard, then SIGKILL whatever is still up. Idempotent.
@@ -285,7 +298,7 @@ def serve_command(
 
     The cameras. ``serve`` takes no such flag, and the first version of this function invented
     one — an argv that reads plausibly and that the CLI rejects. They travel in
-    :data:`SHARD_CAMERAS_ENV` instead, which :meth:`Fleet._spawn` sets.
+    :data:`shipinfer.envs.SHARD_CAMERAS` instead, which :meth:`Fleet._spawn` sets.
 
     The GPUs. The child sees only its own devices, because ``CUDA_VISIBLE_DEVICES`` was in its
     environment before it started, so to the child they are ``0..n-1`` — passing the physical
@@ -307,8 +320,10 @@ def forward_signals(fleet: Fleet) -> None:
     """
 
     def _handle(signum: int, _frame: object) -> None:
+        # Record only. The terminating happens on the supervising thread, which is the one
+        # that can block: a handler that drains would deadlock on the second signal.
         _LOG.info("received signal %d; stopping fleet", signum)
-        fleet.stop()
+        fleet.request_stop()
 
     signal.signal(signal.SIGINT, _handle)
     signal.signal(signal.SIGTERM, _handle)

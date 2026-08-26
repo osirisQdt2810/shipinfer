@@ -110,7 +110,10 @@ class InstanceGroup(_Strict):
         return self
 
     def expand(
-        self, visible_gpus: Sequence[int], shared_by: Mapping[int, int] | None = None
+        self,
+        visible_gpus: Sequence[int],
+        shared_by: Mapping[int, int] | None = None,
+        share_rank: Mapping[int, int] | None = None,
     ) -> list[InstancePlacement]:
         """Materialise the group against the GPUs this process can actually see.
 
@@ -118,10 +121,14 @@ class InstanceGroup(_Strict):
             visible_gpus: device indices the :class:`~shipinfer.runtime.device.DeviceManager`
                 reports. Empty means the host has none.
             shared_by: how many processes share each visible device (absent means one). A
-                shard of a fleet that shares its GPU loads ``count // shared_by[gpu]``
-                instances there — divided, not repeated, because TensorRT contexts are
-                per-process and two shards each loading the full count would double the
-                device's engines and VRAM for the same total throughput.
+                shard of a fleet that shares its GPU loads its *share* of ``count`` there —
+                divided, not repeated, because TensorRT contexts are per-process and two shards
+                each loading the full count would double the device's engines and VRAM for the
+                same total throughput.
+            share_rank: this process's rank among those sharing each device (absent means 0).
+                A count that does not divide evenly gives its remainder to the lowest ranks:
+                ``count: 3`` over two processes is 2 + 1, so the device carries the three the
+                config asked for rather than the two that floor division would leave it.
 
         Raises:
             ConfigurationError: if the group demands a GPU that is not visible — failing
@@ -154,12 +161,13 @@ class InstanceGroup(_Strict):
         placements: list[InstancePlacement] = []
         for gpu in targets:
             sharing = (shared_by or {}).get(gpu, 1)
-            share = self.count // sharing
+            rank = (share_rank or {}).get(gpu, 0)
+            share = self.count // sharing + (1 if rank < self.count % sharing else 0)
             if share < 1:
                 raise ConfigurationError(
                     f"{sharing} processes share gpu {gpu} but only {self.count} instance(s) "
-                    f"per gpu are configured, so each would get {share}. Use at most "
-                    f"{self.count} shards per gpu, or raise the instance count"
+                    f"per gpu are configured, so the process ranked {rank} would get none. Use "
+                    f"at most {self.count} shards per gpu, or raise the instance count"
                 )
             placements.extend(
                 InstancePlacement(device=Device.cuda(gpu), streams=self.streams)
@@ -489,16 +497,19 @@ class ModelConfig(_Strict):
         return self.max_batch_size or 1
 
     def placements(
-        self, visible_gpus: Sequence[int], shared_by: Mapping[int, int] | None = None
+        self,
+        visible_gpus: Sequence[int],
+        shared_by: Mapping[int, int] | None = None,
+        share_rank: Mapping[int, int] | None = None,
     ) -> list[InstancePlacement]:
         """Every instance this model wants, flattened across its groups.
 
-        ``shared_by`` is this process's share of each device — see
+        ``shared_by`` and ``share_rank`` are this process's share of each device — see
         :meth:`InstanceGroup.expand`.
         """
         out: list[InstancePlacement] = []
         for group in self.instance_groups:
-            out.extend(group.expand(visible_gpus, shared_by))
+            out.extend(group.expand(visible_gpus, shared_by, share_rank))
         if not out:
             raise ConfigurationError(f"model {self.name!r} expands to zero instances")
         return out

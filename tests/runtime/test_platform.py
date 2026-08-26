@@ -165,3 +165,15 @@ class TestSharingIsKeyedByDevice:
         manager = DeviceManager(DeviceSettings(shared_by=[2], validate_on_start=False))
         with pytest.raises(ConfigurationError, match="must align"):
             _ = manager.shared_by
+
+    def test_the_rank_is_keyed_the_same_way(self, two_devices) -> None:
+        manager = DeviceManager(
+            DeviceSettings(shared_by=[2, 2], share_rank=[1, 0], validate_on_start=False)
+        )
+        assert manager.share_rank == {0: 1, 1: 0}
+        assert DeviceManager(DeviceSettings(validate_on_start=False)).share_rank == {}
+
+    def test_a_misaligned_rank_list_is_refused(self, two_devices) -> None:
+        manager = DeviceManager(DeviceSettings(share_rank=[0], validate_on_start=False))
+        with pytest.raises(ConfigurationError, match="must align"):
+            _ = manager.share_rank

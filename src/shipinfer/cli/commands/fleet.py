@@ -56,9 +56,17 @@ def fleet(
         )
     devices = list(settings.devices.visible_gpus or [])
     if not devices:
+        # Empty means "every device the driver reports", as it does for `serve` and for
+        # `DeviceManager` — a fleet that refused what a single process accepts would be the
+        # odd one out. The driver is asked here, once, and only when nothing was configured.
+        from shipinfer.runtime.platform import device_count
+
+        devices = list(range(device_count()))
+    if not devices:
         raise ConfigurationError(
-            "no visible GPUs. A shard's device set comes from the plan, so the plan needs to "
-            "know what there is — pass --gpus, or set devices.visible_gpus"
+            "no visible GPUs: none configured and the driver reports none. A shard's device set "
+            "comes from the plan, so the plan needs to know what there is — pass --gpus, or set "
+            "devices.visible_gpus"
         )
 
     # The topology decides the plan and what the children are told. `--topology`, `--shards`
@@ -70,12 +78,12 @@ def fleet(
     out.print(f"topology: {chosen.name} — {chosen.describe()}")
     plan = chosen.plan(settings, cameras=cameras, gpus=devices, shards=count)
     out.print(plan.describe())
-    if plan.imbalance > 0.4:
+    if plan.device_imbalance > 0.4:
         # Not an error: an imbalanced plan can be the best available split of a lopsided
         # fleet. It is printed loudly because the fleet's throughput is bounded by its
-        # *busiest* shard, so this is the number that decides whether sharding helped.
+        # busiest *device*, so this is the number that decides whether sharding helped.
         out.print(
-            f"[yellow]warning[/yellow]: shards differ by {plan.imbalance:.0%} in offered "
+            f"[yellow]warning[/yellow]: GPUs differ by {plan.device_imbalance:.0%} in offered "
             f"load. The fleet is bounded by its busiest shard, so this plan adds less than "
             f"its shard count suggests"
         )

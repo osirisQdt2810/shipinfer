@@ -64,7 +64,7 @@ def reports_env_json(path_for):
         sys.executable,
         "-c",
         "import json, os, sys; names = ['CUDA_VISIBLE_DEVICES', 'SHIPINFER_DEVICES__VISIBLE_GPUS',"
-        " 'SHIPINFER_DEVICES__SHARED_BY', 'SHIPINFER_SHARD_CAMERAS'];"
+        " 'SHIPINFER_DEVICES__SHARED_BY', 'SHIPINFER_DEVICES__SHARE_RANK', 'SHIPINFER_SHARD_CAMERAS'];"
         " open(sys.argv[1], 'w').write(json.dumps({n: os.environ.get(n) for n in names}))",
         str(path_for(shard)),
     ]
@@ -389,7 +389,7 @@ class TestTheDefaultCommand:
         assert argv[argv.index("-r") + 1] == "/models"
         assert (
             "--cameras" not in argv
-        ), "serve has no camera flag; a shard's cameras travel in SHARD_CAMERAS_ENV"
+        ), "serve has no camera flag; a shard's cameras travel in SHIPINFER_SHARD_CAMERAS"
 
     def test_the_cameras_travel_in_the_environment_instead(self, tmp_path) -> None:
         """The half that replaced the invented flag, checked end to end: a child really does
@@ -485,7 +485,18 @@ class TestTheChildsDeviceViewIsCoherent:
         for shard in fleet_plan.shards:
             expected = list(fleet_plan.sharing_for(shard))
             assert seen[shard.index]["SHIPINFER_DEVICES__SHARED_BY"] == str(expected)
+            assert seen[shard.index]["SHIPINFER_DEVICES__SHARE_RANK"] == str(
+                list(fleet_plan.rank_for(shard))
+            )
             assert seen[shard.index]["SHIPINFER_DEVICES__VISIBLE_GPUS"] == "[0]"
+        assert sorted(seen[i]["SHIPINFER_DEVICES__SHARE_RANK"] for i in seen) == [
+            "[0]",
+            "[0]",
+            "[0]",
+            "[0]",
+            "[1]",
+            "[1]",
+        ]
         assert sorted(seen[i]["SHIPINFER_DEVICES__SHARED_BY"] for i in seen) == [
             "[1]",
             "[1]",
@@ -561,3 +572,53 @@ class TestStopEndsSupervision:
             fleet.stop()
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
+
+    def test_a_second_ctrl_c_during_the_drain_does_not_wedge_the_supervisor(self) -> None:
+        """The handler used to call `stop()`, which blocks up to `drain_s` under a
+        non-reentrant lock; a second SIGINT re-entered the frame holding the lock and waited on
+        itself forever, and the `kill()` after the wait never ran — shards that ignored SIGTERM
+        kept their CUDA contexts. The handler now only records; the loop does the stopping."""
+        import os
+        import signal
+        import threading
+        import time
+
+        from shipinfer.server.launcher import forward_signals
+
+        previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+        fleet = Fleet(plan=plan(shards=2), command=ignores_sigterm(), drain_s=0.5)
+        try:
+            forward_signals(fleet)
+            fleet.start()
+            children = [r.process for r in fleet.running]
+            threading.Timer(0.1, os.kill, [os.getpid(), signal.SIGINT]).start()
+            threading.Timer(
+                0.3, os.kill, [os.getpid(), signal.SIGINT]
+            ).start()  # during the drain
+            started = time.monotonic()
+
+            fleet.supervise(poll_s=0.01)
+
+            assert time.monotonic() - started < 5.0, "the supervisor wedged"
+            assert fleet.running == ()
+            assert all(p.poll() is not None for p in children), "a shard outlived the fleet"
+        finally:
+            fleet.stop()
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+
+    def test_request_stop_never_blocks(self) -> None:
+        """What a signal handler may call: it returns at once even while a drain is running."""
+        import threading
+        import time
+
+        fleet = Fleet(plan=plan(shards=1, gpus=(2,)), command=ignores_sigterm(), drain_s=0.4)
+        fleet.start()
+        draining = threading.Thread(target=fleet.stop)
+        draining.start()
+        time.sleep(0.05)  # stop() is now inside process.wait() holding the lock
+        started = time.monotonic()
+        fleet.request_stop()
+        assert time.monotonic() - started < 0.05
+        draining.join()
+        assert fleet.running == ()

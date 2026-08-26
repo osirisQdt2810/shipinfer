@@ -17,7 +17,8 @@ import pytest
 
 from shipinfer.cli.common import build_settings
 from shipinfer.core.errors import ConfigurationError
-from shipinfer.core.settings.topology import SHARD_CAMERAS_ENV, SHARED_BY_ENV
+from shipinfer.core.settings.topology import SHARE_RANK_ENV, SHARED_BY_ENV
+from shipinfer.envs import SHARD_CAMERAS, describe
 
 FLEET = [
     {"camera_id": "quay-1", "uri": "rtsp://host/1"},
@@ -28,9 +29,9 @@ FLEET = [
 
 def settings_for(monkeypatch, shard: str | None):
     if shard is None:
-        monkeypatch.delenv(SHARD_CAMERAS_ENV, raising=False)
+        monkeypatch.delenv(SHARD_CAMERAS.name, raising=False)
     else:
-        monkeypatch.setenv(SHARD_CAMERAS_ENV, shard)
+        monkeypatch.setenv(SHARD_CAMERAS.name, shard)
     return build_settings(ingest={"cameras": FLEET})
 
 
@@ -83,7 +84,7 @@ class TestWithoutTheVariableNothingChanges:
 
     def test_a_single_process_run_is_the_identity(self, monkeypatch) -> None:
         """The reason no existing caller had to change."""
-        monkeypatch.delenv(SHARD_CAMERAS_ENV, raising=False)
+        monkeypatch.delenv(SHARD_CAMERAS.name, raising=False)
 
         assert (
             build_settings(ingest={"cameras": FLEET}).ingest.cameras
@@ -132,3 +133,26 @@ class TestTheSharingRidesBesideTheCameras:
         monkeypatch.setenv(SHARED_BY_ENV, "[0]")
         with pytest.raises(Exception, match="at least 1"):
             settings_for(monkeypatch, None)
+
+    def test_share_rank_is_read_beside_it(self, monkeypatch) -> None:
+        monkeypatch.setenv(SHARE_RANK_ENV, "[1, 0]")
+        assert settings_for(monkeypatch, None).devices.share_rank == [1, 0]
+
+    def test_a_negative_rank_is_refused(self, monkeypatch) -> None:
+        monkeypatch.setenv(SHARE_RANK_ENV, "[-1]")
+        with pytest.raises(Exception, match="0 or more"):
+            settings_for(monkeypatch, None)
+
+
+class TestTheCameraSliceIsADeclaredVariable:
+    """`SHIPINFER_SHARD_CAMERAS` is not a setting; it lives in `shipinfer.envs` with a typed
+    parse and a `describe()` row, so `shipinfer doctor` prints it like every other variable."""
+
+    def test_doctor_can_describe_it(self, monkeypatch) -> None:
+        monkeypatch.setenv(SHARD_CAMERAS.name, "quay-1,quay-3")
+        rows = {name: (value, was_set) for name, value, was_set, _doc in describe()}
+        assert rows[SHARD_CAMERAS.name] == ("('quay-1', 'quay-3')", True)
+
+    def test_the_parser_is_typed(self, monkeypatch) -> None:
+        monkeypatch.setenv(SHARD_CAMERAS.name, " quay-1 , quay-2 ")
+        assert SHARD_CAMERAS.get() == ("quay-1", "quay-2")

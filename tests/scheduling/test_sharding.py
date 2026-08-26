@@ -103,7 +103,17 @@ class TestBalanceIsByLoadNotByCount:
                 round_robin(fleet, shards, descending=True),
                 round_robin(fleet, shards, descending=False),
             )
-            assert plan.imbalance <= best_rr + 1e-9, (shards, plan.describe())
+            equal_shares = len({len(s.gpus) for s in plan.shards}) == 1 and all(
+                n == 1 for n in plan.shards_per_gpu.values()
+            )
+            if equal_shares:
+                # Equal device shares: the per-shard figure is the one to beat.
+                assert plan.imbalance <= best_rr + 1e-9, (shards, plan.describe())
+            else:
+                # Shards share devices, so per-shard loads are *meant* to differ; what must
+                # hold is that no device is more than one camera's load above another.
+                loads = list(plan.device_load.values())
+                assert max(loads) - min(loads) <= max(fleet.values()) + 1e-9, plan.describe()
 
     def test_a_camera_count_split_would_have_been_worse(self) -> None:
         # Eight cameras each is what balancing by count gives, and on this fleet that puts
@@ -197,6 +207,53 @@ class TestGpusAreHandedOutWithoutLeavingOneIdle:
         assert [s.gpus for s in plan.shards] == [(5, 4), (3, 2)]
 
 
+class TestLoadIsBalancedPerDeviceNotPerShard:
+    """The device is what saturates. Six shards on four GPUs used to print an 11% *shard*
+    imbalance while two GPUs carried 340 fps and two carried 160 — the founding bug rebuilt one
+    level up, invisible to a metric that measured processes rather than the resource."""
+
+    UNIFORM = {f"cam{i:02d}": 20.0 for i in range(50)}
+
+    def test_the_reviewers_case_lands_within_one_camera_per_device(self) -> None:
+        plan = plan_shards(self.UNIFORM, shards=6, gpus=[0, 1, 2, 3])
+
+        loads = plan.device_load
+        assert set(loads) == {0, 1, 2, 3}
+        assert max(loads.values()) - min(loads.values()) <= 20.0, plan.describe()
+        assert plan.device_imbalance < 0.1, plan.describe()
+        # And the shards on unshared devices carry about twice what a sharing shard does.
+        alone = [s.offered_fps for s in plan.shards if plan.shards_per_gpu[s.gpus[0]] == 1]
+        sharing = [s.offered_fps for s in plan.shards if plan.shards_per_gpu[s.gpus[0]] == 2]
+        assert min(alone) > max(sharing)
+
+    def test_the_skewed_fleet_too(self) -> None:
+        plan = plan_shards(SKEWED, shards=6, gpus=[2, 3, 4, 5])
+
+        loads = list(plan.device_load.values())
+        assert max(loads) - min(loads) <= 30.0, plan.describe()
+
+    def test_equal_shares_reduce_to_the_old_plan(self) -> None:
+        """With one shard per GPU the capacity weights are all 1 and nothing changes."""
+        plan = plan_shards(SKEWED, shards=4, gpus=[2, 3, 4, 5])
+
+        assert plan.device_imbalance == plan.imbalance
+        assert plan.device_load == {s.gpus[0]: s.offered_fps for s in plan.shards}
+
+    def test_a_shard_with_two_gpus_spreads_its_load_over_both(self) -> None:
+        plan = plan_shards(SKEWED, shards=2, gpus=[2, 3, 4, 5])
+
+        for shard in plan.shards:
+            for gpu in shard.gpus:
+                assert plan.device_load[gpu] == shard.offered_fps / 2
+
+    def test_describe_names_every_device_and_the_figure_the_plan_is_judged_by(self) -> None:
+        text = plan_shards(self.UNIFORM, shards=6, gpus=[0, 1, 2, 3]).describe()
+
+        assert "device imbalance" in text and "shard imbalance" in text
+        for gpu in range(4):
+            assert f"  gpu {gpu}: " in text
+
+
 class TestTheLauncherIsToldHowManyShardsShareEachGpu:
     """`sharing_for` is what rides to the child as `SHIPINFER_DEVICES__SHARED_BY`; the child
     divides every model's configured instance count by it where the instance groups expand."""
@@ -228,6 +285,18 @@ class TestTheLauncherIsToldHowManyShardsShareEachGpu:
 
         assert bare.sharing_for(plan.shards[0]) == (1,)
 
+    def test_the_rank_says_who_gets_the_remainder(self) -> None:
+        """Six shards over four GPUs: the first owner of a shared device is rank 0, the second
+        rank 1 — so `count: 3` becomes 2 + 1 across them, not 1 + 1 with a third gone."""
+        plan = plan_shards(SKEWED, shards=6, gpus=[2, 3, 4, 5])
+
+        assert [plan.rank_for(s) for s in plan.shards] == [(0,), (0,), (0,), (0,), (1,), (1,)]
+
+    def test_a_sole_owner_is_rank_zero_on_every_device(self) -> None:
+        plan = plan_shards(SKEWED, shards=2, gpus=[2, 3, 4, 5])
+
+        assert all(plan.rank_for(s) == (0, 0) for s in plan.shards)
+
 
 class TestAnImpossiblePlanFailsAtPlanTime:
     def test_an_empty_fleet(self) -> None:
@@ -254,7 +323,7 @@ class TestDescribeIsWhatTheLauncherPrints:
 
         assert "2 shard(s)" in text
         assert [line for line in text.splitlines() if line.startswith("  shard ")] != []
-        assert len(text.splitlines()) == 3, "one header line plus one line per shard"
+        assert len(text.splitlines()) == 1 + 2 + 4, "header, one line per shard, one per gpu"
         assert "90 fps offered" in text
         assert "gpu(s) [2, 3]" in text and "gpu(s) [4, 5]" in text
 

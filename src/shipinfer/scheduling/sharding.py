@@ -117,15 +117,32 @@ class ShardPlan:
     def imbalance(self) -> float:
         """``(max - min) / max`` over per-shard offered load, or 0.0 for one shard.
 
-        The number the plan is judged by. A shard is a process and a process is a wall: the
-        fleet's throughput is bounded by its *busiest* shard, so an imbalanced plan wastes
-        exactly the capacity it looks like it added.
+        A shard is a process and a process is a wall: the fleet's throughput is bounded by its
+        *busiest* shard. When shards share devices this is deliberately uneven — a shard alone
+        on its GPU is meant to carry twice what a shard sharing one does — so the figure the
+        plan is judged by is :attr:`device_imbalance`; this one says how the *processes* fare.
         """
-        if len(self.shards) < 2:
-            return 0.0
-        loads = [s.offered_fps for s in self.shards]
-        high = max(loads)
-        return 0.0 if high <= 0 else (high - min(loads)) / high
+        return _spread([s.offered_fps for s in self.shards])
+
+    @property
+    def device_load(self) -> dict[int, float]:
+        """Offered fps per physical GPU: each shard's load spread evenly over its devices.
+
+        The device is what saturates. Six shards on four GPUs once printed an 11% *shard*
+        imbalance while two GPUs carried 340 fps each and the other two 160 — the founding bug
+        of this project rebuilt one level up, invisible to the metric that should have caught
+        it because that metric measured processes, not the resource.
+        """
+        totals: dict[int, float] = dict.fromkeys(self.shards_per_gpu, 0.0)
+        for shard in self.shards:
+            for gpu in shard.gpus:
+                totals[gpu] = totals.get(gpu, 0.0) + shard.offered_fps / len(shard.gpus)
+        return totals
+
+    @property
+    def device_imbalance(self) -> float:
+        """``(max - min) / max`` over per-GPU offered load — the number the plan is judged by."""
+        return _spread(list(self.device_load.values()))
 
     def sharing_for(self, shard: Shard) -> tuple[int, ...]:
         """How many shards share each of ``shard``'s GPUs, in the shard's device order.
@@ -140,17 +157,44 @@ class ShardPlan:
         """
         return tuple(self.shards_per_gpu.get(gpu, 1) for gpu in shard.gpus)
 
+    def rank_for(self, shard: Shard) -> tuple[int, ...]:
+        """``shard``'s position among the shards owning each of its GPUs, in device order.
+
+        Rides beside :meth:`sharing_for` as ``SHIPINFER_DEVICES__SHARE_RANK``. Where a model's
+        configured count does not divide by the sharing, the remainder goes to the lowest
+        ranks — ``count: 3`` over two shards is 2 + 1, not 1 + 1 with a third of the device's
+        configured capacity silently gone.
+        """
+        ranks = []
+        for gpu in shard.gpus:
+            owners = [s.index for s in self.shards if gpu in s.gpus]
+            ranks.append(owners.index(shard.index) if shard.index in owners else 0)
+        return tuple(ranks)
+
     def describe(self) -> str:
-        """One line per shard — what the launcher prints before it spawns anything."""
+        """One line per shard and one per GPU — what the launcher prints before it spawns."""
         lines = [
-            f"{len(self.shards)} shard(s), imbalance {self.imbalance:.1%}",
+            f"{len(self.shards)} shard(s), device imbalance {self.device_imbalance:.1%}, "
+            f"shard imbalance {self.imbalance:.1%}",
         ]
         lines.extend(
             f"  shard {shard.index}: {len(shard.cameras)} camera(s), "
             f"{shard.offered_fps:g} fps offered, gpu(s) {list(shard.gpus)}"
             for shard in self.shards
         )
+        lines.extend(
+            f"  gpu {gpu}: {load:g} fps offered, {self.shards_per_gpu.get(gpu, 1)} shard(s)"
+            for gpu, load in sorted(self.device_load.items())
+        )
         return "\n".join(lines)
+
+
+def _spread(values: list[float]) -> float:
+    """``(max - min) / max``, or 0.0 for fewer than two values or an idle fleet."""
+    if len(values) < 2:
+        return 0.0
+    high = max(values)
+    return 0.0 if high <= 0 else (high - min(values)) / high
 
 
 def plan_shards(
@@ -196,15 +240,11 @@ def plan_shards(
             f"loads engines and holds a CUDA context. Use at most {len(load)} shards."
         )
 
-    buckets: list[list[str]] = [[] for _ in range(shards)]
-    weights = [0.0] * shards
-    # Descending by load, then by name: the first key does the balancing and the second makes
-    # it reproducible.
-    for name in sorted(load, key=lambda n: (-load[n], n)):
-        target = min(range(shards), key=lambda i: (weights[i], i))
-        buckets[target].append(name)
-        weights[target] += load[name]
-
+    # GPUs first, cameras second. The two used to be decided independently — cameras balanced
+    # per shard, then GPUs handed out round-robin — so with six shards on four GPUs the two
+    # shared devices carried twice the load of the two unshared ones while the per-shard figure
+    # read as balanced. The device is what saturates, so a shard's load is weighted by its share
+    # of its devices: a shard alone on one GPU has capacity 1, a shard sharing it has 1/2.
     ordinals = list(gpus)
     assigned: list[tuple[int, ...]] = []
     sharing: dict[int, int] = {}
@@ -223,7 +263,16 @@ def plan_shards(
         assigned.append(mine)
         for ordinal in mine:
             sharing[ordinal] = sharing.get(ordinal, 0) + 1
+    capacity = [sum(1.0 / sharing[g] for g in assigned[i]) for i in range(shards)]
 
+    buckets: list[list[str]] = [[] for _ in range(shards)]
+    weights = [0.0] * shards
+    # Descending by load, then by name: the first key does the balancing and the second makes
+    # it reproducible. The lightest shard is the one with the least load *per unit of device*.
+    for name in sorted(load, key=lambda n: (-load[n], n)):
+        target = min(range(shards), key=lambda i: (weights[i] / capacity[i], i))
+        buckets[target].append(name)
+        weights[target] += load[name]
     return ShardPlan(
         shards=tuple(
             Shard(

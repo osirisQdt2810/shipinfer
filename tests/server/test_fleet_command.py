@@ -68,12 +68,12 @@ class TestTheDryRunPrintsThePlanAndStops:
         """`fps` is 0 for "whatever the source delivers", which is most RTSP cameras.
         Weighting by zero would make every camera equal *and* make the imbalance undefined —
         so the plan would silently go back to balancing by count."""
-        gpus = config(monkeypatch, [(f"cam{i}", 0.0) for i in range(6)])
+        gpus = config(monkeypatch, [(f"cam{i}", 0.0) for i in range(6)], gpus="2,3,4")
 
         fleet(REPO, shards=3, gpus=gpus, dry_run=True)
 
-        printed = capsys.readouterr().out
-        assert "imbalance 0.0%" in printed
+        printed = capsys.readouterr().out.replace("\n", " ")  # the console wraps long lines
+        assert "device imbalance 0.0%" in printed and "shard imbalance 0.0%" in printed
         assert printed.count("2 camera(s)") == 3
 
     def test_a_lopsided_fleet_is_warned_about_rather_than_refused(
@@ -120,12 +120,31 @@ class TestWhatItRefusesBeforeSpawningAnything:
         with pytest.raises(ConfigurationError, match="nothing to shard"):
             fleet(REPO, shards=2, gpus=gpus, dry_run=True)
 
-    def test_no_visible_gpus(self, monkeypatch) -> None:
+    def test_no_visible_gpus_and_none_from_the_driver(self, monkeypatch) -> None:
+        import shipinfer.runtime.platform as platform
+
         config(monkeypatch, [("a", 20.0)])
         monkeypatch.setenv("SHIPINFER_DEVICES__VISIBLE_GPUS", "[]")
+        monkeypatch.setattr(platform, "device_count", lambda: 0)
 
-        with pytest.raises(ConfigurationError, match="no visible GPUs"):
+        with pytest.raises(ConfigurationError, match="driver reports none"):
             fleet(REPO, shards=1, gpus=None, dry_run=True)
+
+    def test_an_empty_visible_list_means_every_device_the_driver_reports(
+        self, monkeypatch, capsys
+    ) -> None:
+        """As it does for `serve` and for `DeviceManager`: a fleet that refused what a single
+        process accepts would be the odd one out."""
+        import shipinfer.runtime.platform as platform
+
+        config(monkeypatch, [("a", 20.0), ("b", 20.0)])
+        monkeypatch.setenv("SHIPINFER_DEVICES__VISIBLE_GPUS", "[]")
+        monkeypatch.setattr(platform, "device_count", lambda: 2)
+
+        assert fleet(REPO, shards=2, gpus=None, dry_run=True) == 0
+
+        out = capsys.readouterr().out
+        assert "gpu(s) [0]" in out and "gpu(s) [1]" in out
 
     def test_more_shards_than_cameras(self, monkeypatch) -> None:
         """A shard with no cameras still loads engines and holds a CUDA context."""

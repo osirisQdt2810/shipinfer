@@ -104,6 +104,19 @@ class DeviceManager:
         return dict(zip(self._visible, sharing, strict=True))
 
     @property
+    def share_rank(self) -> dict[int, int]:
+        """This process's rank among those sharing each visible device; absent means 0."""
+        ranks = self._settings.share_rank
+        if not ranks:
+            return {}
+        if len(ranks) != len(self._visible):
+            raise ConfigurationError(
+                f"devices.share_rank has {len(ranks)} entr(y/ies) but {len(self._visible)} "
+                f"device(s) are visible; the two lists must align"
+            )
+        return dict(zip(self._visible, ranks, strict=True))
+
+    @property
     def has_accelerator(self) -> bool:
         return bool(self._visible)
 
