@@ -89,3 +89,28 @@ class TestTheChildrenAreToldHowToFindEachOther:
 
     def test_describe_says_what_crosses(self) -> None:
         assert "rings" in ServiceTopology().describe()
+
+
+class TestATopologyCanBeHandedAPlan:
+    """The harness splits cameras unevenly on purpose and hands the topology the plan; `service`
+    must still name every peer."""
+
+    def test_service_adopts_an_explicit_plan(self) -> None:
+        from shipinfer.scheduling.sharding import Shard, ShardPlan
+
+        plan = ShardPlan(
+            shards=(
+                Shard(index=0, cameras=("a", "b", "c"), gpus=(2,), offered_fps=60.0),
+                Shard(index=1, cameras=("d",), gpus=(3,), offered_fps=20.0),
+            ),
+            shards_per_gpu={2: 1, 3: 1},
+        )
+        topology = ServiceTopology()
+        topology.adopt(plan)
+        assert json.loads(topology.environment(ServerSettings())[SERVICE_PEERS_ENV]) == [0, 1]
+
+    def test_fleet_needs_nothing_from_it(self) -> None:
+        from shipinfer.server.topology import FleetTopology
+
+        plan = FleetTopology().plan(ServerSettings(), cameras=CAMERAS, gpus=[2], shards=1)
+        FleetTopology().adopt(plan)  # the default: nothing to record

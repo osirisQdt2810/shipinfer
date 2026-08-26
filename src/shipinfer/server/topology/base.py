@@ -79,6 +79,15 @@ class Topology(abc.ABC):
         """
         return {TOPOLOGY_ENV: self.name}
 
+    def adopt(self, plan: ShardPlan) -> None:
+        """Be told the plan that will be launched, when someone else made it.
+
+        :meth:`plan` calls this on its own result. A caller with an explicit plan — the
+        benchmark harness splitting cameras unevenly on purpose — hands it here so a topology
+        whose environment depends on the plan (`service`: the peer set) still describes the
+        fleet that actually starts. The default needs nothing.
+        """
+
     def shard_environment(self, shard: Shard) -> Mapping[str, str]:
         """Extra environment for *one* child, on top of :meth:`environment`.
 

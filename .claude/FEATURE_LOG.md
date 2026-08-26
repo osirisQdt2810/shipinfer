@@ -5,6 +5,19 @@ edits, typo fixes and pure docs.
 
 ---
 
+## bench: the harness drives the shards (26 Aug 2026)
+
+`--topology fleet|service --shards N --shard-cameras A,B,C` on `run_bench.py`: the parent
+plans (the launcher's LPT, or the explicit crowded split), starts one child per shard
+through the real `Fleet` with the topology's own environment, each child runs the
+single-process measurement on its slice with every guard, and the parent sums throughput,
+takes the worst verdict, and adds per-device execution counts where the work ran.
+`Topology.adopt(plan)` is the one new seam method (a topology is told a plan someone else
+made). `bench.sh` passes `--shm-size=2g` for the tier's rings (ADR-015). Evidence in
+PR: B and C sweeps to 72 img/s on GPUs 3–5, C spreading the crowded shard's crop work
+(person_embedder 742/377/389 where B had 1582/0/0). Sized by `benchmarks/tests` (21) and
+the two adopt tests.
+
 ## 2026-08-26 — Topology C, `service`: the crop-stage models served across the fleet's shards
 
 **What it is.** The fleet (topology B, #18) fixed the placement failure the project exists to fix —
