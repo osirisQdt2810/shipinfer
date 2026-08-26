@@ -104,6 +104,9 @@ exec docker run --rm --pid=host --device nvidia.com/gpu=all \
   -e PYTHONPATH="/work/src:/work${shipvision_path}" \
   -e PYTHONDONTWRITEBYTECODE=1 \
   -e SHIPINFER_IN_CONTAINER=1 \
+  -e SHIPINFER_GST_DECODER="${SHIPINFER_GST_DECODER:-}" \
+  -e SHIPINFER_INGEST_HWACCEL="${SHIPINFER_INGEST_HWACCEL:-1}" \
+  -e SHIPINFER_INGEST_BACKEND="${SHIPINFER_INGEST_BACKEND:-gstreamer}" \
   -e SHIPINFER_CUDA_GRAPHS="${SHIPINFER_CUDA_GRAPHS:-off}" \
   -e SHIPINFER_BENCH_SCRIPT="${SHIPINFER_BENCH_SCRIPT:-benchmarks/run_bench.py}" \
   -v "$REPO:/work" \

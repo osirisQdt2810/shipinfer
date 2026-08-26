@@ -64,6 +64,9 @@ _SW_DECODERS: dict[str, tuple[str, ...]] = {
 }
 
 #: Colour-space converters, in preference order. The first two are NVIDIA's and can take
+#: Decoders that can output GL memory and open a GL display to do it. See `build_pipeline`.
+_GL_CAPABLE_DECODERS: frozenset[str] = frozenset({"nvh264dec", "nvh265dec"})
+
 #: NVMM/CUDA memory straight out of a hardware decoder; ``videoconvert`` is the portable
 #: system-memory fallback and is always present.
 _CONVERTERS: tuple[str, ...] = ("nvvideoconvert", "nvvidconv", "videoconvert")
@@ -127,6 +130,15 @@ def build_pipeline(
     else:
         element = decoder or _SW_DECODERS[codec][0]
         decode = f"{_DEPAY[codec]} ! {_PARSE[codec]} ! {element}"
+    if codec == "auto" or (decoder or "") in _GL_CAPABLE_DECODERS:
+        # System memory, stated. nvcodec's `nvh264dec` / `nvh265dec` can output GL memory,
+        # and when downstream leaves the choice open they create a GL display first — which
+        # a headless container does not have: `gst_gl_display_gbm_new: could not find or open
+        # DRM device`, then a segfault, on the first RTSP benchmark run. A `video/x-raw`
+        # filter with no memory feature makes the decoder negotiate plain system memory and
+        # never touch GL. Not applied to the DeepStream pair (`nvv4l2decoder` +
+        # `nvvideoconvert`), whose NVMM hand-off is the point of choosing them.
+        decode = f"{decode} ! video/x-raw"
 
     caps = "video/x-raw,format=BGR"
     if width is not None and height is not None:

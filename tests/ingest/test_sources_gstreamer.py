@@ -58,7 +58,10 @@ class TestPipelineString:
 
     def test_auto_codec_delegates_to_decodebin(self):
         pipeline = build_pipeline(URI, codec="auto")
-        assert "decodebin" in pipeline
+        assert "decodebin ! video/x-raw !" in pipeline, (
+            "decodebin must be told to negotiate system memory, or NVDEC opens a GL display "
+            "the headless container does not have"
+        )
         assert "depay" not in pipeline and "parse" not in pipeline
 
     def test_scaling_and_transport_and_latency(self):
@@ -73,10 +76,24 @@ class TestPipelineString:
             max_buffers=4,
         ) == (
             f"rtspsrc location={URI} latency=100 protocols=udp ! "
-            "rtph264depay ! h264parse ! nvh264dec ! videoconvert ! "
+            "rtph264depay ! h264parse ! nvh264dec ! video/x-raw ! videoconvert ! "
             "videoscale ! video/x-raw,format=BGR,width=1280,height=720 ! "
             f"appsink name={APPSINK_NAME} emit-signals=false sync=false drop=true max-buffers=4"
         )
+
+    def test_the_deepstream_pair_keeps_its_nvmm_handoff(self):
+        """`nvv4l2decoder ! nvvideoconvert` passes NVMM memory between them; forcing system
+        memory there would undo the reason for choosing them. Only the GL-capable nvcodec
+        decoders and the open-ended `decodebin` get the filter."""
+        pipeline = build_pipeline(
+            URI, codec="h264", decoder="nvv4l2decoder", converter="nvvideoconvert"
+        )
+        assert "nvv4l2decoder ! nvvideoconvert" in pipeline
+        assert "video/x-raw ! nvvideoconvert" not in pipeline
+
+    def test_the_software_decoder_needs_no_filter(self):
+        pipeline = build_pipeline(URI, codec="h264", decoder="avdec_h264")
+        assert "avdec_h264 ! videoconvert" in pipeline
 
     def test_auto_transport_omits_the_property(self):
         """`protocols=auto` is not a GStreamer value; leaving it out is what "let rtspsrc decide" is."""
