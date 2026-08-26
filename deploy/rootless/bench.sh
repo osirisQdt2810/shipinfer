@@ -115,6 +115,8 @@ exec docker run --rm --pid=host --device nvidia.com/gpu=all \
   -e GST_GL_PLATFORM="${GST_GL_PLATFORM:-}" \
   -e GST_GL_WINDOW="${GST_GL_WINDOW:-}" \
   -e GST_PLUGIN_FEATURE_RANK="${GST_PLUGIN_FEATURE_RANK:-}" \
+  -e GST_DEBUG="${GST_DEBUG:-}" \
+  -e GIO_USE_PROXY_RESOLVER="${GIO_USE_PROXY_RESOLVER:-dummy}" \
   -e SHIPINFER_CUDA_GRAPHS="${SHIPINFER_CUDA_GRAPHS:-off}" \
   -e SHIPINFER_BENCH_SCRIPT="${SHIPINFER_BENCH_SCRIPT:-benchmarks/run_bench.py}" \
   -v "$REPO:/work" \

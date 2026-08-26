@@ -17,6 +17,7 @@ this one can use the video engine when it is there and still start when it is no
 
 from __future__ import annotations
 
+import os
 import threading
 from typing import Any, ClassVar
 
@@ -215,6 +216,14 @@ def _load_gst() -> tuple[Any, Any]:
     returns only after the registry exists.
     """
     with _GST_INIT_LOCK:
+        # `rtspsrc` asks GIO for a proxy resolver before it connects, and GIO's default on a
+        # desktop-less system is libproxy, which throws a C++ `std::runtime_error("Unable to
+        # read configuration")` when it finds no GSettings or D-Bus to read — uncaught across
+        # the C boundary, that is `terminate` for the whole process, which is how the first
+        # RTSP run inside the container died with fifty cameras connected and zero frames
+        # decoded. GIO's documented override selects its no-op resolver instead; `setdefault`
+        # so an operator who has configured a real proxy keeps it.
+        os.environ.setdefault("GIO_USE_PROXY_RESOLVER", "dummy")
         try:
             import gi
 

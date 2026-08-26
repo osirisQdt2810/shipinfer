@@ -248,3 +248,34 @@ class TestInitialisationIsSerialised:
 
         assert state["inits"] == 1, "one init, however many threads arrive at once"
         assert all(seen_ready), "every caller returned only after the registry existed"
+
+    def test_gio_is_told_not_to_use_libproxy_unless_the_operator_chose_one(self, monkeypatch):
+        """libproxy throws a C++ exception through GIO when it has no configuration to read —
+        `terminate` for the whole process, seen on the first containerised RTSP run."""
+        import os
+        import sys
+        import types
+
+        from shipinfer.ingest.sources import gstreamer
+
+        class FakeGst:
+            @staticmethod
+            def is_initialized():
+                return True
+
+        gi = types.ModuleType("gi")
+        gi.require_version = lambda *_a: None
+        repository = types.ModuleType("gi.repository")
+        repository.Gst = FakeGst
+        repository.GLib = object()
+        gi.repository = repository
+        monkeypatch.setitem(sys.modules, "gi", gi)
+        monkeypatch.setitem(sys.modules, "gi.repository", repository)
+
+        monkeypatch.delenv("GIO_USE_PROXY_RESOLVER", raising=False)
+        gstreamer._load_gst()
+        assert os.environ["GIO_USE_PROXY_RESOLVER"] == "dummy"
+
+        monkeypatch.setenv("GIO_USE_PROXY_RESOLVER", "gnome")  # an operator's real choice stays
+        gstreamer._load_gst()
+        assert os.environ["GIO_USE_PROXY_RESOLVER"] == "gnome"
