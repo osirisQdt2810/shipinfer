@@ -199,9 +199,11 @@ class RingHeader:
 # own structure and none re-reads a value computed before a possible re-entry.
 _PENDING_LOCK = threading.RLock()
 _PENDING_CLOSE: list[shared_memory.SharedMemory] = []
-#: Names this process has opened (not created): the one-writer discipline means a second
-#: open is a wiring bug, and letting it through unbalances the resource tracker's set.
-_OPENED_NAMES: set[str] = set()
+#: Names this process has opened (not created) -> the identity token of the handle holding
+#: the claim. The one-writer discipline means a second open is a wiring bug; keying by token
+#: means only the holder (its close, or its finalizer) can release the claim — a dead handle
+#: collected *after* a successor opened must not silently re-permit two writers.
+_OPENED_CLAIMS: dict[str, object] = {}
 
 
 def reap_pending_closes() -> int:
@@ -222,18 +224,22 @@ def reap_pending_closes() -> int:
         return len(still)
 
 
-def _finalize_handle(view: memoryview, opened_name: str | None) -> None:
+def _finalize_handle(
+    view: memoryview, opened_name: str | None, claim_token: object | None = None
+) -> None:
     """Finalizer for a handle that was never closed.
 
     Drops the view's export so ``SharedMemory.__del__`` can close quietly, and — for a writer
-    handle — releases the one-open-per-process claim, so a handle lost to an exception on the
-    connect path does not make every later ``open()`` of that ring read as terminal.
+    handle — releases the one-open-per-process claim *if this handle still holds it*: a
+    closed-then-collected predecessor firing after its successor opened must not release the
+    successor's claim and silently re-permit two writers over one segment.
     """
     with contextlib.suppress(Exception):
         view.release()
     if opened_name is not None:
         with _PENDING_LOCK:
-            _OPENED_NAMES.discard(opened_name)
+            if opened_name in _OPENED_CLAIMS and _OPENED_CLAIMS[opened_name] is claim_token:
+                del _OPENED_CLAIMS[opened_name]
 
 
 def _attach(name: str) -> shared_memory.SharedMemory:
@@ -287,6 +293,7 @@ class SharedRing:
         name: str,
         owner: str,
         is_owner: bool,
+        claim_token: object | None = None,
     ) -> None:
         self._block = block
         self._layout = layout
@@ -306,7 +313,10 @@ class SharedRing:
         self._submit_lock = threading.Lock()
         # A handle dropped without close() must not strand the mapping: the finalizer lets
         # `SharedMemory.__del__` succeed instead of printing an ignored BufferError.
-        weakref.finalize(self, _finalize_handle, self._view, None if is_owner else name)
+        weakref.finalize(
+            self, _finalize_handle, self._view, None if is_owner else name, claim_token
+        )
+        self._claim_token = claim_token
         self._next = 0
         self._take_next = 0
         self._pinned: Any = None
@@ -398,14 +408,17 @@ class SharedRing:
                 f"ring {name!r}: created with {slots} slots of {slot_bytes} bytes, opened "
                 f"expecting {layout.slots} of {layout.slot_bytes}"
             )
+        claim_token = object()
         with _PENDING_LOCK:
-            if name in _OPENED_NAMES:
+            if name in _OPENED_CLAIMS:
                 block.close()
                 raise RingProtocolError(
                     f"ring {name!r} is already open in this process — one writer per ring"
                 )
-            _OPENED_NAMES.add(name)
-        return cls(block, layout, name=name, owner=owner, is_owner=False)
+            _OPENED_CLAIMS[name] = claim_token
+        return cls(
+            block, layout, name=name, owner=owner, is_owner=False, claim_token=claim_token
+        )
 
     # -- header ------------------------------------------------------------------------
 
@@ -741,22 +754,24 @@ class SharedRing:
         return tensor
 
     def _pinned_view_died(self) -> None:
+        # The whole path holds `_pin_lock` (reentrant): clearing `_parked_unregister`,
+        # running the unregister, and closing the mapping are one step, so a concurrent
+        # `close()` cannot see the cleared state, munmap the block, and leave this thread's
+        # `cudaHostUnregister` running on an unmapped pointer.
         with self._pin_lock:
             self._pinned_live -= 1
-            unregister = None
-            if self._pinned_live == 0 and self._parked_unregister is not None:
-                unregister = self._parked_unregister
-                self._parked_unregister = None
-        if unregister is None:
-            return
-        unregister()
-        try:
-            self._block.close()
-        except BufferError:
-            # A plain payload view is still out there; the *mapping* waits for it (the pages
-            # are already unpinned, which is safe — payload views are used synchronously).
-            with _PENDING_LOCK:
-                _PENDING_CLOSE.append(self._block)
+            if self._pinned_live != 0 or self._parked_unregister is None:
+                return
+            unregister = self._parked_unregister
+            self._parked_unregister = None
+            unregister()
+            try:
+                self._block.close()
+            except BufferError:
+                # A plain payload view is still out there; the *mapping* waits for it (the
+                # pages are already unpinned, which is safe — payload views are synchronous).
+                with _PENDING_LOCK:
+                    _PENDING_CLOSE.append(self._block)
 
     def _torch_with_registration(self) -> Any:
         # Called under `_pin_lock` only: two threads racing this used to both see `_pinned is
@@ -789,7 +804,11 @@ class SharedRing:
         """
         if not self._is_owner:
             with _PENDING_LOCK:
-                _OPENED_NAMES.discard(self._name)
+                if (
+                    self._name in _OPENED_CLAIMS
+                    and _OPENED_CLAIMS[self._name] is self._claim_token
+                ):
+                    del _OPENED_CLAIMS[self._name]
         if self._is_owner and not self._closed_here:
             self._closed_here = True
             header = self.header()
@@ -799,31 +818,6 @@ class SharedRing:
                 heartbeat_ns=time.monotonic_ns(),
                 closed=True,
             )
-        unregister = None
-        parked_for_finalizer = False
-        with self._pin_lock:
-            # Latch first: from here no handout can start, and any that completed has already
-            # counted itself, so `_pinned_live` below is the whole truth.
-            self._pin_closed = True
-            if self._parked_unregister is not None:
-                # A previous close already deferred to the finalizer. Without this, a second
-                # close saw `_pinned is None`, fell through to `block.close()`, and parked a
-                # mapping whose pages were STILL REGISTERED — a later reap would munmap them
-                # and the finalizer's unregister would then run on an unmapped pointer.
-                parked_for_finalizer = True
-            elif self._pinned is not None:
-                torch_module, pinned_ptr = self._pinned, self._pinned_ptr
-                self._pinned = None
-
-                def unregister() -> None:
-                    torch_module.cuda.cudart().cudaHostUnregister(pinned_ptr)
-
-                if self._pinned_live != 0:
-                    # Pinned views are still held; the last one's finalizer unpins and closes.
-                    self._parked_unregister = unregister
-                    unregister = None
-                    parked_for_finalizer = True
-
         # A payload decoded without a copy may still view the block (an in-flight tensor);
         # releasing under it would raise `BufferError` and skip the unlink. The mapping then
         # lives until the last view dies, which is the right lifetime — the *name* goes now.
@@ -838,22 +832,47 @@ class SharedRing:
         # Reap earlier leftovers first — the reap only ever closes mappings whose pages are
         # already unpinned, so it can never unpin anything, let alone under a live DMA.
         reap_pending_closes()
-        if unregister is not None:
-            # No pinned view was out at the latch — so, *provided callers honoured
-            # `pinned_tensor`'s contract* (a tensor outlives the copies it feeds), no DMA
-            # through this ring is in flight: unpin now, while the mapping is certainly alive.
-            unregister()
-            unregister = None
-        closed_now = False
-        if not parked_for_finalizer:
-            try:
-                self._block.close()
-                closed_now = True
-            except BufferError:
-                pass  # a zero-copy payload is still in flight; the mapping waits for it
-            if not closed_now:
-                with _PENDING_LOCK:
-                    _PENDING_CLOSE.append(self._block)
+        # One pin-lock section end to end: the latch, the decision, the unpin, and the
+        # close/park. Splitting the unpin out of the lock let a concurrent close() see the
+        # cleared state, fall through to block.close(), and munmap the pages this thread was
+        # about to cudaHostUnregister.
+        with self._pin_lock:
+            # Latch first: from here no handout can start, and any that completed has already
+            # counted itself, so `_pinned_live` below is the whole truth.
+            self._pin_closed = True
+            parked_for_finalizer = False
+            if self._parked_unregister is not None:
+                # A previous close already deferred to the finalizer. Without this, a second
+                # close saw `_pinned is None`, fell through to `block.close()`, and parked a
+                # mapping whose pages were STILL REGISTERED — a later reap would munmap them
+                # and the finalizer's unregister would then run on an unmapped pointer.
+                parked_for_finalizer = True
+            elif self._pinned is not None:
+                torch_module, pinned_ptr = self._pinned, self._pinned_ptr
+                self._pinned = None
+                if self._pinned_live != 0:
+
+                    def _unregister() -> None:
+                        torch_module.cuda.cudart().cudaHostUnregister(pinned_ptr)
+
+                    # Pinned views are still held; the last one's finalizer unpins and closes.
+                    self._parked_unregister = _unregister
+                    parked_for_finalizer = True
+                else:
+                    # No pinned view is out at the latch — so, *provided callers honoured
+                    # `pinned_tensor`'s contract* (a tensor outlives the copies it feeds), no
+                    # DMA through this ring is in flight: unpin now, mapping certainly alive.
+                    torch_module.cuda.cudart().cudaHostUnregister(pinned_ptr)
+            if not parked_for_finalizer:
+                closed_now = False
+                try:
+                    self._block.close()
+                    closed_now = True
+                except BufferError:
+                    pass  # a zero-copy payload is still in flight; the mapping waits for it
+                if not closed_now:
+                    with _PENDING_LOCK:
+                        _PENDING_CLOSE.append(self._block)
         if self._is_owner and not self._unlinked:
             self._unlinked = True
             # `_attach` unregisters on open; in one process (the tests, and any same-process

@@ -1073,3 +1073,76 @@ class TestASecondCloseKeepsTheParkPinnedSafe:
         del held
         gc.collect()
         assert unregisters == [0xACE0], "the finalizer unpinned exactly once"
+
+
+class TestAStaleFinalizerCannotReleaseASuccessorsClaim:
+    def test_the_dead_handles_collection_leaves_the_live_claim_standing(self, ring) -> None:
+        """Round 12: the reconnect shape — close the old handle, open the new one, drop the
+        old reference. The dead handle's finalizer fires *after* the successor claimed the
+        name, and with a name-keyed claim it released the successor's — re-permitting two
+        writers over one segment. The claim is identity-keyed now."""
+        first = SharedRing.open(ring.name, ring.layout)
+        first.close()
+        second = SharedRing.open(ring.name, ring.layout)
+        del first
+        gc.collect()  # the stale finalizer fires; the live claim must stand
+        with pytest.raises(RingProtocolError, match="already open in this process"):
+            SharedRing.open(ring.name, ring.layout)
+        second.close()
+        third = SharedRing.open(ring.name, ring.layout)  # the holder's close released it
+        third.close()
+
+
+class TestCloseRacesClose:
+    class _View:
+        def data_ptr(self) -> int:
+            return 0xCC1
+
+        def numel(self) -> int:
+            return 4096
+
+    def test_two_closers_and_a_dying_pinned_view_unpin_exactly_once(self, monkeypatch) -> None:
+        """Round 12: the unpin ran outside the pin lock after clearing the state that would
+        tell a concurrent closer it was in flight — the second closer could munmap first and
+        the unregister then ran on an unmapped pointer. Both paths hold the lock end to end
+        now; two racing closers and the finalizer must produce exactly one unregister and no
+        surprise, every time."""
+        from types import SimpleNamespace
+
+        import shipinfer.runtime.platform as platform_module
+
+        for _ in range(100):
+            unregisters: list[int] = []
+            cudart_calls = SimpleNamespace(
+                cudaHostRegister=lambda ptr, n, flags: 0,
+                cudaHostUnregister=lambda ptr, _u=unregisters: _u.append(ptr),
+            )
+            fake_torch = SimpleNamespace(
+                uint8="uint8",
+                frombuffer=lambda *a, **k: self._View(),
+                cuda=SimpleNamespace(cudart=lambda _c=cudart_calls: _c),
+            )
+            monkeypatch.setattr(platform_module, "require_torch", lambda _ft=fake_torch: _ft)
+            ring = SharedRing.create(_name(), RingLayout(slots=2, slot_bytes=4096), owner="A")
+            held = ring.pinned_tensor(0)
+            surprises: list[BaseException] = []
+
+            def closer(ring=ring, surprises=surprises) -> None:
+                try:
+                    ring.close()
+                except BaseException as exc:
+                    surprises.append(exc)
+
+            threads = [threading.Thread(target=closer) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            del held  # the view dies while the closers race; the finalizer may run anywhere
+            gc.collect()
+            for thread in threads:
+                thread.join(timeout=5.0)
+            gc.collect()
+            from shipinfer.runtime.memory.shared_ring import reap_pending_closes
+
+            reap_pending_closes()
+            assert surprises == [], surprises[:2]
+            assert unregisters == [0xCC1], f"unpinned {len(unregisters)} times, want exactly 1"
