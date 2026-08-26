@@ -32,3 +32,17 @@ class TestTheStreamIsPacedByTheClock:
             tmp_path / "f.h264", streams=1, port=18554, fps=20
         ).launch_line()
         assert "framerate=20/1" in line
+
+
+class TestTheFixtureCacheIsKeyedByFrameRate:
+    """The stream's own SPS timing paces playback, so a fixture encoded at one rate cannot be
+    served as another: the first 12 x 5 measurement offered 20 fps per camera from a fixture
+    cached by an earlier 20 fps run."""
+
+    def test_two_rates_are_two_files(self, tmp_path: Path) -> None:
+        data = tmp_path / "person_2K"
+        assert rtsp_serve.default_fixture_path(data, 5) != rtsp_serve.default_fixture_path(
+            data, 20
+        )
+        assert rtsp_serve.default_fixture_path(data, 5).name == "person_2K-5fps.h264"
+        assert rtsp_serve.default_fixture_path(data, 5).parent == tmp_path / ".rtsp"

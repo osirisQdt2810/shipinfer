@@ -57,7 +57,18 @@ DEFAULT_DATA = REPO / "benchmarks" / "baseline" / "data" / "person_2K"
 DEFAULT_PORT = 8554
 DEFAULT_FPS = 20
 
-__all__ = ["RtspFixtureServer", "encode_fixture", "stream_uri"]
+__all__ = ["RtspFixtureServer", "default_fixture_path", "encode_fixture", "stream_uri"]
+
+
+def default_fixture_path(data_dir: Path, fps: int) -> Path:
+    """Where the encoded stream for ``data_dir`` at ``fps`` is cached — keyed by frame rate.
+
+    The stream's own timing (the SPS written by ``ffmpeg -framerate``) is what paces playback,
+    and it used to be cached under the directory's name alone: a fixture encoded for one run's
+    20 fps was served to the next run's ``--fps 5`` at 20 fps, and twelve "5 fps" cameras
+    offered 240. One cache entry per rate, so the rate asked for is the rate served.
+    """
+    return data_dir.parent / ".rtsp" / f"{data_dir.name}-{fps}fps.h264"
 
 
 def encode_fixture(
@@ -258,14 +269,14 @@ def main(argv: list[str] | None = None) -> int:
         "--fixture",
         type=Path,
         default=None,
-        help="where to cache the encoded H.264 (default: <data>/../.rtsp/<name>.h264)",
+        help="where to cache the encoded H.264 (default: <data>/../.rtsp/<name>-<fps>fps.h264)",
     )
     parser.add_argument("--user", default=None)
     parser.add_argument("--password", default=None)
     parser.add_argument("--print-uris", action="store_true", help="print the URIs and exit")
     args = parser.parse_args(argv)
 
-    fixture = args.fixture or (args.data.parent / ".rtsp" / f"{args.data.name}.h264")
+    fixture = args.fixture or default_fixture_path(args.data, args.fps)
     encode_fixture(args.data, fixture, fps=args.fps)
 
     server = RtspFixtureServer(
