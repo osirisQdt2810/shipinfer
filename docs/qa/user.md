@@ -451,6 +451,171 @@ recorded here directly, since the transcript will not keep them).
 
 ---
 
+#### V92 — 06:56 UTC
+
+> tiếp tục
+
+#### V93 — 11:10 UTC
+
+> tiep tuc
+
+#### V94 — 11:58 UTC
+
+> tiếp tục\\
+
+#### V95 — 12:37 UTC
+
+> tiếp tục, check liên tục 3 phút 1 lần
+
+#### V96 — 12:51 UTC
+
+> tiếp tục đi
+
+*(delivered by the operator's stall-watchdog session, not typed by hand)*
+
+#### V97 — 13:15 UTC
+
+> tiếp tục đi
+
+*(the stall-watchdog session again)*
+
+#### V98 — 13:32 UTC
+
+> tiếp tục đi
+
+*(the stall-watchdog session)*
+
+#### V99 — 13:47 UTC
+
+> tiếp tục đi
+
+*(the stall-watchdog session)*
+
+#### V100 — 14:02 UTC
+
+> tiếp tục đi
+
+*(the stall-watchdog session)*
+
+#### V101 — 14:18 UTC
+
+> tiếp tục đi
+
+*(the stall-watchdog session)*
+
+#### V102 — 14:50 UTC
+
+> tiếp tục đi
+
+*(the stall-watchdog session)*
+
+#### V103 — 15:19 UTC
+
+> tiếp tục đi
+
+*(the stall-watchdog session)*
+
+#### V104 — 15:30 UTC
+
+> tiếp tục đi
+
+*(the stall-watchdog session)*
+
+#### V105 — 15:54 UTC
+
+> tiếp tục đi
+
+*(the stall-watchdog session)*
+
+#### V106 — 16:1x UTC
+
+> list cho tôi hiện tại trong toàn bộ feature mà chúng ta đã bàn, bạn đã làm xong cái gì và cái gì còn todo
+
+*(A status request: list everything discussed — done vs still todo. Answered from
+`.claude/TASKS.md` in the session; the ledger itself is the canonical answer.)*
+
+#### V107 — 16:2x UTC
+
+> list cho tôi hiện tại trong toàn bộ feature mà chúng ta đã bàn, bạn đã làm xong cái gì và cái gì còn todo??? tại sao bạn không trả lời???
+
+*(Repeat of V106 with a complaint about the missing answer — legitimate: the report was
+being prepared while round-2 test work continued instead of being answered first. Full
+done/todo report delivered in-session immediately.)*
+
+#### V108 — 16:3x UTC
+
+> note: "T4 · DeepStream tier — hoàn thiện mtmc_deepstream.py của bạn thành competitor benchmark."
+> Đây không phải là benchmark, mà thực sự tôi muốn đưa deepstream vào làm 1 pipeline kế thừa từ
+> abstract pipeline như ta đã từng nói trước đó (chính là topology absstraction). cái file
+> deepstream_mtmc.py đó chẳng là tôi gửi bạn tham khảo và xem xét để nhìn ra topology mà hệ thống
+> của ta đang muốn hướng tới thôi.
+> Tóm gọn lại đang có 1 absstract topology: xương sống của cả system: input api server/offline
+> inference engine nhận đầu vào là camera url/video => đi vào pipeline: ingest (có thể gstreamer,
+> cv...) -> output.
+> Mà hiện có 3 topology như ta đã đề cập trước đó cần triển khai:
+> - threading (là hiện tại)
+> - multi-process theo hướng shard (fleet launcher - nhưng mà mỗi launcher tách riêng biệt không
+>   shared pool gì)
+> - multi-process sharding nhưng làm theo hướng như inference-engine - mỗi launcher tách biệt xử
+>   lý nhưng mà chúng share nhau pool để giảm tải workload imbalânce
+> - deepstream topology
+
+*(T4 re-scoped: DeepStream is **not** a competitor benchmark. It is a fourth topology —
+a pipeline implementation inheriting the abstract topology/pipeline backbone, registered
+like the others. `mtmc_deepstream.py` was reference material to show the target shape, not
+a deliverable to finish. The taxonomy the system implements: **threading** (current
+single-process default), **fleet** (multi-process shards, nothing shared), **service**
+(multi-process shards sharing an instance pool to absorb imbalance — PR #26), and
+**deepstream**. The backbone: API server / offline engine takes camera URL/video → ingest
+(gstreamer, cv, …) → pipeline → output.)*
+
+#### V109 — 16:3x UTC
+
+> ở bước "2. CI PR (compile csrc trong CI + sửa prompt review) — sửa .github/workflows/ nên cần
+> bạn merge tay.", tôi cho phép bạn tự merge luôn, đến khi nào tôi ra lệnh không được tự merge,
+> phải là tôi merge thì lúc đó rule mới hiệu nghiệm
+
+*(A standing grant: I may merge the workflows-editing CI PR myself — and self-merge stays
+permitted in general — until the operator explicitly revokes it. The revocation, when it
+comes, is what re-establishes "operator merges". Recorded in the standing-rules index.)*
+
+#### V110 — 16:4x UTC
+
+> ngoài ra bạn còn cần notice thêm 1 điều cực kì quan trọng: việc shared workload đó đúng là rất
+> tốt, nhưng dễ triển khai ở pipeline đơn giản: detection -> reid -> track thôi. Ở đây của chúng
+> ta ngoài detect,track còn có segment, reid, thậm chí như trong docs còn có thêm cả ocr . mtmc
+> nữa đó nhé
+
+*(Design warning for the service topology: workload sharing is easy on a simple
+detect → reid → track chain, but this pipeline also carries segment, reid, OCR and MTMC.
+The tier must hold for the full DAG — many stateless crop-stage models with very different
+payload sizes, and stateful stages (track, MTMC) that must never cross processes. Recorded
+against T3/T4 in the ledger; the per-model dispatcher-level sharing seam is the answer and
+the ring budget is the cost that scales with it.)*
+
+
+#### V111 — 16:5x UTC
+
+> sao tôi thấy 1 số điều tôi nói không ở trong user.md nhỉ
+
+*(The operator opened the repository's `docs/qa/user.md` in the IDE — the copy last merged
+by docs snapshot #21, through ~V89. Every request since lives in the working copy
+(`/tmp/mps/docs/qa/user.md`, V90–V111) that lands on main in the next docs snapshot PR.
+Fixed the visibility now by refreshing the repository working-tree file with the current
+copy, uncommitted, so the IDE shows everything; the snapshot PR carries it to main.)*
+
+#### V112 — 17:0x UTC
+
+> tiếp tục đi
+
+*(the stall-watchdog session)*
+
+#### V113 — 18:2x UTC
+
+> tiếp tục đi
+
+*(the stall-watchdog session)*
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
@@ -678,6 +843,9 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 | Every MOT/MTMC algorithm from the previous C++ services must exist in shipvision too, callable through the C++ ops binding rather than only in Python | V50 |
 | **Reference implementations first** — when the way to build something is not clear, read how Triton Inference Server or vLLM does it before inventing — their shape is the default, and a departure from it is stated with its reason. | V86 |
 | **Two planes, one architecture** — `csrc/` mirrors the Python data plane seam for seam — instance thread + queue, dispatcher + policy, batch window, fair-queue eviction order, graph, reassembly, ingest — and a change to a Python data-plane seam is not done until the C++ seam is synced and the cross-plane parity test agrees. | V88–V89 |
+| **Self-merge is granted, standing until the operator explicitly revokes it** — the revocation, when it comes, is what re-establishes "operator merges". Exercised once: #28. | V109 |
+| Poll the open PR's checks and review every ~3 minutes while it is in flight | V95 |
+| **Workload sharing must hold for the full DAG** — segment, reid (person & ship), OCR and MTMC beside detect/track, not the simple detect→reid→track chain; stateful stages stay pinned per shard and the ring budget scales with the shared set | V110 |
 
 ### Verbatim, V41–V51
 
