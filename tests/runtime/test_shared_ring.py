@@ -614,12 +614,39 @@ class TestCloseIsConcurrentByDesign:
                 except BaseException as exc:
                     errors.append(exc)
 
+            writer = SharedRing.open(ring.name, ring.layout)
+            submitter_started = threading.Event()
+
+            def submit(writer=writer, started=submitter_started) -> None:
+                """Round 11: a transition racing the close must be inert or typed-closed —
+                never a RingProtocolError masquerading as a build mismatch."""
+                try:
+                    started.set()
+                    while not writer.is_closed:
+                        try:
+                            index = writer.claim(timeout_s=0.001)
+                        except (RingFullError, RingClosedError):
+                            continue
+                        if index % 2:
+                            writer.publish(index)
+                        else:
+                            writer.abandon(index)
+                except RingClosedError:
+                    pass
+                except BaseException as exc:
+                    errors.append(exc)
+
             thread = threading.Thread(target=sweep)
+            pusher = threading.Thread(target=submit)
             thread.start()
+            pusher.start()
             started.wait(1.0)
+            submitter_started.wait(1.0)
             ring.close()
             thread.join(timeout=2.0)
-            assert not thread.is_alive()
+            pusher.join(timeout=2.0)
+            writer.close()
+            assert not thread.is_alive() and not pusher.is_alive()
         assert errors == [], errors[:3]
 
     def test_close_is_idempotent_and_unlinks_once(self) -> None:
@@ -1006,3 +1033,43 @@ class TestThePendingLockIsReentrant:
         with module._PENDING_LOCK:
             module._finalize_handle(memoryview(b""), "never-opened-name")  # re-enters, returns
         assert True
+
+
+class TestASecondCloseKeepsTheParkPinnedSafe:
+    class _View:
+        def data_ptr(self) -> int:
+            return 0xACE0
+
+        def numel(self) -> int:
+            return 4096
+
+    def test_double_close_under_a_live_pinned_view_parks_nothing_and_unpins_once(
+        self, ring, monkeypatch
+    ) -> None:
+        """Round 11: the second close saw `_pinned is None`, fell through to block.close(),
+        and parked a mapping whose pages were still registered — a later reap would munmap
+        them and the finalizer's unregister would run on an unmapped pointer."""
+        from types import SimpleNamespace
+
+        import shipinfer.runtime.platform as platform_module
+        from shipinfer.runtime.memory import shared_ring as module
+
+        unregisters: list[int] = []
+        cudart_calls = SimpleNamespace(
+            cudaHostRegister=lambda ptr, n, flags: 0,
+            cudaHostUnregister=lambda ptr, _u=unregisters: _u.append(ptr),
+        )
+        fake_torch = SimpleNamespace(
+            uint8="uint8",
+            frombuffer=lambda *a, **k: self._View(),
+            cuda=SimpleNamespace(cudart=lambda _c=cudart_calls: _c),
+        )
+        monkeypatch.setattr(platform_module, "require_torch", lambda _ft=fake_torch: _ft)
+        held = ring.pinned_tensor(0)
+        ring.close()
+        ring.close()  # the second close must defer to the finalizer, not park a pinned block
+        assert unregisters == [], "nothing unpinned while the view lives"
+        assert module.reap_pending_closes() == 0, "and nothing pinned was parked for a reap"
+        del held
+        gc.collect()
+        assert unregisters == [0xACE0], "the finalizer unpinned exactly once"

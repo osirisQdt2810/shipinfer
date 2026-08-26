@@ -64,7 +64,9 @@ the deployment are x86 — and recorded here so a port knows where to add the fe
 caveat covers the header stamp: a 24-byte memcpy is per-field atomic in practice on x86 for
 naturally aligned fields, not by architectural guarantee. And pinned-view liveness is the
 *Python object's*: a tensor from `pinned_tensor` must outlive every async copy it feeds — the
-ring cannot see the stream, only the handle.
+ring cannot see the stream, only the handle. A *pinned* handle dropped without ``close()``
+leaks its registration for the process's life — a finalizer cannot unpin safely — so pinned
+rings are closed, not dropped.
 
 Pinned-view liveness is tracked, not guessed: `pinned_tensor` counts what it hands out and a
 finalizer on each tensor brings the count down, so `close()` unpins immediately when nothing
@@ -533,6 +535,32 @@ class SharedRing:
                 return
             self._view[self._layout.state_offset(index)] = value
 
+    def _swap_state(
+        self, index: int, expect: int, to: int, *, expected_word: str | None = None
+    ) -> bool:
+        """The read-modify-write as ONE critical section, with the detached check inside.
+
+        Returns True on the swap; False when the handle detached under the caller (the
+        transition is a no-op, per the closed rule) or — scanning callers, ``expected_word``
+        None — when the state differs. With ``expected_word`` set, a differing state raises
+        :class:`RingProtocolError`: splitting the check and the write across two acquisitions
+        let a racing ``close()`` turn an ordinary shutdown into a fake build-mismatch page.
+        """
+        with self._view_lock:
+            if self._detached:
+                return False
+            offset = self._layout.state_offset(index)
+            current = self._view[offset]
+            if current != expect:
+                if expected_word is not None:
+                    raise RingProtocolError(
+                        f"ring {self._name!r}: slot {index} is not {expected_word} "
+                        f"(state {current})"
+                    )
+                return False
+            self._view[offset] = to
+            return True
+
     @property
     def depth(self) -> int:
         """Slots not currently free — what a writer sees as the ring's backlog."""
@@ -568,8 +596,7 @@ class SharedRing:
                 for _ in range(self._layout.slots):
                     index = self._next
                     self._next = (index + 1) % self._layout.slots
-                    if self.state(index) == SlotState.FREE:
-                        self._set_state(index, SlotState.CLAIMED)
+                    if self._swap_state(index, SlotState.FREE, SlotState.CLAIMED):
                         return index
             if time.monotonic() >= deadline:
                 raise RingFullError(self._owner, self._name, self.depth, self._layout.slots)
@@ -606,11 +633,7 @@ class SharedRing:
             self._publish_locked(index)
 
     def _publish_locked(self, index: int) -> None:
-        if self.state(index) != SlotState.CLAIMED:
-            raise RingProtocolError(
-                f"ring {self._name!r}: slot {index} is not claimed (state {self.state(index)})"
-            )
-        self._set_state(index, SlotState.WRITTEN)
+        self._swap_state(index, SlotState.CLAIMED, SlotState.WRITTEN, expected_word="claimed")
 
     def abandon(self, index: int) -> None:
         """Writer: a claimed slot goes straight back to free, unpublished.
@@ -626,11 +649,7 @@ class SharedRing:
             self._abandon_locked(index)
 
     def _abandon_locked(self, index: int) -> None:
-        if self.state(index) != SlotState.CLAIMED:
-            raise RingProtocolError(
-                f"ring {self._name!r}: slot {index} is not claimed (state {self.state(index)})"
-            )
-        self._set_state(index, SlotState.FREE)
+        self._swap_state(index, SlotState.CLAIMED, SlotState.FREE, expected_word="claimed")
 
     def take(self, timeout_s: float | None) -> int | None:
         """Owner: a written slot, or ``None`` for "no work in this window".
@@ -663,8 +682,7 @@ class SharedRing:
                 return None
             for step in range(self._layout.slots):
                 index = (self._take_next + step) % self._layout.slots
-                if self.state(index) == SlotState.WRITTEN:
-                    self._set_state(index, SlotState.TAKEN)
+                if self._swap_state(index, SlotState.WRITTEN, SlotState.TAKEN):
                     self._take_next = (index + 1) % self._layout.slots
                     return index
             if self.is_closed:
@@ -685,11 +703,7 @@ class SharedRing:
             raise RingProtocolError(
                 f"ring {self._name!r}: only the owner releases; this handle submits"
             )
-        if self.state(index) != SlotState.TAKEN:
-            raise RingProtocolError(
-                f"ring {self._name!r}: slot {index} is not taken (state {self.state(index)})"
-            )
-        self._set_state(index, SlotState.FREE)
+        self._swap_state(index, SlotState.TAKEN, SlotState.FREE, expected_word="taken")
 
     # -- pinning -----------------------------------------------------------------------
 
@@ -791,7 +805,13 @@ class SharedRing:
             # Latch first: from here no handout can start, and any that completed has already
             # counted itself, so `_pinned_live` below is the whole truth.
             self._pin_closed = True
-            if self._pinned is not None:
+            if self._parked_unregister is not None:
+                # A previous close already deferred to the finalizer. Without this, a second
+                # close saw `_pinned is None`, fell through to `block.close()`, and parked a
+                # mapping whose pages were STILL REGISTERED — a later reap would munmap them
+                # and the finalizer's unregister would then run on an unmapped pointer.
+                parked_for_finalizer = True
+            elif self._pinned is not None:
                 torch_module, pinned_ptr = self._pinned, self._pinned_ptr
                 self._pinned = None
 
