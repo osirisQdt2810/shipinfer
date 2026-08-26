@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import struct
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -65,6 +65,8 @@ _REQUEST_HEAD = struct.Struct("<IIQqiIqqqqqq64s64s64s")
 _RESPONSE_HEAD = struct.Struct("<IIQqIIqqqqqq64s16s192s")
 STATUS_OK = 0
 STATUS_FAILED = 1
+STATUS_QUEUE_FULL = 2
+STATUS_INVALID = 3
 #: name 64s | dtype u8 | ndim u8 | pad u16 | nbytes u64 | dims 8 x u32
 _TENSOR_HEAD = struct.Struct("<64sBBHQ8I")
 
@@ -73,9 +75,16 @@ _DTYPES_BY_CODE: dict[int, DataType] = {i: dtype for dtype, i in _DTYPE_CODES.it
 
 
 class RemoteFailureError(Exception):
-    """The owner ran into an error and sent it back instead of a result. The message is the
-    owner's error, class and text; the submitter turns it into a typed failure for the caller.
+    """The owner ran into an error and sent it back instead of a result.
+
+    The message is the owner's error, class and text; ``code`` is the status word, so the
+    submitter can rehydrate the *typed* failure — a saturated queue, a bad request and a dead
+    backend are three different operational events and must not collapse into one class.
     """
+
+    def __init__(self, message: str, code: int = STATUS_FAILED) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +104,25 @@ def _fixed(text: str, width: int, what: str) -> bytes:
 
 def _unfixed(raw: bytes) -> str:
     return raw.rstrip(b"\0").decode(errors="replace")
+
+
+def request_on_host(request: InferenceRequest) -> InferenceRequest:
+    """The same request with every input resident on the host.
+
+    A no-op when nothing lives on a device. The submitter calls this *before* claiming a
+    ring slot, so the D2H copy (and its stream sync) never holds a slot the peer could be
+    using; encoding a host-only request touches no device at all (#26 round 4).
+    """
+    if all(tensor.host is not None for tensor in request.inputs.values()):
+        return request
+    inputs = {name: _as_host_tensor(t, name) for name, t in request.inputs.items()}
+    return replace(request, inputs=inputs)
+
+
+def _as_host_tensor(tensor: Tensor, name: str) -> Tensor:
+    if tensor.host is not None:
+        return tensor
+    return Tensor.from_numpy(_device_to_host(tensor, name))
 
 
 def _host(tensor: Tensor, name: str) -> np.ndarray:
@@ -117,10 +145,12 @@ def _device_to_host(tensor: Tensor, name: str) -> np.ndarray:  # noqa: ARG001 - 
     view = to_torch(tensor)
     if view.is_cuda:
         # The CAI bridge is version 2 - no stream key - so torch orders nothing against the
-        # producer's stream. Drain the device before reading, or a kernel still writing on a
-        # pool stream puts wrong bytes on the wire with no crash. One sync per crossing,
-        # bounded by the producer's own kernel time.
-        torch.cuda.synchronize(view.device)
+        # producing stream. Under ADR-002 (one thread, one stream) the submitting thread IS
+        # the producer, so syncing the *current* stream orders the copy without stalling the
+        # rest of the device the way a device-wide synchronize would (#26 round 4). A caller
+        # bridging a tensor produced on another thread's stream must order the streams first,
+        # as `_DeviceSpan`'s contract already states.
+        torch.cuda.current_stream(view.device).synchronize()
     return np.ascontiguousarray(view.detach().to("cpu", non_blocking=False).numpy())
 
 
@@ -330,6 +360,18 @@ def encode_response(response: InferenceResponse, view: memoryview) -> int:
     return _write_tensors(view, _RESPONSE_HEAD.size, heads)
 
 
+def _status_of(error: BaseException) -> int:
+    # Late imports keep the wire's import set tiny; isinstance order matters — QueueFullError
+    # subclasses ShipInferError, and ValidationError must not shadow it.
+    from shipinfer.core.errors import QueueFullError, ValidationError
+
+    if isinstance(error, QueueFullError):
+        return STATUS_QUEUE_FULL
+    if isinstance(error, ValidationError):
+        return STATUS_INVALID
+    return STATUS_FAILED
+
+
 def encode_failure(
     request_id: int, model_name: str, error: BaseException, view: memoryview
 ) -> int:
@@ -352,7 +394,7 @@ def encode_failure(
         request_id,
         -1,
         0,
-        STATUS_FAILED,
+        _status_of(error),
         0,
         0,
         0,
@@ -383,7 +425,7 @@ def decode_response(
         )
     if f[5] != STATUS_OK:
         raise RemoteFailureError(
-            _unfixed(f[14]) or "the owner failed the request without a message"
+            _unfixed(f[14]) or "the owner failed the request without a message", code=f[5]
         )
     outputs = _read_tensors(view, _RESPONSE_HEAD.size, f[4], copy=copy)
     timings = Timings(

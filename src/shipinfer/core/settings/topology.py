@@ -52,6 +52,9 @@ class ServiceSettings(BaseModel):
     #: lost. 200 ms and 1 s: one missed stamp is a scheduler hiccup, five is a dead process.
     heartbeat_ms: float = Field(default=200.0, gt=0.0)
     lost_after_ms: float = Field(default=1000.0, gt=0.0)
+    #: How long a pending remote request may wait for its reply before it fails with a
+    #: timeout — the bound on how long a stranded WorkItem can pin its inputs.
+    pending_timeout_ms: float = Field(default=60_000.0, gt=0.0)
     #: How long a starting shard waits for its peers' rings to appear.
     connect_timeout_s: float = Field(default=60.0, gt=0.0)
 

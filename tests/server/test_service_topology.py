@@ -61,6 +61,17 @@ class TestTheChildrenAreToldHowToFindEachOther:
         )
         assert settings.topology.service.shard == 1
 
+    def test_every_tier_timing_is_tunable_including_the_pending_deadline(
+        self, monkeypatch
+    ) -> None:
+        """Round 4: a stranded WorkItem pins its inputs for `pending_timeout_ms`; an
+        operator tunes it beside `lost_after_ms` instead of finding it hard-coded."""
+        monkeypatch.setenv(TOPOLOGY_ENV, "service")
+        monkeypatch.setenv("SHIPINFER_TOPOLOGY__SERVICE__PENDING_TIMEOUT_MS", "5000")
+        monkeypatch.setenv("SHIPINFER_TOPOLOGY__SERVICE__LOST_AFTER_MS", "700")
+        service = ServerSettings().topology.service
+        assert (service.pending_timeout_ms, service.lost_after_ms) == (5000.0, 700.0)
+
     def test_the_fleet_carries_a_per_shard_environment(self) -> None:
         """`Fleet` takes the topology's per-shard hook so `service` can name each child."""
         topology = ServiceTopology()

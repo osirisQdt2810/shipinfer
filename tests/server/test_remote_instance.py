@@ -552,10 +552,16 @@ class TestTheProxySeesItsOwnBacklog:
         try:
             owner.stamp(depth=1, ewma_latency_us=10.0)
             assert proxy.depth == 1
+            items = []
             for frame in (1, 2):
                 request = _request("quay-8", frame)
-                proxy.enqueue(WorkItem(request, ResponseFuture(request)))
-            assert proxy.depth == 3, "the stamped depth plus the two published-but-untaken"
+                item = WorkItem(request, ResponseFuture(request))
+                proxy.enqueue(item)
+                items.append(item)
+            assert proxy.depth == 3, "the stamped depth plus the two in flight"
+            for item in items:  # settled in any way, the charge comes off this peer
+                item.fail(ServerStateError("test settles it"))
+            assert proxy.depth == 1, "settled requests are no longer charged"
         finally:
             writer.close()
             owner.close()
@@ -577,3 +583,90 @@ class TestTheReaderFailsWhatItStrands:
         with pytest.raises(ServerStateError, match="quay-2/9"):
             item.future.result(timeout=1.0)
         assert reader.pending == 0
+
+
+class TestAWireRefusalSpills:
+    def test_an_unencodable_request_lands_on_a_local_instance(self) -> None:
+        """Round 4: a camera_id the wire cannot carry is this *candidate* refusing, not the
+        frame failing — the spill loop tries the next instance and the ring stays untouched.
+        Without the WireRefusedError(QueueFullError) shape this was a per-camera outage."""
+        layout = RingLayout(slots=4, slot_bytes=64 * 1024)
+        owner_ring = SharedRing.create(_name("wref"), layout, owner="B")
+        writer = SharedRing.open(owner_ring.name, layout)
+        reader = ResultReader(lost_after_s=5.0)
+        proxy = RemoteInstance(
+            owner="B", model_name="m", submit=writer, reader=reader, lost_after_s=5.0
+        )
+        owner_ring.stamp(depth=0, ewma_latency_us=1.0)  # ready and shallowest: tried first
+        try:
+            deep = FakeLocal(depth=100, full=True)  # the burst filled the local queue
+            roomy = FakeLocal(depth=50, full=False)  # the instance that should get the frame
+            dispatcher = Dispatcher(
+                model_name="m",
+                instances=[deep, proxy, roomy],
+                policy=LocalityAwareSpilloverPolicy(spill_threshold=4),
+            )
+            request = _request("q" * 70, 5)  # 70 bytes: _fixed refuses at 64
+            item = WorkItem(request, ResponseFuture(request))
+            dispatcher.dispatch(item, lambda instance, work: instance.enqueue(work))
+            assert [i.request.context.frame_id for i in roomy.enqueued] == [5]
+            assert writer.depth == 0, "the claimed slot was abandoned, not published"
+            assert proxy.depth == 0, "nothing is charged against the peer"
+        finally:
+            writer.close()
+            owner_ring.close()
+
+
+class TestTheSweepStampIsPerModel:
+    def test_lanes_sharing_a_load_compute_it_once_and_both_are_stamped(self) -> None:
+        """Round 4: `_stamp` was O(lanes x instances) per call on the tier's hottest
+        thread. Lanes of one model share one load callable, computed once per sweep."""
+        layout = RingLayout(slots=2, slot_bytes=8192)
+        ring_a = SharedRing.create(_name("sa"), layout, owner="B")
+        ring_b = SharedRing.create(_name("sb"), layout, owner="B")
+        calls: list[int] = []
+
+        def load() -> tuple[int, float]:
+            calls.append(1)
+            return (2, 5.0)
+
+        def lane(ring: SharedRing) -> IngressLane:
+            return IngressLane(
+                submitter="A",
+                inbound=ring,
+                results=ring,  # never written in this test
+                admit=lambda request: (_ for _ in ()).throw(AssertionError("not served")),
+                dispatch=lambda item: True,
+                reject=lambda: None,
+                load=load,
+            )
+
+        ingress = RingIngress([lane(ring_a), lane(ring_b)], stamp_every_s=10.0)
+        try:
+            ingress._stamp(force=True)
+            assert len(calls) == 1, "one model, one depth computation, two lanes stamped"
+            assert ring_a.load_signal()[0] == 2 and ring_b.load_signal()[0] == 2
+        finally:
+            ring_a.close()
+            ring_b.close()
+
+
+class TestTheGiveUpArrivesTyped:
+    def test_past_the_cap_the_submitter_gets_a_queue_full_error(self) -> None:
+        """Round 4: the wire carries a status code, so the owner's saturation give-up
+        arrives as the QueueFullError it is — not a generic ServerStateError."""
+        model = TestASaturatedOwnerPushesBack.SaturatedThenWilling(refusals=10_000_000)
+        helper = TestASaturatedOwnerPushesBack()
+        ingress, reader, proxy, rings = helper._tier(model, patience_s=0.05, backoff_s=0.01)
+        ingress.start()
+        reader.start()
+        try:
+            request = _request("quay-3", 7)
+            future = ResponseFuture(request)
+            proxy.enqueue(WorkItem(request, future))
+            with pytest.raises(QueueFullError, match="at A's peer"):
+                future.result(timeout=5.0)
+            assert ingress.failed == 1
+            assert model.inner.rejections == 1, "the give-up counted exactly once"
+        finally:
+            helper._teardown(ingress, reader, model, rings)

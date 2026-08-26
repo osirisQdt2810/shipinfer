@@ -188,10 +188,17 @@ class ServiceMesh:
         deadline = time.monotonic() + (
             self.settings.connect_timeout_s if timeout_s is None else timeout_s
         )
-        reader = ResultReader(lost_after_s=self.settings.lost_after_ms / 1000.0)
+        reader = ResultReader(
+            lost_after_s=self.settings.lost_after_ms / 1000.0,
+            pending_timeout_s=self.settings.pending_timeout_ms / 1000.0,
+        )
         self._reader = reader
         owned = {ring.name: ring for ring in self._owned}
         lanes: list[IngressLane] = []
+        # ONE load closure per model, shared by every peer's lane for it: the ingress
+        # memoizes its sweep stamp by callable identity, so each model's depth is computed
+        # once per sweep instead of once per lane (#26 round 4).
+        loads = {name: _load_of(model) for name, model in self.models.items()}
         for peer in self.peers:
             for name, model in self.models.items():
                 # The result ring for my requests to `peer`: I created it, I read it.
@@ -231,7 +238,7 @@ class ServiceMesh:
                         admit=model.admit_local,
                         dispatch=model.try_dispatch_local,
                         reject=model.count_local_rejection,
-                        load=_load_of(model),
+                        load=loads[name],
                     )
                 )
         # ONE sweeper over every lane — the consumer shape the ring's docstring prescribes.

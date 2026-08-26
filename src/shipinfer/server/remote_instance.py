@@ -51,6 +51,8 @@ from shipinfer.core.errors import (
     RingClosedError,
     RingFullError,
     ServerStateError,
+    ValidationError,
+    WireRefusedError,
 )
 from shipinfer.core.logging import get_logger
 from shipinfer.core.request import InferenceRequest, InferenceResponse
@@ -96,6 +98,12 @@ class RemoteInstance:
         self._reader = reader
         self._submit_timeout_s = submit_timeout_s
         self._lost_after_ns = int(lost_after_s * 1e9)
+        #: Requests published to this peer and not yet settled — this submitter's own share
+        #: of the peer's load, kept as a plain int because the policy reads `depth` per
+        #: candidate per request.
+        self._in_flight = 0
+        self._in_flight_lock = threading.Lock()
+        self._warned: set[str] = set()
         reader.watch(owner, submit)
 
     # -- Placeable -------------------------------------------------------------------------
@@ -106,10 +114,11 @@ class RemoteInstance:
 
     @property
     def depth(self) -> int:
-        # The owner's stamped queue depth *plus* what this submitter has already published
-        # and the owner has not yet taken: without the ring backlog a burst reads depth 0
-        # eight times and herds onto one peer while a local instance idles (#26 round 3).
-        return self._submit.load_signal()[0] + self._submit.depth
+        # The owner's stamped queue depth *plus* what this submitter has in flight there:
+        # without its own backlog a burst reads depth 0 eight times and herds onto one peer
+        # while a local instance idles (#26 round 3). A plain int, not a shared-memory
+        # rescan — the policy touches `depth` per candidate per request (#26 round 4).
+        return self._submit.load_signal()[0] + self._in_flight
 
     @property
     def ewma_latency_us(self) -> float:
@@ -134,9 +143,24 @@ class RemoteInstance:
                 treats it exactly like a full local queue: the request is still with the
                 caller and the next candidate is tried.
         """
+        # D2H (and its stream sync) before any slot is claimed, so the copy never holds a
+        # slot the peer could be using; a host-only request passes through untouched.
+        request = wire.request_on_host(item.request)
         index = self._submit.claim(self._submit_timeout_s)
         try:
-            wire.encode_request(item.request, self._submit.payload(index))
+            wire.encode_request(request, self._submit.payload(index))
+        except ValidationError as exc:
+            # The wire cannot carry this request to this peer — a 70-byte camera_id, nine
+            # dims, a payload past the slot. That is *this candidate* refusing, not the
+            # frame failing: raise the QueueFullError-shaped refusal so the dispatcher's
+            # spill loop tries the next instance, and tell the operator once per cause —
+            # silently spilling every frame is a config bug someone should hear about.
+            self._submit.abandon(index)
+            cause = type(exc).__name__
+            if cause not in self._warned:
+                self._warned.add(cause)
+                _LOG.warning("the wire to %r refuses %r: %s", self.owner, self.model_name, exc)
+            raise WireRefusedError(self.owner, self.model_name, exc) from exc
         except Exception:
             # The slot was claimed but never published: hand it straight back.
             self._submit.abandon(index)
@@ -144,10 +168,36 @@ class RemoteInstance:
         item.request.timings.queued_ns = time.monotonic_ns()
         # Registered before publish: a fast owner could answer before the registration.
         self._reader.expect(item, self.owner)
+        # Settled in any way — result, failure, expiry, peer loss, shutdown — the request is
+        # no longer charged against this peer. Registered before publish for the same
+        # fast-owner reason as `expect`.
+        item.future.add_done_callback(self._settled)
         self._submit.publish(index)
+        with self._in_flight_lock:
+            self._in_flight += 1
+
+    def _settled(self, _future: Future[InferenceResponse]) -> None:
+        with self._in_flight_lock:
+            self._in_flight -= 1
 
     def __repr__(self) -> str:
         return f"<RemoteInstance {self.model_name!r} at {self.owner!r} depth={self.depth}>"
+
+
+def _remote_queue_full(owner: str, exc: BaseException) -> QueueFullError:
+    """The owner's saturation give-up, rehydrated with its own words.
+
+    QueueFullError's __init__ would wrap the already-formatted message in a second
+    'queue ... is full (0/0)' — the same bypass RingClosedError uses: build the message
+    here and hand-set the attributes QueueFullError promises (mirror them if it changes).
+    """
+    from shipinfer.core.errors.base import ShipInferError
+
+    error = QueueFullError.__new__(QueueFullError)
+    ShipInferError.__init__(error, f"remote {owner!r}: {exc}")
+    error.depth = 0
+    error.capacity = 0
+    return error
 
 
 class ResultReader(threading.Thread):
@@ -167,6 +217,11 @@ class ResultReader(threading.Thread):
     ) -> None:
         super().__init__(name="shipinfer-result-reader", daemon=True)
         self._results: dict[str, SharedRing] = {}
+        #: Snapshot of `_results` for the hot loop; rebuilt only when `_rings_gen` moves —
+        #: re-listing the dict under the lock per pass contended `expect()` (#26 round 4).
+        self._rings: list[tuple[str, SharedRing]] = []
+        self._rings_gen = 0
+        self._rings_seen = -1
         self._heartbeats: dict[str, SharedRing] = {}
         self._pending: dict[int, tuple[WorkItem, str, int]] = {}
         self._lock = threading.Lock()
@@ -183,6 +238,7 @@ class ResultReader(threading.Thread):
         """The ring ``owner`` writes results into; this process created it and reads it."""
         with self._lock:
             self._results[owner] = ring
+            self._rings_gen += 1
 
     def watch(self, owner: str, submit: SharedRing) -> None:
         """Read ``owner``'s heartbeat off the submit ring it stamps."""
@@ -245,9 +301,11 @@ class ResultReader(threading.Thread):
 
     def _drain_results(self) -> bool:
         busy = False
-        with self._lock:
-            rings = list(self._results.items())
-        for owner, ring in rings:
+        if self._rings_seen != self._rings_gen:
+            with self._lock:
+                self._rings = list(self._results.items())
+                self._rings_seen = self._rings_gen
+        for owner, ring in self._rings:
             index = ring.take(timeout_s=0)
             if index is None:
                 continue
@@ -273,7 +331,15 @@ class ResultReader(threading.Thread):
         try:
             response = wire.decode_response(payload, item.request.context)
         except wire.RemoteFailureError as exc:
-            item.fail(ServerStateError(f"remote {owner!r}: {exc}"))
+            # A saturated queue, a bad request and a dead backend are three different
+            # operational events: the status word says which, so the caller gets the type
+            # a local failure would have raised (#26 round 4).
+            if exc.code == wire.STATUS_QUEUE_FULL:
+                item.fail(_remote_queue_full(owner, exc))
+            elif exc.code == wire.STATUS_INVALID:
+                item.fail(ValidationError(f"remote {owner!r}: {exc}"))
+            else:
+                item.fail(ServerStateError(f"remote {owner!r}: {exc}"))
             return
         except Exception as exc:  # a protocol error is the peer's build disagreeing with ours
             item.fail(exc)
@@ -446,7 +512,12 @@ class RingIngress(threading.Thread):
                         continue
                     busy = True
                     self._serve(lane, index)
-                    self._stamp(force=True)  # the depth just changed; peers decide on it
+                    # The depth just changed; peers decide on it. Stamp THIS lane alone —
+                    # re-stamping every lane per served request made one sweep O(lanes^2)
+                    # on the tier's single hottest thread (#26 round 4). The top-of-sweep
+                    # stamp keeps the other lanes at most one sweep behind.
+                    depth, ewma = lane.load()
+                    lane.inbound.stamp(depth=depth, ewma_latency_us=ewma)
                 if open_lanes == 0 and not self._replies and not self._deferred:
                     return
                 if busy:
@@ -664,7 +735,13 @@ class RingIngress(threading.Thread):
         now = time.monotonic_ns()
         if not force and now - self._last_stamp_ns < self._stamp_every_ns:
             return
+        # Lanes for one model share one `load` callable (the mesh builds it once per model),
+        # so one sweep computes each model's depth once and fans it out — not once per lane.
+        loads: dict[int, tuple[int, float]] = {}
         for lane in self._lanes:
-            depth, ewma = lane.load()
-            lane.inbound.stamp(depth=depth, ewma_latency_us=ewma)
+            signal = loads.get(id(lane.load))
+            if signal is None:
+                signal = lane.load()
+                loads[id(lane.load)] = signal
+            lane.inbound.stamp(depth=signal[0], ewma_latency_us=signal[1])
         self._last_stamp_ns = now
