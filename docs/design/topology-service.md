@@ -41,8 +41,8 @@ project exists to fix, wearing a new coat).
 
 ### `core/errors/topology.py` (extend)
 ```python
-class RingFullError(ShipInferError):        # ADR-005: carries depth and capacity
-    def __init__(self, owner: str, model: str, depth: int, capacity: int) -> None: ...
+class RingFullError(QueueFullError):        # *is* a QueueFullError: the dispatcher's existing `except QueueFullError`
+    def __init__(self, owner: str, ring: str, depth: int, capacity: int) -> None: ...  # re-selects around a full ring exactly as around a full local queue (ADR-005: depth and capacity)
 class PeerLostError(ShipInferError):        # carries (camera_id, frame_id) of every in-flight request lost
     def __init__(self, owner: str, tags: Sequence[tuple[str, int]]) -> None: ...
 class RingProtocolError(ShipInferError):    # header version / layout mismatch between processes
@@ -51,10 +51,17 @@ class RingProtocolError(ShipInferError):    # header version / layout mismatch b
 ### `core/settings/topology.py` (extend)
 ```python
 class ServiceSettings(BaseModel):
-    """`service`: the fleet plus a cross-process tier for the crop-stage models."""
-    shared_models: list[str] = ["person_embedder", "ship_embedder", "ship_segmenter"]  # crops, not frames
-    slots_per_pair: int = 8       # per (submitter, owner, model) ring — single writer each; 8 × slot_bytes pinned per ring
-    slot_bytes: int = 1_638_400   # 1.5 MiB + 64 KiB (400 pages): one crop batch (32 × 3 × 128 × 64 fp16 is exactly 1.5 MiB) plus the request head and the per-tensor heads, which travel in the slot ahead of the bytes; letterboxed full frames do not fit, by design
+    """`service`: the fleet plus a cross-process tier for the crop-stage models.
+
+    `shared_models` are crops, never frames: a letterboxed frame does not fit a slot, by design.
+    `slots_per_pair` is per (submitter, owner, model) ring — single writer each — so the pinned
+    budget is the derivation in the text below. `slot_bytes` is one crop batch *plus its heads*:
+    32 × 3 × 128 × 64 fp16 is exactly 1.5 MiB, and the request head and the per-tensor heads
+    travel in the slot ahead of the bytes, hence 64 KiB of headroom (400 pages in all).
+    """
+    shared_models: list[str] = ["person_embedder", "ship_embedder", "ship_segmenter"]
+    slots_per_pair: int = 8       # rings are pairwise and small; see the budget below
+    slot_bytes: int = 1_638_400   # 1.5 MiB + 64 KiB: the batch plus its heads
     submit_timeout_ms: int = 5    # a full ring refuses after this; the policy then picks another candidate
     heartbeat_ms: int = 200       # an owner that has not stamped its header in 5 × this is lost
     spill_threshold: int = 4      # forwarded to locality_spillover for the shared models
@@ -95,11 +102,11 @@ class SharedRing:
 ```
 Pinning: `torch.cuda.cudart().cudaHostRegister(ptr, nbytes, 0)` once per process per ring, in
 `create`/`open`; `cudaHostUnregister` in `close`. The registration is per process because a
-page is pinned for *this* process's DMA engine; the ring exists once. Slot claim is a
-compare-and-swap on the slot's `claimed` byte — Python has no CAS on shared memory, so the
-claim is a per-slot `multiprocessing` lock-free trick vLLM avoids by having one writer; we
-have N writers, so: **one submit ring per (submitter, owner, model)**, single writer each,
-which restores vLLM's discipline exactly. **The budget, derived once and cited everywhere
+page is pinned for *this* process's DMA engine; the ring exists once. vLLM's ring has one writer, so a slot
+claim is a plain store. An owner here has N−1 submitters, and N writers on one ring would need a
+compare-and-swap that Python cannot express on shared memory. So: **one submit ring per
+(submitter, owner, model)**, single writer each, and a claim stays a plain store — vLLM's
+discipline exactly. **The budget, derived once and cited everywhere
 else:** a directed pair (A → B) has two rings — requests (A writes, B reads) and results (B
 writes, A reads) — so the box holds `N × (N−1) × models × 2` rings of `slots × slot_bytes`,
 each existing once as one `shared_memory` block. Every ring is mapped by exactly two processes
@@ -129,20 +136,23 @@ class RemoteInstance:  # satisfies scheduling.policies.base.Placeable
         Raises RingFullError after submit_timeout_ms — the dispatcher's retry loop then excludes this
         candidate and re-selects, which is exactly how `Dispatcher.dispatch` already handles a full local queue."""
 class ResultReader(threading.Thread):
-    """One per process: waits on this process's result rings, resolves futures, H2D into the
-    caller's staged output, fails every pending future of a lost owner with PeerLostError."""
+    """One per process: waits on this process's result rings, resolves futures with *host*
+    tensors, fails every pending future of a lost owner with PeerLostError. It touches no
+    device and binds none (ADR-002): the consuming stage does its own H2D on the thread it bound."""
 ```
 The tag `(camera_id, frame_id)` rides in the slot header, and `WorkItem.fairness_key` is
 still the camera id on the *owner's* side: the owner's `ModelInstance` receives the remote
 item through the same `FairPriorityQueue` as local work, so per-camera fairness holds across
 processes (the ledger's (c)).
 
-### `server/instance.py` (small change)
-`ModelInstance` gains a `RingIngress` thread started only under `service`: `take()` from every
-inbound ring for this model, wrap the slot as an `InferenceRequest` whose inputs are torch
-tensors over the pinned slot (`from_torch`), `enqueue` as a normal `WorkItem` whose future's
-callback writes outputs to the submitter's result ring and `release`s the slot. No change to
-`execute_batch`: a remote item is a local item that happens to hold pinned memory.
+### `server/remote_instance.py`: `RingIngress` (the owner side)
+One thread per (submitter, model), started by the mesh under `service`: `take()` from its
+inbound ring, decode the slot as an `InferenceRequest` of host tensors without a copy, hand it to
+`Model.infer_local` — the model's *own* instances, so a request that crossed once is never
+re-routed — and on completion write the response (or the failure form) into the submitter's
+result ring and `release` the slot. The ingress touches host memory only and binds no device
+(ADR-002); the instance thread that executes the batch is the one bound at start-up, and it does
+the H2D. No change to `execute_batch`: a remote item is a local item.
 
 ### `server/model.py` (small change)
 `Model.__init__` accepts `extra_instances: Sequence[Placeable] = ()` and passes
@@ -185,13 +195,13 @@ changes is only *when* it resolves — and the stage timeout already covers a lo
 4. B's `RingIngress` (blocked in `take()` with a 1 ms poll then `sched_yield` spin) sees the
    written flag, wraps the slot as tensors, `enqueue`s a `WorkItem` into B's instance
    `FairPriorityQueue` under fairness key = A's camera id. B `stamp`s depth+1.
-5. B's instance batch window closes; `execute_batch` copies the pinned slot H2D on GPU 3
-   (~125 µs, on B's stream), runs, and the completion callback D2H's the output rows into
-   A's result ring slot (~50 µs for 32 × 512 fp16 = 32 KB... negligible), publishes, `release`s
-   the inbound slot, `stamp`s depth−1.
-6. A's `ResultReader` sees the result slot, H2D on GPU 2 into the staged output (if the
-   consumer wants device memory; the collector takes host arrays today, so this copy may be
-   skipped), resolves the future with an `InferenceResponse` carrying `timings.remote_ns`.
+5. B's instance batch window closes; `execute_batch` copies the slot H2D on GPU 3 — on the
+   instance thread, bound at start-up (ADR-002), ~125 µs on B's stream — runs, and the
+   completion callback D2H's the output rows into A's result ring slot (~50 µs for
+   32 × 512 fp16 = 32 KB... negligible), publishes, `release`s the inbound slot, `stamp`s depth−1.
+6. A's `ResultReader` sees the result slot and resolves the future with an `InferenceResponse`
+   of host tensors (`executed_on` = B's device). It touches no device: the collector takes host
+   arrays today, and a consumer that wants device memory does its own H2D on its bound thread.
 Cost: two PCIe copies (~250 µs) + one event wait + two ring hand-offs (spin latency ~10–50 µs
 each) ≈ **0.4 ms added to a batch that takes ~3–8 ms to embed** — worth it whenever the local
 queue's wait exceeds that, which is what `spill_threshold` encodes in queue depths.

@@ -697,7 +697,18 @@ that exposes the four attributes a policy reads.
       `InferenceServer` joining the tier after the models load and leaving it *first* on stop; 7 mesh tests
       (two shards' meshes in one process: a request leaves shard 0's dispatcher and returns from shard 1 as
       `cuda:1`; the deep shard borrows the quiet one; stop takes the rings down; a peer that never appears)
-      + 9 contract tests; ADR-015 and the feature-log entry on the branch. **Not yet:** the multigpu evidence
+      + 9 contract tests; ADR-015 and the feature-log entry on the branch. **Then the first run through the
+      real `Model` found what the fakes could not:** a stray `@property` had made `attach_remote` unbound and
+      every shard died at start — fixed, and `test_service_engine.py` (two `InferenceServer`s in one process
+      as shards 0 and 1) now covers the engine's own path. Also on the way: every fleet shard ran `serve`
+      with no HTTP, so none was addressable — `serve_command(http_port_base=)` gives each shard `base +
+      index`; `Model.infer_local` so work that crossed once is never re-routed (two deep shards on stale
+      headers could bounce it); `slot_bytes` = 1.5 MiB + 64 KiB because the heads travel in the slot; a
+      ring `open` no longer registers with the resource tracker (bpo-38119: an attacher would unlink the
+      owner's ring at exit). **Evidence (26 Aug, container, GPUs 3,4):** `tests/server/test_service_multigpu.py`
+      — two real `serve` processes through the real `ServiceTopology` + `Fleet`, 24 requests posted to
+      shard 0 over HTTP → *19 executed there, 5 executed by shard 1 through the ring*, every tag back on
+      its own response, both processes gone after `stop` (GPUs back to 15 MiB). **Not yet:** the bench-scale
       run — `--topology` on the harness with the fleet driving the shards (PR-cut item 4). Queue: docs
       snapshot #21 (review round 1 answered) → `chore/shipvision-mot` → `fix/rtsp-headless-decode` →
       `fix/letterbox-extents` → `feat/shared-ring` → `feat/remote-instance` → `ci/cpp-offline-and-prompt`.
