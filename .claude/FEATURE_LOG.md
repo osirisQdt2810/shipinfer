@@ -37,9 +37,16 @@ checks (round trips, dtypes, the failure form, size accounting), 7 proxy checks 
 end to end through a real `Dispatcher`, twenty in flight over four slots, the owner's error,
 the lost owner with its tags), 7 mesh checks (two shards' meshes in one process, a request that
 leaves shard 0's dispatcher and returns from shard 1 as `cuda:1`, stop taking the rings down, a
-peer that never appears), 9 topology-contract checks. Suite: 1121 passed, 43 skipped.
+peer that never appears), 9 topology-contract checks, and 3 engine-level checks that start two
+`InferenceServer`s in one process as shards 0 and 1 — the path that found the stray `@property`
+which had made `attach_remote` unbound and killed every real shard at start while the fake-model
+tests stayed green. Suite: 1132 passed, 43 skipped. **Inside the container** (`-m multigpu`, GPUs
+3 and 4): `test_service_multigpu.py` starts two real `serve` processes through the real
+`ServiceTopology` and `Fleet`, posts 24 requests to shard 0 over HTTP — 19 executed there, 5 by
+shard 1 through the ring, every tag back on its own response, both processes gone after `stop`.
 
-**Measured.** Not yet — the multigpu evidence run ("C beats B": per-device retired counts within
+**Measured.** The two-process run above is a proof of the path, not a measurement — the bench-scale
+evidence run ("C beats B": per-device retired counts within
 10% under `--skew 8`, lower p99 on the busy cameras, no new `frames_failed`) is PR-cut item 4 and
 needs `--topology` on the harness with the fleet driving the shards. Until it exists, `service`
 is built and tested, not proven.

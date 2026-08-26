@@ -206,6 +206,10 @@ class TestTwoShardsShareTheEmbedder:
 
             time.sleep(0.5)  # the last statistics update lands
             done_here, done_by_peer = _inference_count(front), _inference_count(peer)
+            print(
+                f"\n{REQUESTS} requests to shard 0 (GPU {gpus[0]}): {done_here} executed there, "
+                f"{done_by_peer} executed by shard 1 (GPU {gpus[1]}) through the ring"
+            )
             assert (
                 done_by_peer >= 1
             ), "shard 1 executed none of shard 0's work: the tier did not carry"

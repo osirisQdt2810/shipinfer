@@ -353,7 +353,6 @@ class Model:
     def is_ready(self) -> bool:
         return self._started and any(i.is_ready for i in self._instances)
 
-    @property
     def attach_remote(self, candidates: Sequence[Placeable]) -> None:
         """Add a peer's instances to this model's dispatcher (the `service` topology).
 
