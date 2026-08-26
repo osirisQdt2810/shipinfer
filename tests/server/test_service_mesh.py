@@ -11,7 +11,7 @@ from concurrent.futures import Future
 import numpy as np
 import pytest
 
-from shipinfer.core.errors import ConfigurationError
+from shipinfer.core.errors import ConfigurationError, RingClosedError
 from shipinfer.core.request import InferenceRequest, InferenceResponse, RequestContext
 from shipinfer.core.request.future import ResponseFuture
 from shipinfer.core.settings.topology import ServiceSettings
@@ -191,7 +191,7 @@ class TestTwoShardsJoinTheTier:
         time.sleep(0.05)
         from shipinfer.runtime.memory.shared_ring import RingLayout, SharedRing
 
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(RingClosedError):
             SharedRing.open(
                 ring_name(run, 0, 1, "emb", "req"), RingLayout(slots=4, slot_bytes=32 * 1024)
             )

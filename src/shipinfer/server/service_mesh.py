@@ -25,7 +25,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from shipinfer.core.errors import ConfigurationError
+from shipinfer.core.errors import ConfigurationError, RingClosedError
 from shipinfer.core.logging import get_logger
 from shipinfer.core.settings.topology import ServiceSettings
 from shipinfer.runtime.memory.shared_ring import RingLayout, SharedRing, reap_pending_closes
@@ -239,7 +239,9 @@ class ServiceMesh:
         while True:
             try:
                 ring = SharedRing.open(name, layout)
-            except FileNotFoundError:
+            except RingClosedError:
+                # Not created yet (peers start in no order) — or already unlinked, which the
+                # deadline turns into the same configuration answer.
                 if time.monotonic() >= deadline:
                     raise ConfigurationError(
                         f"service mesh: peer ring {name!r} never appeared; is every shard up?"

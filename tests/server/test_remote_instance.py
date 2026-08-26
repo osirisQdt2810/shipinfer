@@ -15,7 +15,13 @@ from concurrent.futures import Future
 import numpy as np
 import pytest
 
-from shipinfer.core.errors import PeerLostError, QueueFullError, RingFullError, ServerStateError
+from shipinfer.core.errors import (
+    PeerLostError,
+    QueueFullError,
+    RingClosedError,
+    RingFullError,
+    ServerStateError,
+)
 from shipinfer.core.request import InferenceRequest, InferenceResponse, RequestContext
 from shipinfer.core.request.future import ResponseFuture
 from shipinfer.core.types import Device, Tensor
@@ -122,9 +128,7 @@ def pair():
         reader.join(timeout=2)
         for ring in (request_ring_writer, result_ring_writer, result_ring_owner):
             ring.close()
-        with pytest.raises(
-            FileNotFoundError
-        ):  # the ingress closed and unlinked its inbound ring
+        with pytest.raises(RingClosedError):  # the ingress closed and unlinked its inbound ring
             SharedRing.open(request_ring_owner.name, layout)
 
 

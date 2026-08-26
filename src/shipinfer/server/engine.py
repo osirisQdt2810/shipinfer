@@ -210,7 +210,14 @@ class InferenceServer:
             topology.service, topology.service.shard, shared, slot_bytes_by_model=sizes
         )
         mesh.create()
-        mesh.connect()
+        try:
+            mesh.connect()
+        except BaseException:
+            # A peer that never appeared (or a failed open) must not leak the rings this
+            # shard already created: close and unlink them so a restart can recreate the
+            # names, then let the start fail with the connect error.
+            mesh.stop()
+            raise
         return mesh
 
     @property

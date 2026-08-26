@@ -103,3 +103,25 @@ class TestTheEngineJoinsTheTier:
             assert server.service_mesh is None
         finally:
             server.stop()
+
+
+class TestAFailedConnectLeaksNothing:
+    def test_the_engine_takes_its_rings_down_when_the_peer_never_appears(
+        self, tmp_repository: Path
+    ) -> None:
+        from shipinfer.core.errors import ConfigurationError, RingClosedError
+        from shipinfer.runtime.memory.shared_ring import RingLayout, SharedRing
+        from shipinfer.server.service_mesh import ring_name
+
+        run = uuid.uuid4().hex[:8]
+        settings = _settings(tmp_repository, run, 0)
+        settings.topology.service.connect_timeout_s = 0.3
+        server = InferenceServer(settings)
+        with pytest.raises(ConfigurationError, match="never appeared"):
+            server.start()
+        # The rings shard 0 created for its absent peer are gone, not leaked: a restart can
+        # recreate the names.
+        created = ring_name(run, 1, 0, "echo", "req")
+        with pytest.raises(RingClosedError):
+            SharedRing.open(created, RingLayout(slots=4, slot_bytes=64 * 1024))
+        server.stop()
