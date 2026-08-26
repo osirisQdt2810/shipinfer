@@ -700,3 +700,68 @@ class TestAStampIsNeverTorn:
         finally:
             child.join(timeout=30)
             assert child.exitcode == 0
+
+
+class TestPinningRacesClose:
+    class _View:
+        def data_ptr(self) -> int:
+            return 0xBEEF
+
+        def numel(self) -> int:
+            return 4096
+
+    def test_a_handout_racing_close_is_refused_or_counted_never_leaked(
+        self, monkeypatch
+    ) -> None:
+        """Round 7: the handout is one step under the pin lock. A close can land before it
+        (refused, typed) or after it (counted, so nothing unpins early) — never inside it. No
+        TypeError from a vanished buffer, at most one registration, and every registration is
+        eventually unregistered exactly once."""
+        from types import SimpleNamespace
+
+        import shipinfer.runtime.platform as platform_module
+
+        for _ in range(150):
+            registers: list[int] = []
+            unregisters: list[int] = []
+            cudart_calls = SimpleNamespace(
+                cudaHostRegister=lambda ptr, n, flags, _r=registers: _r.append(ptr) or 0,
+                cudaHostUnregister=lambda ptr, _u=unregisters: _u.append(ptr),
+            )
+            fake_torch = SimpleNamespace(
+                uint8="uint8",
+                frombuffer=lambda *a, **k: self._View(),
+                cuda=SimpleNamespace(cudart=lambda _c=cudart_calls: _c),
+            )
+            monkeypatch.setattr(platform_module, "require_torch", lambda _ft=fake_torch: _ft)
+            ring = SharedRing.create(_name(), RingLayout(slots=2, slot_bytes=4096), owner="A")
+            surprises: list[BaseException] = []
+            held: list = []
+            started = threading.Event()
+
+            def pin_loop(ring=ring, surprises=surprises, held=held, started=started) -> None:
+                started.set()
+                for i in range(64):
+                    try:
+                        tensor = ring.pinned_tensor(0)
+                        if i % 8 == 0:
+                            held.append(tensor)  # some survive past the close
+                    except RingClosedError:
+                        return  # the close landed first: refused, typed — correct
+                    except BaseException as exc:
+                        surprises.append(exc)
+                        return
+
+            thread = threading.Thread(target=pin_loop)
+            thread.start()
+            started.wait(1.0)
+            ring.close()
+            thread.join(timeout=2.0)
+            assert surprises == [], surprises[:2]
+            assert len(registers) <= 1, "one registration per process, ever"
+            held.clear()
+            gc.collect()
+            from shipinfer.runtime.memory.shared_ring import reap_pending_closes
+
+            reap_pending_closes()
+            assert len(unregisters) == len(registers), "every registration unregistered, once"

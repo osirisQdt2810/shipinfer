@@ -47,6 +47,10 @@ the layout is arithmetic, the protocol is bytes in a ``memoryview``, and the tes
 reader as a thread in the same process. Pinning is a per-process registration of the same
 pages, done lazily and only when asked.
 
+A writer that dies between `claim` and `publish` strands that slot at CLAIMED for the ring's
+life — there is no lease and no owner-side recovery, deliberately: the ring is per peer, and a
+dead peer takes the whole ring down through the heartbeat (`PeerLostError`), slots included.
+
 The rings are pairwise, so an owner multiplexes: there is deliberately no select/poll primitive
 here. The intended consumer shape (the proxy layer implements it) is one thread sweeping its
 rings round-robin with ``take(timeout_s=0)`` and a backoff when a whole sweep is idle — at the
@@ -81,7 +85,13 @@ from typing import Any
 
 from shipinfer.core.errors import DeviceError, RingClosedError, RingFullError, RingProtocolError
 
-__all__ = ["RingHeader", "RingLayout", "SharedRing", "SlotState"]
+__all__ = [
+    "RingHeader",
+    "RingLayout",
+    "SharedRing",
+    "SlotState",
+    "reap_pending_closes",
+]
 
 #: Layout version. Bump when the header or the slot metadata changes shape.
 RING_VERSION = 1
@@ -268,6 +278,9 @@ class SharedRing:
         self._pinned_ptr = 0
         self._pin_lock = threading.Lock()
         self._pinned_live = 0
+        #: Latched under `_pin_lock` by `close()` before anything is unpinned, so a handout
+        #: racing the close is refused instead of registering pages nothing will ever free.
+        self._pin_closed = False
         self._parked_unregister: Any = None
         self._closed_here = False
         self._unlinked = False
@@ -292,6 +305,10 @@ class SharedRing:
     @classmethod
     def open(cls, name: str, layout: RingLayout) -> SharedRing:
         """Attach to an existing block as its one writer, checking version and layout first.
+
+        One open per ring per process: a second `_attach` of the same name would unbalance
+        the resource tracker's set-based cache (a daemon-side KeyError at exit). The
+        one-writer discipline makes a second open a wiring bug anyway.
 
         Raises:
             RingProtocolError: the block was created by a different version, or with a
@@ -400,6 +417,7 @@ class SharedRing:
             raise RingProtocolError(
                 f"ring {self._name!r}: only the owner stamps; this handle merely reads"
             )
+        depth = max(0, min(int(depth), 0xFFFFFFFF))  # the metrics path must not struct.error
         with self._view_lock:
             if self._detached:
                 return
@@ -605,19 +623,21 @@ class SharedRing:
         mapping with *this* process's DMA engine; the block exists once. Requires torch and a
         device — the one method here that does, kept apart so everything else runs offline.
         """
-        if self._detached:
-            raise RingClosedError(self._owner, self._name)
-        torch = self._torch_with_registration()
-        start = self._layout.slot_offset(index)
-        tensor = torch.frombuffer(
-            self._block.buf, dtype=torch.uint8, count=self._layout.slot_bytes, offset=start
-        )
-        # Liveness is tracked, not guessed: every handed-out pinned view is counted, and the
-        # count comes down in a finalizer when the tensor dies. `close()` reads the count to
-        # decide whether unpinning is safe *now*, and the last finalizer runs a parked
-        # unregister itself — so a pinned ring frees its pages at the true last-view death,
-        # with no external reaper needed.
+        # The whole handout is serialised against `close()` under `_pin_lock`: the closed
+        # check, the once-per-process registration, the view over the block, and the liveness
+        # increment happen as one step, so a close can land before it (refused, typed) or
+        # after it (the count is already up, so nothing is unpinned) — never inside it.
         with self._pin_lock:
+            if self._pin_closed or self._detached:
+                raise RingClosedError(self._owner, self._name)
+            torch = self._torch_with_registration()
+            start = self._layout.slot_offset(index)
+            tensor = torch.frombuffer(
+                self._block.buf, dtype=torch.uint8, count=self._layout.slot_bytes, offset=start
+            )
+            # Liveness is tracked, not guessed: the count comes down in a finalizer when the
+            # tensor dies; `close()` reads it to decide whether unpinning is safe *now*, and
+            # the last finalizer runs a parked unregister itself.
             self._pinned_live += 1
         weakref.finalize(tensor, self._pinned_view_died)
         return tensor
@@ -641,6 +661,8 @@ class SharedRing:
                 _PENDING_CLOSE.append(self._block)
 
     def _torch_with_registration(self) -> Any:
+        # Called under `_pin_lock` only: two threads racing this used to both see `_pinned is
+        # None` and the loser got cudaErrorHostMemoryAlreadyRegistered as a spurious failure.
         if self._pinned is not None:
             return self._pinned
         from shipinfer.runtime.platform import require_torch
@@ -678,12 +700,22 @@ class SharedRing:
             )
         unregister = None
         parked_for_finalizer = False
-        if self._pinned is not None:
-            torch_module, pinned_ptr = self._pinned, self._pinned_ptr
-            self._pinned = None
+        with self._pin_lock:
+            # Latch first: from here no handout can start, and any that completed has already
+            # counted itself, so `_pinned_live` below is the whole truth.
+            self._pin_closed = True
+            if self._pinned is not None:
+                torch_module, pinned_ptr = self._pinned, self._pinned_ptr
+                self._pinned = None
 
-            def unregister() -> None:
-                torch_module.cuda.cudart().cudaHostUnregister(pinned_ptr)
+                def unregister() -> None:
+                    torch_module.cuda.cudart().cudaHostUnregister(pinned_ptr)
+
+                if self._pinned_live != 0:
+                    # Pinned views are still held; the last one's finalizer unpins and closes.
+                    self._parked_unregister = unregister
+                    unregister = None
+                    parked_for_finalizer = True
 
         # A payload decoded without a copy may still view the block (an in-flight tensor);
         # releasing under it would raise `BufferError` and skip the unlink. The mapping then
@@ -700,17 +732,10 @@ class SharedRing:
         # already unpinned, so it can never unpin anything, let alone under a live DMA.
         reap_pending_closes()
         if unregister is not None:
-            with self._pin_lock:
-                if self._pinned_live == 0:
-                    # No pinned view is out, so no DMA through this ring can be in flight:
-                    # unpin now, while the mapping is certainly alive.
-                    unregister()
-                    unregister = None
-                else:
-                    # Pinned views are still held; the last one's finalizer unpins and closes.
-                    self._parked_unregister = unregister
-                    unregister = None
-                    parked_for_finalizer = True
+            # No pinned view was out at the latch, so no DMA through this ring can be in
+            # flight: unpin now, while the mapping is certainly alive.
+            unregister()
+            unregister = None
         closed_now = False
         if not parked_for_finalizer:
             try:

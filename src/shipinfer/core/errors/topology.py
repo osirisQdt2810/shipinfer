@@ -62,6 +62,8 @@ class RingClosedError(QueueFullError):
     def __init__(self, owner: str, ring: str, reason: str = "closed") -> None:
         # Not QueueFullError.__init__: its message says "is full", and closed is exactly not
         # that. The base's attributes are still set so shape-generic handlers read zeros.
+        # (Hand-set, so a field added to QueueFullError later must be mirrored here — the
+        # message override is the whole reason for bypassing its __init__.)
         ShipInferError.__init__(self, self._MESSAGES[reason].format(ring=ring, owner=owner))
         self.queue_name = ring
         self.depth = 0
