@@ -137,11 +137,20 @@ def _pair(pool: PinnedStagingPool, **kwargs: Any) -> tuple[TorchImageOps, TorchI
 class TestTheStagedResultIsTheSameArray:
     """A faster copy is only a copy if it produces the identical array, bit for bit."""
 
+    @pytest.mark.parametrize("chunked", [False, True], ids=["one-span", "multi-chunk"])
     @pytest.mark.parametrize(("image", "boxes", "dst_size"), CASES)
     @pytest.mark.parametrize("params", STAGED_PARAMS)
     def test_a_staged_crop_is_the_unstaged_crop(
-        self, stream, image, boxes, dst_size, params
+        self, stream, monkeypatch, image, boxes, dst_size, params, chunked
     ) -> None:
+        # #31 round 4: at the default bound every case in the table is one span, and after
+        # round 3's structural rule one span never stages — so without the forced-chunk
+        # variant this table compared `.cpu()` against `.cpu()` and a staged branch
+        # returning zeros passed it. The multi-chunk variant shrinks the bound to one row
+        # per span so the equality claim is made about the branch it names.
+        if chunked:
+            row = 3 * dst_size[0] * dst_size[1]
+            monkeypatch.setattr(TorchImageOps, "_STAGE_CHUNK_ELEMENTS", row)
         pool = PinnedStagingPool(owner="test")
         staged, plain = _pair(pool)
 
@@ -153,12 +162,21 @@ class TestTheStagedResultIsTheSameArray:
         # The staged array is built by `torch.empty` and filled chunk by chunk; a backend
         # handed a non-contiguous batch gets scrambled data.
         assert result.flags["C_CONTIGUOUS"]
+        if chunked and len(boxes) > 1:
+            assert pool.stats()["misses"] == 2, "the pair came from the call under test"
 
+    @pytest.mark.parametrize("chunked", [False, True], ids=["one-span", "multi-chunk"])
     @pytest.mark.parametrize(("images", "dst_size"), LETTERBOX_CASES)
     @pytest.mark.parametrize("params", STAGED_PARAMS)
     def test_a_staged_letterbox_is_the_unstaged_letterbox(
-        self, stream, images, dst_size, params
+        self, stream, monkeypatch, images, dst_size, params, chunked
     ) -> None:
+        if chunked:
+            # One row per span (#31 round 4): letterbox stages too when a batch genuinely
+            # spans chunks — the production single-frame call is one span and does not.
+            monkeypatch.setattr(
+                TorchImageOps, "_STAGE_CHUNK_ELEMENTS", 3 * dst_size[0] * dst_size[1]
+            )
         pool = PinnedStagingPool(owner="test")
         staged, plain = _pair(pool)
 
@@ -274,10 +292,19 @@ class TestTheBufferIsFixedShape:
         frame silently rewrote a batch that is still on its way to a backend."""
         pool = PinnedStagingPool(owner="test")
         ops = _staged(pool)
-
-        first = ops.crop_batch(FRAME, _random_boxes(3, FRAME.shape, seed=1), (8, 8), PARAMS)
-        keep = first.copy()
-        second = ops.crop_batch(NOISE, _random_boxes(3, NOISE.shape, seed=2), (8, 8), PARAMS)
+        # Forced multi-chunk (#31 round 4): at the default bound these are one span, one
+        # span never stages, and `.cpu()` cannot return a view — the assertion below would
+        # be trivially true about the wrong branch.
+        type(ops)._STAGE_CHUNK_ELEMENTS, _saved = 3 * 8 * 8, type(ops)._STAGE_CHUNK_ELEMENTS
+        try:
+            first = ops.crop_batch(FRAME, _random_boxes(3, FRAME.shape, seed=1), (8, 8), PARAMS)
+            keep = first.copy()
+            second = ops.crop_batch(
+                NOISE, _random_boxes(3, NOISE.shape, seed=2), (8, 8), PARAMS
+            )
+        finally:
+            type(ops)._STAGE_CHUNK_ELEMENTS = _saved
+        assert pool.stats()["misses"] == 2, "both arrays came from the staged branch"
 
         assert not np.array_equal(first, second), "the case cannot detect aliasing"
         assert not np.shares_memory(first, second)
@@ -459,22 +486,33 @@ class TestStagedCropOnCuda:
             pool.clear()
             torch.cuda.empty_cache()
 
-    def test_the_buffer_is_actually_pinned(self) -> None:
-        """The whole point. A pageable staging buffer would pass every test above and buy
-        nothing, because the driver would still bounce the copy through its own."""
+    def test_a_multichunk_mask_batch_stages_for_real(self) -> None:
+        """The whole point, on real hardware: a mask-shaped batch — every ship its own span
+        at the DEFAULT bound, no monkeypatching — goes through genuinely pinned buffers with
+        the real DMA and the real `torch.cuda.Event` ordering. If that ordering were wrong,
+        the result would be the *previous* chunk's pixels: plausible values, no error — the
+        one failure class the offline counting fakes structurally cannot see (#31 round 4).
+        """
         pool = PinnedStagingPool(owner="test:cuda:0")
-        ops = TorchImageOps(device_index=0, staging=pool)
+        staged = TorchImageOps(device_index=0, staging=pool)
+        plain = TorchImageOps(device_index=0)
         try:
-            ops.crop_batch(FRAME, _random_boxes(6, FRAME.shape), (16, 16), IMAGENET)
-            rows = TorchImageOps._stage_rows((6, 3, 16, 16))
-            first = pool.get("crop:a", (rows, 3, 16, 16), torch.float32)
-            second = pool.get("crop:b", (rows, 3, 16, 16), torch.float32)
+            frame = np.random.default_rng(7).integers(0, 255, (1080, 1920, 3), dtype=np.uint8)
+            boxes = _random_boxes(4, frame.shape, seed=11)
+            ours = staged.crop_batch(frame, boxes, (640, 640), IMAGENET)  # rows=1 -> 4 spans
+            theirs = plain.crop_batch(frame, boxes, (640, 640), IMAGENET)
 
-            assert pool.pinned
+            np.testing.assert_array_equal(ours, theirs)
+            stats = pool.stats()
+            assert stats["misses"] == 2, "the pair came from the call under test, not from us"
+            assert stats["entries"] == 2
+            # A hit, not a miss: the buffers the call created — and they are truly pinned.
+            first = pool.get("crop:a", (1, 3, 640, 640), torch.float32)
+            second = pool.get("crop:b", (1, 3, 640, 640), torch.float32)
+            assert pool.stats()["misses"] == 2 and pool.stats()["hits"] == 2
             assert first.is_pinned() and second.is_pinned()
-            assert pool.stats()["misses"] == 2  # the ping-pong pair, nothing more
         finally:
-            del ops
+            del staged, plain
             pool.clear()
             torch.cuda.empty_cache()
 
