@@ -471,10 +471,14 @@ tags; the owner's exception crosses as text.
 
 **Consequences.**
 
-- **A pinned budget per process:** `pairs × slots × slot_bytes` — for 4 shards, 3 shared models
-  and 8 × 1.5 MiB slots, ~0.4 GiB. It is set once at start (`topology.service`) and is why the
-  rings are *pairwise and small* rather than one big ring per owner: N writers on one ring
-  would need a compare-and-swap Python does not have on shared memory.
+- **A pinned budget, derived once.** A directed pair has two rings (requests one way, results
+  the other), so the box holds `N × (N−1) × models × 2` rings of `slots × slot_bytes`, each
+  existing once; every ring is mapped by its writer and its reader, and each registers its own
+  mapping, so a process pins `4 × (N−1) × models` rings. For 4 shards and 3 models at the
+  defaults (8 slots of 1.5 MiB + 64 KiB for the heads): 72 rings ≈ 0.9 GiB of shared memory
+  on the box, ≈ 0.44 GiB registered per process. Set once at start (`topology.service`), and
+  the reason the rings are *pairwise and small* rather than one big ring per owner: N writers
+  on one ring would need a compare-and-swap Python does not have on shared memory.
 - **Two copies per remote request** (D2H into the slot, H2D out of it) against zero for a local
   one. That is the price of not opening peer contexts; the policy only pays it when the local
   queue is past its spill threshold, and the per-device counters show how often.
@@ -482,6 +486,9 @@ tags; the owner's exception crosses as text.
   it held for peers fail with their tags within `lost_after_ms`; nothing hangs. The fleet
   supervisor still treats a dead shard as a fleet failure (ADR-006) — `service` changes *what is
   lost*, not whether a dead shard is a failure.
+- **The rings live in `/dev/shm`, and a container's is 64 MiB by default.** A deployment that
+  runs the `service` topology in a container sets `--shm-size` to at least the box budget above;
+  the tests size their rings down instead of assuming the host's.
 - **The protocol is versioned** (`RING_VERSION`, `WIRE_VERSION`); a mismatch at `open` is a
   `RingProtocolError` naming both, so two builds cannot talk past each other.
 - **Not decided here:** slot size per model, and whether the tier should ever carry frames. Both

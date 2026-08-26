@@ -31,8 +31,17 @@ class FakeModel:
         self._depth = depth
         self.remote: list = []
         self.served: list[tuple[str, int]] = []
+        self.via: list[str] = []
 
     def infer(self, request: InferenceRequest) -> Future:
+        self.via.append("infer")
+        return self._run(request)
+
+    def infer_local(self, request: InferenceRequest) -> Future:
+        self.via.append("local")
+        return self._run(request)
+
+    def _run(self, request: InferenceRequest) -> Future:
         self.served.append((request.context.camera_id, request.context.frame_id))
         future: Future = Future()
 
@@ -138,6 +147,9 @@ class TestTwoShardsJoinTheTier:
             response.outputs["x"].numpy(), np.ones((2, 4), dtype=np.float32)
         )
         assert models[1].served == [("quay-1", 5)] and models[0].served == []
+        assert models[1].via == [
+            "local"
+        ], "the owner runs it on its own instances: never twice across"
 
     def test_through_a_dispatcher_the_deep_shard_borrows_the_quiet_one(
         self, two_shards

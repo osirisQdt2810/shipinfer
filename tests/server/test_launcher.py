@@ -622,3 +622,20 @@ class TestStopEndsSupervision:
         assert time.monotonic() - started < 0.05
         draining.join()
         assert fleet.running == ()
+
+
+class TestAShardCanBeAddressedOverHttp:
+    """One port for every shard is not an option — the second bind fails — so HTTP is per shard,
+    and only when asked for: a warm shard has no ingress."""
+
+    def test_no_http_unless_asked(self) -> None:
+        argv = serve_command(plan(shards=2).shards[1], repository="/models")
+        assert "--http" not in argv and "--port" not in argv
+
+    def test_each_shard_gets_its_own_port(self) -> None:
+        shards = plan(shards=2).shards
+        first = serve_command(shards[0], repository="/models", http_port_base=8100)
+        second = serve_command(shards[1], repository="/models", http_port_base=8100)
+        assert first[-3:] == ["--http", "--port", "8100"]
+        assert second[-3:] == ["--http", "--port", "8101"]
+        assert first[:-3] == second[:-3], "everything else is identical across shards"

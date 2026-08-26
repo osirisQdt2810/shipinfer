@@ -288,10 +288,11 @@ class Fleet:
 #: its own configuration, and sending the full camera objects would mean two descriptions of
 #: one camera that can disagree.
 def serve_command(
-    shard: Shard,  # noqa: ARG001 - part of the Fleet.command contract; see below
+    shard: Shard,
     *,
     repository: str,
     extra: Sequence[str] = (),
+    http_port_base: int | None = None,
 ) -> list[str]:
     """The default argv: this interpreter, running ``shipinfer serve`` on one repository.
 
@@ -309,12 +310,18 @@ def serve_command(
     environment before it started, so to the child they are ``0..n-1`` — passing the physical
     ordinals as well would ask it to select devices it cannot see.
 
-    Which leaves ``shard`` unused here, and that is the shape of the answer rather than an
-    oversight: everything per-shard travels in the environment, so the argv is identical for
-    every shard. The parameter stays because :attr:`Fleet.command` is handed one and another
-    command may want it — a per-shard log file, a different repository per shard.
+    Which leaves one per-shard thing on the line, and only when asked for: the HTTP port. A
+    warm shard needs no ingress, so the default is `serve`'s default — no HTTP at all. With
+    ``http_port_base`` every shard serves HTTP on ``base + shard.index``, so a fleet is
+    addressable shard by shard (the `service` topology's tests drive one shard and read the
+    other's statistics). One port for all of them is not an option: the second bind fails.
+    Everything else per-shard travels in the environment, so the rest of the argv is identical
+    for every shard.
     """
-    return [sys.executable, "-m", "shipinfer", "serve", "-r", repository, *extra]
+    argv = [sys.executable, "-m", "shipinfer", "serve", "-r", repository, *extra]
+    if http_port_base is not None:
+        argv += ["--http", "--port", str(http_port_base + shard.index)]
+    return argv
 
 
 def forward_signals(fleet: Fleet) -> None:

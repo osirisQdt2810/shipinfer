@@ -38,9 +38,11 @@ class ServiceSettings(BaseModel):
     #: Slots per (submitter, owner, model) ring. Small on purpose: the rings are pairwise, so
     #: four shards and three models are 24 rings each way, and every slot is pinned.
     slots_per_pair: int = Field(default=8, ge=1)
-    #: Bytes per slot: one crop batch with its head. 1.5 MiB fits 32 crops of 3 x 128 x 64 fp32
-    #: with room; a model whose batch needs more is sized from its config by the mesh.
-    slot_bytes: int = Field(default=1_572_864, ge=4096)
+    #: Bytes per slot: one crop batch plus its heads. 1.5 MiB is exactly 32 crops of 3 x 128 x 64
+    #: fp16; the extra 64 KiB (400 pages in all) carries the request head and the per-tensor heads,
+    #: which travel in the slot ahead of the bytes. A request that does not fit is refused before a
+    #: byte moves; per-model slot sizes are an open question (T3).
+    slot_bytes: int = Field(default=1_638_400, ge=4096)
     #: How long a submit waits for a free slot before the ring is called full.
     submit_timeout_ms: float = Field(default=5.0, gt=0.0)
     #: How often an owner stamps its ring headers, and after how many missed stamps a peer is

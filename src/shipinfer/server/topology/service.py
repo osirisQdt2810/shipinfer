@@ -63,8 +63,10 @@ class ServiceTopology(Topology):
         self._shards = len(plan)
         return plan
 
-    def command(self, shard: Shard, *, repository: str) -> Sequence[str]:
-        return serve_command(shard, repository=repository)
+    def command(
+        self, shard: Shard, *, repository: str, http_port_base: int | None = None
+    ) -> Sequence[str]:
+        return serve_command(shard, repository=repository, http_port_base=http_port_base)
 
     def environment(self, settings: ServerSettings) -> Mapping[str, str]:
         base = dict(super().environment(settings))

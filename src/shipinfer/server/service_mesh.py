@@ -9,7 +9,7 @@ shared model ``M`` present in this process:
 * it **opens** the mirror images that ``P`` created — ``me → P`` to submit and ``P ← me`` to
   answer — retrying until they appear, because peers start in no particular order;
 * it runs one :class:`~shipinfer.server.remote_instance.RingIngress` per ``(P, M)`` over the
-  requests P sends, one :class:`~shipinfer.server.remote_instance.ResultReader` for every result
+  requests P sends — into the model's *local* instances, so a request never crosses twice — one :class:`~shipinfer.server.remote_instance.ResultReader` for every result
   ring it owns, and hands each shared model a :class:`~shipinfer.server.remote_instance.RemoteInstance`
   per peer.
 
@@ -54,6 +54,8 @@ class _SharedModel(Protocol):
     def name(self) -> str: ...
 
     def infer(self, request: Any) -> Any: ...
+
+    def infer_local(self, request: Any) -> Any: ...
 
     def total_depth(self) -> int: ...
 
@@ -171,7 +173,8 @@ class ServiceMesh:
                         submitter=str(peer),
                         inbound=inbound,
                         results=answers,
-                        infer=model.infer,
+                        # Local only: work that crossed once is done here, never re-routed.
+                        infer=model.infer_local,
                         load=_load_of(model),
                         stamp_every_s=self.settings.heartbeat_ms / 1000.0,
                     )

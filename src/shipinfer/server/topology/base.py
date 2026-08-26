@@ -61,8 +61,14 @@ class Topology(abc.ABC):
         """Who owns which cameras and which GPUs. Pure; printed before anything is spawned."""
 
     @abc.abstractmethod
-    def command(self, shard: Shard, *, repository: str) -> Sequence[str]:
-        """The argv for ``shard``'s process."""
+    def command(
+        self, shard: Shard, *, repository: str, http_port_base: int | None = None
+    ) -> Sequence[str]:
+        """The argv for ``shard``'s process.
+
+        ``http_port_base`` set means every shard also serves HTTP, on ``base + shard.index``;
+        unset means a warm shard with no ingress, which is `serve`'s own default.
+        """
 
     def environment(self, settings: ServerSettings) -> Mapping[str, str]:
         """Extra environment for every child, on top of what `Fleet` sets per shard.

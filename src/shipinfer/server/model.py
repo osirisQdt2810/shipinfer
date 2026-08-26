@@ -124,6 +124,9 @@ class Model:
             ),
             on_spill=self._on_spill,
         )
+        # What `infer_local` dispatches over: this process's instances and nothing else.
+        # `attach_remote` widens `_dispatcher`, never this one.
+        self._local_dispatcher = self._dispatcher
         self._started = False
 
     # -- construction --------------------------------------------------------------------
@@ -413,6 +416,22 @@ class Model:
     # -- inference -----------------------------------------------------------------------
 
     def infer(self, request: InferenceRequest) -> ResponseFuture:
+        """Validate, check the cache, then dispatch over every candidate — local instances and,
+        under the `service` topology, the peers' proxies. See :meth:`_infer` for the contract.
+        """
+        return self._infer(request, self._dispatcher)
+
+    def infer_local(self, request: InferenceRequest) -> ResponseFuture:
+        """:meth:`infer`, over this process's instances only.
+
+        The entry point for work that arrived from a peer: a request that has crossed a process
+        boundary once is executed here, whatever the local depth — handing it back to the
+        candidate set could bounce it between two deep shards on stale headers, and every hop is
+        two copies. Outside the `service` topology this is :meth:`infer`.
+        """
+        return self._infer(request, self._local_dispatcher)
+
+    def _infer(self, request: InferenceRequest, dispatcher: Dispatcher) -> ResponseFuture:
         """Validate, check the cache, then dispatch.
 
         Returns:
@@ -456,7 +475,7 @@ class Model:
             self._store_when_done(key, future)
 
         try:
-            self._dispatcher.dispatch(WorkItem(request, future), _enqueue)
+            dispatcher.dispatch(WorkItem(request, future), _enqueue)
         except QueueFullError:
             self._metrics.requests_rejected.inc(model=self.name)
             # And in the per-model statistics, which is where Triton counts a rejection.
