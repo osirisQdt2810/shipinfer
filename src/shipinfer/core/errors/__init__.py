@@ -31,6 +31,7 @@ from shipinfer.core.errors.ingest import (
 from shipinfer.core.errors.sink import SinkDeliveryError
 from shipinfer.core.errors.topology import (
     PeerLostError,
+    RingClosedError,
     RingFullError,
     RingProtocolError,
     ShardExitedError,
@@ -50,9 +51,13 @@ __all__ = [
     "ModelControlError",
     "ModelNotFoundError",
     "ModelVersionNotFoundError",
+    "PeerLostError",
     "QueueFullError",
     "RequestCancelledError",
     "RequestTimeoutError",
+    "RingClosedError",
+    "RingFullError",
+    "RingProtocolError",
     "ServerStateError",
     "ShardExitedError",
     "ShipInferError",

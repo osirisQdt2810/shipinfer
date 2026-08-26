@@ -15,7 +15,12 @@ import uuid
 import numpy as np
 import pytest
 
-from shipinfer.core.errors import RingFullError, RingProtocolError
+from shipinfer.core.errors import (
+    QueueFullError,
+    RingClosedError,
+    RingFullError,
+    RingProtocolError,
+)
 from shipinfer.runtime.memory.shared_ring import RingLayout, SharedRing, SlotState
 
 
@@ -118,9 +123,9 @@ class TestTheProtocol:
     def test_publish_and_release_check_the_state(self, ring) -> None:
         writer = SharedRing.open(ring.name, ring.layout)
         try:
-            with pytest.raises(RuntimeError, match="not claimed"):
+            with pytest.raises(RingProtocolError, match="not claimed"):
                 writer.publish(0)
-            with pytest.raises(RuntimeError, match="not taken"):
+            with pytest.raises(RingProtocolError, match="not taken"):
                 ring.release(0)
         finally:
             writer.close()
@@ -193,7 +198,7 @@ class TestTheProtocol:
         owner.close()
         try:
             assert writer.header().closed
-            with pytest.raises(RingFullError):
+            with pytest.raises(RingClosedError, match="closed"):
                 writer.claim(timeout_s=0.05)
         finally:
             writer.close()
@@ -281,11 +286,101 @@ class TestAbandon:
     def test_only_a_claimed_slot_can_be_abandoned(self, ring) -> None:
         writer = SharedRing.open(ring.name, ring.layout)
         try:
-            with pytest.raises(RuntimeError, match="not claimed"):
+            with pytest.raises(RingProtocolError, match="not claimed"):
                 writer.abandon(0)
             index = writer.claim(timeout_s=0.1)
             writer.publish(index)
-            with pytest.raises(RuntimeError, match="not claimed"):
+            with pytest.raises(RingProtocolError, match="not claimed"):
                 writer.abandon(index)  # published: it is the reader's now
         finally:
             writer.close()
+
+
+class TestClosedIsNotFull:
+    def test_a_closed_ring_says_so_and_the_dispatcher_can_still_spill_on_it(self, ring) -> None:
+        """Closed and full are different events with different operator responses — but both
+        are `QueueFullError`s, so the dispatcher's recovery (exclude, re-select) covers the
+        race where a request passes `is_ready` just before the owner leaves."""
+        writer = SharedRing.open(ring.name, ring.layout)
+        ring.close()
+        with pytest.raises(RingClosedError, match="closed - its owner is gone") as caught:
+            writer.claim(timeout_s=0.05)
+        assert isinstance(caught.value, QueueFullError)
+        assert "full" not in str(caught.value)
+        writer.close()
+
+    def test_a_genuinely_full_ring_reports_its_real_depth(self, ring) -> None:
+        writer = SharedRing.open(ring.name, ring.layout)
+        try:
+            for _ in range(ring.layout.slots):
+                writer.publish(writer.claim(timeout_s=0.1))
+            with pytest.raises(RingFullError) as caught:
+                writer.claim(timeout_s=0.05)
+            assert (caught.value.depth, caught.value.capacity) == (
+                ring.layout.slots,
+                ring.layout.slots,
+            )
+        finally:
+            writer.close()
+
+
+class TestIsClosedIsTheLoopCondition:
+    def test_an_idle_window_is_not_the_end_of_the_loop(self, ring) -> None:
+        """`take` returning None means "nothing this window"; the loop the docstring
+        recommends keeps running until `is_closed` — an owner must survive quiet seconds."""
+        assert ring.take(timeout_s=0.06) is None
+        assert not ring.is_closed, "idle is not closed"
+        writer = SharedRing.open(ring.name, ring.layout)
+        try:
+            assert not writer.is_closed
+            writer.publish(writer.claim(timeout_s=0.1))
+            assert ring.take(timeout_s=0.5) is not None, "still alive after the idle window"
+        finally:
+            writer.close()
+
+    def test_close_flips_the_byte_on_both_handles(self, ring) -> None:
+        writer = SharedRing.open(ring.name, ring.layout)
+        ring.close()
+        assert ring.is_closed, "the detached handle answers closed"
+        assert writer.is_closed, "the peer reads the byte"
+        writer.close()
+
+
+class TestAClosedHandleIsInert:
+    def test_late_transitions_and_stamps_do_not_crash(self, ring) -> None:
+        """The shutdown window: a completion callback or a metrics thread touching the ring
+        after `close()` must be a no-op, not an IndexError from the released view — this is
+        the exact noise the first two-process bench run produced at every rung teardown."""
+        writer = SharedRing.open(ring.name, ring.layout)
+        index = writer.claim(timeout_s=0.1)
+        writer.publish(index)
+        taken = ring.take(timeout_s=0.5)
+        ring.close()
+        writer.close()
+        ring.release(taken)  # settles late; nothing to free, nothing raised
+        ring.stamp(depth=3, ewma_latency_us=1.0)  # the metrics thread's last stamp
+        assert ring.is_closed and writer.is_closed
+
+
+@pytest.mark.gpu
+class TestPinnedForReal:
+    def test_register_roundtrip_unregister(self) -> None:
+        """The one device path in the module: a slot pinned once per process, H2D and back
+        bit-exact, and close() unregistering without touching a new export of the block."""
+        import torch
+
+        layout = RingLayout(slots=2, slot_bytes=8192)
+        ring = SharedRing.create(_name(), layout, owner="A")
+        try:
+            slot = ring.pinned_tensor(0)
+            assert slot.numel() == layout.slot_bytes
+            source = torch.arange(layout.slot_bytes, dtype=torch.uint8) % 251
+            slot.copy_(source)
+            device = slot.to("cuda:0")
+            back = device.to("cpu")
+            assert torch.equal(back, source)
+            del slot, device, back
+        finally:
+            ring.close()  # unregisters via the remembered pointer; raising here fails the test
+        with pytest.raises(FileNotFoundError):
+            SharedRing.open(ring.name, layout)

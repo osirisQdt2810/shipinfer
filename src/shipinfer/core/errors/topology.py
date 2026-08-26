@@ -5,8 +5,15 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from shipinfer.core.errors.base import ShipInferError
+from shipinfer.core.errors.inference import QueueFullError
 
-__all__ = ["PeerLostError", "RingFullError", "RingProtocolError", "ShardExitedError"]
+__all__ = [
+    "PeerLostError",
+    "RingClosedError",
+    "RingFullError",
+    "RingProtocolError",
+    "ShardExitedError",
+]
 
 
 class ShardExitedError(ShipInferError):
@@ -18,24 +25,44 @@ class ShardExitedError(ShipInferError):
     """
 
 
-class RingFullError(ShipInferError):
+class RingFullError(QueueFullError):
     """A shared ring had no free slot within the submit timeout.
 
-    Carries depth and capacity (ADR-005): the dispatcher that receives it excludes the peer
-    and re-selects, and an operator paged on it can tell a ring of 8 that is momentarily full
-    from one that has been full for a minute. Nothing is dropped — the request is still with
-    the caller.
+    A :class:`QueueFullError`, so the dispatcher's spill loop treats a full ring exactly like a
+    full local queue: the request is still with the caller and the next candidate is tried.
+    Carries depth and capacity (ADR-005), so an operator paged on it can tell a ring of 8 that
+    is momentarily full from one that has been full for a minute. Nothing is dropped.
     """
 
     def __init__(self, owner: str, ring: str, depth: int, capacity: int) -> None:
-        super().__init__(
-            f"ring {ring!r} to {owner!r} is full: {depth}/{capacity} slots claimed and not "
-            f"yet released"
-        )
+        super().__init__(f"ring {ring} to {owner}", depth, capacity)
         self.owner = owner
         self.ring = ring
         self.depth = depth
         self.capacity = capacity
+
+
+class RingClosedError(QueueFullError):
+    """The ring was closed by its owner — the peer is gone or leaving, not overloaded.
+
+    A ``QueueFullError`` subclass so the dispatcher's existing recovery — exclude the candidate
+    and re-select — still applies at the races (a proxy's ``is_ready`` goes false on close, but
+    a request already past that check lands here). Distinct from :class:`RingFullError` because
+    the operator's responses differ: a full ring wants back-pressure tuning, a closed one wants
+    to know why the peer left.
+    """
+
+    def __init__(self, owner: str, ring: str) -> None:
+        # Not QueueFullError.__init__: its message says "is full", and closed is exactly not
+        # that. The base's attributes are still set so shape-generic handlers read zeros.
+        ShipInferError.__init__(
+            self, f"ring {ring} to {owner} is closed - its owner is gone or leaving"
+        )
+        self.queue_name = ring
+        self.depth = 0
+        self.capacity = 0
+        self.owner = owner
+        self.ring = ring
 
 
 class PeerLostError(ShipInferError):
