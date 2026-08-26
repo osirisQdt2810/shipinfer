@@ -1,6 +1,7 @@
 """A peer's instance through a ring, offline: two "processes" as objects in one, the rings real.
 
-The owner side is a `RingIngress` over a fake model whose `infer` computes in a thread; the
+The owner side is a `RingIngress` over a fake model that admits once and computes on ONE
+worker thread; the
 submitter side is a `RemoteInstance` behind a real `Dispatcher` next to a fake local instance.
 The rings are real shared memory, so a thread here sees exactly what a peer process would.
 """
@@ -11,7 +12,6 @@ import queue
 import threading
 import time
 import uuid
-from concurrent.futures import Future
 
 import numpy as np
 import pytest
@@ -57,17 +57,29 @@ class FakeModel:
         self.seen: list[str] = []
         self.completed = 0
         self.depth = 0
+        self.admitted = 0
+        self.dispatches = 0
+        self.rejections = 0
         self._work: queue.Queue = queue.Queue()
         self._worker = threading.Thread(target=self._run, daemon=True)
         self._worker.start()
 
-    def infer(self, request: InferenceRequest) -> Future:
+    def admit(self, request: InferenceRequest) -> WorkItem:
+        # First-entry work happens exactly once per request; the counter is the round-3
+        # regression (a retry must never re-admit).
+        self.admitted += 1
         self.seen.append(request.context.camera_id)
         if self.fail:
             raise ValueError("engine refused the batch")
-        future: Future = Future()
-        self._work.put((request, future))
-        return future
+        return WorkItem(request, ResponseFuture(request))
+
+    def dispatch(self, item: WorkItem) -> bool:
+        self.dispatches += 1
+        self._work.put((item.request, item.future))
+        return True
+
+    def reject(self) -> None:
+        self.rejections += 1
 
     def close(self) -> None:
         self._work.put(None)
@@ -134,7 +146,9 @@ def pair():
                 submitter="A",
                 inbound=request_ring_owner,
                 results=result_ring_writer,
-                infer=model.infer,
+                admit=model.admit,
+                dispatch=model.dispatch,
+                reject=model.reject,
                 load=lambda: (model.depth, 500.0),
             )
         ],
@@ -305,7 +319,9 @@ class TestRepliesThatCannotLand:
             submitter="A",
             inbound=inbound_owner,
             results=results_writer,
-            infer=model.infer,
+            admit=model.admit,
+            dispatch=model.dispatch,
+            reject=model.reject,
             load=lambda: (0, 0.0),
         )
         ingress = RingIngress([lane], stamp_every_s=0.05, result_patience_s=patience_s)
@@ -392,27 +408,39 @@ class TestPendingEntriesExpire:
 
 class TestASaturatedOwnerPushesBack:
     class SaturatedThenWilling:
-        """Refuses the first N infers with QueueFullError, then serves normally."""
+        """Admits normally; refuses the first N dispatch attempts, then accepts."""
 
         def __init__(self, refusals: int) -> None:
             self.refusals = refusals
+            self.dispatch_attempts = 0
             self.inner = FakeModel()
 
-        def infer(self, request: InferenceRequest) -> Future:
+        def admit(self, request: InferenceRequest) -> WorkItem:
+            return self.inner.admit(request)
+
+        def dispatch(self, item: WorkItem) -> bool:
+            self.dispatch_attempts += 1
             if self.refusals > 0:
                 self.refusals -= 1
-                raise QueueFullError("emb", 64, 64)
-            return self.inner.infer(request)
+                return False
+            return self.inner.dispatch(item)
 
-    def test_a_refused_request_is_retried_and_succeeds_not_failed_as_text(self) -> None:
-        """Round 2: the owner's model-queue saturation must not leave the process as a text
-        failure — the request waits with its slot held and runs when the queue drains."""
-        layout = RingLayout(slots=4, slot_bytes=64 * 1024)
+        def reject(self) -> None:
+            self.inner.reject()
+
+    def _tier(
+        self,
+        model,
+        *,
+        slots: int = 4,
+        patience_s: float = 5.0,
+        backoff_s: float = 0.005,
+    ):
+        layout = RingLayout(slots=slots, slot_bytes=64 * 1024)
         inbound_owner = SharedRing.create(_name("sat"), layout, owner="B")
         inbound_writer = SharedRing.open(inbound_owner.name, layout)
         results_owner = SharedRing.create(_name("satr"), layout, owner="A")
         results_writer = SharedRing.open(results_owner.name, layout)
-        model = self.SaturatedThenWilling(refusals=3)
         reader = ResultReader(lost_after_s=5.0)
         reader.add_result_ring("B", results_owner)
         proxy = RemoteInstance(
@@ -424,13 +452,32 @@ class TestASaturatedOwnerPushesBack:
                     submitter="A",
                     inbound=inbound_owner,
                     results=results_writer,
-                    infer=model.infer,
+                    admit=model.admit,
+                    dispatch=model.dispatch,
+                    reject=model.reject,
                     load=lambda: (0, 0.0),
                 )
             ],
             stamp_every_s=0.05,
-            result_patience_s=5.0,
+            result_patience_s=patience_s,
+            retry_backoff_s=backoff_s,
         )
+        return ingress, reader, proxy, (inbound_writer, results_owner, results_writer)
+
+    def _teardown(self, ingress, reader, model, rings) -> None:
+        reader.stop()
+        ingress.stop()
+        ingress.join(timeout=2)
+        reader.join(timeout=2)
+        model.inner.close()
+        for ring in rings:  # the inbound owner is closed by the ingress itself
+            ring.close()
+
+    def test_a_refused_request_is_retried_and_succeeds_not_failed_as_text(self) -> None:
+        """Round 2: the owner's model-queue saturation must not leave the process as a text
+        failure — the request waits with its slot held and runs when the queue drains."""
+        model = self.SaturatedThenWilling(refusals=3)
+        ingress, reader, proxy, rings = self._tier(model)
         ingress.start()
         reader.start()
         try:
@@ -440,43 +487,36 @@ class TestASaturatedOwnerPushesBack:
             response = future.result(timeout=5.0)
             assert response.context.frame_id == 11, "retried until the queue drained — not text"
             assert ingress.failed == 0
+            assert model.inner.admitted == 1, "retries are dispatch-only, never re-admission"
         finally:
-            reader.stop()
-            ingress.stop()
-            ingress.join(timeout=2)
-            reader.join(timeout=2)
-            model.inner.close()
-            inbound_writer.close()
-            results_owner.close()
-            results_writer.close()
+            self._teardown(ingress, reader, model, rings)
+
+    def test_a_saturated_lane_is_probed_not_spun_and_admitted_once(self) -> None:
+        """Round 3: a still-refusing lane must not pin a core or re-enter first-entry work.
+
+        Attempts over the window are bounded by window / retry_backoff — a spin makes
+        tens of thousands, and each one would re-run validation and bump the counters.
+        """
+        model = self.SaturatedThenWilling(refusals=10_000_000)
+        ingress, reader, proxy, rings = self._tier(model, backoff_s=0.01)
+        ingress.start()
+        reader.start()
+        try:
+            request = _request("quay-7", 3)
+            proxy.enqueue(WorkItem(request, ResponseFuture(request)))
+            time.sleep(0.3)
+            assert model.inner.admitted == 1, "admission is first-entry work, once"
+            # 0.3 s at a 10 ms probe is ~30 attempts plus the first; give scheduling slack.
+            assert model.dispatch_attempts <= 60, model.dispatch_attempts
+            assert ingress.failed == 0
+        finally:
+            self._teardown(ingress, reader, model, rings)
 
     def test_persistent_saturation_fills_the_ring_and_the_submitter_spills(self) -> None:
         """While the owner stays saturated the slots stay claimed, the ring fills, and the
         submitter's next enqueue raises RingFullError — the dispatcher's spill signal."""
-        layout = RingLayout(slots=2, slot_bytes=64 * 1024)
-        inbound_owner = SharedRing.create(_name("satf"), layout, owner="B")
-        inbound_writer = SharedRing.open(inbound_owner.name, layout)
-        results_owner = SharedRing.create(_name("satfr"), layout, owner="A")
-        results_writer = SharedRing.open(results_owner.name, layout)
-        model = self.SaturatedThenWilling(refusals=10_000)
-        reader = ResultReader(lost_after_s=5.0)
-        reader.add_result_ring("B", results_owner)
-        proxy = RemoteInstance(
-            owner="B", model_name="m", submit=inbound_writer, reader=reader, lost_after_s=5.0
-        )
-        ingress = RingIngress(
-            [
-                IngressLane(
-                    submitter="A",
-                    inbound=inbound_owner,
-                    results=results_writer,
-                    infer=model.infer,
-                    load=lambda: (64, 9000.0),
-                )
-            ],
-            stamp_every_s=0.05,
-            result_patience_s=30.0,
-        )
+        model = self.SaturatedThenWilling(refusals=10_000_000)
+        ingress, reader, proxy, rings = self._tier(model, slots=2, patience_s=30.0)
         ingress.start()
         reader.start()
         try:
@@ -495,11 +535,45 @@ class TestASaturatedOwnerPushesBack:
             assert spilled, "the held slots filled the ring; the submitter got its spill signal"
             assert ingress.failed == 0, "nothing was failed as text while merely saturated"
         finally:
+            self._teardown(ingress, reader, model, rings)
+
+
+class TestTheProxySeesItsOwnBacklog:
+    def test_depth_counts_published_but_untaken_requests(self) -> None:
+        """Round 3: without the ring backlog a burst reads the stamped depth for every
+        request and herds onto one peer while a local instance idles."""
+        layout = RingLayout(slots=4, slot_bytes=64 * 1024)
+        owner = SharedRing.create(_name("bl"), layout, owner="B")
+        writer = SharedRing.open(owner.name, layout)
+        reader = ResultReader(lost_after_s=5.0)
+        proxy = RemoteInstance(
+            owner="B", model_name="m", submit=writer, reader=reader, lost_after_s=5.0
+        )
+        try:
+            owner.stamp(depth=1, ewma_latency_us=10.0)
+            assert proxy.depth == 1
+            for frame in (1, 2):
+                request = _request("quay-8", frame)
+                proxy.enqueue(WorkItem(request, ResponseFuture(request)))
+            assert proxy.depth == 3, "the stamped depth plus the two published-but-untaken"
+        finally:
+            writer.close()
+            owner.close()
+
+
+class TestTheReaderFailsWhatItStrands:
+    def test_stop_fails_pending_futures_with_their_tags(self) -> None:
+        """Round 3 / ADR-002: engine.stop() must not leave a caller riding out its own
+        timeout — a stranded future fails at reader shutdown, tag intact."""
+        reader = ResultReader(lost_after_s=10.0)
+        request = _request("quay-2", 9)
+        item = WorkItem(request, ResponseFuture(request))
+        reader.start()
+        try:
+            reader.expect(item, "B")
+        finally:
             reader.stop()
-            ingress.stop()
-            ingress.join(timeout=2)
             reader.join(timeout=2)
-            model.inner.close()
-            inbound_writer.close()
-            results_owner.close()
-            results_writer.close()
+        with pytest.raises(ServerStateError, match="quay-2/9"):
+            item.future.result(timeout=1.0)
+        assert reader.pending == 0

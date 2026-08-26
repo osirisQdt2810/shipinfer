@@ -110,9 +110,17 @@ def _host(tensor: Tensor, name: str) -> np.ndarray:
 
 
 def _device_to_host(tensor: Tensor, name: str) -> np.ndarray:  # noqa: ARG001 - name aids errors
+    import torch
+
     from shipinfer.runtime.tensor import to_torch
 
     view = to_torch(tensor)
+    if view.is_cuda:
+        # The CAI bridge is version 2 - no stream key - so torch orders nothing against the
+        # producer's stream. Drain the device before reading, or a kernel still writing on a
+        # pool stream puts wrong bytes on the wire with no crash. One sync per crossing,
+        # bounded by the producer's own kernel time.
+        torch.cuda.synchronize(view.device)
     return np.ascontiguousarray(view.detach().to("cpu", non_blocking=False).numpy())
 
 

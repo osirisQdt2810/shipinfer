@@ -106,7 +106,10 @@ class RemoteInstance:
 
     @property
     def depth(self) -> int:
-        return self._submit.load_signal()[0]
+        # The owner's stamped queue depth *plus* what this submitter has already published
+        # and the owner has not yet taken: without the ring backlog a burst reads depth 0
+        # eight times and herds onto one peer while a local instance idles (#26 round 3).
+        return self._submit.load_signal()[0] + self._submit.depth
 
     @property
     def ewma_latency_us(self) -> float:
@@ -203,22 +206,42 @@ class ResultReader(threading.Thread):
         self._stopping.set()
 
     def run(self) -> None:
-        idle = 0
-        last_bookkeeping = 0
-        while not self._stopping.is_set():
-            busy = self._drain_results()
-            now = time.monotonic_ns()
-            # Liveness and expiry decide on second-scale windows; checking them thousands of
-            # times a second only contends `_lock` with the dispatch path's `expect`.
-            if now - last_bookkeeping >= self._lost_after_ns // 4:
-                self._check_heartbeats()
-                last_bookkeeping = now
-            if busy:
-                idle = 0
-                continue
-            idle += 1
-            if idle > 50:
-                time.sleep(self._poll_s)
+        try:
+            idle = 0
+            last_bookkeeping = 0
+            while not self._stopping.is_set():
+                busy = self._drain_results()
+                now = time.monotonic_ns()
+                # Liveness and expiry decide on second-scale windows; checking them thousands
+                # of times a second only contends `_lock` with the dispatch path's `expect`.
+                if now - last_bookkeeping >= self._lost_after_ns // 4:
+                    self._check_heartbeats()
+                    last_bookkeeping = now
+                if busy:
+                    idle = 0
+                    continue
+                idle += 1
+                if idle > 50:
+                    time.sleep(self._poll_s)
+        finally:
+            self._fail_stranded()
+
+    def _fail_stranded(self) -> None:
+        """The reader is stopping: fail every pending future now, tag intact.
+
+        Without this, `engine.stop()` leaves a caller blocked in `future.result()` to ride
+        out its own timeout — the tag must survive every path, shutdown included (ADR-002).
+        """
+        with self._lock:
+            stranded = list(self._pending.items())
+            self._pending.clear()
+        for rid, (item, who, _) in stranded:
+            item.fail(
+                ServerStateError(
+                    f"result reader stopped with request {rid} to {who!r} still pending "
+                    f"({item.request.context.camera_id}/{item.request.context.frame_id})"
+                )
+            )
 
     def _drain_results(self) -> bool:
         busy = False
@@ -318,7 +341,12 @@ class IngressLane:
     submitter: str
     inbound: SharedRing
     results: SharedRing
-    infer: Callable[[InferenceRequest], Future[InferenceResponse]]
+    #: First-entry work, once per request (validate, stamp, count, cache) — `Model.admit_local`.
+    admit: Callable[[InferenceRequest], WorkItem]
+    #: One dispatch attempt for an admitted item; False = every local queue refused, retry me.
+    dispatch: Callable[[WorkItem], bool]
+    #: The tier gave up on an admitted item: count the rejection — `Model.count_local_rejection`.
+    reject: Callable[[], None]
     load: Callable[[], tuple[int, float]]
 
 
@@ -363,6 +391,7 @@ class RingIngress(threading.Thread):
         *,
         stamp_every_s: float = 0.2,
         result_patience_s: float = 30.0,
+        retry_backoff_s: float = 0.005,
         idle_sleep_s: float = 0.0005,
         idle_after: int = 50,
     ) -> None:
@@ -374,9 +403,13 @@ class RingIngress(threading.Thread):
         self._idle_after = idle_after
         self._stopping = threading.Event()
         self._replies: deque[_Reply] = deque()
-        #: Requests the owner's model queue refused: retried next sweep with their inbound
-        #: slots still claimed, so the ring fills and the submitter spills locally (ADR-005).
-        self._deferred: deque[tuple[IngressLane, int, InferenceRequest, float]] = deque()
+        #: Admitted items the owner's model queue refused: their inbound slots stay claimed,
+        #: so the ring fills and the submitter spills locally (ADR-005). Probed — dispatch
+        #: only, on the order of the batch window — never spun (#26 round 3): a retry must
+        #: not re-enter the model's first-entry work or pin a core.
+        self._deferred: deque[tuple[IngressLane, int, WorkItem, float]] = deque()
+        self._retry_backoff_s = retry_backoff_s
+        self._retry_at: dict[int, float] = {}
         self._last_stamp_ns = 0
         self.served = 0
         self.failed = 0
@@ -429,7 +462,7 @@ class RingIngress(threading.Thread):
                 self.dropped += 1
                 reply.lane.inbound.release(reply.inbound_index)
             while self._deferred:
-                lane, index, _request, _cap = self._deferred.popleft()
+                lane, index, _item, _cap = self._deferred.popleft()
                 self.dropped += 1
                 lane.inbound.release(index)
             for lane in self._lanes:
@@ -446,42 +479,19 @@ class RingIngress(threading.Thread):
             self.failed += 1
             self._replies.append(self._failure_reply(lane, index, request_id, "?", exc))
             return
-        self._start(lane, index, request, time.monotonic() + self._result_patience_s)
-
-    def _start(
-        self, lane: IngressLane, index: int, request: InferenceRequest, cap: float
-    ) -> None:
         try:
-            future = lane.infer(request)
-        except QueueFullError:
-            # The owner's own model queue refused — saturation, not death. Failing the frame
-            # here inverts ADR-005: the submitter (depth 5) could have run what it sent to a
-            # peer whose header was 200 ms stale. Keep the inbound slot claimed and retry the
-            # request next sweep; the ring fills, the submitter's next enqueue raises
-            # RingFullError, and the dispatcher spills back to a local instance — the same
-            # pressure propagation a full result ring already applies to replies.
-            if time.monotonic() >= cap:
-                self.failed += 1
-                self._replies.append(
-                    self._failure_reply(
-                        lane,
-                        index,
-                        request.request_id,
-                        request.model_name,
-                        QueueFullError(
-                            f"{request.model_name} at {lane.submitter}'s peer", 0, 0
-                        ),
-                    )
-                )
-                return
-            self._deferred.append((lane, index, request, cap))
-            return
+            item = lane.admit(request)
         except Exception as exc:
             self.failed += 1
             self._replies.append(
                 self._failure_reply(lane, index, request.request_id, request.model_name, exc)
             )
             return
+        self._watch(lane, index, item)
+        self._dispatch(lane, index, item, time.monotonic() + self._result_patience_s)
+
+    def _watch(self, lane: IngressLane, index: int, item: WorkItem) -> None:
+        request = item.request
 
         def done(
             settled: Future[InferenceResponse],
@@ -505,7 +515,50 @@ class RingIngress(threading.Thread):
                 )
             )
 
-        future.add_done_callback(done)
+        # Attached before the first dispatch attempt: a cache hit is already done and lands
+        # its reply through the same path; an item never accepted never fires it.
+        item.future.add_done_callback(done)
+
+    def _dispatch(self, lane: IngressLane, index: int, item: WorkItem, cap: float) -> bool:
+        """One dispatch attempt for an admitted item.
+
+        True = the item's story is settled (accepted, failed, or given up); False = every
+        local queue refused — saturation, not death — and the item is deferred with its
+        inbound slot still claimed, so the ring fills, the submitter's next enqueue raises
+        RingFullError, and its dispatcher spills back to a local instance (ADR-005's
+        pressure propagating). The retry is dispatch-only: admission happened in `_serve`,
+        so validation, `received_ns` and the counters cannot repeat (#26 round 3).
+        """
+        try:
+            if lane.dispatch(item):
+                return True
+        except Exception as exc:
+            self.failed += 1
+            self._replies.append(
+                self._failure_reply(
+                    lane, index, item.request.request_id, item.request.model_name, exc
+                )
+            )
+            return True
+        now = time.monotonic()
+        if now >= cap:
+            lane.reject()
+            self.failed += 1
+            self._replies.append(
+                self._failure_reply(
+                    lane,
+                    index,
+                    item.request.request_id,
+                    item.request.model_name,
+                    QueueFullError(
+                        f"{item.request.model_name} at {lane.submitter}'s peer", 0, 0
+                    ),
+                )
+            )
+            return True
+        self._deferred.append((lane, index, item, cap))
+        self._retry_at[id(lane)] = now + self._retry_backoff_s
+        return False
 
     def _failure_reply(
         self,
@@ -528,17 +581,26 @@ class RingIngress(threading.Thread):
     # -- the replies -----------------------------------------------------------------------
 
     def _retry_deferred(self) -> bool:
-        """Requests an earlier sweep could not hand to a saturated model: try again, once
-        each, keeping their slots claimed. Never blocks."""
-        busy = False
+        """Admitted items an earlier sweep could not hand to a saturated model.
+
+        A still-saturated lane is *probed* on the order of the batch window
+        (`retry_backoff_s`), not spun: the sweep returns True only when something actually
+        progressed (accepted, or given up at its cap), so a lane that keeps refusing reads
+        as idle and the loop reaches its backoff sleep instead of pinning a core and
+        re-packing headers at spin frequency (#26 round 3).
+        """
+        progressed = False
+        now = time.monotonic()
         for _ in range(len(self._deferred)):
             try:
-                lane, index, request, cap = self._deferred.popleft()
+                lane, index, item, cap = self._deferred.popleft()
             except IndexError:
                 break
-            busy = True
-            self._start(lane, index, request, cap)
-        return busy
+            if now < self._retry_at.get(id(lane), 0.0):
+                self._deferred.append((lane, index, item, cap))
+                continue
+            progressed = self._dispatch(lane, index, item, cap) or progressed
+        return progressed
 
     def _drain_replies(self) -> bool:
         """Land what can land; requeue what is back-pressured; drop what expired or lost its

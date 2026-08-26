@@ -199,7 +199,7 @@ class InferenceServer:
             if name in self._models
         }
         for name, candidate in shared.items():
-            if not hasattr(candidate, "infer_local"):
+            if not hasattr(candidate, "admit_local"):
                 raise ConfigurationError(
                     f"shared model {name!r} is an ensemble; only plain models cross the tier "
                     f"— share the models it composes instead"

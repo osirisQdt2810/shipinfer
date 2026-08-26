@@ -91,14 +91,16 @@ def wire_slot_bytes(config: Any, fallback: int) -> tuple[int, int]:
 
 
 class _SharedModel(Protocol):
-    """What the mesh needs of a model: the local entry point, its load, and the attach."""
+    """What the mesh needs of a model: admission and dispatch, its load, and the attach."""
 
     @property
     def name(self) -> str: ...
 
-    def infer(self, request: Any) -> Any: ...
+    def admit_local(self, request: Any) -> Any: ...
 
-    def infer_local(self, request: Any) -> Any: ...
+    def try_dispatch_local(self, item: Any) -> bool: ...
+
+    def count_local_rejection(self) -> None: ...
 
     @property
     def advertised_depth(self) -> int: ...
@@ -224,7 +226,11 @@ class ServiceMesh:
                         inbound=inbound,
                         results=answers,
                         # Local only: work that crossed once is done here, never re-routed.
-                        infer=model.infer_local,
+                        # Admission happens once; a saturated queue is retried dispatch-only,
+                        # so the counters and validation cannot repeat per retry.
+                        admit=model.admit_local,
+                        dispatch=model.try_dispatch_local,
+                        reject=model.count_local_rejection,
                         load=_load_of(model),
                     )
                 )

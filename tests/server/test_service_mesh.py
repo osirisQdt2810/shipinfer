@@ -23,7 +23,7 @@ from shipinfer.server.service_mesh import ServiceMesh, ring_name
 
 
 class FakeModel:
-    """A shared model as the mesh sees it: a name, an `infer`, a load, and an attach."""
+    """A shared model as the mesh sees it: admission and dispatch, a load, and an attach."""
 
     def __init__(self, name: str, shard: int, *, depth: int = 0) -> None:
         self.name = name
@@ -40,6 +40,22 @@ class FakeModel:
     def infer_local(self, request: InferenceRequest) -> Future:
         self.via.append("local")
         return self._run(request)
+
+    def admit_local(self, request: InferenceRequest):
+        from shipinfer.core.request.future import ResponseFuture
+        from shipinfer.scheduling.work import WorkItem
+
+        self.via.append("admit")
+        return WorkItem(request, ResponseFuture(request))
+
+    def try_dispatch_local(self, item) -> bool:
+        self.via.append("local")
+        inner = self._run(item.request)
+        inner.add_done_callback(lambda f: item.future.set_result(f.result()))
+        return True
+
+    def count_local_rejection(self) -> None:
+        self.via.append("rejected")
 
     def _run(self, request: InferenceRequest) -> Future:
         self.served.append((request.context.camera_id, request.context.frame_id))
@@ -153,8 +169,9 @@ class TestTwoShardsJoinTheTier:
         )
         assert models[1].served == [("quay-1", 5)] and models[0].served == []
         assert models[1].via == [
-            "local"
-        ], "the owner runs it on its own instances: never twice across"
+            "admit",
+            "local",
+        ], "the owner admits once, runs it on its own instances: never twice across"
 
     def test_through_a_dispatcher_the_deep_shard_borrows_the_quiet_one(
         self, two_shards
