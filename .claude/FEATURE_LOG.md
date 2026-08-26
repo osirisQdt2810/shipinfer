@@ -5,24 +5,28 @@ edits, typo fixes and pure docs.
 
 ---
 
-## perf: the ops layer's copies home go through pinned ping-pong staging (26 Aug 2026)
+## perf: multi-chunk copies home go through pinned ping-pong staging (26 Aug 2026)
 
-C44's lever 2. The pageable D2H tails were the ops layer, not TensorRT: letterbox_batch's
-`.cpu().numpy()` (4.92 MB × once per frame) and crop_batch's return (the ~39 ms mask-batch
-tails). Both now stage through a per-worker `PinnedStagingPool` — **two fixed-shape buffers
-per name, ping-ponged on the worker's own stream with one `torch.cuda.Event` per buffer**,
-so the copy engine runs chunk k+1's DMA while the host drains chunk k; single-chunk calls
-degenerate to the serial pinned cost. The contract is unchanged (host numpy out, exact
-bytes); a refused pinned allocation degrades once to pageable with a warning; the runner
-releases its workers' pools at stop (`MemoryPool.release_staging`) so stop/start cycles
-cannot strand page-locked memory. Pinned budget ≈40 MB per worker (a pair per name),
-released by `close()` and visible in `stats()`.
+C44's lever 2, converged over three review rounds. The pageable D2H tails were the ops
+layer, not TensorRT. The rule that survived review is **structural**: `_to_host` stages a
+result only when it spans more than one chunk — one span has no overlap to win and the
+staged path would add a full-size serial host memcpy that `.cpu()` never performs. So the
+production letterbox frame (1×3×640×640) and design-sizing person-reid batches (~15 crops)
+take the plain `.cpu()` path they always had, and the mask-sized batches (every ship its
+own span at 640²) stage through a **ping-pong pair with one `torch.cuda.Event` per buffer**
+on the worker's own stream — the copy engine runs chunk k+1's DMA while the host drains
+chunk k. Budget, re-derivable: 8 MiB per buffer, a pair only for a genuinely multi-chunk
+name — at most 16 MiB pinned per worker, released at the runner's stop
+(`MemoryPool.release_staging`) and at `close()`; `stats()`/`close()` snapshot the staging
+map under the lock. A mid-capture refusal goes pageable for that call only; an allocation
+failure degrades once with a warning.
 
-Measurement framing (corrected in review round 2): Nsight's D2H rows do not count the
-staged path's host memcpy-out, so a D2H-only comparison flatters the change — the honest
-claims are the end-to-end A/B and the kernel-tier pair on one commit, both in the PR body.
-Deleting the copies entirely (`letterbox_to_device` through the dispatcher) stays the named
-ADR-007 follow-up.
+Measurement honesty (recorded because it gates the numbers): this box's inter-invocation
+micro noise floor measured 25% on an identical-code control row, wider than every micro
+effect attempted — so no per-call speedup is claimed; the claims are the mechanism, the
+flat alternating end-to-end A/B, exact-equality tests, and the bounded budget. The
+quiet-window pair is the recorded gate for any numeric claim. Deleting the copies entirely
+(`letterbox_to_device` through the dispatcher) stays the ADR-007 follow-up.
 
 ## perf: crop_batch is one batched pass (26 Aug 2026)
 

@@ -213,7 +213,20 @@ class TestTheChunkLoopCoversTheBatch:
         ours = staged_ops.letterbox_batch([FRAME], (16, 16), PARAMS)
         theirs = plain_ops.letterbox_batch([FRAME], (16, 16), PARAMS)
         np.testing.assert_array_equal(ours.tensor, theirs.tensor)
-        assert pool.stats()["misses"] == 0, "letterbox is unstaged by decision, not accident"
+        assert pool.stats()["misses"] == 0, "letterbox is single-chunk: the structural rule"
+        assert _CountingEvent.records == 0
+
+    def test_a_single_chunk_crop_never_touches_the_pool(self, stream) -> None:
+        """#31 round 3: the rule is structural, not per call site — a design-sizing
+        person-reid batch (single span) takes the plain `.cpu()` path exactly as the
+        letterbox frame does, and only multi-chunk work stages."""
+        pool = PinnedStagingPool(owner="test")
+        staged_ops, plain_ops = _pair(pool)
+        boxes = _random_boxes(4, FRAME.shape)
+        ours = staged_ops.crop_batch(FRAME, boxes, (8, 8), PARAMS)  # default bound: 1 span
+        theirs = plain_ops.crop_batch(FRAME, boxes, (8, 8), PARAMS)
+        np.testing.assert_array_equal(ours, theirs)
+        assert pool.stats()["entries"] == 0
         assert _CountingEvent.records == 0
 
 
@@ -234,12 +247,13 @@ class TestTheBufferIsFixedShape:
         for count in (1, 5, 40):
             ops.crop_batch(NOISE, _random_boxes(count, NOISE.shape), (8, 8), PARAMS)
 
-        # Crowds 1 and 5 are single-chunk (one buffer, `:b` lazy — #31 round 2); crowd 40
-        # spans five chunks and brings the pair in. Two entries and two allocations across
-        # three different crowds is the claim: N never reaches the key.
+        # Crowds 1 and 5 are single-chunk and never touch the pool (the structural rule —
+        # #31 round 3); crowd 40 spans five chunks and stages through the ping-pong pair.
+        # Two entries and two allocations across three different crowds is the claim:
+        # single-chunk work stays off the pool, and N never reaches the key.
         assert pool.stats()["entries"] == 2
         assert pool.stats()["misses"] == 2, "a third allocation means N reached the key"
-        assert pool.stats()["hits"] == 2
+        assert pool.stats()["hits"] == 0
 
     def test_the_second_buffer_exists_only_where_the_ping_pong_engages(
         self, stream, monkeypatch
@@ -370,16 +384,28 @@ class TestARefusalDegradesInsteadOfFailing:
             result, TorchImageOps().crop_batch(FRAME, boxes, (8, 8), IMAGENET)
         )
 
-    def test_it_stops_asking_after_the_first_refusal(self, stream) -> None:
-        """Degrade once, not once per frame: a refused pool at 1000 frames a second is a
-        thousand exceptions and a thousand log lines a second."""
-        pool = _RefusingPool(DeviceError("mid-capture"))
-        ops = _staged(pool)
+    def test_an_allocation_failure_stops_asking_but_a_capture_does_not(
+        self, stream, monkeypatch
+    ) -> None:
+        """Two different refusals, two different lifetimes (#31 round 3): the host being
+        out of lockable pages will not heal, so degrade once — a refused pool at 1000
+        frames a second is a thousand log lines a second. A mid-capture refusal is
+        transient by nature, so THIS call goes pageable and the next one asks again."""
+        monkeypatch.setattr(TorchImageOps, "_STAGE_CHUNK_ELEMENTS", 3 * 8 * 8)
+        boxes = _random_boxes(3, FRAME.shape)  # 3 chunks at the shrunken bound: staged path
 
+        transient = _RefusingPool(DeviceError("mid-capture"))
+        ops = _staged(transient)
         for _ in range(3):
-            ops.crop_batch(FRAME, _random_boxes(2, FRAME.shape), (8, 8), PARAMS)
+            ops.crop_batch(FRAME, boxes, (8, 8), PARAMS)
+        assert transient.calls == 3, "a capture refusal is retried on the next call"
+        assert ops._staging is transient
 
-        assert pool.calls == 1
+        permanent = _RefusingPool(RuntimeError("cannot allocate pinned memory"))
+        ops = _staged(permanent)
+        for _ in range(3):
+            ops.crop_batch(FRAME, boxes, (8, 8), PARAMS)
+        assert permanent.calls == 1, "an allocation failure is never retried"
         assert ops._staging is None
 
 

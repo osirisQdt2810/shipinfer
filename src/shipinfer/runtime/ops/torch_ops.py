@@ -79,13 +79,13 @@ class TorchImageOps(ImageOps):
     #: float32 elements one *pinned host* staging buffer may hold. Deliberately its own
     #: bound and not derived from :attr:`_CROP_CHUNK_ELEMENTS`: that one caps device memory a
     #: caching allocator hands straight back, this one caps page-locked host memory, which
-    #: the kernel can never swap and every process on the box competes for. Each name holds
-    #: a ping-pong PAIR of buffers, so at 8 MiB per buffer a worker holds about 40 MB —
-    #: letterbox ``(1, 3, 640, 640)`` 2 x 4.9 MB, person crops ``(21, 3, 256, 128)``
-    #: 2 x 8.3 MB, ship crops ``(2, 3, 512, 512)`` 2 x 6.3 MB — and the four pipeline
-    #: workers on this box cost ~160 MB. Raising it to the crop bound would double a number
-    #: that already buys the overlap: the second buffer is what lets the copy engine run
-    #: chunk *k+1*'s DMA while the host drains chunk *k*.
+    #: the kernel can never swap and every process on the box competes for. The arithmetic,
+    #: re-derivable: 2 Mi float32 elements = 8 MiB per buffer; only a call whose result
+    #: spans more than one chunk stages at all (the structural rule in `_to_host`), and such
+    #: a call uses a ping-pong pair, so one staged name costs at most 16 MiB. One name
+    #: stages in practice ("crop", engaged by mask-sized batches: at (N, 3, 640, 640) a row
+    #: is 1.17 Mi elements, so every ship is its own span) — at most 16 MiB of pinned memory
+    #: per worker, released at the runner's stop and at MemoryPool.close().
     _STAGE_CHUNK_ELEMENTS: ClassVar[int] = 2 * 1024 * 1024
 
     def __init__(
@@ -231,24 +231,29 @@ class TorchImageOps(ImageOps):
 
         rows = self._stage_rows(shape)
         spans = [(lo, min(lo + rows, shape[0])) for lo in range(0, shape[0], rows)]
+        if len(spans) == 1:
+            # One span: no overlap to win, and the staged path would add a full-size serial
+            # host memcpy that `.cpu()` never performs. The rule is structural on purpose
+            # (#31 round 3): the production letterbox frame (1, 3, 640, 640) and a
+            # design-sizing person-reid batch (~15, 3, 256, 128) both land here, and a
+            # per-call-site human judgment already missed the second one once. What stages
+            # is genuinely multi-chunk work — the mask batches, where every ship is its own
+            # span and the ping-pong has something to overlap.
+            return tensor.cpu().numpy()
         try:
-            # `:b` exists only where the ping-pong can engage. A single-chunk call — the
-            # production letterbox frame, a reid-sized crop set — never touches a second
-            # buffer, and an eagerly allocated one would be a permanently locked page that
-            # buys nothing (#31 round 2).
-            first = self._staging.get(f"{name}:a", (rows, *shape[1:]), tensor.dtype)
             staged = (
-                first,
-                (
-                    self._staging.get(f"{name}:b", (rows, *shape[1:]), tensor.dtype)
-                    if len(spans) > 1
-                    else first
-                ),
+                self._staging.get(f"{name}:a", (rows, *shape[1:]), tensor.dtype),
+                self._staging.get(f"{name}:b", (rows, *shape[1:]), tensor.dtype),
             )
-        except (DeviceError, RuntimeError) as exc:
-            # Refused because a capture is underway, or because the host is out of lockable
-            # pages. Degrade once and then never ask again: the array is identical either
-            # way, and an optimisation must not be able to take a worker down.
+        except DeviceError:
+            # A mid-capture refusal is transient by nature: take the ordinary path for THIS
+            # call and ask again next time (#31 round 3 — "degrade once, forever" was
+            # stronger than that failure warrants).
+            return tensor.cpu().numpy()
+        except RuntimeError as exc:
+            # The host is out of lockable pages. Degrade once and then never ask again:
+            # the array is identical either way, and an optimisation must not be able to
+            # take a worker down.
             self._staging = None
             _LOG.warning(
                 "pinned staging unavailable for %s on %s (%s); copying pageable from now on",
@@ -329,14 +334,7 @@ class TorchImageOps(ImageOps):
         )
         scales, pads, extents = self._letterbox(images, canvas, params, pad_value)
         return LetterboxResult(
-            # Deliberately NOT staged (#31 round 2): the production letterbox is one chunk
-            # ((1, 3, 640, 640) -> a single span), where the ping-pong cannot engage and the
-            # staged path is a pinned D2H plus a serial full-size host memcpy the plain
-            # `.cpu()` never performs — and the micro-bench measured the staged row at or
-            # above pageable on every attempt. Staging letterbox is a follow-up gated on a
-            # quiet-box pair at this exact shape (see the PR's record); `crop_batch`'s mask
-            # batches are multi-chunk and keep the staged path, where it measured a win.
-            tensor=canvas.cpu().numpy(),
+            tensor=self._to_host(canvas, "letterbox"),
             scales=scales,
             pads=pads,
             extents=extents,
