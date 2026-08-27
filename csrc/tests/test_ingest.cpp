@@ -2263,6 +2263,23 @@ namespace {
                   "and a non-numeric one names the camera, not somebody's placement policy: " +
                       message);
         }
+        {
+            FrameCounter counter("cam4");
+            IngestConfig config = a_gst_camera("cam4");
+            config.options["max_buffers"] = "0";
+            std::unique_ptr<FrameSource> unbounded = create_source(config, counter, stop);
+            std::string message;
+            try {
+                unbounded->open();
+            } catch (const ConfigError& error) {
+                message = error.what();
+            }
+            check(
+                contains(message, "max_buffers must be >= 1") && contains(message, "unlimited"),
+                "and max_buffers=0 is refused as GStreamer's 'unlimited' — an unbounded "
+                "decoder queue, the opposite of ADR-005 (#46 round 1): " +
+                    message);
+        }
     }
 
 }  // namespace

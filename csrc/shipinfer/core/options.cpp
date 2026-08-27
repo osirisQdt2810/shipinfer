@@ -16,13 +16,13 @@ namespace shipinfer {
         }
     }
 
-    void refuse_unknown_options(const std::string& policy, const KeywordOptions& options,
+    void refuse_unknown_options(const std::string& subject, const KeywordOptions& options,
                                 const std::vector<std::string>& accepted) {
         for (const auto& [key, _] : options) {
             bool known = false;
             for (const std::string& name : accepted) known = known || name == key;
             if (!known) {
-                throw ConfigError(policy + ": unknown option '" + key +
+                throw ConfigError(subject + ": unknown option '" + key +
                                   "' — the constructor does not take it");
             }
         }

@@ -133,6 +133,16 @@ namespace shipinfer {
         options.height = config().height;
         options.max_buffers =
             option_int(subject_for(camera_id()), config().options, "max_buffers", 2);
+        if (options.max_buffers < 1) {
+            // The Python plane's _positive_int, mirrored (#46 round 1): max-buffers=0 is
+            // GstAppSink's documented "unlimited", and with nothing to drop against the
+            // appsink queues every decoded frame — ~124 MB/s of unbounded growth per 1080p
+            // camera whenever the consumer falls behind, ending in an OOM kill with no
+            // typed event anywhere. The opposite of ADR-005, refused at start-up.
+            throw ConfigError(subject_for(camera_id()) +
+                              ": max_buffers must be >= 1 (0 is GStreamer's 'unlimited', "
+                              "which is an unbounded decoder queue)");
+        }
 
         const auto override_it = config().options.find("decoder");
         if (config().codec == "auto") {

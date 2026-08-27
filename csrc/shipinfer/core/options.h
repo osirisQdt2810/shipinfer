@@ -28,7 +28,7 @@ namespace shipinfer {
     // A keyword the constructor does not take is a configuration error, as the Python
     // constructors' `TypeError` is one. Silently ignoring it is how a deployment runs for
     // months with a knob that was never connected to anything.
-    void refuse_unknown_options(const std::string& policy, const KeywordOptions& options,
+    void refuse_unknown_options(const std::string& subject, const KeywordOptions& options,
                                 const std::vector<std::string>& accepted);
 
 }  // namespace shipinfer

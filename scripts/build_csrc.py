@@ -361,11 +361,20 @@ def main() -> int:
         # Only those units are compiled: the offline build must not even *compile* a unit that
         # includes the driver's headers, or one that needs a `-dev` package nobody asked for.
         sources = [q for q in sources if q in free_units]
+        cuda_sources = []
     else:
         # The full build mirrors the rule for the lanes it had to leave out (warned above):
         # compiling a unit without its headers is the same failure, later and uglier.
         sources = [q for q in sources if lanes_in(include_closure(q)) <= enabled]
-        cuda_sources = []
+    # The regression #46 round 1 caught: an editing slip moved the line above into the wrong
+    # arm, and `--offline` then shelled out to nvcc — invisibly green on any machine that HAS
+    # nvcc (this host; the pytorch-runtime base under shipinfer-gst:jammy), a traceback on the
+    # machines the tier exists for (CI). The offline arm's promise is structural, so assert it.
+    if args.offline and cuda_sources:
+        raise SystemExit(
+            "--offline must never compile a .cu: the offline tier is g++ alone on a machine "
+            "with no driver (ADR-001). This is a build-script bug, not a configuration error."
+        )
     for source in cuda_sources:
         # Named by the path under csrc/, not the stem: two files with one stem in different
         # directories used to overwrite each other's object and one was never linked.
