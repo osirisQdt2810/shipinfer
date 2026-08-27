@@ -34,7 +34,7 @@ __all__ = ["build_router"]
 
 # The logger name stays "server.api" on purpose: an operator's log filter is behaviour,
 # and this move promises none changed. It is retargeted when server/ is deleted (A2 PR-6).
-_LOG = get_logger("server.api")
+_LOG = get_logger("api")
 
 #: Ceiling on how long one HTTP request may hold a worker. Generous enough that a cold
 #: model finishing its first batch is not cut off, short enough that a wedged backend

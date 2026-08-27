@@ -114,6 +114,19 @@ cách dùng gọi command giữa 2 tiến trình"*). What this buys, concretely:
 vLLM's engine-core split is the pattern reference: processes talk RPC; nothing meaningful
 rides argv.
 
+**Which runner, and its knobs, are settings — `SHIPINFER_RUNNER__*`.** `runner.runner` picks
+the implementation by registered name (`fleet` by default, `inprocess` on a laptop; `shipinfer
+runners` lists them and `shipinfer run --runner` overrides it), `runner.shards` is how many
+shard processes (default: one per visible GPU, ADR-006; `--shards`), `runner.drain_s` is what
+a shard gets to finish before SIGKILL (`--drain-s`), and `runner.service.*` configures the
+spill tier (§4). Spelled in the environment they are `SHIPINFER_RUNNER__RUNNER`,
+`SHIPINFER_RUNNER__SHARDS`, `SHIPINFER_RUNNER__DRAIN_S`, `SHIPINFER_RUNNER__SERVICE__…`. The
+section used to be `topology`, and the old `SHIPINFER_TOPOLOGY__*` spelling now **fails
+loudly** rather than being ignored: the settings tree is `extra="forbid"`, so a stale export
+refuses the process at start-up with the offending key named instead of silently leaving the
+default in place — which for `SHIPINFER_TOPOLOGY__SHARDS` would have been a fleet quietly
+running the wrong number of processes.
+
 **The RPC surface wraps invariants that already exist — do not rediscover them.** The C++
 ingest manager hardened exactly this lifecycle across #33–#41, and the RPCs are thin skins
 over it: `Stop` wraps the fleet-deadline stop that charges ONE timeout to the whole camera
@@ -397,21 +410,48 @@ src/shipinfer/
 ├── launch/         # §2  spawn + supervise shards; gRPC client + proto/ (.proto + stubs); placement
 ├── topology/       # §1  Element ABC + caps; chain loader (YAML); element registries
 │   └── elements/   #     decode/ detect/ segment/ embed/ recognize/ track/ mtmc/ output/
-├── runners/        # §1  inprocess.py · fleet.py · deepstream/ (the chain→graph compiler)
-├── engine/         # §6  model pool: instances, scheduler, batching, policies (from server/)
+├── runners/        # §1  inprocess.py · fleet.py · service.py (the shard's servicer) ·
+│                   #     deepstream/ (the chain→graph compiler, phase E)
+├── cli/shard.py    # §2  the shard process: two flags in, everything else over gRPC
+├── engine/         # §6  model pool: instances, scheduler, batching, policies (was server/)
+│   ├── ensemble.py #     the KServe-visible model DAG — kept, and NOT the frame chain (§6)
+│   ├── health.py   #     the pool's own report; statistics.py beside it
+│   └── spill/      #     ADR-015's rings: remote instance, wire, mesh (§4's transport)
 ├── datapool/       # §3  slabs, tickets, IPC handshake, per-pair probe, route table
 ├── ingest/         # §5① camera actors + source implementations (used by decode elements)
 └── core/           #     types, errors, settings, registry, logging, metrics (unchanged)
 ```
+
+Three names in that tree are not §-headings and are worth placing explicitly.
+**`engine/ensemble.py` stays**, and is not a duplicate of the chain: an ensemble is a
+*model* composed of models, addressable over KServe as one name (§6's side-door), while a
+topology is a chain of *elements* over frames. They answer different callers and neither
+subsumes the other. **`engine/spill/`** is ADR-015's ring transport, demoted by ADR-016 to
+the control channel and the RAM fallback, which is why it lives under the engine rather than
+beside the DataPool. **`cli/shard.py`** is the child process's entry point: it composes an
+engine, a topology and a runner, which is exactly what `launch` and `runners` may not do.
+
+**`pipeline/` is not in the tree because it retires into it.** Its ~30 modules are the
+previous generation of everything above, and each one lands somewhere named: `graph/` is
+superseded by the chain loader and the runners (phase C); `reassembly/` becomes §5⑤ inside a
+shard, under `runners/`; `sinks/{kafka,jsonlines,null}` become `output` element
+implementations under `topology/elements/`; `deepstream/` becomes the phase-E chain compiler
+under `runners/deepstream/`; `runner.py` is the in-process runner's precedent and is
+superseded by it. Until phase C and phase E have landed those, `pipeline/` remains the
+working application and `csrc/shipinfer/pipeline/` follows it, module for module.
 
 The `.proto` and its generated stubs live under `launch/proto/`, not `api/`: `api/` will
 import `launch` in phase B so `POST /streams` can reach the shards, and putting the stubs in
 `api/` would make `launch` import `api` for them — a cycle. The servicer that answers those
 RPCs is `runners/service.py`, because it holds a runner and a launcher must not.
 
-`server/` disappears: its pool becomes `engine/`, its KServe surface moves under `api/`,
-its topology-as-placement classes dissolve into `launch/` + `runners/`, and the
-argv-command mechanism is deleted outright.
+`server/` is gone (A2, PR-1…PR-6): its pool became `engine/`, its KServe surface moved under
+`api/`, its topology-as-placement classes dissolved into `launch/` + `runners/`, and the
+argv-command mechanism was deleted outright. Two `core/` modules were renamed with the
+vocabulary in the same phase: `core/settings/topology.py` → `runner.py`
+(`TopologySettings.kind` → `RunnerSettings.runner`, and the section is `settings.runner`), and
+`core/errors/topology.py` → `core/errors/launch.py`, which also ends its collision with
+`core/errors/chain.py`'s `TopologyError` — the chain's failures, which are a different thing.
 
 **`csrc/` is the second plane and stays a mirror (ADR-014).** Nothing above changes the
 two-planes rule: every Python package that has a native counterpart keeps it at the same

@@ -39,7 +39,7 @@ from shipinfer.scheduling.work import WorkItem
 
 __all__ = ["Model"]
 
-_LOG = get_logger("server.model")
+_LOG = get_logger("engine.model")
 
 
 def _graphs_enabled(execution: Any) -> bool:

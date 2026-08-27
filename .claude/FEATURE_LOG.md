@@ -5,6 +5,138 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-27 — `server/` dissolved: `engine/` + `api/` + `launch/` + `runners/`, and a gRPC control plane (Phase A2, PR-1…PR-6)
+
+**What.** The package `server/` no longer exists. Its parts moved to the seams arch.md §9 names,
+in six PRs that each kept the offline tier green:
+
+| PR | Delivered |
+|---|---|
+| 1 | `engine/` — the model pool moved whole (`pool.py`, `model`, `instance`, `ensemble`, `statistics`, `health`, `cache/`, ADR-015's rings under `engine/spill/`), mirrored in `csrc/shipinfer/engine/` |
+| 2 | `api/` — the KServe v2 surface; the one layer that may import fastapi |
+| 3 | `runners/` — the `Runner` ABC, `RUNNERS`, `inprocess.py`, and `topology/elements/pool.py` |
+| 4 | `launch/` — `Fleet` supervision, moved verbatim, without gRPC |
+| 5 | the control-plane contract — `launch/proto/shard.proto` + committed stubs, `ShardClient`, the transport-free `launch/control.py`, `runners/service.py`'s servicer |
+| 6 | `runners/fleet.py` over that contract, `cli/shard.py`, `shipinfer run`, and the deletion of the argv mechanism and `server/` itself |
+
+**Why.** Two reasons, and the second is the one that changed behaviour. The tree is meant to be
+the architecture — a reader should find every §-heading of `docs/arch.md` as a directory — and
+`server/` was four unrelated things in one name: a model pool, an HTTP surface, a process
+supervisor, and a set of classes that rendered command lines. And the word "topology" meant
+*placement* there while arch.md §1 uses it for the element chain, a collision the operator
+called out by name (V129/V132).
+
+The behavioural half is **V140**: *"xóa luôn cách dùng gọi command giữa 2 tiến trình"*. A shard
+used to be configured once, at `exec`, by an argv string and a set of environment variables. It
+is now spawned with `--shard-id N --control-port P` and told everything else over gRPC —
+`UpdateTopology`, `AddCamera`, `RemoveCamera`, `Health`, `Stats`, `Drain`, `Stop`. What that
+buys is concrete: a camera can be added to or removed from a *live* shard; health is a typed
+answer rather than a scraped log; a shard's state is `ready` vs `running` vs `draining` instead
+of an inference from an exit code. vLLM's engine-core split is the pattern reference — processes
+talk RPC, nothing meaningful rides argv.
+
+**Decisions.**
+
+- **`CUDA_VISIBLE_DEVICES` stays in the spawn environment, alone.** It has to be set before the
+  child imports torch, which is several frames below the first RPC it could answer. That is the
+  whole boundary of V140. The four variables that used to ride beside it are now *removed* from
+  the child's environment rather than merely unset: an inherited
+  `SHIPINFER_DEVICES__VISIBLE_GPUS` naming physical ordinals would fail a child whose devices
+  the remap renumbered, with a configuration that is correct for a single-process run.
+- **The sharing travels in `UpdateTopology`.** `shared_by`/`share_rank` decide how many
+  instances of each model a shard loads (`ModelConfig.placements`), so two shards on one GPU
+  each load half. A shard never told loads the full count and the device silently holds twice
+  the engines for the same throughput — the assertion `tests/server/test_shard_settings.py`
+  made of the environment is now made of the RPC, in `tests/cli/test_shard_entry.py`.
+- **The stubs live in `launch/proto/`, not `api/`.** `api` imports `launch` in phase B so
+  `POST /streams` can reach the shards; stubs under `api/` would make `launch` import `api` and
+  close the cycle. The servicer is `runners/service.py` because it holds a runner and a launcher
+  must not — `launch` may not import `runners`, and an architecture test asserts the direction.
+- **`cli/shard.py` is the child entry point** for the same reason inverted: it is a composition
+  root, building an engine, a topology and a runner, and neither `launch` nor `runners` may
+  import all three. `cli` is the layer whose job is that wiring.
+- **grpcio and protobuf are an optional extra.** Nothing imports either at module scope; the
+  first call on a client raises a `ConfigurationError` naming the extra, the shape `api/app.py`
+  uses for FastAPI. `import shipinfer.launch` works on a host that has neither.
+- **Two `core/` renames** carried the vocabulary: `core/settings/topology.py` → `runner.py`
+  (`TopologySettings.kind` → `RunnerSettings.runner`, section `settings.runner`, env prefix
+  `SHIPINFER_RUNNER__`) and `core/errors/topology.py` → `core/errors/launch.py`, which also ends
+  its collision with `core/errors/chain.py`'s `TopologyError`.
+- **`shipinfer fleet` → `shipinfer run --topology <chain> --runner <name>`.** The old command
+  took a model repository and a placement; the new one takes the chain and the runner, and
+  names neither in its body — `--shards` is `runner.shards`, `--drain-s` is `runner.drain_s`
+  and `--gpus` is `devices.visible_gpus`, so a third runner needs no edit there. Every flag
+  the old command had has a home: `--drain` is `--drain-s`, under its settings-tree name.
+- **`cli` gained an `ALLOWED_INTERNAL` row.** A *missing* row switches the internal layering
+  check off for that package, silently; `cli` had none, so it could have imported anything.
+  Three architecture tests now pin it: every package has a row in both tables, no row names a
+  package that is not on disk, and nothing below the command line may import it.
+- **Supervision is on the `Runner` contract, not probed for.** `request_stop()` records (it is
+  a signal handler's whole job), `supervise()` blocks, `describe_plan()` answers `--dry-run`;
+  the fleet overrides the last two. `shipinfer run` used to `getattr` for both, which would
+  have silently downgraded a renamed fleet method into a runner that never watched its shards.
+  `launch/signals.py::forward_signals` is retyped on a one-method `Stoppable` protocol and has
+  a production caller for the first time.
+- **`start` owns the only unwind.** `FleetRunner._do_start` had its own, so a failed start ran
+  two release passes and the second — over an already-emptied client map — *assigned* its zero
+  over the count of camera threads the first had abandoned. A fleet with six detached decoders
+  reported none, which is the single lie that signal exists to prevent. `_do_stop` is the one
+  owner, `_unwind_timeout_s()` is how a subclass says what budget that pass gets (a fleet's
+  release is a `Stop` RPC per shard, not a local close), and the counts accumulate.
+- **The fleet's lock is never held across an RPC.** A camera is placed by reserving it under
+  the lock, asking the shard with the lock released, and committing under it again; `health`
+  and `stats` snapshot the two maps under it. `AddCamera` starts a decoder and can sit for
+  seconds on an RTSP source that is not answering, and a health probe that waited behind it
+  would make the one call an operator reaches for during an incident the one call that hangs.
+- **A shard's installs run in parallel.** Each is a `wait_ready` poll plus an `UpdateTopology`
+  that deserialises that shard's engines — both waits on another process. Sixteen sequentially
+  is an eight-minute deployment turned into two hours with every GPU but one idle. The pool is
+  joined before anything is inspected, and the failure re-raised is the first in *plan* order,
+  so a fleet fails the same way twice.
+- **A retired environment section is refused, not ignored.** `extra="forbid"` does not catch
+  `SHIPINFER_TOPOLOGY__SHARDS`: pydantic-settings' environment source only emits keys for
+  fields that exist, so the model never sees it and the export is silently unread — an
+  operator's pinned process count quietly replaced by the default. `RETIRED_ENV_SECTIONS` is
+  a table of old→new names, and the settings tree refuses at start-up with the key named.
+- **The wire's zero timeouts read as defaults.** proto3 has no field presence for scalars, so
+  an unset `timeout_s` and a deliberate `0.0` are the same bytes; read literally, a client that
+  omitted the field asked a shard to detach every camera thread and report a fleet-wide
+  lifetime signal for an ordinary shutdown. The servicer clamps, and `shard.proto` says so for
+  the other-language clients that read the `.proto` and never this package.
+- **A `Drain` that failed does not read as `drained`.** The flag was set in a `finally`, so a
+  drain whose runner raised left the shard claiming it had released cameras it was still
+  reading — and a launcher acts on that by placing them elsewhere. `drained` now means
+  *released*; the reason is in `DrainReply.detail` and `ShardService.drain_detail`.
+- **`grpcio-tools` is pinned**, the only pin in `pyproject.toml`: `gen_proto.py --check`
+  compares regenerated stubs byte for byte, which is a guard only while every machine runs one
+  protoc. It is what already resolved by accident, made deliberate.
+
+**Capabilities temporarily lost, and where they come back.**
+
+- **`deepstream` as a first-class placement.** `DeepStreamTopology` rendered a `shipinfer
+  deepstream` command per shard; the command itself remains and is now hand-run over the
+  configured cameras. It returns in phase E as a *runner* that compiles the chain into a
+  GStreamer graph.
+- **The `service` tier's two-process run.** `tests/engine/test_service_multigpu.py` is skipped:
+  a shard has no supported way to be told its peers before it starts until phase D's `JoinMesh`
+  RPC. The tier itself is unchanged and still covered offline and on one GPU.
+- **A fleet of KServe servers.** `shipinfer fleet` spawned `shipinfer serve` children, each
+  answering HTTP. A fleet's children run a *chain* now; `shipinfer serve` is still the
+  single-process model server, and `/streams` reaches a fleet in phase B.
+- **Running the shipped `topology/ship_person.yaml`.** It names `gstreamer-gpu`, `shipvision`
+  and `kafka` element implementations that arrive in phases C/E; today the loader refuses it by
+  name, which is the refusal working.
+
+**Evidence.** Offline tier green at every step; on the final rebase, 2093 tests collected on
+`main` against 2120 on the branch (2059 passed, 1 skipped, 60 deselected) — six deleted
+`tests/server/` files against the new `tests/runners/`, `tests/cli/` and `tests/launch/` ones.
+`pre-commit run --all-files` clean; `scripts/hooks/check_layers.py` exit 0;
+`scripts/gen_proto.py --check` reports the committed stubs current. The GPU tier is not
+evidence for this phase — nothing here touches a kernel — but `-m gpu` and a `shipinfer serve`
+smoke belong to the release that ships it.
+
+---
+
 ## 2026-08-27 — `runners/inprocess.py`: the batch a stale worker must not finish, and a ledger with no caveat
 
 **What.** Three follow-ups to the entry below, from the review of #62. (1) `_work` read the
