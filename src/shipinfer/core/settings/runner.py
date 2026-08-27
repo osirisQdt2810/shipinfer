@@ -222,7 +222,9 @@ class RunnerSettings(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    #: A name registered in `shipinfer.runners.RUNNERS`. ``fleet`` is one shard process per
+    #: A name registered in `shipinfer.runners.RUNNERS` (until PR-6b lands the ``fleet`` runner
+    #: and ``shipinfer run``, the placement classes' ``build_topology`` is still the door that
+    #: reads this field). ``fleet`` is one shard process per
     #: GPU, driven over the gRPC control plane — the production default (arch.md section 1);
     #: ``inprocess`` is the whole chain on a thread pool here, which is what a laptop and the
     #: offline tier run. Validated when the runner is *built*

@@ -41,7 +41,7 @@ class TestTheRegistryIsTheSwitch:
         assert settings.runner.shards is None  # one per visible GPU, decided at launch
         assert settings.runner.drain_s == 20.0
 
-    def test_the_kind_is_env_overridable_like_every_other_section(self, monkeypatch) -> None:
+    def test_the_runner_is_env_overridable_like_every_other_section(self, monkeypatch) -> None:
         monkeypatch.setenv(TOPOLOGY_ENV, "fleet")
         monkeypatch.setenv("SHIPINFER_RUNNER__SHARDS", "3")
 

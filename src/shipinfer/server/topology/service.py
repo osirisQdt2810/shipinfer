@@ -29,7 +29,7 @@ class ServiceTopology(Topology):
 
     This is topology **C** (ledger T3, `docs/design/topology-service.md`): the fleet's shape —
     decode, detect and track local to the GPU that decoded — with the stateless crop-stage
-    models (`topology.service.shared_models`) served *symmetrically* across processes. Every
+    models (`runner.service.shared_models`) served *symmetrically* across processes. Every
     shard keeps serving its own GPU's instances and also offers them to its peers through
     pinned shared-memory rings, so a dead process loses its K cameras and its capacity,
     nothing else; the dispatcher's candidate set is local instances plus a proxy per peer, and

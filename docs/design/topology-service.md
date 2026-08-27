@@ -1,5 +1,13 @@
 # T3 — topology C, `service`: a cross-process inference tier over the fleet
 
+> **Frozen design record.** This describes the `service` tier as built on the pre-A2 layout.
+> Paths and names below are as they were then: `core/settings/topology.py` is now
+> `core/settings/runner.py` (`TopologySettings` → `RunnerSettings`, `settings.topology.kind` →
+> `settings.runner.runner`), `core/errors/topology.py` is now `core/errors/launch.py`, and the
+> placement classes under `server/topology/` are deleted in A2 PR-6b. The tier itself lives on
+> under `engine/spill/` (ADR-016 keeps its rings as the control channel).
+
+
 *Implementation plan. No code. Written in the main session after the planner agent was cut
 off by the spend limit; references read: vLLM `shm_broadcast.py` (`ShmRingBuffer`,
 `MessageQueue`), `multiproc_executor.py` (`MultiprocExecutor`, `WorkerProc`),

@@ -203,7 +203,7 @@ class DeepStreamPipeline:
         sink: where events go. ``None`` builds the one ``pipeline.result_sink`` names, which is
             how a deployment configures it; injected in tests and in a harness.
         config_root: where the generated nvinfer files are written. ``None`` takes
-            ``topology.deepstream.config_dir`` (which the launcher sets for every child), and
+            ``runner.deepstream.config_dir`` (which the launcher sets for every child), and
             failing that a per-run directory under ``$TMPDIR``.
     """
 

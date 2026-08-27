@@ -104,6 +104,38 @@ class TestTheEngineJoinsTheTier:
         finally:
             server.stop()
 
+    def test_the_sharing_configuration_alone_admits_a_process_to_the_tier(
+        self, tmp_repository: Path
+    ) -> None:
+        """The gate is `runner.service.shard`, not the runner's name (A2 PR-6a).
+
+        It used to require ``runner == "service"`` as well — a second switch that could only ever
+        disagree with the first, and that stops meaning anything once the placement classes are
+        gone. A ``fleet`` child whose sharing section names a shard joins the tier; restoring the
+        name check would make this test fail, which is the point of having it.
+        """
+        settings = ServerSettings(
+            model_repository=tmp_repository,
+            runner={
+                "runner": "fleet",
+                "service": {
+                    "shared_models": ["echo"],
+                    "slots_per_pair": 4,
+                    "slot_bytes": 64 * 1024,
+                    "heartbeat_ms": 50.0,
+                    "connect_timeout_s": 5.0,
+                    "shard": 0,
+                    "peers": [0],
+                    "run_id": "gate-test",
+                },
+            },
+        )
+        server = InferenceServer(settings).start()
+        try:
+            assert server.service_mesh is not None
+        finally:
+            server.stop()
+
 
 class TestAFailedConnectLeaksNothing:
     def test_the_engine_takes_its_rings_down_when_the_peer_never_appears(
