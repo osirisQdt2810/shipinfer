@@ -55,7 +55,8 @@ the runner's own admission door into ``topology``, which must stay pure enough t
 chain on a laptop. So ``decode: {impl: replay}`` selects an ingest *source by name* and
 declares the chain's head cap, and everything with a thread in it lives here. The import of
 ``shipinfer.ingest`` is inside :meth:`InprocessRunner._ingest` for the same purity reason one
-layer down: ``import shipinfer.runners`` must cost no decode runtime and no torch.
+layer down: ``import shipinfer.runners`` must cost no decode runtime and no
+``shipinfer.runtime`` (and, through it, no torch on a host where a device source is present).
 
 **On the duplication with** :mod:`shipinfer.pipeline.runner`. That module is the precedent
 this one follows: the queue-and-workers shape, the expiry re-check, the per-frame error
@@ -103,6 +104,7 @@ from shipinfer.topology import (
     MODEL_KINDS,
     Caps,
     ChainItem,
+    ElementKind,
     ElementNode,
     ModelResolver,
     Topology,
@@ -126,8 +128,9 @@ _INGEST_STOP_SHARE = 0.5
 #: What ``stats()["ingest"]`` says on a runner that has no camera set: before the first
 #: start, and after a stop released it. Written out rather than taken from
 #: :meth:`shipinfer.ingest.IngestSummary.as_dict`, whose keys these are, because reaching for
-#: that class would import the whole ingest plane -- and with it a decode runtime and torch --
-#: onto a runner that has never been given a camera. ``tests/runners/test_camera_lifecycle``
+#: that class would import the whole ingest plane -- and with it a decode runtime and
+#: ``shipinfer.runtime`` -- onto a runner that has never been given a camera.
+#: ``tests/runners/test_camera_lifecycle``
 #: asserts the two shapes still agree, which is the check that keeps a copy honest.
 _NO_INGEST: Mapping[str, Any] = MappingProxyType(
     {
@@ -303,14 +306,18 @@ class InprocessRunner(Runner):
         #: topology is immutable once built, and the alternative is a dict comprehension per
         #: fan-in per frame.
         self._edge_caps = {(edge.producer, edge.consumer): edge.caps for edge in topology.edges}
-        #: The cameras, or ``None`` when this runner has none: before the first start, and
-        #: after a stop released them. Built by :meth:`_do_start` rather than here, because
-        #: constructing it imports the whole ingest plane -- and with it a decode runtime and
-        #: torch -- which ``import shipinfer.runners`` must not pay for
-        #: (``tests/test_architecture.py``). Rebuilt per start cycle for the reason the queue
-        #: and the stop signal are: a manager stopped at a shutdown deadline may still hold an
-        #: abandoned decoder thread, and handing that thread's manager back to the next cycle
-        #: would make it a live producer into the new cycle's queue.
+        #: The cameras, or ``None`` when this runner has none: before the first start, after
+        #: a stop released them, and on a started runner that has not been given one yet.
+        #: Built on **first use** and never here, because constructing it imports the whole
+        #: ingest plane -- and with it a decode runtime, and ``shipinfer.runtime`` behind that
+        #: -- which ``import shipinfer.runners`` must not pay for
+        #: (``tests/test_architecture.py``). First use is :meth:`_do_start` when the
+        #: deployment configured cameras, and :meth:`add_camera` otherwise; a chain of mock
+        #: elements with no camera in it therefore starts without ever touching the ingest
+        #: plane at all. Rebuilt per start cycle for the reason the queue and the stop signal
+        #: are: a manager stopped at a shutdown deadline may still hold an abandoned decoder
+        #: thread, and handing that thread's manager back to the next cycle would make it a
+        #: live producer into the new cycle's queue.
         self._ingest_manager: IngestManager | None = None
         self._source_factory = source_factory
         #: ``camera_id -> priority``, the per-camera band the fair queue reads. Resolved by
@@ -375,6 +382,25 @@ class InprocessRunner(Runner):
     # is the manager's, hardened across #33-#41 in both planes. Nothing is re-derived here;
     # what is added is the mapping from the launcher's vocabulary to the ingest plane's, and
     # the sink that turns a frame into an admitted chain item.
+    #
+    # **All three take :attr:`_lifecycle`, and that is what makes them safe against a
+    # concurrent stop.** They are called from a servicer's thread pool (``runners/service.py``
+    # answers ``AddCamera`` on one, and the HTTP ``POST /streams`` that lands on this runner
+    # will too), so an add and a ``stop()`` on two threads is an ordinary event rather than a
+    # contrived one. Without the lock ``add_camera`` read ``_running`` outside it, and
+    # :meth:`_ingest` builds a manager unconditionally -- so an add that passed the check just
+    # before :meth:`Runner.stop` cleared the flag went on to construct a *fresh* manager on a
+    # runner that had already released its cameras, started a decoder thread into it, and left
+    # it there forever: :meth:`_stop_ingest` had already run and a second ``stop()`` returns at
+    # the idempotence check without reaching it. The lock is the same ``RLock``
+    # :meth:`Runner.start` and :meth:`Runner.stop` hold, and it is re-entrant on purpose --
+    # ``_do_start`` starts the configured cameras on the very thread that is holding it.
+    #
+    # It is *not* taken by ``submit``, ``health``, ``stats`` or :attr:`cameras`, for the reason
+    # ``runners/base.py`` gives: the first is the hot path and the others must answer while a
+    # stop is joining threads. What that costs is bounded -- a camera call now waits out a
+    # concurrent stop rather than racing it, and ``IngestManager.add_camera`` returns as soon
+    # as the actor thread is started, without waiting on the RTSP open.
 
     def add_camera(self, camera: CameraSpec) -> None:
         """Start one camera on this runner.
@@ -386,21 +412,30 @@ class InprocessRunner(Runner):
         -- ``runners/service.py`` maps each to ``accepted=False`` with its reason, and
         swallowing either would have the launcher mark a camera placed that nobody is reading.
 
+        The state check and the add are **one atomic step**, which is the whole reason this
+        method holds :attr:`_lifecycle`: this is the one camera method that can *build* an
+        ingest manager (:meth:`_ingest`), so a check that passed and an add that ran either
+        side of a ``stop()`` left a brand-new manager, with a live decoder thread in it, on a
+        runner that had already been torn down. Nothing stops that thread afterwards.
+
         Raises:
-            ServerStateError: this runner is not running, or the fleet forgot the camera while
-                it was starting. Refused rather than implicitly started: the chain's elements
-                are not open yet, so the first frame would meet a typed refusal from the
-                element rather than from here.
+            ServerStateError: this runner is not running -- before the first ``start()``, or
+                because a ``stop()`` on another thread got here first -- or the fleet forgot
+                the camera while it was starting. Refused rather than implicitly started: the
+                chain's elements are not open, so the first frame would meet a typed refusal
+                from the element rather than from here.
             ConfigurationError: a camera with this id is already running, or the source the
                 chain names is not registered.
         """
-        if not self._running:
-            raise ServerStateError(
-                f"runner {self.name!r} was asked to add camera {camera.camera_id!r} before "
-                "start(); the chain is not open, so the camera would decode into a closed "
-                "queue -- call start() first"
-            )
-        self._ingest().add_camera(self._camera_config(camera))
+        with self._lifecycle:
+            if not self._running:
+                raise ServerStateError(
+                    f"runner {self.name!r} was asked to add camera {camera.camera_id!r} "
+                    "while it is not running (before start(), or after a stop() on another "
+                    "thread); the chain is not open, so the camera would decode into a "
+                    "closed queue -- call start() first"
+                )
+            self._ingest().add_camera(self._camera_config(camera))
 
     def remove_camera(self, camera_id: str, *, timeout_s: float = 5.0) -> bool:
         """Stop and forget one camera.
@@ -410,17 +445,26 @@ class InprocessRunner(Runner):
             and still holds a decoder and a reference to this runner's sink -- the caller's to
             know, not the log's to bury.
 
+        Under :attr:`_lifecycle` so that the manager this reads is the manager it removes
+        from: :meth:`_stop_ingest` drops the attribute, and a removal that had already read it
+        would otherwise stop a camera on a manager the shutdown has stopped tracking. It does
+        **not** raise on a stopped runner: a runner that is not running holds no cameras, so
+        "there is no cam-7 here" is still the true answer, and it is the one
+        ``runners/service.py`` turns into ``removed=False`` (a ``ServerStateError`` there means
+        "this camera raised on its way out", which is a different thing to tell an operator).
+
         Raises:
             ConfigurationError: no such camera. Also the answer on a runner that has no camera
                 set at all, because "there is no cam-7 here" is the same fact either way and a
                 caller that has to tell the two apart is a caller writing an if/elif.
         """
-        manager = self._ingest_manager
-        if manager is None:
-            raise ConfigurationError(
-                f"camera {camera_id!r} is not running; runner {self.name!r} has no cameras"
-            )
-        return manager.remove_camera(camera_id, timeout_s=timeout_s)
+        with self._lifecycle:
+            manager = self._ingest_manager
+            if manager is None:
+                raise ConfigurationError(
+                    f"camera {camera_id!r} is not running; runner {self.name!r} has no cameras"
+                )
+            return manager.remove_camera(camera_id, timeout_s=timeout_s)
 
     def drain(self, timeout_s: float = 20.0) -> int:
         """Stop reading every camera and let what is already admitted finish.
@@ -432,12 +476,20 @@ class InprocessRunner(Runner):
         servicer's decision and not this runner's (``runners/service.py`` owns the drained
         refusal).
 
+        Under :attr:`_lifecycle`, which serialises it against a concurrent ``stop()`` rather
+        than letting both call ``IngestManager.stop`` on the same manager and charge two
+        deadlines to one camera set. A stopped runner is not refused for the reason
+        :meth:`remove_camera` is not: it has no cameras, it therefore abandoned none of them,
+        and ``0`` is what ``runners/service.py::_drain`` needs to hear -- an error there lands
+        in ``DrainReply.detail`` and tells a launcher the drain *failed*.
+
         Returns:
             How many camera threads had to be abandoned; ``0`` is the clean drain, and ``0``
             is also the honest answer for a runner that had no cameras to release.
         """
-        manager = self._ingest_manager
-        return 0 if manager is None else manager.stop(timeout_s=timeout_s)
+        with self._lifecycle:
+            manager = self._ingest_manager
+            return 0 if manager is None else manager.stop(timeout_s=timeout_s)
 
     # -- resolving the ingest plane ----------------------------------------------------
 
@@ -457,15 +509,25 @@ class InprocessRunner(Runner):
         Raises:
             ConfigurationError: the chain has roots that disagree -- on the cap they emit, or
                 on the source that feeds them. One ingest manager publishes into one sink and
-                every root sees that one item, so there is no answer to give; and a root with
+                every root sees that one item, so there is no answer to give; a root with
                 no successor at all, which the loader cannot produce but this would otherwise
-                read as "no cap".
+                read as "no cap"; and a root that is not a decode element, which
+                :func:`~shipinfer.topology.chain._check_structure` also refuses -- said again
+                here because a ``Topology`` may be constructed directly from parts, and the
+                alternative is reading a ``source`` off an element that never promised one.
         """
         if self._head_resolved is not None:
             return self._head_resolved
         caps: dict[str, Caps] = {}
         sources: dict[str, str | None] = {}
         for root in self._topology.roots:
+            if root.kind is not ElementKind.DECODE:
+                raise ConfigurationError(
+                    f"element {root.name!r} is a root of topology "
+                    f"{self._topology.name or '<unnamed>'} but is a {root.kind.value} "
+                    "element; frames enter a chain through a decode element, and only a "
+                    "decode element names the ingest source that produces them"
+                )
             outbound = {
                 edge.caps for edge in self._topology.edges if edge.producer == root.name
             }
@@ -477,9 +539,16 @@ class InprocessRunner(Runner):
                 )
             caps[root.name] = outbound.pop()
             declared = root.element.params.get("source")
-            sources[root.name] = (
-                str(declared) if declared else (getattr(root.element, "source", "") or None)
-            )
+            # `getattr`, and the contract it is reading is named rather than duck-typed:
+            # `topology/elements/decode.py` documents `source` as the class attribute every
+            # decode element in that family carries, defaulting to `""` for "the chain did not
+            # say". A decode element from outside it -- `MockDecode`, which invents a frame
+            # handle instead of naming a decoder -- carries no such attribute, and `""` is the
+            # right reading of that too. An `isinstance` against `_IngestDecode` would import
+            # a private class to ask a question a documented attribute already answers, and
+            # would refuse the mock chains this runner is tested on.
+            inherent = getattr(root.element, "source", "")
+            sources[root.name] = str(declared) if declared else (str(inherent) or None)
         if not caps:
             raise ConfigurationError(
                 f"topology {self._topology.name or '<unnamed>'} has no decode element; "
@@ -529,8 +598,10 @@ class InprocessRunner(Runner):
 
         **The import is inside this method and that is load-bearing.** ``shipinfer.ingest``
         reaches a decode runtime through its source registry and ``shipinfer.runtime`` through
-        that, so naming it at module scope would put torch behind ``import shipinfer.runners``
-        -- which ``tests/test_architecture.py`` refuses, because it is what lets a chain be
+        that, so naming it at module scope would put ``shipinfer.runtime`` -- and, through it,
+        torch on any host where a device source is importable -- behind ``import
+        shipinfer.runners``, which ``tests/test_architecture.py`` refuses, because it is what
+        lets a chain be
         started with mock elements on a host with no driver and what lets ``tests/runners/``
         run in the offline tier at all. The layering hook allows the edge; this method is the
         half that keeps it free.
@@ -689,7 +760,16 @@ class InprocessRunner(Runner):
         # refusal from an element, and one started before the workers exist would fill the
         # lane against a consumer nobody had launched. Configured cameras start here;
         # `add_camera` is the same door for the ones that arrive later.
-        self._ingest().start()
+        #
+        # **Only when there are cameras configured**, because building the manager is what
+        # imports `shipinfer.ingest` and, through its source registry, `shipinfer.runtime`.
+        # Starting one unconditionally made every start pay that -- including a chain of mock
+        # elements with no camera in it, which is the shape `tests/runners/` and a laptop dev
+        # loop use -- and contradicted the whole argument `_NO_INGEST` and `_ingest` make. An
+        # empty manager also has nothing to start: `IngestManager.start` iterates a camera
+        # list this branch has just established is empty.
+        if self._settings.ingest.cameras or self._settings.ingest.camera_db is not None:
+            self._ingest().start()
 
     def _do_stop(self, timeout_s: float) -> None:
         """Release the cameras, close the queue, join the workers, close the chain.
@@ -1434,7 +1514,20 @@ class InprocessRunner(Runner):
             "queue": queue.as_dict(),
             "workers": self._wanted_workers,
             # The producer's side of the same story. `items["accepted"]` counts what got in;
-            # `ingest["frames_read"]` counts what was offered, and the gap between them is
-            # backpressure -- the number the previous generation could not report at all.
+            # `ingest["frames_read"]` counts what was offered, and while the same camera set
+            # is live the gap between them is backpressure -- the number the previous
+            # generation could not report at all.
+            #
+            # **The two do not share a lifetime, so the gap is only that between camera
+            # changes.** `IngestSummary` is summed over the actors that exist *now*
+            # (`ingest/manager.py::summary`), so a `drain()` or a `remove_camera()` takes that
+            # camera's `frames_read` with it and the whole `ingest` block returns to zero,
+            # while `items["accepted"]` is a runner counter and keeps every frame it ever
+            # admitted. Subtracting the two across a drain therefore reads as *negative*
+            # backpressure. That is the ingest plane's own semantics and not something to
+            # paper over here: per-camera the honest pairing is
+            # `shipinfer_ingest_frames_dropped_total{camera}` against
+            # `shipinfer_runner_items_dropped_total{camera}` on the shared registry, which is
+            # cumulative on both sides (`runners/frames.py`).
             "ingest": dict(_NO_INGEST) if manager is None else manager.summary().as_dict(),
         }

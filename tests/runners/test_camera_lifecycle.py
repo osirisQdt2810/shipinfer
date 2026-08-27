@@ -24,6 +24,8 @@ is the ratio the offline tier is for.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import textwrap
 import threading
 import time
@@ -47,6 +49,7 @@ from shipinfer.runners.inprocess import _NO_INGEST, InprocessRunner
 from shipinfer.scheduling.queues import FairPriorityQueue
 from shipinfer.scheduling.work import WorkItem
 from shipinfer.topology import ChainItem, ChainSpec, ElementKind, Topology
+from shipinfer.topology.elements.decode import ReplayDecode
 from shipinfer.topology.elements.mock import MockDetect, MockOutput
 from shipinfer.topology.registry import registry_for
 
@@ -58,7 +61,7 @@ name: replayed
 elements:
   decode: {impl: __DECODE__}
   detect: {impl: __DETECT__, model: ship_detector}
-  output: {impl: mock}
+  output: {impl: __OUTPUT__}
 """
 
 #: Two decode roots that cannot agree on what enters the chain: one host-memory, one the
@@ -70,6 +73,37 @@ elements:
   decode_b: {impl: mock, after: []}
   detect:   {impl: mock, model: ship_detector, after: [decode_a, decode_b]}
   output:   {impl: mock}
+"""
+
+#: A chain with no camera in it, brought all the way up and down in a fresh interpreter --
+#: run by ``TestStopReleasesTheCameras`` above. The chain is spelled with explicit newlines
+#: rather than a nested block string because this whole program is already inside one.
+NO_CAMERA_START = r"""
+import sys
+
+from shipinfer.core.settings import ServerSettings
+from shipinfer.runners.inprocess import InprocessRunner
+from shipinfer.topology import ChainSpec, Topology
+
+CHAIN = (
+    "name: no_cameras\n"
+    "elements:\n"
+    "  decode: {impl: replay}\n"
+    "  detect: {impl: mock, model: ship_detector}\n"
+    "  output: {impl: mock}\n"
+)
+
+runner = InprocessRunner(
+    Topology.from_spec(ChainSpec.from_yaml(CHAIN)),
+    settings=ServerSettings(pipeline={"workers": 1}),
+)
+runner.start()
+try:
+    assert runner._ingest_manager is None, "a runner with no cameras built an ingest manager"
+    heavy = [m for m in ("shipinfer.ingest", "shipinfer.runtime", "torch") if m in sys.modules]
+    assert not heavy, heavy
+finally:
+    runner.stop(timeout_s=5.0)
 """
 
 HEIGHT, WIDTH = 4, 6
@@ -162,6 +196,69 @@ class GateDetect(MockDetect):
         return super()._do_process(item)
 
 
+@registry_for(ElementKind.OUTPUT).register("camera-gate-close")
+class GateCloseOutput(MockOutput):
+    """A sink whose ``close()`` parks the shutdown until the test lets it finish.
+
+    Turns "a stop is in progress" into a fact a second thread can act on. Elements are closed
+    last and in reverse topological order, so parking the output element holds ``_do_stop``
+    open with :attr:`Runner._running` already false and the lifecycle lock already held --
+    which is exactly the window a control-plane ``AddCamera`` lands in.
+    """
+
+    def __init__(self, name: str, params: Any = None, *, model: str | None = None) -> None:
+        super().__init__(name, params, model=model)
+        self.closing = threading.Event()
+        self.may_close = threading.Event()
+
+    def _do_close(self) -> None:
+        self.closing.set()
+        self.may_close.wait(10.0)
+        super()._do_close()
+
+
+@registry_for(ElementKind.DECODE).register("camera-two-caps")
+class TwoCapDecode(ReplayDecode):
+    """A decode element offering two head caps, so the edge's answer differs from the first.
+
+    The whole point of the pair with :class:`GrayOnlyDetect`: ``produces[0]`` is ``bgr@cpu``
+    and the only consumer takes ``gray@cpu``, so the negotiated edge carries ``gray@cpu`` and
+    a runner that read ``output_caps[0]`` would stamp the wrong cap on every frame. No shipped
+    element declares two ``produces`` today, which is why the shortcut looked harmless.
+    """
+
+    produces: ClassVar[tuple[str, ...]] = ("bgr@cpu", "gray@cpu")
+
+
+@registry_for(ElementKind.DETECT).register("camera-gray-only")
+class GrayOnlyDetect(MockDetect):
+    """A detector that takes only the *second* thing :class:`TwoCapDecode` offers."""
+
+    accepts: ClassVar[tuple[str, ...]] = ("gray@cpu",)
+    produces: ClassVar[tuple[str, ...]] = ("gray@cpu",)
+
+
+class GatedIngestRunner(InprocessRunner):
+    """A runner whose ingest build can be held mid-``add_camera``.
+
+    Models what a thread scheduler does for free and a test cannot otherwise arrange: an
+    ``add_camera`` that has already decided the runner is running, suspended before it builds
+    the manager. The gate is in a subclass rather than a monkeypatch of the runner because the
+    window being tested is *inside* one method, and the class under test is the one that has
+    to close it.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.building = threading.Event()
+        self.may_build = threading.Event()
+
+    def _ingest(self) -> Any:
+        self.building.set()
+        self.may_build.wait(10.0)
+        return super()._ingest()
+
+
 class RecordingQueue(FairPriorityQueue):
     """The configured fair queue, plus the band each item was admitted into."""
 
@@ -180,8 +277,13 @@ class RecordingQueue(FairPriorityQueue):
 # -- helpers -------------------------------------------------------------------------------
 
 
-def load(*, decode: str = "replay", detect: str = "mock") -> Topology:
-    text = textwrap.dedent(CHAIN).replace("__DECODE__", decode).replace("__DETECT__", detect)
+def load(*, decode: str = "replay", detect: str = "mock", output: str = "mock") -> Topology:
+    text = (
+        textwrap.dedent(CHAIN)
+        .replace("__DECODE__", decode)
+        .replace("__DETECT__", detect)
+        .replace("__OUTPUT__", output)
+    )
     return Topology.from_spec(ChainSpec.from_yaml(text))
 
 
@@ -551,6 +653,119 @@ class TestAddRemoveAndDrain:
         assert runner.is_running
         assert runner.health()["workers"]["alive"] == 1
 
+    def test_an_add_that_races_a_stop_starts_no_decoder_on_a_stopped_runner(self) -> None:
+        """The bug B3's ``POST /streams`` would have found: an orphaned ingest manager.
+
+        ``add_camera`` used to read ``_running`` outside the lifecycle lock while
+        :meth:`InprocessRunner._ingest` builds a manager unconditionally, so an add that
+        passed the check just before a ``stop()`` cleared the flag went on to construct a
+        *fresh* manager on a torn-down runner and start a decoder thread into it. Nothing ever
+        stops that thread: :meth:`InprocessRunner._stop_ingest` has already run, and a second
+        ``stop()`` returns at :meth:`Runner.stop`'s idempotence check without reaching it.
+
+        The schedule is arranged rather than raced for: :class:`GatedIngestRunner` suspends
+        the add exactly in that window. What is asserted is the property either ordering has
+        to satisfy -- the add happened on a running runner and its camera was released, or it
+        did not happen at all -- and never "a camera nobody will ever stop".
+        """
+        chain = load()
+        runner = GatedIngestRunner(
+            chain, settings=settings(), source_factory=scripted(frames=64, finite=False)
+        )
+        runner.start()
+        errors: list[BaseException] = []
+
+        def add() -> None:
+            try:
+                runner.add_camera(CameraSpec("cam-b", "injected://b"))
+            except BaseException as exc:
+                # Recorded, not raised: a thread's exception goes nowhere on its own, and
+                # *which* error this was is half of what is being asserted.
+                errors.append(exc)
+
+        adder = threading.Thread(target=add, name="test-adder")
+        stopper = threading.Thread(
+            target=runner.stop, kwargs={"timeout_s": 5.0}, name="test-stopper"
+        )
+        try:
+            adder.start()
+            assert runner.building.wait(5.0), "add_camera never reached the ingest build"
+            stopper.start()
+            # Not an assertion: it is the schedule. Without the lock the stop runs to
+            # completion here (and this returns at once); with it the stop is parked behind
+            # the add and this waits out its budget, which is the point.
+            until(lambda: not runner.is_running, timeout_s=1.0)
+            runner.may_build.set()
+            stopper.join(10.0)
+            adder.join(10.0)
+            cameras_after = runner.cameras
+            threads_after = [
+                thread.name
+                for thread in threading.enumerate()
+                if thread.name.startswith("ingest-cam-b")
+            ]
+        finally:
+            runner.may_build.set()
+            runner.stop(timeout_s=5.0)
+            orphan = runner._ingest_manager
+            if orphan is not None:  # only reachable on the unfixed code; do not leak it
+                orphan.stop(timeout_s=2.0)
+
+        assert not errors or isinstance(errors[0], ServerStateError), errors
+        assert cameras_after == (), "a stopped runner is still holding a camera set"
+        assert threads_after == [], threads_after
+
+    def test_an_add_waits_for_a_stop_in_progress_and_is_then_refused(self) -> None:
+        """``add_camera`` and ``stop()`` are mutually exclusive, not merely ordered.
+
+        With the stop parked inside the output element's ``close()`` -- ``_running`` already
+        false, the lifecycle lock already held -- an add from a servicer thread must wait for
+        it and then be refused, rather than answering while the shutdown is halfway through
+        releasing the things it would need.
+        """
+        chain = load(output="camera-gate-close")
+        gate = chain.node("output").element
+        assert isinstance(gate, GateCloseOutput)
+        runner = InprocessRunner(
+            chain, settings=settings(), source_factory=scripted(frames=64, finite=False)
+        )
+        runner.start()
+        errors: list[BaseException] = []
+
+        def add() -> None:
+            try:
+                runner.add_camera(CameraSpec("cam-b", "injected://b"))
+            except BaseException as exc:
+                # Recorded, not raised: a thread's exception goes nowhere on its own, and
+                # *which* error this was is half of what is being asserted.
+                errors.append(exc)
+
+        adder = threading.Thread(target=add, name="test-adder")
+        stopper = threading.Thread(
+            target=runner.stop, kwargs={"timeout_s": 5.0}, name="test-stopper"
+        )
+        try:
+            runner.add_camera(CameraSpec("cam-a", "injected://a"))
+            assert until(lambda: sink(chain).emitted)
+            stopper.start()
+            assert gate.closing.wait(5.0), "the stop never reached the element close"
+            adder.start()
+            adder.join(0.3)
+            answered_during_the_stop = not adder.is_alive()
+        finally:
+            gate.may_close.set()
+            stopper.join(10.0)
+            adder.join(10.0)
+            runner.stop(timeout_s=5.0)
+
+        assert (
+            not answered_during_the_stop
+        ), "add_camera answered while a stop held the lifecycle lock"
+        assert errors and isinstance(errors[0], ServerStateError), errors
+        assert not [
+            thread for thread in threading.enumerate() if thread.name.startswith("ingest-cam-b")
+        ]
+
     def test_a_camera_may_be_added_after_a_drain(self, runner_over) -> None:
         """Whether it *should* be is the shard servicer's refusal, not this runner's."""
         chain = load()
@@ -672,6 +887,36 @@ class TestStopReleasesTheCameras:
         ), [t.name for t in threading.enumerate()]
         assert runner.cameras == ()
 
+    def test_the_cameras_are_released_before_the_queue_is_closed(self) -> None:
+        """The stop ORDER, pinned. Cameras are the producers, so they go first.
+
+        Closing the queue while actors are still publishing is a shutdown racing its own
+        input: every frame admitted after the decision to stop is one more future the join has
+        to outlast, and each one meets a ``RequestCancelledError`` from a queue that closed
+        underneath it. The comment on :meth:`InprocessRunner._do_stop` has always said so;
+        nothing failed when the two lines were swapped.
+        """
+        chain = load()
+        runner = InprocessRunner(
+            chain, settings=settings(), source_factory=scripted(frames=64, finite=False)
+        )
+        runner.start()
+        seen: list[tuple[str, ...]] = []
+        close_queue = runner._close_queue
+
+        def spy() -> int:
+            seen.append(runner.cameras)
+            return close_queue()
+
+        runner._close_queue = spy  # type: ignore[method-assign]
+        try:
+            runner.add_camera(CameraSpec("cam-a", "injected://a"))
+            assert until(lambda: sink(chain).emitted)
+        finally:
+            runner.stop(timeout_s=5.0)
+
+        assert seen == [()], "the queue was closed while cameras were still publishing"
+
     def test_the_stop_leaves_no_unresolved_future(self) -> None:
         """Every admitted frame gets a typed outcome, including the ones caught mid-flight.
 
@@ -707,6 +952,26 @@ class TestStopReleasesTheCameras:
         assert until(lambda: all(future.done() for future in futures)), [
             index for index, future in enumerate(futures) if not future.done()
         ]
+
+    def test_a_start_with_no_configured_cameras_builds_no_ingest_manager(self) -> None:
+        """A mock chain with no camera in it must not pay for the ingest plane at all.
+
+        ``_do_start`` used to call ``self._ingest().start()`` unconditionally, so every start
+        -- including a chain of mocks a laptop runs with no driver -- imported
+        ``shipinfer.ingest`` and, through its source registry, ``shipinfer.runtime``. That is
+        precisely the cost :data:`_NO_INGEST` and :meth:`InprocessRunner._ingest` exist to
+        avoid, so the manager is now built on first *use*: by ``_do_start`` when the
+        deployment configured cameras, and by ``add_camera`` otherwise.
+
+        In a subprocess for the reason ``tests/test_architecture.py`` uses one: ``sys.modules``
+        is process-wide, and this file has already imported ``shipinfer.ingest`` in the parent
+        for its own doubles.
+        """
+        result = subprocess.run(
+            [sys.executable, "-c", NO_CAMERA_START], capture_output=True, text=True
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
 
     def test_a_restart_reads_the_configured_cameras_again(self) -> None:
         """The manager is dropped at the stop, not reused.
@@ -769,16 +1034,32 @@ class TestTheChainDecidesTheHead:
 
     def test_a_params_source_outranks_the_class_default(self) -> None:
         """A slot's own configuration beats its class's, as everywhere else in the chain."""
-        text = textwrap.dedent(CHAIN).replace(
-            "{impl: __DECODE__}", "{impl: replay, params: {source: pyav}}"
+        text = (
+            textwrap.dedent(CHAIN)
+            .replace("{impl: __DECODE__}", "{impl: replay, params: {source: pyav}}")
+            .replace("__DETECT__", "mock")
+            .replace("__OUTPUT__", "mock")
         )
-        chain = Topology.from_spec(ChainSpec.from_yaml(text.replace("__DETECT__", "mock")))
+        chain = Topology.from_spec(ChainSpec.from_yaml(text))
         runner = InprocessRunner(chain, settings=settings())
 
         assert runner._camera_config(CameraSpec("cam-a", "x")).source == "pyav"
 
     def test_the_head_cap_is_read_from_the_edge_and_not_from_produces(self) -> None:
-        chain = load()
+        """A decode element with two ``produces`` hands its consumer the *negotiated* one.
+
+        The version of this test that read ``load()`` could not fail: every shipped element
+        declares one ``produces``, so ``edges[0].caps`` and ``output_caps[0]`` were the same
+        string and swapping one for the other still passed. :class:`TwoCapDecode` offers
+        ``bgr@cpu, gray@cpu`` to a consumer that takes only ``gray@cpu``, which is the case
+        the rule exists for -- and the two answers now differ.
+        """
+        chain = load(decode="camera-two-caps", detect="camera-gray-only")
+        decode = chain.node("decode").element
         runner = InprocessRunner(chain, settings=settings())
 
-        assert str(runner._head().caps) == str(chain.edges[0].caps) == "bgr@cpu"
+        head = runner._head()
+
+        assert str(decode.output_caps[0]) == "bgr@cpu"
+        assert str(chain.edges[0].caps) == "gray@cpu"
+        assert str(head.caps) == "gray@cpu"

@@ -23,6 +23,7 @@ from shipinfer.cli.commands.run import cameras_from_inputs, place_cameras, run
 from shipinfer.core.errors import ConfigurationError
 from shipinfer.core.request import ResponseFuture
 from shipinfer.launch.control import CameraSpec
+from shipinfer.runners import RUNNERS
 from shipinfer.runners.base import Runner
 from shipinfer.topology import ChainItem, ChainSpec, Topology
 
@@ -46,8 +47,15 @@ def chain() -> Topology:
     return Topology.from_spec(ChainSpec.from_yaml(CHAIN))
 
 
+@RUNNERS.register("still")
 class StillRunner(Runner):
-    """A runner that executes a chain and owns no ingest plane — the ABC's default."""
+    """A runner that executes a chain and owns no ingest plane — the ABC's default.
+
+    Registered, so ``run(--runner still)`` can reach it: both shipped runners manage cameras,
+    and the refusal under test is about the ones that do not (``deepstream`` will be the first
+    real one). Registration is module scope and therefore process-wide, which is the same
+    bargain ``tests/runners/test_camera_lifecycle.py`` strikes for its gate elements.
+    """
 
     name: ClassVar[str] = "still"
 
@@ -180,3 +188,22 @@ class TestTheCommandItself:
         run(chain_file, runner="inprocess", dry_run=True)
 
         assert "--inputs" not in capsys.readouterr().out
+
+    def test_a_dry_run_refuses_inputs_on_a_runner_that_manages_no_cameras(
+        self, chain_file: Path
+    ) -> None:
+        """The combination can never work, so the mode for reading a plan must say so.
+
+        The check used to be inside ``place_cameras``, which runs after ``start()`` — so
+        ``--dry-run --inputs`` printed a plan and exited ``0`` for a ``--runner`` that would
+        open none of the files, and the operator found out on the real run. It is a fact about
+        the runner they named, known as soon as it is built.
+        """
+        with pytest.raises(ConfigurationError, match="manages no cameras"):
+            run(chain_file, runner="still", inputs=["a.mp4"], dry_run=True)
+
+    def test_a_dry_run_on_that_runner_is_still_fine_without_inputs(
+        self, chain_file: Path
+    ) -> None:
+        """The refusal is about ``--inputs``, not about the runner."""
+        assert run(chain_file, runner="still", dry_run=True) == 0

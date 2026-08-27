@@ -28,7 +28,12 @@ from shipinfer.launch.control import CameraSpec
 if TYPE_CHECKING:  # pragma: no cover - typing only; `runners` is imported inside `run()`
     from shipinfer.runners.base import Runner
 
-__all__ = ["cameras_from_inputs", "place_cameras", "run"]
+__all__ = [
+    "cameras_from_inputs",
+    "place_cameras",
+    "refuse_if_it_manages_no_cameras",
+    "run",
+]
 
 
 def run(
@@ -56,7 +61,8 @@ def run(
         inputs: files or URLs to run as cameras (arch.md §2's offline mode). Each becomes one
             camera, named by its position, placed on the runner once it is up. A dry run
             reports how many there are and places none, because placing one means starting a
-            decoder thread.
+            decoder thread — but it still refuses a runner that manages no cameras, because
+            that is a fact about the ``--runner`` chosen rather than about this run.
         shards: how many shard processes, for the runners that have any. ``None`` leaves
             ``runner.shards``, whose own default is one per visible GPU (ADR-006).
         gpus: which devices, as ``0,1,2``. ``None`` leaves ``devices.visible_gpus``, and
@@ -112,6 +118,13 @@ def run(
     out.print(f"topology: {chain.name} ({len(list(chain))} element(s)) — runner {chosen}")
 
     built = build_runner(chosen, chain, settings, chain_yaml=chain_yaml)
+    # The capability refusal is made HERE, before the dry-run branch, because it is a fact
+    # about the runner the operator picked and not about this particular execution: reached
+    # only after `start()`, `--dry-run --inputs deepstream` printed a plan and exited 0 for a
+    # combination that can never work, and the operator learned it on the real run. The
+    # *placement* still happens after `start()` -- a camera is placed on a running runner --
+    # so the two halves of the check sit either side of it deliberately.
+    refuse_if_it_manages_no_cameras(built, cameras)
     if cameras:
         out.print(f"cameras: {len(cameras)} from --inputs ({cameras[0].camera_id} ...)")
     if dry_run:
@@ -154,6 +167,29 @@ def cameras_from_inputs(inputs: Sequence[str] | None) -> list[CameraSpec]:
     ]
 
 
+def refuse_if_it_manages_no_cameras(runner: Runner, cameras: Sequence[CameraSpec]) -> None:
+    """Refuse ``--inputs`` on a runner that owns no ingest plane. Starts nothing.
+
+    Separate from :func:`place_cameras` because the two answer at different moments.
+    Placement needs a *running* runner — a camera is placed on an open chain — while this is a
+    fact about the class the operator named, known as soon as it is built. Asking it late made
+    ``--dry-run --inputs`` print a plan and exit ``0`` for a combination that cannot run at
+    all, which is the one thing a dry run exists to catch.
+
+    Raises:
+        ConfigurationError: the runner manages no cameras (the ``--runner`` chosen executes a
+            chain but owns no ingest plane, so nothing would open the files).
+    """
+    if not cameras or runner.manages_cameras:
+        return
+    raise ConfigurationError(
+        f"--inputs was given {len(cameras)} input(s) but runner {runner.name!r} manages "
+        "no cameras, so nothing would open them; choose a runner that does with "
+        "`--runner` (`shipinfer runners` lists them), or feed the chain through the "
+        "control plane"
+    )
+
+
 def place_cameras(runner: Runner, cameras: Sequence[CameraSpec]) -> None:
     """Start every camera on the runner, or refuse naming the first one that would not.
 
@@ -162,21 +198,19 @@ def place_cameras(runner: Runner, cameras: Sequence[CameraSpec]) -> None:
     registered — and each of them means the same thing about every camera behind it. Carrying
     on would report the last one's message for a mistake made in the first.
 
+    The capability refusal is :func:`refuse_if_it_manages_no_cameras`'s and is made before the
+    runner is started, but it is repeated here rather than assumed: this function is public and
+    a caller that placed cameras on a camera-less runner would otherwise get
+    ``Runner.add_camera``'s default ``ServerStateError`` per camera instead of one message
+    naming the flag.
+
     Raises:
-        ConfigurationError: the runner manages no cameras (the ``--runner`` chosen executes a
-            chain but owns no ingest plane), or a camera was refused. In the second case the
-            original message is kept and prefixed with which input it was, because
-            ``ingest/manager.py``'s message names the camera id and the operator typed a path.
+        ConfigurationError: the runner manages no cameras, or a camera was refused. In the
+            second case the original message is kept and prefixed with which input it was,
+            because ``ingest/manager.py``'s message names the camera id and the operator typed
+            a path.
     """
-    if not cameras:
-        return
-    if not runner.manages_cameras:
-        raise ConfigurationError(
-            f"--inputs was given {len(cameras)} input(s) but runner {runner.name!r} manages "
-            "no cameras, so nothing would open them; choose a runner that does with "
-            "`--runner` (`shipinfer runners` lists them), or feed the chain through the "
-            "control plane"
-        )
+    refuse_if_it_manages_no_cameras(runner, cameras)
     for camera in cameras:
         try:
             runner.add_camera(camera)
