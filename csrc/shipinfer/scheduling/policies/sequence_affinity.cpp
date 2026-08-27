@@ -12,7 +12,8 @@ namespace shipinfer {
             [](const PolicyOptions& options) -> std::unique_ptr<PlacementPolicy> {
                 refuse_unknown_options("sequence_affinity", options, {"max_sequences"});
                 return std::make_unique<SequenceAffinityPolicy>(
-                    nullptr, static_cast<size_t>(option_int(options, "max_sequences", 4096)));
+                    nullptr, static_cast<size_t>(option_int("placement policy", options,
+                                                            "max_sequences", 4096)));
             });
     }  // namespace
 }  // namespace shipinfer
