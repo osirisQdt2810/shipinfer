@@ -190,7 +190,7 @@ class TypedFailureDetect(MockDetect):
         "queue_full": lambda: QueueFullError("model:ship_detector", 64, 64),
         # A `QueueFullError` *subclass* that is not backpressure: phase D makes it one so the
         # dispatcher's spill loop retries another candidate, and the runner must still not
-        # charge a dead peer to `items_dropped`.
+        # charge a dead peer to `items_backpressure`.
         "ring_closed": lambda: RingClosedError("shard-1", "ring:ship_detector"),
         "timeout": lambda: RequestTimeoutError("model 'ship_detector' did not answer"),
         "validation": lambda: ValidationError("the payload is not a tensor"),
@@ -260,6 +260,29 @@ class PausedQueue(FairPriorityQueue):
         return super().get_batch(window, poll_s=poll_s)
 
 
+class PausingRunner(InprocessRunner):
+    """A runner whose *own* admission queue is a :class:`PausedQueue`, one per start cycle.
+
+    Injecting the paused queue is the shorter spelling and it forbids the restart one test
+    below needs: ``_do_start`` refuses an *injected* queue that a previous ``stop`` closed,
+    deliberately, because replacing the caller's object would discard the capacity and
+    overflow policy they chose. Overriding the hook the runner already builds its own queue
+    through leaves that refusal exactly where it is, and still makes "one drain, one batch of
+    three" a fact rather than a race against the worker's poll loop.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        #: Every queue this runner has built, newest last -- one per start cycle, so a test
+        #: can release cycle one's drain without touching cycle two's.
+        self.queues: list[PausedQueue] = []
+        super().__init__(*args, **kwargs)
+
+    def _build_queue(self) -> PausedQueue:
+        queue = PausedQueue(f"held-{len(self.queues)}", self._settings.pipeline.queue_capacity)
+        self.queues.append(queue)
+        return queue
+
+
 # -- helpers ------------------------------------------------------------------------------
 
 
@@ -326,12 +349,17 @@ def submit_all(runner: InprocessRunner, chain: Topology) -> list[ResponseFuture]
 #: The right-hand side of the ledger identity `InprocessRunner._do_stats` documents. Every
 #: accepted item is in exactly one of these, or still in flight; the identity used to be false
 #: because the three the *queue* resolves on its own had typed futures and no counter.
+#:
+#: ``backpressure`` and not ``dropped``: the two used to be one counter, and mixing an
+#: admission refusal (never ``accepted``) with a model queue refusing mid-walk (``accepted``,
+#: and inside the chain) is what forced the identity to carry a "minus the queue's rejected"
+#: correction term. ``dropped`` is deliberately absent from this tuple.
 OUTCOMES = (
     "walked",
     "failed",
     "expired",
     "timed_out",
-    "dropped",
+    "backpressure",
     "queue_closed",
     "queue_evicted",
     "queue_expired",
@@ -744,6 +772,7 @@ class TestBackpressureAndFailure:
             "expired": 0,
             "timed_out": 0,
             "dropped": 0,
+            "backpressure": 0,
             "queue_closed": 0,
             "queue_evicted": 0,
             "queue_expired": 0,
@@ -753,7 +782,7 @@ class TestBackpressureAndFailure:
     @pytest.mark.parametrize(
         ("raises", "expected", "counter"),
         [
-            ("queue_full", QueueFullError, "items_dropped"),
+            ("queue_full", QueueFullError, "items_backpressure"),
             ("ring_closed", RingClosedError, "items_failed"),
             ("timeout", RequestTimeoutError, "items_timed_out"),
             ("validation", ValidationError, "items_failed"),
@@ -776,7 +805,7 @@ class TestBackpressureAndFailure:
         is a :class:`QueueFullError` *subclass* — deliberately, so phase D's dispatcher spill
         loop treats a closed ring as a refusal and tries the next candidate — but the operator
         response is the opposite of backpressure's: a peer is gone, and no amount of shedding
-        load brings it back. Counting it as ``dropped`` would put a dead process on the
+        load brings it back. Counting it as ``backpressure`` would put a dead process on the
         "shed load or add capacity" graph, which is the confusion this whole split removes.
         """
         chain = load(detect="runner-typed", params=f"{{class: ship, raises: {raises}}}")
@@ -786,7 +815,12 @@ class TestBackpressureAndFailure:
 
         assert type(error) is expected, f"wrapped into {type(error).__name__}"
         assert getattr(runner.metrics, counter).value(camera="cam-1") == 1
-        for other in ("items_dropped", "items_timed_out", "items_failed"):
+        for other in (
+            "items_dropped",
+            "items_backpressure",
+            "items_timed_out",
+            "items_failed",
+        ):
             if other != counter:
                 assert getattr(runner.metrics, other).value(camera="cam-1") == 0
         assert emitted_tags(chain) == set(), "the walk stopped at the element that raised"
@@ -1006,6 +1040,112 @@ class TestBackpressureAndFailure:
         for worker in workers:
             worker.join(10.0)
             assert not worker.is_alive()
+
+    def test_an_abandoned_worker_walks_no_further_than_the_item_it_was_wedged_in(
+        self,
+    ) -> None:
+        """The stop signal has to be read per *item*, not per wake-up batch.
+
+        A worker holds a whole ``frames_per_wakeup`` batch, and ``stop`` fails every item of it
+        from the in-flight slot precisely because the worker never will. The loop then read the
+        signal only at the top of the outer ``while``, so a worker released after the deadline
+        finished the item it was wedged inside -- documented and unavoidable -- and then went
+        on to walk the ``frames_per_wakeup - 1`` behind it. Their futures had already been
+        resolved at the stop, so the walk delivered nothing to anybody; what it did deliver was
+        ghost events into the sink, through a chain the restart had just re-opened, attributed
+        to a cycle that had been stopped. Downstream sees frames from a shard that is not
+        running.
+
+        Three items in one drain, the worker parked in the first, the restart in between: the
+        sink must gain exactly the one item the worker was already inside, and not the two
+        behind it.
+        """
+        chain = load(detect="runner-gate")
+        gate = chain.node("detect").element
+        assert isinstance(gate, GateDetect)
+        runner = PausingRunner(
+            chain, settings(workers=1, frames_per_wakeup=3, queue_capacity=8)
+        )
+
+        runner.start()
+        futures = [runner.submit(item("cam-1", frame)) for frame in (1, 2, 3)]
+        stale_worker = runner._threads[0]
+        runner.queues[0].ready.set()
+        assert gate.entered.wait(10.0), "the worker never reached the gate"
+        runner.stop(timeout_s=0.2)
+
+        for future in futures:
+            assert isinstance(future.exception(timeout=1.0), RequestCancelledError)
+        emitted_at_stop = len(sink(chain).emitted)
+
+        # The restart is what makes the ghost events *possible*: it re-opens every element, so
+        # a stale worker's walk is no longer refused by a closed chain. `rearm` hands back
+        # cycle one's latch so releasing it frees exactly the abandoned worker.
+        stale_release = gate.rearm()
+        runner.start()
+        fresh_worker = runner._threads[0]
+        runner.queues[1].ready.set()
+
+        stale_release.set()
+        # Cycle two's latch too, so a regression is a *ghost event* rather than a worker
+        # parked in the gate for ten seconds. Nothing has been submitted into cycle two, so
+        # the only thread this frees is the stale one, on the two items it must not walk.
+        gate.release.set()
+        stale_worker.join(10.0)
+        stale_exited = not stale_worker.is_alive()
+
+        assert emitted_tags(chain) == {("cam-1", 1)}, "the rest of the batch was walked"
+        assert (
+            len(sink(chain).emitted) == emitted_at_stop + 1
+        ), "the item it was wedged inside, and nothing behind it"
+        assert stale_exited, "an abandoned worker must exit at the next item, not rejoin"
+        runner.stop(timeout_s=5.0)
+        fresh_worker.join(10.0)
+        assert not fresh_worker.is_alive()
+
+    def test_a_stopped_runner_reports_nothing_in_flight_once_its_stale_worker_wakes(
+        self,
+    ) -> None:
+        """``in_flight`` used to come back up after a stop and never come down again.
+
+        ``stop`` drains the in-flight slots and fails every item in them, so the gauge reads
+        zero the instant it returns. But the abandoned worker still holds the *list*, and its
+        ``finally`` republishes the remainder of its wake-up batch the moment whatever wedged
+        it lets go -- into the same object ``stats()`` was reading. From then on a stopped
+        runner reported two items in flight, forever, for two futures it had already resolved:
+        an operator draining a shard before a deploy watches exactly that number.
+
+        The fix is that the stopped cycle's list is replaced and not merely emptied. The stale
+        thread goes on writing into the object it was handed, and nothing reads it.
+        """
+        chain = load(detect="runner-gate")
+        gate = chain.node("detect").element
+        assert isinstance(gate, GateDetect)
+        queue = PausedQueue("held", 8)
+        runner = InprocessRunner(
+            chain, settings(workers=1, frames_per_wakeup=3), queue=queue
+        ).start()
+        futures = [runner.submit(item("cam-1", frame)) for frame in (1, 2, 3)]
+        workers = list(runner._threads)
+
+        queue.ready.set()
+        assert gate.entered.wait(10.0), "the worker never reached the gate"
+        runner.stop(timeout_s=0.2)
+
+        assert runner.stats()["items"]["in_flight"] == 0, "the drain emptied the slots"
+        for future in futures:
+            assert isinstance(future.exception(timeout=1.0), RequestCancelledError)
+
+        # Let the stale worker out and *wait for it to be done*, so the republish this test is
+        # about has certainly happened before the gauge is read again.
+        gate.release.set()
+        for worker in workers:
+            worker.join(10.0)
+            assert not worker.is_alive()
+
+        assert (
+            runner.stats()["items"]["in_flight"] == 0
+        ), "a stopped runner reported work in flight that it had already failed"
 
     def test_a_worker_abandoned_before_a_restart_cannot_clear_the_new_worker_s_slot(
         self,
@@ -1330,6 +1470,7 @@ class TestHealthAndStats:
             "expired": 0,
             "timed_out": 0,
             "dropped": 0,
+            "backpressure": 0,
             "queue_closed": 0,
             "queue_evicted": 0,
             "queue_expired": 0,
@@ -1379,6 +1520,66 @@ class TestHealthAndStats:
         assert runner.metrics.items_queue_closed.value(camera="cam-2") == 2
         assert runner.metrics.items_queue_closed.value(camera="cam-1") == 0
         gate.release.set()
+        for worker in workers:
+            worker.join(10.0)
+            assert not worker.is_alive()
+
+    def test_a_model_queue_refusing_mid_walk_is_backpressure_not_a_dropped_submission(
+        self, running
+    ) -> None:
+        """The two backpressure populations are not the same items, so they are not one term.
+
+        A ``pool`` element's model queue refusing a request mid-walk loses an item that was
+        **accepted** -- it came off the lane, a worker owns it, and ``stats()`` owes it an
+        outcome. A submission the runner's own lane refuses at the door was never accepted and
+        owes nothing. One counter for both made the ledger identity carry a correction term
+        ("minus the queue's ``rejected``"), and a ledger that needs a correction term is a
+        ledger nobody checks.
+        """
+        chain = load(detect="runner-typed", params="{class: ship, raises: queue_full}")
+        runner = running(chain, settings(workers=1))
+
+        error = runner.submit(item("cam-1", 1)).exception(timeout=10.0)
+
+        assert isinstance(error, QueueFullError)
+        stats = settled(runner)
+        assert stats["items"]["backpressure"] == 1
+        assert stats["items"]["dropped"] == 0, "the door refused nobody"
+        assert runner.metrics.items_backpressure.value(camera="cam-1") == 1
+        assert runner.metrics.items_dropped.value(camera="cam-1") == 0
+        assert accounted(stats) == stats["items"]["accepted"] == 1
+
+    def test_a_refused_submission_is_not_a_term_in_the_ledger(self) -> None:
+        """The other half, and the one that used to make the identity false.
+
+        Three submissions into a one-slot lane with the only worker held: two are accepted and
+        the third is refused at the door. While the refusal was counted on the same
+        ``dropped`` term the ledger summed, the right-hand side read three against an
+        ``accepted`` of two -- an over-count by exactly ``queue["rejected"]``, which the
+        docstring had to spell out as a caveat instead of the numbers simply adding up.
+        """
+        chain = load(detect="runner-gate")
+        gate = chain.node("detect").element
+        assert isinstance(gate, GateDetect)
+        runner = InprocessRunner(chain, settings(workers=1, queue_capacity=1)).start()
+        workers = list(runner._threads)
+        try:
+            first = runner.submit(item("cam-1", 1))
+            assert gate.entered.wait(10.0), "the worker never reached the gate"
+            second = runner.submit(item("cam-1", 2))
+            with pytest.raises(QueueFullError):
+                runner.submit(item("cam-1", 3))
+
+            live = runner.stats()
+            assert live["items"]["accepted"] == 2, "the third never got in"
+            assert live["items"]["dropped"] == 1, "and it is still counted, per camera"
+            assert live["items"]["backpressure"] == 0, "refused at the door, not mid-walk"
+            assert accounted(live) == live["items"]["accepted"] == 2
+        finally:
+            gate.release.set()
+            _, not_done = wait([first, second], timeout=15.0)
+            assert not not_done
+            runner.stop(timeout_s=5.0)
         for worker in workers:
             worker.join(10.0)
             assert not worker.is_alive()
