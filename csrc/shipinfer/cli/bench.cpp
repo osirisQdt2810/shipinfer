@@ -19,6 +19,8 @@
 #include "shipinfer/backends/tensorrt/engine.h"
 #include "shipinfer/core/buffers.h"
 #include "shipinfer/core/platform.h"
+#include "shipinfer/ingest/manager.h"
+#include "shipinfer/ingest/sink.h"
 #include "shipinfer/ingest/sources/replay.h"
 #include "shipinfer/obs/sampler.h"
 #include "shipinfer/pipeline/graph/dag.h"
@@ -61,6 +63,38 @@ namespace {
         bool expired(int64_t) const { return false; }
     };
 
+    // The bridge from the ingest plane to the fair queue: a `FrameSink` that turns a tagged
+    // frame into one queue entry.
+    //
+    // It is *here*, in the application, rather than in `ingest/` — mapping a frame onto a unit
+    // of scheduled work is dispatch policy, and the same code has to undo the mapping when the
+    // results are reassembled. Refusal is thrown rather than returned because the actor is the
+    // only component that knows whose frame it is and can charge the drop to that camera
+    // (ADR-005).
+    class QueueSink : public FrameSink {
+      public:
+        explicit QueueSink(FairPriorityQueue<FrameWork>& queue) : queue_(queue) {}
+
+        void put(Frame&& frame) override {
+            FrameWork work;
+            work.tag = frame.tag;
+            work.frame = std::move(frame.image);
+            work.state = std::make_shared<FrameState>(work.tag, work.frame.height,
+                                                      work.frame.width, 0.0f);
+            const PutStatus status = queue_.put(std::move(work));
+            if (status == PutStatus::Rejected) {
+                const QueueStats stats = queue_.stats();
+                throw QueueFullError("pipeline queue is full", stats.depth, stats.capacity);
+            }
+            if (status == PutStatus::Closed) {
+                throw RequestCancelledError("pipeline queue is closed");
+            }
+        }
+
+      private:
+        FairPriorityQueue<FrameWork>& queue_;
+    };
+
     struct Options {
         std::string person_frames;
         std::string ship_frames;
@@ -81,6 +115,10 @@ namespace {
         int batch_delay_us = 2000;
         // The placement policy for every model, by name — the Python plane's default.
         std::string policy = "locality_spillover";
+        // The video source every camera uses, by name in `SOURCES()`. `replay` is the only one
+        // this binary links today; naming it rather than hard-coding it is what makes the
+        // GStreamer source a new file and nothing else.
+        std::string source = "replay";
         int stage_timeout_ms = 5000;
         int reassembly_capacity = 1024;
         int reassembly_timeout_ms = 1500;
@@ -139,6 +177,8 @@ namespace {
                 options.batch_delay_us = std::stoi(next());
             else if (flag == "--policy")
                 options.policy = next();
+            else if (flag == "--source")
+                options.source = next();
             else if (flag == "--stage-timeout-ms")
                 options.stage_timeout_ms = std::stoi(next());
             else if (flag == "--det-instances")
@@ -421,43 +461,57 @@ int main(int argc, char** argv) {
         });
 
         // -- cameras ----------------------------------------------------------------------
-        auto person_library = std::make_shared<ReplaySource>(options.person_frames);
-        if (!person_library->pinned()) {
-            std::cerr << "warning: the frame library is not page-locked; host->device copies "
-                         "will take the slow path\n";
+        const std::string ship_frames =
+            options.ship_frames.empty() ? options.person_frames : options.ship_frames;
+        // Held for the whole run, for two reasons: the folders are decoded once here instead of
+        // fifty times as the actors start, and `pinned()` is an operator-visible property of
+        // the library rather than of any one camera. Every source acquires the same object.
+        std::vector<std::shared_ptr<const ReplayLibrary>> libraries;
+        if (options.source == "replay") {
+            libraries.push_back(ReplayLibrary::acquire(options.person_frames));
+            if (ship_frames != options.person_frames) {
+                libraries.push_back(ReplayLibrary::acquire(ship_frames));
+            }
+            for (const auto& library : libraries) {
+                if (!library->pinned()) {
+                    std::cerr << "warning: the frame library is not page-locked; host->device "
+                                 "copies will take the slow path\n";
+                }
+                if (library->undecodable() > 0) {
+                    std::cerr << "warning: " << library->undecodable()
+                              << " file(s) did not decode and are not in the replay\n";
+                }
+            }
         }
-        auto ship_library = options.ship_frames.empty()
-                                ? person_library
-                                : std::make_shared<ReplaySource>(options.ship_frames);
 
-        std::vector<std::unique_ptr<CameraActor>> cameras;
+        std::vector<IngestConfig> fleet;
         for (int c = 0; c < options.cameras; ++c) {
             char name[32];
             std::snprintf(name, sizeof(name), "cam%02d", c);
+            IngestConfig camera;
+            camera.camera_id = name;
             // Half the fleet on person frames and half on ship frames, exactly as the baseline
             // splits its source workers — the mix of content decides how many crops the
             // detector produces, so it has to be the same or it is not the same experiment.
-            auto library = (c % 2 == 0) ? person_library : ship_library;
-            cameras.push_back(std::make_unique<CameraActor>(
-                name, library, options.fps,
-                [&queue](const FrameTag& tag, HostFrame frame) -> bool {
-                    FrameWork work;
-                    work.tag = tag;
-                    work.frame = frame;
-                    work.state =
-                        std::make_shared<FrameState>(tag, frame.height, frame.width, 0.0f);
-                    return queue.put(std::move(work)) == PutStatus::Accepted;
-                }));
+            camera.uri = (c % 2 == 0) ? options.person_frames : ship_frames;
+            camera.source = options.source;
+            camera.fps = options.fps;
+            fleet.push_back(std::move(camera));
         }
+        QueueSink sink(queue);
+        IngestManager manager(std::move(fleet), sink);
 
         sampler.start();
-        for (auto& camera : cameras) camera->start();
+        manager.start();
 
         std::this_thread::sleep_for(
             std::chrono::milliseconds(static_cast<long long>(options.seconds * 1000)));
 
         // -- teardown, in dependency order ------------------------------------------------
-        for (auto& camera : cameras) camera->stop();
+        // Read before the fleet is torn down: `stop()` forgets its actors, as the Python
+        // manager does, so a stopped manager has no per-camera numbers left to report.
+        const std::map<std::string, CameraHealth> camera_health = manager.health();
+        manager.stop();
         stopping.store(true);
         queue.close();
         for (auto& worker : workers) worker.join();
@@ -469,10 +523,11 @@ int main(int argc, char** argv) {
         collector.drain();
         sampler.stop();
 
-        uint64_t read = 0, dropped = 0;
-        for (const auto& camera : cameras) {
-            read += camera->read();
-            dropped += camera->dropped();
+        uint64_t read = 0, dropped = 0, published = 0;
+        for (const auto& [id, health] : camera_health) {
+            read += health.frames_read;
+            dropped += health.frames_dropped;
+            published += health.frames_published;
         }
         const auto stats = queue.stats();
 
@@ -480,13 +535,14 @@ int main(int argc, char** argv) {
         // is comparing two identical reports.
         std::cout << "startup_s " << startup_s << "\n";
         std::cout << "frames_read " << read << "\n";
+        std::cout << "frames_published " << published << "\n";
         std::cout << "frames_dropped " << dropped << "\n";
         // Per camera, because 5 000 drops from one starved camera and 100 from each of fifty
         // are the same total — and telling them apart is what ADR-005 exists for.
-        for (const auto& camera : cameras) {
-            if (camera->dropped() > 0) {
-                std::cout << "frames_dropped_by_camera " << camera->id() << " "
-                          << camera->dropped() << "\n";
+        for (const auto& [id, health] : camera_health) {
+            if (health.frames_dropped > 0) {
+                std::cout << "frames_dropped_by_camera " << id << " " << health.frames_dropped
+                          << "\n";
             }
         }
         std::cout << "frames_accepted " << accepted.load() << "\n";
