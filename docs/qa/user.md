@@ -616,6 +616,112 @@ copy, uncommitted, so the IDE shows everything; the snapshot PR carries it to ma
 
 *(the stall-watchdog session)*
 
+#### V114 — 20:2x UTC
+
+> tiếp tuuc
+
+*(continue — typo'd; the flow continues: #30 merged, lever 2's plan in flight)*
+
+
+#### V115 — 21:0x UTC
+
+> tiếp tục đi
+
+*(the stall-watchdog session)*
+
+
+#### V116 — 21:1x UTC
+
+> tiếp tục đi
+
+*(the stall-watchdog session)*
+
+
+#### V117 — 22:0x UTC
+
+> tiếp tục đi
+
+*(the stall-watchdog session)*
+
+
+#### V118 — 23:3x UTC
+
+> tiếp tục đi
+
+*(the stall-watchdog session)*
+
+
+#### V119 — 23:2x UTC (26 Aug; first logged with a drifted clock estimate as 27 Aug 00:1x)
+
+> tiếp tục đi
+
+*(the stall-watchdog session)*
+
+
+#### V120 — 00:0x UTC, 27 Aug
+
+> tiếp tục đi
+
+*(the stall-watchdog session)*
+
+
+#### V121 — 01:4x UTC, 27 Aug
+
+> tiếp tục đi
+
+*(the stall-watchdog session)*
+
+
+#### V122 — 02:2x UTC, 27 Aug
+
+> tiếp tục đi
+
+*(the stall-watchdog session)*
+
+
+#### V123 — 02:4x UTC, 27 Aug
+
+> tiếp tục đi
+
+*(the stall-watchdog session)*
+
+
+#### V124 — 02:5x UTC, 27 Aug
+
+> tôi vẫn chưa hiểu tại sao lại có src/shipinfer/runtime/ops và xử lý image_ops ở đây. Thực tế
+> như tôi đã nói từ trước,, các thuật toán chuyên thuộc về xử lý ảnh cần được đặt trong
+> shipvision, tại shipinfer chủ yếu lo phần system và nếu muốn gọi thuật toán thì gọi từ
+> shipvision mà. Ngoài ra, 3rdparty/shipvision có vẻ cũng không phải main latest mới nhất của
+> nó đúng không, nó cực kì khác với những gì tôi tưởng tượng và yêu cầu trước đó
+
+*(Two architecture concerns: (1) image-processing algorithms belong in shipvision —
+shipinfer is the system layer that CALLS them — so why does `runtime/ops` hold image_ops
+implementations; (2) the submodule pointer/checkout does not look like shipvision's latest
+main. Answered in-session with the recorded rationale for the split, an acknowledgment of
+the recent drift (#30/#31 grew real algorithms inside torch_ops), a fact-check of the
+gitlink vs shipvision main vs the on-disk checkout, and a migration lane opened per the
+standing principle from V50.)*
+
+
+#### V125 — 03:0x UTC, 27 Aug
+
+> shipvision cần luôn được checkout về main để đảm bảo thuật toán là mới nhâts
+
+*(Standing rule: the shipvision submodule checkout must always be at its latest main so the
+algorithms are current — done immediately for the primary working tree (was parked on the
+stale `feat/detection` branch; now at `8e62786` == shipvision origin/main, which the
+project's gitlink already pinned), and recorded in the standing-rules index: keep working
+checkouts on shipvision main, and bump the parent's pinned gitlink promptly whenever
+shipvision main moves.)*
+
+
+#### V126 — 03:2x UTC, 27 Aug
+
+> tiếp tục đi
+
+*(the stall-watchdog session)*
+
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
@@ -845,6 +951,7 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 | **Two planes, one architecture** — `csrc/` mirrors the Python data plane seam for seam — instance thread + queue, dispatcher + policy, batch window, fair-queue eviction order, graph, reassembly, ingest — and a change to a Python data-plane seam is not done until the C++ seam is synced and the cross-plane parity test agrees. | V88–V89 |
 | **Self-merge is granted, standing until the operator explicitly revokes it** — the revocation, when it comes, is what re-establishes "operator merges". Exercised once: #28. | V109 |
 | Poll the open PR's checks and review every ~3 minutes while it is in flight | V95 |
+| **The shipvision checkout is always its latest main** — working trees keep the submodule on shipvision main, and the parent's pinned gitlink is bumped promptly when shipvision main moves, so the algorithms in play are always current | V125 |
 | **Workload sharing must hold for the full DAG** — segment, reid (person & ship), OCR and MTMC beside detect/track, not the simple detect→reid→track chain; stateful stages stay pinned per shard and the ring budget scales with the shared set | V110 |
 
 ### Verbatim, V41–V51
