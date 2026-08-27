@@ -23,9 +23,9 @@ from shipinfer.core.settings.pipeline import (
     ReassemblySettings,
     TrackingSettings,
 )
+from shipinfer.core.settings.runner import RunnerSettings
 from shipinfer.core.settings.scheduler import SchedulerSettings
 from shipinfer.core.settings.server import ServerSettings
-from shipinfer.core.settings.topology import TopologySettings
 
 __all__ = [
     "CameraConfig",
@@ -40,8 +40,8 @@ __all__ = [
     "OverflowPolicy",
     "PipelineSettings",
     "ReassemblySettings",
+    "RunnerSettings",
     "SchedulerSettings",
     "ServerSettings",
-    "TopologySettings",
     "TrackingSettings",
 ]

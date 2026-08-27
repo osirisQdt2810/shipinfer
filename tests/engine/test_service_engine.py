@@ -25,8 +25,8 @@ from shipinfer.engine.spill.remote_instance import RemoteInstance
 def _settings(repository: Path, run: str, shard: int) -> ServerSettings:
     return ServerSettings(
         model_repository=repository,
-        topology={
-            "kind": "service",
+        runner={
+            "runner": "service",
             "service": {
                 "shared_models": ["echo"],
                 "slots_per_pair": 4,
@@ -96,11 +96,43 @@ class TestTheEngineJoinsTheTier:
     def test_a_server_without_a_shard_index_joins_nothing(self, tmp_repository: Path) -> None:
         settings = ServerSettings(
             model_repository=tmp_repository,
-            topology={"kind": "service", "service": {"shared_models": ["echo"]}},
+            runner={"runner": "service", "service": {"shared_models": ["echo"]}},
         )
         server = InferenceServer(settings).start()
         try:
             assert server.service_mesh is None
+        finally:
+            server.stop()
+
+    def test_the_sharing_configuration_alone_admits_a_process_to_the_tier(
+        self, tmp_repository: Path
+    ) -> None:
+        """The gate is `runner.service.shard`, not the runner's name (A2 PR-6a).
+
+        It used to require ``runner == "service"`` as well — a second switch that could only ever
+        disagree with the first, and that stops meaning anything once the placement classes are
+        gone. A ``fleet`` child whose sharing section names a shard joins the tier; restoring the
+        name check would make this test fail, which is the point of having it.
+        """
+        settings = ServerSettings(
+            model_repository=tmp_repository,
+            runner={
+                "runner": "fleet",
+                "service": {
+                    "shared_models": ["echo"],
+                    "slots_per_pair": 4,
+                    "slot_bytes": 64 * 1024,
+                    "heartbeat_ms": 50.0,
+                    "connect_timeout_s": 5.0,
+                    "shard": 0,
+                    "peers": [0],
+                    "run_id": "gate-test",
+                },
+            },
+        )
+        server = InferenceServer(settings).start()
+        try:
+            assert server.service_mesh is not None
         finally:
             server.stop()
 
@@ -115,7 +147,7 @@ class TestAFailedConnectLeaksNothing:
 
         run = uuid.uuid4().hex[:8]
         settings = _settings(tmp_repository, run, 0)
-        settings.topology.service.connect_timeout_s = 0.3
+        settings.runner.service.connect_timeout_s = 0.3
         server = InferenceServer(settings)
         with pytest.raises(ConfigurationError, match="never appeared"):
             server.start()
@@ -138,7 +170,7 @@ class TestAnEnsembleCannotCrossTheTier:
         from shipinfer.core.errors import ConfigurationError
 
         settings = _settings(tmp_repository, uuid.uuid4().hex[:8], 0)
-        settings.topology.service.shared_models = ["fused"]
+        settings.runner.service.shared_models = ["fused"]
         server = InferenceServer(settings)
         server._models["fused"] = SimpleNamespace(name="fused")  # ensembles have no infer_local
         with pytest.raises(ConfigurationError, match="'fused' is an ensemble"):

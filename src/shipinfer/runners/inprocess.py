@@ -877,7 +877,7 @@ class InprocessRunner(Runner):
         ``rejected`` first. See :meth:`_do_stats` for the identity that buys.
 
         The backpressure family is narrowed by hand, because inheritance does not carry the
-        operator's response. ``core/errors/topology.py`` makes :class:`RingClosedError` and
+        operator's response. ``core/errors/launch.py`` makes :class:`RingClosedError` and
         :class:`WireRefusedError` :class:`QueueFullError` subclasses so that phase D's
         dispatcher spill loop treats them as a refusal and tries the next candidate — the
         right call there, and the wrong label here: a ring whose peer died and a wire that

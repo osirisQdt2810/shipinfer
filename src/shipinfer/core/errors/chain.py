@@ -11,10 +11,10 @@ Each one carries the *names* involved, as strings. Deliberately strings and neve
 objects: ``core`` sits below ``topology`` and must stay importable on its own, so the error
 vocabulary cannot depend on the vocabulary of the thing that raises it.
 
-Not to be confused with :mod:`shipinfer.core.errors.topology` next door, which names the
+Not to be confused with :mod:`shipinfer.core.errors.launch` next door, which names the
 *shard-wire* failures of the older topology-as-placement classes (rings, peers, shards).
-The word "topology" means the chain from here on (arch.md §1); that module keeps its name
-until the phase that dissolves ``server/topology`` renames both together.
+The word "topology" means the chain from here on (arch.md §1); that module was renamed to
+``launch`` for the same reason, so the two vocabularies no longer share a name.
 """
 
 from __future__ import annotations

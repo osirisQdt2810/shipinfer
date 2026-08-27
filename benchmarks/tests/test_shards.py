@@ -106,7 +106,7 @@ class TestThePlanTheHarnessLaunches:
         import json
 
         from shipinfer.core.settings import ServerSettings
-        from shipinfer.core.settings.topology import SERVICE_PEERS_ENV
+        from shipinfer.core.settings.runner import SERVICE_PEERS_ENV
 
         topology, _plan = shards.plan_for(_config(topology="service", shard_cameras=(6, 2)))
         env = topology.environment(ServerSettings())

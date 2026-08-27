@@ -89,7 +89,7 @@ def settings_for(**deepstream: object) -> ServerSettings:
     return ServerSettings(
         model_repository=Path("model_repository"),
         ingest={"cameras": CAMERAS},
-        topology={"kind": "deepstream", "deepstream": {**PARSER, **deepstream}},
+        runner={"runner": "deepstream", "deepstream": {**PARSER, **deepstream}},
     )
 
 
@@ -254,7 +254,7 @@ class TestTheRepositoryGeneratesTheNvinferConfigs:
         settings = ServerSettings(
             ingest={"cameras": CAMERAS},
             pipeline={"class_labels": {3: "person", 4: "ship"}},
-            topology={"kind": "deepstream", "deepstream": PARSER},
+            runner={"runner": "deepstream", "deepstream": PARSER},
         )
         configs = write_configs(
             repository,
@@ -1011,7 +1011,7 @@ class TestTheProbePublishesAndNeverRaises:
 
 class TestTheShardsProcess:
     def test_it_refuses_a_configuration_with_no_cameras(self) -> None:
-        settings = ServerSettings(topology={"kind": "deepstream", "deepstream": PARSER})
+        settings = ServerSettings(runner={"runner": "deepstream", "deepstream": PARSER})
 
         with pytest.raises(ConfigurationError, match="no enabled cameras"):
             DeepStreamPipeline(settings)
@@ -1020,7 +1020,7 @@ class TestTheShardsProcess:
         settings = ServerSettings(
             ingest={"cameras": CAMERAS},
             devices={"visible_gpus": [0, 1]},
-            topology={"kind": "deepstream", "deepstream": PARSER},
+            runner={"runner": "deepstream", "deepstream": PARSER},
         )
 
         with pytest.raises(ConfigurationError, match="one graph on one GPU"):
@@ -1033,7 +1033,7 @@ class TestTheShardsProcess:
             model_repository=tmp_path / "model_repository",
             ingest={"cameras": CAMERAS},
             devices={"visible_gpus": [3]},
-            topology={"kind": "deepstream", "deepstream": {**PARSER, "shard": 1}},
+            runner={"runner": "deepstream", "deepstream": {**PARSER, "shard": 1}},
         )
 
         pipeline = DeepStreamPipeline(settings, config_root=tmp_path / "run")
@@ -1046,7 +1046,7 @@ class TestTheShardsProcess:
         settings = ServerSettings(
             model_repository=repository.root,
             ingest={"cameras": CAMERAS},
-            topology={"kind": "deepstream", "deepstream": {**PARSER, "shard": 1}},
+            runner={"runner": "deepstream", "deepstream": {**PARSER, "shard": 1}},
         )
 
         configs = DeepStreamPipeline(
@@ -1076,7 +1076,7 @@ class TestDryRunTouchesNoSink:
                 "result_sink": "jsonlines",
                 "result_sink_options": {"path": str(live), "append": False},
             },
-            topology={"kind": "deepstream", "deepstream": dict(PARSER)},
+            runner={"runner": "deepstream", "deepstream": dict(PARSER)},
         )
         pipeline = DeepStreamPipeline(settings, config_root=tmp_path / "cfg")
         assert live.read_text() == "PRE-EXISTING LIVE DATA\n", "a dry construction wrote"
@@ -1088,7 +1088,7 @@ class TestEverySecondaryClaimsItsLabels:
     def test_the_settings_refuse_an_unfiltered_secondary(self) -> None:
         """#32 round 1: a secondary absent from operate_on ran on EVERY class, and the
         probe published whichever tensor came first — a person with a ship's embedding."""
-        from shipinfer.core.settings.topology import DeepStreamSettings
+        from shipinfer.core.settings.runner import DeepStreamSettings
 
         with pytest.raises(ValueError, match="no operate_on entry"):
             DeepStreamSettings(operate_on={"person_embedder": ["person"]})
@@ -1098,13 +1098,13 @@ class TestEverySecondaryClaimsItsLabels:
     ) -> None:
         """Defense in depth for a settings object built past validation: config generation
         itself refuses the claim-all secondary, naming the knob and the known labels."""
-        from shipinfer.core.settings.topology import DeepStreamSettings
+        from shipinfer.core.settings.runner import DeepStreamSettings
         from shipinfer.pipeline.deepstream import write_configs
 
         settings = settings_for()
-        settings.topology.deepstream = DeepStreamSettings.model_construct(
+        settings.runner.deepstream = DeepStreamSettings.model_construct(
             **{
-                **settings.topology.deepstream.model_dump(),
+                **settings.runner.deepstream.model_dump(),
                 "operate_on": {"person_embedder": ["person"]},
             }
         )
@@ -1183,7 +1183,7 @@ class TestStartWiresTheSink:
         settings = ServerSettings(
             model_repository=tmp_path / "model_repository",  # the fixture built it here
             ingest={"cameras": CAMERAS},
-            topology={"kind": "deepstream", "deepstream": dict(PARSER)},
+            runner={"runner": "deepstream", "deepstream": dict(PARSER)},
         )
         pipeline = DeepStreamPipeline(settings, sink=injected, config_root=tmp_path / "cfg")
         pipeline.start()
@@ -1230,7 +1230,7 @@ class TestStartWiresTheSink:
                 "result_sink": "jsonlines",
                 "result_sink_options": {"path": str(out)},
             },
-            topology={"kind": "deepstream", "deepstream": dict(PARSER)},
+            runner={"runner": "deepstream", "deepstream": dict(PARSER)},
         )
         pipeline = DeepStreamPipeline(settings, config_root=tmp_path / "cfg")
         pipeline.start()
@@ -1254,7 +1254,7 @@ class TestThePrimaryBatchIsBounded:
         settings = ServerSettings(
             model_repository=tmp_path / "model_repository",
             ingest={"cameras": many},
-            topology={"kind": "deepstream", "deepstream": dict(PARSER)},
+            runner={"runner": "deepstream", "deepstream": dict(PARSER)},
         )
         from shipinfer.pipeline.deepstream import write_configs
 
@@ -1281,7 +1281,7 @@ class TestTheParserAndItsLibraryTravelTogether:
         """#32 round 5: one without the other passes generation and dies with
         NVDSINFER_CUSTOM_LIB_FAILED inside the element on every shard — nvinfer dlsym()s
         the function out of the library, so the pair is atomic."""
-        from shipinfer.core.settings.topology import DeepStreamSettings
+        from shipinfer.core.settings.runner import DeepStreamSettings
 
         with pytest.raises(ValueError, match=r"travel together|Set both or neither"):
             DeepStreamSettings(**settings_kwargs)
@@ -1289,12 +1289,12 @@ class TestTheParserAndItsLibraryTravelTogether:
     def test_the_generation_mirror_refuses_a_hand_built_half_pair(
         self, repository: ModelRepository, tmp_path: Path
     ) -> None:
-        from shipinfer.core.settings.topology import DeepStreamSettings
+        from shipinfer.core.settings.runner import DeepStreamSettings
         from shipinfer.pipeline.deepstream import write_configs
 
         settings = settings_for()
-        settings.topology.deepstream = DeepStreamSettings.model_construct(
-            **{**settings.topology.deepstream.model_dump(), "custom_lib": ""}
+        settings.runner.deepstream = DeepStreamSettings.model_construct(
+            **{**settings.runner.deepstream.model_dump(), "custom_lib": ""}
         )
         with pytest.raises(ConfigurationError, match="travel together"):
             write_configs(
@@ -1363,7 +1363,7 @@ class TestStopIsAFinallyNotAHappyPath:
                 "result_sink": "jsonlines",
                 "result_sink_options": {"path": str(out)},
             },
-            topology={"kind": "deepstream", "deepstream": dict(PARSER)},
+            runner={"runner": "deepstream", "deepstream": dict(PARSER)},
         )
         pipeline = DeepStreamPipeline(settings, config_root=tmp_path / "cfg")
         pipeline.start()
@@ -1404,7 +1404,7 @@ class TestStopIsAFinallyNotAHappyPath:
                 "result_sink": "jsonlines",
                 "result_sink_options": {"path": str(out)},
             },
-            topology={"kind": "deepstream", "deepstream": dict(PARSER)},
+            runner={"runner": "deepstream", "deepstream": dict(PARSER)},
         )
         pipeline = DeepStreamPipeline(settings, config_root=tmp_path / "cfg")
         with pytest.raises(ConfigurationError, match="refused to enter PLAYING"):
@@ -1437,7 +1437,7 @@ class TestStopIsAFinallyNotAHappyPath:
         settings = ServerSettings(
             model_repository=tmp_path / "model_repository",
             ingest={"cameras": CAMERAS},
-            topology={"kind": "deepstream", "deepstream": dict(PARSER)},
+            runner={"runner": "deepstream", "deepstream": dict(PARSER)},
         )
         pipeline = DeepStreamPipeline(settings, sink=injected, config_root=tmp_path / "cfg")
         pipeline.start()
@@ -1771,7 +1771,7 @@ class TestBuildBranchOffline:
             cameras=settings.ingest.cameras,
             gpu_id=3,
             configs=configs,
-            deepstream=settings.topology.deepstream,
+            deepstream=settings.runner.deepstream,
             ingest=settings.ingest,
         )
         return branch, pipeline, gst
@@ -1847,7 +1847,7 @@ class TestBuildBranchOffline:
                 cameras=settings.ingest.cameras,
                 gpu_id=0,
                 configs=configs,
-                deepstream=settings.topology.deepstream,
+                deepstream=settings.runner.deepstream,
                 ingest=settings.ingest,
             )
 

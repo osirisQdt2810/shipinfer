@@ -51,7 +51,7 @@ class InferenceServer:
         self._memory = MemoryPool(self._settings.memory)
         self._repository: ModelRepository | None = None
         self._models: dict[str, Model | EnsembleModel] = {}
-        self._mesh: Any = None  # a ServiceMesh under the `service` topology
+        self._mesh: Any = None  # a ServiceMesh when this process joined the spill tier
         self._lock = threading.Lock()
         # A second lock, and the two are not interchangeable. `_lock` guards the model table
         # for the microseconds a lookup takes; `_control_lock` serialises whole load/unload
@@ -202,20 +202,21 @@ class InferenceServer:
         return self
 
     def _join_service_tier(self) -> Any:
-        """Under the `service` topology, offer the shared models to the peers and take theirs.
+        """Offer the shared models to this shard's peers and take theirs (ADR-015).
 
-        Only when the launcher said which shard this is: a single-process `serve` has no tier
-        to join, and `fleet` has none by design.
+        The gate is the shard index alone: the launcher sets `runner.service.shard` for a
+        child that is part of a tier, and nothing else does. It used to be gated on the
+        topology *name* as well (`kind == "service"`), which stopped meaning anything when
+        the placement classes were deleted and "topology" became the chain (A2 PR-6) — a
+        second switch that could only ever disagree with the first.
         """
-        topology = self._settings.topology
-        if topology.kind != "service" or topology.service.shard is None:
+        service = self._settings.runner.service
+        if service.shard is None:
             return None
         from shipinfer.engine.spill.mesh import ServiceMesh, wire_slot_bytes
 
         shared = {
-            name: self._models[name]
-            for name in topology.service.shared_models
-            if name in self._models
+            name: self._models[name] for name in service.shared_models if name in self._models
         }
         for name, candidate in shared.items():
             if not hasattr(candidate, "admit_local"):
@@ -225,20 +226,16 @@ class InferenceServer:
                 )
         if not shared:
             _LOG.warning(
-                "service topology: none of the shared models %s is loaded here; no tier joined",
-                topology.service.shared_models,
+                "service tier: none of the shared models %s is loaded here; no tier joined",
+                service.shared_models,
             )
             return None
         assert self._repository is not None  # start() loaded it before any model
         sizes = {
-            name: wire_slot_bytes(
-                self._repository.entry(name).config, topology.service.slot_bytes
-            )
+            name: wire_slot_bytes(self._repository.entry(name).config, service.slot_bytes)
             for name in shared
         }
-        mesh = ServiceMesh(
-            topology.service, topology.service.shard, shared, slot_bytes_by_model=sizes
-        )
+        mesh = ServiceMesh(service, service.shard, shared, slot_bytes_by_model=sizes)
         mesh.create()
         try:
             mesh.connect()
@@ -252,7 +249,7 @@ class InferenceServer:
 
     @property
     def service_mesh(self) -> Any:
-        """The tier this process joined, or ``None`` outside the `service` topology."""
+        """The tier this process joined, or ``None`` when it joined none."""
         return self._mesh
 
     def _startup_names(self) -> list[str]:

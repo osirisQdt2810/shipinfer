@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from shipinfer.core.settings import ServerSettings
-from shipinfer.core.settings.topology import (
+from shipinfer.core.settings.runner import (
     SERVICE_PEERS_ENV,
     SERVICE_RUN_ENV,
     SERVICE_SHARD_ENV,
@@ -54,12 +54,12 @@ class TestTheChildrenAreToldHowToFindEachOther:
         monkeypatch.setenv(SERVICE_PEERS_ENV, "[0, 1]")
         monkeypatch.setenv(SERVICE_SHARD_ENV, "1")
         settings = ServerSettings()
-        assert settings.topology.kind == "service"
-        assert (settings.topology.service.run_id, settings.topology.service.peers) == (
+        assert settings.runner.runner == "service"
+        assert (settings.runner.service.run_id, settings.runner.service.peers) == (
             "abc123",
             [0, 1],
         )
-        assert settings.topology.service.shard == 1
+        assert settings.runner.service.shard == 1
 
     def test_every_tier_timing_is_tunable_including_the_pending_deadline(
         self, monkeypatch
@@ -67,9 +67,9 @@ class TestTheChildrenAreToldHowToFindEachOther:
         """Round 4: a stranded WorkItem pins its inputs for `pending_timeout_ms`; an
         operator tunes it beside `lost_after_ms` instead of finding it hard-coded."""
         monkeypatch.setenv(TOPOLOGY_ENV, "service")
-        monkeypatch.setenv("SHIPINFER_TOPOLOGY__SERVICE__PENDING_TIMEOUT_MS", "5000")
-        monkeypatch.setenv("SHIPINFER_TOPOLOGY__SERVICE__LOST_AFTER_MS", "700")
-        service = ServerSettings().topology.service
+        monkeypatch.setenv("SHIPINFER_RUNNER__SERVICE__PENDING_TIMEOUT_MS", "5000")
+        monkeypatch.setenv("SHIPINFER_RUNNER__SERVICE__LOST_AFTER_MS", "700")
+        service = ServerSettings().runner.service
         assert (service.pending_timeout_ms, service.lost_after_ms) == (5000.0, 700.0)
 
     def test_the_fleet_carries_a_per_shard_environment(self) -> None:

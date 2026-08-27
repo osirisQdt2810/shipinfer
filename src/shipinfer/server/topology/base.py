@@ -39,9 +39,9 @@ from shipinfer.scheduling.sharding import Shard, ShardPlan
 __all__ = ["TOPOLOGIES", "Topology"]
 
 #: The environment variable that tells a child which topology it is part of. Read by the
-#: child through the settings tree (``SHIPINFER_TOPOLOGY__KIND``), so a shard started by hand
+#: child through the settings tree (``SHIPINFER_RUNNER__RUNNER``), so a shard started by hand
 #: with the same variable behaves the same way — there is one switch, not two.
-TOPOLOGY_ENV = "SHIPINFER_TOPOLOGY__KIND"
+TOPOLOGY_ENV = "SHIPINFER_RUNNER__RUNNER"
 
 
 class Topology(abc.ABC):
