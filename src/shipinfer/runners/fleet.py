@@ -31,6 +31,13 @@ It does not execute a chain. :meth:`submit` refuses, typed: frames enter a shard
 shard's own decode elements, and a fleet that accepted items here would be funnelling every
 camera through the parent process — the single shared buffer this project exists to delete.
 Reassembly, batching and the walk are the shard's (``runners/inprocess.py``).
+
+And **it does not re-place a dead shard's cameras.** They are reported ``lost`` — by
+:meth:`FleetRunner._lost`, in the health report and in the stats — and left in the placement
+map until an operator or a control plane removes them. ADR-018 is the argument: a camera's
+tracker is stateful and lives on its home shard (arch.md section 4), nothing respawns the
+process (:meth:`Fleet.supervise` is fail-stop), and moving the cameras onto survivors would
+oversubscribe GPUs whose ``shared_by`` was decided when the plan was made.
 """
 
 from __future__ import annotations
@@ -176,6 +183,8 @@ class FleetRunner(Runner):
         #: only thing that places a camera, so a count derived from it cannot lag behind a
         #: health probe. What the shards report is in :meth:`health`, beside it, so a
         #: disagreement is visible rather than resolved silently in favour of one of them.
+        #: A camera whose shard has **exited** stays here and is reported ``lost``
+        #: (:meth:`_lost`, ADR-018): an entry that vanished would read as "never placed".
         self._placed: dict[str, int] = {}
         #: How many camera threads this cycle has had to abandon — a lifetime signal, not a
         #: statistic (``launch/control.py``). Non-zero means a detached thread on some shard
@@ -444,6 +453,16 @@ class FleetRunner(Runner):
         next-least-loaded shard. Only when *every* shard has refused is this an error, and
         then the message carries what each of them said.
 
+        **A shard whose process has exited is not offered the camera at all.** Its channel is
+        still in the client map — nothing removes it, because :meth:`_lost` reports on it —
+        so the loop below would otherwise open an ``AddCamera`` against a corpse and spend
+        the whole deadline discovering what :meth:`Fleet.dead_indices` already knows. That
+        loop does not catch an RPC that *raises* either (only a typed refusal moves it on),
+        so a dead peer would fail the placement outright rather than sending it to a
+        survivor. Excluding the dead up front is both answers. The view lags by however long
+        ago the last poll was, so a shard that dies inside the call still fails the placement
+        the ordinary way; this is the cheap case, not a guarantee.
+
         RESERVE, ASK, COMMIT. :attr:`_lock` is taken three times for microseconds each and
         never across the ``AddCamera`` itself - the rule is *never hold a lock across an RPC*,
         and it does not depend on how quick the servicer is. ``ShardService.AddCamera`` is in
@@ -470,6 +489,7 @@ class FleetRunner(Runner):
                 now will take it in a minute. The two reach an HTTP caller as 400 and 503
                 respectively (``api/errors.py``), which is the whole point of the split.
         """
+        dead = self._dead_shards()
         with self._lock:
             self._check_running()
             if camera.camera_id in self._placed:
@@ -477,7 +497,12 @@ class FleetRunner(Runner):
                     f"camera {camera.camera_id!r} is already on shard "
                     f"{self._placed[camera.camera_id]}; remove it before placing it again"
                 )
-            order = self._by_load()
+            order = [shard_id for shard_id in self._by_load() if shard_id not in dead]
+            if not order:
+                raise NoShardAvailableError(
+                    camera.camera_id,
+                    [f"shard {shard_id}: its process has exited" for shard_id in sorted(dead)],
+                )
             self._placed[camera.camera_id] = order[0]
             self._pending.add(camera.camera_id)
         refusals: list[str] = []
@@ -528,13 +553,24 @@ class FleetRunner(Runner):
         it, and what the shard answers describes the thread and not the placement. It also
         means the lock is not held across a call that waits ``timeout_s`` on a decoder.
 
+        A camera on a shard that has **exited** is dropped without an RPC and answered
+        ``False``. Its decoder thread died with the process, which is not a clean stop by any
+        reading: nothing ran the release, so whatever that thread was in the middle of was
+        abandoned rather than finished, and ``clean=True`` here would tell a control plane
+        the camera was shut down in an orderly way when in truth its process was. The
+        placement goes either way — that is this method's whole contract — so the id can be
+        placed on a survivor immediately, which is the one recovery a fleet that does not
+        respawn can offer (ADR-018).
+
         Returns:
-            Whether the camera's thread stopped within the deadline.
+            Whether the camera's thread stopped within the deadline. ``False`` also for a
+            camera whose shard is gone.
 
         Raises:
             ServerStateError: the fleet is not running.
             ConfigurationError: no shard holds this camera.
         """
+        dead = self._dead_shards()
         with self._lock:
             # Inside the lock, like the placement it undoes: `_release()` empties the client
             # map without emptying `_placed`, so a check that ran beside the lock left this
@@ -546,12 +582,39 @@ class FleetRunner(Runner):
                     f"no shard holds camera {camera_id!r}; this fleet has "
                     f"{sorted(set(self._placed) - self._pending) or 'none'}"
                 )
+            if shard_id in dead:
+                self._placed.pop(camera_id, None)
+                _LOG.warning(
+                    "camera %s was on shard %d, whose process exited; dropping the placement "
+                    "without asking it to stop",
+                    camera_id,
+                    shard_id,
+                    extra=log_context(camera_id=camera_id),
+                )
+                return False
             client = self._clients[shard_id]
             self._placed.pop(camera_id, None)
         return client.remove_camera(camera_id, timeout_s=timeout_s)
 
     def drain(self, timeout_s: float = 20.0) -> int:
         """Ask every shard to stop reading, on one shared deadline. Sums what was abandoned.
+
+        A shard that cannot be asked does not stop the others from being: its exception is
+        logged and the loop continues, for the same reason :meth:`_stop_shards` does it —
+        the one unreachable shard is precisely the one whose neighbours must still be
+        emptied. What came back from the rest is still added to :attr:`abandoned`, because
+        those threads are detached whatever the unreachable shard is doing.
+
+        RESERVATIONS SURVIVE THE DRAIN. Everything the launcher *knows* is placed is
+        forgotten here — the shards were told to release it — but a camera whose
+        ``AddCamera`` is in flight right now has an outcome nobody has heard yet, and this
+        method is not the one that gets to decide it. Clearing :attr:`_pending` as well used
+        to mean an add that was accepted a moment later committed into an empty map: the
+        shard was reading a camera the "authoritative" placement map did not contain, so it
+        appeared in no listing and :meth:`remove_camera` refused it for the fleet's whole
+        life. The reservation is left exactly where :meth:`add_camera` put it, and that
+        method's own commit-or-rollback resolves it — accepted, and it is a placement again;
+        refused or raised, and its ``finally`` drops it.
 
         Returns:
             How many camera threads across the whole fleet had to be abandoned; ``0`` is the
@@ -568,8 +631,10 @@ class FleetRunner(Runner):
             except Exception as exc:
                 _LOG.warning("shard %d could not be drained: %s", shard_id, exc)
         with self._lock:
-            self._placed.clear()
-            self._pending.clear()
+            in_flight = set(self._pending)
+            self._placed = {
+                camera: shard for camera, shard in self._placed.items() if camera in in_flight
+            }
         # Added, not assigned. The stop that follows a drain abandons its own threads, and
         # both sets are still detached: this is a lifetime signal, and a lifetime signal that
         # the next writer can zero is worse than none (see :attr:`_abandoned`).
@@ -584,14 +649,27 @@ class FleetRunner(Runner):
         A shard that cannot be reached is reported as ``unreachable`` with the reason rather
         than omitted. An absent entry reads as "no such shard", and the whole point of a fleet
         health report is to name the shard that stopped answering.
+
+        ``lost`` names the cameras of shards whose **process has exited** (ADR-018): they are
+        not being read, nothing will re-place them, and they are still in the placement map
+        because deleting them would make an absent entry mean "never placed". The per-shard
+        ``placed`` lists exclude them, so one report cannot say a camera is running on a
+        shard and lost in the same breath — which is why the dead set and the placement map
+        are read once here and passed down rather than each being asked for again.
+
+        The loss view is a poll of the child processes taken as this report is built, so it
+        lags a death by however long ago the caller last asked; a supervised deployment sees
+        it within ``poll_s`` because :meth:`supervise` is looking at the same signal.
         """
+        dead = self._dead_shards()
         with self._lock:
             clients = sorted(self._clients.items())
             placed = dict(self._placed)
             pending = set(self._pending)
+        lost = _lost_in(placed, dead)
         shards: dict[str, Any] = {}
         for shard_id, client in clients:
-            entry: dict[str, Any] = {"placed": _placed_on(placed, pending, shard_id)}
+            entry: dict[str, Any] = {"placed": _placed_on(placed, pending, lost, shard_id)}
             try:
                 report = client.health()
             except Exception as exc:
@@ -614,14 +692,25 @@ class FleetRunner(Runner):
                 )
                 for camera, shard in sorted(placed.items())
             },
+            "lost": dict(sorted(lost.items())),
             "abandoned": self._abandoned,
         }
 
     def _do_stats(self) -> dict[str, Any]:
+        """Counters, and the two camera numbers an operator compares.
+
+        ``cameras`` is what the launcher has confirmed placed and ``lost`` is how many of
+        those are on a shard that has exited — a subset, not a second population, so
+        ``cameras: 4, lost: 2`` reads "four placed, two of them dark". Kept as a count here
+        rather than the map :meth:`_do_health` carries: this is the shape a dashboard scrapes,
+        and *which* cameras is a question with a report of its own.
+        """
+        dead = self._dead_shards()
         with self._lock:
             clients = sorted(self._clients.items())
             cameras = len(self._placed) - len(self._pending)
-        stats: dict[str, Any] = {"shards": {}, "cameras": cameras}
+            lost = len(_lost_in(self._placed, dead))
+        stats: dict[str, Any] = {"shards": {}, "cameras": cameras, "lost": lost}
         for shard_id, client in clients:
             try:
                 stats["shards"][str(shard_id)] = client.stats()
@@ -678,6 +767,33 @@ class FleetRunner(Runner):
         with self._lock:
             return sorted(self._clients.items())
 
+    def _dead_shards(self) -> frozenset[int]:
+        """Which shards' processes have exited, or nothing if there is no fleet. Never raises.
+
+        A poll of the children, not an RPC: a shard that is wedged, paging in an engine or
+        unreachable is *alive* and answers ``unreachable`` in the health report instead. The
+        two are different facts and a fleet that conflated them would report a camera lost
+        because its shard was slow. Read outside :attr:`_lock` at every call site, so the one
+        syscall per child is never charged to a caller waiting on the placement map.
+        """
+        fleet = self._fleet
+        return frozenset() if fleet is None else fleet.dead_indices()
+
+    def _lost(self) -> dict[str, int]:
+        """Cameras whose shard's process has exited: ``{camera_id: shard_id}`` (ADR-018).
+
+        **Reported, never deleted.** The placement stays in :attr:`_placed` because the two
+        possible absences would otherwise be one: a camera nobody ever placed and a camera
+        whose shard died read the same, and "I have never heard of it" is the wrong answer to
+        "where did my camera go". Removing it is :meth:`remove_camera`'s decision and the
+        operator's, and re-placing it is nothing's — see ADR-018 for why a launcher that
+        moved these cameras onto survivors would be resetting a tracker and oversubscribing a
+        GPU to look highly available.
+        """
+        dead = self._dead_shards()
+        with self._lock:
+            return _lost_in(self._placed, dead)
+
     def _by_load(self) -> list[int]:
         """Shard ids, least-loaded first, ties on the id. Call under :attr:`_lock`.
 
@@ -725,11 +841,30 @@ class FleetRunner(Runner):
         )
 
 
-def _placed_on(placed: dict[str, int], pending: set[str], shard_id: int) -> list[str]:
+def _lost_in(placed: dict[str, int], dead: frozenset[int]) -> dict[str, int]:
+    """The placements that fell on a dead shard, out of one snapshot of both.
+
+    A free function so a caller can take the placement map and the dead set once and derive
+    every view from that pair. :meth:`FleetRunner._do_health` builds three of them, and
+    asking twice is how a report comes to list a camera as both placed and lost.
+    """
+    return {camera: shard for camera, shard in placed.items() if shard in dead}
+
+
+def _placed_on(
+    placed: dict[str, int], pending: set[str], lost: dict[str, int], shard_id: int
+) -> list[str]:
     """The cameras this launcher has *confirmed* on one shard, out of a snapshot.
 
     A reservation is left out on purpose: ``placed`` under a shard's entry is what the
     launcher believes is running there, and a camera the shard has not accepted yet is not.
     The whole camera map beside it says ``pending`` for those, so nothing is hidden.
+
+    A camera on a shard that has exited is left out for the same reason and reported under
+    ``lost``: the placement is still the launcher's record of where that camera was, but
+    nothing is reading it, and a shard entry that listed it would contradict the ``lost`` map
+    three lines below it.
     """
-    return sorted(c for c, s in placed.items() if s == shard_id and c not in pending)
+    return sorted(
+        c for c, s in placed.items() if s == shard_id and c not in pending and c not in lost
+    )

@@ -51,6 +51,22 @@ def sleeps(seconds: float = 30.0):
     return lambda shard: [sys.executable, "-c", f"import time; time.sleep({seconds})"]
 
 
+def kill_shard(runner, shard_id: int) -> None:
+    """Kill one shard's child the way a segfault would, and wait until the parent can see it.
+
+    ``supervise()`` is deliberately not called: what is under test is the report a live
+    launcher gives between polls, and the supervisor's answer to a dead shard is to stop the
+    whole fleet. The ``wait()`` is what makes the test deterministic rather than timing-
+    dependent — it reaps the child, so ``poll()`` has an exit code from the next line on.
+    """
+    for running in runner._fleet.running:
+        if running.shard.index == shard_id:
+            running.process.kill()
+            running.process.wait(timeout=5.0)
+            return
+    raise AssertionError(f"no shard {shard_id} in this fleet")
+
+
 class FakeClient:
     """A shard that answers, and remembers what it was asked.
 
@@ -805,6 +821,125 @@ class TestStoppingCostsWhatItCosts:
         assert runner.drain(timeout_s=4.0) == 1
         assert runner.health()["cameras"] == {}
 
+    def test_a_shard_that_cannot_be_drained_does_not_skip_the_others(
+        self, runner, clients
+    ) -> None:
+        """The one unreachable shard is precisely the one whose neighbours must still be
+        emptied — and what came back from them is still added, because those threads are
+        detached whatever the unreachable shard is doing."""
+        runner.start()
+
+        def explode(*_a: Any, **_k: Any) -> int:
+            raise ServerStateError("shard 0 did not answer Drain")
+
+        clients[0].drain = explode  # type: ignore[method-assign]
+        clients[1].abandoned = 2
+
+        assert runner.drain(timeout_s=4.0) == 2
+        assert clients[1].drains, "shard 1 was skipped because shard 0 could not be asked"
+        assert runner.abandoned == 2
+
+    def test_a_drain_and_the_stop_after_it_accumulate(self, runner, clients) -> None:
+        """Both sets of threads are still detached. A lifetime signal the next writer can
+        overwrite is worse than none: the last writer is the one with nothing left to
+        release, and assigning made its zero the only truth."""
+        runner.start()
+        clients[0].abandoned = 1
+        clients[1].abandoned = 2
+
+        runner.drain(timeout_s=4.0)
+        runner.stop(timeout_s=5.0)
+
+        assert runner.abandoned == 6, "3 abandoned by the drain plus 3 by the stop"
+
+    def test_a_drain_does_not_forget_a_camera_whose_add_is_still_in_flight(
+        self, runner, clients
+    ) -> None:
+        """The carried bug: clearing the reservations too made an accepted camera vanish.
+
+        `drain()` forgets everything the launcher *knows* is placed, but a camera whose
+        `AddCamera` is in flight has an outcome nobody has heard yet. Clearing `_pending` as
+        well meant the add committed into an emptied map a moment later: the shard was
+        reading a camera the authoritative placement map did not contain, so it appeared in
+        no listing and `remove_camera` refused it for the fleet's whole life.
+        """
+        import threading
+
+        entered, released = threading.Event(), threading.Event()
+
+        def blocking(camera: CameraSpec, **_: Any) -> AddCameraResult:
+            entered.set()
+            assert released.wait(10.0), "the test never released the fake shard"
+            clients[0].cameras.append(camera.camera_id)
+            return AddCameraResult(accepted=True)
+
+        runner.start()
+        clients[0].add_camera = blocking  # type: ignore[method-assign]
+        adding = threading.Thread(
+            target=runner.add_camera,
+            args=(CameraSpec(camera_id="quay-1", url="rtsp://host"),),
+        )
+        adding.start()
+        try:
+            assert entered.wait(5.0), "the add never reached the shard"
+
+            assert runner.drain(timeout_s=4.0) == 0
+            assert runner.health()["cameras"] == {"quay-1": {"shard": 0, "pending": True}}
+        finally:
+            released.set()
+            adding.join(10.0)
+
+        assert runner.health()["cameras"] == {"quay-1": {"shard": 0}}
+        assert runner.remove_camera("quay-1") is True, "the accepted camera was untracked"
+
+    def test_a_drain_still_forgets_a_placement_whose_add_already_returned(
+        self, runner, clients
+    ) -> None:
+        """The other half of the same rule: a confirmed placement was drained, so it goes.
+        Keeping it would make every camera unplaceable after the first drain."""
+        runner.start()
+        runner.add_camera(CameraSpec(camera_id="quay-1", url="rtsp://host"))
+
+        runner.drain(timeout_s=4.0)
+        runner.add_camera(CameraSpec(camera_id="quay-1", url="rtsp://host"))
+
+        assert runner.health()["cameras"] == {"quay-1": {"shard": 0}}
+
+    def test_a_refused_add_across_a_drain_leaves_nothing_behind(self, runner, clients) -> None:
+        """The reservation survives the drain, and `add_camera`'s own rollback resolves it:
+        refused by every shard, and the map is empty rather than holding a ghost."""
+        import threading
+
+        entered, released = threading.Event(), threading.Event()
+
+        def blocking(camera: CameraSpec, **_: Any) -> AddCameraResult:
+            entered.set()
+            assert released.wait(10.0), "the test never released the fake shard"
+            return AddCameraResult(accepted=False, reason="draining")
+
+        runner.start()
+        clients[0].add_camera = blocking  # type: ignore[method-assign]
+        clients[1].refuse_cameras = "draining"
+        failed: list[BaseException] = []
+
+        def place() -> None:
+            try:
+                runner.add_camera(CameraSpec(camera_id="quay-1", url="rtsp://host"))
+            except BaseException as exc:
+                failed.append(exc)
+
+        adding = threading.Thread(target=place)
+        adding.start()
+        try:
+            assert entered.wait(5.0), "the add never reached the shard"
+            runner.drain(timeout_s=4.0)
+        finally:
+            released.set()
+            adding.join(10.0)
+
+        assert isinstance(failed[0], NoShardAvailableError)
+        assert runner.health()["cameras"] == {}
+
     def test_a_shard_that_cannot_be_asked_does_not_skip_the_others(
         self, runner, clients
     ) -> None:
@@ -861,6 +996,177 @@ class TestWhatTheFleetReports:
         stats = runner.stats()
 
         assert "detail" in stats["shards"]["0"] and stats["shards"]["1"] == {"cameras": 0}
+
+
+class TestWhenAShardDies:
+    """Its cameras are reported **lost**, and nothing re-places them (ADR-018).
+
+    The three reasons, restated so a reader of the tests has them: a camera's tracker is
+    stateful and lives on its home shard (arch.md section 4), so moving the camera is a
+    tracker reset dressed as high availability; nothing respawns the process, so a survivor
+    would hold those cameras for the rest of the deployment; and the survivors' GPUs were
+    given a ``shared_by`` when the plan was made, so piling a dead shard's cameras onto them
+    oversubscribes devices that were never told.
+
+    The processes here are real ``sleeps()`` children and one of them is really killed —
+    that is the only part of a shard's death this parent can observe anyway.
+    """
+
+    @staticmethod
+    def _four_cameras(runner) -> None:
+        for index in range(4):
+            runner.add_camera(CameraSpec(camera_id=f"quay-{index}", url="rtsp://host"))
+
+    def test_health_names_exactly_the_dead_shards_cameras(self, runner, clients) -> None:
+        runner.start()
+        self._four_cameras(runner)  # quay-0/2 on shard 0, quay-1/3 on shard 1
+
+        kill_shard(runner, 0)
+        report = runner.health()
+
+        assert report["lost"] == {"quay-0": 0, "quay-2": 0}
+
+    def test_no_camera_goes_missing_from_the_report(self, runner, clients) -> None:
+        """Reported, never deleted: an entry that vanished would read as "never placed", and
+        "I have never heard of it" is the wrong answer to "where did my camera go"."""
+        runner.start()
+        self._four_cameras(runner)
+
+        kill_shard(runner, 0)
+        report = runner.health()
+
+        assert sorted(report["cameras"]) == ["quay-0", "quay-1", "quay-2", "quay-3"]
+        assert report["cameras"]["quay-0"] == {"shard": 0}
+
+    def test_one_report_does_not_contradict_itself(self, runner, clients) -> None:
+        """The dead shard's `placed` list and the `lost` map are derived from ONE snapshot.
+
+        Asking twice is how a report comes to list a camera as running on shard 0 three lines
+        above saying it is lost.
+        """
+        runner.start()
+        self._four_cameras(runner)
+
+        kill_shard(runner, 0)
+        report = runner.health()
+
+        assert report["shards"]["0"]["placed"] == []
+        assert set(report["lost"]) == {"quay-0", "quay-2"}
+
+    def test_the_survivor_is_unaffected(self, runner, clients) -> None:
+        runner.start()
+        self._four_cameras(runner)
+
+        kill_shard(runner, 0)
+        report = runner.health()
+
+        assert report["shards"]["1"]["placed"] == ["quay-1", "quay-3"]
+        assert report["shards"]["1"]["state"] == "running"
+        assert not {"quay-1", "quay-3"} & set(report["lost"])
+
+    def test_a_live_fleet_reports_nothing_lost(self, runner, clients) -> None:
+        runner.start()
+        self._four_cameras(runner)
+
+        assert runner.health()["lost"] == {}
+        assert runner._lost() == {}
+
+    def test_an_unreachable_shard_is_not_a_lost_one(self, runner, clients) -> None:
+        """A shard that is wedged, paging in an engine or slow is ALIVE and may answer again.
+
+        Conflating the two would report a camera lost — which is terminal until an operator
+        removes it — because its shard took two seconds over a health probe.
+        """
+        runner.start()
+        runner.add_camera(CameraSpec(camera_id="quay-1", url="rtsp://host"))
+
+        def explode(**_k: Any):
+            raise ServerStateError("shard 0 did not answer Health")
+
+        clients[0].health = explode  # type: ignore[method-assign]
+        report = runner.health()
+
+        assert report["shards"]["0"]["state"] == "unreachable"
+        assert report["lost"] == {}
+        assert report["shards"]["0"]["placed"] == ["quay-1"]
+
+    def test_stats_count_the_lost_as_a_subset_of_the_placed(self, runner, clients) -> None:
+        runner.start()
+        self._four_cameras(runner)
+
+        kill_shard(runner, 0)
+        stats = runner.stats()
+
+        assert stats["cameras"] == 4 and stats["lost"] == 2
+
+    def test_removing_a_lost_camera_is_not_clean_and_asks_nobody(self, runner, clients) -> None:
+        """`clean=True` would say the camera was shut down in an orderly way. Its process was.
+
+        Nothing ran the decoder's release, so whatever that thread held was abandoned rather
+        than finished — and there is no one left to ask, so no RPC is attempted.
+        """
+        runner.start()
+        self._four_cameras(runner)
+        kill_shard(runner, 0)
+
+        assert runner.remove_camera("quay-0") is False
+        assert clients[0].cameras == ["quay-0", "quay-2"], "a corpse was sent RemoveCamera"
+
+    def test_removing_a_lost_camera_frees_the_id_for_a_survivor(self, runner, clients) -> None:
+        """The one recovery a fleet that does not respawn can offer, and it is the operator's
+        to ask for: remove, then add, and the camera lands somewhere alive."""
+        runner.start()
+        self._four_cameras(runner)
+        kill_shard(runner, 0)
+        runner.remove_camera("quay-0")
+
+        runner.add_camera(CameraSpec(camera_id="quay-0", url="rtsp://host"))
+
+        assert "quay-0" in clients[1].cameras
+        assert runner.health()["lost"] == {"quay-2": 0}
+
+    def test_a_lost_camera_is_still_a_duplicate_until_it_is_removed(
+        self, runner, clients
+    ) -> None:
+        """Because the placement is reported, not deleted. Re-adding the same id without
+        removing it would leave two records of one camera and no way to tell them apart."""
+        runner.start()
+        self._four_cameras(runner)
+        kill_shard(runner, 0)
+
+        with pytest.raises(ConfigurationError, match="already on shard 0"):
+            runner.add_camera(CameraSpec(camera_id="quay-0", url="rtsp://host"))
+
+    def test_a_new_camera_lands_on_a_survivor(self, runner, clients) -> None:
+        """Shard 0 is emptiest by every count that matters and is not offered the camera:
+        `AddCamera` against a corpse spends the whole deadline discovering what the process
+        table already said, and the placement loop does not catch an RPC that *raises*."""
+        runner.start()
+        runner.add_camera(CameraSpec(camera_id="quay-1", url="rtsp://host"))
+        kill_shard(runner, 0)
+
+        runner.add_camera(CameraSpec(camera_id="quay-2", url="rtsp://host"))
+
+        assert clients[1].cameras == ["quay-2"]
+
+    def test_every_shard_dead_is_a_capacity_refusal_that_names_them(
+        self, runner, clients
+    ) -> None:
+        """503 rather than 400 (`api/errors.py`): nothing about the request is wrong, and the
+        fleet a supervisor is about to restart will take the camera."""
+        runner.start()
+        kill_shard(runner, 0)
+        kill_shard(runner, 1)
+
+        with pytest.raises(NoShardAvailableError) as caught:
+            runner.add_camera(CameraSpec(camera_id="quay-1", url="rtsp://host"))
+
+        assert caught.value.refusals == (
+            "shard 0: its process has exited",
+            "shard 1: its process has exited",
+        )
+        assert not isinstance(caught.value, ConfigurationError)
+        assert runner.health()["cameras"] == {}, "a refused placement kept its reservation"
 
 
 class TestSupervisingTheShards:
