@@ -5,6 +5,70 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-27 — `/streams`: the camera door, over a runner (Phase B3)
+
+**What.** `shipinfer run --topology c.yaml --http` now serves arch.md §2's camera door:
+`POST /streams {"url": "rtsp://..."}` starts a camera on the runner, `DELETE /streams/{id}`
+stops it, `GET /streams` (alias `GET /cameras`) lists what the runner says it is reading,
+`POST /streams/drain?timeout_s=` empties the deployment without tearing it down, and
+`GET /health` answers 200 with the state in the body. Five pieces:
+
+| Piece | Delivered |
+|---|---|
+| `core/errors/launch.py` | `NoShardAvailableError(ServerStateError)`, carrying the camera id and every shard's refusal; `runners/fleet.py` raises it where it raised `ConfigurationError` |
+| `api/streams.py` | the six-member `CameraController` protocol + `build_streams_router`, with the status-code mapping and the minting of `cam-<n>` |
+| `api/errors.py` | `routes.py`'s `_fail` extracted, so both routers share one table |
+| `api/app.py` | `create_app(server=None, *, cameras=None)` mounts whichever routers it was given; `BackgroundHttpServer` runs uvicorn on a thread |
+| `cli/commands/run.py` + `cli/__init__.py` | `--http/--host/--port`, and `_wait` supervising with the ingress up |
+
+**Why.** arch.md §2 draws two doors into the deployment and only one of them existed. Cameras
+could reach a shard over gRPC or `--inputs` at start-up, and a running system could not be
+given a fifty-first camera by anything but a restart.
+
+**Decisions.**
+
+- **`run --http`, not `serve --http`.** `run` is the composition root that owns a runner, and
+  a runner is the only thing that owns cameras. `serve` builds an engine and no runner; with
+  `--runner fleet` there is no engine in the parent at all. So the two commands serve
+  different routers, and `create_app` mounts what it was handed rather than assuming both.
+- **`api` may import `launch`, and may NOT import `runners`.** The grant is `CameraSpec` and
+  `mint_camera_id` — the launcher's vocabulary, which is what `add_camera` takes. What is
+  behind the routes arrives as the structural `CameraController` (six members), so an HTTP
+  handler can drive the runner it was handed and cannot build one, choose a placement or open
+  a chain. Both halves are asserted: the table in `tests/test_architecture.py`, and a
+  subprocess that imports `shipinfer.api` and refuses if `shipinfer.runners` came with it.
+- **A duplicate id is 400; a fleet with no room is 503.** They were one error, so a control
+  plane reading 400 as "my request is malformed" stopped asking about a condition that clears
+  as soon as a shard finishes draining. `NoShardAvailableError` is what splits them, and it is
+  a `ServerStateError` so the existing rule in `api/errors.py` maps it without a new case.
+- **`clean=false` is a body signal, never a 5xx.** `DELETE` removes the camera whatever the
+  decoder thread does; a 500 would say the removal failed, and the retry would earn a 404.
+- **A runner that manages no cameras is 501.** Its own refusal is a `ServerStateError` (a
+  retryable 503), and no amount of retrying gives a `deepstream` runner an ingest plane.
+- **`add_camera` runs in a worker thread with a request deadline**, mirroring `routes.py`'s
+  `_INFER_TIMEOUT_S`, with `abandon_on_cancel=True` — without that, anyio's cancel scope waits
+  for the very thread it is cancelling and the deadline is decorative.
+- **The camera ids are minted by one helper.** `launch/control.py::mint_camera_id` is what
+  `--inputs` uses and what a `POST` with no `camera_id` uses (lowest free index), because two
+  spellings of "the next camera" collide on a deployment that uses both doors.
+- **uvicorn goes on a thread and `--host` defaults to loopback.** The main thread is the
+  supervising thread (`launch/signals.py`), and `uvicorn.Server` installs its own
+  SIGINT/SIGTERM handlers unless it is off the main thread — a Ctrl-C that stopped the web
+  server and left fifty decoders reading is exactly what that would buy. Loopback because
+  these routes start and stop decoding on a shared GPU box and phase B has no authentication:
+  exposing them is a proxy in front, not a different default.
+
+**Evidence.** `tests/api/test_streams.py` (32 cases over a ten-line fake controller — every
+status code), `tests/api/test_streams_over_a_runner.py` (10 cases: a real `InprocessRunner`
+behind a `TestClient`; a posted URL's frames arrive at the sink tagged with the caller's
+camera id, `DELETE` stops them), `tests/cli/test_run_http.py` (8 cases: the thread, the
+config, `should_exit` on return, and SIGINT still routed to the runner). Offline throughout.
+
+**Known gap.** `StreamInfo.url` reads `""` for any camera this process did not just place: no
+runner's health report carries a source URL, and a router that remembered them would answer
+from its own memory about cameras added over gRPC. A real `shipinfer run --http` against a
+GPU box is container-tier evidence and was not run here.
+
 ## 2026-08-27 — the launcher places the fleet; a shard opens only what it was sent (B1 review)
 
 **What.** Round-1 review of PR #71 found a blocking defect in the entry above and this is the

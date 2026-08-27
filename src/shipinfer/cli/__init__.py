@@ -148,6 +148,20 @@ def build_app() -> typer.Typer:
             "--drain-s",
             help="Seconds a shard gets to drain before it is killed (default: settings).",
         ),
+        http: bool = typer.Option(
+            False,
+            "--http",
+            help="Serve /streams, /cameras and /health beside the running chain.",
+        ),
+        host: str = typer.Option(
+            "127.0.0.1",
+            "--host",
+            help=(
+                "Address --http binds. Loopback by default: /streams starts and stops "
+                "decoding and has no authentication, so put a proxy in front to expose it."
+            ),
+        ),
+        port: int = typer.Option(8000, "--port", help="Port --http binds."),
         dry_run: bool = typer.Option(
             False, "--dry-run", help="Print what would run, and spawn nothing."
         ),
@@ -165,6 +179,9 @@ def build_app() -> typer.Typer:
                 gpus=gpus,
                 policy=policy,
                 drain_s=drain_s,
+                http=http,
+                host=host,
+                port=port,
                 dry_run=dry_run,
                 log_level=log_level,
             )

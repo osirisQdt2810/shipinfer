@@ -49,6 +49,9 @@ def run(
     gpus: str | None = None,
     policy: str | None = None,
     drain_s: float | None = None,
+    http: bool = False,
+    host: str = "127.0.0.1",
+    port: int = 8000,
     log_level: str = "INFO",
     dry_run: bool = False,
 ) -> int:
@@ -77,6 +80,16 @@ def run(
         gpus: which devices, as ``0,1,2``. ``None`` leaves ``devices.visible_gpus``, and
             only when *that* is empty too is the driver asked, once (:func:`_fill_in_gpus`).
             A flag is not the only way an operator answers this question.
+        http: serve ``/streams`` (arch.md §2's camera door) beside the running chain, on a
+            thread. Off by default: a chain driven by ``--inputs`` needs no ingress, and a
+            port that nobody asked for is a port somebody has to firewall.
+        host: what the HTTP server binds. **Loopback by default**, unlike ``shipinfer serve``:
+            these routes start and stop video decoding on a shared GPU box and phase B has no
+            authentication on them, so reaching them from another machine is a decision an
+            operator makes explicitly — by putting an authenticating proxy in front, or, at
+            their own risk, by passing ``--host 0.0.0.0``.
+        port: what it binds. ``0`` is not special-cased; ask the OS for one only if you have
+            a way to find out which it chose.
         drain_s: seconds a shard gets to finish before it is killed. ``None`` leaves
             ``runner.drain_s``. It is ``shipinfer fleet --drain`` under its settings-tree
             name: the same budget, on the command that replaced it, so an operator who had
@@ -159,7 +172,7 @@ def run(
         # open and its workers up before a decoder thread starts publishing into them. A
         # refusal here therefore travels through the `finally`, which stops what did come up.
         place_cameras(built, cameras)
-        _wait(built)
+        _wait(built, http=http, host=host, port=port, log_level=log_level)
     except ShardExitedError as exc:
         out.print(f"[red]{exc}[/red]")
         return 1
@@ -345,8 +358,15 @@ def _fill_in_gpus(settings: ServerSettings) -> ServerSettings:
     return settings.model_copy(update={"devices": devices})
 
 
-def _wait(built: Runner) -> None:
-    """Block until Ctrl-C, SIGTERM, or a shard dies.
+def _wait(
+    built: Runner,
+    *,
+    http: bool = False,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    log_level: str = "INFO",
+) -> None:
+    """Block until Ctrl-C, SIGTERM, or a shard dies, answering ``/streams`` meanwhile.
 
     Signals are installed here rather than by the runner: handlers are process-global state,
     and a library that installed them behind your back is a library you cannot embed
@@ -358,10 +378,38 @@ def _wait(built: Runner) -> None:
     ``getattr`` fallback would have silently downgraded a fleet whose method got renamed into
     one that never watched its shards.
 
+    **The main thread stays the supervising thread**, which is what decides where the web
+    server goes. ``forward_signals`` is installed *first* and is the only handler this process
+    installs: uvicorn installs its own inside ``Server.serve``, and a Ctrl-C that stopped the
+    web server while fifty decoder threads kept running is precisely the shutdown this
+    codebase spent ADR-005 and ``launch/signals.py`` avoiding. Running it on a thread is what
+    prevents that (``api/app.py::BackgroundHttpServer`` says how), and it is also what lets
+    ``supervise()`` return the moment the runner is told to go rather than one HTTP tick later.
+
+    The server is stopped in a ``finally`` and the runner is stopped by the caller's, in that
+    order: the ingress closes first, so nothing places a camera on a runner that is going down.
+
     Raises:
         ShardExitedError: a shard exited; the fleet is already stopped.
+        ConfigurationError: ``--http`` was asked for and FastAPI or uvicorn is not installed.
+            Typed and naming the extra, raised before the supervise loop starts.
     """
     from shipinfer.launch import forward_signals
 
     forward_signals(built)
-    built.supervise()
+    if not http:
+        built.supervise()
+        return
+
+    # Imported here, not at module scope: `--http` is the only thing in this command that
+    # needs the `server` extra, and `shipinfer run` without it must work on a host that never
+    # installed FastAPI.
+    from shipinfer.api import BackgroundHttpServer, create_app
+
+    server = BackgroundHttpServer(
+        create_app(cameras=built), host=host, port=port, log_level=log_level
+    ).start()
+    try:
+        built.supervise()
+    finally:
+        server.stop()
