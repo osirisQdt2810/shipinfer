@@ -19,11 +19,18 @@
 // ones shipped today live in units an offline build does not compile. `--with-external
 // gstreamer` opts the second one back in for the container that has GStreamer, which is how its
 // registry tests get to run at all.
+//
+// What that consequence must NOT do is arrive as "unknown video source".
+// `ingest/omitted_lanes.h` carries the build's own list of left-out lanes together with the
+// names each lane registers, so `canonical` can tell a correctly spelled source this build does
+// not contain from a typo. That header includes no source header — it names strings, not units
+// — so the invariant above is intact; its own comment says why at length.
 #include "shipinfer/ingest/registry.h"
 
 #include <sstream>
 
 #include "shipinfer/core/types.h"
+#include "shipinfer/ingest/omitted_lanes.h"
 
 namespace shipinfer {
 
@@ -47,8 +54,20 @@ namespace shipinfer {
         if (alias != by_alias_.end()) return alias->second;
         std::ostringstream known;
         for (const auto& [n, _] : entries_) known << (known.tellp() > 0 ? ", " : "") << n;
-        throw ConfigError("unknown video source '" + name +
-                          "'; known sources: " + (known.tellp() > 0 ? known.str() : "(none)"));
+        const std::string listed = known.tellp() > 0 ? known.str() : "(none)";
+        // "not in this build" is checked BEFORE "unknown", because the two need different
+        // actions from an operator and the second one sends them to re-read a `source:` line
+        // that is already correct. An offline binary contains no real source at all, so without
+        // this the most likely name anybody types is the one with the least useful answer.
+        const std::string lane = omitted_lane_of_source(name);
+        if (!lane.empty()) {
+            throw ConfigError("video source '" + name +
+                              "' exists but was not compiled into this binary (the '" + lane +
+                              "' external lane was not part of this build — see "
+                              "scripts/build_csrc.py --with-external); known sources: " +
+                              listed);
+        }
+        throw ConfigError("unknown video source '" + name + "'; known sources: " + listed);
     }
 
     bool SourceRegistry::contains(const std::string& name) const {

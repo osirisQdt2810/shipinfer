@@ -5,6 +5,46 @@ edits, typo fixes and pure docs.
 
 ---
 
+## test: a decoded pixel over a real RTSP session, and refusals that name the build (P4-PR2c)
+
+**The evidence #32 and #46 owed.** `csrc/tests/test_ingest.cpp` section P stands up an RTSP
+server on 127.0.0.1, opens it through `SOURCES()` as `GStreamerSource`, and asserts on the
+bytes that come back: the negotiated size is the served size, the frame carries HWC BGR with
+its keepalive, **the pixels vary** (256 distinct byte values, not the blank buffer that would
+have passed every other check in the file), consecutive frames differ (so the per-frame copy is
+real), the ids are the actor counter's 0.., both clocks are stamped, and it closes cleanly
+while the server is still serving. Container: `246 checks, 0 failure(s), 1 skipped`, plus one
+deliberate `PIXEL:` line — "246 checks" cannot tell a reviewer whether anything ever looked at
+a pixel, which is how two PRs went by. Host (driverless, offline): `219 checks, 0 failure(s),
+3 skipped`.
+
+**The server is the one that already existed.** `csrc/tests/rtsp_loopback.h` runs
+`scripts/rtsp_serve.py` in a child process — the same fixture the Python ingest tests and
+`benchmarks/harness/rtsp.py` use, whose pacing bugs are already argued out in its docstring —
+rather than growing a second RTSP server in C++. It could not have grown one anyway:
+`shipinfer-gst:jammy` has `libgstrtspserver-1.0.so.0` and the gir binding but **no `-dev`
+package** (`pkg-config --modversion gstreamer-rtsp-server-1.0`: not found), so there are no
+headers to compile against, and `ffmpeg -f rtsp` cannot serve (in 4.4 `rtsp_flags listen` is a
+demuxer option). Ten `testsrc` JPEGs are made on the spot, because the repository ships no
+fixture data. Header-only, POSIX-only, no `EXTERNAL` lane: it compiles in the offline tier
+everywhere and decides at *runtime* whether this host can serve, with the server's own log in
+the skip.
+
+**A refusal now names the build lane.** A lane left out means a unit not compiled, means a
+registrar that never ran, means `create_source("gstreamer")` answering "unknown video source"
+for a name that is spelled correctly — the third failure mode `ingest/registry.h` warns about,
+arriving disguised as the first. `scripts/build_csrc.py` bakes what it left out into every unit
+(`-DSHIPINFER_OMITTED_LANES`), `ingest/omitted_lanes.h` maps lane -> the source names that lane
+registers (strings, not includes, so the offline-closure invariant holds), and
+`SourceRegistry::canonical` checks "not in this build" before "unknown". The wording is neutral
+about *why* a lane is absent, because `--offline` omits lanes by design and only a full build's
+absence is a missing package. The offline tier asserts this in the branch that used to be a
+bare skip, a misspelling still gets the plain message, and `tests/test_build_csrc.py` fails if
+the Python lane list and the C++ table ever disagree. The script also re-prints the omitted
+lanes after the last `built ...` line (flushing stdout first, or a piped `2>&1` puts the note
+back on top of everything).
+
+
 ## feat: the GStreamer camera source crosses to the C++ plane (27 Aug 2026, P4-PR2a+b)
 
 **What it is.** `ingest/sources/gstreamer.py`, ported: the pure half first (#45 —

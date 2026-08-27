@@ -37,11 +37,16 @@ nvcc and no TensorRT, so the full build cannot run there and the offline build i
 stretch. A lane whose units reach ``core/platform.h`` is refused rather than stretched to — see
 :func:`main`.
 
-A full build (no ``--offline``) compiles every unit and therefore needs every lane's packages.
-When one is missing it fails naming the package and where to get it, rather than quietly
-dropping the unit: a binary whose registry silently lacks a source reports "unknown video
-source" for what is really "that library is not installed", and ``ingest/registry.h`` says at
-length why those must not be confused.
+A full build (no ``--offline``) compiles every unit and therefore wants every lane's packages.
+A lane it cannot resolve is left out with a loud warning rather than dropped quietly, because a
+binary whose registry silently lacks a source is a binary that answers a configuration question
+wrongly, and ``ingest/registry.h`` says at length why "not registered", "not installed" and
+"not in this build" must not be confused.
+
+Which is also why the omitted lanes are **compiled into** every unit as
+``-DSHIPINFER_OMITTED_LANES``: this script is the only thing that knows what it left out, and
+``ingest/omitted_lanes.h`` turns that list into a refusal that names the lane instead of the
+bare "unknown video source" a missing registrar used to produce. See :func:`lane_defines`.
 """
 
 from __future__ import annotations
@@ -137,6 +142,55 @@ def pkg_config_flags(lane: str) -> list[str]:
             )
         _PKG_CONFIG_CACHE[lane] = probe.stdout.split()
     return _PKG_CONFIG_CACHE[lane]
+
+
+def omitted(enabled: frozenset[str]) -> list[str]:
+    """The lanes this build has NOT got, in the order a message should list them."""
+    return sorted(set(EXTERNAL) - set(enabled))
+
+
+def lane_defines(enabled: frozenset[str]) -> list[str]:
+    """``-DSHIPINFER_OMITTED_LANES``, for every unit this build compiles.
+
+    Baked into the binary because it is the one fact about a build that the *binary* has to
+    know and cannot work out: a lane left out means a translation unit that was not compiled,
+    which means a file-scope registrar that never ran, which means a registry that is missing a
+    source it otherwise ships. `ingest/omitted_lanes.h` reads this and turns "unknown video
+    source 'gstreamer'" into a sentence naming the lane and this flag.
+
+    Every unit gets the same value, so the ``inline`` reader in that header has one definition
+    across the whole link. The value is quoted here and the quotes survive: ``subprocess`` is
+    given an argument list, so no shell strips them and the preprocessor sees a string literal.
+    """
+    return [f'-DSHIPINFER_OMITTED_LANES="{",".join(omitted(enabled))}"']
+
+
+def report_omitted(enabled: frozenset[str], offline: bool) -> None:
+    """Say once, after the build output, which lanes are missing from what was just built.
+
+    The per-lane ``WARNING`` above is printed before forty compile lines and was reviewed as
+    buried (#46 round 2). This is the same fact where an operator will actually see it, and it
+    is exactly what the binaries were told: see :func:`lane_defines`.
+
+    The flush is load-bearing, not hygiene. A piped ``stdout`` is block-buffered while
+    ``stderr`` is not, so without it every ``built ...`` line appears *after* this one in
+    ``build_csrc.py 2>&1 | tail`` — the note lands back where it was reviewed as buried, only
+    now at the top. Diagnostics stay on ``stderr`` with the WARNING they re-surface.
+    """
+    if not omitted(enabled):
+        return
+    sys.stdout.flush()
+    how = (
+        "add `--with-external <lane>`"
+        if offline
+        else "install the package named in the WARNING above"
+    )
+    print(
+        f"NOTE: external lane(s) not in this build: {', '.join(omitted(enabled))}. Every "
+        f"binary above therefore lacks those lanes' video sources, and refuses them naming "
+        f'the lane rather than with a bare "unknown video source" — to change that, {how}.',
+        file=sys.stderr,
+    )
 
 
 def compile_flags(lanes: set[str]) -> list[str]:
@@ -259,9 +313,9 @@ def main() -> int:
             except SystemExit as refusal:
                 print(
                     f"WARNING: external lane '{lane}' left out of this build — {refusal}\n"
-                    f'         binaries from this build answer "unknown video source" for '
-                    f"that lane's sources; that is the missing -dev package talking, not the "
-                    f"registry.",
+                    f"         binaries from this build refuse that lane's sources naming the "
+                    f"lane (-DSHIPINFER_OMITTED_LANES, see ingest/omitted_lanes.h); that is "
+                    f"the missing -dev package talking, not the registry.",
                     file=sys.stderr,
                 )
             else:
@@ -340,6 +394,10 @@ def main() -> int:
         and all(t.is_file() and t.stat().st_mtime >= newest for t in targets)
     ):
         print("up to date: " + ", ".join(str(t) for t in targets))
+        # Also on this path: the lanes those binaries lack is a property of the binaries, not
+        # of the compile that made them, and a run that printed it only when it recompiled
+        # would answer "which sources does this have?" differently depending on the mtimes.
+        report_omitted(enabled, args.offline)
         return 0
 
     BUILD.mkdir(parents=True, exist_ok=True)
@@ -347,6 +405,7 @@ def main() -> int:
     includes = [f"-I{CSRC}"]
     if not args.offline:
         includes += [f"-I{TENSORRT / 'include'}", f"-I{CUDA / 'include'}"]
+    defines = lane_defines(enabled)
 
     objects: list[str] = []
     object_of: dict[Path, str] = {}
@@ -396,6 +455,7 @@ def main() -> int:
                 "-fPIC",
                 *gencode,
                 *includes,
+                *defines,
             ],
             f"compiling {source.name}",
         )
@@ -422,6 +482,7 @@ def main() -> int:
                 "-o",
                 str(obj),
                 *includes,
+                *defines,
                 *compile_flags(lanes_of(source)),
             ],
             f"compiling {source.name}",
@@ -449,6 +510,7 @@ def main() -> int:
                 "-o",
                 str(obj),
                 *includes,
+                *defines,
                 *compile_flags(lanes_of(app)),
             ],
             f"compiling {app.name}",
@@ -493,6 +555,7 @@ def main() -> int:
             f"linking {binary.name}",
         )
         print(f"built {binary}")
+    report_omitted(enabled, args.offline)
     # Last, so a failed build never leaves the tree looking fresh for a lane set it does not
     # have on disk.
     stamp.write_text(lane_key)
