@@ -289,6 +289,54 @@ class TestTheWebFrameworkEntersAtOneSeam:
         assert result.returncode == 0, result.stdout + result.stderr
 
 
+class TestTheCameraDoorCannotBuildARunner:
+    """`POST /streams` drives a runner it was handed, and cannot construct one.
+
+    B3 grew `api`'s row by exactly one name — `launch`, for `CameraSpec` and
+    `mint_camera_id`, the vocabulary `add_camera` takes and the helper `--inputs` names its
+    cameras with. What it deliberately did *not* grow is `runners`: the thing behind the
+    routes arrives as the six-member `CameraController` protocol (`api/streams.py`), so an
+    HTTP handler can start and stop the cameras of the runner it was given and cannot build
+    an executor, choose a placement or open a chain — which would be the dispatch layer
+    wearing a router (arch.md §6).
+
+    Both halves are here because they fail differently: the table is a *rule* and the
+    subprocess is what catches an import that arrives transitively.
+    """
+
+    def test_the_api_may_name_launch_and_may_not_name_runners(self) -> None:
+        module = _checker()
+        allowed = module.ALLOWED_INTERNAL["api"]
+
+        assert "launch" in allowed, "`/streams` needs CameraSpec from launch/control.py"
+        assert "runners" not in allowed, (
+            "an HTTP handler that could import `runners` could build one; the seam is the "
+            "CameraController protocol in api/streams.py"
+        )
+
+    def test_the_direction_is_one_way_as_everywhere_else(self) -> None:
+        """`launch` may not import `api` either, which is why the proto stubs live under
+        `launch/proto/` rather than here (arch.md §9): the reverse edge would be a cycle."""
+        module = _checker()
+
+        assert "api" not in module.ALLOWED_INTERNAL["launch"]
+
+    def test_importing_the_api_still_loads_no_runner_and_no_web_framework(self) -> None:
+        """The runtime half. `shipinfer.runners` reaches `topology`, `scheduling` and — one
+        method call deep — `ingest` and torch; none of that belongs behind an import of the
+        HTTP surface, and the streams router is written so it never arrives."""
+        code = (
+            "import sys, shipinfer.api; "
+            "assert callable(shipinfer.api.build_streams_router); "
+            "assert shipinfer.api.CameraController is not None; "
+            "heavy = [m for m in ('fastapi', 'starlette', 'uvicorn', 'torch', "
+            "'shipinfer.runners', 'shipinfer.ingest') if m in sys.modules]; "
+            "assert not heavy, heavy"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
 class TestTheLauncherNeedsNoDeviceAndNoEngine:
     """`import shipinfer.launch` costs a CUDA context on nothing and a model pool on nothing.
 

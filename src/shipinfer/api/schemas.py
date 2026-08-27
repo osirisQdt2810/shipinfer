@@ -17,6 +17,7 @@ from shipinfer.core.errors import ValidationError
 from shipinfer.core.types import DataType, Tensor
 
 __all__ = [
+    "DrainResult",
     "ErrorBody",
     "InferInputTensor",
     "InferOutputTensor",
@@ -24,6 +25,10 @@ __all__ = [
     "InferenceResponseBody",
     "ModelMetadata",
     "ServerMetadata",
+    "StreamInfo",
+    "StreamList",
+    "StreamRemoved",
+    "StreamRequest",
     "tensor_from_wire",
     "tensor_to_wire",
 ]
@@ -130,6 +135,101 @@ class ServerMetadata(BaseModel):
 
 class ErrorBody(BaseModel):
     error: str
+
+
+# -- the stream control plane (arch.md section 2) ------------------------------------------
+#
+# Not KServe. `POST /streams` is this project's own surface -- cameras and videos enter the
+# deployment here, and the tensor side-door above is for a caller who already has pixels.
+# They share a package because they share a process and an error mapping, and nothing else.
+
+
+class StreamRequest(BaseModel):
+    """One camera, as a client asks for it: ``{"url": "rtsp://..."}`` and little else.
+
+    Deliberately :class:`~shipinfer.launch.control.CameraSpec`'s three fields and not
+    :class:`~shipinfer.core.settings.ingest.CameraConfig`'s twenty. Codec, transport, decode
+    size and priority are *deployment* settings that the shard resolves from its own tree
+    (CONVENTIONS 2.6); what only the caller knows is which video it wants read.
+
+    ``extra="forbid"`` is the load-bearing line. A client that posts ``{"uri": ...}`` or
+    ``{"fps": 30, "priority": "high"}`` against a server that silently drops what it does not
+    recognise gets a 201 and a camera reading nothing, or a camera at the wrong rate -- and
+    finds out from a dashboard rather than from the response. A 422 naming the field is the
+    cheaper failure.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Optional. Empty means "name it for me": the server mints the next free ``cam-<n>``
+    #: with :func:`~shipinfer.launch.control.mint_camera_id`, the same helper
+    #: ``shipinfer run --inputs`` uses, so ids minted by the two paths cannot collide.
+    camera_id: str = ""
+    url: str
+    #: Target frame rate; ``0.0`` means "whatever the source delivers".
+    fps: float = 0.0
+
+
+class StreamInfo(BaseModel):
+    """One camera as the server sees it, assembled from a runner's health report.
+
+    Every field is optional-shaped on purpose, because two runners answer this question with
+    different amounts of knowledge and neither is lying: an in-process runner knows the
+    camera's ingest ``state`` and has no shard to report beyond its own, while a launcher
+    knows the ``shard`` and reads the state back out of that shard's report.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    camera_id: str
+    #: The source, when the runner's health carries one. Neither runner does today -- a
+    #: camera's URL is its shard's configuration, not the launcher's -- so this reads ``""``
+    #: for a camera this process did not just place. It is here rather than tracked in the
+    #: router because a router that remembered urls would answer from its own memory about
+    #: cameras added over gRPC, and be confidently wrong after a shard restart.
+    url: str = ""
+    #: Which shard holds it. ``None`` only when the runner reports no shard at all.
+    shard: int | None = None
+    #: Placed but not yet accepted -- the launcher's reservation window
+    #: (``runners/fleet.py``). A pending camera is not being read yet, and reporting it as
+    #: running is how an operator concludes a dark camera is fine.
+    pending: bool = False
+    #: The ingest state as the shard reports it (``connecting``, ``streaming``,
+    #: ``exhausted``, ...), or ``""`` when nothing has said yet.
+    state: str = ""
+
+
+class StreamList(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    streams: list[StreamInfo]
+
+
+class StreamRemoved(BaseModel):
+    """The answer to ``DELETE /streams/{id}``: the placement is gone, was the thread?
+
+    ``clean=False`` is a **body signal and never a 5xx**: the camera *has* been removed and
+    the caller must not retry, but a decoder thread outlived its deadline and still holds
+    buffers. A 500 would say the removal failed, and a control plane that retried it would
+    get a 404 and conclude something worse.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    clean: bool
+
+
+class DrainResult(BaseModel):
+    """The answer to ``POST /streams/drain``: how many camera threads were abandoned.
+
+    ``0`` is the clean drain. Non-zero is a lifetime signal rather than a statistic -- one
+    deadline is charged to the whole camera set, so a thread still unfinished at it is
+    genuinely stuck and still references this process's buffers.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    abandoned: int
 
 
 def tensor_from_wire(spec: InferInputTensor) -> Tensor:

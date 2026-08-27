@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 from shipinfer.cli.common import build_settings, console
 from shipinfer.core.errors import ConfigurationError, ShardExitedError
 from shipinfer.core.settings import DeviceSettings, ServerSettings
-from shipinfer.launch.control import CameraSpec
+from shipinfer.launch.control import CameraSpec, mint_camera_id
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; `runners` is imported inside `run()`
     from shipinfer.runners.base import Runner
@@ -171,7 +171,9 @@ def run(
 def cameras_from_inputs(inputs: Sequence[str] | None, *, loop: bool = True) -> list[CameraSpec]:
     """``--inputs a.mp4 rtsp://b`` as the camera specs a runner takes.
 
-    Identity is **positional** — ``cam-000``, ``cam-001`` — and that is the only sensible
+    Identity is **positional** — ``cam-000``, ``cam-001``, minted by
+    :func:`~shipinfer.launch.control.mint_camera_id`, which is also what ``POST /streams``
+    uses for a request that supplies no id — and that is the only sensible
     answer: a file path is not a camera id (two directories can hold the same ``clip.mp4``,
     and a path is not a legal metric label), and the offline mode has nobody to ask. Stable
     across restarts for a fixed argument list, which is what a downstream tracker keyed on
@@ -187,7 +189,7 @@ def cameras_from_inputs(inputs: Sequence[str] | None, *, loop: bool = True) -> l
     inputs is the normal way to bring a chain up and add cameras over the control plane.
     """
     return [
-        CameraSpec(camera_id=f"cam-{index:03d}", url=url, fps=0.0, loop=loop)
+        CameraSpec(camera_id=mint_camera_id(index), url=url, fps=0.0, loop=loop)
         for index, url in enumerate(inputs or ())
     ]
 

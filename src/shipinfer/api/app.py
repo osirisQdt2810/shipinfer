@@ -2,26 +2,44 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from shipinfer.api.routes import build_router
+from shipinfer.api.streams import CameraController, build_streams_router
 from shipinfer.core.errors import ConfigurationError
 from shipinfer.core.logging import get_logger
 from shipinfer.engine.pool import InferenceServer
 
-__all__ = ["create_app", "serve_http"]
+__all__ = ["BackgroundHttpServer", "create_app", "serve_http"]
 
 # The logger name stays "server.api" on purpose: an operator's log filter is behaviour,
 # and this move promises none changed. It is retargeted when server/ is deleted (A2 PR-6).
 _LOG = get_logger("api")
 
 
-def create_app(server: InferenceServer) -> Any:
-    """Wrap a running server in a FastAPI application.
+def create_app(
+    server: InferenceServer | None = None, *, cameras: CameraController | None = None
+) -> Any:
+    """Wrap a running server, a camera controller, or both, in a FastAPI application.
 
-    The server's lifecycle is deliberately *not* tied to the app's: whoever created the
-    server started it and will stop it. Tying them would make the HTTP layer load-bearing
-    for a library whose main use is in-process.
+    Two doors, two arguments, and each router is mounted only when the thing behind it exists
+    (arch.md section 2): ``server`` brings the KServe side-door for a caller who already has
+    tensors, ``cameras`` brings ``/streams`` for a caller who has a camera. They are separate
+    because the two commands that serve them are: ``shipinfer serve`` owns an engine and no
+    runner, ``shipinfer run --http`` owns a runner and — with ``--runner fleet`` — no engine
+    in this process at all. Mounting a router with nothing behind it would answer 500 for
+    every request to it, which is a worse answer than 404.
+
+    Neither lifecycle is tied to the app's: whoever created the server or the runner started
+    it and will stop it. Tying them would make the HTTP layer load-bearing for a library whose
+    main use is in-process.
+
+    Raises:
+        ConfigurationError: FastAPI is not installed (the ``server`` extra), or neither a
+            server nor a camera controller was given — an app with no routers answers 404 for
+            everything, and finding that out from a probe is more expensive than being told
+            here.
     """
     try:
         from fastapi import FastAPI
@@ -29,6 +47,12 @@ def create_app(server: InferenceServer) -> Any:
         raise ConfigurationError(
             'the HTTP API needs FastAPI: pip install "shipinfer[server]"'
         ) from exc
+    if server is None and cameras is None:
+        raise ConfigurationError(
+            "create_app was given neither an engine nor a camera controller, so the "
+            "application would have no routes; pass server= for the KServe side-door, "
+            "cameras= for /streams, or both"
+        )
 
     from shipinfer import __version__
 
@@ -38,7 +62,10 @@ def create_app(server: InferenceServer) -> Any:
         description="KServe v2 inference API",
         docs_url="/docs",
     )
-    app.include_router(build_router(server))
+    if server is not None:
+        app.include_router(build_router(server))
+    if cameras is not None:
+        app.include_router(build_streams_router(cameras))
     return app
 
 
@@ -61,3 +88,102 @@ def serve_http(server: InferenceServer, *, host: str = "0.0.0.0", port: int = 80
         # another layer of workers would multiply the queues and defeat the balancing.
         workers=1,
     )
+
+
+class BackgroundHttpServer:
+    """uvicorn on a thread, so the process's main thread keeps supervising.
+
+    ``shipinfer run --http`` has two jobs at once: supervise a runner until it is told to stop
+    (``launch/signals.py``'s invariant — the handler *records*, the supervising thread does the
+    blocking work) and answer ``/streams``. Only one of them can own the main thread, and it
+    has to be the supervisor: a signal handler installed by anything else is a Ctrl-C that
+    stops the web server and leaves fifty decoder threads running.
+
+    So uvicorn runs here instead, and **the thread is what keeps the signal handlers ours**.
+    ``uvicorn.Server.capture_signals`` installs its own ``SIGINT``/``SIGTERM`` handlers, and
+    the only thing that stops it is that it early-returns off the main thread (uvicorn 0.52
+    removed the ``install_signal_handlers`` flag that used to say this explicitly; the thread
+    rule is what is left, and ``tests/cli/test_run_http.py`` asserts the outcome rather than
+    the mechanism — after the server is up, ``SIGINT`` is still routed to the runner).
+
+    Shutdown is ``should_exit``, which is uvicorn's own cooperative flag: the serving loop
+    notices it within one tick, finishes what it is answering and returns. There is no kill —
+    a request in flight is somebody's ``POST /streams``, and cutting it off would leave a
+    camera placed with nobody told.
+
+    This class lives in ``api/`` and not in ``cli/`` because ``uvicorn`` may be named in
+    exactly one layer (``scripts/hooks/check_layers.py``), and because the missing-extra
+    refusal belongs next to the import that fails.
+    """
+
+    def __init__(
+        self,
+        app: Any,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 8000,
+        log_level: str = "info",
+    ) -> None:
+        """Build the server. Binds nothing until :meth:`start`.
+
+        Raises:
+            ConfigurationError: uvicorn is not installed. Typed and naming the extra, for the
+                reason the whole package imports lazily: a host that never installed
+                ``shipinfer[server]`` must still be able to import this module.
+        """
+        try:
+            import uvicorn
+        except ImportError as exc:
+            raise ConfigurationError(
+                'the HTTP API needs uvicorn: pip install "shipinfer[server]"'
+            ) from exc
+
+        self._host = host
+        self._port = port
+        self._server = uvicorn.Server(
+            uvicorn.Config(
+                app,
+                host=host,
+                port=port,
+                log_level=log_level.lower(),
+                # One worker, for `serve_http`'s reason: the runner already owns a thread pool
+                # per element and letting uvicorn add another layer would multiply the queues.
+                workers=1,
+            )
+        )
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> BackgroundHttpServer:
+        """Serve on a daemon thread. Idempotent.
+
+        Daemon on purpose: the runner's shutdown is what the process waits for, and an HTTP
+        thread that could keep a stopped deployment alive would turn a failed
+        :meth:`stop` into a hang instead of a warning.
+        """
+        if self._thread is not None:
+            return self
+        _LOG.info("serving /streams on http://%s:%d (docs at /docs)", self._host, self._port)
+        self._thread = threading.Thread(
+            target=self._server.run, name="shipinfer-http", daemon=True
+        )
+        self._thread.start()
+        return self
+
+    def stop(self, timeout_s: float = 10.0) -> None:
+        """Ask uvicorn to finish and wait for the thread. Idempotent, and never raises.
+
+        A server that will not stop is logged rather than raised: this runs in the ``finally``
+        that also stops the runner, and an exception here would mask why the deployment was
+        going down in the first place.
+        """
+        if self._thread is None:
+            return
+        self._server.should_exit = True
+        self._thread.join(timeout=timeout_s)
+        if self._thread.is_alive():
+            _LOG.warning(
+                "the HTTP thread did not finish within %.1fs; it is a daemon and the "
+                "process will not wait for it",
+                timeout_s,
+            )
+        self._thread = None
