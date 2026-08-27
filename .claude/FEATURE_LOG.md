@@ -33,7 +33,7 @@ backend does. *`http_port_base` is refused, not ignored* — a DS shard serves n
 segmenter and the recogniser do not run, and **every event this topology emits names them in
 `missing_stages`** rather than passing a partial frame off as a complete one. **No performance
 claim is made**: there is no DeepStream image on this box and not one frame has run. What is
-verified is everything that can be without one — 73 offline tests (53 pipeline + 20 topology) —
+verified is everything that can be without one — 93 offline tests (70 pipeline + 23 topology, twenty-one of them review regressions from the seven rounds) —
 and the live run is the operator/infra step, recipe in `deploy/deepstream/image.sh` (the
 `docker run` + `docker commit`, `--network=host` shape `gst-image.sh` established).
 
