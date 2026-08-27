@@ -15,7 +15,10 @@ namespace shipinfer {
         // before its first wait is gone in microseconds; one that is not is inside a blocked
         // `do_open` (whose budget, 10 s by default, outlives any stop grace) and will have
         // to be detached. Long enough to tell those apart, short enough not to stall the
-        // error path of an API call for the full shutdown grace.
+        // error path of an API call for the full shutdown grace — with one bounded
+        // exception (#39 round 2): a re-check that loses `lifecycle_mutex_` to the fleet's
+        // own stop waits out its rival's grace, 5 s by default, before this constant
+        // applies. Race-path-only, and the price of never double-detaching.
         constexpr std::chrono::milliseconds kRecheckStopGrace{250};
 
     }  // namespace

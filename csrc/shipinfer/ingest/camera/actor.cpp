@@ -122,9 +122,13 @@ namespace shipinfer {
         // re-check, #35), and without the lock one caller joins while the other detaches —
         // or both detach — which is `std::terminate`, in CI's own hammer test (flip-proven:
         // removing this lock aborts this binary 3/3). The second caller blocks for at most
-        // the first one's grace, then finds the thread already joined or detached and
-        // returns; only the caller that performed the detach reports the abandonment, so an
-        // actor is never counted (or parked) twice.
+        // its rival's grace, then finds the thread already joined or detached and returns.
+        // Exactly one caller PERFORMS the detach, but every caller REPORTS it —
+        // `thread_abandoned_` is the thread's fate, not this call's work — so a losing
+        // stopper can never answer clean for a detached thread (#39 round 1: that lie
+        // zeroes the fleet count that keeps the sink alive). Double-parking on the race
+        // path is deliberate and harmless; the never-counted-twice property lives on the
+        // fleet count, which increments once per actor.
         if (thread_id_.load() != std::this_thread::get_id()) {
             std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
             if (thread_.joinable()) {
