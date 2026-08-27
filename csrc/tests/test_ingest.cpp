@@ -13,6 +13,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <future>
 #include <map>
@@ -41,6 +42,10 @@
 #include "shipinfer/ingest/sources/gstreamer_pipeline.h"
 #include "shipinfer/ingest/timing/backoff.h"
 #include "shipinfer/ingest/timing/pacing.h"
+// Test support, not part of the tree under test: a real RTSP server in a child process, for
+// section P. Header-only and POSIX-only, so it adds nothing to any link line and nothing to the
+// include closure `scripts/build_csrc.py` walks — its own comment says why at length.
+#include "tests/rtsp_loopback.h"
 
 namespace {
 
@@ -672,6 +677,14 @@ namespace {
         check(message.find("gstremaer") != std::string::npos &&
                   message.find("fake") != std::string::npos,
               "an unknown name is refused with the known ones listed");
+        // A typo stays a typo. `gstremaer` is in no lane's table, so it must NOT collect the
+        // "was not compiled into this binary" sentence that the correctly spelled `gstreamer`
+        // gets from this same binary (section O's skip branch asserts that half): a message
+        // that blamed the build for a misspelling would send an operator to the wrong file.
+        // (`.find` rather than the `contains` helper, which section M declares further down.)
+        check(message.find("unknown video source") != std::string::npos &&
+                  message.find("external lane") == std::string::npos,
+              "and a misspelling is not blamed on the build: " + message);
 
         bool refused = false;
         try {
@@ -2093,14 +2106,13 @@ namespace {
     // host, `build_csrc.py --offline` leaves the unit out and these report a skip; inside
     // `shipinfer-gst:jammy`, `--offline --with-external gstreamer` links it and they run.
     //
-    // WHAT IS NOT HERE, AND WHY IT IS NOT HERE: a real decode. Every check below stops at the
-    // first thing that would need a camera. A `videotestsrc` cannot stand in — `build_pipeline`
-    // builds an `rtspsrc` pipeline by construction, which is the whole reason the string is
-    // assertable — so a decoded frame needs a real RTSP session on a real socket. PR2c's
-    // `gst-rtsp-server` loopback owns that, exactly as the Python plane's
-    // `tests/ingest/test_rtsp_loopback.py` does. Until then: no check in this file has ever
-    // seen a pixel come out of GStreamer, and saying so is more useful than a test that
-    // pretends otherwise.
+    // WHAT IS NOT HERE: a real decode. Every check in *this* function stops at the first thing
+    // that would need a camera. A `videotestsrc` cannot stand in — `build_pipeline` builds an
+    // `rtspsrc` pipeline by construction, which is the whole reason the string is assertable —
+    // so a decoded frame needs a real RTSP session on a real socket. That is now section P
+    // (PR2c), which stands one up in a child process and asserts on the pixels that come back;
+    // the two sections are split because the checks below want a URI that refuses instantly and
+    // section P wants one that serves.
 
     IngestConfig a_gst_camera(const std::string& id) {
         IngestConfig config;
@@ -2126,6 +2138,27 @@ namespace {
 
     void test_the_gstreamer_source_where_it_is_linked() {
         if (!SOURCES().contains("gstreamer")) {
+            // Not only a skip. The binary that cannot run these checks is exactly the binary
+            // whose refusal has to be good, so the offline tier asserts the message here rather
+            // than reporting a skip and testing nothing: a correctly spelled `gstreamer` names
+            // the lane and the flag that would compile it, instead of "unknown video source"
+            // sending an operator to check a spelling that was right (#46 round 2,
+            // `ingest/omitted_lanes.h`).
+            std::string message;
+            try {
+                FrameCounter counter("cam0");
+                StopSignal stop;
+                (void)create_source(a_gst_camera("cam0"), counter, stop);
+            } catch (const ConfigError& error) {
+                message = error.what();
+            }
+            check(
+                contains(message, "'gstreamer' exists but was not compiled into this binary") &&
+                    contains(message, "the 'gstreamer' external lane") &&
+                    contains(message, "--with-external"),
+                "a source this build left out is refused by BUILD LANE, not as a typo "
+                "(-DSHIPINFER_OMITTED_LANES, baked in by scripts/build_csrc.py): " +
+                    message);
             skip(
                 "the gstreamer source lives in a gst-facing unit the offline build does not "
                 "compile (see ingest/registry.cpp); build with `--with-external gstreamer` "
@@ -2282,6 +2315,159 @@ namespace {
         }
     }
 
+    // =====================================================================================
+    // P. A decoded pixel, over a real RTSP session (PR2c)
+    // =====================================================================================
+    //
+    // The evidence #32 and #46 both owed. Section O stops at every point that would need a
+    // camera; this one stands a camera up: `csrc/tests/rtsp_loopback.h` runs
+    // `scripts/rtsp_serve.py` in a child process — the same RTSP fixture the Python ingest
+    // tests and `benchmarks/harness/rtsp.py` use — and `GStreamerSource` connects to it over
+    // 127.0.0.1, negotiates, and hands back frames whose bytes are asserted on here.
+    //
+    // Still no `sources/gstreamer.h` in this file: the source is built through `SOURCES()`,
+    // exactly as everything else in section O is, so the offline-closure invariant holds
+    // (`ingest/registry.cpp`).
+    //
+    // Two gates, and they answer different questions. `SOURCES().contains("gstreamer")` is a
+    // *build* question — is the gst-linked unit in this binary — and `RtspLoopback::start` is a
+    // *host* one: can this machine serve RTSP at all (ffmpeg, a `python3` with PyGObject, the
+    // `gst-rtsp-server` typelib). Either answer being no is a counted skip carrying the reason,
+    // never a silent pass: in `shipinfer-gst:jammy` both are yes and these checks run.
+    void test_a_decoded_pixel_over_a_real_rtsp_session() {
+        if (!SOURCES().contains("gstreamer")) {
+            skip(
+                "no decoded pixel without the gstreamer source: this binary does not link it "
+                "(build with `--with-external gstreamer` inside shipinfer-gst:jammy)");
+            return;
+        }
+        // The served size. Deliberately not a multiple of 4 in width would be the better
+        // stride test, but `x264enc` needs even dimensions and the stride path already has a
+        // unit-level home; what this check is for is the end-to-end one.
+        const int width = 320;
+        const int height = 240;
+        const int fps = 15;
+
+        testsupport::RtspLoopback loopback;
+        const std::string unavailable = loopback.start(width, height, fps);
+        if (!unavailable.empty()) {
+            skip("no RTSP loopback on this host: " + unavailable);
+            return;
+        }
+
+        StopSignal stop;
+        FrameCounter counter("loopback");
+        IngestConfig config = a_gst_camera("loopback");
+        config.uri = loopback.uri();
+        // Generous, because this open does a real DESCRIBE/SETUP/PLAY and the server encodes
+        // its fixture on the first connect. Section O's two seconds are for a URI that refuses
+        // instantly; the same number here would make a slow container look like a broken
+        // source.
+        config.open_timeout_ms = 20000;
+        config.read_timeout_ms = 2000;
+
+        std::unique_ptr<FrameSource> source = create_source(config, counter, stop);
+        std::string failed;
+        try {
+            source->open();
+        } catch (const IngestError& error) {
+            failed = error.what();
+        }
+        check(failed.empty() && source->is_open(),
+              "a source pointed at a real RTSP server opens: " + failed);
+        if (!source->is_open()) return;
+
+        check(source->height() == height && source->width() == width,
+              "and reports the size it NEGOTIATED, not the one nobody asked for: " +
+                  std::to_string(source->width()) + "x" + std::to_string(source->height()));
+
+        // Read until three frames or the deadline. Not "read three times": a live source
+        // legitimately returns nothing while the stream warms up, and a check that treated an
+        // empty read as a failure would be testing the jitter buffer.
+        std::vector<Frame> frames;
+        std::string decode_error;
+        const Clock::time_point deadline = Clock::now() + 30s;
+        while (frames.size() < 3 && Clock::now() < deadline) {
+            try {
+                std::optional<Frame> frame = source->read();
+                if (frame) frames.push_back(std::move(*frame));
+            } catch (const IngestError& error) {
+                decode_error = error.what();
+                break;
+            }
+        }
+        check(decode_error.empty(), "and no read raised: " + decode_error);
+        check(frames.size() == 3, "and delivers frames over the wire: got " +
+                                      std::to_string(frames.size()) + " of 3 within 30s");
+        if (frames.empty()) return;
+
+        const Frame& first = frames.front();
+        check(first.image.height == height && first.image.width == width,
+              "the frame carries the negotiated size");
+        check(first.image.pixels != nullptr && first.image.owner != nullptr &&
+                  first.image.bytes() == static_cast<size_t>(width) * height * 3,
+              "with HWC BGR bytes and the keepalive that owns them");
+
+        // THE POINT OF THIS WHOLE SECTION: the bytes are a decoded image. A pipeline that
+        // parsed, played and delivered a buffer of zeros would pass every other check in this
+        // file — and did, for two PRs, because nothing looked.
+        size_t distinct = 0;
+        {
+            bool seen[256] = {};
+            for (size_t i = 0; i < first.image.bytes(); ++i) {
+                const uint8_t value = first.image.pixels[i];
+                if (!seen[value]) {
+                    seen[value] = true;
+                    ++distinct;
+                }
+            }
+        }
+        check(distinct > 8, "and they VARY — a decoded picture, not a blank buffer: " +
+                                std::to_string(distinct) + " distinct byte values");
+
+        // Ten different JPEGs are looping, so two frames in a row must not be identical. This
+        // is what catches the failure a single-frame check cannot: the same decoder buffer
+        // handed out twice, which is exactly what `do_read`'s copy exists to prevent
+        // (`sources/gstreamer.cpp`, "THE COPY IS NOT OPTIONAL").
+        bool consecutive_differ = frames.size() >= 2;
+        if (frames.size() >= 2) {
+            const Frame& second = frames[1];
+            consecutive_differ =
+                second.image.bytes() != first.image.bytes() ||
+                std::memcmp(first.image.pixels, second.image.pixels, first.image.bytes()) != 0;
+            check(consecutive_differ,
+                  "and consecutive frames differ: the source is not handing out one buffer "
+                  "twice");
+        }
+
+        // The one line in this file that prints on SUCCESS, and it is deliberate: "246 checks,
+        // 0 failures" cannot tell a reader whether a pixel was ever looked at, and this PR
+        // exists because two previous ones could not either. What a green run should be able to
+        // paste into a review is a measurement. "n/a" rather than "no" when there was no second
+        // frame to compare: a run that fell short must not also read as though the source had
+        // handed out one buffer twice.
+        std::fprintf(
+            stderr,
+            "PIXEL: %zu frames of %dx%d over RTSP, %zu distinct byte values, "
+            "consecutive frames differ: %s\n",
+            frames.size(), first.image.width, first.image.height, distinct,
+            frames.size() < 2 ? "n/a (one frame)" : (consecutive_differ ? "yes" : "no"));
+
+        bool monotonic = true;
+        for (size_t i = 0; i < frames.size(); ++i) {
+            monotonic = monotonic && frames[i].tag.frame_id == static_cast<int64_t>(i) &&
+                        frames[i].tag.camera_id == "loopback";
+        }
+        check(monotonic,
+              "every frame is stamped by the actor's counter: ids 0.. and this camera's id");
+        check(first.tag.captured_ns > 0 && first.tag.captured_unix_ns > 0,
+              "with both clocks read at decode time");
+
+        source->close();
+        check(!source->is_open(), "and it closes cleanly while the server is still serving");
+        loopback.stop();
+    }
+
 }  // namespace
 
 int main() {
@@ -2353,6 +2539,7 @@ int main() {
     test_an_unsupported_codec_is_refused_before_a_thread_starts();
 
     test_the_gstreamer_source_where_it_is_linked();
+    test_a_decoded_pixel_over_a_real_rtsp_session();
 
     std::printf("%d checks, %d failure(s), %d skipped\n", checks, failures, skips);
     return failures == 0 ? 0 : 1;

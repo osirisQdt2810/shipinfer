@@ -145,6 +145,20 @@ namespace shipinfer {
     // -- the source -------------------------------------------------------------------------
 
     void ReplaySource::do_open() {
+        // TODO(P4): this is `core/options.h`'s `option_int` open-coded, and the swap is
+        // byte-identical — `option_int("camera '" + camera_id() + "': replay", options,
+        // "limit", 0)` builds the very same message, because that helper renders
+        // `<subject> option <key> must be an integer, got '<value>'`. Two copies of one parse
+        // is how the second one ends up subtly different, which is the argument
+        // `core/options.h` itself makes at the top.
+        //
+        // Not done here for one reason: this unit is in the **opencv** lane, so it is compiled
+        // only by a full build or by `--with-external opencv`, and the container that runs the
+        // ingest tests (`shipinfer-gst:jammy`, `--offline --with-external gstreamer`) does not
+        // compile it — `tests/test_ingest.cpp` reports a counted skip for `replay` there.
+        // Changing a message that no tier in this PR can execute is how a "trivial" edit ships
+        // broken; it belongs in the change that builds this lane and can watch it fail
+        // (#46 round 2, NB4).
         int limit = 0;
         auto option = config().options.find("limit");
         if (option != config().options.end()) {
