@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Sequence
 
 from shipinfer.core.errors import QueueFullError, RequestCancelledError
@@ -51,6 +51,13 @@ class FifoQueue(RequestQueue):
         self._rejected = 0
         self._evicted = 0
         self._expired = 0
+        #: Per-camera attribution, kept even though this queue is fairness-blind: the
+        #: breakdown is how an operator *sees* that it is. A FIFO under DROP_OLDEST charges
+        #: whichever camera happened to be at the head, and that is the reading ADR-005
+        #: wants visible rather than argued about.
+        self._rejected_by_camera: Counter[str] = Counter()
+        self._evicted_by_camera: Counter[str] = Counter()
+        self._expired_by_camera: Counter[str] = Counter()
 
     @property
     def depth(self) -> int:
@@ -61,21 +68,39 @@ class FifoQueue(RequestQueue):
         return self._closed
 
     def stats(self) -> QueueStats:
-        return QueueStats(
-            depth=len(self._items),
-            capacity=self.capacity,
-            accepted=self._accepted,
-            rejected=self._rejected,
-            evicted=self._evicted,
-            expired=self._expired,
-        )
+        """A snapshot under the lock, with every map copied.
+
+        ``depth_by_camera`` is a walk of the deque, O(depth), taken here and not maintained
+        on :meth:`put`/:meth:`get_batch` — same trade as the fair queue: a snapshot an
+        operator reads every few seconds must not cost anything on the path that runs
+        15 000 times a second.
+        """
+        with self._cond:
+            depth_by_camera: Counter[str] = Counter(item.fairness_key for item in self._items)
+            return QueueStats(
+                depth=len(self._items),
+                capacity=self.capacity,
+                accepted=self._accepted,
+                rejected=self._rejected,
+                evicted=self._evicted,
+                expired=self._expired,
+                depth_by_camera=dict(depth_by_camera),
+                rejected_by_camera=dict(self._rejected_by_camera),
+                evicted_by_camera=dict(self._evicted_by_camera),
+                expired_by_camera=dict(self._expired_by_camera),
+            )
 
     def put(self, item: WorkItem) -> None:
         with self._cond:
             if self._closed:
                 raise RequestCancelledError(f"queue {self.name!r} is closed")
             if len(self._items) >= self.capacity and not self._make_room_locked():
+                # A BLOCK producer woken by `close()` is cancelled, not refused — see
+                # `FairPriorityQueue.put` for what charging it instead reported.
+                if self._closed:
+                    raise RequestCancelledError(f"queue {self.name!r} is closed")
                 self._rejected += 1
+                self._rejected_by_camera[item.fairness_key] += 1
                 raise QueueFullError(self.name, len(self._items), self.capacity)
             item.request.timings.queued_ns = item.enqueued_ns
             self._items.append(item)
@@ -95,6 +120,7 @@ class FifoQueue(RequestQueue):
             return not self._closed
         victim = self._items.popleft()
         self._evicted += 1
+        self._evicted_by_camera[victim.fairness_key] += 1
         victim.fail(QueueFullError(self.name, len(self._items) + 1, self.capacity))
         return True
 
@@ -128,6 +154,7 @@ class FifoQueue(RequestQueue):
                 item = self._items.popleft()
                 if self.drop_expired and item.request.is_expired(now):
                     self._expired += 1
+                    self._expired_by_camera[item.fairness_key] += 1
                     item.fail(RequestCancelledError("request deadline passed before execution"))
                     continue
                 batch.append(item)

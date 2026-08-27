@@ -98,8 +98,18 @@ namespace shipinfer {
         uint64_t evicted = 0;
         uint64_t expired = 0;
         size_t peak = 0;
+        // Who paid for each outcome. `depth_by_camera` is built by `stats()` from the lanes
+        // it already holds the lock over; the other three are counted at the drop sites. A
+        // camera missing from a map lost nothing to that outcome — the maps are sparse on
+        // purpose, so a 50-camera server does not report 200 zeroes.
+        //
+        // `close()` deliberately feeds none of them: shutdown loss is not a per-camera fault,
+        // and charging it here would make an orderly stop read like a flood in the one view
+        // an operator uses to find floods.
+        std::map<std::string, uint64_t> depth_by_camera;
         std::map<std::string, uint64_t> rejected_by_camera;
         std::map<std::string, uint64_t> evicted_by_camera;
+        std::map<std::string, uint64_t> expired_by_camera;
 
         double utilisation() const {
             return capacity == 0 ? 0.0

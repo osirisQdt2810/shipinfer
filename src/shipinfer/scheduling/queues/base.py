@@ -10,9 +10,9 @@ that can be A/B'd against plain FIFO rather than a hardcoded assumption.
 from __future__ import annotations
 
 import abc
-from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import ClassVar
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Any, ClassVar
 
 from shipinfer.core.settings import OverflowPolicy
 from shipinfer.scheduling.work import WorkItem
@@ -45,7 +45,22 @@ class BatchWindow:
 
 @dataclass(frozen=True, slots=True)
 class QueueStats:
-    """A snapshot an operator can act on."""
+    """A snapshot an operator can act on.
+
+    The four ``*_by_camera`` maps are the per-camera half of ADR-005. The totals say a
+    queue lost work; only the breakdown says *whose* work, which is the difference between
+    "the server dropped 4 000 frames" and "camera 17 flooded and paid for it". They are
+    keyed by :attr:`~shipinfer.scheduling.work.WorkItem.fairness_key`, so a caller with no
+    camera lands in the honest ``"-"`` bucket rather than inventing a lane of its own.
+
+    Every map is defaulted to empty: a queue that cannot attribute an outcome — a third
+    implementation, a compiled adapter — constructs without them and reports nothing rather
+    than reporting a zero it did not measure.
+
+    ``close()`` deliberately feeds none of these. Shutdown loss is not a per-camera fault
+    and the runner's ``items_queue_closed`` already owns that outcome; charging it here
+    would make a clean stop look like a flood.
+    """
 
     depth: int
     capacity: int
@@ -53,12 +68,22 @@ class QueueStats:
     rejected: int
     evicted: int
     expired: int
+    depth_by_camera: Mapping[str, int] = field(default_factory=dict)
+    rejected_by_camera: Mapping[str, int] = field(default_factory=dict)
+    evicted_by_camera: Mapping[str, int] = field(default_factory=dict)
+    expired_by_camera: Mapping[str, int] = field(default_factory=dict)
 
     @property
     def utilisation(self) -> float:
         return self.depth / self.capacity if self.capacity else 0.0
 
-    def as_dict(self) -> dict[str, int]:
+    def as_dict(self) -> dict[str, Any]:
+        """The wire shape, with the maps copied.
+
+        Copied, not handed out: this dict is what ``/v2/statistics`` serialises and what a
+        health handler nests into its own document, and a caller that trims or re-keys it
+        must not be editing a live queue's counters through the back door.
+        """
         return {
             "depth": self.depth,
             "capacity": self.capacity,
@@ -66,6 +91,10 @@ class QueueStats:
             "rejected": self.rejected,
             "evicted": self.evicted,
             "expired": self.expired,
+            "depth_by_camera": dict(self.depth_by_camera),
+            "rejected_by_camera": dict(self.rejected_by_camera),
+            "evicted_by_camera": dict(self.evicted_by_camera),
+            "expired_by_camera": dict(self.expired_by_camera),
         }
 
 

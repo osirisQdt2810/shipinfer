@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from shipinfer.core.errors import ConfigurationError
+from shipinfer.core.errors import ConfigurationError, QueueFullError
 from shipinfer.core.request import InferenceRequest, RequestContext
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Tensor
@@ -33,6 +33,20 @@ outputs: [{name: y, data_type: FP32, dims: [2]}]
 instance_groups: [{kind: KIND_CPU, count: 1}]
 dynamic_batching: {enabled: false}
 parameters: {latency_ms: 0.05}
+"""
+
+
+#: One instance, batching off, and a backend slow enough to keep its queue full. Every other
+#: server in this file is healthy, so the four per-camera maps are legitimately empty there —
+#: this is the shape that makes a refusal certain rather than a race.
+_SLOW_ECHO = """
+platform: mock
+max_batch_size: 1
+inputs: [{name: x, data_type: FP32, dims: [2]}]
+outputs: [{name: y, data_type: FP32, dims: [2]}]
+instance_groups: [{kind: KIND_CPU, count: 1}]
+dynamic_batching: {enabled: false}
+parameters: {latency_ms: 200}
 """
 
 
@@ -55,12 +69,34 @@ def server(repository: Path):
         yield running
 
 
-def _request() -> InferenceRequest:
+def _request(camera: str = "cam0", frame: int = 1) -> InferenceRequest:
     return InferenceRequest(
         model_name="echo",
         inputs={"x": Tensor.from_numpy(np.zeros((1, 2), dtype=np.float32))},
-        context=RequestContext(camera_id="cam0", frame_id=1),
+        context=RequestContext(camera_id=camera, frame_id=frame),
     )
+
+
+@pytest.fixture()
+def saturated_server(tmp_path: Path):
+    """A server whose one instance can be made to refuse work deterministically.
+
+    `max_batch_size: 1` with batching off means the worker holds exactly one request for
+    200 ms; `max_queue_size: 1` means exactly one more fits; everything after that has
+    nowhere to go and is refused by the queue itself, which is where the per-camera
+    attribution is written.
+    """
+    root = tmp_path / "slow_repo"
+    (root / "echo" / "1").mkdir(parents=True)
+    (root / "echo" / "config.yaml").write_text(_SLOW_ECHO.lstrip())
+    settings = ServerSettings(
+        model_repository=root,
+        devices={"visible_gpus": []},
+        execution={"warmup_iterations": 0},
+        scheduler={"max_queue_size": 1},
+    )
+    with InferenceServer(settings) as running:
+        yield running
 
 
 class TestDurationStat:
@@ -242,6 +278,56 @@ class TestPerModelStatsEndpoint:
 
         assert per_model["inference_count"] == 1
         assert "models" in whole_server  # the server view still exists, unchanged
+
+    def test_the_queues_per_camera_attribution_reaches_the_wire(self, client, server) -> None:
+        """`QueueStats.as_dict()` grew four nested maps; this is the endpoint that serialises
+        them.
+
+        The four totals were plain ints and the response was flat. A `Mapping` field that is
+        not JSON-serialisable, or a live dict mutated while FastAPI walks it, turns
+        `/v2/statistics` into a 500 — and the only place that shows up is here, over a real
+        client, on a real instance's queue.
+        """
+        server.infer_sync(_request(), timeout=10)
+
+        queue = client.get("/v2/statistics").json()["models"][0]["instances"][0]["queue"]
+
+        assert queue["depth_by_camera"] == {}, "nothing is still queued after a sync infer"
+        for key in ("rejected_by_camera", "evicted_by_camera", "expired_by_camera"):
+            assert queue[key] == {}, f"{key} is present and empty on a healthy queue"
+
+    def test_a_populated_map_survives_the_serialisation_too(self, saturated_server) -> None:
+        """The test above cannot tell a working feature from an absent one.
+
+        `{} == {}` holds whether the maps carry a camera name or the queue never attributed
+        anything at all, and an empty dict is exactly what a `Mapping` that failed to
+        populate looks like on the wire. So this one saturates a real instance's queue until
+        it refuses, and reads the refusal back off `/v2/statistics` with the camera still
+        named in it — a non-empty nested map, which is the case that can 500.
+        """
+        pytest.importorskip("fastapi")
+        pytest.importorskip("httpx")
+        from fastapi.testclient import TestClient
+
+        from shipinfer.api import create_app
+
+        pending = []
+        refusals = 0
+        for frame in range(8):
+            try:
+                pending.append(saturated_server.infer(_request("cam_flood", frame)))
+            except QueueFullError:
+                refusals += 1
+        assert refusals, "the one-slot queue never refused; this proves nothing"
+
+        with TestClient(create_app(saturated_server)) as client:
+            body = client.get("/v2/statistics").json()
+
+        queue = body["models"][0]["instances"][0]["queue"]
+        assert queue["rejected_by_camera"] == {"cam_flood": refusals}
+        assert queue["rejected"] == refusals
+        for future in pending:
+            future.result(timeout=10)
 
 
 class TestABatchedRequestIsNotChargedItsOwnWaitTwice:

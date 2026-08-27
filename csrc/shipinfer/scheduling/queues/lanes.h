@@ -7,7 +7,9 @@
 // port.)
 #pragma once
 
+#include <cstdint>
 #include <deque>
+#include <map>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -92,6 +94,18 @@ namespace shipinfer {
                 forget(worst);
             }
             return item;
+        }
+
+        // How many requests each key is holding in this lane, accumulated into a caller's
+        // map so one walk covers all four priority lanes (`scheduling/queues/lanes.py`
+        // returns a fresh dict; the queue sums them the same way). O(keys), and only ever
+        // called from `stats()` — never per frame. A running per-key counter maintained by
+        // `push`/`pop` would put bookkeeping on the hot path to serve a snapshot an operator
+        // reads every few seconds.
+        void add_depths(std::map<std::string, uint64_t>& out) const {
+            for (const auto& entry : by_key_) {
+                out[entry.first] += static_cast<uint64_t>(entry.second.size());
+            }
         }
 
         std::vector<T> drain() {
