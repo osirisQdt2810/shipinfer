@@ -79,3 +79,6 @@ csrc/build/
 # the Stop hook's consecutive-block counter, written beside the ledger
 .claude/.tasks_state.json
 benchmarks/build
+
+# Probe evidence cited by docs/arch.md and ADR-016 is committed on purpose.
+!benchmarks/link/results/**/*.log

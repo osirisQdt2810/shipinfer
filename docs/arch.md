@@ -200,7 +200,10 @@ it, and budget it** rather than to avoid it:
   own context is 243 MiB. So a device is charged once by every peer that opens *its* slabs:
   with symmetric K-neighbourhoods that is `K × 208 MiB` — **≈ 0.6 GB at K = 3**, against
   the `(G−1) × 208 MiB ≈ 3.1 GB` an unbounded 16-GPU mesh would take (ADR-015 feared
-  ~4.8 GB at an assumed 300 MiB).
+  ~4.8 GB at an assumed 300 MiB). The 208 MiB is the cost of the opener having *any*
+  context on the owner's device (mapping + context), measured at K = 1 on one pair;
+  linearity in K is assumed and **must be probed at K = 2, 3 before the start-up refusal
+  is enforced** (phase D).
 - **The budget is enforced at start-up.** Each shard writes its VRAM budget into its
   Health report — `slabs + own_ctx + K × C_ctx + engines ≤ device memory − reserve`, the
   `K × C_ctx` term being what its K openers will cost it — and
@@ -402,10 +405,17 @@ no-GPU/no-gst guarantees throughout (element ABCs and the chain loader are pure)
 
 | Link (pair class) | 12 MB frame | 128 KB crop | Route decision |
 |---|---|---|---|
-| NVLink (0-1, 3-4, 5-6, 2-7) | 261 µs (48 GB/s) | ~30 µs | direct |
-| SYS (cross-NUMA) | 756 µs (16.7 GB/s) | 31 µs | staged (driver) |
-| PXB direct P2P | **98.6 ms (0.1 GB/s)** | **49 ms** | **poison — never direct** |
-| PXB staged via pinned | 996 µs (12.6 GB/s) | 29 µs | staged |
+| NVLink NV4 — **timed** 0-1, 3-4; 5-6 and 2-7 are the same class per `topo -m`, *not timed* | 261 µs (48 GB/s) | 29 µs | direct |
+| SYS (cross-NUMA) — timed 3-5, 4-6 | 753 µs (16.7 GB/s) | 30 µs | staged (driver) |
+| PXB direct P2P — timed 0-3, 1-3, 2-4 | **98.6 ms** | **49.3 ms** | **poison — never direct** |
+| PXB staged via pinned — same pairs | 996 µs (12.6 GB/s) | 29 µs | staged |
+| same device (baseline) | 47 µs (267 GB/s) | 17 µs | — |
+
+The PXB "direct" cells are **a fixed ~49 ms cost per copy, not a bandwidth**: 98.6 ms for
+12 MB against 49.3 ms for 128 KB is a 2× time ratio over a 96× size ratio — the signature
+of a driver fallback to synchronous chunked staging, not of a slow wire. So a *small*
+payload is relatively *worse* on a PXB direct route (1700× the NVLink crop floor), which is
+why the crop column is in the table and why no payload size makes PXB direct acceptable.
 
 `cudaDeviceCanAccessPeer` returns true for *every* pair above, including the poison ones.
 The PXB rows were reproduced on pairs **0-3, 1-3 and 2-4**; the dev trio (GPUs 3,4,5)

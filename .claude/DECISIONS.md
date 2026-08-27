@@ -530,8 +530,9 @@ VRAM must not be staged through RAM to reach another GPU ("gây down performance
 mạnh"); cross-GPU access is permitted, the only criteria being perf and accuracy. And the
 topology caveat is no longer folklore — it was measured on this box (Appendix A of
 `docs/arch.md`): NVLink pairs move a 12 MB frame in 261 µs; a PXB pair moves it in
-**98.6 ms** over direct P2P (three orders of magnitude, reproduced on pairs 0-3, 1-3 and
-2-4; `benchmarks/link/link_probe.py`, in-container) and in 996 µs when staged;
+**98.6 ms** over direct P2P — a fixed ~49 ms per-copy penalty (a 128 KB crop takes
+49.3 ms), i.e. a driver fallback rather than a slow wire, reproduced on pairs 0-3, 1-3 and
+2-4 (`benchmarks/link/link_probe.py`, in-container) — and in 996 µs when staged;
 `cudaDeviceCanAccessPeer` says "yes" to all of them.
 
 **Decision.**
@@ -558,7 +559,10 @@ topology caveat is no longer folklore — it was measured on this box (Appendix 
    `slabs + own_ctx + K × C_ctx + engines ≤ device memory − reserve` — `K × C_ctx` being
    what the shard's K openers cost it — refused before any camera opens if it does not
    hold. At K = 3 the context line is ≈ 0.6 GB per device on a 16-GPU node, against
-   ≈ 3.1 GB for an unbounded mesh (ADR-015 feared 4.8 GB at an assumed 300 MiB).
+   ≈ 3.1 GB for an unbounded mesh (ADR-015 feared 4.8 GB at an assumed 300 MiB). The
+   208 MiB is a whole-context cost (mapping + the context the driver creates on the owner's
+   device) at K = 1; linearity in K is assumed here and is probed at K = 2, 3 before the
+   refusal is enforced.
 4. **Every pair is timed at handshake — this is the topology caveat, made a routine.** One
    12 MB and one 128 KB copy per pair (a few ms, once) fill a route table:
    `direct` (NVLink/PIX-class) or `staged`. "Capable" is never trusted as "fast"; NCCL's
