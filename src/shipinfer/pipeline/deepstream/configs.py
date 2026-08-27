@@ -214,20 +214,24 @@ def pgie_config(
     """
     tensor = _single_image_input(artifact)
     outputs = [io.name for io in artifact.config.outputs]
-    if len(outputs) != 2 and not deepstream.bbox_parser:
-        # Not just the single decoded tensor (#32): a four-output EfficientNMS export
-        # (num_dets/boxes/scores/labels) is every bit as unreadable to nvinfer's built-in
-        # parsers, which expect exactly the two-tensor coverage/bbox layout — anything else
-        # slips into the same runs-and-reports-zero-detections failure (#32 round 7).
+    if not deepstream.bbox_parser and not _is_coverage_bbox_pair(artifact.config.outputs):
+        # Not just the single decoded tensor (#32) or the four-output EfficientNMS quartet
+        # (#32 round 7): the count alone let a two-output yolo-seg-shaped model through
+        # (#42 round 1 — this repository's own ship_segmenter, [300, 38] + [32, 160, 160],
+        # is the counterexample). What nvinfer's built-in parser documents is the DetectNet
+        # layout: a 3-D coverage grid of C class confidences beside a 3-D bbox grid of 4*C
+        # channels on the same spatial extent. Anything else slips into the same
+        # runs-and-reports-zero-detections failure the refusal exists to prevent.
         shapes = ", ".join(f"{io.name}{list(io.dims)}" for io in artifact.config.outputs)
         raise ConfigurationError(
-            f"{artifact.name} emits {len(outputs)} output tensor(s) ({shapes}), which "
-            f"nvinfer's built-in bounding-box parsers cannot read: they expect exactly the "
-            f"two-tensor coverage/bbox layout, not a decoded end-to-end tensor or an "
-            f"EfficientNMS quartet. Set topology.deepstream.bbox_parser (nvinfer's "
-            f"`parse-bbox-func-name`) and custom_lib (`custom-lib-path`) to the function "
-            f"that decodes it — without one the graph runs and reports zero detections on "
-            f"every frame, which looks like a quiet camera"
+            f"{artifact.name} emits output tensor(s) {shapes}, which nvinfer's built-in "
+            f"bounding-box parsers cannot read: they expect the two-tensor DetectNet "
+            f"coverage/bbox layout ([C, gh, gw] beside [4*C, gh, gw]), not a decoded "
+            f"end-to-end tensor, an EfficientNMS quartet, or a segmentation head. Set "
+            f"topology.deepstream.bbox_parser (nvinfer's `parse-bbox-func-name`) and "
+            f"custom_lib (`custom-lib-path`) to the function that decodes it — without one "
+            f"the graph runs and reports zero detections on every frame, which looks like "
+            f"a quiet camera"
         )
     if batch_size < 1:
         raise ConfigurationError(
@@ -495,6 +499,24 @@ def _require_tensorrt(artifact: ModelArtifact) -> None:
             f"TensorRT engine (or an ONNX it builds one from) directly. The `deepstream` "
             f"topology cannot run it; `fleet` and `service` can, through the {artifact.config.platform!r} backend"
         )
+
+
+def _is_coverage_bbox_pair(outputs: Sequence[IOConfig]) -> bool:
+    """Whether two output tensors are the DetectNet coverage/bbox layout, by shape.
+
+    The one layout nvinfer's built-in parser documents: a coverage grid of ``C`` class
+    confidences and a bbox grid of ``4 * C`` channels, both 3-D, on the same spatial
+    extent. A heuristic on purpose — shapes cannot prove semantics — but every shape it
+    rejects is one the built-in parser demonstrably cannot read, and the remedy in the
+    refusal (a custom parser pair) is the same either way (#42 round 1).
+    """
+    if len(outputs) != 2:
+        return False
+    a, b = (list(io.dims) for io in outputs)
+    if len(a) != 3 or len(b) != 3:
+        return False
+    coverage, bbox = (a, b) if a[0] <= b[0] else (b, a)
+    return bbox[0] == 4 * coverage[0] and coverage[1:] == bbox[1:]
 
 
 def _single_image_input(artifact: ModelArtifact) -> IOConfig:
