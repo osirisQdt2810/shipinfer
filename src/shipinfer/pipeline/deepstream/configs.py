@@ -214,16 +214,20 @@ def pgie_config(
     """
     tensor = _single_image_input(artifact)
     outputs = [io.name for io in artifact.config.outputs]
-    if len(outputs) == 1 and not deepstream.bbox_parser:
-        shape = artifact.config.outputs[0].dims
+    if len(outputs) != 2 and not deepstream.bbox_parser:
+        # Not just the single decoded tensor (#32): a four-output EfficientNMS export
+        # (num_dets/boxes/scores/labels) is every bit as unreadable to nvinfer's built-in
+        # parsers, which expect exactly the two-tensor coverage/bbox layout — anything else
+        # slips into the same runs-and-reports-zero-detections failure (#32 round 7).
+        shapes = ", ".join(f"{io.name}{list(io.dims)}" for io in artifact.config.outputs)
         raise ConfigurationError(
-            f"{artifact.name} emits one output tensor {outputs[0]!r} with dims {shape}, which "
-            f"nvinfer's built-in bounding-box parsers cannot read: they expect the "
-            f"two-tensor coverage/bbox layout, not a decoded end-to-end tensor. Set "
-            f"topology.deepstream.bbox_parser (nvinfer's `parse-bbox-func-name`) and "
-            f"custom_lib (`custom-lib-path`) to the function that decodes it — without one "
-            f"the graph runs and reports zero detections on every frame, which looks like a "
-            f"quiet camera"
+            f"{artifact.name} emits {len(outputs)} output tensor(s) ({shapes}), which "
+            f"nvinfer's built-in bounding-box parsers cannot read: they expect exactly the "
+            f"two-tensor coverage/bbox layout, not a decoded end-to-end tensor or an "
+            f"EfficientNMS quartet. Set topology.deepstream.bbox_parser (nvinfer's "
+            f"`parse-bbox-func-name`) and custom_lib (`custom-lib-path`) to the function "
+            f"that decodes it — without one the graph runs and reports zero detections on "
+            f"every frame, which looks like a quiet camera"
         )
     if batch_size < 1:
         raise ConfigurationError(

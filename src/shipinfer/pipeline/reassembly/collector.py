@@ -86,7 +86,7 @@ class FrameResult:
     #: worker then filled it, and the scatter indexed past the end.
     #:
     #: The first fix built the *records* under the lock, which closed the race and opened a
-    #: contention problem: `_as_embedding` is a 2048-float `tolist()` per object, so at
+    #: contention problem: `as_embedding` is a 2048-float `tolist()` per object, so at
     #: ~15 000 objects/s that is ~30M conversions a second serialised inside the one mutex
     #: every worker takes in `open`/`expect`/`deliver`/`seal` — and `sweep()` did the whole
     #: expired list in one hold. Capturing is what has to be locked; building does not.

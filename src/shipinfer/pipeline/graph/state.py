@@ -58,7 +58,7 @@ DETECTIONS = "detections"
 _RELEASED = np.zeros((0, 0, 3), dtype=np.uint8)
 
 
-def _as_embedding(row: np.ndarray) -> tuple[float, ...]:
+def as_embedding(row: np.ndarray) -> tuple[float, ...]:
     """A model row as a tuple of floats — a **copy**, so the source batch can be freed.
 
     `tolist()`, not `float(v) for v in ...`. The generator was a per-element Python loop on
@@ -66,6 +66,11 @@ def _as_embedding(row: np.ndarray) -> tuple[float, ...]:
     ~15 000 objects/s, so ~30 M `float()` calls a second, paid even with the `null` sink.
     `tolist()` does the identical conversion — it yields Python floats, not `np.float32` —
     in one C call. ADR-003 and the ponytail principle: numpy already does this well.
+    And no `.astype(float)` first: `tolist()` on the float32 view already yields Python
+    floats and already copies — the astype was a second, redundant full float64
+    materialisation, ~240 MB/s of pure allocation at the design load (#32 round 7). Public
+    because the DeepStream probe reads the same tensors from NvDs metadata and must convert
+    them the same way (the two-planes rule): ONE helper, not two copies that drift.
     """
     return tuple(np.asarray(row).reshape(-1).tolist())
 
@@ -95,7 +100,7 @@ def _as_str(row: np.ndarray) -> str:
 #: conditionals, so adding a field is an entry here and a field there — and so a typo in a
 #: graph's field map is caught at construction against this table's keys.
 RECORD_CONVERTERS: Mapping[str, Callable[[np.ndarray], Any]] = {
-    "embedding": _as_embedding,
+    "embedding": as_embedding,
     "ship_id": _as_int,
     "similarity": _as_float,
     "mask_area_px": _as_float,

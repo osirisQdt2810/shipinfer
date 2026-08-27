@@ -1331,12 +1331,61 @@ class TestStopIsAFinallyNotAHappyPath:
             State=types.SimpleNamespace(PLAYING=3, NULL=0),
             StateChangeReturn=types.SimpleNamespace(FAILURE="FAILURE"),
         )
-        branch = types.SimpleNamespace(
-            probe_pad=types.SimpleNamespace(add_probe=lambda *_: None), camera_by_pad={}
-        )
+        probe_calls: list = []
+
+        class FakePad:
+            def add_probe(self, *_args):
+                probe_calls.append(("add", 7))
+                return 7
+
+            def remove_probe(self, probe_id):
+                probe_calls.append(("remove", probe_id))
+
+        branch = types.SimpleNamespace(probe_pad=FakePad(), camera_by_pad={})
         monkeypatch.setattr(run_module, "load_pyds", lambda: (fake_gst, None, object()))
         monkeypatch.setattr(run_module, "build_branch", lambda *a, **k: branch)
-        return transitions
+        return transitions, probe_calls
+
+    def test_stop_removes_the_probe_before_the_sink_closes(
+        self, tmp_path: Path, monkeypatch, repository: ModelRepository
+    ) -> None:
+        """#32 round 7 (T4-NB3): a buffer in flight after NULL raised inside emit against
+        the closed sink, was caught by on_buffer's safety net, and was counted as a BUILD
+        failure — misattributed. The probe comes off first now, and the order is the test."""
+        from shipinfer.pipeline.deepstream.run import DeepStreamPipeline
+
+        _transitions, probe_calls = self._fakes(monkeypatch)
+        out = tmp_path / "events.jsonl"
+        settings = ServerSettings(
+            model_repository=repository.root,
+            ingest={"cameras": CAMERAS},
+            pipeline={
+                "result_sink": "jsonlines",
+                "result_sink_options": {"path": str(out)},
+            },
+            topology={"kind": "deepstream", "deepstream": dict(PARSER)},
+        )
+        pipeline = DeepStreamPipeline(settings, config_root=tmp_path / "cfg")
+        pipeline.start()
+        assert ("add", 7) in probe_calls, "the probe went on at start"
+        inner = pipeline._sink
+        assert inner is not None
+
+        class CloseRecorder:
+            def emit(self, event):
+                return inner.emit(event)
+
+            def close(self):
+                probe_calls.append(("sink-close",))
+                inner.close()
+
+        pipeline._sink = CloseRecorder()
+        pipeline.stop()
+        assert ("remove", 7) in probe_calls, "the probe came off at stop"
+        assert probe_calls.index(("remove", 7)) < probe_calls.index(("sink-close",)), (
+            "the probe must be gone before the sink closes — the other order is the "
+            "misattributed build_failures lie"
+        )
 
     def test_a_failed_playing_transition_still_nulls_the_graph_and_closes_the_sink(
         self, tmp_path: Path, monkeypatch, repository: ModelRepository
@@ -1346,7 +1395,7 @@ class TestStopIsAFinallyNotAHappyPath:
         start — NULL runs, the sink WE built closes."""
         from shipinfer.pipeline.deepstream.run import DeepStreamPipeline
 
-        transitions = self._fakes(monkeypatch, playing_result="fail")
+        transitions, _probe_calls = self._fakes(monkeypatch, playing_result="fail")
         out = tmp_path / "events.jsonl"
         settings = ServerSettings(
             model_repository=tmp_path / "model_repository",
@@ -1508,6 +1557,54 @@ class FakePipeline:
 
     def add(self, element) -> None:
         self.added.append(element)
+
+
+class TestTheRoundSevenFollowUps:
+    """#32 round 7's non-blocking trio, taken as one PR."""
+
+    def test_a_four_output_end_to_end_export_is_refused_without_a_parser(
+        self, repository: ModelRepository, tmp_path: Path
+    ) -> None:
+        """T4-NB1: an EfficientNMS quartet (num_dets/boxes/scores/labels) is as unreadable
+        to nvinfer's built-in parsers as the single decoded tensor — only exactly the
+        two-tensor coverage/bbox layout passes parserless."""
+        config_path = repository.root / "ship_detector" / "config.yaml"
+        text = config_path.read_text()
+        single = """  - name: output0
+    data_type: FP32
+    dims: [300, 6]
+"""
+        quartet = """  - name: num_dets
+    data_type: FP32
+    dims: [1]
+  - name: boxes
+    data_type: FP32
+    dims: [100, 4]
+  - name: scores
+    data_type: FP32
+    dims: [100]
+  - name: labels
+    data_type: FP32
+    dims: [100]
+"""
+        assert single in text, "the fixture edit must take"
+        config_path.write_text(text.replace(single, quartet, 1))
+        reloaded = ModelRepository.load(repository.root)
+        with pytest.raises(ConfigurationError, match=r"EfficientNMS quartet|cannot read"):
+            generate(reloaded, tmp_path, bbox_parser="", custom_lib="")
+
+    def test_the_probe_and_the_python_plane_share_one_embedding_conversion(self) -> None:
+        """T4-NB2: `tolist()` on the float32 view already yields Python floats and already
+        copies; the probe's old `.astype(float)` was a second, redundant float64
+        materialisation on the streaming thread. One helper now — imported, not copied."""
+        from shipinfer.pipeline.deepstream import probe as probe_module
+        from shipinfer.pipeline.graph import state as state_module
+
+        assert probe_module.as_embedding is state_module.as_embedding
+        row = np.arange(8, dtype=np.float32)
+        converted = state_module.as_embedding(row)
+        assert converted == tuple(float(v) for v in row)
+        assert all(type(v) is float for v in converted)
 
 
 class TestBuildBranchOffline:

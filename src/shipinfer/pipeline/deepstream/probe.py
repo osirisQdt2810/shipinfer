@@ -37,6 +37,7 @@ from typing import Any
 import numpy as np
 
 from shipinfer.pipeline.graph.detections import UNKNOWN_LABEL
+from shipinfer.pipeline.graph.state import as_embedding
 from shipinfer.pipeline.schema import ObjectRecord, PerceptionEvent
 
 __all__ = [
@@ -257,7 +258,11 @@ def _first_output_layer(pyds: Any, tensor_meta: Any) -> tuple[float, ...] | None
         # `astype` copies, and the copy is the point: the buffer belongs to the graph and is
         # recycled the moment this probe returns, so a view into it would be re-filled by the
         # next batch while the event was still being serialised.
-        return tuple(np.ctypeslib.as_array(pointer, shape=(count,)).astype(float).tolist())
+        # One shared conversion with the Python plane (graph/state.py): tolist() on the
+        # float32 view already yields Python floats and already copies; the astype(float)
+        # this used to do was a redundant float64 materialisation on the streaming thread,
+        # ~240 MB/s at the design load (#32 round 7).
+        return as_embedding(np.ctypeslib.as_array(pointer, shape=(count,)))
     return None
 
 
