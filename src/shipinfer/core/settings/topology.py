@@ -164,6 +164,17 @@ class DeepStreamSettings(BaseModel):
                 f"operate_on names {unknown}, which is not in secondaries {self.secondaries}: "
                 "a class filter for a GIE that does not run configures nothing"
             )
+        unfiltered = sorted(set(self.secondaries) - set(self.operate_on))
+        if unfiltered:
+            # nvinfer runs an UNFILTERED secondary on every class, so an object would carry
+            # two embeddings and the probe publishes whichever tensor comes first in the
+            # user-meta list — a person with a ship's embedding, at full confidence, on
+            # every frame (#32 round 1 reproduced it). Claiming labels is not optional.
+            raise ValueError(
+                f"secondaries {unfiltered} have no operate_on entry: an unfiltered GIE runs "
+                "on every class and its embedding silently displaces the right one. Name the "
+                "labels each secondary operates on"
+            )
         return self
 
     @model_validator(mode="after")

@@ -1041,3 +1041,65 @@ class TestTheShardsProcess:
 
         assert configs.root == (tmp_path / "run" / "shard1").resolve()
         assert read(configs.pgie)["property"]["gpu-id"] == "0"
+
+
+class TestDryRunTouchesNoSink:
+    def test_a_dry_construction_leaves_a_live_results_file_byte_identical(
+        self, tmp_path: Path
+    ) -> None:
+        """#32 round 1, reproduced by the review: constructing the pipeline for --dry-run
+        built the configured sink, and jsonlines truncates its file in __init__ — a dry run
+        on the box that is also collecting results destroyed them. The sink is lazy now:
+        construction touches nothing; only start() builds it."""
+        from shipinfer.pipeline.deepstream.run import DeepStreamPipeline
+
+        live = tmp_path / "live-results.jsonl"
+        live.write_text("PRE-EXISTING LIVE DATA\n")
+        settings = ServerSettings(
+            model_repository=Path("model_repository"),
+            ingest={"cameras": CAMERAS},
+            pipeline={
+                "result_sink": "jsonlines",
+                "result_sink_options": {"path": str(live), "append": False},
+            },
+            topology={"kind": "deepstream", "deepstream": dict(PARSER)},
+        )
+        pipeline = DeepStreamPipeline(settings, config_root=tmp_path / "cfg")
+        assert live.read_text() == "PRE-EXISTING LIVE DATA\n", "a dry construction wrote"
+        pipeline.stop()  # idempotent, and must not build a sink just to close it
+        assert live.read_text() == "PRE-EXISTING LIVE DATA\n"
+
+
+class TestEverySecondaryClaimsItsLabels:
+    def test_the_settings_refuse_an_unfiltered_secondary(self) -> None:
+        """#32 round 1: a secondary absent from operate_on ran on EVERY class, and the
+        probe published whichever tensor came first — a person with a ship's embedding."""
+        from shipinfer.core.settings.topology import DeepStreamSettings
+
+        with pytest.raises(ValueError, match="no operate_on entry"):
+            DeepStreamSettings(operate_on={"person_embedder": ["person"]})
+
+    def test_write_configs_refuses_a_hand_built_unfiltered_secondary(
+        self, repository: ModelRepository, tmp_path: Path
+    ) -> None:
+        """Defense in depth for a settings object built past validation: config generation
+        itself refuses the claim-all secondary, naming the knob and the known labels."""
+        from shipinfer.core.settings.topology import DeepStreamSettings
+        from shipinfer.pipeline.deepstream import write_configs
+
+        settings = settings_for()
+        settings.topology.deepstream = DeepStreamSettings.model_construct(
+            **{
+                **settings.topology.deepstream.model_dump(),
+                "operate_on": {"person_embedder": ["person"]},
+            }
+        )
+        with pytest.raises(ConfigurationError, match="no operate_on labels"):
+            write_configs(
+                repository,
+                settings=settings,
+                shard_index=0,
+                gpu_id=0,
+                cameras=settings.ingest.cameras,
+                root=tmp_path,
+            )

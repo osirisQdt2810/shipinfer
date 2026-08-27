@@ -235,9 +235,13 @@ class DeepStreamPipeline:
             )
         )
         self._metrics = PipelineMetrics()
-        self._sink = sink or RESULT_SINKS.create(
-            settings.pipeline.result_sink, **settings.pipeline.result_sink_options
-        )
+        # The sink is built at start(), never here: both shipped sinks side-effect in
+        # __init__ (jsonlines truncates/opens its file, kafka builds a Producer), and this
+        # object is also constructed on control boxes for --dry-run, whose contract is
+        # "reads a repository and writes text" (#32 round 1 reproduced a dry run truncating
+        # a live results file).
+        self._injected_sink = sink
+        self._sink: ResultSink | None = None
         self._gst: Any = None
         self._glib: Any = None
         self._pyds: Any = None
@@ -289,6 +293,14 @@ class DeepStreamPipeline:
         )
 
     # -- lifecycle -----------------------------------------------------------------------
+
+    def _ensure_sink(self) -> ResultSink:
+        if self._sink is None:
+            self._sink = self._injected_sink or RESULT_SINKS.create(
+                self._settings.pipeline.result_sink,
+                **self._settings.pipeline.result_sink_options,
+            )
+        return self._sink
 
     def start(self) -> None:
         """Generate the configs, build the graph, and put it into PLAYING."""
@@ -379,7 +391,11 @@ class DeepStreamPipeline:
         if self._pipeline is not None and self._gst is not None:
             self._pipeline.set_state(self._gst.State.NULL)
             self._pipeline = None
-        self._sink.close()
+        # Only a sink that was ever built gets closed, and only once: a dry construction
+        # never builds one, and stop() advertises idempotency.
+        sink, self._sink = self._sink, None
+        if sink is not None:
+            sink.close()
 
     # -- the bus -------------------------------------------------------------------------
 

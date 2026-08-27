@@ -495,6 +495,17 @@ def _class_ids_for(
     object ends up carrying would depend on GIE order — a wrong embedding that looks like a
     right one.
     """
+    if not labels:
+        # nvinfer runs an UNFILTERED secondary on every class, so an empty entry is a claim
+        # on all of them. The settings validator refuses this before it ever reaches here;
+        # this refusal covers a hand-built settings object handed straight to
+        # `write_configs` (#32 round 1: an unfiltered secondary displaced the right
+        # embedding with whichever tensor came first in the user-meta list).
+        raise ConfigurationError(
+            f"secondary {model!r} has no operate_on labels: an unfiltered GIE runs on every "
+            f"class, and its output tensor silently displaces another secondary's on shared "
+            f"objects. Name the labels it operates on (known: {sorted(by_label)})"
+        )
     ids: list[int] = []
     for label in labels:
         if label not in by_label:
