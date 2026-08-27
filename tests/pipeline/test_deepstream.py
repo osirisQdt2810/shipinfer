@@ -1618,7 +1618,103 @@ class TestTheRoundSevenFollowUps:
         config_path.write_text(text.replace(single, pair, 1))
         reloaded = ModelRepository.load(repository.root)
         configs = generate(reloaded, tmp_path, bbox_parser="", custom_lib="")
-        assert configs is not None, "the DetectNet pair is the parserless layout"
+        pgie = configs.pgie.read_text()
+        assert "output-blob-names=output_cov;output_bbox" in pgie
+        assert "parse-bbox-func-name" not in pgie, "parserless is the point"
+        assert "cluster-mode=2" in pgie, (
+            "raw DetectNet grids must be clustered — unclustered, every object publishes "
+            "as hundreds of overlapping boxes (#43 round 1)"
+        )
+        assert "nms-iou-threshold=0.5" in pgie, (
+            "the mode's own parameter travels beside it — NVIDIA's sample values for the "
+            "same architecture (#44 round 1: a mode without its parameters degenerates)"
+        )
+
+    def test_a_correctly_shaped_pair_with_foreign_names_is_refused(
+        self, repository: ModelRepository, tmp_path: Path
+    ) -> None:
+        """#43 round 1: nvinfer locates the pair by strstr on "cov"/"bbox", not by shape or
+        position — a conf/boxes pair with perfect DetectNet dims would generate parserless
+        and then die at start-up with "Could not find output coverage layer". The gate asks
+        the name question too."""
+        config_path = repository.root / "ship_detector" / "config.yaml"
+        text = config_path.read_text()
+        single = """  - name: output0
+    data_type: FP32
+    dims: [300, 6]
+"""
+        foreign = """  - name: conf
+    data_type: FP32
+    dims: [2, 40, 40]
+  - name: boxes
+    data_type: FP32
+    dims: [8, 40, 40]
+"""
+        assert single in text, "the fixture edit must take"
+        config_path.write_text(text.replace(single, foreign, 1))
+        reloaded = ModelRepository.load(repository.root)
+        with pytest.raises(ConfigurationError, match=r"cannot read"):
+            generate(reloaded, tmp_path, bbox_parser="", custom_lib="")
+
+    def test_the_end_to_end_path_keeps_cluster_mode_none(
+        self, repository: ModelRepository, tmp_path: Path
+    ) -> None:
+        """The other half of the cluster-mode rule: decoded boxes must NOT be re-clustered —
+        a second NMS would merge boxes the engine already decided to keep — and the NMS
+        parameter must not ride along either."""
+        pgie = generate(repository, tmp_path).pgie.read_text()
+        assert "cluster-mode=4" in pgie
+        assert "nms-iou-threshold" not in pgie
+
+    def test_a_swapped_role_pair_is_refused(
+        self, repository: ModelRepository, tmp_path: Path
+    ) -> None:
+        """#44 round 1: output_bbox[2,40,40] + output_cov[8,40,40] passed the merged gate
+        (the name probe and the channel-count sort never met) — on the host nvinfer binds
+        coverage to output_cov (8 channels = 8 classes) and indexes 4*8 channels out of the
+        2-channel bbox tensor. Roles resolve by name now, shapes check the resolved pair."""
+        config_path = repository.root / "ship_detector" / "config.yaml"
+        text = config_path.read_text()
+        single = """  - name: output0
+    data_type: FP32
+    dims: [300, 6]
+"""
+        swapped = """  - name: output_bbox
+    data_type: FP32
+    dims: [2, 40, 40]
+  - name: output_cov
+    data_type: FP32
+    dims: [8, 40, 40]
+"""
+        assert single in text, "the fixture edit must take"
+        config_path.write_text(text.replace(single, swapped, 1))
+        reloaded = ModelRepository.load(repository.root)
+        with pytest.raises(ConfigurationError, match=r"cannot read"):
+            generate(reloaded, tmp_path, bbox_parser="", custom_lib="")
+
+    def test_one_layer_matching_both_probes_is_refused(
+        self, repository: ModelRepository, tmp_path: Path
+    ) -> None:
+        """#44 round 1's second false-accept: cov_bbox[2,40,40] + junk[8,40,40] — one name
+        satisfies both strstr probes while the sibling binds to nothing."""
+        config_path = repository.root / "ship_detector" / "config.yaml"
+        text = config_path.read_text()
+        single = """  - name: output0
+    data_type: FP32
+    dims: [300, 6]
+"""
+        aliased = """  - name: cov_bbox
+    data_type: FP32
+    dims: [2, 40, 40]
+  - name: junk
+    data_type: FP32
+    dims: [8, 40, 40]
+"""
+        assert single in text, "the fixture edit must take"
+        config_path.write_text(text.replace(single, aliased, 1))
+        reloaded = ModelRepository.load(repository.root)
+        with pytest.raises(ConfigurationError, match=r"cannot read"):
+            generate(reloaded, tmp_path, bbox_parser="", custom_lib="")
 
     def test_a_two_output_segmentation_head_is_still_refused_without_a_parser(
         self, repository: ModelRepository, tmp_path: Path

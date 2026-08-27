@@ -66,8 +66,16 @@ _MODEL_COLOR_FORMAT_RGB = 0
 
 #: ``cluster-mode=4`` is "no clustering". The shipped detector is end-to-end — yolo26 emits
 #: decoded boxes with NMS already applied — so a second round of clustering here would merge
-#: boxes the engine already decided to keep.
+#: boxes the engine already decided to keep. The DetectNet coverage/bbox path is the
+#: opposite: the grid emits raw per-cell boxes, and publishing them unclustered is hundreds
+#: of overlapping boxes per object. That path clusters the way NVIDIA's own sample for the
+#: same architecture does — ``cluster-mode=2`` (NMS) with ``nms-iou-threshold=0.5``
+#: (deepstream_python_apps, ``dstest1_pgie_config.txt``, the DetectNet_v2 TrafficCamNet
+#: primary), chosen over DBSCAN because a mode is only as good as the parameters shipped
+#: beside it and DBSCAN's ``eps``/``minBoxes`` default to 0 when omitted (#44 round 1).
 _CLUSTER_MODE_NONE = 4
+_CLUSTER_MODE_NMS = 2
+_NMS_IOU_THRESHOLD = 0.5
 
 #: What ``nvurisrcbin`` is asked to open. Two schemes on purpose: a fleet is RTSP cameras, and
 #: a file is how a fixture replays one. Adding a third (``http``) is one entry here plus a test.
@@ -202,15 +210,20 @@ def pgie_config(
     Two keys are opinions rather than translations. ``maintain-aspect-ratio=1`` with
     ``symmetric-padding=1`` is the letterbox this project's own preprocessing does
     (``ImageOps.letterbox``, centre-padded), so the detector sees the geometry it was built for
-    and nvinfer scales its boxes back to the muxed frame itself. ``cluster-mode=4`` is no
-    clustering, because the shipped detector already applied NMS in the engine.
+    and nvinfer scales its boxes back to the muxed frame itself. ``cluster-mode`` follows the
+    layout: 4 (none) for decoded end-to-end or custom-parsed outputs, NMS with its
+    ``nms-iou-threshold`` for the raw DetectNet coverage/bbox grid — NVIDIA's own sample
+    values for the same architecture — whose per-cell boxes must be clustered or every
+    object publishes as hundreds of overlapping rectangles.
 
     Raises:
         ConfigurationError: the model is not a TensorRT model, does not have exactly one 3-D
-            FP32 input, or emits a single output tensor with no bounding-box parser configured
-            to read it. That last one is the refusal that matters: nvinfer's built-in parsers
-            cannot decode a ``(300, 6)`` end-to-end output, and without ``parse-bbox-func-name``
-            a shard starts, runs, and reports zero detections on every frame.
+            FP32 input, or emits outputs that are not the named DetectNet coverage/bbox pair
+            while no bounding-box parser is configured to read them. That last one is the
+            refusal that matters: nvinfer's built-in parsers cannot decode a ``(300, 6)``
+            end-to-end tensor, an EfficientNMS quartet or a segmentation head, and without
+            ``parse-bbox-func-name`` a shard starts, runs, and reports zero detections on
+            every frame.
     """
     tensor = _single_image_input(artifact)
     outputs = [io.name for io in artifact.config.outputs]
@@ -279,7 +292,10 @@ def pgie_config(
         f"output-blob-names={';'.join(outputs)}",
         "maintain-aspect-ratio=1",
         "symmetric-padding=1",
-        f"cluster-mode={_CLUSTER_MODE_NONE}",
+        # Decoded boxes must not be re-clustered; raw DetectNet grids must be. The guard
+        # above already refused every parserless non-pair, so by here "no parser" IS "the
+        # DetectNet pair" — the third case cannot occur (#44 round 1).
+        f"cluster-mode={_CLUSTER_MODE_NONE if deepstream.bbox_parser else _CLUSTER_MODE_NMS}",
     ]
     if bool(deepstream.bbox_parser) != bool(deepstream.custom_lib):
         # Belt and braces beside the settings validator (the unfiltered-secondary
@@ -300,6 +316,10 @@ def pgie_config(
         f"pre-cluster-threshold={pipeline.score_threshold}",
         f"topk={pipeline.max_detections}",
     ]
+    if not deepstream.bbox_parser:
+        # The NMS mode's own parameter, beside it (#44 round 1: a mode without its
+        # parameters is the two-descriptions drift this module's preamble warns about).
+        lines.append(f"nms-iou-threshold={_NMS_IOU_THRESHOLD}")
     return "\n".join(lines) + "\n"
 
 
@@ -502,7 +522,7 @@ def _require_tensorrt(artifact: ModelArtifact) -> None:
 
 
 def _is_coverage_bbox_pair(outputs: Sequence[IOConfig]) -> bool:
-    """Whether two output tensors are the DetectNet coverage/bbox layout, by shape.
+    """Whether two outputs are the DetectNet coverage/bbox layout, by name and shape.
 
     The one layout nvinfer's built-in parser documents: a coverage grid of ``C`` class
     confidences and a bbox grid of ``4 * C`` channels, both 3-D, on the same spatial
@@ -512,11 +532,20 @@ def _is_coverage_bbox_pair(outputs: Sequence[IOConfig]) -> bool:
     """
     if len(outputs) != 2:
         return False
-    a, b = (list(io.dims) for io in outputs)
-    if len(a) != 3 or len(b) != 3:
+    # The roles are resolved BY NAME, the way nvinfer's DetectPostprocessor does it —
+    # strstr(layerName, "cov") / strstr(layerName, "bbox") — and only then are the shapes
+    # checked on the RESOLVED pair (#44 round 1: probing the names and sorting by channel
+    # count independently false-accepted a swapped-role pair, whose parse indexes 4*C
+    # channels out of the C-channel tensor, and a cov_bbox layer that satisfied both
+    # probes at once while its sibling bound to nothing).
+    cov = next((io for io in outputs if "cov" in io.name), None)
+    box = next((io for io in outputs if "bbox" in io.name), None)
+    if cov is None or box is None or cov is box:
         return False
-    coverage, bbox = (a, b) if a[0] <= b[0] else (b, a)
-    return bbox[0] == 4 * coverage[0] and coverage[1:] == bbox[1:]
+    c, b = list(cov.dims), list(box.dims)
+    if len(c) != 3 or len(b) != 3:
+        return False
+    return b[0] == 4 * c[0] and c[1:] == b[1:]
 
 
 def _single_image_input(artifact: ModelArtifact) -> IOConfig:
