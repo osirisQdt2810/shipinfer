@@ -17,7 +17,7 @@ import pytest
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "shipinfer"
 
-PURE_LAYERS = ("core", "scheduling", "repository")
+PURE_LAYERS = ("core", "scheduling", "repository", "topology")
 FORBIDDEN_IN_PURE = {"torch", "tensorrt", "onnxruntime", "cuda", "cv2", "fastapi", "uvicorn"}
 
 
@@ -68,6 +68,24 @@ class TestImportsGoOneWay:
                     offenders.append(f"{path.relative_to(SRC)} imports {module}")
         assert not offenders, "scheduling may only import core:\n" + "\n".join(offenders)
 
+    def test_topology_only_imports_core(self) -> None:
+        """The chain sits directly on ``core``, and that is what makes it loadable anywhere.
+
+        Not on ``scheduling`` and not on the engine: everything an element needs from the
+        surrounding runner arrives through the ``ElementContext`` handed to ``open()``
+        (arch.md §1). The inversion is the reason a chain file can be validated on a laptop —
+        ``Topology.from_spec`` instantiates every element to read its caps.
+        """
+        allowed = {"shipinfer.core", "shipinfer.topology"}
+        offenders: list[str] = []
+        for path in (SRC / "topology").rglob("*.py"):
+            for module in _modules_imported_by(path):
+                if module.startswith("shipinfer.") and not any(
+                    module.startswith(prefix) for prefix in allowed
+                ):
+                    offenders.append(f"{path.relative_to(SRC)} imports {module}")
+        assert not offenders, "topology may only import core:\n" + "\n".join(offenders)
+
 
 class TestEnforcementAgrees:
     """The pre-commit hook and this suite check the same rule, so neither can drift alone."""
@@ -92,6 +110,26 @@ class TestImportIsCheap:
             "import sys, shipinfer; "
             "assert 'tensorrt' not in sys.modules; "
             "assert 'shipinfer.server' not in sys.modules, sorted(m for m in sys.modules if m.startswith('shipinfer'))"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_importing_topology_pulls_in_no_accelerator(self) -> None:
+        """``import shipinfer.topology`` must load no accelerator, no decoder, no server.
+
+        A *runtime* check next to the static one above, and it is the load-bearing half. The
+        static rule ("topology imports only core") is a rule about module scope, and the
+        element implementations that arrive in later phases will legitimately need
+        GStreamer, TensorRT and the engine — inside ``_do_open``. This test is what keeps
+        that promise honest when the day comes to relax the static rule: importing the
+        package, and therefore every registered element class, still costs nothing.
+        """
+        code = (
+            "import sys, shipinfer.topology as t; "
+            "assert t.ELEMENTS, 'nothing registered'; "
+            "heavy = [m for m in ('torch', 'tensorrt', 'cv2', 'gi', 'shipinfer.server', "
+            "'shipinfer.runtime', 'shipinfer.scheduling') if m in sys.modules]; "
+            "assert not heavy, heavy"
         )
         result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
         assert result.returncode == 0, result.stdout + result.stderr
