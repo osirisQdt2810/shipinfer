@@ -20,6 +20,7 @@ gives two same-named modules in non-package directories the same module name.
 
 from __future__ import annotations
 
+import sys
 import textwrap
 import types
 from pathlib import Path
@@ -55,7 +56,7 @@ from shipinfer.topology import (
     load_topology,
     registry_for,
 )
-from shipinfer.topology.elements.mock import MockDetect
+from shipinfer.topology.elements.mock import MockDetect, MockOutput
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -229,6 +230,69 @@ class TestRegistries:
         assert element.kind is ElementKind.OUTPUT
         assert element.impl == "mock-lazy-output", "no decorator ran, so the factory sets it"
 
+    def test_one_class_under_two_lazy_names_is_refused_at_creation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``impl`` is a class attribute, so a second name renames the first's instances.
+
+        The eager decorator writes ``impl`` once per class, but a lazy entry has nothing to
+        write on until ``create_element`` builds it -- and two lazy names pointing at one
+        class would have that factory rewrite the attribute under every element already
+        built, some time after start-up. An element would then report an implementation the
+        chain never asked for, in its logs and its metrics. Refused at the second creation
+        instead, where the message can name both registrations.
+        """
+        module = types.ModuleType("shipinfer_test_two_lazy_names")
+
+        class DoubleRegistered(Element):
+            kind = ElementKind.OUTPUT
+            accepts = ("*@*",)
+
+            def _do_open(self, context: ElementContext) -> None: ...
+
+            def _do_process(self, item: ChainItem) -> ChainItem | None: ...
+
+        module.Sink = DoubleRegistered  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+        registry = registry_for(ElementKind.OUTPUT)
+        for name in ("mock-lazy-twice-a", "mock-lazy-twice-b"):
+            registry.register_lazy(
+                name, f"{module.__name__}:Sink", description="one class, two names"
+            )
+
+        first = create_element(ElementKind.OUTPUT, "mock-lazy-twice-a", "output")
+
+        with pytest.raises(ConfigurationError, match="two implementation names"):
+            create_element(ElementKind.OUTPUT, "mock-lazy-twice-b", "output")
+        assert first.impl == "mock-lazy-twice-a", "the built element keeps its own name"
+
+    def test_a_subclass_may_carry_its_own_lazy_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The false positive the rule above must not have: ``impl`` is inherited.
+
+        A subclass of a registered element is ordinary -- ``nvinfer`` deriving from the
+        ``pool`` detector -- and it inherits the base's ``impl``. Refusing on the *inherited*
+        value would refuse every such subclass, so the check reads the class's own
+        attribute.
+        """
+        module = types.ModuleType("shipinfer_test_subclass_lazy_name")
+
+        class Derived(MockOutput):
+            """A sink that is a subclass of an eagerly registered one."""
+
+        module.Sink = Derived  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+        registry = registry_for(ElementKind.OUTPUT)
+        registry.register_lazy(
+            "mock-lazy-derived", f"{module.__name__}:Sink", description="a subclass"
+        )
+
+        element = create_element(ElementKind.OUTPUT, "mock-lazy-derived", "output")
+
+        assert element.impl == "mock-lazy-derived"
+        assert MockOutput.impl == "mock", "the base's own name must not be rewritten"
+
 
 class TestLoadingAValidChain:
     def test_the_mock_chain_loads_and_is_ordered(self) -> None:
@@ -321,6 +385,24 @@ class TestLoadingAValidChain:
         assert "decode -> detect [nv12@gpu]" in described
         assert "when=class == ship" in described
         assert "model=ship_detector" in described
+
+    def test_the_element_is_told_which_model_it_runs(self) -> None:
+        """``model:`` reaches the element, not only the node's spec beside it.
+
+        A ``pool`` element resolves that name against ``ElementContext.models`` at ``open``;
+        it holds no reference to the node, so a name it is never handed is a name it cannot
+        resolve. ``None`` for the four kinds that have no model, which is a kind's property
+        and not a missing value -- the loader has already refused a model kind that names
+        none.
+        """
+        chain = load(MOCK_CHAIN)
+
+        assert chain.node("detect").element.model == "ship_detector"
+        assert chain.node("embed_ship").element.model == "ship_embedder"
+        assert chain.node("embed_person").element.model == "person_embedder"
+        assert chain.node("decode").element.model is None
+        assert chain.node("track").element.model is None
+        assert chain.node("output").element.model is None
 
     def test_the_runner_can_still_read_what_the_file_said(self) -> None:
         """``per``/``scope``/``params`` are the runner's business, so the spec is kept."""
@@ -431,6 +513,23 @@ class TestRefusals:
             load("""
                 elements:
                   decode: {impl: mock-any}
+                  output: {impl: mock}
+                """)
+
+    def test_a_conditional_root_is_refused(self) -> None:
+        """A ``when:`` on a root can never be true, so the chain would ingest nothing.
+
+        Everything a condition can read is metadata an element wrote, and at ingest the
+        metadata is empty; ``Condition.matches`` is false for a missing field, because
+        absence is not evidence. So the decoder would be skipped for every frame of every
+        camera while every process looked healthy -- exactly the silent failure the loader
+        exists to refuse at start-up.
+        """
+        with pytest.raises(ChainStructureError, match="carries `when: class == ship`"):
+            load("""
+                elements:
+                  decode: {impl: mock, when: class == ship}
+                  detect: {impl: mock, model: d}
                   output: {impl: mock}
                 """)
 

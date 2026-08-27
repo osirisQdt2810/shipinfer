@@ -382,9 +382,9 @@ class Topology:
             ChainSpecError: the chain declares no elements.
             UnknownElementKindError: a slot, or an explicit ``kind:``, names no kind.
             ChainStructureError: a model kind with no ``model:``, a root that is not a
-                decode element or does not say what it produces, no output element, an
-                output element with a successor, a branch that reaches no output, or a
-                wildcard ``produces`` whose inbound edges disagree.
+                decode element, does not say what it produces or carries a ``when:``, no
+                output element, an output element with a successor, a branch that reaches no
+                output, or a wildcard ``produces`` whose inbound edges disagree.
             UnknownElementImplError: an ``impl:`` nobody registered.
             ConfigurationError: a registered class whose kind is not its registry's.
             UnknownElementError: an ``after:`` naming an element that is not declared.
@@ -416,16 +416,15 @@ class Topology:
                 )
 
         elements = {
-            slot: create_element(kinds[slot], declared.impl, slot, declared.params)
+            slot: create_element(
+                kinds[slot], declared.impl, slot, declared.params, model=declared.model
+            )
             for slot, declared in spec.elements.items()
         }
 
         inputs = _resolve_predecessors(spec)
         order = _topological_order(inputs)
-        outputs: dict[str, list[str]] = {slot: [] for slot in spec.elements}
-        for consumer, producers in inputs.items():
-            for producer in producers:
-                outputs[producer].append(consumer)
+        outputs = _consumers(inputs)
 
         nodes = [
             ElementNode(
@@ -683,9 +682,10 @@ def _check_structure(nodes: Sequence[ElementNode]) -> None:
     2. a root needs no input caps, because nothing precedes it;
     3. a root **states** what it produces — no wildcard half, since there is no inbound edge
        to resolve one from (:func:`_resolve_produced` is the other half of that rule);
-    4. the chain has at least one ``output`` element;
-    5. every ``output`` element is a sink;
-    6. every element reaches an ``output``.
+    4. a root carries no ``when:``, because there is no metadata for one to read yet;
+    5. the chain has at least one ``output`` element;
+    6. every ``output`` element is a sink;
+    7. every element reaches an ``output``.
 
     No "the chain has no root" rule: it cannot happen. This runs after
     :func:`_topological_order`, and a non-empty finite DAG always has a node of in-degree
@@ -710,6 +710,18 @@ def _check_structure(nodes: Sequence[ElementNode]) -> None:
                 f"{[str(cap) for cap in root.element.output_caps]}, but a root has no "
                 "inbound edge to resolve a `*` from; a root must say what it produces "
                 "(for example `nv12@gpu`), or every cap downstream of it is unknown"
+            )
+        if root.condition is not None:
+            # The one condition rule the loader can decide statically. Everything a `when:`
+            # can test is written into `item.meta` by an element, and at ingest the meta is
+            # empty -- `Condition.matches` is False for a missing field (absence is not
+            # evidence), so this decoder would be skipped for every frame of every camera
+            # and the chain would run, healthy-looking, producing nothing at all.
+            raise ChainStructureError(
+                f"root element {root.name!r} carries `when: {root.condition}`, but a root "
+                "has no predecessor to write that metadata: the condition would be false "
+                "for every frame and the chain would ingest nothing. Move the condition "
+                "onto an element downstream of the decoder"
             )
 
     outputs = [node for node in nodes if node.kind is ElementKind.OUTPUT]

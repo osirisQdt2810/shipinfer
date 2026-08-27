@@ -225,6 +225,15 @@ class Element(abc.ABC):
         name: the slot this element fills in the chain (``embed_ship``), not its
             implementation name. Two embedders differ by this and by their params.
         params: implementation-specific settings, straight from the chain's ``params:``.
+        model: the repository model this element runs, from the chain's ``model:``, or
+            ``None`` for the four kinds that have no model (``decode``, ``track``, ``mtmc``,
+            ``output``). Keyword-only, and a plain string: an element resolves it to a
+            handle through :attr:`ElementContext.models` at ``open``, because a *name* is
+            data the loader can validate on a laptop and a *handle* is not.
+
+    An implementation that overrides ``__init__`` must accept ``model`` and forward it --
+    :func:`~shipinfer.topology.registry.create_element` always passes it, so a two-argument
+    constructor is a ``TypeError`` at load time.
 
     ``__init__`` must be **cheap and hardware-free**. The loader instantiates every element
     in the chain to read its caps, so a constructor that opened a stream or a CUDA context
@@ -243,9 +252,16 @@ class Element(abc.ABC):
     #: Caps this element hands on. Empty means it is a sink.
     produces: ClassVar[tuple[str, ...]] = ()
 
-    def __init__(self, name: str, params: Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        model: str | None = None,
+    ) -> None:
         self.name = name
         self.params: dict[str, Any] = dict(params or {})
+        self.model = model
         self._is_open = False
         self._context: ElementContext | None = None
         # Parsed once, here, rather than per edge in the loader: a cap typo in a *class*

@@ -142,6 +142,8 @@ def create_element(
     impl: str,
     name: str,
     params: Mapping[str, Any] | None = None,
+    *,
+    model: str | None = None,
 ) -> Element:
     """Build one element: ``create_element("detect", "pool", "detect", {...})``.
 
@@ -158,14 +160,18 @@ def create_element(
         impl: the registered implementation name, or one of its aliases.
         name: the chain slot this instance fills.
         params: the slot's ``params:`` block, passed through untouched.
+        model: the slot's ``model:``, likewise. The loader has already refused a model kind
+            that names none, so a ``None`` here means a kind that has no model rather than a
+            missing one.
 
     Raises:
         UnknownElementKindError: ``kind`` does not name a kind.
         UnknownElementImplError: no implementation of that kind under that name; the message
             lists the ones there are.
         ConfigurationError: the registered class declares a different
-            :attr:`~shipinfer.topology.base.Element.kind`, or the lazy target cannot be
-            imported.
+            :attr:`~shipinfer.topology.base.Element.kind`, the lazy target cannot be
+            imported, or the class is already registered under another implementation name
+            (see :func:`_stamp_impl`).
     """
     registry = registry_for(kind)
     if impl not in registry:
@@ -173,12 +179,44 @@ def create_element(
     registered = registry.canonical(impl)
     cls = registry.get(impl)
     _check_kind(cls, registry, registered)
-    # `register` sets this for an eager registration; a lazy one has nothing to set it on
-    # until now. Assigning here rather than only asserting keeps the promise that
-    # `element.impl` is the name the chain file used, whichever style registered it.
-    if cls.impl != registered:
-        cls.impl = registered
-    return cls(name, params)
+    _stamp_impl(cls, registered)
+    return cls(name, params, model=model)
+
+
+def _stamp_impl(cls: type[Element], registered: str) -> None:
+    """Record the registered name on the class, but never *change* one already recorded.
+
+    ``impl`` is a ``ClassVar``: the eager decorator sets it, and a lazy registration has
+    nothing to set it on until the class is first built here. Both are fine, because both
+    write one name once.
+
+    What is not fine is *re-writing* it. Two lazy names pointing at one class would make the
+    second ``create_element`` rename ``impl`` under every instance already built from the
+    first -- an element would report, in its logs and its metrics, an implementation the
+    chain never asked for, and it would start doing so some time after start-up. So the
+    second name is refused instead, at load time, where the mistake is in the registration
+    and an operator can be told which two names collided.
+
+    Read from ``cls.__dict__`` and not from ``cls.impl``, because an element subclass
+    *inherits* its base's name: ``nvinfer`` deriving from the registered ``pool`` element is
+    ordinary, and it needs its own name stamped rather than a refusal.
+
+    Raises:
+        ConfigurationError: this class already carries a different implementation name of
+            its own.
+    """
+    own = cls.__dict__.get("impl", Element.impl)
+    if own == registered:
+        return
+    if own != Element.impl:
+        raise ConfigurationError(
+            f"{cls.__name__} is registered under two implementation names, "
+            f"{own!r} and {registered!r}; `Element.impl` is a class attribute, so the "
+            "second name would rewrite it under every instance already built from the "
+            "first. Give each name its own class, or register the second name as an alias "
+            "-- `register(name, *aliases)` resolves an alias to one canonical name"
+        )
+    cls.impl = registered
 
 
 def describe_elements() -> dict[str, list[tuple[str, str]]]:

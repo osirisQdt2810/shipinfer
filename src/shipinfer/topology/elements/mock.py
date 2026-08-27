@@ -51,8 +51,14 @@ class _Mock(Element):
     them from a multi-threaded runner test.
     """
 
-    def __init__(self, name: str, params: Mapping[str, Any] | None = None) -> None:
-        super().__init__(name, params)
+    def __init__(
+        self,
+        name: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        model: str | None = None,
+    ) -> None:
+        super().__init__(name, params, model=model)
         self.opens = 0
         self.processes = 0
         self.closes = 0
@@ -72,6 +78,15 @@ class _Mock(Element):
         # `derive`, never a fresh ChainItem: that is what carries the (camera_id, frame_id)
         # tag forward, and a mock that cut the corner would make the tests agree with a
         # mistake a real element must not make.
+        #
+        # `output_caps[0]` and not the negotiated `Edge.caps` -- and a real element must not
+        # copy that. The cap on an item is the cap of the edge it is travelling, which the
+        # loader decided per pair (`Edge`, and `Topology.edges` is where a runner reads it);
+        # an element with two `produces` and two consumers hands a different cap to each,
+        # so its own first declaration is not the answer. Stamping it here is valid only
+        # because no mock declares two `produces`, so the first is the only one. Resolving
+        # the edge properly means telling the element which edge it is on, and that is the
+        # runner's job -- not something to smuggle into `ChainItem` from here.
         return item.derive(caps=self.output_caps[0], **self._meta(item))
 
 
@@ -242,8 +257,14 @@ class MockCpuOutput(_Mock):
     kind: ClassVar[ElementKind] = ElementKind.OUTPUT
     accepts: ClassVar[tuple[str, ...]] = ("bgr@cpu", "meta@cpu")
 
-    def __init__(self, name: str, params: Mapping[str, Any] | None = None) -> None:
-        super().__init__(name, params)
+    def __init__(
+        self,
+        name: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        model: str | None = None,
+    ) -> None:
+        super().__init__(name, params, model=model)
         self.emitted: list[ChainItem] = []
 
     def _do_process(self, item: ChainItem) -> ChainItem | None:
@@ -282,8 +303,14 @@ class MockOutput(_Mock):
     kind: ClassVar[ElementKind] = ElementKind.OUTPUT
     accepts: ClassVar[tuple[str, ...]] = ("*@*",)
 
-    def __init__(self, name: str, params: Mapping[str, Any] | None = None) -> None:
-        super().__init__(name, params)
+    def __init__(
+        self,
+        name: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        model: str | None = None,
+    ) -> None:
+        super().__init__(name, params, model=model)
         self.emitted: list[ChainItem] = []
 
     def _do_process(self, item: ChainItem) -> ChainItem | None:
