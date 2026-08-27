@@ -27,10 +27,16 @@ outputs:
     dims: [32, 160, 160]
 
 instance_groups:
-  # One per GPU, not two: segmentation runs on a fraction of the frames, so a second instance
-  # would hold memory for work that is not arriving.
+  # Two per GPU, and the number is a measurement, not a guess. The old comment argued "one,
+  # not two: segmentation runs on a fraction of the frames, so a second instance would hold
+  # memory for work that is not arriving" — and the fleet ceiling sweep (27 Aug 2026,
+  # 12 cameras x 2 fps x rung 6 on GPUs 3-5) proved the work does arrive: at 48 img/s per
+  # GPU the single instance's queue capped (3-25 rejected requests per shard) and bounded
+  # the whole fleet at 96 img/s, while count: 2 sustained 143.8 img/s with every stage
+  # flat. The design load is 62.5 img/s per GPU, so one instance would cap the deployment
+  # this repository is sized for.
   - kind: KIND_AUTO
-    count: 1
+    count: 2
     streams: 2
 
 dynamic_batching:
