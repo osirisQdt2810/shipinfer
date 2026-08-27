@@ -75,9 +75,10 @@ elements:
   output:   {impl: mock}
 """
 
-#: A chain with no camera in it, brought all the way up and down in a fresh interpreter --
-#: run by ``TestStopReleasesTheCameras`` above. The chain is spelled with explicit newlines
-#: rather than a nested block string because this whole program is already inside one.
+#: A chain brought all the way up and down in a fresh interpreter -- run by
+#: ``TestStopReleasesTheCameras`` above, with ``__INGEST__`` replaced by the ingest section
+#: under test. The chain is spelled with explicit newlines rather than a nested block string
+#: because this whole program is already inside one.
 NO_CAMERA_START = r"""
 import sys
 
@@ -95,11 +96,12 @@ CHAIN = (
 
 runner = InprocessRunner(
     Topology.from_spec(ChainSpec.from_yaml(CHAIN)),
-    settings=ServerSettings(pipeline={"workers": 1}),
+    settings=ServerSettings(pipeline={"workers": 1}, ingest=__INGEST__),
 )
 runner.start()
 try:
-    assert runner._ingest_manager is None, "a runner with no cameras built an ingest manager"
+    assert runner.cameras == (), runner.cameras
+    assert runner._ingest_manager is None, "the start built an ingest manager by itself"
     heavy = [m for m in ("shipinfer.ingest", "shipinfer.runtime", "torch") if m in sys.modules]
     assert not heavy, heavy
 finally:
@@ -219,12 +221,14 @@ class GateCloseOutput(MockOutput):
 
 @registry_for(ElementKind.DECODE).register("camera-two-caps")
 class TwoCapDecode(ReplayDecode):
-    """A decode element offering two head caps, so the edge's answer differs from the first.
+    """A decode element offering two head caps. The chain the runner refuses.
 
-    The whole point of the pair with :class:`GrayOnlyDetect`: ``produces[0]`` is ``bgr@cpu``
-    and the only consumer takes ``gray@cpu``, so the negotiated edge carries ``gray@cpu`` and
-    a runner that read ``output_caps[0]`` would stamp the wrong cap on every frame. No shipped
-    element declares two ``produces`` today, which is why the shortcut looked harmless.
+    The pair with :class:`GrayOnlyDetect` is what makes the refusal worth having: the loader
+    happily negotiates the *second* declaration onto the edge, because that is the only one
+    the consumer takes -- and this element, like every decode element, hands the frame on
+    untouched. So the sink would stamp ``gray@cpu`` on a BGR array and every element
+    downstream would believe it. No shipped decode declares two ``produces``, which is
+    exactly why nothing had refused it.
     """
 
     produces: ClassVar[tuple[str, ...]] = ("bgr@cpu", "gray@cpu")
@@ -431,22 +435,31 @@ class TestAFrameTravelsFromACameraToTheSink:
         assert isinstance(emitted.payload, Tensor)
         assert emitted.payload.shape == (1, HEIGHT, WIDTH, 3)
 
-    def test_a_camera_configured_in_the_settings_tree_starts_with_the_runner(
+    def test_a_configured_camera_is_placed_by_the_cli_and_not_started_by_the_runner(
         self, runner_over
     ) -> None:
-        """``ingest.cameras`` is the fleet; ``add_camera`` is how one arrives later.
+        """``add_camera`` is THE door, and ``ingest.cameras`` comes through it like the rest.
 
-        Both doors, one manager: a runner that only honoured the RPC would leave a configured
-        deployment silently camera-less.
+        The runner used to start the configured fleet inside ``_do_start``. That is right for
+        one process and wrong for the deployment: a shard *is* an ``InprocessRunner``, built
+        from an env-only settings tree that inherits the operator's whole camera list, so
+        every shard opened every camera. The camera set is now the *launcher's* decision --
+        ``cli/commands/run.py::cameras_to_place`` derives the specs and places them on
+        whichever runner was chosen, which for a fleet means one shard each.
+
+        Both halves are asserted here because they are one contract: the start reads nothing,
+        and the specs the CLI derives from these very settings start exactly this camera.
         """
+        from shipinfer.cli.commands.run import cameras_to_place
+
         chain = load()
-        runner = runner_over(
-            chain,
-            settings=settings(
-                ingest={"cameras": [{"camera_id": "cam-cfg", "uri": "injected://cfg"}]}
-            ),
-            source_factory=scripted(frames=2),
-        )
+        tree = settings(ingest={"cameras": [{"camera_id": "cam-cfg", "uri": "injected://cfg"}]})
+        runner = runner_over(chain, settings=tree, source_factory=scripted(frames=2))
+
+        assert runner.cameras == (), "the runner started a camera nobody placed on it"
+
+        for spec in cameras_to_place(tree, None):
+            runner.add_camera(spec)
 
         assert runner.cameras == ("cam-cfg",)
         assert until(lambda: len(sink(chain).emitted) == 2)
@@ -518,25 +531,29 @@ class TestThePriorityBandComesFromTheCameraConfig:
         """
         chain = load()
         queue = RecordingQueue("recording", 64)
+        tree = settings(
+            ingest={
+                "cameras": [
+                    {
+                        "camera_id": "cam-hot",
+                        "uri": "injected://hot",
+                        "priority": Priority.TRACKING_CRITICAL,
+                    },
+                    {"camera_id": "cam-cold", "uri": "injected://cold"},
+                ]
+            }
+        )
         runner = InprocessRunner(
-            chain,
-            settings=settings(
-                ingest={
-                    "cameras": [
-                        {
-                            "camera_id": "cam-hot",
-                            "uri": "injected://hot",
-                            "priority": Priority.TRACKING_CRITICAL,
-                        },
-                        {"camera_id": "cam-cold", "uri": "injected://cold"},
-                    ]
-                }
-            ),
-            queue=queue,
-            source_factory=scripted(frames=2),
+            chain, settings=tree, queue=queue, source_factory=scripted(frames=2)
         )
         runner.start()
         try:
+            # Placed, not self-started -- and the band still comes off the settings tree. A
+            # `CameraSpec` carries no priority on purpose (it is deployment configuration, not
+            # a launcher decision), so this is also the assertion that the runner keeps reading
+            # the configured bands for cameras it is *told* about.
+            runner.add_camera(CameraSpec("cam-hot", "injected://hot"))
+            runner.add_camera(CameraSpec("cam-cold", "injected://cold"))
             assert until(lambda: len(sink(chain).emitted) == 4), sink(chain).emitted
         finally:
             runner.stop(timeout_s=5.0)
@@ -953,51 +970,61 @@ class TestStopReleasesTheCameras:
             index for index, future in enumerate(futures) if not future.done()
         ]
 
-    def test_a_start_with_no_configured_cameras_builds_no_ingest_manager(self) -> None:
-        """A mock chain with no camera in it must not pay for the ingest plane at all.
+    @pytest.mark.parametrize(
+        "ingest",
+        [
+            pytest.param("{}", id="no cameras"),
+            pytest.param(
+                '{"cameras": [{"camera_id": "cam-cfg", "uri": "rtsp://10.0.0.1/live"}]}',
+                id="a configured fleet",
+            ),
+        ],
+    )
+    def test_a_start_builds_no_ingest_manager(self, ingest: str) -> None:
+        """A start must not pay for the ingest plane, and must not open what it was not given.
 
-        ``_do_start`` used to call ``self._ingest().start()`` unconditionally, so every start
-        -- including a chain of mocks a laptop runs with no driver -- imported
-        ``shipinfer.ingest`` and, through its source registry, ``shipinfer.runtime``. That is
-        precisely the cost :data:`_NO_INGEST` and :meth:`InprocessRunner._ingest` exist to
-        avoid, so the manager is now built on first *use*: by ``_do_start`` when the
-        deployment configured cameras, and by ``add_camera`` otherwise.
+        Two facts in one program, because they are one line of code. ``_do_start`` used to
+        call ``self._ingest().start()``, so every start -- including a chain of mocks a laptop
+        runs with no driver -- imported ``shipinfer.ingest`` and, through its source registry,
+        ``shipinfer.runtime``; and every start of a process whose settings named cameras
+        opened all of them, which on a shard is the operator's entire fleet arriving through
+        an inherited environment variable. The manager is now built by ``add_camera`` and by
+        nothing else, so both facts hold for the *same* reason and the parametrisation says so.
 
         In a subprocess for the reason ``tests/test_architecture.py`` uses one: ``sys.modules``
         is process-wide, and this file has already imported ``shipinfer.ingest`` in the parent
         for its own doubles.
         """
-        result = subprocess.run(
-            [sys.executable, "-c", NO_CAMERA_START], capture_output=True, text=True
-        )
+        program = NO_CAMERA_START.replace("__INGEST__", ingest)
+        result = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True)
 
         assert result.returncode == 0, result.stdout + result.stderr
 
-    def test_a_restart_reads_the_configured_cameras_again(self) -> None:
+    def test_a_restart_takes_the_camera_again_on_a_fresh_manager(self) -> None:
         """The manager is dropped at the stop, not reused.
 
         A decoder abandoned at a shutdown deadline is parked inside a read, not gone, and it
         still holds a sink bound to the stopped cycle. Handing that manager back would make
         the stale actor a live producer into the new cycle's queue — the ingest-side spelling
         of the bug ``_work`` documents on the worker side.
+
+        So a restarted runner comes up with **no** cameras and has to be placed on again,
+        which is also what a launcher does after a shard restarts (``ShardState.READY``).
         """
         chain = load()
-        runner = InprocessRunner(
-            chain,
-            settings=settings(
-                ingest={"cameras": [{"camera_id": "cam-cfg", "uri": "injected://cfg"}]}
-            ),
-            source_factory=scripted(frames=1),
-        )
+        runner = InprocessRunner(chain, settings=settings(), source_factory=scripted(frames=1))
         runner.start()
+        runner.add_camera(CameraSpec("cam-a", "injected://a"))
         assert until(lambda: len(sink(chain).emitted) == 1)
         runner.stop(timeout_s=5.0)
         assert runner.cameras == ()
 
         runner.start()
         try:
+            assert runner.cameras == (), "the restart brought a camera back by itself"
+            runner.add_camera(CameraSpec("cam-a", "injected://a"))
             assert until(lambda: len(sink(chain).emitted) == 2)
-            assert runner.cameras == ("cam-cfg",)
+            assert runner.cameras == ("cam-a",)
         finally:
             runner.stop(timeout_s=5.0)
 
@@ -1045,21 +1072,38 @@ class TestTheChainDecidesTheHead:
 
         assert runner._camera_config(CameraSpec("cam-a", "x")).source == "pyav"
 
-    def test_the_head_cap_is_read_from_the_edge_and_not_from_produces(self) -> None:
-        """A decode element with two ``produces`` hands its consumer the *negotiated* one.
+    def test_a_decode_root_that_offers_two_caps_is_refused(self) -> None:
+        """A pass-through cannot convert, so a second declaration is a claim about nothing.
 
-        The version of this test that read ``load()`` could not fail: every shipped element
-        declares one ``produces``, so ``edges[0].caps`` and ``output_caps[0]`` were the same
-        string and swapping one for the other still passed. :class:`TwoCapDecode` offers
-        ``bgr@cpu, gray@cpu`` to a consumer that takes only ``gray@cpu``, which is the case
-        the rule exists for -- and the two answers now differ.
+        :class:`TwoCapDecode` offers ``bgr@cpu, gray@cpu`` to a consumer that takes only
+        ``gray@cpu``. The loader negotiates ``gray@cpu`` onto the edge and is right to -- but
+        the element hands the decoded BGR array straight on, so the cap the frame sink stamps
+        would be a lie about the buffer, and it is a lie every element downstream acts on.
+        Refused at start-up, where a mis-declared chain costs one message, rather than in
+        phase D when a converting ``gstreamer-gpu`` makes two caps mean something.
         """
         chain = load(decode="camera-two-caps", detect="camera-gray-only")
+        runner = InprocessRunner(chain, settings=settings())
+
+        with pytest.raises(ConfigurationError, match="exactly one cap"):
+            runner.start()
+
+        assert not runner.is_running
+
+    def test_the_head_cap_is_read_from_the_edge_and_not_from_the_element(self) -> None:
+        """Where the answer comes from, on the only shape the refusal above still allows.
+
+        Honest about what this can and cannot show: with one ``produces`` on a root -- and a
+        root may not wildcard either (``chain.py::_check_structure``) -- the edge and the
+        declaration agree by construction, so no assertion here can fail for a runner that
+        read ``output_caps[0]`` instead. That case is now a *refusal*, tested above, and this
+        pins the other half: a cap belongs to an edge, and this is the edge it belongs to.
+        """
+        chain = load()
         decode = chain.node("decode").element
         runner = InprocessRunner(chain, settings=settings())
 
         head = runner._head()
 
-        assert str(decode.output_caps[0]) == "bgr@cpu"
-        assert str(chain.edges[0].caps) == "gray@cpu"
-        assert str(head.caps) == "gray@cpu"
+        assert str(chain.edges[0].caps) == "bgr@cpu"
+        assert str(head.caps) == str(chain.edges[0].caps) == str(decode.output_caps[0])

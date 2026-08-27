@@ -5,6 +5,60 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-27 — the launcher places the fleet; a shard opens only what it was sent (B1 review)
+
+**What.** Round-1 review of PR #71 found a blocking defect in the entry above and this is the
+correction. `InprocessRunner._do_start` no longer starts `ingest.cameras` / `ingest.camera_db`;
+`cli/commands/run.py::cameras_to_place` derives `CameraSpec`s from the settings tree and places
+them — configured first, `--inputs` after — through the same `place_cameras` both already used,
+so `add_camera` is the single door on every runner. `launch/supervisor.py::_NOT_INHERITED`
+gains `SHIPINFER_INGEST__CAMERAS` and `SHIPINFER_INGEST__CAMERA_DB`. `CameraSpec` gains
+`loop: bool = True`, carried on the wire as `optional bool loop = 4`, and `shipinfer run` gains
+`--loop/--no-loop` — which supersedes the "Not done here" note in the entry below.
+
+**Why.** A shard *is* an `InprocessRunner` (`cli/shard.py` hard-codes `build_runner("inprocess",
+…)`) whose settings come from `build_settings()` with no arguments — env-only, so every child
+inherited the operator's whole fleet. `UpdateTopology` → `runner.start()` → the auto-start
+branch therefore opened all fifty cameras on all eight shards: 400 RTSP sessions, eight
+`FrameCounter`s minting identical `(camera_id, frame_id)` tags for one camera (the ADR-002
+misattribution, by construction rather than by race), and a control plane that could then place
+nothing because `FleetRunner.add_camera` met "already running" everywhere. The old tests could
+not see it: the shard-shaped ones configured no cameras.
+
+**Decisions.**
+
+- **The camera set is a launcher decision, not a property of whichever settings a process
+  loaded.** Option (a) of the review, plus the defence from (b): the runner starts nothing, and
+  the `IngestManager` is *built* with `cameras=[]`/`camera_db=None` so that even a future
+  `start()` on it cannot open a fleet. `_priorities` is still filled from the **full** settings,
+  because a band is deployment configuration keyed by camera id — a shard told `cam-7` still
+  admits it into the band its config names.
+- **The two `SHIPINFER_INGEST__*` names are stripped from a child.** The same argument already
+  written for `visible_gpus`: a child is told one thing at `exec`, and an inherited copy of what
+  an RPC now carries is worse than absent. Both halves are pinned — the supervisor test asserts
+  the child cannot see them, and a shard-shaped `InprocessRunner` handed the whole fleet in its
+  settings still reports `cameras == ()` with no `ingest-*` thread until `AddCamera` arrives.
+- **`loop` joins `CameraSpec` rather than the help text being corrected.** An `--inputs` camera
+  is minted in the CLI and appears in no `ingest.cameras` entry, so the knob the help named was
+  unreachable for exactly the cameras that needed it; and now that a configured camera is
+  *placed*, a fleet would otherwise have dropped the `loop: false` its operator wrote. Presence
+  (`optional`) because the wire default for a bool is false and this field's default is true.
+- **A decode root declaring more than one `produces` is refused.** Every decode element hands
+  the frame on untouched, so the cap the sink stamps is a claim about a buffer nothing converts;
+  with two declarations the loader picks whichever the consumer prefers and stamps *that* on the
+  same array. Refused in `_head()` with the reason; a converting decode is phase D. The
+  consequence for the test below it is stated rather than hidden: with one `produces` the edge
+  and the declaration agree by construction, so "read the edge, not `output_caps[0]`" is now
+  pinned by the refusal instead of by a difference.
+
+**Not done here.** `CameraSpec` still carries no `priority`, so a camera placed on a *fleet*
+shard whose environment no longer names the fleet is admitted at `NORMAL` unless that shard's
+own settings configure it. The bands still work for `inprocess` and for any shard given the
+config by other means; carrying the band on the wire is a wire change with a falsy-zero trap in
+it (`TRACKING_CRITICAL == 0`) and belongs in its own PR.
+
+---
+
 ## 2026-08-27 — the runner owns the cameras: decode elements, `ChainFrameSink`, `--inputs` (Phase B1)
 
 **What.** `shipinfer run --topology c.yaml --inputs a.mp4 b.mp4` now opens the videos, and a

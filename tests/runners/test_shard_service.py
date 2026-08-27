@@ -1256,11 +1256,15 @@ class TestOverARealInprocessRunner:
           output: {impl: mock}
         """)
 
-    def _runner(self) -> Any:
+    def _runner(self, cameras: list[dict[str, Any]] | None = None) -> Any:
         """A real runner over a source that opens, delivers nothing, and never blocks.
 
         The camera's *state* is what is under test, not its frames, so the source is the
         cheapest thing that keeps an actor alive without a decoder anywhere near it.
+
+        ``cameras`` populates ``ingest.cameras``, which is what a shard's settings really look
+        like: ``cli/shard.py`` builds them with ``build_settings()``, an env-only tree, so a
+        child inherits whatever fleet the operator configured for the launcher.
         """
         from shipinfer.core.settings import ServerSettings
         from shipinfer.ingest.base import FrameSource
@@ -1284,10 +1288,59 @@ class TestOverARealInprocessRunner:
             Chain.from_spec(Spec.from_yaml(self.CHAIN_YAML)),
             ServerSettings(
                 pipeline={"workers": 1},
-                ingest={"read_timeout_ms": 20, "empty_read_sleep_ms": 5},
+                ingest={
+                    "read_timeout_ms": 20,
+                    "empty_read_sleep_ms": 5,
+                    "cameras": cameras or [],
+                },
             ),
             source_factory=lambda config, counter: SilentSource(config, counter),
         )
+
+    @staticmethod
+    def _ingest_threads(prefix: str) -> set[str]:
+        """The camera actor threads alive right now, by name (``ingest/camera/actor.py``)."""
+        return {t.name for t in threading.enumerate() if t.name.startswith(f"ingest-{prefix}")}
+
+    def test_a_shard_reads_only_what_it_was_sent_not_what_it_inherited(self) -> None:
+        """The configured fleet is the LAUNCHER's to place; a shard opens what it is told.
+
+        A shard is an ``InprocessRunner`` (``cli/shard.py`` hard-codes it) and its settings
+        come from ``build_settings()``, which is env-only -- so ``SHIPINFER_INGEST__CAMERA_DB``,
+        the documented way to configure a fifty-camera fleet, reaches every shard verbatim.
+        While ``_do_start`` started that list, ``UpdateTopology`` -> ``runner.start()`` opened
+        all fifty cameras on all eight shards: 400 RTSP sessions, eight ``FrameCounter``s
+        minting identical ``(camera_id, frame_id)`` tags for the same camera (ADR-002), and
+        every subsequent ``AddCamera`` refused as "already running" so the control plane could
+        place nothing at all.
+
+        The launcher's ``_NOT_INHERITED`` now strips those two names, and this is the half of
+        the fix that does not depend on it: even handed the whole fleet, the shard reads
+        nothing until it is told to.
+        """
+        runner = self._runner(
+            cameras=[
+                {"camera_id": "cam-cfg-a", "uri": "injected://a"},
+                {"camera_id": "cam-cfg-b", "uri": "injected://b"},
+            ]
+        )
+        svc = service(runner)
+        install(svc, yaml=self.CHAIN_YAML)
+        try:
+            assert runner.is_running
+            assert runner.cameras == (), "the shard opened cameras nobody placed on it"
+            assert self._ingest_threads("cam-cfg") == set()
+            assert svc.state() == ShardState.READY
+
+            reply = svc.AddCamera(
+                pb.AddCameraRequest(camera=CameraSpec("cam-cfg-b", "injected://b").to_pb())
+            )
+
+            assert reply.accepted, reply.reason
+            assert runner.cameras == ("cam-cfg-b",)
+            assert self._ingest_threads("cam-cfg") == {"ingest-cam-cfg-b"}
+        finally:
+            svc.Stop(pb.StopRequest(timeout_s=5.0))
 
     def test_a_camera_makes_the_shard_running_and_appears_in_its_health(self) -> None:
         runner = self._runner()

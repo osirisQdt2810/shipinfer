@@ -311,10 +311,11 @@ class InprocessRunner(Runner):
         #: Built on **first use** and never here, because constructing it imports the whole
         #: ingest plane -- and with it a decode runtime, and ``shipinfer.runtime`` behind that
         #: -- which ``import shipinfer.runners`` must not pay for
-        #: (``tests/test_architecture.py``). First use is :meth:`_do_start` when the
-        #: deployment configured cameras, and :meth:`add_camera` otherwise; a chain of mock
-        #: elements with no camera in it therefore starts without ever touching the ingest
-        #: plane at all. Rebuilt per start cycle for the reason the queue and the stop signal
+        #: (``tests/test_architecture.py``). First use is :meth:`add_camera`, the one door a
+        #: camera arrives through, so a runner nobody has placed a camera on -- a chain of
+        #: mock elements, and every shard until its launcher calls ``AddCamera`` -- starts
+        #: without ever touching the ingest plane at all. Rebuilt per start cycle for the
+        #: reason the queue and the stop signal
         #: are: a manager stopped at a shutdown deadline may still hold an abandoned decoder
         #: thread, and handing that thread's manager back to the next cycle would make it a
         #: live producer into the new cycle's queue.
@@ -394,7 +395,7 @@ class InprocessRunner(Runner):
     # it there forever: :meth:`_stop_ingest` had already run and a second ``stop()`` returns at
     # the idempotence check without reaching it. The lock is the same ``RLock``
     # :meth:`Runner.start` and :meth:`Runner.stop` hold, and it is re-entrant on purpose --
-    # ``_do_start`` starts the configured cameras on the very thread that is holding it.
+    # a camera method called from inside another lifecycle step must not deadlock on it.
     #
     # It is *not* taken by ``submit``, ``health``, ``stats`` or :attr:`cameras`, for the reason
     # ``runners/base.py`` gives: the first is the hot path and the others must answer while a
@@ -498,11 +499,20 @@ class InprocessRunner(Runner):
 
         Read off the **loader's** answers: the cap comes from
         :attr:`~shipinfer.topology.chain.Topology.edges` and never from the root element's own
-        ``produces``, because a cap belongs to an edge -- an element with two ``produces``
-        hands a different one to each consumer, so its first declaration is not the answer
+        ``produces``, because a cap belongs to an edge and not to an element
         (``topology/chain.py::Edge``). The source comes from the decode slot's ``params:``
         first and its class's :attr:`~shipinfer.topology.elements.decode._IngestDecode.source`
         second, the same precedence an element uses for everything else it can be told twice.
+
+        A decode root that declares **more than one** cap is refused here rather than read.
+        Every decode element that exists hands the frame on untouched
+        (``elements/decode.py::_IngestDecode._do_process``), so the cap the frame sink stamps
+        on the way in is a claim about a buffer nothing converts: with one declaration that
+        claim is the element's own and true, and with two the loader would pick whichever the
+        consumer preferred and the sink would stamp it on the same unconverted array. The
+        refusal is what makes reading the edge *safe* as well as correct -- for every chain
+        that loads, the two now agree, and the case where they would not is a converting
+        decode, which is phase D.
 
         Resolved once and kept: a topology is immutable once built.
 
@@ -511,7 +521,8 @@ class InprocessRunner(Runner):
                 on the source that feeds them. One ingest manager publishes into one sink and
                 every root sees that one item, so there is no answer to give; a root with
                 no successor at all, which the loader cannot produce but this would otherwise
-                read as "no cap"; and a root that is not a decode element, which
+                read as "no cap"; a root declaring two caps, above; and a root that is not a
+                decode element, which
                 :func:`~shipinfer.topology.chain._check_structure` also refuses -- said again
                 here because a ``Topology`` may be constructed directly from parts, and the
                 alternative is reading a ``source`` off an element that never promised one.
@@ -527,6 +538,16 @@ class InprocessRunner(Runner):
                     f"{self._topology.name or '<unnamed>'} but is a {root.kind.value} "
                     "element; frames enter a chain through a decode element, and only a "
                     "decode element names the ingest source that produces them"
+                )
+            if len(root.element.output_caps) > 1:
+                raise ConfigurationError(
+                    f"decode element {root.name!r} declares "
+                    f"{[str(cap) for cap in root.element.output_caps]}, but a pass-through "
+                    "decode declares exactly one cap: the runner's frame sink stamps the "
+                    "negotiated cap onto a buffer the element hands on unchanged, so a "
+                    "second declaration is a claim about pixels nothing converts. A "
+                    "converting decode -- `gstreamer-gpu`, which would keep NV12 in VRAM -- "
+                    "is phase D, behind the DataPool"
                 )
             outbound = {
                 edge.caps for edge in self._topology.edges if edge.producer == root.name
@@ -585,12 +606,20 @@ class InprocessRunner(Runner):
         and it is the one line that makes ``decode: {impl: replay}`` mean anything at all.
         ``None`` leaves ``ingest.backend`` and then the environment to decide, which is what a
         chain that did not say should get (``ingest/resolve.py``).
+
+        ``loop`` is the second exception, and it is the launcher's for a duller reason: it is
+        the only per-camera field that decides whether the camera *ends*. ``shipinfer run
+        --inputs clip.mp4`` used to replay that file forever with no knob anywhere -- the
+        ``--inputs`` camera is minted here and never appears in ``ingest.cameras``, so the
+        setting the help text named was unreachable for exactly the cameras that needed it.
+        It rides on the spec so that ``--no-loop`` reaches a shard too.
         """
         return CameraConfig(
             camera_id=camera.camera_id,
             uri=camera.url,
             fps=camera.fps,
             source=self._head().source,
+            loop=camera.loop,
         )
 
     def _ingest(self) -> IngestManager:
@@ -615,26 +644,43 @@ class InprocessRunner(Runner):
         manager = self._ingest_manager
         if manager is not None:
             return manager
-        from shipinfer.ingest import IngestManager, IngestMetrics
+        from shipinfer.ingest import IngestManager, IngestMetrics, configured_cameras
 
-        # `_do_submit`, not the public `submit`: the manager is started by `_do_start`, which
-        # runs BEFORE `Runner.start` publishes `_running`, so a camera that delivered its
-        # first frame in that window would meet a `ServerStateError` -- an error outside the
-        # `FrameSink` contract, which the actor reads as a bug, backs off from and logs a
-        # traceback for. The queue and the workers are live by then (ingest starts last), and
-        # after the stop the closed queue delivers the `RequestCancelledError` the contract
-        # does name, which is what tells an actor to finish.
+        # `_do_submit`, not the public `submit`: a stop clears `_running` and only then
+        # releases the cameras, so every frame an actor publishes during `_do_stop` would meet
+        # a `ServerStateError` -- an error outside the `FrameSink` contract, which the actor
+        # reads as a bug, backs off from and logs a traceback for. The queue is still open at
+        # that moment; once it is closed the actor gets the `RequestCancelledError` the
+        # contract does name, which is what tells it to finish.
         sink = ChainFrameSink(self._do_submit, self._head().caps)
+        ingest = self._settings.ingest
         manager = IngestManager(
             sink,
-            settings=self._settings.ingest,
+            # WITHOUT the configured camera set, and that is a defence rather than a
+            # tidy-up. `IngestManager.start()` starts `ingest.cameras` and `ingest.camera_db`,
+            # and a **shard is an `InprocessRunner`** built from `build_settings()` -- which
+            # is env-only, so every shard inherits the operator's whole fleet verbatim. A
+            # manager holding that list is one `start()` away from 8 shards x 50 cameras:
+            # 400 RTSP sessions, eight `FrameCounter`s minting the same `(camera_id,
+            # frame_id)` tags, and every later `add_camera` refused as "already running".
+            # `add_camera` is THE door (`cli/commands/run.py` places the configured fleet
+            # through it, on whichever runner the operator chose), so the manager is given
+            # nothing to start on its own.
+            #
+            # `model_copy` rather than a rebuilt `IngestSettings`: the two fields are being
+            # *cleared*, so there is no operator-supplied value left for a field validator to
+            # judge, and rebuilding would re-validate fifty camera records only to drop them.
+            settings=ingest.model_copy(update={"cameras": [], "camera_db": None}),
             metrics=IngestMetrics(registry=self._metrics.registry),
             source_factory=self._source_factory,
         )
-        # Before any actor exists, so every camera the manager is about to start is already in
-        # the map when its first frame arrives.
+        # From the FULL settings, and before any actor exists. A band is deployment
+        # configuration keyed by camera id (CONVENTIONS 2.6), so a camera this process is
+        # given by RPC is admitted into the band its config names even though this process
+        # will not start it; a camera nobody configured gets the default, once, with a log
+        # line (`_priority_for`).
         self._priorities.update(
-            {camera.camera_id: camera.priority for camera in manager.configured_cameras()}
+            {camera.camera_id: camera.priority for camera in configured_cameras(ingest)}
         )
         self._ingest_manager = manager
         return manager
@@ -755,21 +801,19 @@ class InprocessRunner(Runner):
             self._queue.capacity,
             head.caps,
         )
-        # Cameras LAST, and the order is the whole of it: an actor publishes the instant it
-        # has a frame, so a manager started before the chain was open would meet a typed
-        # refusal from an element, and one started before the workers exist would fill the
-        # lane against a consumer nobody had launched. Configured cameras start here;
-        # `add_camera` is the same door for the ones that arrive later.
+        # No cameras. A start opens the chain and raises the workers; it reads nothing until
+        # somebody places a camera on it, and that is the entire content of `manages_cameras`
+        # being a control-plane property (arch.md section 2).
         #
-        # **Only when there are cameras configured**, because building the manager is what
-        # imports `shipinfer.ingest` and, through its source registry, `shipinfer.runtime`.
-        # Starting one unconditionally made every start pay that -- including a chain of mock
-        # elements with no camera in it, which is the shape `tests/runners/` and a laptop dev
-        # loop use -- and contradicted the whole argument `_NO_INGEST` and `_ingest` make. An
-        # empty manager also has nothing to start: `IngestManager.start` iterates a camera
-        # list this branch has just established is empty.
-        if self._settings.ingest.cameras or self._settings.ingest.camera_db is not None:
-            self._ingest().start()
+        # This used to start `settings.ingest.cameras` here, which is right for a single
+        # process and wrong for a shard -- and a shard is an `InprocessRunner`
+        # (`cli/shard.py` hard-codes it) whose settings come from `build_settings()`, an
+        # env-only tree that inherits the operator's whole fleet. Every shard therefore
+        # started every camera: eight shards x fifty cameras, duplicate `(camera_id,
+        # frame_id)` tags by construction, and a control plane whose `add_camera` was then
+        # refused everywhere as "already running". `cli/commands/run.py` places the configured
+        # fleet through `add_camera` instead, on whichever runner the operator chose -- which
+        # is the fleet's placement for a fleet and this runner's own manager for `inprocess`.
 
     def _do_stop(self, timeout_s: float) -> None:
         """Release the cameras, close the queue, join the workers, close the chain.
@@ -888,8 +932,9 @@ class InprocessRunner(Runner):
         inside a blocking read, not gone, and it still holds a sink bound to this cycle's
         ``_do_submit``. Handing that manager to the next start would make the stale actor a
         live producer into the new cycle's queue -- the ingest-side spelling of exactly the
-        bug ``_work`` documents on the worker side. A fresh manager also re-reads the
-        configured camera set, which is the right thing for a restart to do.
+        bug ``_work`` documents on the worker side. A restarted runner therefore comes up
+        with no cameras and waits to be placed on again, which is what the control plane's
+        own vocabulary says a fresh shard is (``ShardState.READY``).
 
         Safe on the unwind path of a failed start, where there is no manager and this is a
         no-op costing one attribute read.

@@ -19,9 +19,16 @@ from typing import Any, ClassVar
 
 import pytest
 
-from shipinfer.cli.commands.run import cameras_from_inputs, place_cameras, run
+from shipinfer.cli.commands.run import (
+    cameras_from_inputs,
+    cameras_from_settings,
+    cameras_to_place,
+    place_cameras,
+    run,
+)
 from shipinfer.core.errors import ConfigurationError
 from shipinfer.core.request import ResponseFuture
+from shipinfer.core.settings import ServerSettings
 from shipinfer.launch.control import CameraSpec
 from shipinfer.runners import RUNNERS
 from shipinfer.runners.base import Runner
@@ -47,6 +54,11 @@ def chain() -> Topology:
     return Topology.from_spec(ChainSpec.from_yaml(CHAIN))
 
 
+# Registered into the process-wide `RUNNERS`, so `shipinfer runners` lists a test double for
+# the rest of any session that imports this file. The same bargain the element registries
+# already take in `tests/runners/test_inprocess.py`, and `test_runner_registry.py` asserts
+# membership rather than equality, so nothing breaks -- but the runner registry had been clean
+# until now, and a reader who finds `still` in a listing deserves this line.
 @RUNNERS.register("still")
 class StillRunner(Runner):
     """A runner that executes a chain and owns no ingest plane — the ABC's default.
@@ -108,10 +120,112 @@ class TestInputsBecomeCameraSpecs:
         """``0.0`` means "whatever it delivers"; the pacing knob is per-camera config."""
         assert cameras_from_inputs(["a.mp4"])[0].fps == 0.0
 
+    def test_a_file_replays_in_a_loop_unless_no_loop_says_otherwise(self) -> None:
+        """The knob the help text used to promise and nothing implemented.
+
+        ``--inputs`` cameras are minted here, so no entry in ``ingest.cameras`` can carry
+        their ``loop:`` — ``shipinfer run --inputs clip.mp4`` replayed the file forever and no
+        configuration anywhere would stop it. It rides on the spec, so it reaches a shard too.
+        """
+        assert cameras_from_inputs(["clip.mp4"])[0].loop is True
+        assert cameras_from_inputs(["clip.mp4"], loop=False)[0].loop is False
+
     @pytest.mark.parametrize("inputs", [None, [], ()])
     def test_no_inputs_is_no_cameras_and_not_an_error(self, inputs: Any) -> None:
         """Bringing a chain up empty and adding cameras over the control plane is normal."""
         assert cameras_from_inputs(inputs) == []
+
+
+def settings_with(*cameras: dict[str, object]) -> ServerSettings:
+    """A settings tree whose ``ingest.cameras`` is the deployment's fleet."""
+    return ServerSettings(ingest={"cameras": list(cameras)})
+
+
+class TestTheConfiguredFleetIsPlacedTheSameWay:
+    """``ingest.cameras`` / ``ingest.camera_db`` reach a runner through ``add_camera``.
+
+    They used to reach it through ``InprocessRunner._do_start``, which read the settings tree
+    it happened to be built from. A shard is an ``InprocessRunner`` built from an env-only
+    tree, so every shard read the operator's whole fleet and opened all of it — eight shards
+    x fifty cameras, and an ``AddCamera`` that could then place nothing because every id was
+    already taken. Deriving the specs here instead means one list, one door, and the runner
+    the operator chose decides where they land.
+    """
+
+    def test_a_configured_camera_becomes_a_spec_a_runner_takes(self) -> None:
+        cameras = cameras_from_settings(
+            settings_with(
+                {"camera_id": "cam-quay", "uri": "rtsp://10.0.0.7/live", "fps": 20.0},
+            )
+        )
+
+        assert cameras == [
+            CameraSpec(camera_id="cam-quay", url="rtsp://10.0.0.7/live", fps=20.0)
+        ]
+
+    def test_a_disabled_camera_is_not_placed(self) -> None:
+        """``enabled: false`` keeps a camera in the database and out of the fleet."""
+        cameras = cameras_from_settings(
+            settings_with(
+                {"camera_id": "cam-a", "uri": "rtsp://a/live"},
+                {"camera_id": "cam-off", "uri": "rtsp://b/live", "enabled": False},
+            )
+        )
+
+        assert [camera.camera_id for camera in cameras] == ["cam-a"]
+
+    def test_a_configured_camera_keeps_its_own_loop(self) -> None:
+        """``--loop`` is for ``--inputs``; a configured camera already said what it wants."""
+        cameras = cameras_to_place(
+            settings_with({"camera_id": "cam-file", "uri": "clip.mp4", "loop": False}),
+            ["other.mp4"],
+            loop=True,
+        )
+
+        assert [camera.loop for camera in cameras] == [False, True]
+
+    def test_the_configured_fleet_is_offered_before_the_inputs(self) -> None:
+        """Order is a decision: the deployment first, then what this invocation adds.
+
+        A least-loaded placement spreads the standing fleet evenly before the extras land on
+        top of it, and a collision is reported against the ``--inputs`` camera that caused it
+        rather than against the configured one that was there first.
+        """
+        runner = CountingRunner(chain())
+        tree = settings_with(
+            {"camera_id": "cam-cfg-a", "uri": "rtsp://a/live"},
+            {"camera_id": "cam-cfg-b", "uri": "rtsp://b/live"},
+        )
+
+        place_cameras(runner, cameras_to_place(tree, ["clip.mp4"]))
+
+        assert [camera.camera_id for camera in runner.added] == [
+            "cam-cfg-a",
+            "cam-cfg-b",
+            "cam-000",
+        ]
+        assert [camera.url for camera in runner.added] == [
+            "rtsp://a/live",
+            "rtsp://b/live",
+            "clip.mp4",
+        ]
+
+    def test_no_configured_cameras_is_just_the_inputs(self) -> None:
+        assert cameras_to_place(ServerSettings(), ["a.mp4"]) == cameras_from_inputs(["a.mp4"])
+
+    def test_a_refusal_names_the_camera_whichever_door_it_came_through(self) -> None:
+        """``ingest/manager.py`` names the id; for an ``--inputs`` camera that id was minted
+        from a position and appears nowhere in what the operator typed, so both travel."""
+        runner = CountingRunner(chain())
+        runner.refuse = "cam-000"
+        tree = settings_with({"camera_id": "cam-cfg", "uri": "rtsp://a/live"})
+
+        with pytest.raises(ConfigurationError) as caught:
+            place_cameras(runner, cameras_to_place(tree, ["clip.mp4"]))
+
+        assert "cam-000" in str(caught.value)
+        assert "clip.mp4" in str(caught.value)
+        assert [camera.camera_id for camera in runner.added] == ["cam-cfg"]
 
 
 class TestPlacingThemOnARunner:
@@ -188,6 +302,23 @@ class TestTheCommandItself:
         run(chain_file, runner="inprocess", dry_run=True)
 
         assert "--inputs" not in capsys.readouterr().out
+
+    def test_the_configured_fleet_is_in_the_plan_and_the_environment_is_where_it_came_from(
+        self, chain_file: Path, capsys, monkeypatch
+    ) -> None:
+        """``SHIPINFER_INGEST__CAMERAS`` is how an operator configures a fleet, and this
+        command is now what places it — so a dry run has to show it, and showing it is the
+        proof that ``run`` reads the settings tree rather than leaving it to a runner."""
+        monkeypatch.setenv(
+            "SHIPINFER_INGEST__CAMERAS",
+            '[{"camera_id": "cam-quay", "uri": "rtsp://10.0.0.7/live"}]',
+        )
+
+        assert run(chain_file, runner="inprocess", inputs=["a.mp4"], dry_run=True) == 0
+
+        out = capsys.readouterr().out
+        assert "cameras: 1 configured (cam-quay ...)" in out
+        assert "cameras: 1 from --inputs (cam-000 ...)" in out
 
     def test_a_dry_run_refuses_inputs_on_a_runner_that_manages_no_cameras(
         self, chain_file: Path
