@@ -18,7 +18,7 @@ import pytest
 
 from shipinfer.core.errors import ServerStateError
 from shipinfer.core.settings import ServerSettings
-from shipinfer.server import InferenceServer
+from shipinfer.engine import InferenceServer
 
 _MODEL = """
 platform: mock

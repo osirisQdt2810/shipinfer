@@ -12,7 +12,7 @@ import pytest
 from shipinfer.core.request import InferenceRequest, RequestContext
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Tensor
-from shipinfer.server import InferenceServer
+from shipinfer.engine import InferenceServer
 
 
 def _repo(tmp_path: Path, instances: int, latency_ms: float = 2.0) -> Path:

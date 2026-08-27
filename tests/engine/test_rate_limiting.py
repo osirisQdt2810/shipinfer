@@ -19,7 +19,7 @@ from shipinfer.core.errors import RequestCancelledError
 from shipinfer.core.request import InferenceRequest, RequestContext
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Tensor
-from shipinfer.server import InferenceServer
+from shipinfer.engine import InferenceServer
 
 # Four instances, a bound of one, and a per-execution latency large enough that a burst
 # genuinely overlaps: without the limiter all four would be in compute at once.

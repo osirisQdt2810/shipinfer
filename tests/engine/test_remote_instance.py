@@ -27,16 +27,16 @@ from shipinfer.core.errors import (
 from shipinfer.core.request import InferenceRequest, InferenceResponse, RequestContext
 from shipinfer.core.request.future import ResponseFuture
 from shipinfer.core.types import Device, Tensor
-from shipinfer.runtime.memory.shared_ring import RingLayout, SharedRing
-from shipinfer.scheduling.dispatcher import Dispatcher
-from shipinfer.scheduling.policies.locality_spillover import LocalityAwareSpilloverPolicy
-from shipinfer.scheduling.work import WorkItem
-from shipinfer.server.remote_instance import (
+from shipinfer.engine.spill.remote_instance import (
     IngressLane,
     RemoteInstance,
     ResultReader,
     RingIngress,
 )
+from shipinfer.runtime.memory.shared_ring import RingLayout, SharedRing
+from shipinfer.scheduling.dispatcher import Dispatcher
+from shipinfer.scheduling.policies.locality_spillover import LocalityAwareSpilloverPolicy
+from shipinfer.scheduling.work import WorkItem
 
 
 def _name(tag: str) -> str:
@@ -330,7 +330,7 @@ class TestRepliesThatCannotLand:
     def _submit(self, writer, camera: str, frame: int) -> None:
         index = writer.claim(timeout_s=1.0)
         wire_request = _request(camera, frame)
-        from shipinfer.server import remote_wire
+        from shipinfer.engine.spill import wire as remote_wire
 
         remote_wire.encode_request(wire_request, writer.payload(index))
         writer.publish(index)

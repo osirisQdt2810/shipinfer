@@ -21,7 +21,7 @@ from shipinfer.core.errors import ConfigurationError, ModelControlError, ModelNo
 from shipinfer.core.request import InferenceRequest, RequestContext
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Tensor
-from shipinfer.server import InferenceServer
+from shipinfer.engine import InferenceServer
 
 _MODEL = """
 platform: mock
@@ -336,9 +336,9 @@ class TestTheModelTableIsNeverIteratedLive:
         """
         import inspect
 
-        from shipinfer.server import engine
+        from shipinfer.engine import pool
 
-        source = inspect.getsource(engine.InferenceServer)
+        source = inspect.getsource(pool.InferenceServer)
         safe = (
             "_models_snapshot",  # the helper's own read, under the lock
             "self._models[",  # single-key access

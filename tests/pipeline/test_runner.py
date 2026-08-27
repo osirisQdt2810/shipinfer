@@ -1,7 +1,7 @@
 """The runner: the whole flow, and the guarantee that no frame vanishes on the way through.
 
 The last class is the one that matters most — a real
-:class:`~shipinfer.server.InferenceServer` on the mock backend, the ``replay`` ingest source
+:class:`~shipinfer.engine.InferenceServer` on the mock backend, the ``replay`` ingest source
 reading PNGs off disk, and the ``jsonlines`` sink writing to a temporary file. No camera, no
 GPU, no broker, no build. That combination existing is what makes the 50-camera bench
 possible, so it is asserted rather than assumed.
@@ -676,8 +676,8 @@ class TestEndToEndWithReplayAndJsonLines:
         container has no TensorRT, by design. Substituting a fake backend here would leave
         the assertion intact while deleting what it proves.
         """
+        from shipinfer.engine import InferenceServer
         from shipinfer.ingest import IngestManager
-        from shipinfer.server import InferenceServer
 
         events_path = tmp_path / "events.jsonl"
         settings = ServerSettings(

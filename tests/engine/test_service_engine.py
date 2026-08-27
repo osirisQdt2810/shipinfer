@@ -18,8 +18,8 @@ import pytest
 from shipinfer.core.request import InferenceRequest, RequestContext
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Tensor
-from shipinfer.server import InferenceServer
-from shipinfer.server.remote_instance import RemoteInstance
+from shipinfer.engine import InferenceServer
+from shipinfer.engine.spill.remote_instance import RemoteInstance
 
 
 def _settings(repository: Path, run: str, shard: int) -> ServerSettings:
@@ -110,8 +110,8 @@ class TestAFailedConnectLeaksNothing:
         self, tmp_repository: Path
     ) -> None:
         from shipinfer.core.errors import ConfigurationError, RingClosedError
+        from shipinfer.engine.spill.mesh import ring_name
         from shipinfer.runtime.memory.shared_ring import RingLayout, SharedRing
-        from shipinfer.server.service_mesh import ring_name
 
         run = uuid.uuid4().hex[:8]
         settings = _settings(tmp_repository, run, 0)

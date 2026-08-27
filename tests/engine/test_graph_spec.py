@@ -8,7 +8,7 @@ graph for the one size the batcher actually stops at. Neither is an error and ne
 visible: capture failure falls back to the ordinary launch path, so the only symptom is a
 replay counter stuck at zero.
 
-These tests live in ``tests/server`` rather than ``tests/runtime`` because the derivation
+These tests live in ``tests/engine`` rather than ``tests/runtime`` because the derivation
 only means anything as an answer the *model* gives: it reads the same batching window the
 instance's queue batches against, and that pairing is the property worth protecting.
 """
@@ -24,8 +24,8 @@ import yaml
 
 from shipinfer.core.errors import ConfigurationError
 from shipinfer.core.settings import ServerSettings
+from shipinfer.engine import InferenceServer
 from shipinfer.runtime.graphs import derive_graph_batch_sizes, resolve_graph_spec
-from shipinfer.server import InferenceServer
 
 
 def _write_model(

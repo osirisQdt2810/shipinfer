@@ -12,7 +12,7 @@ from shipinfer.core.errors import ModelNotFoundError, ServerStateError, Validati
 from shipinfer.core.request import InferenceRequest, RequestContext
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Tensor
-from shipinfer.server import HealthStatus, InferenceServer, check_health
+from shipinfer.engine import HealthStatus, InferenceServer, check_health
 
 
 @pytest.fixture()

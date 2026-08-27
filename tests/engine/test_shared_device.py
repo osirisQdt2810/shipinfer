@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 
 from shipinfer.core.settings import DeviceSettings, ServerSettings
+from shipinfer.engine import InferenceServer
 from shipinfer.runtime.platform import device_count
-from shipinfer.server import InferenceServer
 
 _CONFIG = """
 name: echo

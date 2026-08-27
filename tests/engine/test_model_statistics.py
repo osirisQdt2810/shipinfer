@@ -22,8 +22,8 @@ from shipinfer.core.errors import ConfigurationError
 from shipinfer.core.request import InferenceRequest, RequestContext
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Tensor
-from shipinfer.server import InferenceServer
-from shipinfer.server.statistics import DurationStat, ModelStatistics
+from shipinfer.engine import InferenceServer
+from shipinfer.engine.statistics import DurationStat, ModelStatistics
 
 _ECHO = """
 platform: mock
@@ -263,7 +263,7 @@ class TestABatchedRequestIsNotChargedItsOwnWaitTwice:
     """
 
     def _stats(self):
-        from shipinfer.server.statistics import ModelStatistics
+        from shipinfer.engine.statistics import ModelStatistics
 
         return ModelStatistics()
 
@@ -400,7 +400,7 @@ class TestAnInvalidCudaGraphsOverrideIsRefusedEverywhere:
     def test_a_bad_value_is_refused(self, monkeypatch) -> None:
         from shipinfer.core.errors import ConfigurationError
         from shipinfer.core.settings import ExecutionSettings
-        from shipinfer.server.model import _graphs_enabled
+        from shipinfer.engine.model import _graphs_enabled
 
         monkeypatch.setenv("SHIPINFER_CUDA_GRAPHS", "1")
 
@@ -409,7 +409,7 @@ class TestAnInvalidCudaGraphsOverrideIsRefusedEverywhere:
 
     def test_on_and_off_both_win_over_the_setting(self, monkeypatch) -> None:
         from shipinfer.core.settings import ExecutionSettings
-        from shipinfer.server.model import _graphs_enabled
+        from shipinfer.engine.model import _graphs_enabled
 
         monkeypatch.setenv("SHIPINFER_CUDA_GRAPHS", "on")
         assert _graphs_enabled(ExecutionSettings(cuda_graphs=False)) is True
@@ -419,7 +419,7 @@ class TestAnInvalidCudaGraphsOverrideIsRefusedEverywhere:
 
     def test_unset_leaves_the_models_own_setting_alone(self, monkeypatch) -> None:
         from shipinfer.core.settings import ExecutionSettings
-        from shipinfer.server.model import _graphs_enabled
+        from shipinfer.engine.model import _graphs_enabled
 
         monkeypatch.delenv("SHIPINFER_CUDA_GRAPHS", raising=False)
 

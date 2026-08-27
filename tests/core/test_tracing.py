@@ -11,7 +11,7 @@ phase names — a trace from this server should diff against one from Triton wit
 translation table. That alignment is what the first test pins.
 
 Pure-layer tests only. That a served request actually reaches the sink is a server property
-and lives in ``tests/server/test_request_tracing.py``.
+and lives in ``tests/engine/test_request_tracing.py``.
 """
 
 from __future__ import annotations

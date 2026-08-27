@@ -9,7 +9,7 @@ from shipinfer.core.errors import RingProtocolError, ValidationError
 from shipinfer.core.request import InferenceRequest, InferenceResponse, Priority, RequestContext
 from shipinfer.core.request.timings import Timings
 from shipinfer.core.types import DataType, Device, Tensor
-from shipinfer.server import remote_wire as wire
+from shipinfer.engine.spill import wire
 
 
 def _request(**overrides) -> InferenceRequest:

@@ -21,7 +21,7 @@ from shipinfer.core.errors import ConfigurationError
 from shipinfer.core.request import InferenceRequest, RequestContext
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Tensor
-from shipinfer.server import InferenceServer
+from shipinfer.engine import InferenceServer
 
 # `fail_every` is not used here, but `seed` is: the mock's has_ship flag decides which
 # branch runs, and a test that asserts on a branch needs to know which one it got.

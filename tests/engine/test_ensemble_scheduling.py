@@ -14,7 +14,7 @@ on by a held thread or by a callback. A step that blocks on a :class:`threading.
 answers both without a timing assertion: if the scheduling is wrong the barrier is never
 reached by enough parties and the test fails outright instead of flaking.
 
-``tests/server/test_ensemble.py`` keeps the end-to-end coverage over real mock-backed
+``tests/engine/test_ensemble.py`` keeps the end-to-end coverage over real mock-backed
 models, including the conditional-branch behaviour these tests must not regress.
 """
 
@@ -40,8 +40,8 @@ from shipinfer.core.request import (
 )
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Tensor
+from shipinfer.engine.ensemble import EnsembleModel
 from shipinfer.repository import ModelArtifact, ModelConfig
-from shipinfer.server.ensemble import EnsembleModel
 
 _ROW = 2
 
@@ -107,7 +107,7 @@ class _FakeModel:
 
     Implements exactly the surface an ensemble step needs — ``name``, ``artifact``,
     ``is_ready``, ``infer`` — so the ensemble cannot tell it from a real
-    :class:`~shipinfer.server.model.Model`. ``work`` decides when the step finishes, which
+    :class:`~shipinfer.engine.model.Model`. ``work`` decides when the step finishes, which
     is the whole point: a real backend cannot be asked to stay open until three other
     requests have arrived.
     """

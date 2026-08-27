@@ -16,10 +16,10 @@ from shipinfer.core.request import InferenceRequest, InferenceResponse, RequestC
 from shipinfer.core.request.future import ResponseFuture
 from shipinfer.core.settings.topology import ServiceSettings
 from shipinfer.core.types import Device, Tensor
+from shipinfer.engine.spill.mesh import ServiceMesh, ring_name
 from shipinfer.scheduling.dispatcher import Dispatcher
 from shipinfer.scheduling.policies.locality_spillover import LocalityAwareSpilloverPolicy
 from shipinfer.scheduling.work import WorkItem
-from shipinfer.server.service_mesh import ServiceMesh, ring_name
 
 
 class FakeModel:
@@ -259,7 +259,7 @@ class TestSlotSizing:
         from types import SimpleNamespace
 
         from shipinfer.core.types import DataType
-        from shipinfer.server.service_mesh import wire_slot_bytes
+        from shipinfer.engine.spill.mesh import wire_slot_bytes
 
         embedder = SimpleNamespace(
             max_batch_size=16,
@@ -275,7 +275,7 @@ class TestSlotSizing:
         from types import SimpleNamespace
 
         from shipinfer.core.types import DataType
-        from shipinfer.server.service_mesh import wire_slot_bytes
+        from shipinfer.engine.spill.mesh import wire_slot_bytes
 
         dyn = SimpleNamespace(
             max_batch_size=8,
@@ -305,7 +305,7 @@ class TestTheAdvertisedDepthIsPerInstance:
         depth, so the wire must too."""
         from types import SimpleNamespace
 
-        from shipinfer.server.model import Model
+        from shipinfer.engine.model import Model
 
         model = Model.__new__(Model)
         model._instances = [SimpleNamespace(depth=5), SimpleNamespace(depth=3)]

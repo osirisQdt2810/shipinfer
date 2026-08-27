@@ -17,7 +17,7 @@ from shipinfer.core.request import InferenceRequest, RequestContext
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.tracing import TRACE_EVENTS, NullTraceSink
 from shipinfer.core.types import Tensor
-from shipinfer.server import InferenceServer
+from shipinfer.engine import InferenceServer
 
 _ECHO = """
 platform: mock

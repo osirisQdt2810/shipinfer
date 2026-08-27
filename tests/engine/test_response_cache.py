@@ -20,7 +20,7 @@ from shipinfer.core.errors import InferenceError
 from shipinfer.core.request import InferenceRequest, RequestContext
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Tensor
-from shipinfer.server import InferenceServer
+from shipinfer.engine import InferenceServer
 
 
 def _repo(tmp_path: Path, *, cache: str | None = "lru", fail_every: int = 0) -> Path:
@@ -153,7 +153,7 @@ class TestCacheIsOptIn:
     def test_caching_is_off_by_default_and_costs_no_hash(self, tmp_path: Path) -> None:
         """ADR-009: opt-in only. The null cache must not even compute a key, because the
         BLAKE2b pass over every input byte is the expensive half of a lookup."""
-        from shipinfer.server.cache import NullResponseCache
+        from shipinfer.engine.cache import NullResponseCache
 
         with _server(_repo(tmp_path, cache=None)) as server:
             server.infer_sync(_request(1.0), timeout=10)

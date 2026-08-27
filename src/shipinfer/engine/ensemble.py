@@ -27,7 +27,7 @@ waited for. The pool now bounds how much DAG bookkeeping runs at once, which is 
 of work, rather than how many frames may be in flight.
 
 What is *measured* about that, and what is not — stated because a design argument reads like a
-throughput claim if it is not labelled. ``tests/server/test_ensemble_scheduling.py`` runs a
+throughput claim if it is not labelled. ``tests/engine/test_ensemble_scheduling.py`` runs a
 mock DAG with two independent steps and asserts ``stats()["peak_parallel_steps"] >= 2``: two
 steps of one execution genuinely run at once, which the walked design could not do. No
 frames-per-second figure is claimed for the scheduler, because the repository ships no

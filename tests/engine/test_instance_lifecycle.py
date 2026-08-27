@@ -21,11 +21,11 @@ from shipinfer.core.metrics import ServerMetrics
 from shipinfer.core.request import InferenceRequest, RequestContext, ResponseFuture
 from shipinfer.core.settings import SchedulerSettings
 from shipinfer.core.types import DataType, Device, Tensor, TensorSpec
+from shipinfer.engine.instance import ModelInstance
 from shipinfer.runtime.device import DeviceManager
 from shipinfer.scheduling.batching import StackingBatcher
 from shipinfer.scheduling.queues import BatchWindow, FairPriorityQueue
 from shipinfer.scheduling.work import WorkItem
-from shipinfer.server.instance import ModelInstance
 
 INPUTS = (TensorSpec("x", DataType.FP32, (4,)),)
 OUTPUTS = (TensorSpec("y", DataType.FP32, (4,)),)
