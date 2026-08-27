@@ -1,0 +1,31 @@
+# topology/ship_person.yaml — the production chain
+#
+# The chain of arch.md §1, verbatim: this file is the design's own example, kept here as the
+# thing the loader must accept rather than as a copy that drifts from it.
+#
+# HOW THE ORDER IS DECIDED. An element with no `after:` follows the element declared
+# immediately before it. `after:` overrides that, and is how the two branches below rejoin:
+# `embed_ship` follows `segment` (not the person embedder declared after it), and
+# `recognize` follows `embed_ship`. Reordering two lines here reorders the chain, so check
+# the resolved wiring with `Topology.describe()` after an edit.
+#
+# WHAT DOES NOT LOAD YET. Every `impl:` below is a name that lands in a later phase of the
+# migration plan (arch.md §10), so this file is a schema fixture today, not a runnable
+# chain — `Topology.from_spec` refuses it with UnknownElementImplError naming
+# `gstreamer-gpu`, and a test asserts exactly that:
+#   * decode `gstreamer-gpu`         -> phase D (DataPool: NV12 decoded straight into VRAM)
+#   * detect/segment/embed/recognize `pool` -> phase A (the engine split out of server/)
+#   * track/mtmc `shipvision`        -> phase C (the MOT and MTMC elements in-chain)
+#   * output `kafka`                 -> phase C, with the event schema
+# The hardware-free `mock` implementations of every kind are registered today; they are what
+# the offline tier loads chains with.
+elements:
+  decode:    {impl: gstreamer-gpu}                  # NV12 → VRAM, the default
+  detect:    {impl: pool, model: ship_detector}
+  segment:   {impl: pool, model: ship_segmenter, when: class == ship}
+  embed_ship:   {impl: pool, model: ship_embedder,   after: segment}
+  embed_person: {impl: pool, model: person_embedder, when: class == person}
+  recognize: {impl: pool, model: ship_recognizer, after: embed_ship}
+  track:     {impl: shipvision, per: camera}        # stateful — pinned to the home shard
+  mtmc:      {impl: shipvision, scope: global}
+  output:    {impl: kafka}
