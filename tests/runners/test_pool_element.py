@@ -24,10 +24,14 @@ runner package.
 
 from __future__ import annotations
 
+import textwrap
+from typing import ClassVar
+
 import numpy as np
 import pytest
 
 from shipinfer.core.errors import (
+    CapsMismatchError,
     ConfigurationError,
     ModelNotFoundError,
     QueueFullError,
@@ -40,16 +44,21 @@ from shipinfer.core.request import (
     RequestContext,
     ResponseFuture,
 )
+from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Tensor
 from shipinfer.topology import (
     Caps,
     ChainItem,
+    ChainSpec,
     ElementContext,
     ElementKind,
+    Topology,
     create_element,
     registry_for,
 )
+from shipinfer.topology.elements.mock import MockDecode
 from shipinfer.topology.elements.pool import (
+    _DEFAULT_TIMEOUT_S,
     PoolDetect,
     PoolEmbed,
     PoolRecognize,
@@ -127,10 +136,10 @@ def tensor(rows: int = 1) -> Tensor:
     return Tensor.from_numpy(np.zeros((rows, 4), dtype=np.float32))
 
 
-def item(payload: object = None, **meta: object) -> ChainItem:
+def item(payload: object = None, *, caps: str = "tensor@gpu", **meta: object) -> ChainItem:
     return ChainItem(
         RequestContext(camera_id="cam-1", frame_id=7),
-        Caps.parse("tensor@gpu"),
+        Caps.parse(caps),
         payload=tensor() if payload is None else payload,
         meta=dict(meta),
     )
@@ -238,15 +247,35 @@ class TestSubmittingOneItem:
         assert model.requests[0].inputs == {"pixels": payload}
         assert model.requests[0].model_name == "ship_detector"
 
-    def test_the_successor_carries_the_declared_output_cap(self) -> None:
+    @pytest.mark.parametrize("caps", ["nv12@gpu", "tensor@gpu", "bgr@cpu"])
+    def test_the_successor_carries_the_cap_it_arrived_with(self, caps: str) -> None:
+        """The payload is handed on untouched, so its label is handed on untouched too.
+
+        This element used to stamp its own first ``produces`` on every successor, which
+        **relabelled** the payload: a ``bgr@cpu`` frame left it claiming to be ``nv12@gpu``,
+        and the device-to-host download arch.md §8 exists to refuse became invisible to every
+        element downstream. The cap on an item is the cap of the edge it is travelling, and
+        that is the loader's answer, not this element's.
+        """
         element = PoolDetect("detect", model="ship_detector")
         element.open(ElementContext(models=FakePool(ship_detector=FakeModel())))
 
-        result = element.process(item())
+        result = element.process(item(caps=caps))
 
         assert result is not None
-        assert result.caps == Caps.parse("nv12@gpu")
+        assert result.caps == Caps.parse(caps), "carried, not relabelled"
         assert result.context is not None
+
+    def test_the_wait_defaults_to_the_stage_timeout_the_settings_declare(self) -> None:
+        """Two defaults that have to agree, in two packages that cannot import each other.
+
+        ``topology`` is pure and may not read ``core.settings`` at import time, so the
+        element's default is a literal — and a literal that drifts from
+        ``pipeline.stage_timeout_ms`` is a chain quietly waiting a different length of time
+        than the deployment was tuned for. This is the assertion that ties them.
+        """
+        assert ServerSettings().pipeline.stage_timeout_ms / 1000.0 == _DEFAULT_TIMEOUT_S
+        assert PoolDetect("detect", model="m")._timeout_s == _DEFAULT_TIMEOUT_S
 
 
 class TestFailuresAreCarriedNotSwallowed:
@@ -293,3 +322,71 @@ class TestTheLifecycle:
 
         assert pool.lookups == ["ship_detector", "ship_detector"]
         assert element.is_open
+
+
+# -- the cap the loader resolves for a pool element ---------------------------------------
+#
+# A `pool` element declares `produces: *@*`, so its outbound cap is whatever the loader
+# negotiated on its inbound edge. That is a *chain* property, not an element property, and
+# these are the two halves of it: the host-memory chain is refused, and the device chain
+# still loads.
+
+
+@registry_for(ElementKind.DECODE).register("pool-test-cpu")
+class CpuDecode(MockDecode):
+    """A decoder that hands out host memory. The producer §8 refuses to see downloaded from."""
+
+    produces: ClassVar[tuple[str, ...]] = ("bgr@cpu",)
+
+
+#: ``decode -> segment{impl: pool} -> track -> output``. The tracker takes ``nv12@gpu`` or
+#: ``meta@cpu`` and nothing else, so what the segmenter hands on decides whether this chain
+#: loads at all.
+CHAIN = """
+name: pool_caps
+elements:
+  decode:  {impl: __DECODE__}
+  segment: {impl: pool, model: ship_segmenter}
+  track:   {impl: mock}
+  output:  {impl: mock}
+"""
+
+
+def chain(decode: str) -> Topology:
+    text = textwrap.dedent(CHAIN).replace("__DECODE__", decode)
+    return Topology.from_spec(ChainSpec.from_yaml(text))
+
+
+class TestWhatTheLoaderResolvesForAPoolElement:
+    def test_a_host_memory_producer_behind_it_is_refused_at_load(self) -> None:
+        """The relabelling this element used to do, caught where it has to be caught.
+
+        ``bgr@cpu`` reaches the segmenter, which accepts it — and hands it on as ``bgr@cpu``,
+        which the tracker cannot take. Refused at start-up, naming both sides. With a
+        concrete ``produces: nv12@gpu`` on the element this chain *loaded*: the segmenter
+        told the loader it had turned host memory into device memory, and the download
+        arch.md §8 exists to refuse would have shown up as a mysteriously slow tracker.
+        """
+        with pytest.raises(CapsMismatchError) as caught:
+            chain("pool-test-cpu")
+
+        assert "segment" in str(caught.value)
+        assert "track" in str(caught.value)
+
+    def test_a_device_producer_behind_it_loads_with_the_device_cap_on_both_edges(
+        self,
+    ) -> None:
+        """The other half: the wildcard must not refuse the chain the deployment runs.
+
+        The negotiated inbound cap is propagated to the outbound edge, so the ``*@*`` never
+        reaches an ``Edge`` — a chain whose edges read ``*@*`` would be a chain nobody
+        checked.
+        """
+        loaded = chain("mock")
+
+        negotiated = {(edge.producer, edge.consumer): str(edge.caps) for edge in loaded.edges}
+        assert negotiated[("decode", "segment")] == "nv12@gpu"
+        assert negotiated[("segment", "track")] == "nv12@gpu"
+        assert loaded.node("segment").element.output_caps == (
+            Caps.parse("*@*"),
+        ), "the element still declares the wildcard; only the edge is resolved"

@@ -22,17 +22,22 @@ misconfigured chain into a failure that appears on the first frame of a deploy i
 start-up. A model that is not in the pool must stop the deploy (§2.6: validate at start-up,
 not at first use).
 
-**The caps, and one promise this element cannot yet keep.** It declares ``nv12@gpu`` first
-because the device path is the default end to end (§8), ``tensor@gpu`` for a producer that
-already cropped, and ``bgr@cpu`` for the host fallback. It *produces* ``nv12@gpu``, because
-it hands the payload on unchanged for the next element to read. Those two are consistent for
-the two device caps and inconsistent for ``bgr@cpu``: an element that is handed host memory
-and claims to hand on ``nv12@gpu`` is lying to the loader. Nothing is wired to the host path
-today — no registered decode implementation produces ``bgr@cpu`` outside the tests — and the
-fix when something is is to declare ``produces: *@*`` and let the loader resolve it from the
-inbound cap, exactly as ``MockPassthrough`` does. That is a change to what §8 refuses, so it
-is not smuggled in here; it is named, and it is the first thing to do before a host-memory
-decoder ships.
+**The caps: it hands on what it was handed.** It *accepts* ``nv12@gpu`` first because the
+device path is the default end to end (§8), then ``tensor@gpu`` for a producer that already
+cropped, then ``bgr@cpu`` for the host fallback. It *produces* ``*@*``, which is not vagueness
+but the precise claim: this element reads the payload, adds a metadata key and hands the
+payload on **unchanged**, so its outbound cap is its negotiated inbound cap and the loader
+resolves it as such (:func:`~shipinfer.topology.chain._resolve_produced`, exactly as
+``MockPassthrough`` does).
+
+Declaring a concrete ``produces: nv12@gpu`` instead — which this file did until the wildcard
+went in — is a **relabelling**: fed ``bgr@cpu`` it told the loader host memory was device
+memory, so the device-to-host download §8 exists to refuse became invisible one element
+further down, with every edge reported valid. The wildcard is why a ``bgr@cpu`` decoder in
+front of a ``pool`` element and an ``nv12@gpu``-only tracker behind it is now refused at load.
+The corollary is that :meth:`_PoolElement._do_process` must not stamp a cap on the item it
+derives: the cap on an item is the cap of the edge it is travelling, and the edge is the
+loader's (:class:`~shipinfer.topology.chain.Edge`).
 """
 
 from __future__ import annotations
@@ -83,7 +88,10 @@ class _PoolElement(Element):
     """
 
     accepts: ClassVar[tuple[str, ...]] = ("nv12@gpu", "tensor@gpu", "bgr@cpu")
-    produces: ClassVar[tuple[str, ...]] = ("nv12@gpu",)
+    #: ``*@*``: the payload is handed on untouched, so the outbound cap *is* the negotiated
+    #: inbound one and the loader fills it in. See the module docstring for what a concrete
+    #: cap here would relabel.
+    produces: ClassVar[tuple[str, ...]] = ("*@*",)
 
     #: Where this kind's results are filed in :attr:`ChainItem.meta`. The one thing a
     #: subclass must declare, and the vocabulary the downstream elements read: ``track``
@@ -175,10 +183,12 @@ class _PoolElement(Element):
                 f"model {self.model!r} did not answer element {self.name!r} for "
                 f"{item.key} within {self._timeout_s}s"
             ) from exc
-        # `output_caps[0]` is the only cap this element declares, which is what makes it the
-        # right answer here — an element with two `produces` and two consumers hands a
-        # different cap to each and would have to be told which edge it is on.
-        return item.derive(caps=self.output_caps[0], **{self.meta_key: response.outputs})
+        # No `caps=`: the payload is handed on unchanged, so the cap it carries is the cap it
+        # arrived with. Stamping `output_caps[0]` here would relabel a `bgr@cpu` frame as
+        # whatever this class declares first, and resolving the real outbound cap means
+        # knowing which edge the item is travelling — which is the loader's answer
+        # (`Edge.caps`), not this element's.
+        return item.derive(**{self.meta_key: response.outputs})
 
 
 @registry_for(ElementKind.DETECT).register("pool")

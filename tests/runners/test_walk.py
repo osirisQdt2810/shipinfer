@@ -7,8 +7,10 @@ the ship's ``identities``, the other the person's ``vectors``, and the tracker n
 here directly — the walk that calls it is tested end to end in ``test_inprocess.py``, but a
 merge is worth pinning where the inputs can be stated by hand.
 
-Everything here runs with the runner **stopped**: the donor map is topology data, resolved
-once in ``__init__``, so the merge is answerable without a thread or an open element.
+Everything here runs with the runner **stopped**: the donor is topology data resolved by the
+loader and stored on the node (``ElementNode.donor``, pinned in
+``tests/topology/test_chain.py::TestTheDonorAtAFanIn``), so the merge is answerable without a
+thread or an open element. This file asks only what the runner does with it.
 """
 
 from __future__ import annotations
@@ -100,9 +102,9 @@ class TestTheFanInMerge:
     ) -> None:
         """Half a frame handle plus half a metadata dict is not a payload.
 
-        ``join`` is a tracker: it accepts ``nv12@gpu`` before ``meta@cpu``, so of its two
-        predecessors the one whose edge carries the frame donates the payload and the caps —
-        even though the metadata branch is declared first.
+        ``join``'s donor is ``detect`` (the loader's answer — it accepts ``nv12@gpu`` before
+        ``meta@cpu``), and this is the runner honouring it: the payload and the caps come
+        from that one predecessor even though the metadata branch is declared first.
         """
         node = runner.topology.node("join")
         frame = item(payload="frame:cam-1:7")
