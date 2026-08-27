@@ -69,7 +69,10 @@ namespace shipinfer {
         // On the add-vs-stop race path this loop can overrun the deadline by at most one
         // re-check grace: a stopper that loses `lifecycle_mutex_` waits out its rival's
         // grace regardless of its own remaining budget. Bounded, race-path-only, and the
-        // price of never double-detaching.
+        // price of never double-detaching. (The mirror-image overrun — the re-check losing
+        // to THIS loop and waiting out the fleet's grace — is documented at
+        // `kRecheckStopGrace` in manager.cpp; the two paragraphs are one rule seen from
+        // its two sides.)
         //
         // The deadline is the fleet's, so later actors may be handed a remaining budget of
         // zero — that is not mistreatment: the signal pass already reached them at t0, so

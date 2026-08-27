@@ -1583,14 +1583,20 @@ namespace {
             std::this_thread::sleep_for(5ms);
     }
 
-    void test_two_concurrent_stops_agree_on_one_abandonment() {
+    void test_two_concurrent_stops_both_report_the_one_abandonment() {
         // #35 rounds 2-3, escalated: the manager itself enters CameraActor::stop from two
         // threads (its own stop() and add_camera's re-check). Without the lifecycle lock
         // both pass the unsynchronised joinable() read, and one joins while the other
         // detaches — or both detach: std::terminate, in this binary. With it, the second
-        // caller waits out the first and finds the thread already handled; exactly ONE
-        // caller performs and reports the detach, so an actor cannot be counted or parked
-        // twice.
+        // caller waits out the first and finds the thread already joined or detached.
+        // Exactly one caller PERFORMS the detach, but every caller REPORTS it — the flag
+        // is the thread's fate, not the caller's work — so both stops here must answer
+        // false. Parking twice on this path is deliberate; the never-counted-twice
+        // property lives on the fleet count, which increments once per actor. Do not
+        // weaken the check below: it is the ONLY guard against a loser answering "clean"
+        // for a detached thread (#39 round 3 measured that with it edited to match this
+        // comment's round-1 ancestor, the whole tier stays green while bench unwinds the
+        // sink under a live thread).
         static FakeScript script;
         static CountingSink sink;
         static std::promise<void> gate;
@@ -1851,7 +1857,7 @@ int main() {
     test_a_directly_built_actor_names_the_camera_in_its_refusal();
     test_a_camera_added_during_stop_never_keeps_running();
     test_the_managers_death_leaks_the_abandoned_rather_than_freeing_them();
-    test_two_concurrent_stops_agree_on_one_abandonment();
+    test_two_concurrent_stops_both_report_the_one_abandonment();
     test_a_stop_racing_the_recheck_still_counts_the_abandonment();
     test_a_refused_add_pays_the_abandonment_debt();
     test_stop_charges_one_deadline_to_the_fleet_not_one_per_camera();

@@ -140,6 +140,12 @@ namespace shipinfer {
                 }
                 if (finished) {
                     thread_.join();
+                    // The id is cleared at the join and only at the join: a joined thread
+                    // is gone, and glibc may hand its pthread_t to an unrelated thread
+                    // whose later stop() on this actor would then take the self-stop branch
+                    // (#39 round 3). A DETACHED thread's id stays — the abandoned thread
+                    // may still self-stop, and that must keep hitting the guard.
+                    thread_id_.store(std::thread::id{});
                 } else {
                     thread_.detach();
                     thread_abandoned_ = true;
