@@ -258,6 +258,65 @@ class TestCleanShutdownDoesNotAbandonThreads:
         assert lying == [], f"reported STOPPED while the thread was still running: {lying}"
 
 
+class TestStopChargesOneDeadlineToTheFleet:
+    """``timeout_s`` is the fleet's budget, not each actor's — synced from the C++ plane.
+
+    The first pass signals every actor at t0, so an actor still unfinished at t0+timeout is
+    genuinely stuck; charging the budget per actor would turn one stuck decoder into five
+    consecutive waits. And the count of abandonments is *returned*, not just logged — a
+    caller deciding whether references it lent the fleet must now outlive it cannot grep a
+    log for that.
+    """
+
+    def test_five_hung_cameras_cost_one_deadline_and_are_counted(
+        self, sink, fast_settings, make_camera
+    ):
+        armed, released = threading.Event(), threading.Event()
+
+        def factory(config, counter):
+            return ParkedSource(
+                config,
+                counter,
+                script=[synthetic_image(0)],
+                armed=armed,
+                released=released,
+            )
+
+        cameras = [make_camera(f"cam{index}") for index in range(5)]
+        manager = IngestManager(
+            sink, settings=fast_settings(cameras=cameras), source_factory=factory
+        )
+        manager.start()
+        try:
+            assert _wait_for(lambda: manager.summary().streaming == 5)
+            armed.set()
+            time.sleep(0.05)  # let all five threads enter a parked read
+            started = time.monotonic()
+            abandoned = manager.stop(timeout_s=0.3)
+            elapsed = time.monotonic() - started
+            assert abandoned == 5, "every hung camera is reported, not just logged"
+            assert elapsed < 1.2, (
+                f"five hung cameras took {elapsed:.2f}s to give up on — the budget was "
+                f"charged per actor, not to the fleet"
+            )
+        finally:
+            released.set()
+            manager.stop()
+
+    def test_a_clean_shutdown_returns_zero(
+        self, sink, fast_settings, scripted_factory, make_camera
+    ):
+        factory, _ = scripted_factory(script=[synthetic_image(0)])
+        settings = fast_settings(cameras=[make_camera("cam0"), make_camera("cam1")])
+        manager = IngestManager(sink, settings=settings, source_factory=factory)
+        manager.start()
+        try:
+            assert _wait_for(lambda: manager.summary().streaming == 2)
+            assert manager.stop() == 0
+        finally:
+            manager.stop()
+
+
 class TestFleetHealth:
     """The fleet reports per-camera state, and start-up fails on a dead camera."""
 

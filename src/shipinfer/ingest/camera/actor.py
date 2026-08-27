@@ -177,7 +177,7 @@ class CameraActor:
         """
         self._stop.set()
 
-    def stop(self, timeout_s: float = 5.0) -> None:
+    def stop(self, timeout_s: float = 5.0) -> bool:
         """Ask the actor to finish, and wait for it. Idempotent.
 
         A no-op on an actor that was never started and on one that has already stopped,
@@ -187,8 +187,13 @@ class CameraActor:
         read. A thread still alive after ``timeout_s`` is logged and abandoned: it is a
         daemon blocked inside a decoder, and holding up the whole process's shutdown behind
         it would be the worse failure.
+
+        Returns ``False`` when the thread had to be abandoned, ``True`` on a clean stop —
+        the same contract as the C++ plane's ``CameraActor::stop``, so a caller can count
+        its abandonments instead of grepping the log for them.
         """
         self.request_stop()
+        abandoned = False
         thread = self._thread
         if (
             thread is not None
@@ -197,6 +202,7 @@ class CameraActor:
         ):
             thread.join(timeout_s)
             if thread.is_alive():
+                abandoned = True
                 _LOG.warning(
                     "camera %s did not stop within %.1fs; abandoning the thread",
                     self.camera_id,
@@ -205,6 +211,7 @@ class CameraActor:
                 )
         if not self._state_is_final():
             self._set_state(CameraState.STOPPED)
+        return not abandoned
 
     def __enter__(self) -> CameraActor:
         self.start()

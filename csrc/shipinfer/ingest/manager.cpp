@@ -100,7 +100,9 @@ namespace shipinfer {
         // across a thread launch makes every health read wait on the scheduler. The local
         // `shared_ptr` is what makes that safe — a concurrent `stop()` can strip the map in
         // this window, and without it the actor would be freed under our feet.
+        between_publish_and_start();
         actor->start();
+        between_start_and_recheck();
         {
             // The re-check. If the fleet forgot this camera while it was starting — a
             // `stop()` or `remove_camera` landed in the window — its stop request was aimed
@@ -111,7 +113,19 @@ namespace shipinfer {
             auto found = actors_.find(config.camera_id);
             if (found == actors_.end() || found->second != actor) {
                 lock.unlock();
-                actor->stop();
+                // A freshly started actor that got its stop signal before its first wait is
+                // gone in microseconds; one that is not is blocked inside `do_open` (whose
+                // budget, 10 s by default, outlives any stop grace) and will have to be
+                // DETACHED. 250 ms is enough to tell those apart without stalling the error
+                // path of an API call for the full shutdown grace.
+                if (!actor->stop(std::chrono::milliseconds(250))) {
+                    // The abandonment debt (#33 round 3): the detached thread is still
+                    // standing on this actor, and the throw below drops our last reference —
+                    // park it with the others `~IngestManager` deliberately leaks, exactly
+                    // as `stop()` and `remove_camera` do.
+                    std::lock_guard<std::mutex> parked(mutex_);
+                    abandoned_.push_back(std::move(actor));
+                }
                 throw ServerStateError("camera '" + config.camera_id +
                                        "' was removed while it was starting; the fleet is "
                                        "stopping or the camera was removed — add it again "

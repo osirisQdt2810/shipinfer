@@ -930,6 +930,28 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       divergence ADR-014 recorded is closed; the parity harness (P6) lists it as a case to pin.
 - [ ] **P4 · Ingest.** RTSP (GStreamer/NVDEC) and replay behind one source registry, camera
       actors with reconnect, the manager's stop semantics — the Python `ingest/` mirrored.
+      PR1 (#33, the CUDA-free core) merged 27 Aug; #35 pays add_camera's abandonment debt and
+      syncs the Python stop. Open sub-items from its reviews:
+      - [ ] **P4-NB2-py · Python `add_camera` has NO re-check** (#35 rounds 1–2; pre-existing
+            from #33's C++-only fix). `manager.py` inserts under the lock, releases it, calls
+            `actor.start()` — and `CameraActor.start` clears the stop event. A `stop()` in
+            that window strips `_actors` and signals a thread that does not exist yet;
+            `start()` erases the signal; the camera reads and publishes indefinitely while
+            `manager.size()` reports 0 and no later `stop()` can reach it. No UAF (the bound
+            method keeps the actor alive) — the orphaned camera is the whole defect. Mirror
+            the C++ re-check + `ServerStateError` + tests.
+      - [ ] **P4-NB3 · `CameraActor::stop` is not safe against a concurrent stop, and the
+            manager now enters it from two threads** (#35 round 2; pre-existing, narrowed but
+            made more likely by the 250 ms re-check grace). Both callers pass the
+            unsynchronised `thread_.joinable()` read (which also races `start()`'s write of
+            `thread_`); one joins while the other detaches → UB, or a double detach →
+            `std::terminate` on the shutdown path. Fix: a `stop_mutex_` serialising the
+            joinable/join/detach section, or a re-check that consults the actor instead of
+            re-stopping it. Same actor may also be parked on `abandoned_` from both sites
+            (refcount-harmless; the double detach is the defect).
+      - [ ] **P4-NB4 · Python `remove_camera` discards `actor.stop()`'s now-meaningful
+            bool** (#35 round 2 nit) — the C++ counterpart parks on it; Python has nothing to
+            park but should at least surface the abandonment to its caller.
 - [ ] **P5 · Resolved config in, same events out.** The binary takes the settings tree and the
       model repository (`config.yaml`) the Python plane reads, not CLI flags; emits the same
       event schema (`pipeline/schema.py`) so one sink serves both planes.
