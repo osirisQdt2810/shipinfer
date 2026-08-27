@@ -63,17 +63,26 @@ class ConditionSyntaxError(TopologyError):
 
 
 class UnknownElementKindError(TopologyError):
-    """A chain slot does not name one of the eight element kinds.
+    """A chain slot, or an explicit ``kind:``, does not name one of the eight kinds.
 
     Raised when neither an explicit ``kind:`` nor the slot name resolves: ``sement:`` is a
     typo, and inferring nothing from it and running a chain with a missing stage would be
     far worse than refusing to load.
+
+    **One mistake, one error type.** A misspelled kind is the same mistake whether it is
+    written as the slot name (``sement:``) or as an explicit value (``kind: sement``), so
+    the schema keeps ``kind`` a plain string and
+    :meth:`~shipinfer.topology.base.ElementKind.parse` raises this for both. Declaring the
+    field as the enum would answer the second spelling with a pydantic ``ChainSpecError``
+    and the first with this, which is two vocabularies for one typo.
+
+    ``slot`` is whatever was misspelled — the slot name or the ``kind:`` value.
     """
 
     def __init__(self, slot: str, known: Sequence[str]) -> None:
         super().__init__(
-            f"element slot {slot!r} does not name an element kind; "
-            f"add an explicit `kind:` or use one of {sorted(known)}"
+            f"{slot!r} does not name an element kind; use one of {sorted(known)} as the "
+            "slot name, or add an explicit `kind:`"
         )
         self.slot = slot
         self.known = tuple(known)
@@ -117,31 +126,52 @@ class UnknownElementError(TopologyError):
 class ChainCycleError(TopologyError):
     """The ``after`` edges form a cycle, so no execution order exists.
 
-    Carries the members, because "the chain has a cycle" without them is the least
-    actionable message a loader can produce.
+    Carries the cycle as a **path**, in the direction data would flow, and prints it that
+    way: ``detect -> track -> detect``. A set of names ("the chain has a cycle through
+    ['detect', 'track', 'output']") is the least actionable message a loader can produce,
+    and a set built from "everything Kahn's algorithm could not place" also drags in every
+    element that merely hangs off the cycle.
     """
 
     def __init__(self, cycle: Sequence[str]) -> None:
-        super().__init__(f"the chain has a cycle through {sorted(cycle)}")
+        path = " -> ".join([*cycle, cycle[0]]) if cycle else "<unknown>"
+        super().__init__(f"the chain has a cycle: {path}")
         self.cycle = tuple(cycle)
 
 
 class ChainStructureError(TopologyError):
     """The chain is a DAG but not a runnable one.
 
-    A chain with no decode root has nothing to read frames with; one with no output sink
-    computes results nobody emits; a model element with no ``model:`` has nothing to run.
-    All three are start-up refusals rather than silent no-ops.
+    A chain whose root is not a decode element has nothing to read frames with; one with no
+    output element computes results nobody emits; an output element with a successor is not
+    the end of anything; a model element with no ``model:`` has nothing to run; a root or a
+    fan-in whose caps cannot be pinned down leaves the loader unable to say what flows on an
+    edge. All of them are start-up refusals rather than silent no-ops.
+
+    Distinct from :class:`CapsMismatchError`, which is about *two* elements disagreeing.
+    This one is about *one* element's place in the chain.
     """
 
 
 class CapsMismatchError(TopologyError):
-    """Two adjacent elements agree on no format/location pair.
+    """Two elements that can hand data to each other agree on no format/location pair.
 
     The message names the fix on purpose. The tempting alternative — quietly inserting a
     device-to-host copy so ``nv12@gpu`` can feed ``bgr@cpu`` — is precisely the failure
     arch.md §8 refuses: a 1000 fps chain that silently downloads every frame to host memory
     looks like a working deployment and performs like a broken one.
+
+    Args:
+        producer: the element the data comes from.
+        produced: its output caps, **as resolved** — a wildcard ``produces`` is filled in
+            from what arrives at the element before this check runs, so the message names
+            the cap that would really flow rather than the ``*@*`` the class declared.
+        consumer: the element the data goes to.
+        accepted: its declared input caps.
+        skipped: the ``when:`` element whose *bypass* is being refused, if any. A
+            conditional element is skipped for items its condition rejects, and the item
+            then travels straight from its predecessor to its successor; that hand-over is
+            checked too, and it is worth saying which element being absent creates it.
     """
 
     def __init__(
@@ -150,9 +180,12 @@ class CapsMismatchError(TopologyError):
         produced: Sequence[str],
         consumer: str,
         accepted: Sequence[str],
+        *,
+        skipped: str | None = None,
     ) -> None:
+        detour = "" if skipped is None else f"when {skipped!r} is skipped by its `when:`, "
         super().__init__(
-            f"{producer!r} produces {list(produced)} but {consumer!r} accepts "
+            f"{detour}{producer!r} produces {list(produced)} but {consumer!r} accepts "
             f"{list(accepted)}: no cap in common. Declare a matching cap on one side or "
             "spell an explicit convert element — this loader will not download a frame to "
             "host memory implicitly (arch.md §8)."
@@ -161,3 +194,4 @@ class CapsMismatchError(TopologyError):
         self.produced = tuple(produced)
         self.consumer = consumer
         self.accepted = tuple(accepted)
+        self.skipped = skipped
