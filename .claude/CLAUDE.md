@@ -128,7 +128,7 @@ src/shipinfer/
 │   ├── base.py            #   per kind, YAML chain loader — validated at load time
 │   └── elements/          #   one impl per file; mock today, real impls in phase C/E
 │
-├── engine/                # the model pool (arch.md §6) — moved out of server/ in A2 PR-1
+├── engine/                # the model pool (arch.md §6) — what `server/` used to be
 │   ├── pool.py            # InferenceServer: repository, devices, memory pool, loaded models
 │   ├── instance.py        # 1 backend copy + 1 queue + 1 worker thread, pinned to 1 GPU
 │   ├── model.py           # instances + dispatcher + batcher + cache
@@ -139,17 +139,24 @@ src/shipinfer/
 ├── api/                   # KServe v2 over FastAPI — the engine's side-door, arch.md §6
 │                          #   the ONE layer that may import fastapi/uvicorn, and lazily
 │
-├── launch/                # §2 spawn + supervise shards; gRPC clients arrive in A2 PR-5/6
+├── runners/               # §1 HOW a topology executes   <- @RUNNERS.register
+│   ├── inprocess.py       #   the whole chain on a thread pool here
+│   ├── fleet.py           #   one shard process per GPU, driven over gRPC — the default
+│   └── service.py         #   the shard's half of the control plane (holds a runner)
+│
+├── launch/                # §2 spawn + supervise shards; the parent's half of the RPCs
 │   ├── supervisor.py      #   Fleet: one process per shard, all-or-nothing start, one drain
+│   ├── client.py          #   ShardClient: Ready/UpdateTopology/AddCamera/Health/Stop
+│   ├── control.py         #   the vocabulary, with no transport in it
+│   ├── proto/             #   shard.proto + the committed generated stubs
 │   └── signals.py         #   Ctrl-C/SIGTERM -> the fleet. Never imports torch: it sets
 │                          #   CUDA_VISIBLE_DEVICES before the child's interpreter starts
 │
-├── server/                # DISSOLVING (A2): supervision left in PR-4; launcher.py is now
-│   ├── launcher.py        #   just the argv a shard is started with, and the topology
-│   └── topology/          #   classes -> runners/ (PR-6); __init__ is a shim onto engine/
-│                          #   topology/ here = process placement, the OLD sense of the word
+├── cli/shard.py           # §2 the child: `--shard-id N --control-port P` and nothing else.
+│                          #   Binds, answers `starting`, builds its runner when told what
+│                          #   to run. A composition root, which is why it is under cli/
 │
-└── pipeline/, ingest/     # the ship+person application on top of the server
+└── pipeline/, ingest/     # the ship+person application on top of the engine
 
 3rdparty/                  # first-party libraries with their own repos, as submodules
   shipvision/              #   algorithms + C++17/CUDA/HIP fused kernels -> shipvision._C
@@ -253,8 +260,10 @@ The harness takes `--cameras --fps --gpus --seconds --warmup --source replay|rts
 --sweep`; it has no `--skew`. `shipinfer bench <model> --cameras 50 --fps 20 --skew 8` is the
 in-process scheduler demonstration (one model, synthetic load, skewed cameras), not the
 system measurement. The design load — 50 cameras × 20 fps — is more than one interpreter can
-generate or serve: it needs the multi-process generator, which is `shipinfer fleet` (one process
-per shard) with the harness driving each shard's cameras.
+generate or serve: it needs the multi-process generator, which is the benchmark harness's own
+sharded mode (`benchmarks/harness/shards.py`, one process per shard) driving each shard's
+cameras. `shipinfer fleet` was that entry point until A2 PR-6; `shipinfer run --runner fleet`
+is the deployment command now, and it runs a chain rather than a repository.
 
 "The offline suite is green" is **not** evidence that the server balances load. A bench run
 with a per-device breakdown is.

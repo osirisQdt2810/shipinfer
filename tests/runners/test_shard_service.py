@@ -106,6 +106,9 @@ class CameraRunner(FakeRunner):
         #: servicer's "the shard knew it, the removal failed" branch is reached.
         self.remove_error: Exception | None = None
         self.drain_delay_s = 0.0
+        #: Every deadline `drain` was actually given. The servicer clamps a proto3 zero to
+        #: its default before it gets here, and this is what shows which number arrived.
+        self.drain_timeouts: list[float] = []
         #: The highest number of threads ever inside `drain` at once. 1 is the assertion:
         #: the servicer's lock is what keeps two Drains out of one camera set.
         self.drain_concurrency = 0
@@ -132,6 +135,7 @@ class CameraRunner(FakeRunner):
     def drain(self, timeout_s: float = 20.0) -> int:
         with self._counter:
             self.drains += 1
+            self.drain_timeouts.append(timeout_s)
             self._inside += 1
             self.drain_concurrency = max(self.drain_concurrency, self._inside)
         try:
@@ -206,6 +210,37 @@ class TestTheStateIsDerivedNotRemembered:
 
         assert ShardIdentity.from_pb(reply.identity) == ShardIdentity(5, 50105, 99)
         assert reply.state == ShardState.STARTING
+
+
+class TestTheShutdownPollReadsAFlag:
+    """``cli/shard.py`` polls once a second, only to learn whether it may exit and give its
+    CUDA context back. ``state()`` answers the same question and takes a full
+    ``runner.health()`` to do it - every element walked, the ingest manager snapshotted - for
+    every second the shard is alive."""
+
+    def test_stopped_costs_no_snapshot_and_state_costs_one(self) -> None:
+        runner = FakeRunner(chain())
+        svc = service(runner)
+        install(svc)
+        before = runner.health_calls
+
+        assert svc.stopped is False
+        assert runner.health_calls == before, "the poll took a health snapshot"
+
+        assert svc.state() == ShardState.READY
+        assert runner.health_calls == before + 1, "the expensive path stopped being expensive"
+
+    def test_it_answers_what_state_answers(self) -> None:
+        """Same meaning, so the cheaper read is a substitution and not a second opinion."""
+        runner = FakeRunner(chain())
+        svc = service(runner)
+        install(svc)
+
+        assert svc.stopped is (svc.state() == ShardState.STOPPED) is False
+
+        svc.Stop(pb.StopRequest(timeout_s=0.1))
+
+        assert svc.stopped is (svc.state() == ShardState.STOPPED) is True
 
 
 class TestHealthAsksTheRunnerExactlyOnce:
@@ -862,3 +897,340 @@ class TestTheServicerNeedsNoChannel:
         assert svc.Stats(pb.StatsRequest(), None) is not None
         assert svc.Drain(pb.DrainRequest(timeout_s=0.1), None).abandoned == 0
         assert svc.Stop(pb.StopRequest(timeout_s=0.1), None).abandoned == 0
+
+
+class TestAShardThatIsToldWhatToRun:
+    """A spawned shard has two flags and no chain (arch.md section 2), so it has no runner.
+
+    ``Topology.from_spec`` refuses an empty chain, so there is genuinely nothing to construct
+    one over until the first ``UpdateTopology`` arrives — which is why the servicer takes a
+    factory instead of a runner. Everything before that call has to answer *something*: a
+    shard that could not say "starting" would be a shard a launcher either respawns or hands
+    a camera to, and both are wrong.
+    """
+
+    @staticmethod
+    def _service(build: Any, **kw: Any) -> ShardService:
+        return ShardService(
+            None, ShardIdentity(shard_id=3, control_port=50103, pid=99), build=build, **kw
+        )
+
+    def test_neither_a_runner_nor_a_factory_is_refused_at_construction(self) -> None:
+        """It would bind a port, answer Ready, and refuse every RPC after it."""
+        with pytest.raises(ConfigurationError, match="neither a runner nor"):
+            ShardService(None, ShardIdentity(shard_id=3, control_port=50103))
+
+    def test_before_the_first_topology_it_says_starting(self) -> None:
+        svc = self._service(lambda spec, shared, rank: FakeRunner(chain()))
+
+        assert svc.Ready(pb.ReadyRequest()).state == ShardState.STARTING
+        assert svc.Health(pb.HealthRequest()).state == ShardState.STARTING
+        assert svc.runner is None
+
+    def test_it_takes_no_camera_before_it_has_a_topology(self) -> None:
+        """`accepted=True` here would have the launcher mark the camera placed and stop
+        looking for a home for it — dark until somebody reads a dashboard."""
+        svc = self._service(lambda spec, shared, rank: FakeRunner(chain()))
+
+        reply = svc.AddCamera(
+            pb.AddCameraRequest(camera=CameraSpec("quay-1", "rtsp://host").to_pb())
+        )
+
+        assert reply.accepted is False and "starting" in reply.reason
+
+    def test_stopping_one_costs_nothing_and_says_so(self) -> None:
+        svc = self._service(lambda spec, shared, rank: FakeRunner(chain()))
+
+        reply = svc.Stop(pb.StopRequest(timeout_s=0.1))
+
+        assert reply.abandoned == 0 and reply.detail == ""
+
+    def test_the_topology_builds_the_runner_and_starts_it(self) -> None:
+        built: list[Any] = []
+
+        def build(spec: Any, shared: Any, rank: Any) -> Runner:
+            built.append((spec.name, tuple(shared), tuple(rank)))
+            return FakeRunner(chain())
+
+        svc = self._service(build)
+        reply = install(svc, shared_by=[2], share_rank=[1])
+
+        assert reply.accepted and reply.topology == "linear"
+        assert built == [("linear", (2,), (1,))]
+        assert svc.runner is not None and svc.runner.is_running
+        assert svc.Health(pb.HealthRequest()).state == ShardState.READY
+
+    def test_the_sharing_reaches_the_factory_and_not_only_the_property(self) -> None:
+        """`shared_by` used to arrive in the child's environment, where the settings tree read
+        it before anything was built. It arrives here now, and the factory is what puts it
+        back in front of the engine — so a servicer that only recorded it would be a shard
+        loading twice the engines with the right number in its logs."""
+        seen: list[tuple[int, ...]] = []
+        svc = self._service(
+            lambda spec, shared, rank: (seen.append(tuple(shared)), FakeRunner(chain()))[1]
+        )
+
+        install(svc, shared_by=[4], share_rank=[3])
+
+        assert seen == [(4,)]
+        assert svc.shared_by == (4,) and svc.share_rank == (3,)
+
+    def test_a_factory_that_fails_is_an_answer_not_a_crash(self) -> None:
+        def build(spec: Any, shared: Any, rank: Any) -> Runner:
+            raise ConfigurationError("model 'ship_detector' is not in this repository")
+
+        svc = self._service(build)
+        reply = install(svc)
+
+        assert reply.accepted is False
+        assert "ship_detector" in reply.reason
+        assert svc.runner is None, "a failed build must not leave half a runner behind"
+
+    def test_a_start_that_failed_sends_the_retry_back_through_the_factory(self) -> None:
+        """Otherwise the retry records the NEW sharing over an engine built with the OLD one.
+
+        `shared_by` is the number that decides whether two shards on one GPU load two
+        instances each or four, so a shard that skipped the factory would report a sharing it
+        is not running - and `UpdateTopology` is the one RPC a launcher would retry.
+        """
+        built: list[tuple[int, ...]] = []
+
+        def build(spec: Any, shared: Any, rank: Any) -> Runner:
+            built.append(tuple(shared))
+            runner = FakeRunner(chain())
+            if len(built) == 1:
+                runner.start_error = RuntimeError("the decode element could not open")
+            return runner
+
+        svc = self._service(build)
+
+        first = install(svc, shared_by=[4], share_rank=[3])
+
+        assert first.accepted is False and "could not open" in first.reason
+        assert svc.runner is None, "a runner that could not start was left assigned"
+
+        second = install(svc, shared_by=[2], share_rank=[1])
+
+        assert second.accepted is True
+        assert built == [(4,), (2,)], "the retry skipped the factory"
+        assert svc.shared_by == (2,) and svc.share_rank == (1,)
+        assert svc.runner is not None and svc.runner.is_running
+
+    def test_a_runner_handed_in_at_construction_is_kept_across_a_failed_start(self) -> None:
+        """The other side of the same coin: this servicer has no factory, so dropping its one
+        runner would leave a shard answering `starting` forever with nothing to rebuild."""
+        runner = FakeRunner(chain())
+        runner.start_error = RuntimeError("the decode element could not open")
+        svc = service(runner)
+
+        assert install(svc).accepted is False
+        assert svc.runner is runner
+
+        runner.start_error = None
+
+        assert install(svc).accepted is True
+
+    def test_a_chain_that_does_not_parse_never_reaches_the_factory(self) -> None:
+        """The refusal that earns the RPC its keep: a mistyped chain fails the deploy."""
+        calls: list[Any] = []
+        svc = self._service(lambda *a: calls.append(a) or FakeRunner(chain()))
+
+        reply = install(svc, yaml="elements: [this, is, not, a, mapping]")
+
+        assert reply.accepted is False and not calls
+
+
+class TestAZeroTimeoutOnTheWireIsTheDefaultNotNoGrace:
+    """proto3 has no field presence for scalars.
+
+    An unset ``double timeout_s`` and a deliberate ``0.0`` are the same bytes, and no servicer
+    can tell them apart. Read literally, a client that simply omits the field asks this shard
+    to detach every camera thread at once and report ``abandoned>0`` — which ``StopReply`` and
+    ``StopResult.clean`` both define as "a detached thread still references this shard's
+    buffers, do not unwind them". That is a fleet-wide lifetime signal raised by an ordinary
+    shutdown, and the ``.proto`` ships in the wheel for clients that never see this package's
+    defaults. So zero reads as the default, and the numbers are the ones ``ShardClient`` and
+    ``Runner`` already use.
+    """
+
+    def test_stop_with_an_unset_timeout_gets_the_default(self) -> None:
+        from shipinfer.runners.service import DEFAULT_STOP_TIMEOUT_S
+
+        runner = CameraRunner(chain())
+        svc = service(runner)
+        install(svc)
+        svc.AddCamera(pb.AddCameraRequest(camera=CameraSpec("cam-1", "rtsp://x").to_pb()))
+
+        svc.Stop(pb.StopRequest())  # no timeout_s: 0.0 on the wire
+
+        assert runner.drain_timeouts == [DEFAULT_STOP_TIMEOUT_S]
+
+    def test_drain_with_an_unset_timeout_gets_the_default(self) -> None:
+        from shipinfer.runners.service import DEFAULT_DRAIN_TIMEOUT_S
+
+        runner = CameraRunner(chain())
+        svc = service(runner)
+        install(svc)
+
+        svc.Drain(pb.DrainRequest())
+
+        assert runner.drain_timeouts == [DEFAULT_DRAIN_TIMEOUT_S]
+
+    def test_remove_camera_with_an_unset_timeout_gets_the_default(self) -> None:
+        from shipinfer.runners.service import DEFAULT_REMOVE_TIMEOUT_S
+
+        runner = CameraRunner(chain())
+        svc = service(runner)
+        install(svc)
+        svc.AddCamera(pb.AddCameraRequest(camera=CameraSpec("cam-1", "rtsp://x").to_pb()))
+
+        svc.RemoveCamera(pb.RemoveCameraRequest(camera_id="cam-1"))
+
+        assert runner.removed_with == [("cam-1", DEFAULT_REMOVE_TIMEOUT_S)]
+
+    def test_a_number_the_caller_did_set_is_still_the_one_used(self) -> None:
+        """The clamp is for the unset field, not a floor on what a caller may ask for."""
+        runner = CameraRunner(chain())
+        svc = service(runner)
+        install(svc)
+
+        svc.Drain(pb.DrainRequest(timeout_s=0.25))
+
+        assert runner.drain_timeouts == [0.25]
+
+
+class TestADrainThatFailedDoesNotReadAsDrained:
+    """``drained`` means RELEASED, not "a Drain was attempted".
+
+    The flag used to be set in a ``finally``, so a drain whose runner raised left the shard
+    reporting ``drained`` with its cameras still running. A launcher reads that as "this shard
+    is finished, place its cameras elsewhere" — and two shards end up reading one camera.
+    """
+
+    def test_a_failed_drain_leaves_the_shard_where_it_was(self) -> None:
+        runner = CameraRunner(chain())
+        svc = service(runner)
+        install(svc)
+        svc.AddCamera(pb.AddCameraRequest(camera=CameraSpec("cam-1", "rtsp://x").to_pb()))
+        runner.drain_error = ServerStateError("the manager would not release cam-1")
+
+        reply = svc.Drain(pb.DrainRequest(timeout_s=1.0))
+
+        assert reply.abandoned == 0
+        assert "would not release" in reply.detail
+        assert svc.state() != ShardState.DRAINED
+        assert svc.state() == ShardState.RUNNING, "the shard is still serving cam-1"
+        assert svc.drain_detail == "the manager would not release cam-1"
+
+    def test_a_failed_drain_still_takes_cameras(self) -> None:
+        """Which is the operational consequence: the shard did not release anything, so it is
+        not a shard that must refuse the next camera."""
+        runner = CameraRunner(chain())
+        svc = service(runner)
+        install(svc)
+        runner.drain_error = ServerStateError("nope")
+        svc.Drain(pb.DrainRequest(timeout_s=1.0))
+
+        reply = svc.AddCamera(
+            pb.AddCameraRequest(camera=CameraSpec("cam-2", "rtsp://x").to_pb())
+        )
+
+        assert reply.accepted
+
+    def test_a_drain_that_abandoned_threads_is_still_a_completed_drain(self) -> None:
+        """Abandoning is not failing: the cameras WERE released, and `abandoned` is the
+        lifetime signal that goes with it."""
+        runner = CameraRunner(chain())
+        runner.abandoned = 2
+        svc = service(runner)
+        install(svc)
+
+        reply = svc.Drain(pb.DrainRequest(timeout_s=1.0))
+
+        assert reply.abandoned == 2 and reply.detail == ""
+        assert svc.state() == ShardState.DRAINED
+        assert svc.drain_detail == ""
+
+    def test_a_fresh_topology_clears_the_failure_with_the_flag(self) -> None:
+        runner = CameraRunner(chain())
+        svc = service(runner)
+        install(svc)
+        runner.drain_error = ServerStateError("nope")
+        svc.Drain(pb.DrainRequest(timeout_s=1.0))
+        runner.drain_error = None
+        runner.stop()
+
+        install(svc)
+
+        assert svc.drain_detail == ""
+
+
+class TestAddCameraIsSerialisedAgainstTheLifecycle:
+    """The guard is read twice — outside the lock as a fast path, inside it as the decision.
+
+    The servicer runs on a thread pool, so an ``AddCamera`` and a ``Stop`` on two threads is
+    an ordinary wire event. With the guard read only outside the lock, the add passes a
+    still-false ``_stopped`` and reaches the runner *while* the Stop is releasing that
+    runner's camera set: the launcher is told ``accepted=True``, marks the camera placed, and
+    stops looking for a home for it. The camera is then dark until somebody reads a dashboard
+    — ADR-005's failure, one layer up.
+    """
+
+    def test_a_stop_waits_for_an_add_in_flight_instead_of_racing_it(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        class SlowAdd(CameraRunner):
+            def add_camera(self, camera: CameraSpec) -> None:
+                entered.set()
+                assert release.wait(10.0), "the test never released the add"
+                super().add_camera(camera)
+
+        runner = SlowAdd(chain())
+        svc = service(runner)
+        install(svc)
+        adding = threading.Thread(
+            target=svc.AddCamera,
+            args=(pb.AddCameraRequest(camera=CameraSpec("cam-1", "rtsp://x").to_pb()),),
+        )
+        adding.start()
+        try:
+            assert entered.wait(5.0)
+            stopping = threading.Thread(target=svc.Stop, args=(pb.StopRequest(timeout_s=1.0),))
+            stopping.start()
+            time.sleep(0.1)
+
+            assert stopping.is_alive(), "the Stop ran while the add was inside the runner"
+        finally:
+            release.set()
+            adding.join(timeout=10.0)
+            stopping.join(timeout=10.0)
+
+        # The camera was inserted first and drained by the Stop that waited for it - never
+        # left running on a shard the launcher believes is down.
+        assert runner.cameras == {}
+        assert svc.state() == ShardState.STOPPED
+
+    def test_the_fast_path_still_refuses_a_draining_shard_without_waiting(self) -> None:
+        """Read twice, and the outer read is why: a camera offered to a shard that is already
+        draining is refused NOW and placed on a sibling, rather than queueing behind a
+        twenty-second drain for the same answer."""
+        runner = CameraRunner(chain())
+        runner.drain_delay_s = 0.5
+        svc = service(runner)
+        install(svc)
+        draining = threading.Thread(target=svc.Drain, args=(pb.DrainRequest(timeout_s=2.0),))
+        draining.start()
+        try:
+            time.sleep(0.05)
+            started = time.monotonic()
+
+            reply = svc.AddCamera(
+                pb.AddCameraRequest(camera=CameraSpec("cam-1", "rtsp://x").to_pb())
+            )
+
+            assert time.monotonic() - started < 0.3, "the refusal waited out the drain"
+        finally:
+            draining.join(timeout=5.0)
+
+        assert not reply.accepted and ShardState.DRAINING in reply.reason

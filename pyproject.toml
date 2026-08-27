@@ -113,10 +113,17 @@ dev = [
     # never run on the one machine that gates a merge.
     # Same floors as the `grpc` extra, and for the same reason: the committed stubs
     # validate GRPC_GENERATED_VERSION = '1.71.2' and a 5.29 gencode version at import, so
-    # anything lower fails loudly rather than being merely old. grpcio-tools matches grpcio
-    # because it is what regenerates them.
+    # anything lower fails loudly rather than being merely old.
     "grpcio>=1.71.2,<2",
-    "grpcio-tools>=1.71.2,<2",
+    # grpcio-tools is PINNED, and it is the only pin in this file. `scripts/gen_proto.py
+    # --check` regenerates the stubs and compares them BYTE FOR BYTE against the committed
+    # ones, so the guard is only meaningful while every machine runs the same protoc: 1.83
+    # emits a different `shard_pb2_grpc.py` for the same .proto and would fail the check on
+    # a green tree. Today the pin is also what already happens by accident - `protobuf<6`
+    # drags grpcio-tools back to 1.71.2 - and an accident is not a guarantee: the day that
+    # floor moves, this line is what keeps the check honest instead of quietly red.
+    # Bump it deliberately, regenerate, and commit the new stubs in the same commit.
+    "grpcio-tools==1.71.2",
     "protobuf>=5.29,<6",
 ]
 

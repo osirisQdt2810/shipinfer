@@ -36,7 +36,7 @@
 #                      and nvinfer's built-in parsers cannot read it. A ~60-line C++ `.so`
 #                      against nvdsinfer_custom_impl.h is required, compiled INSIDE this image
 #                      because that is where the SDK headers are. Config generation refuses
-#                      until `topology.deepstream.bbox_parser` names it, so this cannot be
+#                      until `runner.deepstream.bbox_parser` names it, so this cannot be
 #                      forgotten into a run that silently reports zero detections.
 #   the engines        `model.plan` is valid only for the TensorRT version that built it, and
 #                      this image's is unlikely to be the host's. Declare `onnx_file` in the

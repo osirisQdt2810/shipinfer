@@ -27,9 +27,12 @@ from shipinfer.runtime.native import is_native_available, native_version, resolv
 
 __all__ = ["InferenceServer"]
 
-# Logger names stay "server…" on purpose: an operator's log filter is behaviour, and this
-# move promises none changed. They are retargeted to "engine…" when server/ is deleted (A2 PR-6).
-_LOG = get_logger("server")
+# The four "server…" logger names in this package become "engine…" here, with `server/`
+# itself (A2 PR-6). They were kept through the move on purpose — an operator's log filter is
+# behaviour, and a rename per PR would have changed it four times — so this is the one place
+# the change is recorded: `shipinfer.server*` filters become `shipinfer.engine*`, and
+# `shipinfer.server.api` becomes `shipinfer.api`.
+_LOG = get_logger("engine")
 
 
 class InferenceServer:

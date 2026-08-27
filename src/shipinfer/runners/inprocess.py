@@ -160,11 +160,19 @@ class InprocessRunner(Runner):
         shard_id: int = 0,
         device: Device | None = None,
         models: ModelResolver | None = None,
+        chain_yaml: str = "",
         queue: RequestQueue | None = None,
         workers: int | None = None,
         metrics: RunnerMetrics | None = None,
     ) -> None:
-        super().__init__(topology, settings, shard_id=shard_id, device=device, models=models)
+        super().__init__(
+            topology,
+            settings,
+            shard_id=shard_id,
+            device=device,
+            models=models,
+            chain_yaml=chain_yaml,
+        )
         pipeline = self._settings.pipeline
         if workers is not None and workers < 1:
             raise ConfigurationError(
@@ -594,6 +602,15 @@ class InprocessRunner(Runner):
                     # which ran after the join deadline, before this thread woke -- has
                     # already failed every one of these futures. Walking them anyway would
                     # emit ghost events through a chain this cycle closed.
+                    #
+                    # This is deliberate on the CLEAN stop path too, not only the abandoned
+                    # one: `stop` is abort-shaped, the same shape `_close_queue` already
+                    # gives the items still queued. A healthy worker that notices mid-batch
+                    # breaks here and leaves the remainder for `_fail_in_flight`, which
+                    # resolves each with `RequestCancelledError` -- a typed outcome its
+                    # producer can act on, delivered inside the shutdown budget. Finishing
+                    # the batch instead would be a *drain*, and a drain has no deadline of
+                    # its own: one wedged element would hold the whole shutdown open.
                     break
                 try:
                     self._walk(work)

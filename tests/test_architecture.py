@@ -87,6 +87,22 @@ class TestImportsGoOneWay:
         assert not offenders, "topology may only import core:\n" + "\n".join(offenders)
 
 
+def _checker():
+    """The hook, imported as a module, so its tables are read rather than restated.
+
+    Loaded by path because `scripts/` is not a package: a table asserted here and defined
+    there could otherwise drift, and the drift would be a rule silently switched off.
+    """
+    import importlib.util
+
+    hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "check_layers.py"
+    spec = importlib.util.spec_from_file_location("check_layers", hook)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class TestEnforcementAgrees:
     """The pre-commit hook and this suite check the same rule, so neither can drift alone."""
 
@@ -104,16 +120,54 @@ class TestEnforcementAgrees:
         "every layer on disk has a row"; this makes that a check rather than a sentence, so
         the next top-level package gets a failing test instead of silence.
         """
-        import importlib.util
-
-        hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "check_layers.py"
-        spec = importlib.util.spec_from_file_location("check_layers", hook)
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        module = _checker()
         packages = {p.name for p in SRC.iterdir() if (p / "__init__.py").is_file()}
         missing = packages - set(module.FORBIDDEN_EXTERNAL)
         assert not missing, f"layers with no FORBIDDEN_EXTERNAL row: {sorted(missing)}"
+
+    def test_every_package_on_disk_has_an_allowed_internals_row(self) -> None:
+        """The twin, and the one that was actually off.
+
+        `check` reads `ALLOWED_INTERNAL.get(layer)` and skips the internal check entirely when
+        it is `None` — so `cli`, which had no row, could have imported anything at all and the
+        hook would still have exited 0. A row that grants everything is a decision; a missing
+        row is a rule nobody turned on. The reverse check is below: nothing may import `cli`.
+        """
+        module = _checker()
+        packages = {p.name for p in SRC.iterdir() if (p / "__init__.py").is_file()}
+
+        missing = packages - set(module.ALLOWED_INTERNAL)
+        assert not missing, f"layers with no ALLOWED_INTERNAL row: {sorted(missing)}"
+
+    def test_no_row_names_a_package_that_is_not_on_disk(self) -> None:
+        """A row for a package that does not exist is a rule that cannot be violated.
+
+        `observability` had one for both tables long after the package went; it read as a
+        constraint and constrained nothing. Grants are checked here rather than only keys,
+        because a stale *grant* is the one that would quietly allow an import later.
+        """
+        module = _checker()
+        packages = {p.name for p in SRC.iterdir() if (p / "__init__.py").is_file()}
+
+        keys = set(module.ALLOWED_INTERNAL) | set(module.FORBIDDEN_EXTERNAL)
+        granted = {name for grants in module.ALLOWED_INTERNAL.values() for name in grants}
+        stale = (keys | granted) - packages - set(module.NON_LAYER_MODULES)
+        assert not stale, f"rows naming packages that are not on disk: {sorted(stale)}"
+
+    def test_nothing_below_the_command_line_may_import_it(self) -> None:
+        """`cli` is the composition root, and the direction is what makes that harmless.
+
+        It may import every layer; no layer may import it. A library whose scheduler reached
+        for a typer command could not be embedded in anything that is not this CLI.
+        """
+        module = _checker()
+
+        importers = [
+            layer
+            for layer, allowed in module.ALLOWED_INTERNAL.items()
+            if layer != "cli" and "cli" in allowed
+        ]
+        assert not importers, f"layers allowed to import the CLI: {importers}"
 
 
 class TestImportIsCheap:
@@ -310,13 +364,7 @@ class TestTheControlPlaneEntersAtTwoSeams:
         Asserted against the checker's own tables rather than restated, so a row deleted in
         `check_layers.py` fails here instead of quietly switching the rule off.
         """
-        import importlib.util
-
-        hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "check_layers.py"
-        spec = importlib.util.spec_from_file_location("check_layers", hook)
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        module = _checker()
 
         may_name_grpc = {
             layer for layer, banned in module.FORBIDDEN_EXTERNAL.items() if "grpc" not in banned
@@ -337,76 +385,10 @@ class TestTheControlPlaneEntersAtTwoSeams:
         imported the executor would pay for it in the parent process, and a cycle between the
         two would make the generated stubs' home ambiguous (arch.md §9).
         """
-        import importlib.util
-
-        hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "check_layers.py"
-        spec = importlib.util.spec_from_file_location("check_layers", hook)
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        module = _checker()
 
         assert "launch" in module.ALLOWED_INTERNAL["runners"]
         assert "runners" not in module.ALLOWED_INTERNAL["launch"]
-
-
-class TestTheServerShimIsTheSameObjects:
-    """`shipinfer.server` re-exports `shipinfer.engine`, and re-export means *identity*.
-
-    The pool moved to `engine/` and `server/__init__.py` is a shim until the rest of
-    `server/` has moved too (arch.md §9). The failure worth preventing is not an import
-    error — that is loud and immediate — but a shim that grew a second definition of one of
-    these names. `isinstance(cache, shipinfer.server.ResponseCache)` would then be False for
-    a cache the engine built, from a call site that never mentioned either package, and no
-    test that only checks importability would notice.
-
-    Silent by design, too: `pyproject.toml` turns a `DeprecationWarning` from `shipinfer.*`
-    into an error in the offline tier, so a shim that warned would fail the suite instead of
-    nudging anybody. This class is what stands in for the warning.
-    """
-
-    def test_every_name_the_shim_exports_is_the_engine_s_own_object(self) -> None:
-        import shipinfer.engine as engine
-        import shipinfer.server as server
-
-        assert server.__all__, "the shim exports nothing"
-        mismatched = [
-            name
-            for name in server.__all__
-            if getattr(server, name) is not getattr(engine, name, object())
-        ]
-        assert not mismatched, "shipinfer.server re-exports a *copy* of: " + ", ".join(
-            sorted(mismatched)
-        )
-
-    def test_the_inference_server_class_is_one_class(self) -> None:
-        """Spelled out separately because it is the name every caller outside this tree holds."""
-        import shipinfer
-        import shipinfer.engine
-        import shipinfer.server
-
-        assert shipinfer.server.InferenceServer is shipinfer.engine.InferenceServer
-        assert shipinfer.InferenceServer is shipinfer.engine.InferenceServer
-
-    def test_the_shim_does_not_export_a_submodule_named_engine(self) -> None:
-        """`from shipinfer.server import engine` used to reach the pool module.
-
-        Re-exporting the `shipinfer.engine` *package* under that attribute would make
-        `shipinfer.server.engine.InferenceServer` keep working by accident, and every
-        remaining caller would then be invisible to the grep that has to find them. The
-        spelling is `from shipinfer.engine import pool`.
-        """
-        import importlib
-
-        import shipinfer.engine.pool
-        import shipinfer.server
-
-        # The attribute check alone is vacuous: importing `shipinfer.engine.pool` sets
-        # `pool` on `shipinfer.engine`, never `engine` on `shipinfer.server`, so it would
-        # pass even with a `server/engine.py` re-export on disk. Ask for the module itself.
-        with pytest.raises(ModuleNotFoundError):
-            importlib.import_module("shipinfer.server.engine")
-
-        assert not hasattr(shipinfer.server, "engine")
 
 
 class TestTheLayerCheckerCoversSharedModules:

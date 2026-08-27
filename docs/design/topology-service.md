@@ -13,6 +13,17 @@ off by the spend limit; references read: vLLM `shm_broadcast.py` (`ShmRingBuffer
 `MessageQueue`), `multiproc_executor.py` (`MultiprocExecutor`, `WorkerProc`),
 `core_client.py` (`DPLBAsyncMPClient`), Triton `rate_limiter.h`.*
 
+> **Where this stands after phase A2 (2026-08-27).** The *transport* below is built and lives
+> under `engine/spill/`; the settings are `runner.service.*`
+> (`core/settings/runner.py`). What is gone is the `ServiceTopology` **class**: "topology"
+> means the element chain now (arch.md §1), placement is the runner's, and the class that
+> rendered a child's argv and environment was deleted with the rest of that mechanism (V140).
+> A shard therefore has no supported way to be told its peers before it starts, so
+> `tests/engine/test_service_multigpu.py` is skipped until phase D gives the mesh a `JoinMesh`
+> RPC. The paths in §5 and §6 below are as they were written; read `server/topology/service.py`
+> as "gone", `core/errors/topology.py` as `core/errors/launch.py`, and
+> `tests/server/test_service_topology.py` as deleted.
+
 ## 1. The shape, in the Triton/vLLM analogy
 
 `fleet` (T2) is vLLM's data-parallel deployment with no load balancer: N engine processes,
@@ -79,7 +90,10 @@ class TopologySettings(BaseModel):
     service: ServiceSettings = ServiceSettings()
 ```
 Environment the launcher adds for `service` children (beside the three from T2):
-`SHIPINFER_RUNNER__RUNNER=service`, `SHIPINFER_SERVICE__RING_DIR=<run dir>` (where the
+`SHIPINFER_RUNNER__RUNNER=service` (**N/A — the class is deleted**: `ServiceTopology` went
+with `server/topology/` in A2 PR-6 and no registry resolves that name; the tier is joined on
+`runner.service.shard` alone, see `engine/pool.py::_join_service_tier`),
+`SHIPINFER_SERVICE__RING_DIR=<run dir>` (where the
 `multiprocessing.shared_memory` names are published as small JSON files, one per (owner,
 model) — the "handle" vLLM pickles across processes), `SHIPINFER_SERVICE__SHARD_INDEX`.
 

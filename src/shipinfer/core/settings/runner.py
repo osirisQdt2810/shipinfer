@@ -222,9 +222,7 @@ class RunnerSettings(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    #: A name registered in `shipinfer.runners.RUNNERS` (until PR-6b lands the ``fleet`` runner
-    #: and ``shipinfer run``, the placement classes' ``build_topology`` is still the door that
-    #: reads this field). ``fleet`` is one shard process per
+    #: A name registered in `shipinfer.runners.RUNNERS`. ``fleet`` is one shard process per
     #: GPU, driven over the gRPC control plane — the production default (arch.md section 1);
     #: ``inprocess`` is the whole chain on a thread pool here, which is what a laptop and the
     #: offline tier run. Validated when the runner is *built*
@@ -249,29 +247,18 @@ class RunnerSettings(BaseModel):
     deepstream: DeepStreamSettings = Field(default_factory=DeepStreamSettings)
 
 
-#: The settings-tree keys a fleet launcher sets for each shard process. Defined here, beside the
-#: settings, because both sides — the launcher that sets them and the settings loader that
-#: reads them — must agree on the spelling.
+#: The settings-tree keys the **spill tier** is configured with for each shard process
+#: (`runner.service.*`). Defined here, beside the settings, because both sides — whoever sets
+#: them and the settings loader that reads them — must agree on the spelling.
 #:
-#: The shard's *logical* device list after ``CUDA_VISIBLE_DEVICES`` renumbered its GPUs —
-#: ``[0, 1]`` for a two-GPU shard, whatever the physical ordinals. Set by the launcher so an
-#: inherited ``SHIPINFER_DEVICES__VISIBLE_GPUS`` naming physical ordinals cannot survive the
-#: remap and fail the child at start-up.
-VISIBLE_GPUS_ENV = "SHIPINFER_DEVICES__VISIBLE_GPUS"
-#: How many shard processes share each of the shard's devices, aligned with the logical
-#: ordinals. Two shards on one GPU must each load *half* the configured instances, or the
-#: device holds twice the engines and twice the VRAM for the same total throughput.
-SHARED_BY_ENV = "SHIPINFER_DEVICES__SHARED_BY"
-#: The shard's rank among the processes sharing each device, aligned with the ordinals. The
-#: remainder of a count that does not divide evenly goes to the lowest ranks.
-SHARE_RANK_ENV = "SHIPINFER_DEVICES__SHARE_RANK"
-#: The `service` tier's per-child keys, settings-tree spellings (`runner.service.*`).
+#: What is *not* here any more: the three device-placement keys
+#: (``SHIPINFER_DEVICES__{VISIBLE_GPUS,SHARED_BY,SHARE_RANK}``) and the `deepstream` runner's
+#: per-child keys. A shard is configured over gRPC now (arch.md section 2): the sharing rides
+#: in ``UpdateTopology`` and is applied by ``cli/shard.py::apply_sharing``, and nothing renders
+#: an environment for a child but :class:`~shipinfer.launch.supervisor.Fleet`, which now
+#: *removes* those three rather than setting them. The keys themselves still exist as
+#: ordinary settings an operator may export for a single-process run; what is gone is the
+#: launcher's use of them, and the constants that only that use needed.
 SERVICE_SHARD_ENV = "SHIPINFER_RUNNER__SERVICE__SHARD"
 SERVICE_PEERS_ENV = "SHIPINFER_RUNNER__SERVICE__PEERS"
 SERVICE_RUN_ENV = "SHIPINFER_RUNNER__SERVICE__RUN_ID"
-#: The `deepstream` runner's per-child keys (`runner.deepstream.*`). The run id and the
-#: config directory are fleet-wide; the shard index is per child. Same rule as `service`: the
-#: launcher sets them, an operator does not.
-DEEPSTREAM_RUN_ENV = "SHIPINFER_RUNNER__DEEPSTREAM__RUN_ID"
-DEEPSTREAM_SHARD_ENV = "SHIPINFER_RUNNER__DEEPSTREAM__SHARD"
-DEEPSTREAM_CONFIG_DIR_ENV = "SHIPINFER_RUNNER__DEEPSTREAM__CONFIG_DIR"

@@ -129,6 +129,12 @@ message AddCameraReply {
 message RemoveCameraRequest {
   string camera_id = 1;
   // One deadline for this camera's stop.
+  //
+  // 0 = THE SERVICER'S DEFAULT, not "no grace". proto3 has no field presence for scalars,
+  // so an unset double and a deliberate 0.0 are the same bytes on the wire and no servicer
+  // can tell them apart. Zero therefore reads as the default (5s), because the other
+  // reading detaches a decoder thread for a client that simply did not set the field. Ask
+  // for a tiny positive number if you really want none.
   double timeout_s = 2;
 }
 
@@ -170,6 +176,9 @@ message DrainRequest {
   // ONE deadline for the whole camera set, not one per camera: everyone is signalled at t0,
   // so a camera still unfinished at t0+timeout is genuinely stuck, and charging the budget
   // per camera would turn one stuck decoder into fifty consecutive waits.
+  //
+  // 0 = THE SERVICER'S DEFAULT (20s), not "abandon everything now" - see
+  // RemoveCameraRequest.timeout_s for why proto3 leaves the servicer no other honest choice.
   double timeout_s = 1;
 }
 
@@ -179,6 +188,12 @@ message DrainReply {
 }
 
 message StopRequest {
+  // ONE deadline for the whole shutdown - the camera set and the executor together.
+  //
+  // 0 = THE SERVICER'S DEFAULT (20s), not "abandon everything now" - see
+  // RemoveCameraRequest.timeout_s. Read literally, an unset field would detach every camera
+  // thread on the shard and return a non-zero `abandoned`, which StopReply below defines as
+  // "do not unwind anything" - a fleet-wide lifetime signal raised by an ordinary shutdown.
   double timeout_s = 1;
 }
 

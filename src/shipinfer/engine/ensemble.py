@@ -69,7 +69,7 @@ from shipinfer.repository import EnsembleStep, ModelArtifact
 
 __all__ = ["EnsembleModel"]
 
-_LOG = get_logger("server.ensemble")
+_LOG = get_logger("engine.ensemble")
 
 _NO_PRODUCERS: frozenset[int] = frozenset()
 
