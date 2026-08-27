@@ -63,7 +63,7 @@ from dataclasses import dataclass, field
 
 from shipinfer.core.errors import ConfigurationError, ShardExitedError
 from shipinfer.core.logging import get_logger
-from shipinfer.core.settings.topology import SHARE_RANK_ENV, SHARED_BY_ENV, VISIBLE_GPUS_ENV
+from shipinfer.core.settings.runner import SHARE_RANK_ENV, SHARED_BY_ENV, VISIBLE_GPUS_ENV
 from shipinfer.envs import SHARD_CAMERAS
 from shipinfer.scheduling.sharding import Shard, ShardPlan
 

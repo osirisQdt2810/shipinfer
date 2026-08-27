@@ -16,7 +16,7 @@ import pytest
 
 from shipinfer.core.errors import ConfigurationError
 from shipinfer.core.settings import ServerSettings
-from shipinfer.core.settings.topology import (
+from shipinfer.core.settings.runner import (
     DEEPSTREAM_CONFIG_DIR_ENV,
     DEEPSTREAM_RUN_ENV,
     DEEPSTREAM_SHARD_ENV,
@@ -41,21 +41,21 @@ class TestTheRegistryIsTheSwitch:
 
     def test_the_settings_read_what_an_operator_and_the_launcher_set(self, monkeypatch) -> None:
         monkeypatch.setenv(TOPOLOGY_ENV, "deepstream")
-        monkeypatch.setenv("SHIPINFER_TOPOLOGY__DEEPSTREAM__MUX_WIDTH", "1280")
-        monkeypatch.setenv("SHIPINFER_TOPOLOGY__DEEPSTREAM__NETWORK_MODE", "int8")
+        monkeypatch.setenv("SHIPINFER_RUNNER__DEEPSTREAM__MUX_WIDTH", "1280")
+        monkeypatch.setenv("SHIPINFER_RUNNER__DEEPSTREAM__NETWORK_MODE", "int8")
         monkeypatch.setenv(DEEPSTREAM_RUN_ENV, "abc123def456")
         monkeypatch.setenv(DEEPSTREAM_SHARD_ENV, "2")
 
         settings = ServerSettings(model_repository=Path("model_repository"))
 
-        assert settings.topology.kind == "deepstream"
-        assert settings.topology.deepstream.mux_width == 1280
-        assert settings.topology.deepstream.network_mode == "int8"
-        assert settings.topology.deepstream.run_id == "abc123def456"
-        assert settings.topology.deepstream.shard == 2
+        assert settings.runner.runner == "deepstream"
+        assert settings.runner.deepstream.mux_width == 1280
+        assert settings.runner.deepstream.network_mode == "int8"
+        assert settings.runner.deepstream.run_id == "abc123def456"
+        assert settings.runner.deepstream.shard == 2
 
     def test_the_defaults_are_the_shipped_dag(self) -> None:
-        deepstream = ServerSettings().topology.deepstream
+        deepstream = ServerSettings().runner.deepstream
 
         assert deepstream.detector == "ship_detector"
         assert deepstream.secondaries == ["person_embedder", "ship_embedder"]
@@ -67,8 +67,8 @@ class TestTheRegistryIsTheSwitch:
     def test_a_class_filter_for_a_gie_that_does_not_run_is_refused(self) -> None:
         with pytest.raises(ValueError, match="operate_on names"):
             ServerSettings(
-                topology={
-                    "kind": "deepstream",
+                runner={
+                    "runner": "deepstream",
                     "deepstream": {
                         "secondaries": ["person_embedder"],
                         "operate_on": {"ship_embedder": ["ship"]},
@@ -78,7 +78,7 @@ class TestTheRegistryIsTheSwitch:
 
     def test_a_tracker_extent_the_library_refuses_is_refused_here(self) -> None:
         with pytest.raises(ValueError, match="multiples of 32"):
-            ServerSettings(topology={"deepstream": {"tracker_width": 961}})
+            ServerSettings(runner={"deepstream": {"tracker_width": 961}})
 
 
 class TestThePlanIsTheFleetsPlusOneRefusal:
@@ -165,7 +165,7 @@ class TestTheChildrenAreToldWhereToWrite:
         assert one.config_dir(ServerSettings()) != two.config_dir(ServerSettings())
 
     def test_a_configured_directory_wins_over_the_per_run_default(self, tmp_path) -> None:
-        settings = ServerSettings(topology={"deepstream": {"config_dir": str(tmp_path)}})
+        settings = ServerSettings(runner={"deepstream": {"config_dir": str(tmp_path)}})
 
         assert DeepStreamTopology().config_dir(settings) == tmp_path
 

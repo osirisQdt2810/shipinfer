@@ -73,9 +73,9 @@ def fleet(
     # The topology decides the plan and what the children are told. `--topology`, `--shards`
     # and `--drain` override the settings section; unset, the section decides, and the
     # section's own default for `shards` is one process per visible GPU (ADR-006).
-    chosen = build_topology(topology or settings.topology.kind)
-    count = shards if shards is not None else (settings.topology.shards or len(devices))
-    drain = drain_s if drain_s is not None else settings.topology.drain_s
+    chosen = build_topology(topology or settings.runner.runner)
+    count = shards if shards is not None else (settings.runner.shards or len(devices))
+    drain = drain_s if drain_s is not None else settings.runner.drain_s
     out.print(f"topology: {chosen.name} — {chosen.describe()}")
     plan = chosen.plan(settings, cameras=cameras, gpus=devices, shards=count)
     out.print(plan.describe())

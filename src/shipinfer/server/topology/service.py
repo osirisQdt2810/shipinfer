@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from typing import ClassVar
 
 from shipinfer.core.settings import ServerSettings
-from shipinfer.core.settings.topology import (
+from shipinfer.core.settings.runner import (
     SERVICE_PEERS_ENV,
     SERVICE_RUN_ENV,
     SERVICE_SHARD_ENV,

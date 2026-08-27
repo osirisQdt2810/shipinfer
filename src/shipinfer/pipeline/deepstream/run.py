@@ -95,7 +95,7 @@ class MetadataProbe:
         self._sink = sink
         self._metrics = metrics
         self._settings = settings
-        self._deepstream = settings.topology.deepstream
+        self._deepstream = settings.runner.deepstream
         self._camera_by_pad = camera_by_pad
         self._cameras = cameras
         self._missing_stages = missing_stages
@@ -215,7 +215,7 @@ class DeepStreamPipeline:
         config_root: Path | None = None,
     ) -> None:
         self._settings = settings
-        self._deepstream = settings.topology.deepstream
+        self._deepstream = settings.runner.deepstream
         self._cameras = [c for c in settings.ingest.cameras if c.enabled]
         if not self._cameras:
             raise ConfigurationError(

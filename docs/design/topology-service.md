@@ -71,7 +71,7 @@ class TopologySettings(BaseModel):
     service: ServiceSettings = ServiceSettings()
 ```
 Environment the launcher adds for `service` children (beside the three from T2):
-`SHIPINFER_TOPOLOGY__KIND=service`, `SHIPINFER_SERVICE__RING_DIR=<run dir>` (where the
+`SHIPINFER_RUNNER__RUNNER=service`, `SHIPINFER_SERVICE__RING_DIR=<run dir>` (where the
 `multiprocessing.shared_memory` names are published as small JSON files, one per (owner,
 model) — the "handle" vLLM pickles across processes), `SHIPINFER_SERVICE__SHARD_INDEX`.
 

@@ -37,7 +37,7 @@ from pathlib import Path
 
 from shipinfer.core.errors import ConfigurationError
 from shipinfer.core.settings import CameraConfig, PipelineSettings, ServerSettings
-from shipinfer.core.settings.topology import DeepStreamSettings
+from shipinfer.core.settings.runner import DeepStreamSettings
 from shipinfer.core.types import DataType
 from shipinfer.pipeline.graph.detections import UNKNOWN_LABEL
 from shipinfer.repository import IOConfig, ModelArtifact, ModelRepository
@@ -429,7 +429,7 @@ def write_configs(
             with no cameras is a graph with a zero-sized batch) and an `operate_on` label the
             detector's own map does not define.
     """
-    deepstream = settings.topology.deepstream
+    deepstream = settings.runner.deepstream
     pipeline = settings.pipeline
     if not cameras:
         raise ConfigurationError(

@@ -27,7 +27,7 @@ from typing import Any, Protocol
 
 from shipinfer.core.errors import ConfigurationError, RingClosedError
 from shipinfer.core.logging import get_logger
-from shipinfer.core.settings.topology import ServiceSettings
+from shipinfer.core.settings.runner import ServiceSettings
 from shipinfer.engine.spill.remote_instance import (
     IngressLane,
     RemoteInstance,

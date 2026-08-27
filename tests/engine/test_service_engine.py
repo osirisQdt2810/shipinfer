@@ -25,8 +25,8 @@ from shipinfer.engine.spill.remote_instance import RemoteInstance
 def _settings(repository: Path, run: str, shard: int) -> ServerSettings:
     return ServerSettings(
         model_repository=repository,
-        topology={
-            "kind": "service",
+        runner={
+            "runner": "service",
             "service": {
                 "shared_models": ["echo"],
                 "slots_per_pair": 4,
@@ -96,7 +96,7 @@ class TestTheEngineJoinsTheTier:
     def test_a_server_without_a_shard_index_joins_nothing(self, tmp_repository: Path) -> None:
         settings = ServerSettings(
             model_repository=tmp_repository,
-            topology={"kind": "service", "service": {"shared_models": ["echo"]}},
+            runner={"runner": "service", "service": {"shared_models": ["echo"]}},
         )
         server = InferenceServer(settings).start()
         try:
@@ -115,7 +115,7 @@ class TestAFailedConnectLeaksNothing:
 
         run = uuid.uuid4().hex[:8]
         settings = _settings(tmp_repository, run, 0)
-        settings.topology.service.connect_timeout_s = 0.3
+        settings.runner.service.connect_timeout_s = 0.3
         server = InferenceServer(settings)
         with pytest.raises(ConfigurationError, match="never appeared"):
             server.start()
@@ -138,7 +138,7 @@ class TestAnEnsembleCannotCrossTheTier:
         from shipinfer.core.errors import ConfigurationError
 
         settings = _settings(tmp_repository, uuid.uuid4().hex[:8], 0)
-        settings.topology.service.shared_models = ["fused"]
+        settings.runner.service.shared_models = ["fused"]
         server = InferenceServer(settings)
         server._models["fused"] = SimpleNamespace(name="fused")  # ensembles have no infer_local
         with pytest.raises(ConfigurationError, match="'fused' is an ensemble"):

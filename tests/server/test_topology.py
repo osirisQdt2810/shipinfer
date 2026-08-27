@@ -37,18 +37,18 @@ class TestTheRegistryIsTheSwitch:
     def test_the_settings_default_is_fleet(self) -> None:
         settings = ServerSettings(model_repository=Path("model_repository"))
 
-        assert settings.topology.kind == "fleet"
-        assert settings.topology.shards is None  # one per visible GPU, decided at launch
-        assert settings.topology.drain_s == 20.0
+        assert settings.runner.runner == "fleet"
+        assert settings.runner.shards is None  # one per visible GPU, decided at launch
+        assert settings.runner.drain_s == 20.0
 
     def test_the_kind_is_env_overridable_like_every_other_section(self, monkeypatch) -> None:
         monkeypatch.setenv(TOPOLOGY_ENV, "fleet")
-        monkeypatch.setenv("SHIPINFER_TOPOLOGY__SHARDS", "3")
+        monkeypatch.setenv("SHIPINFER_RUNNER__SHARDS", "3")
 
         settings = ServerSettings(model_repository=Path("model_repository"))
 
-        assert settings.topology.kind == "fleet"
-        assert settings.topology.shards == 3
+        assert settings.runner.runner == "fleet"
+        assert settings.runner.shards == 3
 
     def test_a_topology_must_subclass_the_contract(self) -> None:
         with pytest.raises(TypeError, match="does not subclass Topology"):
@@ -85,8 +85,8 @@ class TestFleetIsTheLauncherBehindTheContract:
 
         assert env[TOPOLOGY_ENV] == "fleet"
         # Read back through the settings tree: one switch, not two.
-        assert ServerSettings.model_fields["topology"] is not None
-        assert TOPOLOGY_ENV == "SHIPINFER_TOPOLOGY__KIND"
+        assert ServerSettings.model_fields["runner"] is not None
+        assert TOPOLOGY_ENV == "SHIPINFER_RUNNER__RUNNER"
 
     def test_describe_is_one_line(self) -> None:
         assert "\n" not in FleetTopology().describe()
