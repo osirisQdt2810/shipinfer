@@ -136,6 +136,28 @@ class TestImportIsCheap:
         result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
         assert result.returncode == 0, result.stdout + result.stderr
 
+    def test_importing_runners_pulls_in_neither_the_engine_nor_torch(self) -> None:
+        """``import shipinfer.runners`` must cost no accelerator and no model pool.
+
+        The static rule is the narrow one — ``runners`` may import ``core``, ``topology``
+        and ``scheduling``, and neither ``engine`` nor ``runtime`` — because the ``inprocess``
+        runner reaches the model pool through the ``ModelResolver`` it is *handed* rather than
+        by importing anything. That is what lets a chain be started with mock elements on a
+        host with no driver, and what lets ``tests/runners/`` run in the offline tier at all.
+        This runtime check is the load-bearing half: the static rule is about module scope,
+        and the ``fleet`` runner will legitimately bind its shard's device through ``runtime``
+        one day. This is the test that notices the day that changes.
+        """
+        code = (
+            "import sys, shipinfer.runners as r; "
+            "assert 'inprocess' in r.RUNNERS, r.RUNNERS.names(); "
+            "heavy = [m for m in ('torch', 'tensorrt', 'cv2', 'fastapi', 'shipinfer.engine', "
+            "'shipinfer.runtime', 'shipinfer.backends') if m in sys.modules]; "
+            "assert not heavy, heavy"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+
     def test_importing_topology_pulls_in_no_accelerator(self) -> None:
         """``import shipinfer.topology`` must load no accelerator, no decoder, no server.
 

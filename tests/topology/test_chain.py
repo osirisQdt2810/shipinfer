@@ -963,6 +963,66 @@ class TestWalkingAChain:
         assert len(sink.emitted) == 1
 
 
+class TestTheDonorAtAFanIn:
+    """Which predecessor donates payload and caps when two branches rejoin.
+
+    Resolved by the loader and stored on the node, for exactly the reason
+    :meth:`ElementNode.admits` lives there: the answer has to be the same in ``inprocess``,
+    ``fleet`` and ``deepstream``, and three runners that each worked it out from the edges
+    would eventually disagree about which branch donated a frame. The *merge* that consumes
+    it stays in the runner (``tests/runners/test_walk.py``).
+    """
+
+    #: Two branches into one tracker, carrying **different** caps: ``detect`` hands a frame
+    #: (``nv12@gpu``) and ``tap`` hands metadata (``meta@cpu``). ``after: [tap, detect]``
+    #: puts the metadata predecessor *first* in declaration order on purpose — the rule is
+    #: about the negotiated cap, and with the two aligned the test would not know which one
+    #: it proved.
+    FAN_IN = """
+        name: fan_in
+        elements:
+          decode: {impl: mock}
+          detect: {impl: mock, model: ship_detector}
+          tap:    {impl: mock, kind: track, after: detect}
+          join:   {impl: mock, kind: track, after: [tap, detect]}
+          output: {impl: mock}
+        """
+
+    def test_the_donor_is_the_predecessor_whose_edge_carries_the_preferred_cap(self) -> None:
+        """A payload is a frame handle or a tensor; half of one and half of another is not one.
+
+        ``join`` is a tracker: it accepts ``nv12@gpu`` before ``meta@cpu``, so of its two
+        predecessors the one whose edge carries the frame donates — even though the metadata
+        branch is declared first.
+        """
+        chain = load(self.FAN_IN)
+
+        node = chain.node("join")
+        assert node.inputs == ("tap", "detect"), "the fixture's declaration order"
+        assert node.donor == "detect", "the preferred cap wins over declaration order"
+
+    def test_a_root_has_no_donor(self) -> None:
+        chain = load(self.FAN_IN)
+
+        assert chain.node("decode").donor is None
+        assert chain.node("detect").donor == "decode", "a straight line donates from upstream"
+
+    def test_a_fan_in_whose_edges_agree_takes_the_first_declared(self) -> None:
+        """What a reader of the chain file would expect, and it must not depend on a hash."""
+        chain = load("""
+            name: agreeing_fan_in
+            elements:
+              decode: {impl: mock}
+              detect: {impl: mock, model: d}
+              left:   {impl: mock, kind: segment, model: s, after: detect}
+              right:  {impl: mock, kind: embed, model: e, after: detect}
+              join:   {impl: mock, kind: recognize, model: r, after: [right, left]}
+              output: {impl: mock}
+            """)
+
+        assert chain.node("join").donor == "right"
+
+
 class TestTheProductionChainFile:
     """``topology/ship_person.yaml`` is arch.md §1's chain, kept as a fixture until it runs."""
 
