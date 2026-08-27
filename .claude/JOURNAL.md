@@ -4,7 +4,55 @@ Newest on top. One entry per working session: what changed, what it cost, what i
 
 ---
 
+## 27 Aug (early) — #31 merged; #32 (deepstream topology) through six review rounds
+
+- **#31 (`perf/pinned-staging`) merged 26 Aug 23:43 UTC after five rounds** — pinned
+  ping-pong staging for the ops layer's D2H copies, with the structural single-chunk rule;
+  the 25% identical-code control row exposed the box's noise floor, so every micro claim
+  was withdrawn; the quiet-window rerun fired 04:55 and the table is POSTED to #31 (staged wins 1.4–1.7× with a 0.06–4% A/B/A control; crop stays staged).
+- **#32 (`feat/deepstream-topology`) opened and driven through rounds 1–6, all findings
+  real**: the lazy sink (r1), the unfiltered secondary (r1), the lost-in-transit sink wiring
+  + missed round (r2–3, both process defects mine and told plainly), attach-sys-ts semantics
+  inverted → capture_origin distinguishability (r4), the parser/lib pair validator + start()
+  inside the try (r5), and pad-added matching names instead of caps + zero builder coverage
+  (r6: FakeBuilderGst now drives chain order, video-links/audio-does-not, missing element,
+  USE_NEW_NVSTREAMMUX, refused link). Tier 1675/93 suite at `2ea6c09`; awaiting round 7.
+- **V124 answered with a fact-check** (gitlink WAS latest main; the checkout was on a stale
+  branch — synced; drift into torch_ops acknowledged, lanes V124a/V124b opened) and **V125
+  honored + indexed** (shipvision checkout stays on main).
+- **P4-PR1 pre-flighted**: already based on #31's merge commit; pushes the moment #32 lands.
+
+## 27 Aug (morning) — five merges, the CI-health sweep, V124a phase 1 landed
+
+- **#32 MERGED** (r7 APPROVE, `e72955f`): DeepStream is the fourth topology. **#33 MERGED**
+  (3 rounds: shared_ptr lifecycle, the redact fail-open + the ported redaction suite,
+  fleet-wide stop deadline): the C++ ingest core. **#34 MERGED** (V109): CI runs
+  test_ingest. **#35 MERGED** (3 rounds: the abandonment debt paid at the re-check with a
+  flip-proven weak_ptr witness; Python stop synced; the ledger-claim-must-be-in-the-diff
+  lesson). **#36 MERGED** (V109): the kernels job can finally clone its submodule (born
+  broken in #28). **#37 MERGED** (r1): the mesh flake — three hits, two spellings, one
+  birth race — is dead at the root: both mid-birth windows are retryable "unborn" now.
+- **shipvision #12 MERGED** (V124a phase 1: swap_rb + nms max_output; the float-cap
+  finding); parent gitlink bumped to `90b0c41` on main, operator checkout synced (V125).
+- **The quiet-window table posted to #31**: staged beats pageable 1.4–1.7× with a 0.06–4%
+  A/B/A control (box never quiet, load ~25 — the control is what licensed the medians);
+  **crop stays on staging**, the merge-time commitment discharged.
+- Reviews escalated P4-NB3 (concurrent CameraActor::stop = latent std::terminate in the
+  hammer test → crashing-CI class; NEXT ingest fix) and found a fourth, narrower ring
+  window (R2: magic lands first in create's header write). Ledgered: R1/R2, P4-NB2-py,
+  P4-NB4.
+- Process: two evidence blocks caught written-before-run (both replaced with real output;
+  memory extended — REPLACE_* is absolute); the sv12 fix once posted a reply before its
+  commit existed (fresh clone had no git identity) — commit landed minutes later.
+
+
 ## 26 Aug (evening → night) — T3 shipped end to end; C44 answered; B4/B5 closed
+
+- **#30 (`perf/batched-torch-crop`) merged 19:43 UTC, APPROVE round 1** — C44's lever 1:
+  `crop_batch` one batched pass, constant in the crowd; 98 offline tests on a frozen-loop
+  reference, parity byte-identical; the honest three-layer evidence (degenerate-biased
+  fixture, valid-box wash per call, system −11% host CUDA-API / upsample 4083→322). The
+  C44 `generatedNativePointwise` attribution corrected (it is TensorRT's, invariant).
 
 - **#26 (`service` tier) merged 17:39 UTC after five review rounds** — every finding real:
   round 1 the owner threading (ONE sweeper, workers never touch a ring); round 2 `_DeviceSpan`

@@ -642,6 +642,14 @@ hook down, for when the operator asked to see something before it is executed.
       output says what a quantile is. And `settings.tracking.enabled` crashed the harness at
       the end of a real GPU run because the unit tests never went through the call site; now
       `tracking_enabled()` is reached through a real `ServerSettings`.
+- [ ] **C1c · Today's fleet ceiling — attempted 26 Aug ~21:04, deferred to a quiet window.**
+      Fleet sweep 12×2 × {1,2,4,6,8} on GPUs 3–5 (tree: main+#30+#31-candidate): x1 (24
+      offered) SUSTAINED 100%%; at x2 one child's generator delivered 15.1/16 (94%%) and the
+      harness stopped the climb by its own rule — box load was 24.1/48 (the other tenant's
+      evening ramp; the same guard tripped once during #31's evidence at load ~22). Not a
+      code finding: the C-sweep sustained 36 fps/child at load ~18 this afternoon. The
+      ceiling measurement re-runs in a quiet window (early UTC morning has been quiet);
+      until then C1's "where are we" number stays the sustained-to-72-img/s floor from #27.
 - [~] **C1a · Profile before optimising** (V63). Two of the three pieces are in place and
       neither has been *run*, because the GPUs are held by parallel agents:
       - per-stage host timings — `benchmarks/stages.py` (C5), reads the histograms the
@@ -829,7 +837,86 @@ that exposes the four attributes a policy reads.
       `7c76b78`, 17 commits / 30 files, tier 1331, T3 set 109, container 20/4 + 2-passed
       wire, hygiene clean, body v7, per-finding reply posted; **round 5: APPROVE — MERGED
       26 Aug 17:39 UTC** as `464c499`, five rounds, every finding real) →
-      `bench/topology` (**#27 MERGED 26 Aug 18:00 UTC, APPROVE on round 1**, 1 commit / 11 files, tier 1354 on the rebase, both sweeps re-run on the merged tree — B 1572/0/0 vs C 847/345/382 on person_embedder at x3, all rungs SUSTAINED; stray absolute-path symlink `benchmarks/build` dropped from the commit and gitignored, feature-log entry added) → `ci/cpp-offline-and-prompt` (self-merge granted, V109).
+      `bench/topology` (**#27 MERGED 26 Aug 18:00 UTC, APPROVE on round 1**, 1 commit / 11 files, tier 1354 on the rebase, both sweeps re-run on the merged tree — B 1572/0/0 vs C 847/345/382 on person_embedder at x3, all rungs SUSTAINED; stray absolute-path symlink `benchmarks/build` dropped from the commit and gitignored, feature-log entry added) → `ci/cpp-offline-and-prompt` (**#28 MERGED 26 Aug 18:06 UTC** by hand under V109) →
+      docs snapshot (**#29 MERGED 26 Aug 19:02 UTC**, round 2 APPROVE — round 1's two real
+      blockers were the V111/V112 misfiling recurring inside the fix and a false
+      "recorded in the index" claim; both fixed, the append trap written to session memory).
+      **`perf/batched-torch-crop` = #30, MERGED 26 Aug 19:43 UTC, APPROVE round 1** (C44's lever 1:
+      one batched pass, 1 commit / 3 files — torch_ops.py, the new 98-test module, the
+      feature-log entry; tier 1452; gpu 29 passed with parity byte-identical; evidence
+      carries three labelled measurements: the degenerate-biased committed fixture, the
+      valid-box wash per call, and the system-level −11% host CUDA-API / upsample
+      4083→322 / memcpyAsync −3.7k calls. The claim is scaling, not per-call speed.)
+      **Watch item (26 Aug): one teardown ERROR in `test_service_engine.py::TestTheEngineJoinsTheTier`
+      in 1 of 4 full-tier runs on the staging branch** — passed 5/5 isolated, unrelated diff
+      (no server/ files touched); possibly a latent tier-teardown race from #26. Watch for
+      recurrence; root-cause if it shows again.
+      **Lever 2 = #31** (open 26 Aug ~20:5x; **round 1** answered ~21:5x — the blocker was the
+      evidence and, behind it, a real cost: Nsight's D2H window is asymmetric (the staged
+      memcpy-out sits outside it) and the serial drain idled the copy engine (+31% micro).
+      Fixed by the reviewer's path B: ping-pong buffer pair + one Event each on the worker's
+      own stream — crop staged now 11% BELOW unstaged with clean spreads (3725 vs 4169 µs);
+      the A/B they asked for exists (alternating base/branch ×2 at 12×4: all four SUSTAINED
+      100%); framing corrected in body+FEATURE_LOG; `release_staging` closes the restart
+      strand; the letterbox micro row is noise-bound tonight (3 strikes at load 19–25) and
+      says so. **Round 2** (~23:1x): three more real blockers — `stats()` racing
+      `release_staging` (snapshot under lock + 200-alternation hammer), the eager dead `:b`
+      page at single-chunk shapes (now lazy, tested both directions), and the letterbox
+      evidence contradicting the change (letterbox UNSTAGED by the reviewer's own branch;
+      the quiet-window pair is the recorded gate for re-staging it). **The control-row
+      discovery**: after unstaging, the two letterbox bench rows measure identical code and
+      still differ 25% with sub-1% spreads — the box's inter-invocation noise floor, wider
+      than every micro effect measured tonight; round 1's crop −11% withdrawn as a claim
+      (reported as inside the floor). The PR now rests on mechanism + flat A/B +
+      exact-equality tests + bounded budget; the quiet-window table (both ops + the A/B
+      re-run, early UTC) carries the numeric decision — if staged crop reads at/above
+      pageable there, crop comes off staging too and the PR reduces to infrastructure +
+      the release fix. — `6495630`, tier 1506, staging module 52, gpu 42. **Round 3** (~23:5x): three more, none
+      needing a measurement, all real — the single-chunk rule belonged IN `_to_host`
+      (the letterbox reasoning applied verbatim to the design-sizing person-reid batch, a
+      LARGER span; now structural: one span → plain `.cpu()`, letterbox back through
+      `_to_host`, the special case dissolved), the FEATURE_LOG/body claimed both sites
+      stage (corrected), and the budget docstring's arithmetic was unreproducible (now
+      re-derivable: ≤16 MiB pinned/worker, a pair only for multi-chunk names). NB taken:
+      `DeviceError` transient vs `RuntimeError` permanent in the degrade. NB noted for
+      someday: a worker outliving stop()'s join keeps refilling a popped pool (untracked
+      pinned residue, pathological only). — `1f4dc46`, tier 1508, module 53. **Round 4** (~23:1x, 26 Aug — the round entries above carried drifted clock estimates): both real and the
+      sharpest kind — round 3's structural rule had EMPTIED the proving tests (every
+      case-table shape one span → both sides `.cpu()`; the reviewer's zeros-mutation of the
+      staged body was caught by exactly ONE test; the pinned gpu test manufactured its own
+      misses with test-side get()s). Fixed: one-span/multi-chunk parametrization on both
+      equality tables, the no-view test forced multi-chunk with misses-from-the-call
+      asserts, and a REAL device test — mask-shaped batch at the default bound, real DMA +
+      real Event ordering, misses==2 from the call, pinned-ness via cache hits. The
+      zeros-mutation now fails 10. NB noted: health() mints a staging owner on the caller's
+      thread (bounded, lazy, released — follow-up beside the join-timeout note). — `4a3c539`,
+      tier 1540, module 85, gpu 42. **Round 5: APPROVE — #31 MERGED 26 Aug 23:43:49 UTC**
+      (mergeCommit `46c908d`, five rounds, every finding real). **Quiet-window follow-up
+      DELIVERED 27 Aug 04:55–05:0x (#31 comment #issuecomment-5434557913):** the box never
+      went quiet (tenant load ~25) but the A/B/A control rows agreed 0.06–4% (vs the
+      daytime 25% self-disagreement), which licensed the medians — staged beats pageable on
+      all three ops (letterbox 1.42×, letterbox_to_device ~1.7×, crop ~1.5×), so **crop
+      STAYS on staging**; the merge-time residency commitment is discharged in the keep-it
+      direction, and the structural single-chunk rule remains the only carve-out. A/B at 60
+      img/s both SUSTAINED (60.0 / 60.2 — daytime aborts were load bursts). Hygiene: GPUs
+      3–5 at 15 MiB after; the residual pid was tts26's live experiment, left alone. **Process slip, same class as before: an UNQUOTED
+      heredoc (needed for $S) ran the backticks in embedded prose as command substitution
+      and published a hole-ridden PR body — caught and repaired within minutes; the rule is
+      quote the heredoc and pass paths via sys.argv, never interpolate into python source.** One process slip on the way, caught in-turn: a red-hook commit was pushed and
+      amended green (`8f2fe3f`) within minutes — the &&-chain must gate the push on the grep
+      *count*, not run them as separate lines; `grep -c` exits 1 on zero which also needs
+      handling)** (1 commit / 8 files; tier 1505; gpu 42; 8-mutation harness; the honest split: system D2H −76% [3.061→0.726 s, max 61.7→35.7 ms], micro-bench bimodality explained — pageable is fast on a quiet bus, terrible contended; crop staged +0.9 ms/call at micro conditions, said plainly. One box-noise abort mid-evidence was root-caused to the generator guard, not the branch: the rerun sustained 60.1/60.) **Original target note:** (the survey refined the
+      target: the TRT output path is already pinned by default (`fetch_output` stages through
+      `PinnedStagingPool`; the segmenter's 26.2 MB `output1` is pinned, and that path's cost
+      is its per-output `stream.synchronize()`, a separate note); the pageable tails are
+      `letterbox_batch`'s `.cpu().numpy()` — 4.92 MB × once per frame = **8.85 GB of the
+      run's 11.4 GB D2H** — and `crop_batch`'s return, whose 8-ship mask batch is the 39 ms
+      tail. Fix: per-worker `PinnedStagingPool` into `TorchImageOps`, fixed-shape chunk
+      staging composed with #30's compute chunking, copy-out contract like `fetch_output`.
+      The fix that deletes the copies entirely — `letterbox_to_device` wired through the
+      dispatcher (all three impls already implement it; nothing calls it) — is ADR-007
+      territory, deferred and named. Then the frame-scoped device cache for the 3-crop-set
+      re-upload (the deferred seam change).**
       Original sketch: `fleet` plus a cross-process inference tier, symmetric — every shard
       process serves its own GPU's crop-stage instances to its peers, so a dead process loses its K
       cameras and its capacity, nothing else. Pieces: (a) `runtime/memory/shared_ring.py` — a
@@ -863,6 +950,254 @@ that exposes the four attributes a policy reads.
       too**: the DAG is detect + segment + reid (person & ship) + track + OCR + MTMC, not
       detect→reid→track — the sgie fan-out and the tracker/MTMC placement must carry the full
       graph. Parallel lane; file-disjoint from T1–T3.
+      **T4-PR1 = #32, open 26 Aug 23:5x with automerge** (1 commit / 19 files: the topology
+      + generated nvinfer configs with the zero-detections refusal + the pyds-free probe →
+      PerceptionEvent mapper + the child CLI + the design doc's five live-run blockers +
+      image.sh; 73 offline tests, tier 1613 on the rebase; both --dry-run demos pasted; NO
+      perf claim — no DS image on this box. The coder's feature-log line said "and the
+      competitor" — fixed to V108's framing before push. **Round 1** (~00:2x 27 Aug), both
+      blockers REPRODUCED by the reviewer: --dry-run constructed the live sink (jsonlines
+      truncated a results file in their repro; kafka raised on a control box) — the sink is
+      lazy now, built at start(), stop() closes once-if-built, regression pins a live file
+      byte-identical through a dry construction; and a secondary absent from operate_on
+      silently claimed EVERY class (a person could publish a ship's embedding) — refused in
+      the settings validator AND at config generation, both tested. NB opened per the
+      two-planes rule: csrc has no topology seam yet, so nothing desynchronises today — the
+      ledger line for the csrc topology seam is this sentence.
+      **Rounds 2–3** (~01:3x, 27 Aug): round 2's sink fix was LOST IN TRANSIT — my
+      three-edit fix script died on its third assert and never wrote the first two edits,
+      so `_ensure_sink` shipped with zero callers (a real shard would publish NOTHING for
+      its lifetime, GPU burning, counters at 0); and I never read round 2 at all because my
+      review-counting jq matched only `## Review` headings. Both process defects mine, both
+      told to the reviewer plainly. Fixes: the wiring re-landed with the seam test they
+      specified (injected sink honoured, configured sink built at start); pgie batch
+      bounded by max_batch_size (9-vs-8 refusal test); the metrics sentence corrected
+      (write-only in this topology; exporter-in-child = ledger item for the live-run PR).
+      Working rules hardened: one-edit-one-write (or write-before-assert), and list ALL
+      comment heads, never filter by heading shape. — `6a27102`, tier 1619, suite 79.
+      **Round 4** (~02:0x): rounds 2–3 confirmed properly fixed; one new blocker, subtle and
+      real — `attach-sys-ts=false` means "source NTP or NOTHING" (both the builder comment
+      and §6 described the OPPOSITE), so a file source published latency_us=0 on every event
+      forever: a measured-looking zero on the very axis the project optimises. Fixed by the
+      reviewer's second option: an unstamped frame takes the probe's receipt as its capture
+      time and `extra.capture_origin` distinguishes "probe" from "source"; the wrong-way
+      test replaced by the distinguishability test. All five NBs taken: parent-side plan
+      refusal for the batch bound (best-effort, tested both ways), the sink property back
+      to a plain getter, sgie `interval` omitted with the reason, the num-detected-classes
+      coincidence named in §6, and the last four "competitor" sentences scrubbed (V108,
+      third time it resurfaced — grep-all this time). — `d9ac69c`, tier 1621, suite 81.
+      **Round 5** (~03:0x): two blockers, both real — the parser/lib pair had no paired
+      validator (half-set = NVDSINFER_CUSTOM_LIB_FAILED inside the element, on all shards;
+      reviewer reproduced) → model_validator + pgie_config mirror + both-direction tests;
+      and run() called start() outside the try, so a failed PLAYING never NULLed the graph
+      nor closed the just-truncated sink → try/except BaseException → stop(); raise, plus
+      stop()'s first tests (transitions recorded by a FakeElement; injected-sink ownership).
+      NBs: num-detected-classes truncation named as deliberate in a comment + §6; pid in the
+      fallback config dir (two hand-started shards collided); _exit_code reset; stop() closes
+      only the sink it owns; letterbox 114-vs-0 caveat; the pasted dry-run was missing
+      SHARD=3 env — re-run for real and re-pasted. — `6dde588`, tier 1668, suite 86.
+      **Round 6** (~04:1x, 27 Aug): two blockers, both in builder.py, both real — (B1)
+      pad-added matched get_name().startswith("src") but nvurisrcbin names pads vsrc_%u, so
+      NO camera ever linked: pipeline reaches PLAYING, bus quiet, frames_emitted=0, nothing
+      logged — the exact looks-like-a-quiet-camera failure the PR refuses elsewhere. Fixed
+      with caps-based matching (video/ prefix) + a debug log naming skipped pads. (B2) the
+      builder — dependency-injected precisely for a fake — had ZERO offline coverage, the
+      stated direct cause of B1. Added FakeBuilderGst + TestBuildBranchOffline (6 tests:
+      chain+link order, vsrc video pad links / asrc audio pad does not, missing element
+      names factory, USE_NEW_NVSTREAMMUX, refused link raises). NBs both taken: FP32-only
+      secondary outputs refused at generation (+FP16 doctored-config test); except Exception
+      narrowed — the reviewer's exact (ModelNotFoundError, OSError) missed that a MISSING
+      repo raises ConfigurationError from _scan (their own printable-plan test caught it),
+      so is_dir() first then the narrow catch; malformed-repo-SURFACES pinned by a new test.
+      Process: my new FakeGst shadowed the probe tests' module-level FakeGst (6 old tests
+      broke) — caught by the file run, renamed. — `2ea6c09`, tier 1675, suite 93 (70
+      pipeline + 23 topology), reply #issuecomment-5433705786, body updated.
+      **Round 7: APPROVE — #32 MERGED 27 Aug 02:50:46 UTC, merge `e72955f`** (auto-merge
+      gate fired; reviewer hand-worked the padded to_source case, confirmed the loader move
+      verbatim, confirmed nvstreammux queues per sink pad so the inherited starvation bug is
+      NOT reproduced). Five NBs, none re-review-worthy:
+      - **T4-NB1 (open)**: the end-to-end-detector refusal keys on len(outputs)==1 — a
+        four-output EfficientNMS export (num_dets/boxes/scores/labels) slips past into the
+        zero-detections-looks-quiet failure. Widen: require a parser unless outputs are the
+        two-tensor coverage/bbox layout.
+      - **T4-NB2 (open)**: probe.py `.astype(float)` before tolist() is a redundant float64
+        materialisation on the streaming thread (~240 MB/s at design load); tolist() on the
+        float32 view already yields Python floats and copies. Same conversion lives in
+        graph/state.py `_as_embedding` — extract ONE shared helper (two-planes rule).
+      - **T4-NB3 (open)**: stop() closes the sink but leaves the pad probe attached — an
+        in-flight buffer after set_state(NULL) raises in emit, is caught, and is counted as
+        build_failures instead of sink_failures (misattributed, not lost). remove_probe in
+        stop() closes it.
+      - **NB4: DONE on main directly** (`87f1a89`) — FEATURE_LOG's stale "73 offline tests"
+        → 93 (70 pipeline + 23 topology).
+      - **NB5**: metrics write-only in the child (sink_failures unobservable in production
+        for this topology) — already the exporter-in-child ledger line for the live-run PR.
+      T4-PR1 CLOSED. T4 residuals: the live-run PR (DS image + exporter + §6's five
+      blockers), T4-NB1..NB3 (one small follow-up PR fits all three).)
+
+      **P4-PR1 = #33, open 27 Aug ~03:0x UTC with automerge** (5 commits: the two-clock
+      FrameTag + ingest error vocabulary + StopSignal + KeywordOptions; the source contract
+      + registry + backoff + pacer + sink; the camera actor + fleet manager; replay
+      conformance + bench through the manager; test_ingest as the offline tier's FOURTH
+      binary — 131 checks). Rebased onto e72955f (one conflict: FEATURE_LOG both-prepended;
+      resolved P4-entry-on-top), C++ offline tier green on the rebased tree (66/27/17/131),
+      Python tier 1675/1 skipped, pre-commit 0 Failed. NOTE learned: csrc has NO CMakeLists —
+      `python scripts/build_csrc.py --offline` is the canonical build (ci.yml's own recipe);
+      the test_pipeline binary is NOT offline (its closure reaches core/platform.h) and a
+      stale full-build binary dumps core on a driverless host — do not run it outside the
+      container. After merge: the one-line ci.yml follow-up adds test_ingest to the run list
+      (V109 self-merge lane, workflows PRs cannot pass the review job).
+      **Round 1** (27 Aug ~03:1x): review ran the tier itself (ldd closure check included);
+      tests py3.10 FLAKED on test_service_engine mesh-join (0-byte ring / peer never
+      appeared — #26 code, zero .py in this diff; rerun green — WATCH: recurring mesh flake
+      candidate). Two blockers, both real, both in manager.cpp: (B1) add_camera started its
+      actor outside the lock → stop() could free it mid-start (UAF), or in the benign order
+      leave a camera running that the manager forgot (start() cleared the stop aimed at it)
+      → actors_/abandoned_ are shared_ptr, adder re-checks the map and refuses with
+      ServerStateError, AND the same fix closed snapshot()'s unflagged raw-pointer window;
+      (B2) ~IngestManager freed abandoned_ — exactly what it exists not to do → destructor
+      leaks each shared_ptr to the heap, regression proves the detached thread resumes
+      against alive memory AFTER manager death. NBs taken: one fleet-wide stop deadline
+      (five hung cameras ≠ five timeouts, wall-time asserted); ctor validates before the
+      backoff (camera-named refusal). NB answered: ci.yml ledger line exists in working
+      copy, lands in the queued docs snapshot. NB agreed-as-is: bench pre-stop snapshot.
+      138 checks (+7), 5/5 stable, ~2.7s. — `0c6f78d`, reply #issuecomment-5433919626.
+      **Round 2** (27 Aug ~03:4x): BLOCKING, both real — (B1) redact_in FAILED OPEN: the
+      scheme walk-back gave up when the run's first char was not alpha, so
+      "2.rtsp://user:pw@host" leaked the fleet password where Python redacts (regex anchors
+      on the first alpha); fix advances to the first alpha of the run; byte-identical
+      cross-plane probe on six cases (incl. 2:// untouched in both). (B2) redact.h — 139
+      security lines — had ZERO tests; ported test_redaction.py whole (three hard passwords,
+      hostile never-throws sweep, host-survives, decoder templates, fail-closed, the
+      numeric-prefix case). NBs taken: actor()/add_camera() return shared_ptr (raw ref into
+      an erasable map contradicted the class's own invariant); the five missing pydantic
+      bounds with camera-named refusals; stop() returns abandoned count + bench _Exit(1)s
+      instead of unwinding when non-zero; one-deadline divergence documented in body (Python
+      syncing to C++ = follow-up ledger line below). NB answered: stale-131 body was a race
+      (edit landed after their checkout). 177 checks (+39). — `3be722b`, reply #issuecomment-5434068751.
+      **Round 3: APPROVE — #33 MERGED 27 Aug 03:52:15 UTC** (reviewer re-verified by
+      RUNNING: rebuilt --offline, all four binaries, ldd closure; even built an ASan
+      harness and hammered 400 add-vs-stop races trying to reach the residual below).
+      Five NBs:
+      - **P4-NB1 (open, fix in the next ingest PR)**: add_camera's re-check path does not
+        pay the abandonment debt — if the freshly started actor's stop() DETACHES (open
+        blocked >5s; open_timeout default 10s > stop default 5s), the throw drops the last
+        shared_ptr and ~CameraActor runs under the live thread. Unreachable with replay
+        (their ASan attempt confirms), reachable the moment PR2 adds a network source.
+        One line: park on abandoned_ when stop() returns false, + regression test.
+      - NB2 ci.yml → **PR #34 opened** (see below). NB3: both-clocks test lives in the CUDA
+        binary by layering necessity — honest, no action. NB4: 32 files vs ~25 — accepted at
+        this margin. NB5: Python tier taken on CI's word (no torch on reviewer host).
+      **#34 = ci: run test_ingest (one line, V109 self-merge lane)** — opened 27 Aug ~04:2x,
+      evidence run locally on the merged tree first (177 checks). Merge by hand once tests
+      green; review job cannot pass on workflows PRs.
+      **#34 MERGED 27 Aug ~04:5x (`ea58f75`, V109 self-merge)** — tests green, review job
+      on a workflows PR can only fail and sat queued 15+ min; body's trigger claim corrected
+      first (ci.yml runs on main pushes, not PRs — proof lands on the first main run).
+      **#35 = fix(ingest) bundle, open ~04:5x with automerge** (`09db04f`): P4-NB1 — the
+      re-check pays the abandonment debt (250 ms grace, park on false) with the ~100 ns
+      window made TWO protected-virtual test seams (between_publish_and_start /
+      between_start_and_recheck; review's 400 ASan rounds = unreachable by hammering) and a
+      deterministic regression standing in both (thread parked in gated do_open, manager
+      destroyed, gate opened, thread resumes alive); + P4-NB — Python actor.stop returns the
+      clean/abandoned contract, manager.stop charges ONE fleet deadline and returns the
+      count (5 hung cameras → 5, <1.2 s; clean → 0). C++ 181 checks 5/5, Python tier 1677.
+      **Main CI went red (2 runs) — all three causes found and fixed (~04:4x):**
+      1. MY race test's invariant was wrong: `added && !contains` counts the legitimate
+         "add completed, then stop() cleaned up" order as an orphan — 12/100 on the 2-core
+         runner. The orphan is "RUNNING untracked": test now keeps the returned shared_ptr
+         and requires is_running(). Pushed onto #35 (`51c4df5`).
+      2. The "Fused kernels (compile only)" job NEVER passed since #28: .gitmodules records
+         the SSH remote (house rule for humans) and a keyless runner cannot clone it.
+         shipvision is PUBLIC → `insteadOf` https rewrite in the checkout step. Branch
+         `ci/kernels-submodule-https` (`08f90fd`) ready, V109 lane, queued behind #35.
+      3. The mesh flake (2nd hit in one day, now on main) ROOT-CAUSED: shm names are
+         visible at creation BEFORE ftruncate; a reader attaching in that window saw a
+         0-byte block → RingProtocolError, which the connect loop does NOT retry (unlike
+         the all-zero-header "unborn" case one line below) → one unlucky attach killed the
+         whole join and the peer reported "never appeared". Fix: sub-header block raises
+         the same retryable RingClosedError("unborn"); + sizeless regression test beside
+         the existing mid-birth one. Branch `fix/ring-unborn-sizeless` (`5d6007e`) ready,
+         queued behind #35. Queue: #35 → kernels ci (self-merge) → ring fix → docs snapshot.
+      **Shipvision #12 round 1** (~04:1x): review APPROVE-shaped but BLOCKING on one real
+      finding — validate_max_output(2.0) accepts a whole float and returns the int, but
+      prepare() discarded the return: python/torch sliced with the caller's object
+      (TypeError on frame 1) while native converted (ran fine) — the exact backend
+      divergence the validator's own message warns about. Fixed at both slice sites
+      (suppress() + torch classic), +float-2.0==int-2 row across backends. First push of
+      the fix FAILED TO COMMIT (fresh clone had no git identity; the reply had already
+      been posted claiming "at the new HEAD" — identity set, committed `0f9064d`, pushed
+      minutes later). Round-1.5: their py3.12 lint job runs the REPO'S pinned black,
+      which wraps a line my local black left alone — amended `5a2170f`, gate green via
+      the repo's own pre-commit this time. Awaiting round 2.
+      **#35 round 1** (~04:5x): BLOCKING, the finding real and expertly demonstrated — the
+      reviewer reverted the fix under the repo's own plain build and my debt regression
+      STAYED GREEN (the freed actor's memory is not reused before the gate opens, so the
+      UAF looks correct without ASan; they then caught it under -fsanitize=address and
+      validated the fix itself). Their 3-line weak_ptr witness applied: taken in
+      between_publish_and_start while still tracked, asserted un-expired after refusal AND
+      after manager death. FLIP-PROVEN: reverted → 183/2 failures, restored → 183/0, 5/5.
+      NB3 taken (grace timed from recheck_began, not around the test's own poll loop). NB2
+      taken (the 51c4df5 predicate narrowing now disclosed in Content/Changes). NB1 →
+      ledger P4-NB2-py (Python add_camera has no re-check; orphan minus UAF) + body line.
+      NB4 answered with a rerun. — `0dc0a82`, reply #issuecomment-5434475638.
+      **Round 2** (~05:0x): BLOCKING on exactly one thing, and rightly — the body claimed
+      "ledger item opened (P4-NB2-py)" but the REPO's TASKS.md was untouched by the diff:
+      per the two-planes rule's own text, a ledger claim must be IN the diff, not in a PR
+      body (the working-copy /tmp ledger is invisible to the next session). Fixed with a
+      docs commit `f3cb1e7` adding the P4 sub-items to the repo's TASKS.md: P4-NB2-py (the
+      Python re-check gap, their concrete failure verbatim), P4-NB3 (their round-2 NB1,
+      folded in as asked: CameraActor::stop entered from two threads — fleet stop + the
+      re-check — races the unsynchronised thread_.joinable() read; join-vs-detach UB or
+      double-detach std::terminate; pre-existing, detach-half likelier at 250 ms), P4-NB4
+      (Python remove_camera discards the bool). Everything else in the round was
+      verification: they REPRODUCED the flip-proof (183/2 reverted, 183/0 restored, 3/3),
+      endorsed the predicate narrowing as legitimate, and traced the Python deadline sync
+      line-for-line. Reply #issuecomment-5434529503.
+      **Round 3: APPROVE — #35 MERGED 27 Aug 04:57:53 UTC.** NBs recorded: (a) P4-NB3
+      ESCALATED by the reviewer — the concurrent-stop race is a latent std::terminate
+      inside test_a_camera_added_during_stop_never_keeps_running itself (100 rounds of
+      fleet-stop + re-check both possibly inside CameraActor::stop on one actor; 5/5 clean
+      today, but the consequence is a CRASHING CI JOB, not UB-on-paper) → P4-NB3 is the
+      NEXT ingest-lane fix, before PR2; (b) stop()'s docstring should say "later actors may
+      get zero" rather than only "genuinely stuck"; (c) name the 250 ms grace
+      kRecheckStopGrace. All three fold into the P4-NB3 PR.
+      **#36 (kernels-ci https) MERGED 27 Aug ~05:2x (`a651fed`, V109 self-merge)** after its
+      py3.10 run FLAKED on the mesh (THIRD hit in one day, NEW spelling: raw
+      ValueError('cannot mmap an empty file') — the window BEFORE ftruncate, which my
+      prepared fix did not cover) and a rerun went green. Body evidence rule enforced on
+      myself twice this PR: the anon-clone probe was written before it was run (ran it:
+      exit=0) and the ssh-repro claim was softened to cite the runner's own logs.
+      **#37 = fix(runtime) ring mid-birth, open ~05:3x with automerge** (`a2070cc`): BOTH
+      windows retryable — _attach maps the mmap-empty ValueError to
+      RingClosedError("unborn") (state 1), open()'s sub-header check raises unborn instead
+      of RingProtocolError (state 2), zero-header (state 3) was already right; regression
+      per window (the /dev/shm touch trick fabricates state 1). Mesh tests unchanged — the
+      flake is removed, not waited out. Tier 1679 on the branch. A body number was caught
+      invented pre-run (mesh-test count "36 passed" → real 17) and replaced. Awaiting
+      round 1.
+      NOTE the mirrored lanes now live in BOTH ledgers (repo + working copy) — keep them in
+      sync at the docs snapshot.
+      **Shipvision #12 MERGED 27 Aug 04:33:26 UTC (round 2 APPROVE + auto-merge)** —
+      V124a phase 1 landed. V125 consequence: shipvision main moved → the parent's gitlink
+      bump is due (its own commit, ADR-010) — DONE 27 Aug ~05:1x: gitlink bumped straight on main
+      (`e5a94b5`, small-standalone-edit rule; its own commit per ADR-010) and the
+      operator's checkout synced to `90b0c41` (tree clean, their old stashes untouched,
+      their parent branch untouched). The owed `-m native` container run for the swap_rb /
+      max_output forwarding remains open, gated on the V124a phase-3 adapter work.
+- [ ] **R1 · The mesh deadline message should carry the last RingClosedError.reason**
+      (#37 r1 NB1): "never appeared" is wrong for a persistently unborn ring — it appeared,
+      it never got a header; "unborn" vs "absent" must read differently at 3am.
+- [ ] **R2 · The FOURTH ring-birth window: magic lands FIRST in create()'s one-slice header
+      write** (#37 r1 NB2, pre-existing): a peer observing the forward memcpy mid-flight can
+      see magic==_MAGIC with slots==0, sail past the unborn branch, and hit the TERMINAL
+      "created with 0 slots of 0 bytes" — same flake class, far narrower. Fix: write the
+      header with magic=0, then store magic as the LAST word (the readiness signal the
+      create comment already claims it is). R1+R2 = one small ring-hygiene PR, after
+      P4-NB3.
+- [x] **P4-NB · Sync Python IngestManager.stop to the fleet-wide deadline** (DONE in #35) the C++ plane
+      now implements (one deadline, remaining budget per actor, returns abandoned count) —
+      small, after P4-PR1 merges.
 
 - [x] **C44 · ANSWERED by the Nsight timeline (26 Aug 18:30, container, 12×5 on GPUs 3–5,
       30 s, merged main; report `.artifacts/profile/run.nsys-rep` on the t3c tree, stats at
@@ -874,11 +1209,16 @@ that exposes the four attributes a policy reads.
         blocking (12 754 calls, median 40 µs, **max 116 ms**) and the three launch entry
         points **~31 s** across ~400 k launches (median 8–9 µs — the tail is queue-blocking,
         avg 282 µs on `cudaLaunchKernel`). A copy-and-launch storm: ~13 k launches/s.
-      * Both C44 suspects confirmed: the per-object host loop shows as
-        `generatedNativePointwise` — **133 k instances ≈ 74 pointwise launches per frame**
-        (torch per-crop slice/normalize); and the D2H on the crop path shows as pageable-tail
-        copies — device-side D2H median 8.7 µs but **max 39 ms** (11.4 GB total; the big ones
-        are segmenter masks / letterbox copy-home).
+      * **Correction (26 Aug, from the after-profile):** `generatedNativePointwise` is
+        **TensorRT's** fused pointwise inside the engines — ~22% and ~135 k instances in
+        BOTH profiles, invariant to the crop change; attributing it to the torch crop loop
+        was wrong. The crop loop's true device signature was
+        `upsample_bilinear2d_out_frame`: **4 083 instances before → 322 after** (the
+        letterbox's share only) — the per-box `F.interpolate` population is gone. The other
+        confirmed suspect stands: D2H pageable tails (median 8.7 µs, **max 39 ms**, 11.4 GB
+        total) — lever 2, still open. At this dataset (~1 crop/frame) the host-dispatch win
+        is small in absolute terms; it scales with the crowd (2 launches + ~5 dispatches
+        *per box* before, constant ~10 kernels per crop set after).
       **The levers this hands C1** (in order): (1) route the crop stage through the fused
       `crop_batch` (one launch per batch instead of ~74; the kernel tier already measured it
       3.87×); (2) pin the large-output D2H paths through the staging pool (a 39 ms pageable
@@ -941,7 +1281,11 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
             method keeps the actor alive) — the orphaned camera is the whole defect. Mirror
             the C++ re-check + `ServerStateError` + tests.
       - [ ] **P4-NB3 · `CameraActor::stop` is not safe against a concurrent stop, and the
-            manager now enters it from two threads** (#35 round 2; pre-existing, narrowed but
+            manager now enters it from two threads** (#35 round 2; ESCALATED round 3: the
+            race is a latent std::terminate inside the hammer test itself — a crashing CI
+            job, not UB-on-paper — so this is the NEXT ingest fix, before PR2; fold in the
+            stop-docstring "later actors may get zero" wording and the kRecheckStopGrace
+            naming from the same round. Pre-existing, narrowed but
             made more likely by the 250 ms re-check grace). Both callers pass the
             unsynchronised `thread_.joinable()` read (which also races `start()`'s write of
             `thread_`); one joins while the other detaches → UB, or a double detach →
@@ -1038,6 +1382,65 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       the containment gate itself and the hook should know its name.
 
 ---
+
+## V124 · Image ops belong in shipvision (operator, 27 Aug)
+
+- [ ] **V124a · Move the torch/numpy image-op IMPLEMENTATIONS into shipvision's python
+      package.** The operator's standing principle (V50, restated V124): image-processing
+      algorithms live in shipvision; shipinfer is the system layer that CALLS them. What
+      stays in `runtime/ops` (system, per the same principle): the `ImageOps` ABC (the
+      contract the pipeline consumes), the registry/factory/thread-local binding, and
+      `native_ops.py` as the thin adapter over `shipvision._C`. What moves: `torch_ops.py`
+      and `numpy_ops.py` implementations — the drift became undeniable in #30/#31, which
+      grew a real batched-bilinear algorithm and pinned staging inside shipinfer.
+      **RE-SCOPED by the Explore map (27 Aug ~03:2x, full report at scratchpad
+      v124a-map.md): shipvision ALREADY implements letterbox/crop/nms in all three
+      backends** (numpy oracle, torch, native) under its own pinned conventions — the lane
+      is not "move files", it is "adopt or reconcile", with one owner-decision fork:
+      * CONFLICT (load-bearing): crop sampling. shipinfer #30 clamps the far bilinear tap
+        INSIDE the patch (C45; docstring rejects grid_sample for reading outside the box);
+        shipvision samples in frame coordinates, clamps taps to the FRAME, torch backend
+        IS grid_sample(border) — and test_conventions.py pins that as intended. Both have
+        written rationales; produce different pixels at every box edge.
+      * Also diverging: resized-extent rounding (banker's float64 vs half-up float32),
+        int-truncated exclusive boxes vs float inclusive, numpy oracle nearest vs bilinear,
+        uint8 vs float32 letterbox canvas.
+      * GAPS if shipinfer adapts onto shipvision: swap_rb on the BGR path (binding already
+        takes it), nms max_output, and the #31 pinned-staging D2H — which is SYSTEM
+        plumbing and stays in shipinfer: the adapter asks shipvision for device-out
+        (letterbox_into/crop_batch_into on DeviceBuffer) and stages the copy home itself.
+      * Plan: phase 1 = shipvision PR filling the two contract gaps (swap_rb, max_output),
+        no convention change; phase 2 = the crop-convention decision goes TO THE OPERATOR
+        with both rationales (recommendation: adopt shipvision's frame-clamp — it is the
+        convention its oracle, parity suite AND native kernels all implement, while
+        patch-clamp exists only in shipinfer's torch path whose own numpy oracle is not
+        pixel-comparable anyway); phase 3 = shipinfer PR thins runtime/ops to an adapter
+        (ExecutionProvider mapping + error translation + ThreadLocalImageOps stay), pixel
+        deltas re-baselined in tests, submodule bump its own commit (ADR-010).
+      **Phase 1 = shipvision PR #12, open 27 Aug ~04:0x with automerge** (coder-built on
+      /tmp/sv clone, verified + rerun by main session; commit `1930d16`, 9 files +732/−42):
+      swap_rb keyword on the four BGR entry points (all three backends; native forwards
+      bool(swap_rb) where a literal True sat; Convention 4 rewritten — mean/std stay in
+      DESTINATION order, never reordered by the flag) and max_output on nms/nms_with_scores
+      (capped once in suppress() — all five methods return descending final score; kernel's
+      max_output verified BY READING image_ops.cu:323-380 to be top-k-by-final-score so
+      pass-through is right; negative/fractional caps refused at prepare()). imgproc
+      collected 549→687, offline tier 1797 passed; vacuity-checked (87 fail without the
+      src change). OWED: a `-m native` container run before the parent adapts onto this
+      path (native rows all skip in the unbuilt clone). Detection heads deliberately
+      uncapped — max_detections wiring is a separate decision, not phase 1.
+- [ ] **V124b · The CI consequence, decided before V124a lands:** shipinfer's offline tier
+      deliberately checks out no submodule (ADR-001), so after the move the ops tests
+      need one of: (a) CI checks out the submodule's PYTHON half (no build — pure python;
+      test.sh already PYTHONPATHs it in the container, so this extends the same move to
+      the plain runner), or (b) shipvision becomes a pip dependency. Recommend (a);
+      flag to the operator in the next summary.
+- [x] **V125 · The shipvision checkout is always its latest main** — done for the primary
+      tree (was parked on stale `feat/detection`; now `8e62786` == shipvision origin/main,
+      which the gitlink already pinned — the "looks completely different" was the stale
+      BRANCH checkout, not a stale pointer). Standing rule indexed in user.md §3: working
+      checkouts track shipvision main; the parent's gitlink is bumped promptly when
+      shipvision main moves.
 
 ## Z · Final gate
 
