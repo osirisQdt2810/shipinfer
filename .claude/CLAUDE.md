@@ -139,7 +139,13 @@ src/shipinfer/
 ├── api/                   # KServe v2 over FastAPI — the engine's side-door, arch.md §6
 │                          #   the ONE layer that may import fastapi/uvicorn, and lazily
 │
-├── server/                # DISSOLVING (A2): launcher.py -> launch/ (PR-4), the topology
+├── launch/                # §2 spawn + supervise shards; gRPC clients arrive in A2 PR-5/6
+│   ├── supervisor.py      #   Fleet: one process per shard, all-or-nothing start, one drain
+│   └── signals.py         #   Ctrl-C/SIGTERM -> the fleet. Never imports torch: it sets
+│                          #   CUDA_VISIBLE_DEVICES before the child's interpreter starts
+│
+├── server/                # DISSOLVING (A2): supervision left in PR-4; launcher.py is now
+│   ├── launcher.py        #   just the argv a shard is started with, and the topology
 │   └── topology/          #   classes -> runners/ (PR-6); __init__ is a shim onto engine/
 │                          #   topology/ here = process placement, the OLD sense of the word
 │
