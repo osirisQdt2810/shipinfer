@@ -662,3 +662,72 @@ a chain is validated, and where the "no silent download to CPU" promise (§8) is
   rejoin after the `embed` fork).
 - Not decided here: a `convert` element kind (added when the first real convert is needed),
   and whether the deepstream runner's graph compiler reads caps or GStreamer's own.
+
+---
+
+## ADR-018 — A dead shard's cameras are reported lost, not re-placed
+
+**Status:** Accepted · 2026-08-27 · phase B4 (`docs/arch.md` §2, §4); builds on ADR-002 (a
+GPU is the unit of a worker) and ADR-005 (a refusal is typed and carried).
+
+**Context.** A shard process can die: an engine that fails to load, an OOM kill, a segfault
+in a native op. Its cameras are then dark, and the launcher is the only thing that knows
+which ones they were, because it is the only thing that placed them. The obvious reflex is
+to move them onto the shards that are still up — that is what "high availability" looks
+like from the outside, and `docs/arch.md` §2's diagram still says the launcher "respawns on
+death". Nothing in this tree does that today, and re-placing without a respawn is worse than
+it looks.
+
+**Decision.** When a shard's process exits, the fleet runner **reports** its cameras and
+places them nowhere. `Fleet.dead_indices()` names the exited shards by plan index (the
+runner never touches `ShardProcess`, so `subprocess` stays inside `launch/`);
+`FleetRunner._lost()` maps those to `{camera_id: shard_id}`; `_do_health` carries them under
+`lost` and excludes them from the per-shard `placed` lists, `_do_stats` carries the count,
+and `StreamInfo.lost` surfaces the flag on `GET /streams`. The placements are **kept** —
+reported, never deleted — because the two absences would otherwise be one: a camera nobody
+ever placed and a camera whose shard died would read the same, and "I have never heard of
+it" is the wrong answer to "where did my camera go".
+
+Three reasons, in the order they decide it:
+
+1. **A camera's tracker is stateful and lives on its home shard.** `arch.md` §4's invariant
+   is that results return to the camera's *home* shard for reassembly and tracking, and that
+   the tracker never migrates mid-stream — even a tier-1 frame ticket, which moves the
+   heaviest work to a peer, sends the metadata home. Re-placing a camera means starting a
+   new tracker with no history: every track id under that camera changes, and MTMC
+   downstream sees a fleet of new objects. That is a tracker reset dressed as failover.
+2. **Nothing respawns.** `Fleet.supervise()` is fail-stop: the first dead shard stops the
+   rest of the fleet and raises `ShardExitedError`, precisely so that a deployment cannot sit
+   in the state where three quarters of the cameras are watched behind a green dashboard.
+   A launcher that quietly re-placed the cameras would be *creating* that state — the fleet
+   looks whole, one GPU's worth of capacity is gone, and the only signal is a latency curve.
+3. **Re-placing oversubscribes the survivors.** `shared_by` and `share_rank` are decided
+   when the plan is made and told to each shard once at `UpdateTopology`; they are how two
+   shards on one GPU each load a fraction of the instances instead of a full set. A survivor
+   handed a dead peer's cameras runs them against an engine slice sized for its own share,
+   on a GPU whose budget was never renegotiated. The first symptom is an OOM on the shard
+   that was still healthy.
+
+**Consequences.**
+
+- The loss view **lags**. It is a poll of the child processes taken as a report is built, so
+  a death shows up on the next probe — within `poll_s` for a supervised deployment. Every
+  docstring that exposes it says so; an empty `lost` is not a promise that nothing died.
+- `lost` and `unreachable` are different words for different facts and must stay that way. A
+  wedged, paging or slow shard is *alive* and may answer the next probe; a dead one will not.
+  Conflating them would report a camera terminally lost because its shard took two seconds
+  over a health probe.
+- The one recovery is the operator's, and it is two calls: `remove_camera` on a lost camera
+  drops the placement and answers `False` — the thread died with its process, so "clean"
+  would be a lie — and `add_camera` then places the id on a survivor, with a fresh tracker
+  the caller asked for rather than one the launcher invented.
+- `add_camera` excludes dead shards from the placement order rather than discovering them
+  over RPC, and a fleet whose shards are *all* dead answers `NoShardAvailableError` (503,
+  retryable) naming each one.
+- **What changes when respawn exists.** A respawned shard is a shard with the same index,
+  the same GPUs and the same `shared_by`, so re-placing onto *it* breaks none of the three
+  reasons above — only reason 1 remains, and it is a per-deployment trade (a reset tracker
+  beats a dark camera for some operators and not for others). That makes it a *policy*, not
+  a branch: a `PlacementPolicy` in `scheduling/policies/` (seam 2), chosen by name, deciding
+  where a lost camera goes and whether it goes anywhere at all. This ADR is then superseded
+  by the one that adds it, not edited.
