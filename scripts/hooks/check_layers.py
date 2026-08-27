@@ -66,10 +66,18 @@ FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
     # `confluent_kafka` from the engine's row: publishing results is a `pipeline` sink's job,
     # and an HTTP handler that reached for a broker would be doing dispatch.
     "api": {"confluent_kafka"},
-    # `server` is what the split has not carried off yet — the shard launcher and the
-    # topology-as-placement classes (both leave in A2 PR-4/PR-6). It held the only fastapi
-    # import in the tree until `server/api/` became `api/`; this row is what stops it growing
-    # a second one on the way out.
+    # `launch` is the only layer that bans **torch**, and it is not a purity argument. The
+    # whole reason a shard is a subprocess is that `CUDA_VISIBLE_DEVICES` has to be in the
+    # child's environment before its interpreter imports torch (`launch/supervisor.py`); the
+    # parent therefore sets it and must never import torch itself, or the one CPU-only process
+    # in the deployment holds a CUDA context on every device it can see. `tensorrt` rides along
+    # for the same reason, and the rest is `server`'s row: a launcher serves no HTTP and
+    # publishes to no broker.
+    "launch": {"torch", "tensorrt", "fastapi", "uvicorn", "confluent_kafka"},
+    # `server` is what the split has not carried off yet — the argv-rendering half of the
+    # launcher and the topology-as-placement classes (both leave in A2 PR-6; supervision left
+    # in PR-4). It held the only fastapi import in the tree until `server/api/` became `api/`;
+    # this row is what stops it growing a second one on the way out.
     "server": {"fastapi", "uvicorn", "confluent_kafka"},
     # The three layers left without a ban, banned: an output sink pushes, a camera actor
     # pulls, and the CLI calls `serve_http` rather than building an app itself. Rows rather
@@ -105,6 +113,15 @@ ALLOWED_INTERNAL: dict[str, set[str]] = {
     # annotates `RepositoryEntry` directly, and `launch` in phase B when `/streams` needs the
     # shards — each as a diff with an argument, not a standing permission.
     "api": {"core", "engine"},
+    # `launch` spawns and supervises processes, so it sits on `core` (errors, logging, the
+    # settings tree) and on `scheduling` for the `ShardPlan` that says which cameras and which
+    # GPUs each process owns — a pure decision, made before anything is spawned. It reaches
+    # `envs` too, which is a non-layer module every layer may name. Deliberately absent:
+    # `engine`, `runners` and `topology`. A launcher that imported the thing it launches would
+    # be paying for the model pool in the parent process and would have no reason left to be a
+    # separate process at all; what it needs from a child arrives over the control plane
+    # (arch.md §2), and `launch/client.py` in A2 PR-5 is where that starts.
+    "launch": {"core", "scheduling"},
     # What is left of `server` is the launcher and the topology-as-placement classes; they sit
     # *on* the engine and may not import `runtime` or `backends` directly any more
     # (transitively they still reach both through the engine — this check is about direct

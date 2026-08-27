@@ -10,7 +10,7 @@ from shipinfer.core.settings.topology import (
     SERVICE_RUN_ENV,
     SERVICE_SHARD_ENV,
 )
-from shipinfer.server.launcher import Fleet
+from shipinfer.launch import Fleet
 from shipinfer.server.topology import TOPOLOGIES, ServiceTopology, build_topology
 from shipinfer.server.topology.base import TOPOLOGY_ENV
 

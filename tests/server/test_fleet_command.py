@@ -1,7 +1,7 @@
 """``shipinfer fleet`` — the plan, the refusals, and the one path that runs without a GPU.
 
 The command itself is thin: it builds the plan, prints it, and hands it to
-:class:`~shipinfer.server.launcher.Fleet`. What is worth testing here is the part that is not
+:class:`~shipinfer.launch.Fleet`. What is worth testing here is the part that is not
 thin — what it refuses, and whether the number an operator reads before spawning fifty camera
 connections is the number the plan actually has.
 

@@ -371,7 +371,7 @@ class DeepStreamPipeline:
 
         Returns:
             The process exit code. Non-zero when the bus reported an error, so
-            :class:`~shipinfer.server.launcher.Fleet` raises
+            :class:`~shipinfer.launch.Fleet` raises
             :class:`~shipinfer.core.errors.ShardExitedError` for it and stops the rest of the
             fleet — the same failure story a dying ``serve`` shard has.
         """

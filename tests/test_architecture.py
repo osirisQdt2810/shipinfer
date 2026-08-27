@@ -202,6 +202,43 @@ class TestTheWebFrameworkEntersAtOneSeam:
         assert result.returncode == 0, result.stdout + result.stderr
 
 
+class TestTheLauncherNeedsNoDeviceAndNoEngine:
+    """`import shipinfer.launch` costs a CUDA context on nothing and a model pool on nothing.
+
+    Two separate promises, both load-bearing, and neither visible to a static rule.
+
+    **No torch.** The reason a shard is a subprocess rather than a thread is that
+    ``CUDA_VISIBLE_DEVICES`` must be in the child's environment *before* its interpreter
+    imports torch — a module-scope import two packages deep otherwise wins the race
+    (``launch/supervisor.py``). The parent is the process that sets that variable, and a
+    parent that imported torch itself would hold a CUDA context of ~220-480 MiB on every
+    device it can see, on the one process in the deployment that needs no device at all. The
+    hook checks the string; this checks the import graph, which is where the mistake actually
+    arrives.
+
+    **No engine, and no runners.** A launcher spawns the thing that owns models; it does not
+    own them. If ``shipinfer.launch`` pulled in the pool, the parent would pay for the backend
+    registry and there would be no reason left for the shard to be a separate process.
+    ``shipinfer.runners`` does not exist yet (A2 PR-3/PR-6) — it is asserted absent anyway,
+    because the direction of that dependency is the whole point: the fleet runner will import
+    ``launch``, never the reverse, and a cycle between them is what would make the gRPC
+    client's home ambiguous.
+    """
+
+    def test_importing_launch_pulls_in_no_accelerator_and_no_engine(self) -> None:
+        code = (
+            "import sys, shipinfer.launch as launch; "
+            "assert callable(launch.forward_signals); "
+            "assert launch.Fleet is not None; "
+            "heavy = [m for m in ('torch', 'tensorrt', 'fastapi', 'starlette', 'uvicorn', "
+            "'shipinfer.engine', 'shipinfer.api', 'shipinfer.runners', 'shipinfer.runtime', "
+            "'shipinfer.backends') if m in sys.modules]; "
+            "assert not heavy, heavy"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
 class TestTheServerShimIsTheSameObjects:
     """`shipinfer.server` re-exports `shipinfer.engine`, and re-export means *identity*.
 

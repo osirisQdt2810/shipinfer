@@ -85,7 +85,8 @@ src/shipinfer/
   engine/      instances, models, ensembles, cache, health   <- the model pool (arch.md §6)
   api/         the KServe v2 HTTP surface — the engine's side-door, and the one layer
                that may import fastapi
-  server/      the shard launcher and the topologies (dissolving; see docs/arch.md §9)
+  launch/      spawn and supervise the shard processes (arch.md §2) — never imports torch
+  server/      the argv a shard is started with, and the topologies (dissolving; arch.md §9)
 3rdparty/shipvision/         algorithms and fused CUDA/HIP kernels — its own repository, as a submodule
 model_repository/  the real DAG, on real TensorRT engines (built by scripts/build_engines.py)
 benchmarks/        the head-to-head against the counting-simulation architecture
