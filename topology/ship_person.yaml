@@ -1,17 +1,30 @@
-# topology/ship_person.yaml — the production chain
+# topology/ship_person.yaml -- the production chain
 #
-# The chain of arch.md §1, verbatim: this file is the design's own example, kept here as the
-# thing the loader must accept rather than as a copy that drifts from it.
+# The chain of arch.md §1, with the rejoin spelled out. This file is the design's own
+# example, kept here as the thing the loader must accept rather than as a copy that drifts
+# from it -- so where the design's snippet is ambiguous, this file is the answer and arch.md
+# points at it.
 #
 # HOW THE ORDER IS DECIDED. An element with no `after:` follows the element declared
-# immediately before it. `after:` overrides that, and is how the two branches below rejoin:
-# `embed_ship` follows `segment` (not the person embedder declared after it), and
-# `recognize` follows `embed_ship`. Reordering two lines here reorders the chain, so check
-# the resolved wiring with `Topology.describe()` after an edit.
+# immediately before it. `after:` overrides that, and is how the two branches below split
+# and rejoin. Reordering two lines here reorders the chain, so check the resolved wiring
+# with `Topology.describe()` after an edit.
+#
+# WHY `embed_person` AND `track` CARRY AN `after:`. arch.md §1's snippet stops after four
+# lines and under-specifies the rejoin; the default rule alone would wire this chain wrong
+# and the loader would refuse it, correctly:
+#   * `embed_person` needs `after: detect`, not the `embed_ship` declared before it -- a
+#     person embedding is computed from the detector's crop, and the ship segmenter and ship
+#     embedder are not in its path;
+#   * `track` needs BOTH branches as predecessors. With the default rule it would follow
+#     only `recognize`, leaving `embed_person` with no successor -- a branch whose vectors
+#     nothing consumes, which is `ChainStructureError: ['embed_person'] reach no output`.
+# `tests/topology/test_chain.py` loads exactly this wiring with the `mock` implementations
+# substituted, so the file and the tests cannot drift apart again.
 #
 # WHAT DOES NOT LOAD YET. Every `impl:` below is a name that lands in a later phase of the
 # migration plan (arch.md §10), so this file is a schema fixture today, not a runnable
-# chain — `Topology.from_spec` refuses it with UnknownElementImplError naming
+# chain -- `Topology.from_spec` refuses it with UnknownElementImplError naming
 # `gstreamer-gpu`, and a test asserts exactly that:
 #   * decode `gstreamer-gpu`         -> phase D (DataPool: NV12 decoded straight into VRAM)
 #   * detect/segment/embed/recognize `pool` -> phase A (the engine split out of server/)
@@ -20,12 +33,12 @@
 # The hardware-free `mock` implementations of every kind are registered today; they are what
 # the offline tier loads chains with.
 elements:
-  decode:    {impl: gstreamer-gpu}                  # NV12 → VRAM, the default
+  decode:    {impl: gstreamer-gpu}                  # NV12 -> VRAM, the default
   detect:    {impl: pool, model: ship_detector}
   segment:   {impl: pool, model: ship_segmenter, when: class == ship}
   embed_ship:   {impl: pool, model: ship_embedder,   after: segment}
-  embed_person: {impl: pool, model: person_embedder, when: class == person}
+  embed_person: {impl: pool, model: person_embedder, when: class == person, after: detect}
   recognize: {impl: pool, model: ship_recognizer, after: embed_ship}
-  track:     {impl: shipvision, per: camera}        # stateful — pinned to the home shard
+  track:     {impl: shipvision, per: camera, after: [recognize, embed_person]}
   mtmc:      {impl: shipvision, scope: global}
   output:    {impl: kafka}

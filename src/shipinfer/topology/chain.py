@@ -21,10 +21,22 @@ convenience is that reordering two lines in the file reorders the chain, so
 ambiguous.
 
 **Everything is checked at load time.** Kinds, implementations, model names, cycles,
-structure and — the one that matters most — the caps of every adjacent pair. Validation
-lives in exactly one place, :meth:`Topology.from_spec`, so there is no second door into a
-half-checked chain. A mis-wired chain stops a deploy; it does not become a camera that
-quietly produces no detections at 3 a.m.
+structure and — the one that matters most — the caps of every pair of elements that can
+hand data to each other. Validation lives in exactly one place,
+:meth:`Topology.from_spec`, so there is no second door into a half-checked chain. A
+mis-wired chain stops a deploy; it does not become a camera that quietly produces no
+detections at 3 a.m.
+
+"Every pair that can hand data to each other" is wider than "every declared edge", and both
+extensions exist because a per-edge check alone is evadable:
+
+* a wildcard half of an element's ``produces`` is **propagated** — resolved from what
+  actually arrives at that element — before its outbound edges are negotiated, so a
+  cap-transparent passthrough cannot launder a ``nv12@gpu`` producer into a ``bgr@cpu``
+  consumer (:func:`_resolve_produced`);
+* a ``when:`` element is skipped for items its condition rejects, so its predecessor hands
+  straight to its successor; that **bypass** pair is negotiated as well
+  (:meth:`ElementNode.admits`).
 
 The loader is deliberately **not** clever: where two adjacent elements disagree it refuses
 rather than inserting a conversion. See :mod:`shipinfer.topology.caps` for why an implicit
@@ -41,7 +53,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from shipinfer.core.errors import (
     CapsMismatchError,
@@ -52,7 +64,7 @@ from shipinfer.core.errors import (
     UnknownElementError,
 )
 from shipinfer.topology.base import MODEL_KINDS, ChainItem, Element, ElementKind
-from shipinfer.topology.caps import Caps, negotiate
+from shipinfer.topology.caps import ANY, Caps, negotiate
 from shipinfer.topology.registry import create_element
 
 __all__ = [
@@ -146,8 +158,13 @@ class ElementSpec(_Strict):
 
     #: Registered implementation name, e.g. ``pool`` or ``gstreamer-gpu``.
     impl: str
-    #: Explicit kind, when the slot name does not imply it. Usually omitted.
-    kind: Optional[ElementKind] = None
+    #: Explicit kind, when the slot name does not imply it. Usually omitted. A **string**,
+    #: not the enum, on purpose: pydantic would answer ``kind: decdoe`` with a schema error
+    #: while ``decdoe:`` as a slot name gets an
+    #: :class:`~shipinfer.core.errors.UnknownElementKindError`, and one typo deserves one
+    #: error type. :meth:`Topology.from_spec` resolves it through
+    #: :meth:`~shipinfer.topology.base.ElementKind.parse`, which raises that one.
+    kind: Optional[str] = None
     #: Repository model name. Required for the four model kinds, meaningless for the rest.
     model: Optional[str] = None
     #: Branch condition, e.g. ``class == ship``.
@@ -214,6 +231,9 @@ class ChainSpec(_Strict):
             ChainSpecError: the document is not YAML, is not a mapping, or does not match
                 the schema. The source is always in the message — a pydantic report with no
                 file name is nearly useless once a deployment has more than one topology.
+                Only schema failures are wrapped: anything else escaping this call is a bug
+                here, not a bad file, and swallowing it into a ChainSpecError would send an
+                operator to edit a chain that is fine.
         """
         try:
             raw: Any = yaml.safe_load(text) or {}
@@ -224,8 +244,11 @@ class ChainSpec(_Strict):
         data = dict(raw)
         data.setdefault("name", name)
         try:
-            return cls(**data)
-        except Exception as exc:  # pydantic ValidationError, or our own ValueError
+            # `model_validate`, not `cls(**data)`: keyword expansion turns a non-string YAML
+            # key (`1: foo` at the top level) into a TypeError from CPython rather than a
+            # validation error, which would need a broader `except` here to catch.
+            return cls.model_validate(data)
+        except (ValidationError, ValueError) as exc:
             raise ChainSpecError(f"{source}: {exc}") from exc
 
     @classmethod
@@ -284,6 +307,18 @@ class ElementNode:
         Lives on the node rather than in a runner so that all three runners (arch.md §1)
         answer it identically; a per-runner copy of this is how ``inprocess`` and ``fleet``
         would come to disagree about which frames the segmenter sees.
+
+        **The contract for a ``False``: skip and continue.** The item is *not* dropped and
+        the walk does *not* stop. A runner hands it, unchanged, to this element's successors
+        — ``when: class == ship`` means "the segmenter does not run on people", not "people
+        leave the chain", and a person still has to reach the tracker and the output. Two
+        consequences follow, and both are load-time rules rather than runner conventions:
+
+        * the hand-over from this element's predecessor to its successor is real, so the
+          loader negotiates that **bypass** pair too and refuses a chain where it cannot
+          work (see :func:`_negotiate_edges`);
+        * dropping an item is a different act, spelled by an element returning ``None`` from
+          :meth:`~shipinfer.topology.base.Element.process`, not by a condition.
         """
         return self.condition is None or self.condition.matches(item.meta)
 
@@ -295,6 +330,15 @@ class Edge:
     The negotiated cap is stored because it is a *decision*, not a derivation: it depends on
     both sides' declaration order, and the runner and every log line should read the same
     answer the loader reached.
+
+    **The cap belongs to the edge, not to the element.** Each edge is negotiated on its own
+    pair, so two edges out of one producer, or two edges into one consumer, may carry
+    different caps — a fan-in where a detector hands ``nv12@gpu`` and a tracker hands
+    ``meta@cpu`` into the same element is legal and does happen. Read the cap from the edge
+    you are about to traverse; asking "what cap does ``track`` take?" has no single answer.
+    The one exception is an element that wildcards a half of its ``produces``: there the
+    loader must pick one cap for the outbound edge, so it requires the inbound ones to agree
+    and refuses when they do not.
     """
 
     producer: str
@@ -336,13 +380,18 @@ class Topology:
 
         Raises:
             ChainSpecError: the chain declares no elements.
-            UnknownElementKindError: a slot names no kind.
-            ChainStructureError: a model kind with no ``model:``, no decode root, no output
-                sink, or a branch that reaches no output.
+            UnknownElementKindError: a slot, or an explicit ``kind:``, names no kind.
+            ChainStructureError: a model kind with no ``model:``, a root that is not a
+                decode element or does not say what it produces, no output element, an
+                output element with a successor, a branch that reaches no output, or a
+                wildcard ``produces`` whose inbound edges disagree.
             UnknownElementImplError: an ``impl:`` nobody registered.
+            ConfigurationError: a registered class whose kind is not its registry's.
             UnknownElementError: an ``after:`` naming an element that is not declared.
             ChainCycleError: the ``after:`` edges form a cycle.
-            CapsMismatchError: two adjacent elements agree on no format/location.
+            CapsMismatchError: two elements that can hand data to each other agree on no
+                format/location — including the *bypass* pair created when a ``when:``
+                element is skipped.
         """
         if not spec.elements:
             raise ChainSpecError(
@@ -351,7 +400,11 @@ class Topology:
             )
 
         kinds = {
-            slot: declared.kind if declared.kind is not None else ElementKind.infer(slot)
+            slot: (
+                ElementKind.parse(declared.kind)
+                if declared.kind is not None
+                else ElementKind.infer(slot)
+            )
             for slot, declared in spec.elements.items()
         }
 
@@ -424,13 +477,21 @@ class Topology:
         """One element by slot name.
 
         Raises:
-            UnknownElementError: no such slot; the message lists the ones there are.
+            KeyError: no such slot; the message lists the ones there are. A plain
+                ``KeyError`` and *not* the typed
+                :class:`~shipinfer.core.errors.UnknownElementError`, which is deliberate: by
+                the time a ``Topology`` exists every name in the file has been resolved, so a
+                miss here comes from a mistyped literal in a runner or a CLI, not from a
+                chain an operator can fix. Raising a ``ConfigurationError`` would send them
+                to edit a file that is correct, and would let a caller's bug be swallowed by
+                the same ``except TopologyError`` that handles bad configuration.
         """
         try:
             return self._by_name[name]
         except KeyError:
-            raise UnknownElementError(
-                self._name or "<chain>", name, list(self._by_name)
+            raise KeyError(
+                f"topology {self._name or '<unnamed>'} has no element {name!r}; "
+                f"declared: {sorted(self._by_name)}"
             ) from None
 
     def successors(self, name: str) -> tuple[ElementNode, ...]:
@@ -525,22 +586,33 @@ def _resolve_predecessors(spec: ChainSpec) -> dict[str, tuple[str, ...]]:
     return inputs
 
 
-def _topological_order(inputs: Mapping[str, tuple[str, ...]]) -> list[str]:
-    """Kahn's algorithm, keeping declaration order among ready elements.
-
-    Declaration order as the tie-break so that two chains that differ only in an irrelevant
-    ordering still print and execute identically — a stable order is what makes
-    :meth:`Topology.describe` reviewable in a diff.
-
-    Raises:
-        ChainCycleError: naming the elements still waiting, which are exactly the cycle and
-            whatever hangs off it.
-    """
-    pending = {slot: len(producers) for slot, producers in inputs.items()}
+def _consumers(inputs: Mapping[str, tuple[str, ...]]) -> dict[str, list[str]]:
+    """Invert ``consumer -> producers`` into ``producer -> consumers``, order preserved."""
     consumers: dict[str, list[str]] = {slot: [] for slot in inputs}
     for consumer, producers in inputs.items():
         for producer in producers:
             consumers[producer].append(consumer)
+    return consumers
+
+
+def _topological_order(inputs: Mapping[str, tuple[str, ...]]) -> list[str]:
+    """Kahn's algorithm, keeping declaration order among ready elements.
+
+    **Why not** :class:`graphlib.TopologicalSorter`, which is in the standard library and
+    would be the ponytail-principle answer: its ``static_order`` iterates the ready set as a
+    ``set`` of ``str``, and the iteration order of a string set depends on
+    ``PYTHONHASHSEED``. Two runs of the same chain file would then print different
+    :meth:`Topology.describe` output, and this chain's default-predecessor rule already makes
+    declaration order semantic — a nine-element straight line must come out in the order it
+    was written. Kahn over a ``deque`` seeded in declaration order gives exactly that in
+    twelve lines. (``graphlib`` is still the right tool for a cycle *check* on its own; the
+    tie-break is the whole reason it is not used here.)
+
+    Raises:
+        ChainCycleError: with one real cycle as a path, found by :func:`_find_cycle`.
+    """
+    pending = {slot: len(producers) for slot, producers in inputs.items()}
+    consumers = _consumers(inputs)
 
     ready = deque(slot for slot in inputs if pending[slot] == 0)
     order: list[str] = []
@@ -552,21 +624,75 @@ def _topological_order(inputs: Mapping[str, tuple[str, ...]]) -> list[str]:
             if pending[consumer] == 0:
                 ready.append(consumer)
     if len(order) != len(inputs):
-        raise ChainCycleError([slot for slot, count in pending.items() if count > 0])
+        # Not `[slot for slot, count in pending.items() if count > 0]`: that set is the cycle
+        # *plus every element downstream of it*, so a two-element cycle in a nine-element
+        # chain gets reported as seven names and the reader has to find the loop themselves.
+        raise ChainCycleError(_find_cycle(inputs))
     return order
 
 
-def _check_structure(nodes: Sequence[ElementNode]) -> None:
-    """The four rules that separate a DAG from a runnable chain.
+def _find_cycle(inputs: Mapping[str, tuple[str, ...]]) -> list[str]:
+    """One cycle, as the path data would try to travel: a depth-first back edge.
 
-    A chain must *start* somewhere frames come from, and *end* somewhere results go. Both
-    are start-up refusals because the failure they prevent is silent: a chain with no output
-    sink runs every model at full cost and emits nothing.
+    Walks forward (producer to consumer) and starts from the slots in declaration order, so
+    the cycle reported for a given file is always the same one — an error message that moves
+    between runs is one nobody trusts. Recursive, which is fine: a chain is a dozen elements
+    written by hand, not a graph.
+
+    Returns:
+        The cycle in flow order, e.g. ``["detect", "track"]`` for
+        ``detect -> track -> detect``. Empty only if there is no cycle, which the one caller
+        has already ruled out by counting.
     """
-    roots = [node for node in nodes if node.is_root]
-    if not roots:
-        raise ChainStructureError("the chain has no root element")
-    for root in roots:
+    consumers = _consumers(inputs)
+    grey: set[str] = set()
+    done: set[str] = set()
+    path: list[str] = []
+
+    def walk(slot: str) -> list[str]:
+        grey.add(slot)
+        path.append(slot)
+        for consumer in consumers[slot]:
+            if consumer in grey:
+                return path[path.index(consumer) :]
+            if consumer not in done:
+                found = walk(consumer)
+                if found:
+                    return found
+        path.pop()
+        grey.discard(slot)
+        done.add(slot)
+        return []
+
+    for slot in inputs:
+        if slot not in done:
+            cycle = walk(slot)
+            if cycle:
+                return cycle
+    return []
+
+
+def _check_structure(nodes: Sequence[ElementNode]) -> None:
+    """The rules that separate a DAG from a runnable chain.
+
+    A chain must *start* somewhere frames come from, and *end* somewhere results go. All of
+    these are start-up refusals because the failure they prevent is silent: a chain with no
+    output element runs every model at full cost and emits nothing.
+
+    1. every root is a ``decode`` element;
+    2. a root needs no input caps, because nothing precedes it;
+    3. a root **states** what it produces — no wildcard half, since there is no inbound edge
+       to resolve one from (:func:`_resolve_produced` is the other half of that rule);
+    4. the chain has at least one ``output`` element;
+    5. every ``output`` element is a sink;
+    6. every element reaches an ``output``.
+
+    No "the chain has no root" rule: it cannot happen. This runs after
+    :func:`_topological_order`, and a non-empty finite DAG always has a node of in-degree
+    zero — a graph where every node has a predecessor has a cycle, which is the error the
+    sort has already raised.
+    """
+    for root in (node for node in nodes if node.is_root):
         if root.kind is not ElementKind.DECODE:
             raise ChainStructureError(
                 f"element {root.name!r} has no predecessor, so it is a root, but a root "
@@ -578,13 +704,29 @@ def _check_structure(nodes: Sequence[ElementNode]) -> None:
                 f"root element {root.name!r} requires input caps "
                 f"{[str(cap) for cap in root.element.input_caps]} but nothing precedes it"
             )
+        if any(cap.is_wildcard for cap in root.element.output_caps):
+            raise ChainStructureError(
+                f"root element {root.name!r} declares output caps "
+                f"{[str(cap) for cap in root.element.output_caps]}, but a root has no "
+                "inbound edge to resolve a `*` from; a root must say what it produces "
+                "(for example `nv12@gpu`), or every cap downstream of it is unknown"
+            )
 
-    outputs = [node for node in nodes if node.kind is ElementKind.OUTPUT and node.is_sink]
+    outputs = [node for node in nodes if node.kind is ElementKind.OUTPUT]
     if not outputs:
         raise ChainStructureError(
-            "the chain has no output sink; every chain ends in an element of kind "
+            "the chain has no output element; every chain ends in an element of kind "
             "`output`, or its results go nowhere"
         )
+    # Said separately from the rule above, because "no output sink" is the wrong diagnosis
+    # for `mtmc: {after: output}`: the chain has an output element, it just is not the end.
+    for emitter in outputs:
+        if not emitter.is_sink:
+            raise ChainStructureError(
+                f"output element {emitter.name!r} must be a sink, but the chain gives it "
+                f"successors {list(emitter.outputs)}; an output element emits results and "
+                "hands nothing on, so move those elements before it"
+            )
 
     # Reverse reachability, not forward: in a DAG every element is reachable from some
     # root by construction, so the check with teeth is the other direction — a branch
@@ -607,20 +749,125 @@ def _check_structure(nodes: Sequence[ElementNode]) -> None:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _Arrival:
+    """One cap that can be handed to an element, and where it came from.
+
+    ``skipped`` is set when this cap arrives only because a ``when:`` element in between did
+    not fire, which is the difference between an edge and a bypass in an error message.
+    """
+
+    origin: str
+    caps: Caps
+    skipped: str | None = None
+
+
+def _agreed_half(node: str, arrivals: Sequence[_Arrival], half: str) -> str:
+    """The one value every arriving cap has for ``format`` or ``location``.
+
+    Raises:
+        ChainStructureError: the arriving caps disagree. Only reached for a half the element
+            wildcarded: a fan-in whose edges genuinely carry different caps is legal (see
+            :class:`Topology`), but an element that says "I hand on whatever I was given"
+            cannot be handing on two different things at once — the loader would have to
+            pick one and stamp it on the outbound edge.
+    """
+    values = {getattr(arrival.caps, half) for arrival in arrivals}
+    concrete = sorted(values - {ANY})
+    if len(concrete) > 1:
+        raise ChainStructureError(
+            f"element {node!r} declares a wildcard {half} in its `produces`, so the loader "
+            f"resolves it from what arrives; but its inputs disagree: "
+            f"{[f'{a.origin} -> {a.caps}' for a in arrivals]}. Declare the {half} "
+            f"explicitly on {node!r}, or stop feeding it two different {half}s"
+        )
+    return concrete[0] if concrete else ANY
+
+
+def _resolve_produced(node: ElementNode, arrivals: Sequence[_Arrival]) -> tuple[Caps, ...]:
+    """The caps an element really hands on, with any wildcard half filled in.
+
+    This is cap *propagation*, and it is what makes arch.md §8's promise hold for a whole
+    chain rather than for one edge at a time. An element declaring ``accepts: *@*`` and
+    ``produces: *@*`` — a passthrough, a filter, a tee — would otherwise satisfy an
+    ``nv12@gpu`` producer on its input and a ``bgr@cpu`` consumer on its output, and the
+    device-to-host download the loader exists to refuse would reappear in the middle of the
+    chain with both edges reported as valid. GStreamer resolves this the same way: a
+    passthrough's output caps are its *negotiated* input caps, not its template.
+
+    Only the wildcard halves are resolved. A concrete ``produces`` is what the element said
+    it makes, and nothing upstream gets to overrule it — that is how the tracker turns
+    ``nv12@gpu`` into ``meta@cpu``.
+
+    Raises:
+        ChainStructureError: the element wildcards a half and its inputs disagree on it.
+    """
+    declared = node.element.output_caps
+    if not any(cap.is_wildcard for cap in declared):
+        return declared
+    resolved = [
+        Caps(
+            cap.format if cap.format != ANY else _agreed_half(node.name, arrivals, "format"),
+            (
+                cap.location
+                if cap.location != ANY
+                else _agreed_half(node.name, arrivals, "location")
+            ),
+        )
+        for cap in declared
+    ]
+    # Two declared caps can resolve to the same thing (`*@gpu, nv12@*` behind an nv12@gpu
+    # producer). Dedupe, preserving preference order, so the error messages stay readable.
+    return tuple(dict.fromkeys(resolved))
+
+
 def _negotiate_edges(nodes: Sequence[ElementNode]) -> tuple[Edge, ...]:
-    """One :class:`Edge` per hand-over, or a refusal naming both sides."""
+    """One :class:`Edge` per hand-over, or a refusal naming both sides.
+
+    Walks ``nodes`` in **topological order**, which is what lets an element's outbound caps
+    be resolved from its inbound ones: every predecessor has already been negotiated by the
+    time an element is reached. That ordering is the whole mechanism; a loop over edges in
+    any other order could not propagate anything.
+
+    Two hand-overs are checked per element, and only the first becomes an :class:`Edge`:
+
+    * the **edge** itself, producer to consumer;
+    * for a ``when:`` element, the **bypass** — its predecessor straight to its successor.
+      An item the condition rejects is skipped past the element and continues down the
+      chain (see :meth:`ElementNode.admits`), so that pair really does exchange data at
+      runtime and deserves the same refusal. It is not an ``Edge`` because no element hands
+      anything over there; it is the *absence* of one element on an existing route.
+    """
     by_name = {node.name: node for node in nodes}
+    arrivals: dict[str, list[_Arrival]] = {node.name: [] for node in nodes}
     edges: list[Edge] = []
     for node in nodes:
+        produced = _resolve_produced(node, arrivals[node.name])
         for consumer_name in node.outputs:
             consumer = by_name[consumer_name]
-            caps = negotiate(node.element.output_caps, consumer.element.input_caps)
+            accepted = consumer.element.input_caps
+            caps = negotiate(produced, accepted)
             if caps is None:
                 raise CapsMismatchError(
                     node.name,
-                    [str(cap) for cap in node.element.output_caps],
+                    [str(cap) for cap in produced],
                     consumer.name,
-                    [str(cap) for cap in consumer.element.input_caps],
+                    [str(cap) for cap in accepted],
                 )
             edges.append(Edge(node.name, consumer_name, caps))
+            arrivals[consumer_name].append(_Arrival(node.name, caps))
+            if node.condition is None:
+                continue
+            for arrival in arrivals[node.name]:
+                if negotiate([arrival.caps], accepted) is None:
+                    raise CapsMismatchError(
+                        arrival.origin,
+                        [str(arrival.caps)],
+                        consumer.name,
+                        [str(cap) for cap in accepted],
+                        skipped=node.name,
+                    )
+                arrivals[consumer_name].append(
+                    _Arrival(arrival.origin, arrival.caps, skipped=node.name)
+                )
     return tuple(edges)

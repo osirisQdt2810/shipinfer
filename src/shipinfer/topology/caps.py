@@ -13,11 +13,21 @@ elements has to agree on are different in kind:
 
 **A wildcard is a declaration, not a converter.** ``*@*`` on an output sink means "I will
 take whatever arrives". It never *bridges* two concrete caps: ``nv12@gpu`` does not match
-``nv12@cpu``, and no amount of wildcarding elsewhere in the chain makes it. That is the rule
-arch.md §8 asks for — "a chain that would silently download to CPU refuses to load instead"
-— and it is the reason this module has no ``convert`` anything in it. At 1000 frames/s an
-implicit device-to-host copy is not a fallback, it is a 3 GB/s tax that looks like a working
-deployment.
+``nv12@cpu``, so no *pair* of elements can be talked into an implicit download. That is the
+rule arch.md §8 asks for — "a chain that would silently download to CPU refuses to load
+instead" — and it is the reason this module has no ``convert`` anything in it. At 1000
+frames/s an implicit device-to-host copy is not a fallback, it is a 3 GB/s tax that looks
+like a working deployment.
+
+**What this module does not guarantee on its own, and where the rest lives.**
+:func:`negotiate` answers one question about one edge. That is not enough for the §8
+promise, because a cap-transparent element declaring ``accepts: *@*`` and ``produces: *@*``
+would otherwise satisfy a ``nv12@gpu`` producer on one side and a ``bgr@cpu`` consumer on
+the other, and the download would reappear in the middle of the chain. Closing that is a
+*chain* property: :mod:`shipinfer.topology.chain` walks the elements in topological order
+and resolves a wildcard half of ``produces`` from the caps that actually arrive at that
+element before negotiating its outbound edges, the way GStreamer propagates caps through a
+passthrough. Read the two files together; neither is sufficient alone.
 """
 
 from __future__ import annotations
@@ -145,6 +155,11 @@ def negotiate(produced: Sequence[Caps], accepted: Sequence[Caps]) -> Caps | None
     that any entry of ``accepted`` will take wins. So a detector that lists
     ``nv12@gpu, bgr@cpu`` says "device-resident if my producer can, host memory if it
     cannot", and the loader picks the device path without anyone configuring a preference.
+
+    This function sees **one edge**. It does not know, and must not assume, what the
+    producer's own inputs were: the loader resolves a wildcard half of ``produced`` from the
+    element's inbound caps before calling this, so what arrives here is already as concrete
+    as the chain can make it. See the module docstring for why that matters.
 
     ``None`` here is a *no*, not a failure signal: the only caller is the chain loader,
     which turns it into a

@@ -27,12 +27,16 @@ from shipinfer.topology.base import ChainItem, Element, ElementContext, ElementK
 from shipinfer.topology.registry import registry_for
 
 __all__ = [
+    "MockAnyDecode",
     "MockCpuDetect",
+    "MockCpuOutput",
     "MockDecode",
     "MockDetect",
     "MockEmbed",
+    "MockLazyOutput",
     "MockMtmc",
     "MockOutput",
+    "MockPassthrough",
     "MockRecognize",
     "MockSegment",
     "MockTrack",
@@ -171,6 +175,49 @@ class MockTrack(_Mock):
         return {"tracks": [1]}
 
 
+@registry_for(ElementKind.TRACK).register("mock-passthrough")
+class MockPassthrough(_Mock):
+    """A cap-transparent element: ``*@*`` in, ``*@*`` out. The evasion that must not work.
+
+    A real element shaped like this is ordinary — a tee, a filter, a tracker that annotates
+    whatever it is handed — and declaring the wildcard on both sides is the honest way to say
+    "I do not touch the pixels". It is also the hole a per-edge caps check leaves open: an
+    ``nv12@gpu`` producer matches ``*@*``, and ``*@*`` matches a ``bgr@cpu`` consumer, so the
+    device-to-host download arch.md §8 refuses would reappear in the middle of the chain with
+    both edges reported valid.
+
+    It does not work, and this class exists so a test can prove it: the loader resolves the
+    wildcard from the element's negotiated *input* cap before negotiating its output, so this
+    element is ``nv12@gpu`` on both sides behind a GPU decoder and is refused in front of a
+    host-only sink.
+    """
+
+    kind: ClassVar[ElementKind] = ElementKind.TRACK
+    accepts: ClassVar[tuple[str, ...]] = ("*@*",)
+    produces: ClassVar[tuple[str, ...]] = ("*@*",)
+
+    def _do_process(self, item: ChainItem) -> ChainItem | None:
+        self.processes += 1
+        # No `caps=`: the cap it hands on is the cap it was given. That is what
+        # cap-transparent means at runtime, and it is what the loader assumed at load time
+        # when it resolved this element's `*@*` from its inbound edge.
+        return item.derive(tracks=[1])
+
+
+@registry_for(ElementKind.DECODE).register("mock-any")
+class MockAnyDecode(_Mock):
+    """A decoder that will not say what it produces. The root a chain cannot resolve.
+
+    Exists for one test. A wildcard ``produces`` is resolved from what arrives at the
+    element, and nothing arrives at a root -- so a root declaring ``*@*`` leaves every cap
+    downstream of it unknown, and the loader refuses it rather than stamping ``*@*`` on the
+    first edge and calling the chain validated.
+    """
+
+    kind: ClassVar[ElementKind] = ElementKind.DECODE
+    produces: ClassVar[tuple[str, ...]] = ("*@*",)
+
+
 @registry_for(ElementKind.MTMC).register("mock")
 class MockMtmc(_Mock):
     """Cross-camera association: metadata in, metadata out."""
@@ -181,6 +228,47 @@ class MockMtmc(_Mock):
 
     def _meta(self, item: ChainItem) -> dict[str, Any]:
         return {"global_ids": ["g-1"]}
+
+
+@registry_for(ElementKind.OUTPUT).register("mock-cpu")
+class MockCpuOutput(_Mock):
+    """A sink that can only read host memory - a Kafka producer, a JSON writer, a database.
+
+    The realistic counterpart of :class:`MockPassthrough`: most real sinks *are* host-only,
+    because they serialise. Exists so a test can put one behind a GPU element and check the
+    chain is refused rather than quietly growing a download per frame.
+    """
+
+    kind: ClassVar[ElementKind] = ElementKind.OUTPUT
+    accepts: ClassVar[tuple[str, ...]] = ("bgr@cpu", "meta@cpu")
+
+    def __init__(self, name: str, params: Mapping[str, Any] | None = None) -> None:
+        super().__init__(name, params)
+        self.emitted: list[ChainItem] = []
+
+    def _do_process(self, item: ChainItem) -> ChainItem | None:
+        self.processes += 1
+        self.emitted.append(item)
+        return None
+
+
+class MockLazyOutput(_Mock):
+    """A sink deliberately in **no** registry: the lazy-registration target.
+
+    Undecorated, and that is the whole point. ``register_lazy`` names a dotted path so that
+    the module need not be imported at registration time; a class that registered itself
+    eagerly could not stand in for one whose import is impossible without its runtime
+    (``pyds``). A test registers this lazily and builds it, which is the only way to walk the
+    path a real DeepStream element will take -- including the fact that ``impl`` is set by
+    :func:`~shipinfer.topology.registry.create_element` rather than by a decorator.
+    """
+
+    kind: ClassVar[ElementKind] = ElementKind.OUTPUT
+    accepts: ClassVar[tuple[str, ...]] = ("*@*",)
+
+    def _do_process(self, item: ChainItem) -> ChainItem | None:
+        self.processes += 1
+        return None
 
 
 @registry_for(ElementKind.OUTPUT).register("mock")

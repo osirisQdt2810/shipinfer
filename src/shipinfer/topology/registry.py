@@ -14,13 +14,16 @@ wrong when this was sketched flat:
    alphabetically.
 3. **The kind check has somewhere to live.** ``@DETECTORS.register("pool")`` on a class
    whose ``kind`` is ``segment`` is caught at import time, which is the difference between
-   a start-up refusal and a chain that runs the wrong model.
+   a start-up refusal and a chain that runs the wrong model. The check is repeated in
+   :func:`create_element` because a lazy registration has no class to check at registration
+   time, and the loader trusts ``node.kind`` for its structure rules.
 
 Registration is **eager**, following ``ingest/registry.py``: an element module imports
 nothing heavier than ``core`` at module scope and loads its runtime inside ``_do_open``. So
 ``ELEMENTS`` can list ``gstreamer-gpu`` on a host with no GStreamer and still fail usefully,
-at ``open()``, naming the package to install. ``register_lazy`` is for the one case that
-cannot honour that — a module whose *import* is impossible without the runtime (``pyds``).
+at ``open()``, naming the package to install. :meth:`ElementRegistry.register_lazy` is for
+the one case that cannot honour that — a module whose *import* is impossible without the
+runtime (``pyds``) — and it is overridden here to say where its kind check went.
 """
 
 from __future__ import annotations
@@ -62,19 +65,13 @@ class ElementRegistry(Registry[Element]):
         Raises:
             ConfigurationError: the class declares a different :attr:`Element.kind`, or
                 none at all. Checked *before* delegating, so a rejected class does not
-                stay half-registered in the map.
+                stay half-registered in the map. :meth:`register_lazy` cannot check this
+                early; see its docstring.
         """
         inner = super().register(name, *aliases, description=description)
 
         def decorator(cls: type[Element]) -> type[Element]:
-            declared = getattr(cls, "kind", None)
-            if declared is not self.element_kind:
-                raise ConfigurationError(
-                    f"{cls.__name__} declares kind {declared!r} and cannot be registered "
-                    f"as a {self.element_kind.value} element; set "
-                    f"`kind = ElementKind.{self.element_kind.name}` or register it under "
-                    f"its own kind"
-                )
+            _check_kind(cls, self, name)
             result = inner(cls)
             # One source of truth for the registered name: the chain file says `impl:
             # pool`, the log line says `impl=pool`, and neither is retyped by hand.
@@ -82,6 +79,44 @@ class ElementRegistry(Registry[Element]):
             return result
 
         return decorator
+
+    def register_lazy(
+        self, name: str, target: str, *aliases: str, description: str = ""
+    ) -> None:
+        """Register ``"module:ClassName"`` — with the kind checked at *creation*, not here.
+
+        The eager :meth:`register` can check :attr:`Element.kind` immediately, because it
+        holds the class. This one cannot: the whole point is that the module is not imported
+        yet, and importing it to check the kind would defeat the registration style it
+        exists for (``pyds``, whose import needs DeepStream present).
+
+        So the check moves one step later, to :func:`create_element` — the single place
+        every element in every chain is built. A lazily registered class of the wrong kind
+        is refused when a chain first asks for it, with the same
+        :class:`~shipinfer.core.errors.ConfigurationError`, rather than never. Overridden
+        only to say so: without this docstring the inherited method looks like it inherits
+        the guarantee too, and it does not.
+        """
+        super().register_lazy(name, target, *aliases, description=description)
+
+
+def _check_kind(cls: type[Element], registry: ElementRegistry, name: str) -> None:
+    """Refuse a class whose :attr:`Element.kind` is not the registry's kind.
+
+    Both kinds are in the message. "wrong kind" without them sends the reader looking at the
+    registration when the mistake is as often in the class, or the other way round.
+
+    Raises:
+        ConfigurationError: the class declares a different kind, or none at all.
+    """
+    declared = getattr(cls, "kind", None)
+    if declared is not registry.element_kind:
+        raise ConfigurationError(
+            f"{cls.__name__} declares kind {declared!r} and cannot be registered as a "
+            f"{registry.element_kind.value} element (as {name!r}); set "
+            f"`kind = ElementKind.{registry.element_kind.name}` or register it under its "
+            "own kind"
+        )
 
 
 #: Every kind's registry, created once. A ``MappingProxyType`` because the eight kinds are
@@ -110,6 +145,14 @@ def create_element(
 ) -> Element:
     """Build one element: ``create_element("detect", "pool", "detect", {...})``.
 
+    **The one place every element is built**, which is why the kind check is repeated here
+    rather than left to :meth:`ElementRegistry.register`. A lazy registration has no class
+    to check at registration time, so without this a
+    ``register_lazy("kafka", "...:MockTrack")`` on the output registry would hand the chain
+    loader a tracker labelled as an output sink — and the loader's structure rules, which
+    read ``node.kind``, would agree that the chain ends properly. Checking at creation
+    covers eager and lazy registrations with one rule.
+
     Args:
         kind: which registry to look in.
         impl: the registered implementation name, or one of its aliases.
@@ -120,11 +163,22 @@ def create_element(
         UnknownElementKindError: ``kind`` does not name a kind.
         UnknownElementImplError: no implementation of that kind under that name; the message
             lists the ones there are.
+        ConfigurationError: the registered class declares a different
+            :attr:`~shipinfer.topology.base.Element.kind`, or the lazy target cannot be
+            imported.
     """
     registry = registry_for(kind)
     if impl not in registry:
         raise UnknownElementImplError(registry.element_kind.value, impl, registry.names())
-    return registry.get(impl)(name, params)
+    registered = registry.canonical(impl)
+    cls = registry.get(impl)
+    _check_kind(cls, registry, registered)
+    # `register` sets this for an eager registration; a lazy one has nothing to set it on
+    # until now. Assigning here rather than only asserting keeps the promise that
+    # `element.impl` is the name the chain file used, whichever style registered it.
+    if cls.impl != registered:
+        cls.impl = registered
+    return cls(name, params)
 
 
 def describe_elements() -> dict[str, list[tuple[str, str]]]:
