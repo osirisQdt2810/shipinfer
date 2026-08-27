@@ -45,11 +45,11 @@ from shipinfer.topology.chain import (
     load_topology,
 )
 
-# Imported for the side effect only: this is what puts `mock` in the registries. Not
-# re-exported. An implementation is reached through its registry, by the name a chain file
+# Imported for the side effect only: this is what puts `mock` and `pool` in the registries.
+# Not re-exported. An implementation is reached through its registry, by the name a chain file
 # uses -- `create_element(ElementKind.DETECT, "mock", ...)` -- never by importing the class,
 # which is what keeps the registry the seam rather than a lookup table beside one.
-from shipinfer.topology.elements import mock
+from shipinfer.topology.elements import mock, pool
 from shipinfer.topology.registry import (
     ELEMENTS,
     ElementRegistry,

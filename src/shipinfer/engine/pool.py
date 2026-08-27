@@ -138,6 +138,23 @@ class InferenceServer:
         except KeyError:
             raise ModelNotFoundError(name, self.models()) from None
 
+    def get(self, name: str) -> Model | EnsembleModel:
+        """:meth:`model`, under the name the chain's ``pool`` elements ask for.
+
+        This is the whole of the `ModelResolver` protocol a topology element needs
+        (`topology/base.py`): one method, a name in, a handle out,
+        :class:`~shipinfer.core.errors.ModelNotFoundError` when there is no such model. The
+        satisfaction is **structural** and stays that way in both directions — the engine
+        never imports `topology`, and `topology` never imports the engine — which is what lets
+        a chain be loaded and validated on a host that has no accelerator, and what lets a
+        test hand an element a dict instead of a server.
+
+        A second name for one lookup, rather than renaming `model`: `server.model("x")` is the
+        spelling every existing caller and the KServe routes use, and `get` is the spelling the
+        protocol needs. Renaming either would only move the alias.
+        """
+        return self.model(name)
+
     def __iter__(self) -> Iterator[Model | EnsembleModel]:
         """Iterate the loaded models.
 
