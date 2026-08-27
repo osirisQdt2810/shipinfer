@@ -2152,6 +2152,11 @@ namespace {
             } catch (const ConfigError& error) {
                 message = error.what();
             }
+#ifdef SHIPINFER_OMITTED_LANES
+            // Guarded on the macro, because `omitted_lanes.h` deliberately supports a
+            // hand-rolled `g++` line with no define, where the refusal stays the bare
+            // "unknown video source" — an unconditional check here contradicted that
+            // documented fallback and made hand builds fail instead of skip (#48 round 1).
             check(
                 contains(message, "'gstreamer' exists but was not compiled into this binary") &&
                     contains(message, "the 'gstreamer' external lane") &&
@@ -2159,6 +2164,34 @@ namespace {
                 "a source this build left out is refused by BUILD LANE, not as a typo "
                 "(-DSHIPINFER_OMITTED_LANES, baked in by scripts/build_csrc.py): " +
                     message);
+            {
+                // The table's other row, end to end (#48 round 1): the opencv lane's names
+                // answer the same way in a binary that omitted it. The construction sits
+                // INSIDE the guard (#49 round 1 N1): a `--with-external opencv` build with
+                // gstreamer omitted still enters this branch, and constructing a real
+                // ReplaySource for nothing was harmless only via another unit's detail
+                // (replay throws from do_open, not its constructor).
+                if (!SOURCES().contains("replay")) {
+                    std::string replay_message;
+                    try {
+                        FrameCounter counter("cam-r");
+                        StopSignal stop;
+                        IngestConfig config = a_camera("cam-r");
+                        config.source = "replay";
+                        (void)create_source(config, counter, stop);
+                    } catch (const ConfigError& error) {
+                        replay_message = error.what();
+                    }
+                    check(
+                        contains(replay_message, "the 'opencv' external lane"),
+                        "and the opencv row of the lane table answers too: " + replay_message);
+                }
+            }
+#else
+            check(contains(message, "unknown video source"),
+                  "a hand-rolled build with no define keeps the documented bare refusal: " +
+                      message);
+#endif
             skip(
                 "the gstreamer source lives in a gst-facing unit the offline build does not "
                 "compile (see ingest/registry.cpp); build with `--with-external gstreamer` "
