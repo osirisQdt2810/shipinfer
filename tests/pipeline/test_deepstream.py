@@ -1593,6 +1593,58 @@ class TestTheRoundSevenFollowUps:
         with pytest.raises(ConfigurationError, match=r"EfficientNMS quartet|cannot read"):
             generate(reloaded, tmp_path, bbox_parser="", custom_lib="")
 
+    def test_a_detectnet_coverage_bbox_pair_generates_without_a_parser(
+        self, repository: ModelRepository, tmp_path: Path
+    ) -> None:
+        """#42 round 1's second note: the accept side of the gate had no test at all — the
+        arity check could be edited from != 2 to < 2 and the suite stayed green. This is
+        the positive case: the one layout the built-in parser documents (a C-channel
+        coverage grid beside a 4*C-channel bbox grid, same spatial extent) passes with no
+        parser configured."""
+        config_path = repository.root / "ship_detector" / "config.yaml"
+        text = config_path.read_text()
+        single = """  - name: output0
+    data_type: FP32
+    dims: [300, 6]
+"""
+        pair = """  - name: output_cov
+    data_type: FP32
+    dims: [2, 40, 40]
+  - name: output_bbox
+    data_type: FP32
+    dims: [8, 40, 40]
+"""
+        assert single in text, "the fixture edit must take"
+        config_path.write_text(text.replace(single, pair, 1))
+        reloaded = ModelRepository.load(repository.root)
+        configs = generate(reloaded, tmp_path, bbox_parser="", custom_lib="")
+        assert configs is not None, "the DetectNet pair is the parserless layout"
+
+    def test_a_two_output_segmentation_head_is_still_refused_without_a_parser(
+        self, repository: ModelRepository, tmp_path: Path
+    ) -> None:
+        """#42 round 1's first note: the count alone let a yolo-seg-shaped pair through —
+        this repository's own ship_segmenter ([300, 38] + [32, 160, 160]) is the
+        counterexample. The layout gate refuses it as a primary."""
+        config_path = repository.root / "ship_detector" / "config.yaml"
+        text = config_path.read_text()
+        single = """  - name: output0
+    data_type: FP32
+    dims: [300, 6]
+"""
+        seg_pair = """  - name: output0
+    data_type: FP32
+    dims: [300, 38]
+  - name: output1
+    data_type: FP32
+    dims: [32, 160, 160]
+"""
+        assert single in text, "the fixture edit must take"
+        config_path.write_text(text.replace(single, seg_pair, 1))
+        reloaded = ModelRepository.load(repository.root)
+        with pytest.raises(ConfigurationError, match=r"segmentation head|cannot read"):
+            generate(reloaded, tmp_path, bbox_parser="", custom_lib="")
+
     def test_the_probe_and_the_python_plane_share_one_embedding_conversion(self) -> None:
         """T4-NB2: `tolist()` on the float32 view already yields Python floats and already
         copies; the probe's old `.astype(float)` was a second, redundant float64
