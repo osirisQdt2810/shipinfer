@@ -121,7 +121,14 @@ jobs:
       - name: Check out the kernels only
         # Without this the submodule directory is an empty placeholder and the job below
         # silently passes having built nothing.
-        run: git submodule update --init --depth 1 3rdparty/shipvision
+        #
+        # The rewrite exists because .gitmodules records the SSH remote (the house rule for
+        # humans) and a plain runner has no deploy key — shipvision is public, so anonymous
+        # https is the right transport here. This job had never once passed: it was born in
+        # #28 failing on exactly this, and two red mains surfaced it (27 Aug).
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init --depth 1 3rdparty/shipvision
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
