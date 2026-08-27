@@ -1595,6 +1595,16 @@ namespace {
         static CountingSink sink;
         static std::promise<void> gate;
         static std::shared_future<void> opened = gate.get_future().share();
+        // The lifetime witness (#35 round 1): a weak_ptr taken while the camera is still
+        // tracked. Without it the plain -O2 build cannot tell the fix from its absence —
+        // the freed actor's memory is not reused before the gate opens, so the detached
+        // thread's use-after-free LOOKS like the correct behaviour unless ASan is watching.
+        // Expired after the refusal == the throw dropped the last reference; alive == the
+        // refusal parked it on abandoned_.
+        static std::weak_ptr<CameraActor> parked;
+        // The re-check's grace, timed from where it starts (#35 round 1: timing from before
+        // add_camera would include this test's own poll loop in the hook below).
+        static Clock::time_point recheck_began;
         script.on_open = [](int) { opened.wait(); };
         script.on_read = [](int) { return 1; };
 
@@ -1604,6 +1614,8 @@ namespace {
 
           protected:
             void between_publish_and_start() override {
+                // Still tracked here — the stop below is what forgets it.
+                parked = actor("cam0");
                 // The concurrent stop(): strips the map, signals the not-yet-existing
                 // thread, parks nothing (the actor is not joinable yet), reports 0.
                 stop(0ms);
@@ -1614,23 +1626,28 @@ namespace {
                 // cleanly at its first signal check and the safe sub-case is all that runs.
                 for (int i = 0; i < 600 && script.opens.load() == 0; ++i)
                     std::this_thread::sleep_for(5ms);
+                recheck_began = Clock::now();
             }
         };
 
         bool refused = false;
         {
             StopsInTheWindow manager({}, sink, scripted(script));
-            const auto start = Clock::now();
             try {
                 manager.add_camera(a_camera("cam0"));
             } catch (const ServerStateError&) {
                 refused = true;
             }
             check(refused, "the add is refused, not returned as a camera nobody tracks");
-            check(ms_since(start) < 2000.0,
+            check(ms_since(recheck_began) < 2000.0,
                   "and the refusal used the short re-check grace, not the full shutdown one");
             check(manager.size() == 0, "the fleet holds nothing");
+            check(!parked.expired(),
+                  "the actor outlived the refusal: parked on abandoned_, not dropped by the "
+                  "throw");
         }  // ~IngestManager — must leak the parked actor, not free it under its thread
+        check(!parked.expired(),
+              "and it outlived the manager too — the deliberate leak covers the parked");
         gate.set_value();
         bool resumed = false;
         for (int i = 0; i < 600; ++i) {
