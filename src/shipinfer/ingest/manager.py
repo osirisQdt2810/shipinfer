@@ -18,7 +18,11 @@ from __future__ import annotations
 import threading
 import time
 
-from shipinfer.core.errors import CameraUnavailableError, ConfigurationError
+from shipinfer.core.errors import (
+    CameraUnavailableError,
+    ConfigurationError,
+    ServerStateError,
+)
 from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.settings.ingest import CameraConfig, IngestSettings
 from shipinfer.ingest.camera.actor import CameraActor, SourceFactory
@@ -141,13 +145,29 @@ class IngestManager:
 
     # -- per-camera control ------------------------------------------------------------
 
+    #: The re-check's stop grace, mirroring the C++ plane's ``kRecheckStopGrace``: a
+    #: freshly started actor that got its stop signal before its first wait is gone in
+    #: milliseconds; one that is not is inside a blocked open, and the error path of an API
+    #: call must not stall for the full shutdown grace.
+    _RECHECK_STOP_GRACE_S = 0.25
+
     def add_camera(self, config: CameraConfig) -> CameraActor:
         """Start one camera. Returns its actor.
+
+        Safe against a concurrent :meth:`stop`/:meth:`remove_camera` — the C++ plane's
+        re-check (#35/#39), mirrored (#35 review, P4-NB2-py): the actor is started outside
+        the lock, and a fleet that forgot the camera in that window aimed its stop request
+        at a thread that did not exist yet (``CameraActor.start`` clears the signal). The
+        map is re-checked after the start; a forgotten camera is stopped here and refused,
+        rather than left reading and publishing behind a manager whose ``size()`` says 0
+        and whose every later ``stop()`` misses it.
 
         Raises:
             ConfigurationError: a camera with this id is already running. Silently replacing
                 it would leave two threads pulling one stream and two frame counters
                 producing duplicate tags.
+            ServerStateError: the fleet forgot this camera while it was starting — a
+                concurrent stop or removal landed between the insert and the start.
         """
         with self._lock:
             if config.camera_id in self._actors:
@@ -164,6 +184,15 @@ class IngestManager:
             )
             self._actors[config.camera_id] = actor
         actor.start()
+        with self._lock:
+            forgotten = self._actors.get(config.camera_id) is not actor
+        if forgotten:
+            actor.stop(timeout_s=self._RECHECK_STOP_GRACE_S)
+            raise ServerStateError(
+                f"camera {config.camera_id!r} was removed while it was starting; the fleet "
+                "is stopping or the camera was removed — add it again once the manager is "
+                "running"
+            )
         _LOG.info(
             "camera %s added",
             config.camera_id,
@@ -172,8 +201,13 @@ class IngestManager:
         self._refresh_gauges(self._snapshot())
         return actor
 
-    def remove_camera(self, camera_id: str, *, timeout_s: float = 5.0) -> None:
+    def remove_camera(self, camera_id: str, *, timeout_s: float = 5.0) -> bool:
         """Stop and forget one camera.
+
+        Returns whether the stop was clean: ``False`` means the thread had to be abandoned
+        (#35 review, P4-NB4) — the C++ counterpart parks the actor on that answer; Python
+        has nothing to park (the thread's bound method keeps the actor alive), but the
+        abandonment is the caller's to know, not the log's to bury.
 
         Raises:
             ConfigurationError: no such camera. Naming what is running turns a typo in an
@@ -185,9 +219,10 @@ class IngestManager:
                 raise ConfigurationError(
                     f"camera {camera_id!r} is not running; running: {sorted(self._actors)}"
                 )
-        actor.stop(timeout_s=timeout_s)
+        clean = actor.stop(timeout_s=timeout_s)
         _LOG.info("camera %s removed", camera_id, extra=log_context(camera_id=camera_id))
         self._refresh_gauges(self._snapshot())
+        return clean
 
     def actor(self, camera_id: str) -> CameraActor:
         """The actor for one camera.

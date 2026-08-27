@@ -1632,6 +1632,48 @@ namespace {
               "and the detached thread resumed against alive memory and closed its source");
     }
 
+    void test_a_self_stop_reports_the_fate_too() {
+        // #39 round 4 (P4-NB5): the self-stop branch was the one stopper that answered
+        // from its own work instead of the thread's fate. Sequence: an external stop
+        // detaches the thread (parked in a gated read, fate sealed); the gate opens; the
+        // detached thread's next read calls stop() on its own actor — the self-stop path,
+        // lockless via the atomic — and must answer false, because the header promises
+        // the fate "by ANY stopper", the actor itself included.
+        static FakeScript script;
+        static CountingSink sink;
+        static std::promise<void> gate;
+        static std::shared_future<void> opened = gate.get_future().share();
+        static CameraActor* actor = nullptr;
+        static std::atomic<int> self_stop_answers{-1};
+        script.on_read = [](int index) {
+            if (index == 0) {
+                opened.wait();
+                // The external stop has already detached this thread and sealed the fate
+                // (the gate opens only after it returned false). The self-stop below runs
+                // ON the detached thread — one read is all it gets, because the loop sees
+                // the stop signal right after this returns.
+                self_stop_answers.store(actor->stop(0ms) ? 1 : 0);
+            }
+            return 1;
+        };
+        // Heap-built and deliberately leaked, as in the concurrent-stop test: after the
+        // detach the thread still stands on the actor, and there is no manager here.
+        actor = new CameraActor(a_camera("cam0"), sink, scripted(script));
+        actor->start();
+        for (int i = 0; i < 400 && script.reads.load() == 0; ++i)
+            std::this_thread::sleep_for(5ms);
+        check(!actor->stop(100ms), "the external stop abandons the parked thread");
+        gate.set_value();
+        for (int i = 0; i < 600 && self_stop_answers.load() == -1; ++i)
+            std::this_thread::sleep_for(5ms);
+        check(self_stop_answers.load() == 0,
+              "the detached thread's own stop() answers the fate (false), not its work — "
+              "got " +
+                  std::to_string(self_stop_answers.load()));
+        for (int i = 0; i < 600 && script.closes.load() == 0; ++i)
+            std::this_thread::sleep_for(5ms);
+    }
+
     void test_a_stop_racing_the_recheck_still_counts_the_abandonment() {
         // #39 round 1, the manager-level consequence: the fleet stop() and add_camera's
         // re-check both stop the same actor; whichever loses the lifecycle lock must still
@@ -1858,6 +1900,7 @@ int main() {
     test_a_camera_added_during_stop_never_keeps_running();
     test_the_managers_death_leaks_the_abandoned_rather_than_freeing_them();
     test_two_concurrent_stops_both_report_the_one_abandonment();
+    test_a_self_stop_reports_the_fate_too();
     test_a_stop_racing_the_recheck_still_counts_the_abandonment();
     test_a_refused_add_pays_the_abandonment_debt();
     test_stop_charges_one_deadline_to_the_fleet_not_one_per_camera();

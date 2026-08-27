@@ -129,7 +129,14 @@ namespace shipinfer {
         // zeroes the fleet count that keeps the sink alive). Double-parking on the race
         // path is deliberate and harmless; the never-counted-twice property lives on the
         // fleet count, which increments once per actor.
-        if (thread_id_.load() != std::this_thread::get_id()) {
+        if (thread_id_.load() == std::this_thread::get_id()) {
+            // The self-stop path reports the fate too (#39 round 4, P4-NB5): it cannot
+            // take the lifecycle lock — an external stopper may hold it across a grace
+            // wait for this very thread — so the flag is atomic and read bare. Unreachable
+            // through today's call sites (the sink path sets `stop_` directly), but the
+            // header promises "by ANY stopper", and now that is simply true.
+            abandoned = thread_abandoned_.load();
+        } else {
             std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
             if (thread_.joinable()) {
                 bool finished = false;

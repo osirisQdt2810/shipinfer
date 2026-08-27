@@ -133,13 +133,17 @@ namespace shipinfer {
         // across its whole grace wait, and health reads must not queue behind that.
         std::mutex lifecycle_mutex_;
         // The thread's fate, written at the detach under `lifecycle_mutex_` and read by
-        // every stopper under the same lock: once abandoned, every `stop()` answers false —
+        // every stopper — external stoppers under the same lock, the self-stop path through
+        // the atomic directly, because that path must not take the lock a stopper may be
+        // holding while it waits for this very thread (#39 round 4, P4-NB5: the header's
+        // "by ANY stopper" now includes the actor itself). Once abandoned, every `stop()`
+        // answers false —
         // STICKY, deliberately, where the Python plane's stop() re-reads live is_alive():
         // a detach is irreversible and the lifetime debt it creates is permanent, so "it
         // has since finished" does not un-abandon it. The planes diverge only on a repeat
         // stop() after an abandoned thread later exits (C++ false forever, Python true);
         // a parity harness must not read that as a bug.
-        bool thread_abandoned_ = false;
+        std::atomic<bool> thread_abandoned_{false};
         // The self-stop guard's own copy of the id, atomic because the guard cannot take
         // `lifecycle_mutex_` (a stopper holds it across its grace wait FOR this thread —
         // taking it here would deadlock the shutdown), yet reading `thread_.get_id()` bare
