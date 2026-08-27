@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from shipinfer.core.errors import CameraUnavailableError, ConfigurationError
+from shipinfer.core.errors import CameraUnavailableError, ConfigurationError, ServerStateError
 from shipinfer.core.settings.ingest import CameraConfig, IngestSettings
 from shipinfer.ingest import (
     BoundedSink,
@@ -19,6 +19,7 @@ from shipinfer.ingest import (
     IngestMetrics,
     load_camera_db,
 )
+from shipinfer.ingest.camera.actor import CameraActor
 
 from .conftest import FRAME_COUNT, ScriptedSource, synthetic_image
 
@@ -256,6 +257,87 @@ class TestCleanShutdownDoesNotAbandonThreads:
         )
         assert observed, "the observation window closed before anything was sampled"
         assert lying == [], f"reported STOPPED while the thread was still running: {lying}"
+
+
+class TestAddCameraRechecksTheFleet:
+    """The C++ plane's re-check, mirrored (#35/#39, P4-NB2-py).
+
+    The deadly order: insert under the lock, a concurrent stop() strips the map and signals
+    a thread that does not exist yet, and CameraActor.start then CLEARS that signal — the
+    camera reads and publishes forever while size() reports 0 and no later stop() can reach
+    it. The re-check after start() is what refuses it.
+    """
+
+    def test_a_camera_added_during_stop_is_refused_not_orphaned(
+        self, sink, fast_settings, scripted_factory, make_camera, monkeypatch
+    ):
+        factory, _ = scripted_factory(script=[synthetic_image(0)])
+        settings = fast_settings(cameras=[])
+        manager = IngestManager(sink, settings=settings, source_factory=factory)
+        real_start = CameraActor.start
+
+        def stop_lands_in_the_window(actor_self):
+            # The concurrent stop(), deterministically inside the window: the map is
+            # stripped and the signal aimed at a thread that does not exist yet...
+            manager.stop(timeout_s=0.0)
+            # ...and the real start() then erases that signal — the deadly order.
+            real_start(actor_self)
+
+        monkeypatch.setattr(CameraActor, "start", stop_lands_in_the_window)
+        with pytest.raises(ServerStateError, match="was removed while it was starting"):
+            manager.add_camera(make_camera("cam0"))
+        assert manager.camera_ids == [], "the fleet holds nothing"
+        monkeypatch.undo()
+        manager.stop()
+
+    def test_a_clean_add_still_returns_the_actor(
+        self, sink, fast_settings, scripted_factory, make_camera
+    ):
+        factory, _ = scripted_factory(script=[synthetic_image(0)])
+        manager = IngestManager(
+            sink, settings=fast_settings(cameras=[]), source_factory=factory
+        )
+        try:
+            actor = manager.add_camera(make_camera("cam0"))
+            assert "cam0" in manager and actor.is_running
+        finally:
+            manager.stop()
+
+
+class TestRemoveCameraReportsTheStop:
+    def test_a_parked_camera_reports_the_abandonment(self, sink, fast_settings, make_camera):
+        """#35 review, P4-NB4: the bool is the caller's to know, not the log's to bury."""
+        armed, released = threading.Event(), threading.Event()
+
+        def factory(config, counter):
+            return ParkedSource(
+                config, counter, script=[synthetic_image(0)], armed=armed, released=released
+            )
+
+        settings = fast_settings(cameras=[make_camera("cam0")])
+        manager = IngestManager(sink, settings=settings, source_factory=factory)
+        manager.start()
+        try:
+            assert _wait_for(lambda: manager.summary().streaming == 1)
+            armed.set()
+            time.sleep(0.05)
+            assert manager.remove_camera("cam0", timeout_s=0.2) is False
+        finally:
+            released.set()
+            manager.stop()
+
+    def test_a_clean_removal_reports_true(
+        self, sink, fast_settings, scripted_factory, make_camera
+    ):
+        factory, _ = scripted_factory(script=[synthetic_image(0)])
+        settings = fast_settings(cameras=[make_camera("cam0")])
+        manager = IngestManager(sink, settings=settings, source_factory=factory)
+        manager.start()
+        try:
+            assert _wait_for(lambda: manager.summary().streaming == 1)
+            assert manager.remove_camera("cam0") is True
+        finally:
+            manager.stop()
 
 
 class TestStopChargesOneDeadlineToTheFleet:
