@@ -8,7 +8,7 @@ declares :class:`Cardinality`, a per-object stage moves an
 :class:`~shipinfer.pipeline.graph.objects.ObjectBatch`, and the batch carries the detection
 index of every row so a result can never be attached to the wrong object.
 
-**Why not just use an ensemble.** :class:`shipinfer.server.ensemble.EnsembleModel` already
+**Why not just use an ensemble.** :class:`shipinfer.engine.ensemble.EnsembleModel` already
 executes a validated DAG of models and it is the right tool for a caller that wants the DAG
 as *one addressable model*, with fixed tensor shapes throughout. It cannot express what this
 layer needs: a variable number of crops per frame (its tensors are
@@ -107,8 +107,8 @@ class StageOutcome:
 class Servable(Protocol):
     """The slice of a loaded model a stage needs.
 
-    Both :class:`shipinfer.server.model.Model` and
-    :class:`shipinfer.server.ensemble.EnsembleModel` satisfy it, so a stage can be pointed
+    Both :class:`shipinfer.engine.model.Model` and
+    :class:`shipinfer.engine.ensemble.EnsembleModel` satisfy it, so a stage can be pointed
     at either without knowing which — an ensemble step inside a pipeline stage is a valid
     thing to want, and this is what makes it free.
     """
@@ -243,7 +243,7 @@ class ModelStage(PipelineStage):
     Waiting is not the throughput problem it looks like. Each stage's *model* batches across
     every frame in flight, so while frame A is embedding, frame B is detecting; the
     concurrency comes from the worker pool, not from this call. That is the same reasoning
-    :class:`shipinfer.server.ensemble.EnsembleModel` documents for its sequential steps, and
+    :class:`shipinfer.engine.ensemble.EnsembleModel` documents for its sequential steps, and
     keeping the two consistent means one mental model for the whole server.
 
     Args:

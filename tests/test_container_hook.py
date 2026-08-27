@@ -156,7 +156,7 @@ class TestAllows:
         "command",
         [
             "csrc/build/test_scheduling",
-            "./csrc/build/test_server",
+            "./csrc/build/test_engine",
             "csrc/build/test_containment",
         ],
     )

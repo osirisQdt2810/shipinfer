@@ -105,11 +105,14 @@ class TestImportIsCheap:
 
         The top-level package resolves ``InferenceServer`` lazily precisely so a CLI that only
         lists a repository does not pay for the backend registry and everything behind it.
+        ``shipinfer.engine`` is the module named here rather than ``shipinfer.server``: the
+        pool moved, and asserting the absence of a package that is now a thin shim would pass
+        while the whole engine loaded behind it.
         """
         code = (
             "import sys, shipinfer; "
             "assert 'tensorrt' not in sys.modules; "
-            "assert 'shipinfer.server' not in sys.modules, sorted(m for m in sys.modules if m.startswith('shipinfer'))"
+            "assert 'shipinfer.engine' not in sys.modules, sorted(m for m in sys.modules if m.startswith('shipinfer'))"
         )
         result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
         assert result.returncode == 0, result.stdout + result.stderr
@@ -127,12 +130,72 @@ class TestImportIsCheap:
         code = (
             "import sys, shipinfer.topology as t; "
             "assert t.ELEMENTS, 'nothing registered'; "
-            "heavy = [m for m in ('torch', 'tensorrt', 'cv2', 'gi', 'shipinfer.server', "
+            "heavy = [m for m in ('torch', 'tensorrt', 'cv2', 'gi', 'shipinfer.engine', "
             "'shipinfer.runtime', 'shipinfer.scheduling') if m in sys.modules]; "
             "assert not heavy, heavy"
         )
         result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+class TestTheServerShimIsTheSameObjects:
+    """`shipinfer.server` re-exports `shipinfer.engine`, and re-export means *identity*.
+
+    The pool moved to `engine/` and `server/__init__.py` is a shim until the rest of
+    `server/` has moved too (arch.md §9). The failure worth preventing is not an import
+    error — that is loud and immediate — but a shim that grew a second definition of one of
+    these names. `isinstance(cache, shipinfer.server.ResponseCache)` would then be False for
+    a cache the engine built, from a call site that never mentioned either package, and no
+    test that only checks importability would notice.
+
+    Silent by design, too: `pyproject.toml` turns a `DeprecationWarning` from `shipinfer.*`
+    into an error in the offline tier, so a shim that warned would fail the suite instead of
+    nudging anybody. This class is what stands in for the warning.
+    """
+
+    def test_every_name_the_shim_exports_is_the_engine_s_own_object(self) -> None:
+        import shipinfer.engine as engine
+        import shipinfer.server as server
+
+        assert server.__all__, "the shim exports nothing"
+        mismatched = [
+            name
+            for name in server.__all__
+            if getattr(server, name) is not getattr(engine, name, object())
+        ]
+        assert not mismatched, "shipinfer.server re-exports a *copy* of: " + ", ".join(
+            sorted(mismatched)
+        )
+
+    def test_the_inference_server_class_is_one_class(self) -> None:
+        """Spelled out separately because it is the name every caller outside this tree holds."""
+        import shipinfer
+        import shipinfer.engine
+        import shipinfer.server
+
+        assert shipinfer.server.InferenceServer is shipinfer.engine.InferenceServer
+        assert shipinfer.InferenceServer is shipinfer.engine.InferenceServer
+
+    def test_the_shim_does_not_export_a_submodule_named_engine(self) -> None:
+        """`from shipinfer.server import engine` used to reach the pool module.
+
+        Re-exporting the `shipinfer.engine` *package* under that attribute would make
+        `shipinfer.server.engine.InferenceServer` keep working by accident, and every
+        remaining caller would then be invisible to the grep that has to find them. The
+        spelling is `from shipinfer.engine import pool`.
+        """
+        import importlib
+
+        import shipinfer.engine.pool
+        import shipinfer.server
+
+        # The attribute check alone is vacuous: importing `shipinfer.engine.pool` sets
+        # `pool` on `shipinfer.engine`, never `engine` on `shipinfer.server`, so it would
+        # pass even with a `server/engine.py` re-export on disk. Ask for the module itself.
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("shipinfer.server.engine")
+
+        assert not hasattr(shipinfer.server, "engine")
 
 
 class TestTheLayerCheckerCoversSharedModules:

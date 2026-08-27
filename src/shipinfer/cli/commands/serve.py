@@ -7,8 +7,8 @@ import threading
 from pathlib import Path
 
 from shipinfer.cli.common import build_settings, console
+from shipinfer.engine import InferenceServer, check_health
 from shipinfer.runtime.containment import require_container
-from shipinfer.server import InferenceServer, check_health
 
 __all__ = ["serve"]
 

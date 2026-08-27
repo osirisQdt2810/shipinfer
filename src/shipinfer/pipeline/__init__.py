@@ -1,6 +1,6 @@
 """The ship + person application: cameras in, perception events out.
 
-This is the top layer. :mod:`shipinfer.server` knows how to run *a model* — batching it,
+This is the top layer. :mod:`shipinfer.engine` knows how to run *a model* — batching it,
 placing it on a GPU, keeping its queue fair. This package knows what the models are *for*:
 that a ship needs segmenting and a person does not, that one frame becomes a variable number
 of crops, that a frame's results have to be joined back together before anyone downstream can

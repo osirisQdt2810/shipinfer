@@ -17,7 +17,7 @@
 namespace shipinfer {
 
     // The two clocks, one place. Every deadline and every latency in this plane is steady
-    // (`scheduling/queues/fair.h`, `fifo.h`, `server/request.h`), so the arithmetic reads
+    // (`scheduling/queues/fair.h`, `fifo.h`, `engine/request.h`), so the arithmetic reads
     // `monotonic_ns`; anything a human or another process reads is wall time.
     inline int64_t monotonic_ns() {
         return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -45,7 +45,7 @@ namespace shipinfer {
         // `InferenceRequest::is_expired` compares against `monotonic_ns()`. Stamping wall time
         // here is not a cosmetic error: a wall-clock value is ~1.7e18 against a steady value of
         // ~1e13, so `deadline_ns = captured_ns + budget` would land roughly 54 years out and
-        // nothing would ever expire. `tests/test_server.cpp` pins both halves of that.
+        // nothing would ever expire. `tests/test_engine.cpp` pins both halves of that.
         int64_t captured_ns = 0;
         // WALL nanoseconds — for humans and for cross-process joins. NEVER for deadline
         // arithmetic: NTP can step it, including backwards.
@@ -87,7 +87,7 @@ namespace shipinfer {
     };
     // `core.errors.RequestCancelledError`: the request left the system without an answer.
     // Lives here rather than beside the request it cancels because the camera actor catches it
-    // — a sink that has shut down says so with this — and `ingest/` may not include `server/`.
+    // — a sink that has shut down says so with this — and `ingest/` may not include `engine/`.
     struct RequestCancelledError : std::runtime_error {
         using std::runtime_error::runtime_error;
     };

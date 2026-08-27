@@ -17,9 +17,9 @@
 #include "shipinfer/core/buffers.h"
 #include "shipinfer/core/platform.h"
 #include "shipinfer/core/types.h"
+#include "shipinfer/engine/model.h"
 #include "shipinfer/pipeline/graph/stage.h"
 #include "shipinfer/pipeline/graph/state.h"
-#include "shipinfer/server/model.h"
 
 namespace shipinfer {
 

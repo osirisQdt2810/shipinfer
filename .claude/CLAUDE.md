@@ -124,12 +124,21 @@ src/shipinfer/
 │   ├── onnx.py            # portable fallback
 │   └── torch_backend.py   # TorchScript, for prototyping and numeric parity
 │
-├── server/                # instances, models, ensembles, the engine, health, HTTP
+├── topology/              # PURE. the element chain (ADR-017): Element ABC, caps, registry
+│   ├── base.py            #   per kind, YAML chain loader — validated at load time
+│   └── elements/          #   one impl per file; mock today, real impls in phase C/E
+│
+├── engine/                # the model pool (arch.md §6) — moved out of server/ in A2 PR-1
+│   ├── pool.py            # InferenceServer: repository, devices, memory pool, loaded models
 │   ├── instance.py        # 1 backend copy + 1 queue + 1 worker thread, pinned to 1 GPU
 │   ├── model.py           # instances + dispatcher + batcher + cache
-│   ├── ensemble.py        # the DAG, validated at load time
+│   ├── ensemble.py        # the KServe-visible model DAG, validated at load time
 │   ├── cache/             # response cache (off by default)
-│   └── api/               # KServe v2 over FastAPI
+│   └── spill/             # the ADR-015 ring tier (kept as the control channel, ADR-016)
+│
+├── server/                # DISSOLVING (A2): api/ -> api/, launcher -> launch/, topology
+│   ├── api/               #   classes -> runners/; __init__ is an import shim onto engine/
+│   └── topology/          #   process placement (the OLD meaning; deleted in A2 PR-6)
 │
 └── pipeline/, ingest/     # the ship+person application on top of the server
 

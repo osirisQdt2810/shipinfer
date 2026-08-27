@@ -72,7 +72,7 @@ def __getattr__(name: str) -> object:
     so it is resolved on first attribute access instead.
     """
     if name == "InferenceServer":
-        from shipinfer.server import InferenceServer
+        from shipinfer.engine import InferenceServer
 
         return InferenceServer
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

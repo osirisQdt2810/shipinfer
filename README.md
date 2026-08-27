@@ -82,7 +82,8 @@ src/shipinfer/
   scheduling/  queues / batching / policies        <- the part this project exists to own
   runtime/     devices, streams, memory, graphs, image ops   <- the accelerator seam
   backends/    tensorrt / onnx / torchscript / mock
-  server/      instances, models, ensembles, cache, health, KServe v2
+  engine/      instances, models, ensembles, cache, health   <- the model pool (arch.md §6)
+  server/      the KServe v2 surface, the shard launcher, the topologies
 3rdparty/shipvision/         algorithms and fused CUDA/HIP kernels — its own repository, as a submodule
 model_repository/  the real DAG, on real TensorRT engines (built by scripts/build_engines.py)
 benchmarks/        the head-to-head against the counting-simulation architecture

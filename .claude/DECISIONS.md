@@ -229,7 +229,7 @@ preconditions and the capture-failure policy above are unchanged.
 after frame. Re-embedding a parked ship sixty times a minute competes for the same GPU as
 the moving one. Triton has a response cache; vLLM's prefix cache is the same idea.
 
-**Decision.** Implemented (`server/cache/`, keyed on a BLAKE2b hash of every input byte),
+**Decision.** Implemented (`engine/cache/`, keyed on a BLAKE2b hash of every input byte),
 **opt-in per model** via `parameters.response_cache`, and **off by default**.
 
 **Consequences.** It is only sound for a deterministic, stateless model. Enabling it on a
