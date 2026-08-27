@@ -122,7 +122,7 @@ rings dominate). **This
 is the first design decision the coder must not silently re-make**: single writer per ring,
 pairwise rings, small slot counts.
 
-### `server/remote_instance.py` (new)
+### `engine/spill/remote_instance.py` (new)
 ```python
 class RemoteInstance:  # satisfies scheduling.policies.base.Placeable
     """A peer shard's instance of one model, seen through its ring header."""
@@ -148,7 +148,7 @@ still the camera id on the *owner's* side: the owner's `ModelInstance` receives 
 item through the same `FairPriorityQueue` as local work, so per-camera fairness holds across
 processes (the ledger's (c)).
 
-### `server/remote_instance.py`: `RingIngress` (the owner side)
+### `engine/spill/remote_instance.py`: `RingIngress` (the owner side)
 One thread per (submitter, model), started by the mesh under `service`: `take()` from its
 inbound ring, decode the slot as an `InferenceRequest` of host tensors without a copy, hand it to
 `Model.infer_local` — the model's *own* instances, so a request that crossed once is never
@@ -157,7 +157,7 @@ result ring and `release` the slot. The ingress touches host memory only and bin
 (ADR-002); the instance thread that executes the batch is the one bound at start-up, and it does
 the H2D. No change to `execute_batch`: a remote item is a local item.
 
-### `server/model.py` (small change)
+### `engine/model.py` (small change)
 `Model.__init__` accepts `extra_instances: Sequence[Placeable] = ()` and passes
 `instances=[*self._instances, *extra_instances]` to the `Dispatcher`. `Model` never knows what a
 proxy is — the dispatcher and the policy see `Placeable`, which is the whole point of that
@@ -172,7 +172,7 @@ class ServiceTopology(Topology):
     def environment(self, settings) -> Mapping[str, str]: ...       # + KIND, RING_DIR, SHARD_INDEX
     def describe(self) -> str: "fleet plus a cross-process tier for <shared models>"
 ```
-The child side: `server/engine.py` (or wherever models are built) asks
+The child side: `engine/pool.py` (or wherever models are built) asks
 `build_topology(settings.topology.kind).attach(model, settings, devices)` — a new optional
 `Topology.attach(...) -> Sequence[Placeable]` hook returning the proxies for that model, `()`
 for `fleet`. That keeps the contract small: **one** new optional method, with a default.
@@ -222,7 +222,7 @@ queue's wait exceeds that, which is what `spill_threshold` encodes in queue dept
 
 ## 5. Tests by tier
 
-- **offline** (`tests/runtime/test_shared_ring.py`, `tests/server/test_remote_instance.py`,
+- **offline** (`tests/runtime/test_shared_ring.py`, `tests/engine/test_remote_instance.py`,
   `tests/server/test_service_topology.py`): `TestTheLayoutIsArithmetic` (offsets, page
   alignment, total bytes); `TestClaimPublishTakeRelease` over a real `shared_memory` block in one
   process with a thread as the peer (no torch: `pin=False`); `TestAFullRingRefusesWithNumbers`;
@@ -251,8 +251,8 @@ queue's wait exceeds that, which is what `spill_threshold` encodes in queue dept
 1. **`feat(runtime): the pinned shared ring`** — `runtime/memory/shared_ring.py`,
    `core/errors/topology.py` (+2 errors), `tests/runtime/test_shared_ring.py` (+gpu class).
    ~6 files.
-2. **`feat(server): RemoteInstance and the result reader`** — `server/remote_instance.py`,
-   `server/instance.py` (`RingIngress`), `server/model.py` (`extra_instances`), tests. ~8 files.
+2. **`feat(server): RemoteInstance and the result reader`** — `engine/spill/remote_instance.py`,
+   `engine/instance.py` (`RingIngress`), `engine/model.py` (`extra_instances`), tests. ~8 files.
 3. **`feat(topology): service`** — `server/topology/service.py`, `Topology.attach`,
    `core/settings/topology.py` (`ServiceSettings`), the launcher's environment, CLI wiring,
    `tests/server/test_service_topology.py`, the multigpu test, docs + feature log + ADR-015
