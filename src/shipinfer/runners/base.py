@@ -200,11 +200,12 @@ class Runner(abc.ABC):
 
         Returns:
             A future that completes when the item has been walked to the end of the chain.
-            Its result is the item as the last element saw it; its *exception* is how a
-            caller learns the item was dropped — a deadline that passed, a shutdown, an
-            element that failed. A caller that does not care may discard it, but there is
-            always one: a frame that vanishes with no typed outcome delivered is the failure
-            mode ADR-005 exists to prevent.
+            Its result is the item as the last *non-None* element saw it — a sink consumes
+            its item and returns ``None``, which is not the walk producing nothing. Its
+            *exception* is how a caller learns the item was dropped — a deadline that passed,
+            a shutdown, an element that failed. A caller that does not care may discard it,
+            but there is always one: a frame that vanishes with no typed outcome delivered is
+            the failure mode ADR-005 exists to prevent.
 
         Raises:
             ServerStateError: before :meth:`start`. A refusal, not an implicit start.

@@ -35,14 +35,17 @@ from typing import Any, ClassVar
 import pytest
 
 from shipinfer.core.errors import (
+    ConfigurationError,
     InferenceError,
     QueueFullError,
     RequestCancelledError,
     ServerStateError,
 )
-from shipinfer.core.request import RequestContext, ResponseFuture
+from shipinfer.core.request import InferenceRequest, RequestContext, ResponseFuture
 from shipinfer.core.settings import ServerSettings
 from shipinfer.runners.inprocess import InprocessRunner
+from shipinfer.scheduling.queues import FairPriorityQueue
+from shipinfer.scheduling.work import WorkItem
 from shipinfer.topology import (
     Caps,
     ChainItem,
@@ -72,14 +75,32 @@ elements:
   output:       {impl: mock}
 """
 
+#: A **straight line** with one conditional element in the middle, which is the shape the
+#: branch conditions are actually deployed in and the one where skip-and-continue is the only
+#: thing keeping the sink fed: ``segment`` runs on ships, and a person still has to reach the
+#: output through the gap it leaves. ``MOCK_CHAIN`` cannot show this — every one of its
+#: conditional elements has an unconditional sibling on the other branch, so the item reaches
+#: the tracker either way and a runner that dropped a skipped item would still look correct.
+LINEAR_CHAIN = """
+name: linear
+elements:
+  decode:  {impl: mock}
+  detect:  {impl: mock, model: ship_detector, params: {class: __CLASS__}}
+  segment: {impl: mock, model: ship_segmenter, when: class == ship}
+  output:  {impl: mock}
+"""
+
 #: The slots in the order the loader resolves them, which is the order elements are opened in
-#: and the reverse of the order they are closed in.
+#: and the reverse of the order they are closed in. ``embed_person`` before ``embed_ship``
+#: because Kahn's algorithm keeps declaration order *among the elements that are ready*, and
+#: ``embed_person`` becomes ready at ``detect`` while ``embed_ship`` waits for ``segment`` —
+#: the resolved order, which is what ``Topology.describe()`` prints, not the file's order.
 ORDER = (
     "decode",
     "detect",
     "segment",
-    "embed_ship",
     "embed_person",
+    "embed_ship",
     "recognize",
     "track",
     "mtmc",
@@ -138,6 +159,26 @@ class UnopenableRecognize(MockDetect):
         raise ServerStateError("this element cannot open")
 
 
+class PausedQueue(FairPriorityQueue):
+    """The configured fair queue, handing out nothing until the test says ``ready``.
+
+    Needed for one property and worth the six lines: the walk re-checks expiry, and only an
+    item that was *fresh when its batch was drained* and stale by the time the worker reached
+    it can reach that check. That needs two items in **one** batch — and with
+    ``max_delay_us`` at zero the queue hands over whatever is present the instant a worker
+    asks, so "both items were in the same batch" would otherwise be a race against the
+    worker's poll loop rather than a fact.
+    """
+
+    def __init__(self, name: str, capacity: int, **options: Any) -> None:
+        super().__init__(name, capacity, **options)
+        self.ready = threading.Event()
+
+    def get_batch(self, window: Any, *, poll_s: float = 0.05) -> Any:
+        self.ready.wait(10.0)
+        return super().get_batch(window, poll_s=poll_s)
+
+
 # -- helpers ------------------------------------------------------------------------------
 
 
@@ -151,6 +192,12 @@ def load(
         .replace("__RECOGNIZE__", recognize)
         .replace("__PARAMS__", params)
     )
+    return Topology.from_spec(ChainSpec.from_yaml(text))
+
+
+def load_linear(*, klass: str) -> Topology:
+    """The straight-line chain, with the class its detector stamps on every item."""
+    text = textwrap.dedent(LINEAR_CHAIN).replace("__CLASS__", klass)
     return Topology.from_spec(ChainSpec.from_yaml(text))
 
 
@@ -295,6 +342,42 @@ class TestTheChainRuns:
             if absent is not None:
                 assert absent not in emitted.meta
 
+    def test_a_skipped_element_hands_its_own_item_to_the_next_one(self, running) -> None:
+        """Skip-and-continue on a straight line, where a gap would lose the frame outright.
+
+        ``decode -> detect -> segment{when: class == ship} -> output`` with a **person**: the
+        segmenter must not run, and the person must still be emitted. This is the assertion
+        that fails if the walk stops storing a skipped element's inbound item under that
+        element's name — the successor then has no contributor at all, does not run, and every
+        person in the deployment disappears between the detector and the sink while the runner
+        reports a clean walk.
+        """
+        chain = load_linear(klass="person")
+        segment = chain.node("segment").element
+        runner = running(chain, settings(workers=1))
+
+        future = runner.submit(item("cam-1", 1))
+
+        assert future.exception(timeout=10.0) is None
+        assert emitted_tags(chain) == {("cam-1", 1)}
+        assert segment.processes == 0, "the segmenter does not run on a person"
+        emitted = sink(chain).emitted[0]
+        assert emitted.meta["class"] == "person"
+        assert emitted.meta["boxes"], "the detector's work survives the gap"
+        assert "masks" not in emitted.meta
+
+    def test_the_same_chain_runs_the_conditional_element_for_its_own_class(
+        self, running
+    ) -> None:
+        """The other half, so the test above cannot pass by the segmenter never running."""
+        chain = load_linear(klass="ship")
+        segment = chain.node("segment").element
+        runner = running(chain, settings(workers=1))
+
+        assert runner.submit(item("cam-1", 1)).exception(timeout=10.0) is None
+        assert segment.processes == 1
+        assert sink(chain).emitted[0].meta["masks"]
+
 
 # -- lifecycle ----------------------------------------------------------------------------
 
@@ -427,6 +510,55 @@ class TestTheLifecycle:
         finally:
             runner.stop(timeout_s=5.0)
 
+    def test_the_chain_is_closed_in_the_reverse_of_the_order_it_opened(self) -> None:
+        """A sink that fails to flush must not leave the decoder upstream of it open.
+
+        Reverse order is the whole reason ``_do_stop`` iterates ``reversed(nodes)``, and
+        without this test the loop could iterate forwards and every other assertion in the
+        file would still pass — the counters only say *that* each element closed. Recording
+        the order on the instances rather than in the mock class keeps it a property of this
+        test: a shared list in ``topology/elements/mock.py`` would be module state that two
+        tests running in one process could interleave.
+        """
+        chain = load()
+        closed: list[str] = []
+        for node in chain.nodes:
+            element = node.element
+
+            def record(_original=element._do_close, _name=node.name) -> None:
+                _original()
+                closed.append(_name)
+
+            element._do_close = record  # type: ignore[method-assign]
+
+        runner = InprocessRunner(chain, settings(workers=1)).start()
+        runner.stop(timeout_s=5.0)
+
+        assert [node.name for node in chain.nodes] == list(ORDER), "the resolved order"
+        assert closed == list(reversed(ORDER))
+
+    def test_a_runner_with_no_workers_is_refused_at_construction(self) -> None:
+        """It accepts items and walks none of them, which looks exactly like a hung chain."""
+        with pytest.raises(ConfigurationError, match="workers must be >= 1"):
+            InprocessRunner(load(), workers=0)
+
+    def test_an_injected_queue_that_is_already_closed_is_refused_at_start(self) -> None:
+        """A closed queue fails every submission: the shard looks alive and serves nothing.
+
+        Only reachable for an *injected* queue: one this runner built is rebuilt on a restart.
+        Replacing the caller's object instead would silently discard the capacity and overflow
+        policy they chose, which is the more expensive mistake.
+        """
+        queue = FairPriorityQueue("spent", 4)
+        queue.close()
+        runner = InprocessRunner(load(), settings(workers=1), queue=queue)
+
+        with pytest.raises(ServerStateError, match="closed queue"):
+            runner.start()
+
+        assert not runner.is_running
+        assert all(not chain_node.element.is_open for chain_node in runner.topology)
+
 
 # -- refusals and failures ----------------------------------------------------------------
 
@@ -452,6 +584,9 @@ class TestBackpressureAndFailure:
             runner.submit(item("cam-1", 3))
 
         assert caught.value.capacity == 1
+        # The number worth paging on is *which* camera flooded, not the shard total (ADR-005).
+        assert runner.metrics.items_dropped.value(camera="cam-1") == 1
+        assert runner.stats()["items"]["dropped"] == 1
         gate.release.set()
         _, not_done = wait([first, second], timeout=15.0)
         assert not not_done
@@ -482,6 +617,7 @@ class TestBackpressureAndFailure:
             "walked": 3,
             "failed": 3,
             "expired": 0,
+            "dropped": 0,
         }
 
     def test_an_item_past_its_deadline_never_reaches_the_chain(self, running) -> None:
@@ -522,6 +658,111 @@ class TestBackpressureAndFailure:
         for future in queued:
             assert isinstance(future.exception(timeout=5.0), RequestCancelledError)
 
+    def test_the_walk_re_checks_the_deadline_it_may_have_passed_while_waiting(
+        self, running
+    ) -> None:
+        """The queue drops what expired on the way *out*; this catches what expired after.
+
+        Two items are drained in one wakeup batch, both fresh at that instant. The worker
+        parks in the gate with the first one, and by the time it reaches the second the
+        deadline has passed — so the second must be failed without a model ever seeing it.
+        Spending a GPU on a frame that is already too late to act on is pure waste, and this
+        is the only check that can catch this one: the queue is done with the item.
+        """
+        chain = load(detect="runner-gate")
+        gate = chain.node("detect").element
+        assert isinstance(gate, GateDetect)
+        queue = PausedQueue("held", 8)
+        runner = running(
+            chain,
+            ServerSettings(
+                pipeline={"workers": 1, "frames_per_wakeup": 2},
+                ingest={"frame_deadline_ms": 100},
+            ),
+            queue=queue,
+        )
+        held = runner.submit(item("cam-1", 1, captured_ns=time.monotonic_ns()))
+        late = runner.submit(item("cam-1", 2, captured_ns=time.monotonic_ns()))
+
+        queue.ready.set()
+        assert gate.entered.wait(10.0), "the worker never reached the gate"
+        # Sleeping past the deadline is what the gate makes deterministic: the drain has
+        # already happened (both items were fresh then) and the second item's expiry check
+        # has not.
+        time.sleep(0.25)
+        gate.release.set()
+
+        assert held.exception(timeout=10.0) is None
+        error = late.exception(timeout=10.0)
+        assert isinstance(error, RequestCancelledError)
+        assert "before the walk" in str(error), "the walk's check, not the queue's"
+        assert runner.stats()["items"]["expired"] == 1
+        assert runner.metrics.items_expired.value(camera="cam-1") == 1
+        assert emitted_tags(chain) == {("cam-1", 1)}
+
+    def test_stopping_fails_the_item_an_abandoned_worker_was_still_walking(self) -> None:
+        """The one item per worker that is neither in the queue nor at the sink.
+
+        ``stop`` closing the queue resolves what is still *queued*. The item a worker is
+        already inside the chain with is not in the queue any more, and a worker still stuck
+        at the join deadline will never resolve it — so without this the producer holding that
+        future waits forever, which is exactly the frame that vanishes with no typed outcome
+        that ADR-005 and ``base.py``'s ``submit`` contract exist to prevent.
+
+        The gate makes "stuck" deterministic: the worker is parked inside ``detect`` and the
+        deadline is 0.2 s, so ``stop`` must return having failed the item rather than having
+        waited for it.
+        """
+        chain = load(detect="runner-gate")
+        gate = chain.node("detect").element
+        assert isinstance(gate, GateDetect)
+        runner = InprocessRunner(chain, settings(workers=1, queue_capacity=8)).start()
+        held = runner.submit(item("cam-1", 1))
+        assert gate.entered.wait(10.0), "the worker never reached the gate"
+        workers = list(runner._threads)
+
+        started = time.monotonic()
+        runner.stop(timeout_s=0.2)
+        elapsed = time.monotonic() - started
+
+        assert held.done(), "resolved by stop() itself, not by the worker that is stuck in it"
+        assert elapsed < 5.0, "stop waited for the gate instead of failing the item"
+        error = held.exception(timeout=1.0)
+        assert isinstance(error, RequestCancelledError)
+        assert "the runner stopped" in str(error)
+        assert runner.stats()["items"]["failed"] == 1
+        assert runner.metrics.items_failed.value(camera="cam-1") == 1
+        # Release the abandoned worker and let it exit, so the test leaves no thread behind.
+        # It resumes into a closed chain and logs one refusal per element it reaches; that is
+        # the documented consequence of abandoning it, and its future is already resolved.
+        gate.release.set()
+        for worker in workers:
+            worker.join(10.0)
+            assert not worker.is_alive()
+
+    def test_a_work_item_that_did_not_come_through_submit_is_refused_by_name(self) -> None:
+        """A typed refusal on a worker thread, not an ``AttributeError`` from inside one.
+
+        The queue's element type is ``WorkItem``, so anything put into an injected queue
+        directly — a test, a caller reusing the lane — reaches ``_walk`` carrying no chain
+        item. It has a future, so it gets a typed failure like every other item.
+        """
+        chain = load()
+        queue = FairPriorityQueue("foreign", 4)
+        runner = InprocessRunner(chain, settings(workers=1), queue=queue).start()
+        try:
+            request = InferenceRequest(model_name="chain", inputs={}, context=RequestContext())
+            work = WorkItem(request, ResponseFuture(request))
+            queue.put(work)
+
+            error = work.future.exception(timeout=10.0)
+        finally:
+            runner.stop(timeout_s=5.0)
+
+        assert isinstance(error, InferenceError)
+        assert "carries no chain item" in str(error)
+        assert "submit()" in str(error), "the message says how items are meant to arrive"
+
 
 # -- observability ------------------------------------------------------------------------
 
@@ -548,6 +789,26 @@ class TestHealthAndStats:
         assert health["workers"] == {"wanted": 2, "alive": 2}
         assert health["queue"]["depth"] == 0, "nothing submitted yet"
 
+    def test_every_counter_is_attributed_to_the_camera_that_earned_it(self, running) -> None:
+        """The fleet total is never the number that matters — *which* camera is (ADR-005).
+
+        The previous generation could report "1000 entries in the buffer" and never "camera 7
+        lost 40% of its frames", and four integers behind a lock reproduce exactly that blind
+        spot. Two frames from each of three cameras, and each camera's own count is readable.
+        """
+        chain = load()
+        runner = running(chain, settings(workers=2))
+
+        submit_all(runner, chain)
+
+        metrics = runner.metrics
+        for camera in ("cam-1", "cam-2", "cam-3"):
+            assert metrics.items_accepted.value(camera=camera) == 2
+            assert metrics.items_walked.value(camera=camera) == 2
+            assert metrics.items_failed.value(camera=camera) == 0
+        assert metrics.items_walked.value(camera="cam-9") == 0, "a camera that sent nothing"
+        assert runner.stats()["items"]["walked"] == 6, "and the roll-up still agrees"
+
     def test_stats_counts_what_was_accepted_and_what_was_walked(self, running) -> None:
         chain = load()
         runner = running(chain, settings(workers=2))
@@ -555,6 +816,12 @@ class TestHealthAndStats:
         submit_all(runner, chain)
 
         stats = runner.stats()
-        assert stats["items"] == {"accepted": 6, "walked": 6, "failed": 0, "expired": 0}
+        assert stats["items"] == {
+            "accepted": 6,
+            "walked": 6,
+            "failed": 0,
+            "expired": 0,
+            "dropped": 0,
+        }
         assert stats["queue"]["accepted"] == 6
         assert stats["workers"] == 2

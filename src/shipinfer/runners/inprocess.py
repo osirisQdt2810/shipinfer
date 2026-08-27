@@ -37,6 +37,15 @@ serving every camera on the shard, so the loop survives one bad frame and the it
 carries the typed failure — the same shape ``pipeline/runner.py`` uses, and for the same
 reason.
 
+**A batch is as wide as the worker pool, and that is the known ceiling.** The walk is
+synchronous: a worker submits to a model and sleeps on the future, so the most frames that
+can be sitting in one model's queue at once is the number of workers. With the default
+``pipeline.workers = 4`` a shard therefore offers each model **batches of at most 4**, whatever
+``max_batch_size`` the model declares. That is arch.md §5⑤'s asynchronous walk, deferred: it
+is a throughput ceiling and not a correctness bug, the workaround is more workers, and the
+number phase B's bench has to produce is the achieved batch size per model per shard against
+this bound.
+
 **On the duplication with** :mod:`shipinfer.pipeline.runner`. That module is the precedent
 this one follows: the queue-and-workers shape, the expiry re-check, the per-frame error
 handling and the shared shutdown deadline are all its ideas. The two coexist deliberately
@@ -51,12 +60,14 @@ import contextlib
 import threading
 import time
 from collections.abc import Mapping
+from concurrent.futures import InvalidStateError
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from shipinfer.core.errors import (
     ConfigurationError,
     InferenceError,
+    QueueFullError,
     RequestCancelledError,
     ServerStateError,
 )
@@ -65,10 +76,11 @@ from shipinfer.core.request import InferenceRequest, ResponseFuture
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Device
 from shipinfer.runners.base import Runner
+from shipinfer.runners.metrics import RunnerMetrics
 from shipinfer.runners.registry import RUNNERS
 from shipinfer.scheduling.queues import QUEUES, BatchWindow, RequestQueue
 from shipinfer.scheduling.work import WorkItem
-from shipinfer.topology import Caps, ChainItem, ElementNode, ModelResolver, Topology
+from shipinfer.topology import ChainItem, ElementNode, ModelResolver, Topology
 
 __all__ = ["InprocessRunner"]
 
@@ -92,29 +104,6 @@ class _ChainWork(WorkItem):
     item: ChainItem | None = None
 
 
-@dataclass(slots=True)
-class _Counts:
-    """The runner's counters, incremented under one lock.
-
-    A plain ``+= 1`` from thirty-two worker threads is a read-modify-write that can lose an
-    update, and these numbers are what a test asserts and an operator reads. One lock for all
-    of them costs a fraction of what the queue's own lock already costs per item.
-    """
-
-    accepted: int = 0
-    walked: int = 0
-    failed: int = 0
-    expired: int = 0
-
-    def as_dict(self) -> dict[str, int]:
-        return {
-            "accepted": self.accepted,
-            "walked": self.walked,
-            "failed": self.failed,
-            "expired": self.expired,
-        }
-
-
 @RUNNERS.register("inprocess", "single")
 class InprocessRunner(Runner):
     """Runs the whole chain in this process, on a pool of worker threads.
@@ -132,10 +121,23 @@ class InprocessRunner(Runner):
             :class:`~shipinfer.scheduling.queues.fair.FairPriorityQueue`. An injected queue
             is never replaced — see :meth:`_do_start` for what that means for a restart.
         workers: override the worker count. ``None`` takes ``pipeline.workers``.
+        metrics: share a :class:`~shipinfer.runners.metrics.RunnerMetrics` with the rest of
+            the process. ``None`` mints a private registry, which is what a test wants; a
+            shard passes the one its exporter scrapes.
 
     Raises:
         ConfigurationError: ``workers`` below one. A runner with no workers accepts items and
             walks none of them, which looks exactly like a hung chain.
+
+    **What this runner does not honour yet: ``per:`` and ``scope:``.** One element instance is
+    shared by every worker, so with ``workers > 1`` two frames of the same camera can be inside
+    a ``per: camera`` element at the same time, and that element's per-camera ordering can
+    invert — frame 8 finishing before frame 7 because a different worker got to it first. A
+    ``scope: global`` element is likewise just an ordinary element here. Nothing stateful ships
+    today (the mocks hold no state and a ``pool`` element holds only a model handle), so this
+    is a promise not yet kept rather than a live defect; it is resolved in phase C, either with
+    a per-camera element instance or with a camera-keyed lock around a ``per: camera`` element.
+    Until then, a chain with a stateful element runs it correctly at ``workers=1``.
     """
 
     name: ClassVar[str] = "inprocess"
@@ -150,6 +152,7 @@ class InprocessRunner(Runner):
         models: ModelResolver | None = None,
         queue: RequestQueue | None = None,
         workers: int | None = None,
+        metrics: RunnerMetrics | None = None,
     ) -> None:
         super().__init__(topology, settings, shard_id=shard_id, device=device, models=models)
         pipeline = self._settings.pipeline
@@ -170,14 +173,18 @@ class InprocessRunner(Runner):
         # context with no capture clock (a hand-built item in a test) gets no deadline rather
         # than one that expired before the process started.
         self._deadline_ns = self._settings.ingest.frame_deadline_ms * 1_000_000
-        #: Which predecessor donates payload and caps at a fan-in, per node. Pure topology
-        #: data, so it is resolved here — once per runner, not once per frame — and is
-        #: available to `_inbound` before `start()`.
-        self._donors = _donors(topology)
         self._threads: list[threading.Thread] = []
         self._stopping = threading.Event()
-        self._counts = _Counts()
-        self._counts_lock = threading.Lock()
+        self._metrics = RunnerMetrics() if metrics is None else metrics
+        #: What each worker is walking right now, one slot per worker, indexed by the
+        #: worker's own number. Sized once, written only by the worker that owns the slot and
+        #: read only by `_do_stop` after the join deadline, so the hot path takes no lock —
+        #: the same single-writer discipline `pipeline/runner.py` gets from `_awaiting` being
+        #: keyed by the tag. It exists so that a worker abandoned at the deadline does not
+        #: take its item's future with it: an unresolved future is exactly the frame that
+        #: vanishes with no typed outcome that ADR-005 exists to prevent, and `base.py`'s
+        #: `submit` promises there is always one.
+        self._inflight: list[_ChainWork | None] = [None] * self._wanted_workers
 
     def _build_queue(self) -> RequestQueue:
         """The configured admission queue, named after the chain it fronts."""
@@ -202,6 +209,11 @@ class InprocessRunner(Runner):
         """How many worker threads this runner wants."""
         return self._wanted_workers
 
+    @property
+    def metrics(self) -> RunnerMetrics:
+        """The counters, per camera. ``stats()`` is the rolled-up view of these."""
+        return self._metrics
+
     # -- lifecycle ---------------------------------------------------------------------
 
     def _do_start(self) -> None:
@@ -212,11 +224,13 @@ class InprocessRunner(Runner):
         :meth:`~shipinfer.topology.base.Element.process` on a real item, which is a refusal
         the runner caused and the operator would have to diagnose.
 
-        Opening walks forwards and unwinds backwards, so an element that fails at position
-        five leaves one through four *closed* rather than holding a decoder thread, a socket
-        or a CUDA context on a shared box. :meth:`Runner.start` also calls
-        :meth:`_do_stop` on the way out; both paths are safe because ``Element.close`` is
-        idempotent.
+        An element that fails at position five must leave one through four *closed* rather
+        than holding a decoder thread, a socket or a CUDA context on a shared box — and that
+        unwind is :meth:`Runner.start`'s, which calls :meth:`_do_stop` on the way out for
+        exactly this. There is deliberately no second unwind loop here: two paths that close
+        the same elements in the same order are one path that can be fixed in one place and
+        one that cannot, and ``Element.close`` is idempotent and a no-op on an element that
+        never opened, so the shared path covers the partial case exactly.
 
         Raises:
             ServerStateError: the runner was given a queue that is already closed. Only
@@ -236,26 +250,24 @@ class InprocessRunner(Runner):
             self._queue = self._build_queue()
 
         context = self.element_context()
-        opened: list[ElementNode] = []
-        for node in self._topology.nodes:
+        for index, node in enumerate(self._topology.nodes):
             try:
                 node.element.open(context)
             except BaseException:
                 _LOG.error(
-                    "element %r failed to open; closing the %d already open",
+                    "element %r failed to open; the %d already open are closed by the "
+                    "unwind in Runner.start",
                     node.name,
-                    len(opened),
+                    index,
                 )
-                for previous in reversed(opened):
-                    with contextlib.suppress(Exception):
-                        previous.element.close()
                 raise
-            opened.append(node)
 
         self._stopping.clear()
+        self._inflight = [None] * self._wanted_workers
         for index in range(self._wanted_workers):
             thread = threading.Thread(
                 target=self._work,
+                args=(index,),
                 name=f"chain-worker-{self._shard_id}-{index}",
                 daemon=True,
             )
@@ -288,6 +300,16 @@ class InprocessRunner(Runner):
         a failed :meth:`Runner.start`. Nothing can have been submitted then — ``submit``
         refuses before ``start`` returns — so closing it would buy nothing and would poison
         an injected queue for the restart that follows the fix.
+
+        **An abandoned worker's item is failed, not forgotten.** Closing the queue resolves
+        what is still *queued*; the one item each worker is inside the chain with is not in
+        the queue any more, and a worker still stuck at the deadline will never resolve it.
+        Leaving it is the one case where this runner would break the promise ``submit``
+        makes — a future that never completes, on a producer that is waiting for it — so
+        every in-flight slot still occupied is failed here with the same typed cancellation
+        the queue uses. The race with a worker that finishes a microsecond later is benign
+        because :meth:`_fail` and :meth:`_finish` both refuse a future that is already
+        resolved, whichever of the two got there first.
         """
         self._stopping.set()
         lost: int = 0
@@ -306,6 +328,19 @@ class InprocessRunner(Runner):
                     abandoned,
                     timeout_s,
                 )
+            stranded = self._fail_in_flight()
+            if stranded:
+                # Counted against `failed`, and an abandoned worker that later finishes its
+                # walk counts the same item as `walked` too: a restart re-arms the slots, so
+                # the two numbers can disagree by the number of items abandoned. That is the
+                # honest shape — the item did fail for its producer *and* did eventually run
+                # — and the alternative, suppressing the walk's own count from a thread the
+                # runner has stopped tracking, would need the hot path to check a flag.
+                _LOG.warning(
+                    "%d in-flight item(s) failed with the runner; their workers were "
+                    "abandoned mid-walk",
+                    stranded,
+                )
 
         for node in reversed(self._topology.nodes):
             try:
@@ -313,13 +348,26 @@ class InprocessRunner(Runner):
             except Exception:
                 _LOG.exception("element %r failed to close cleanly", node.name)
 
+        totals = self._metrics.totals()
         _LOG.info(
             "runner %s stopped: %d item(s) failed in the queue, %d walked, %d failed",
             self.name,
             lost,
-            self._counts.walked,
-            self._counts.failed,
+            totals["walked"],
+            totals["failed"],
         )
+
+    def _fail_in_flight(self) -> int:
+        """Fail whatever the abandoned workers were still walking. Returns how many."""
+        stranded = 0
+        for slot, work in enumerate(self._inflight):
+            if work is None:
+                continue
+            self._inflight[slot] = None
+            stranded += 1
+            self._metrics.items_failed.inc(camera=work.request.context.camera_id)
+            self._fail(work, RequestCancelledError("the runner stopped"))
+        return stranded
 
     # -- submission --------------------------------------------------------------------
 
@@ -334,7 +382,8 @@ class InprocessRunner(Runner):
 
         Raises:
             QueueFullError: this camera's lane is full and the policy rejects. Propagated
-                untouched (ADR-005).
+                untouched, and counted against **this** camera on the way past (ADR-005): the
+                number worth paging on is which camera flooded, not the shard total.
             RequestCancelledError: the queue is closed — the runner is shutting down.
         """
         context = item.context
@@ -349,20 +398,28 @@ class InprocessRunner(Runner):
             ),
         )
         work = _ChainWork(request, ResponseFuture(request), item=item)
-        self._queue.put(work)
-        with self._counts_lock:
-            self._counts.accepted += 1
+        try:
+            self._queue.put(work)
+        except QueueFullError:
+            self._metrics.items_dropped.inc(camera=context.camera_id)
+            raise
+        self._metrics.items_accepted.inc(camera=context.camera_id)
         return work.future
 
     # -- the worker loop ---------------------------------------------------------------
 
-    def _work(self) -> None:
+    def _work(self, slot: int) -> None:
         """Drain the admission queue and walk one item at a time.
 
         ``get_batch`` returning an empty list means the queue closed, which is how a worker
         learns to exit without a separate sentinel. The batch here is a *wakeup* batch
         (``pipeline.frames_per_wakeup``), not an inference batch: batching for a GPU is the
         engine's job, and a worker walks its items one after another.
+
+        Args:
+            slot: this worker's index into :attr:`_inflight`. Owned exclusively by this
+                thread, which is what lets the publish be a plain store: :meth:`_do_stop`
+                reads the slots only after its join deadline has passed.
         """
         while not self._stopping.is_set():
             items = self._queue.get_batch(self._window, poll_s=0.05)
@@ -371,16 +428,23 @@ class InprocessRunner(Runner):
                     return
                 continue
             for work in items:
+                # Published *before* the walk and retracted in a `finally`, so that between
+                # those two lines this item has an owner a shutdown can find. Off the queue
+                # and not yet in a slot is the window where a frame's future could go
+                # unresolved, and it is two stores wide.
+                self._inflight[slot] = work
                 try:
                     self._walk(work)
-                except Exception as exc:  # pragma: no cover - the walk handles its own
+                except Exception as exc:
                     # Reaching here means something outside an element failed. A worker that
                     # dies stops serving every camera on this shard, so the loop survives it
                     # — and the item's future is resolved, because a frame that vanishes with
                     # no typed outcome is the failure ADR-005 exists to prevent.
-                    self._count_failure()
+                    self._count_failure(work)
                     _LOG.exception("runner failed on %s", work.request.context.key)
                     self._fail(work, InferenceError(f"the runner failed: {exc}"))
+                finally:
+                    self._inflight[slot] = None
 
     def _walk(self, work: WorkItem) -> None:
         """Walk one item through every element that admits it, in topological order.
@@ -417,8 +481,7 @@ class InprocessRunner(Runner):
             # The queue drops expired items on the way out too (`drop_expired`); this catches
             # one that expired while a worker was busy with the frame before it. Spending a
             # GPU on a frame that is already too late to act on is pure waste.
-            with self._counts_lock:
-                self._counts.expired += 1
+            self._metrics.items_expired.inc(camera=work.request.context.camera_id)
             self._fail(
                 work, RequestCancelledError("the item's deadline passed before the walk")
             )
@@ -439,7 +502,7 @@ class InprocessRunner(Runner):
             try:
                 result = node.element.process(incoming)
             except Exception as exc:
-                self._count_failure()
+                self._count_failure(work)
                 _LOG.exception(
                     "element %s failed on %s",
                     node.name,
@@ -455,10 +518,8 @@ class InprocessRunner(Runner):
             if result is not None:
                 last = result
 
-        with self._counts_lock:
-            self._counts.walked += 1
-        if work.future.set_running_or_notify_cancel():
-            work.future.set_result(last)
+        self._metrics.items_walked.inc(camera=work.request.context.camera_id)
+        self._finish(work, last)
 
     def _inbound(
         self, node: ElementNode, produced: Mapping[str, ChainItem | None]
@@ -477,10 +538,12 @@ class InprocessRunner(Runner):
           ``vectors``. First-writer-wins rather than last, so the resolution of a genuine
           collision is a property of the chain file's declaration order and does not change
           between runs.
-        * **payload and caps come from one donor**, the first predecessor whose edge carries
-          the cap this element prefers (:func:`_donors`). A payload is a frame handle or a
-          tensor, and half of one plus half of another is not a thing; picking by the
-          negotiated cap is what makes the choice the loader's rather than the runner's.
+        * **payload and caps come from one donor**, the predecessor the *loader* nominated
+          (:attr:`~shipinfer.topology.chain.ElementNode.donor`, resolved from the negotiated
+          edge caps). A payload is a frame handle or a tensor, and half of one plus half of
+          another is not a thing; the choice belongs where ``admits`` belongs, so that
+          ``inprocess`` and ``fleet`` cannot come to disagree about which branch donated the
+          frame.
         * **a skipped predecessor contributes its own inbound item**, because that is what
           skip-and-continue means — the walk stored it under that predecessor's name.
         """
@@ -491,8 +554,7 @@ class InprocessRunner(Runner):
         ]
         if not contributors:
             return None
-        donor_name = self._donors.get(node.name)
-        donor = produced.get(donor_name) if donor_name is not None else None
+        donor = produced.get(node.donor) if node.donor is not None else None
         if donor is None:
             donor = contributors[0]
         if len(contributors) == 1:
@@ -509,13 +571,35 @@ class InprocessRunner(Runner):
 
     # -- failure and observability -----------------------------------------------------
 
-    def _count_failure(self) -> None:
-        with self._counts_lock:
-            self._counts.failed += 1
+    def _count_failure(self, work: WorkItem) -> None:
+        self._metrics.items_failed.inc(camera=work.request.context.camera_id)
 
     def _fail(self, work: WorkItem, error: BaseException) -> None:
-        """Resolve this item's future with a typed failure, unless the caller gave up."""
-        work.fail(error)
+        """Resolve this item's future with a typed failure, unless it is already resolved.
+
+        The ``done()`` guard is what makes shutdown and a slow worker safe to race: a future
+        :meth:`_do_stop` has already cancelled is *finished*, and
+        ``Future.set_running_or_notify_cancel`` raises ``RuntimeError`` on a finished future
+        rather than answering ``False``. Without the guard, an abandoned worker that reached
+        the end of its walk after the runner stopped would die inside the failure handler,
+        which is a stack trace about the thing that was supposed to be handled cleanly.
+        """
+        if work.future.done():
+            return
+        with contextlib.suppress(RuntimeError, InvalidStateError):
+            work.fail(error)
+
+    def _finish(self, work: WorkItem, item: ChainItem) -> None:
+        """Resolve this item's future with the walked item, unless it is already resolved.
+
+        Same guard as :meth:`_fail`, and the same race: the loser of a stop-versus-finish is
+        whoever arrives second, and the caller sees exactly one outcome either way.
+        """
+        if work.future.done():
+            return
+        with contextlib.suppress(RuntimeError, InvalidStateError):
+            if work.future.set_running_or_notify_cancel():
+                work.future.set_result(item)
 
     def _do_health(self) -> dict[str, Any]:
         return {
@@ -528,40 +612,7 @@ class InprocessRunner(Runner):
 
     def _do_stats(self) -> dict[str, Any]:
         return {
-            "items": self._counts.as_dict(),
+            "items": self._metrics.totals(),
             "queue": self._queue.stats().as_dict(),
             "workers": self._wanted_workers,
         }
-
-
-def _donors(topology: Topology) -> dict[str, str]:
-    """``node -> the predecessor whose payload and caps a fan-in adopts``.
-
-    Resolved once per runner from topology data alone, so the per-frame merge is a dict
-    lookup rather than a search over edges.
-
-    The donor is the first predecessor, **in declaration order**, whose edge carries the cap
-    this element most prefers — ``Element.accepts`` is a preference list and
-    :func:`~shipinfer.topology.caps.negotiate` already treats it as one, so the runner reads
-    the same order the loader did. A node whose predecessors all carry the same cap therefore
-    adopts the first one declared, which is what a reader of the chain file would expect.
-    """
-    caps_by_edge: dict[tuple[str, str], Caps] = {
-        (edge.producer, edge.consumer): edge.caps for edge in topology.edges
-    }
-    donors: dict[str, str] = {}
-    for node in topology.nodes:
-        if not node.inputs:
-            continue
-        donors[node.name] = _donor_for(node, caps_by_edge)
-    return donors
-
-
-def _donor_for(node: ElementNode, caps_by_edge: Mapping[tuple[str, str], Caps]) -> str:
-    """One node's donor. Falls back to the first predecessor when no edge cap is known."""
-    for declared in node.element.input_caps:
-        for name in node.inputs:
-            caps = caps_by_edge.get((name, node.name))
-            if caps is not None and caps.matches(declared):
-                return name
-    return node.inputs[0]
