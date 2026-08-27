@@ -88,7 +88,7 @@ silently: an `infer-dims` that no longer matches the engine fails at start-up, a
 | `batch-size` (pgie) | `len(cameras)` for this shard | nvstreammux's batch |
 | `batch-size` (sgie) | `max_batch_size` | refused at 0 — one inference per object |
 | `output-blob-names` | declared `outputs`, in order | |
-| `network-mode` | `topology.deepstream.network_mode` | fp32/int8/fp16 → 0/1/2 |
+| `network-mode` | `runner.deepstream.network_mode` | fp32/int8/fp16 → 0/1/2 |
 | `num-detected-classes` | `max(pipeline.class_labels) + 1` | the label file's length |
 | `labelfile-path` | generated from `pipeline.class_labels` | positional; gaps filled with `unknown` |
 | `pre-cluster-threshold` | `pipeline.score_threshold` | |
@@ -101,7 +101,7 @@ silently: an `infer-dims` that no longer matches the engine fails at start-up, a
 | `gie-unique-id` | 1 for the pgie, 2..N for the sgies | `operate-on-gie-id=1` on every sgie |
 
 **Nothing is written into the model repository.** The generated files live under
-`$TMPDIR/shipinfer-ds-<run>/shard<N>/` (or `topology.deepstream.config_dir`), because
+`$TMPDIR/shipinfer-ds-<run>/shard<N>/` (or `runner.deepstream.config_dir`), because
 `ModelRepository` refuses a stray Triton config in a model directory and a `.txt` beside a
 `config.yaml` is noise in every future diff. A test asserts the repository tree is byte
 identical after generation.
@@ -179,7 +179,7 @@ An operator reading the settings tree should know which knobs stop meaning anyth
 | `pipeline.workers`, `queue_capacity`, `frame_budget_ms` | inert. No pipeline worker exists. |
 | `pipeline.reassembly.*` | inert. A frame's stages complete inside one buffer's trip through the graph; there is nothing to reassemble and nothing to time out. |
 | `ingest.*` reconnect/backoff/health | inert. `nvurisrcbin` owns reconnection; only `reconnect_max_ms` is used, as its `rtsp-reconnect-interval`, and `latency_ms` as its jitter buffer. |
-| `pipeline.tracking.*` | inert. `nvtracker` is the tracker; `topology.deepstream.tracker_*` configures it. |
+| `pipeline.tracking.*` | inert. `nvtracker` is the tracker; `runner.deepstream.tracker_*` configures it. |
 | `pipeline.class_labels`, `score_threshold`, `max_detections`, `result_sink*`, `source_id` | **live.** They are what the generated configs and the emitted events are made of. |
 
 **Backpressure is different, and this is not ADR-005 parity.** With `live-source=1` the muxer
