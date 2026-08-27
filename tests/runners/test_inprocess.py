@@ -40,6 +40,7 @@ from shipinfer.core.errors import (
     QueueFullError,
     RequestCancelledError,
     RequestTimeoutError,
+    RingClosedError,
     ServerStateError,
     ValidationError,
 )
@@ -187,6 +188,10 @@ class TypedFailureDetect(MockDetect):
     #: from, instead of the two drifting apart.
     ERRORS: ClassVar[dict[str, Any]] = {
         "queue_full": lambda: QueueFullError("model:ship_detector", 64, 64),
+        # A `QueueFullError` *subclass* that is not backpressure: phase D makes it one so the
+        # dispatcher's spill loop retries another candidate, and the runner must still not
+        # charge a dead peer to `items_dropped`.
+        "ring_closed": lambda: RingClosedError("shard-1", "ring:ship_detector"),
         "timeout": lambda: RequestTimeoutError("model 'ship_detector' did not answer"),
         "validation": lambda: ValidationError("the payload is not a tensor"),
         "foreign": lambda: ValueError("something nobody typed"),
@@ -749,6 +754,7 @@ class TestBackpressureAndFailure:
         ("raises", "expected", "counter"),
         [
             ("queue_full", QueueFullError, "items_dropped"),
+            ("ring_closed", RingClosedError, "items_failed"),
             ("timeout", RequestTimeoutError, "items_timed_out"),
             ("validation", ValidationError, "items_failed"),
         ],
@@ -765,6 +771,13 @@ class TestBackpressureAndFailure:
         and ``topology/elements/pool.py`` promised in as many words that a ``QueueFullError``
         is "propagated untouched". It was not. Each one is also charged to its own counter, so
         an overloaded shard does not read as a shard full of bugs.
+
+        ``ring_closed`` is the row that says inheritance is not the rule. ``RingClosedError``
+        is a :class:`QueueFullError` *subclass* — deliberately, so phase D's dispatcher spill
+        loop treats a closed ring as a refusal and tries the next candidate — but the operator
+        response is the opposite of backpressure's: a peer is gone, and no amount of shedding
+        load brings it back. Counting it as ``dropped`` would put a dead process on the
+        "shed load or add capacity" graph, which is the confusion this whole split removes.
         """
         chain = load(detect="runner-typed", params=f"{{class: ship, raises: {raises}}}")
         runner = running(chain, settings(workers=1))
@@ -1054,6 +1067,85 @@ class TestBackpressureAndFailure:
             worker.join(10.0)
             assert not worker.is_alive()
 
+    def test_a_worker_abandoned_before_a_restart_cannot_consume_the_new_cycle_s_queue(
+        self,
+    ) -> None:
+        """A stale worker that rejoins loses futures that ``stop()`` had already promised.
+
+        A worker abandoned at a stop deadline is not gone: it is parked inside
+        ``element.process()``. Everything it read off ``self`` when it woke therefore belonged
+        to whichever cycle was current *then* — and cycle two rebuilt all of it. Clearing
+        ``self._stopping`` made its loop condition true again, and ``self._queue`` had been
+        rebuilt, so it called ``get_batch`` on the **new** cycle's queue, took real work off
+        it, and published that work into cycle **one's** slot list, which no shutdown drains.
+        The result is the exact failure ADR-005 and ``base.py``'s ``submit`` contract exist to
+        prevent: ``stop()`` returned, ``is_running`` was ``False``, ``in_flight`` read 0, and a
+        producer was still holding a future nobody would ever resolve.
+
+        Two items, because the loss is a *race* between the stale worker and the live one over
+        the queue — with one item either thread might win it, and with two the stale thread
+        cannot avoid taking one if it is still a consumer at all. Both futures must be typed
+        by the second shutdown, whichever worker held which.
+
+        The sink is the second half of the same property. Cycle one's stop closed every
+        element; a stale worker that goes back to the queue walks cycle two's items through
+        elements a stopped runner owns, and emits them. Its own item — the one it was parked
+        on — does reach the sink, and that is documented and unavoidable; nothing *after* that
+        may.
+
+        Determinism comes from the latches, not from sleeping: ``rearm`` hands back cycle
+        one's release event so exactly one of the two workers is freed, and the freed worker is
+        then **joined** — with the fix it finds an event set forever and a queue closed
+        forever and exits, so by the time the two new items are submitted the only consumer
+        left is cycle two's. That join is asserted last rather than first, so a regression
+        reports the lost future it caused instead of the thread that caused it.
+        """
+        chain = load(detect="runner-gate")
+        gate = chain.node("detect").element
+        assert isinstance(gate, GateDetect)
+        runner = InprocessRunner(chain, settings(workers=1, queue_capacity=8))
+
+        runner.start()
+        first = runner.submit(item("cam-1", 1))
+        stale_worker = runner._threads[0]
+        assert gate.entered.wait(10.0), "the first cycle's worker never reached the gate"
+        runner.stop(timeout_s=0.2)
+        assert isinstance(first.exception(timeout=1.0), RequestCancelledError)
+
+        stale_release = gate.rearm()
+        runner.start()
+        fresh_worker = runner._threads[0]
+
+        # Let cycle one's worker out. It finishes the item it was parked on -- the future is
+        # already resolved, so nothing is delivered twice -- and then takes its next loop turn,
+        # which is the turn this test is about.
+        stale_release.set()
+        deadline = time.monotonic() + 10.0
+        while ("cam-1", 1) not in emitted_tags(chain) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ("cam-1", 1) in emitted_tags(chain), "the abandoned worker never finished"
+        stale_worker.join(10.0)
+        stale_exited = not stale_worker.is_alive()
+        emitted_by_cycle_one = len(sink(chain).emitted)
+
+        second = runner.submit(item("cam-2", 1))
+        third = runner.submit(item("cam-3", 1))
+        assert gate.entered.wait(10.0), "the second cycle's worker never reached the gate"
+        runner.stop(timeout_s=0.2)
+
+        for future, tag in ((second, "cam-2"), (third, "cam-3")):
+            assert future.done(), f"{tag}'s future was lost to cycle one's worker"
+            assert isinstance(future.exception(timeout=1.0), RequestCancelledError)
+        assert (
+            len(sink(chain).emitted) == emitted_by_cycle_one
+        ), "a stopped cycle's worker emitted through elements the runner had closed"
+        assert stale_exited, "an abandoned worker must exit on its next turn, not rejoin"
+        # Release cycle two's worker and let both threads exit, so the test leaves none behind.
+        gate.release.set()
+        for worker in (stale_worker, fresh_worker):
+            worker.join(10.0)
+            assert not worker.is_alive()
+
     def test_the_walk_re_checks_the_deadline_in_front_of_every_model_element(
         self, running
     ) -> None:
@@ -1286,6 +1378,44 @@ class TestHealthAndStats:
         # The camera is the number that matters, not the shard total (ADR-005).
         assert runner.metrics.items_queue_closed.value(camera="cam-2") == 2
         assert runner.metrics.items_queue_closed.value(camera="cam-1") == 0
+        gate.release.set()
+        for worker in workers:
+            worker.join(10.0)
+            assert not worker.is_alive()
+
+    def test_the_ledger_counts_the_items_a_closed_injected_queue_failed(self) -> None:
+        """The counter belongs to whoever performs the close, and here that is the runner.
+
+        ``_do_start`` refuses to *replace* an injected queue, because doing so would throw away
+        the capacity and overflow policy the caller chose — so it is fair to ask whether the
+        runner should count what closing that queue fails. It should, and does: a queue the
+        runner closes is a queue whose typed futures the runner can enumerate, injected or not,
+        and the ``accepted``-outran-the-outcomes gap is the same gap either way.
+
+        The half that stays with the caller is the close the *caller* performs. There is no
+        callback and no drained list on that path, and the queue's own ``stats()`` does not
+        separate "failed by close" from the rest, so the runner would have to guess -- and a
+        guessed counter reads exactly like a real one. ``_close_queue`` documents that split.
+        """
+        chain = load(detect="runner-gate")
+        gate = chain.node("detect").element
+        assert isinstance(gate, GateDetect)
+        injected = FairPriorityQueue("injected", 8)
+        runner = InprocessRunner(chain, settings(workers=1), queue=injected).start()
+        held = runner.submit(item("cam-1", 1))
+        assert gate.entered.wait(10.0), "the worker never reached the gate"
+        queued = runner.submit(item("cam-2", 1))
+        workers = list(runner._threads)
+
+        runner.stop(timeout_s=0.2)
+
+        assert isinstance(queued.exception(timeout=1.0), RequestCancelledError)
+        assert isinstance(held.exception(timeout=1.0), RequestCancelledError)
+        assert runner.stats()["items"]["queue_closed"] == 1
+        assert runner.metrics.items_queue_closed.value(camera="cam-2") == 1
+        assert (
+            runner.metrics.items_queue_closed.value(camera="cam-1") == 0
+        ), "the held item was failed from its in-flight slot, not by the close"
         gate.release.set()
         for worker in workers:
             worker.join(10.0)

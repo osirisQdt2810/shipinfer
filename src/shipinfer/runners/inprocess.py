@@ -70,8 +70,10 @@ from shipinfer.core.errors import (
     QueueFullError,
     RequestCancelledError,
     RequestTimeoutError,
+    RingClosedError,
     ServerStateError,
     ShipInferError,
+    WireRefusedError,
 )
 from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.request import InferenceRequest, ResponseFuture
@@ -182,6 +184,12 @@ class InprocessRunner(Runner):
         # than one that expired before the process started.
         self._deadline_ns = self._settings.ingest.frame_deadline_ms * 1_000_000
         self._threads: list[threading.Thread] = []
+        #: This start cycle's stop signal, and *only* where `_do_stop` finds it — a worker is
+        #: handed the event as an argument and never reads this attribute. Rebuilt by
+        #: `_do_start`, never cleared: an event a worker holds must stay set forever, because
+        #: the worker holding it may be one abandoned at a shutdown deadline, and clearing it
+        #: for the next cycle is what turned that stale thread back into a live consumer of
+        #: the *new* cycle's queue. See `_work` for what that cost.
         self._stopping = threading.Event()
         self._metrics = RunnerMetrics() if metrics is None else metrics
         #: What each worker still owes an answer for, one slot per worker, indexed by the
@@ -288,16 +296,19 @@ class InprocessRunner(Runner):
                 )
                 raise
 
-        self._stopping.clear()
-        # Built here and passed *by value* to every worker of this cycle, so an abandoned
-        # worker from the previous one cannot reach it. See the `_inflight` note in
-        # `__init__` for the bug that shape fixes.
+        # Every piece of per-cycle state is built here and passed *by value* to this
+        # cycle's workers, so an abandoned worker from the previous one cannot reach any of
+        # it. Never `self._stopping.clear()` and never a shared queue attribute: those two
+        # reads are what let a stale worker rejoin. See `_work` for the bug that shape fixes.
+        stopping = threading.Event()
+        self._stopping = stopping
+        queue = self._queue
         inflight: list[tuple[WorkItem, ...]] = [()] * self._wanted_workers
         self._inflight = inflight
         for index in range(self._wanted_workers):
             thread = threading.Thread(
                 target=self._work,
-                args=(index, inflight),
+                args=(index, stopping, queue, inflight),
                 name=f"chain-worker-{self._shard_id}-{index}",
                 daemon=True,
             )
@@ -342,21 +353,23 @@ class InprocessRunner(Runner):
         because :meth:`_fail` and :meth:`_finish` both refuse a future that is already
         resolved, whichever of the two got there first.
 
-        The slots drained are **this cycle's**: :attr:`_inflight` holds the list handed to the
-        workers by the matching :meth:`_do_start`, a worker abandoned here goes on writing into
-        that same list, and the next start publishes a different one.
+        The signal and the queue are **this cycle's** too, and that is load-bearing rather
+        than tidy. Setting an event that no later start will clear, and closing a queue that no
+        later start will hand out again, is what makes a worker abandoned here *terminal*: it
+        wakes from whatever wedged it, sees a set event and a closed queue, and exits. While
+        those two came off ``self``, a restart handed the stale thread a live event and the new
+        cycle's queue, and it went back to work — taking cycle two's items and publishing them
+        into cycle one's slot list, which no shutdown drains. Every one of those futures was
+        lost after ``stop()`` had returned.
+
+        The slots drained are this cycle's for the same reason: :attr:`_inflight` holds the
+        list handed to the workers by the matching :meth:`_do_start`, a worker abandoned here
+        goes on writing into that same list, and the next start publishes a different one.
         """
         self._stopping.set()
         lost: int = 0
         if self._threads:
-            drained = self._queue.close()
-            lost = len(drained)
-            for item in drained:
-                # Counted, not just logged: `close` has already failed these futures with a
-                # typed error, and until this loop existed that outcome had no counter at all
-                # — `stats()["items"]["accepted"]` outran the sum of every outcome by exactly
-                # the number of items a shutdown caught in the lane.
-                self._metrics.items_queue_closed.inc(camera=item.request.context.camera_id)
+            lost = self._close_queue()
             deadline = time.monotonic() + timeout_s
             abandoned = 0
             for thread in self._threads:
@@ -398,6 +411,30 @@ class InprocessRunner(Runner):
             totals["walked"],
             totals["failed"],
         )
+
+    def _close_queue(self) -> int:
+        """Close the admission queue and charge every item it failed. Returns how many.
+
+        The close and the count are one call because they were two, and the counter is only
+        true if nothing can close the queue here without it: ``close`` resolves what is still
+        queued with a typed error, and an outcome with no counter is precisely the gap
+        ``stats()`` exists to close — ``accepted`` outran the sum of every outcome by exactly
+        the number of items a shutdown caught in the lane.
+
+        **An injected queue that its owner closes is its owner's to count.** The runner counts
+        the items *it* failed; a caller who passes a queue in keeps the right to close it (and
+        :meth:`_do_start` refuses to replace it for exactly that reason), and that close
+        happens where this runner cannot see it — no callback, no drained list, and the queue's
+        own ``stats()`` does not separate "failed by close" from the rest. Attributing it from
+        a stats delta would be a guess, and a guessed counter is worse than an absent one, so
+        the honest split is: the runner owns the closes it performs, the queue's owner owns
+        the closes they perform. It costs nothing in the shape this runner ships with, where
+        the queue it built is the queue it closes.
+        """
+        drained = self._queue.close()
+        for item in drained:
+            self._metrics.items_queue_closed.inc(camera=item.request.context.camera_id)
+        return len(drained)
 
     def _fail_in_flight(self, inflight: list[tuple[WorkItem, ...]]) -> int:
         """Fail everything the abandoned workers still owed an answer for. Returns how many.
@@ -461,7 +498,13 @@ class InprocessRunner(Runner):
 
     # -- the worker loop ---------------------------------------------------------------
 
-    def _work(self, slot: int, inflight: list[tuple[WorkItem, ...]]) -> None:
+    def _work(
+        self,
+        slot: int,
+        stopping: threading.Event,
+        queue: RequestQueue,
+        inflight: list[tuple[WorkItem, ...]],
+    ) -> None:
         """Drain the admission queue and walk one item at a time.
 
         ``get_batch`` returning an empty list means the queue closed, which is how a worker
@@ -470,19 +513,38 @@ class InprocessRunner(Runner):
         engine's job, and a worker walks its items one after another.
 
         Args:
+        **Every piece of per-cycle state is an argument, and none of it is read off**
+        ``self``. A worker abandoned at a shutdown deadline outlives its cycle — it is parked
+        inside ``element.process()``, not gone — so whatever it reads from the runner it reads
+        from whichever cycle is current when it finally wakes. All three attributes had to
+        move for that to be safe, and each one cost a different bug:
+
+        * ``self._stopping`` was *cleared* by the next :meth:`_do_start`, so the stale
+          thread's loop condition came back true;
+        * ``self._queue`` was rebuilt by that same start, so the stale thread called
+          ``get_batch`` on the **new** cycle's queue and took real work off it;
+        * ``self._inflight`` was rebound, so what it published landed in the new cycle's slot
+          list — under the *live* worker's index, at the same slot number.
+
+        Together those made an abandoned worker a second, untracked consumer: it drained cycle
+        two's items into cycle one's slot list, which no shutdown drains, and their futures
+        were lost after ``stop()`` had returned. It also walked those items through elements
+        cycle one had closed. Bound to its own cycle's event and queue, it instead finds an
+        event set forever and a queue closed forever, and exits on its next turn.
+
+        Args:
             slot: this worker's index into ``inflight``. Owned exclusively by this thread,
                 which is what lets the publish be a plain store: :meth:`_do_stop` reads the
                 slots only after its join deadline has passed.
-            inflight: the slot list of the start cycle this thread belongs to, taken as an
-                argument rather than read off ``self``. A worker abandoned at a shutdown
-                deadline outlives its cycle, and reading the attribute made its last store
-                land in the *next* cycle's list — clearing a live worker's slot, so the
-                following shutdown found nothing to fail and those futures never resolved.
+            stopping: this cycle's stop signal. Set by the matching :meth:`_do_stop` and never
+                cleared again.
+            queue: this cycle's admission queue, closed by that same :meth:`_do_stop`.
+            inflight: this cycle's slot list, drained by that same :meth:`_do_stop`.
         """
-        while not self._stopping.is_set():
-            items = self._queue.get_batch(self._window, poll_s=0.05)
+        while not stopping.is_set():
+            items = queue.get_batch(self._window, poll_s=0.05)
             if not items:
-                if self._queue.is_closed:
+                if queue.is_closed:
                     return
                 continue
             # The whole batch is published *before* the first walk and narrowed to the
@@ -774,13 +836,24 @@ class InprocessRunner(Runner):
         ``failed`` — which is what this did — hid the first two behind the third, so a shard
         under sustained overload looked like a shard full of bugs.
 
+        The backpressure family is narrowed by hand, because inheritance does not carry the
+        operator's response. ``core/errors/topology.py`` makes :class:`RingClosedError` and
+        :class:`WireRefusedError` :class:`QueueFullError` subclasses so that phase D's
+        dispatcher spill loop treats them as a refusal and tries the next candidate — the
+        right call there, and the wrong label here: a ring whose peer died and a wire that
+        cannot carry the payload are both "file a ticket", not "shed load or add capacity".
+        They count as ``failed``. :class:`RingFullError` stays with backpressure, which is
+        exactly what it is.
+
         Args:
             work: the item being failed; its camera is the label.
             error: the failure. ``None``, or anything outside the backpressure and timeout
                 families, counts as ``failed``.
         """
         camera = work.request.context.camera_id
-        if isinstance(error, QueueFullError):
+        if isinstance(error, (RingClosedError, WireRefusedError)):
+            self._metrics.items_failed.inc(camera=camera)
+        elif isinstance(error, QueueFullError):
             self._metrics.items_dropped.inc(camera=camera)
         elif isinstance(error, RequestTimeoutError):
             self._metrics.items_timed_out.inc(camera=camera)
