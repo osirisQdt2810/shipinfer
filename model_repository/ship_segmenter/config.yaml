@@ -34,7 +34,11 @@ instance_groups:
   # GPU the single instance's queue capped (3-25 rejected requests per shard) and bounded
   # the whole fleet at 96 img/s, while count: 2 sustained 143.8 img/s with every stage
   # flat. The design load is 62.5 img/s per GPU, so one instance would cap the deployment
-  # this repository is sized for.
+  # this repository is sized for. MEASURED AT ONE SHARD PER GPU: `expand()` divides this
+  # count among processes sharing a device, so a fleet running two shards on one GPU gets
+  # one instance each and lands back on exactly the ceiling this number removes — and does
+  # so silently, because raising the count also removed the loud "the process ranked 1
+  # would get none" refusal that count: 1 tripped. Scale the count with the shard count.
   - kind: KIND_AUTO
     count: 2
     streams: 2
