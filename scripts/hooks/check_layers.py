@@ -86,6 +86,12 @@ FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
     "pipeline": {"fastapi", "uvicorn"},
     "ingest": {"fastapi", "uvicorn"},
     "cli": {"fastapi", "uvicorn"},
+    # A runner is the third of arch.md's three concepts (§1) and it is *scheduling* code: it
+    # owns admission, placement and the walk, and it reaches the accelerator only through the
+    # engine it is handed. Naming torch here would be wrong — the `fleet` runner will bind its
+    # shard's device through `runtime` — but a web framework and a Kafka client never belong
+    # behind a runner: an output *element* serialises, and it lives in `topology/elements/`.
+    "runners": {"fastapi", "uvicorn", "confluent_kafka"},
 }
 
 #: Top-level modules that are not layers, and may therefore be imported by any layer
@@ -129,6 +135,13 @@ ALLOWED_INTERNAL: dict[str, set[str]] = {
     # reads the model repository to plan its shards — a config question, answered without a
     # device. `pipeline` names `engine` rather than `server` for the same reason the row above
     # exists: it wants the pool, and the two stopped being the same package.
+    # `runners` executes a topology (arch.md §1): it needs `topology` for the chain it walks,
+    # `scheduling` for the bounded fair lane in front of it (ADR-005 — there is no second
+    # fairness mechanism), `engine` for the pool a `pool` element submits to, and `runtime` for
+    # the device binding the `fleet` runner's shard does. It must NOT be imported *by*
+    # `topology`: an element receives its runner's decisions through `ElementContext` and
+    # never reaches for them, which is what keeps `topology` importable with no driver.
+    "runners": {"core", "topology", "scheduling", "engine", "runtime"},
     "server": {"core", "repository", "scheduling", "engine"},
     "pipeline": {"core", "repository", "runtime", "backends", "scheduling", "engine"},
     # `ingest` does NOT depend on `scheduling`: it publishes into the `FrameSink` protocol
