@@ -88,8 +88,8 @@ class RunnerMetrics:
             # `accepted`, while this one did both. Merged, `accepted` could not be reconciled
             # against the outcomes without subtracting the queue's own `rejected` first, and a
             # ledger that needs a correction term is a ledger nobody checks.
-            "Chain items an *accepted* item lost mid-walk to a `pool` element's model queue "
-            "refusing the request, per camera. The camera lost a frame to backpressure and "
+            "Accepted chain items lost mid-walk to a `pool` element's model queue refusing "
+            "the request, per camera. The camera lost a frame to backpressure and "
             "the fix is capacity, exactly as for `items_dropped`; this is the half of that "
             "population the runner had already admitted.",
         )
