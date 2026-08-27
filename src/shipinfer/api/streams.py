@@ -57,6 +57,13 @@ _LOG = get_logger("api")
 #: the day one of them needs tuning it is not the other.
 _ADD_TIMEOUT_S = 120.0
 
+#: Ceiling on ``POST /streams/drain?timeout_s=``. Five minutes is far past any honest drain --
+#: a decoder that has not stopped in that long is not going to -- and the number exists to bound
+#: the *thread*, not the drain: the handler is synchronous, so the caller's deadline is how long
+#: it holds one of anyio's forty shared workers. Without a ceiling one request parks a worker
+#: for as long as it likes and forty of them stop the server answering anything at all.
+_MAX_DRAIN_S = 300.0
+
 #: What a camera's decoder gets to stop in on ``DELETE``. The same default
 #: :meth:`shipinfer.runners.base.Runner.remove_camera` documents; a thread still running at it
 #: is abandoned, and the answer says so in the body rather than in the status.
@@ -136,6 +143,24 @@ def build_streams_router(cameras: CameraController) -> Any:
             _LOG.warning("the camera controller could not report health: %s", exc)
             return {"state": "unknown", "detail": f"{type(exc).__name__}: {exc}"}
 
+    async def _report() -> Mapping[str, Any]:
+        """The same report, fetched off the event loop. For the ``async`` handler only.
+
+        ``health()`` is blocking work on every runner and *serial* blocking work on a fleet --
+        one gRPC ``Health`` per shard, each with its own deadline -- so an ``async`` handler
+        that called it directly would park the event loop for the sum of them, and one wedged
+        shard would freeze every request this process is answering, ``GET /health`` included.
+        That is exactly what :data:`_ADD_TIMEOUT_S` exists to prevent, so the read goes to a
+        worker thread; the plain ``def`` handlers below get the same treatment for free,
+        because that is where FastAPI runs them.
+
+        ``abandon_on_cancel`` for :func:`add_stream`'s reason: without it the cancel scope
+        waits for the very thread it is cancelling, and a wedged report would hold the socket
+        open past the deadline. Letting this one finish alone is safe -- :func:`_health` never
+        raises and changes nothing.
+        """
+        return await anyio.to_thread.run_sync(_health, abandon_on_cancel=True)
+
     # -- reading -------------------------------------------------------------------------
 
     @router.get("/streams", response_model=StreamList)
@@ -172,17 +197,45 @@ def build_streams_router(cameras: CameraController) -> Any:
 
     # -- writing -------------------------------------------------------------------------
 
+    async def _named(body: StreamRequest) -> CameraSpec:
+        """The posted camera, named by the server when the caller did not name it."""
+        camera_id = body.camera_id or _mint(_camera_ids(await _report()))
+        return CameraSpec(camera_id=camera_id, url=body.url, fps=body.fps)
+
+    async def _hand_over(camera: CameraSpec) -> None:
+        """Give one camera to the controller, on a worker thread it may hold past the scope."""
+        await anyio.to_thread.run_sync(
+            partial(cameras.add_camera, camera), abandon_on_cancel=True
+        )
+
     @router.post("/streams", response_model=StreamInfo, status_code=201)
     async def add_stream(body: StreamRequest) -> StreamInfo:
         """Start reading one camera. 201 with where it landed.
 
-        ``async`` for one reason: the deadline. ``add_camera`` is blocking work — a lock, a
-        thread start, an ``AddCamera`` RPC per shard — so it goes to a worker thread either
-        way, and a plain ``def`` handler would go to the same pool with *no* bound on how long
-        it holds it. ``abandon_on_cancel=True`` is what makes the bound real: without it the
-        cancel scope waits for the thread it is cancelling and the timeout is decorative.
-        The abandoned call still finishes on its thread — a placement half-made is worse than
-        one that completes late — and the caller gets 504 rather than an open socket.
+        ``async`` for one reason: the deadline. Everything this handler does is blocking work
+        -- a health report per name, a lock, a thread start, an ``AddCamera`` RPC per shard --
+        so **every one of those calls goes to a worker thread**, and none of them runs here.
+        A plain ``def`` handler would reach the same pool with *no* bound on how long it holds
+        a thread; an ``async`` one that called a controller method directly would be worse
+        still, because it would park the event loop for the whole call and freeze every other
+        request in the process, ``GET /health`` first among them. ``abandon_on_cancel=True``
+        is what makes the bound real: without it the cancel scope waits for the very thread it
+        is cancelling and the timeout is decorative. The abandoned call still finishes on its
+        thread -- a placement half-made is worse than one that completes late.
+
+        **What the deadline buys is the socket, not the thread.** A cancelled ``run_sync``
+        returns to the caller and leaves the worker where it was, and the workers come from
+        anyio's default limiter -- 40 of them, shared with every plain ``def`` route in this
+        app. So forty simultaneously wedged adds still stop the server answering, and the
+        limit on that is the controller's own per-call deadline (``launch/client.py``), not
+        this one. What this bound does guarantee is that no *caller* waits forever and that a
+        wedged runner cannot accumulate held connections.
+
+        The retry is :func:`_mint`'s: a minted id is read from one report and acted on in a
+        later call, so two concurrent id-less POSTs can pick the same name and the loser is
+        refused. It is refused with a message about an id the caller never supplied, so the
+        name is minted once more against a fresh report. An id the *caller* chose is never
+        retried -- that duplicate is their 400 and it will be a duplicate on the next try too.
 
         Raises:
             HTTPException: 501 if this runner manages no cameras; 400 for a duplicate id
@@ -191,25 +244,39 @@ def build_streams_router(cameras: CameraController) -> Any:
                 ``api/errors.py``); 504 if the placement outran ``_ADD_TIMEOUT_S``.
         """
         _refuse_if_it_manages_no_cameras()
-        camera_id = body.camera_id or _mint(_camera_ids(_health()))
-        camera = CameraSpec(camera_id=camera_id, url=body.url, fps=body.fps)
+        # The request as posted, so a timeout taken before the server has named anything still
+        # has something to name in its answer. Replaced by the named spec below.
+        camera = CameraSpec(camera_id=body.camera_id, url=body.url, fps=body.fps)
         try:
             with anyio.fail_after(_ADD_TIMEOUT_S):
-                await anyio.to_thread.run_sync(
-                    partial(cameras.add_camera, camera), abandon_on_cancel=True
-                )
+                camera = await _named(body)
+                try:
+                    await _hand_over(camera)
+                except ConfigurationError:
+                    if body.camera_id:
+                        raise
+                    camera = await _named(body)
+                    await _hand_over(camera)
+                report = await _report()
         except TimeoutError as exc:
+            named = (
+                f"camera {camera.camera_id!r}"
+                if camera.camera_id
+                else f"the camera at {camera.url!r}"
+            )
             raise HTTPException(
                 504,
-                f"camera {camera_id!r} was not placed within {_ADD_TIMEOUT_S:.0f}s; "
+                f"{named} was not placed within {_ADD_TIMEOUT_S:.0f}s; "
                 "it may still be being placed - read GET /streams before retrying",
             ) from exc
         except ShipInferError as exc:
             raise http_error(exc) from exc
         _LOG.info(
-            "camera %s added over HTTP", camera_id, extra=log_context(camera_id=camera_id)
+            "camera %s added over HTTP",
+            camera.camera_id,
+            extra=log_context(camera_id=camera.camera_id),
         )
-        return _placed(camera)
+        return _placed_from(report, camera)
 
     @router.delete("/streams/{camera_id}", response_model=StreamRemoved)
     def remove_stream(camera_id: str) -> StreamRemoved:
@@ -242,7 +309,12 @@ def build_streams_router(cameras: CameraController) -> Any:
 
     @router.post("/streams/drain", response_model=DrainResult)
     def drain_streams(
-        timeout_s: float = Query(20.0, ge=0.0, description="One deadline for every camera.")
+        timeout_s: float = Query(
+            20.0,
+            ge=0.0,
+            le=_MAX_DRAIN_S,
+            description="One deadline for every camera.",
+        )
     ) -> DrainResult:
         """Stop reading every camera and let what is in flight finish.
 
@@ -252,8 +324,17 @@ def build_streams_router(cameras: CameraController) -> Any:
         (``ingest/manager.py``). The chain, its workers and the queue stay up: a drain is how
         a deployment is emptied without being torn down.
 
+        The deadline is bounded at both ends. This is a plain ``def`` handler, so it holds one
+        of anyio's forty shared worker threads for as long as the drain takes, and a caller
+        who asks for ``timeout_s=1e9`` parks that thread for thirty-one years -- forty such
+        requests and the app answers nothing, health check included. 422 with a ceiling is a
+        better answer than a server that stops replying, and an operator who genuinely wants
+        longer has ``shipinfer run``'s own shutdown for it.
+
         Raises:
-            HTTPException: 501 if this runner manages no cameras; 503 if it is not running.
+            HTTPException: 501 if this runner manages no cameras; 503 if it is not running;
+                422 for a deadline outside ``[0, _MAX_DRAIN_S]``, which FastAPI answers before
+                this function is entered.
         """
         _refuse_if_it_manages_no_cameras()
         try:
@@ -261,22 +342,6 @@ def build_streams_router(cameras: CameraController) -> Any:
         except ShipInferError as exc:
             raise http_error(exc) from exc
         return DrainResult(abandoned=abandoned)
-
-    # -- reading a health report -----------------------------------------------------------
-
-    def _placed(camera: CameraSpec) -> StreamInfo:
-        """What to say about a camera that was just accepted.
-
-        The health report is consulted so the answer carries where it landed — the interesting
-        fact on a fleet — and the posted ``url`` is filled in because the caller supplied it
-        and no runner's health carries one (:class:`StreamInfo`). A camera missing from the
-        report is still a 201: the add returned success, and reporting a failure would earn a
-        retry and a duplicate.
-        """
-        for info in _streams(_health()):
-            if info.camera_id == camera.camera_id:
-                return info.model_copy(update={"url": camera.url})
-        return StreamInfo(camera_id=camera.camera_id, url=camera.url)
 
     return router
 
@@ -286,6 +351,27 @@ def _camera_ids(health: Mapping[str, Any]) -> frozenset[str]:
     return frozenset(entries) if isinstance(entries, Mapping) else frozenset()
 
 
+def _placed_from(health: Mapping[str, Any], camera: CameraSpec) -> StreamInfo:
+    """What to say about a camera that was just accepted, given one health report.
+
+    A pure function of a report rather than a call that fetches its own, because the caller is
+    an ``async`` handler and ``health()`` blocks: the report is read once, on a worker thread,
+    inside the deadline that handler owns (:func:`build_streams_router`). Taking it here would
+    put a serial per-shard RPC back on the event loop, which is the one thing ``POST /streams``
+    is arranged to avoid.
+
+    The report is consulted at all so the answer carries where the camera landed -- the
+    interesting fact on a fleet -- and the posted ``url`` is filled in because the caller
+    supplied it and no runner's health carries one (:class:`StreamInfo`). A camera missing
+    from the report is still a 201: the add returned success, and reporting a failure would
+    earn a retry and a duplicate.
+    """
+    for info in _streams(health):
+        if info.camera_id == camera.camera_id:
+            return info.model_copy(update={"url": camera.url})
+    return StreamInfo(camera_id=camera.camera_id, url=camera.url)
+
+
 def _mint(taken: Container[str]) -> str:
     """The lowest free ``cam-<n>``, so a POST with no id cannot collide with ``--inputs``.
 
@@ -293,6 +379,16 @@ def _mint(taken: Container[str]) -> str:
     free" rather than "one past the highest" is what makes a deployment that has removed
     ``cam-001`` reuse the name instead of drifting to ``cam-137`` — the ids are labels on
     every metric and log line, and unbounded drift makes them unreadable.
+
+    **This is read-then-act and it is not atomic.** ``taken`` comes from a health report that
+    was true when it was fetched; the id is handed to ``add_camera`` afterwards, and the only
+    thing that decides a name is unique is the controller (an ingest manager's lock, or a
+    shard's). Two concurrent id-less POSTs therefore read the same report and mint the same
+    ``cam-000``, and one of them is refused -- with a message about an id its caller never
+    supplied. There is nothing to lock here that would help, because the winner is decided a
+    layer down; the answer is that :func:`build_streams_router`'s ``add_stream`` re-mints
+    against a fresh report once when the id was the server's own, and never when it was the
+    caller's.
     """
     index = 0
     while mint_camera_id(index) in taken:

@@ -247,6 +247,12 @@ class TestDeletingAStream:
             assert response.json() == {"clean": True}
 
             settled = len(streamed.sink().emitted)
+            # The sleep is not what makes this deterministic, and it should not be read as
+            # one: `clean=True` above is the ingest manager saying it *joined* the actor
+            # thread, so nothing can publish after it and the assertion holds with no pause at
+            # all. What the pause is for is the opposite case -- an implementation that
+            # signalled the decoder and returned without waiting would need somewhere to be
+            # caught, and a check taken in the same breath as the DELETE would not catch it.
             time.sleep(0.05)
             assert len(streamed.sink().emitted) == settled, "the decoder is still publishing"
             assert client.get("/streams").json() == {"streams": []}

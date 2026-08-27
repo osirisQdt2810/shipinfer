@@ -21,6 +21,8 @@ What is under test is mostly the **mapping**, because that is what a client acts
 from __future__ import annotations
 
 import threading
+import time
+from collections.abc import Container
 from typing import Any
 
 import pytest
@@ -31,6 +33,7 @@ from fastapi.testclient import TestClient
 
 from shipinfer.api import create_app
 from shipinfer.api import streams as streams_module
+from shipinfer.api.streams import CameraController
 from shipinfer.core.errors import (
     ConfigurationError,
     NoShardAvailableError,
@@ -73,12 +76,16 @@ class FakeCameras:
         manages_cameras: bool = True,
         health: dict[str, Any] | None = None,
         refuse: Exception | None = None,
+        refuse_ids: Container[str] = frozenset(),
         clean: bool = True,
         abandoned: int = 0,
     ) -> None:
         self.manages_cameras = manages_cameras
         self._health = health if health is not None else {"state": "running", "cameras": {}}
         self.refuse = refuse
+        #: Ids this controller already holds, refused the way an ingest manager refuses a
+        #: duplicate -- and remembered, because whoever took the name is in the report now.
+        self.refuse_ids = refuse_ids
         self.clean = clean
         self.abandoned = abandoned
         self.added: list[CameraSpec] = []
@@ -92,14 +99,22 @@ class FakeCameras:
         self.block.wait(10.0)
         if self.refuse is not None:
             raise self.refuse
+        if camera.camera_id in self.refuse_ids:
+            self._remember(camera.camera_id)
+            raise ConfigurationError(f"camera {camera.camera_id!r} is already running")
         self.added.append(camera)
-        # `setdefault`, so a health report the test wrote (a fleet's placement map) is not
-        # overwritten by this stand-in. What the mutation is for is minting: the *next* POST
-        # with no id must see this one as taken.
+        self._remember(camera.camera_id)
+
+    def _remember(self, camera_id: str) -> None:
+        """Put a camera in the health report, whoever it was that took the name.
+
+        `setdefault`, so a health report the test wrote (a fleet's placement map) is not
+        overwritten by this stand-in. What the mutation is for is minting: the *next* POST
+        with no id must see this one as taken -- including when "the next POST" is this
+        request's own retry after a refusal.
+        """
         cameras = dict(self._health.get("cameras") or {})
-        cameras.setdefault(
-            camera.camera_id, {"camera_id": camera.camera_id, "state": "connecting"}
-        )
+        cameras.setdefault(camera_id, {"camera_id": camera_id, "state": "connecting"})
         self._health = {**self._health, "cameras": cameras}
 
     def remove_camera(self, camera_id: str, *, timeout_s: float = 5.0) -> bool:
@@ -123,7 +138,72 @@ class FakeCameras:
         return {"cameras": len(self.added)}
 
 
-def client_over(cameras: FakeCameras) -> TestClient:
+class ThreadWatchingCameras:
+    """A controller that records which thread each of its calls arrived on.
+
+    ``manages_cameras`` is the load-bearing member. ``add_stream`` is ``async`` and reads it
+    directly, so the thread that reads it *is* the event loop's for that request -- which is
+    what lets this fake name the forbidden thread rather than assert against a string like
+    "AnyIO worker thread" and pin an anyio implementation detail instead of the property.
+
+    ``wedge_first_health`` is the failure the deadline exists for: one controller call that
+    never comes back. On a fleet that is one shard paging in an engine, answered by a serial
+    ``Health`` per shard.
+    """
+
+    def __init__(self, *, wedge_first_health: bool = False) -> None:
+        self.calls: dict[str, list[str]] = {}
+        self.added: list[CameraSpec] = []
+        #: Set once the wedged ``health()`` has been entered, so a test knows it is safe to
+        #: ask a second question and expect an answer.
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self._wedge = wedge_first_health
+        self._lock = threading.Lock()
+
+    @property
+    def loop_thread(self) -> str:
+        """The thread the ``async`` handler itself ran on. Nothing blocking may touch it."""
+        assert self.calls.get("manages_cameras"), "no POST or DELETE reached this controller"
+        return self.calls["manages_cameras"][0]
+
+    def _record(self, call: str) -> int:
+        with self._lock:
+            seen = self.calls.setdefault(call, [])
+            seen.append(threading.current_thread().name)
+            return len(seen)
+
+    @property
+    def manages_cameras(self) -> bool:
+        self._record("manages_cameras")
+        return True
+
+    def add_camera(self, camera: CameraSpec) -> None:
+        self._record("add_camera")
+        with self._lock:
+            self.added.append(camera)
+
+    def remove_camera(self, camera_id: str, *, timeout_s: float = 5.0) -> bool:
+        self._record("remove_camera")
+        return True
+
+    def drain(self, timeout_s: float = 20.0) -> int:
+        self._record("drain")
+        return 0
+
+    def health(self) -> dict[str, Any]:
+        if self._record("health") == 1 and self._wedge:
+            self.entered.set()
+            self.release.wait(10.0)
+        with self._lock:
+            placed = {camera.camera_id: {} for camera in self.added}
+        return {"state": "running", "cameras": placed}
+
+    def stats(self) -> dict[str, Any]:
+        return {"cameras": len(self.added)}
+
+
+def client_over(cameras: CameraController) -> TestClient:
     return TestClient(create_app(cameras=cameras))
 
 
@@ -260,6 +340,118 @@ class TestWhyACameraIsRefused:
             cameras.block.set()
 
 
+class TestTwoPostsThatMintTheSameName:
+    """The mint is read-then-act, so the report it read can be stale by the time it acts.
+
+    Nothing here locks: the only thing that decides a name is unique is the controller, a
+    layer down (an ingest manager's lock, or a shard's). So the race is not prevented, it is
+    *answered* -- the loser of a mint it never asked for is re-minted against a fresh report
+    rather than handed a 400 about an id its caller never supplied.
+    """
+
+    def test_a_minted_id_that_was_taken_in_the_race_is_minted_again(self) -> None:
+        cameras = FakeCameras(refuse_ids={"cam-000"})
+        with client_over(cameras) as client:
+            response = client.post("/streams", json={"url": "rtsp://a"})
+
+        assert response.status_code == 201, response.text
+        assert response.json()["camera_id"] == "cam-001"
+        assert [camera.camera_id for camera in cameras.added] == ["cam-001"]
+
+    def test_an_id_the_caller_supplied_is_never_retried_under_another_name(self) -> None:
+        """Their 400, and it will be a duplicate on the next try too.
+
+        Retrying this one would place a camera the caller did not ask for, under a name they
+        will not recognise, and answer 201 to a request that was wrong.
+        """
+        cameras = FakeCameras(refuse_ids={"cam-000"})
+        with client_over(cameras) as client:
+            response = client.post("/streams", json={"camera_id": "cam-000", "url": "x"})
+
+        assert response.status_code == 400
+        assert cameras.added == []
+
+    def test_the_retry_happens_once_and_the_second_refusal_is_the_answer(self) -> None:
+        """A loop here would be a POST that races forever against a busy deployment."""
+        cameras = FakeCameras(refuse_ids={"cam-000", "cam-001"})
+        with client_over(cameras) as client:
+            response = client.post("/streams", json={"url": "rtsp://a"})
+
+        assert response.status_code == 400
+        assert "cam-001" in response.json()["detail"]
+        assert cameras.added == []
+
+
+class TestNothingBlockingRunsOnTheEventLoop:
+    """The property that makes ``_ADD_TIMEOUT_S`` mean anything.
+
+    ``add_stream`` is ``async``, so every blocking call it makes has to be pushed to a worker
+    thread -- and ``health()`` is blocking work on every runner and *serial* blocking work on
+    a fleet, one gRPC ``Health`` per shard with its own deadline. Called from the handler it
+    would park the event loop for the sum of them, which stops every other request in the
+    process, ``GET /health`` first among them: exactly the failure the deadline was added to
+    prevent, reached by the route that enforces it.
+    """
+
+    def test_a_post_touches_the_controller_only_from_worker_threads(self) -> None:
+        watcher = ThreadWatchingCameras()
+        with client_over(watcher) as client:
+            assert client.post("/streams", json={"url": "rtsp://a"}).status_code == 201
+
+        assert watcher.calls["health"], "the report was never read"
+        assert watcher.loop_thread not in watcher.calls["health"]
+        assert watcher.loop_thread not in watcher.calls["add_camera"]
+
+    def test_a_get_is_off_it_too_and_that_is_where_the_bar_comes_from(self) -> None:
+        """A plain ``def`` route is the reference: FastAPI already runs those in the pool."""
+        watcher = ThreadWatchingCameras()
+        with client_over(watcher) as client:
+            client.post("/streams", json={"url": "rtsp://a"})
+            assert client.get("/health").status_code == 200
+
+        assert watcher.loop_thread not in watcher.calls["health"]
+
+    def test_a_wedged_report_is_a_504_and_the_next_request_still_answers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One controller call that never returns must cost one request, not the server.
+
+        With ``health()`` back on the handler's own thread this fails twice over: the POST
+        cannot time out at all -- ``fail_after`` cannot interrupt a blocking call on the
+        thread the loop is running on -- and the ``GET /health`` beside it is not even
+        dispatched until the wedge lets go.
+        """
+        monkeypatch.setattr(streams_module, "_ADD_TIMEOUT_S", 0.05)
+        watcher = ThreadWatchingCameras(wedge_first_health=True)
+        posted: dict[str, int] = {}
+
+        with client_over(watcher) as client:
+
+            def post() -> None:
+                posted["status"] = client.post("/streams", json={"url": "rtsp://a"}).status_code
+
+            caller = threading.Thread(target=post, name="posting")
+            caller.start()
+            try:
+                assert watcher.entered.wait(5.0), "the POST never asked for a report"
+                started = time.monotonic()
+                assert client.get("/health").status_code == 200
+                # Still wedged: the POST has to give up on its own deadline, not because the
+                # test let the report go. That is the whole claim.
+                caller.join(5.0)
+                elapsed = time.monotonic() - started
+                assert not caller.is_alive(), "the POST outlived its own deadline"
+                # Both answers came back while the first report was still held. The bound is
+                # loose on purpose -- what it has to tell apart is milliseconds from the ten
+                # seconds the wedge holds for, and a shared box is allowed to be slow.
+                assert elapsed < 2.0, "a request waited on the wedged report"
+            finally:
+                watcher.release.set()
+                caller.join(10.0)
+
+        assert posted == {"status": 504}
+
+
 class TestRemovingACamera:
     def test_a_removed_camera_answers_200_and_clean(self, client, cameras) -> None:
         response = client.delete("/streams/cam-000")
@@ -394,6 +586,14 @@ class TestDraining:
 
     def test_a_negative_timeout_is_refused_by_the_schema(self, client) -> None:
         assert client.post("/streams/drain", params={"timeout_s": -1}).status_code == 422
+
+    def test_a_timeout_past_the_ceiling_is_refused_too(self, client, cameras) -> None:
+        """This handler is synchronous, so the caller's deadline is how long it holds one of
+        anyio's forty shared workers. Forty requests asking for a year each and the app stops
+        answering anything, health check included -- a 422 is the cheaper failure."""
+        assert client.post("/streams/drain", params={"timeout_s": 301}).status_code == 422
+        assert client.post("/streams/drain", params={"timeout_s": 300}).status_code == 200
+        assert cameras.drained == [300.0], "the ceiling itself is still a legal deadline"
 
     def test_a_stopped_runner_is_503(self) -> None:
         cameras = FakeCameras(refuse=ServerStateError("the fleet is not running"))
