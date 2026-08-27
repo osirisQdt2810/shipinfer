@@ -174,10 +174,11 @@ jobs:
 
             House rules to enforce:
 
-            - LAYERS, one-way only (ADR-001). `core/`, `scheduling/` and `repository/` must
-              import NO torch, tensorrt, onnxruntime, cv2 or fastapi. `core/` must not import
-              any sibling layer. `runtime/` must not import `server/`. `import shipinfer`
-              must not pull in a backend. Breaking this silently makes the offline test suite
+            - LAYERS, one-way only (ADR-001, ADR-017). `core/`, `scheduling/`, `repository/`
+              and `topology/` must import NO torch, tensorrt, onnxruntime, cv2 or fastapi.
+              `core/` must not import any sibling layer; `topology/` imports only `core/`.
+              `runtime/` must not import the engine (`engine/`, or `server/` while the shim
+              lives). `import shipinfer` must not pull in a backend. Breaking this silently makes the offline test suite
               require a GPU, which nobody notices for weeks.
             - REUSE, do not reimplement (ADR-003, the "ponytail principle"). Torch already
               provides the caching device allocator, the caching pinned-host allocator,
