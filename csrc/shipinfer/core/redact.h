@@ -103,7 +103,13 @@ namespace shipinfer {
             }
             size_t scheme = mark;
             while (scheme > 0 && detail::is_scheme_char(text[scheme - 1])) --scheme;
-            if (scheme == mark || !detail::is_alpha(text[scheme])) {
+            // The run may begin with characters a scheme cannot *start* with — digits, `.`,
+            // `+`, `-`, as in `"2.rtsp://admin:pw@host"`. The scheme is the run from its
+            // first ALPHA onwards, which is where Python's regex anchors too. Giving up on
+            // the whole run here fails OPEN: the password behind a numeric prefix would pass
+            // through unredacted (#33 round 2).
+            while (scheme < mark && !detail::is_alpha(text[scheme])) ++scheme;
+            if (scheme == mark) {
                 out.append(text, cursor, mark + 3 - cursor);  // not a scheme; nothing to do
                 cursor = mark + 3;
                 continue;

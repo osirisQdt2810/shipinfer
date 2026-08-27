@@ -5,6 +5,7 @@
 // point of the file format being boring.
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <map>
@@ -511,7 +512,18 @@ int main(int argc, char** argv) {
         // Read before the fleet is torn down: `stop()` forgets its actors, as the Python
         // manager does, so a stopped manager has no per-camera numbers left to report.
         const std::map<std::string, CameraHealth> camera_health = manager.health();
-        manager.stop();
+        const size_t abandoned = manager.stop();
+        if (abandoned != 0) {
+            // An abandoned actor's detached thread still holds references into this frame —
+            // the sink and the queue above all. Unwinding the stack now would free them under
+            // a live thread, so take the manager's own containment to its conclusion: report,
+            // and leave without running destructors. Unreachable with `replay` (a replay read
+            // cannot block), so this is armour for the sources PR2 adds.
+            std::cerr << "bench: " << abandoned
+                      << " camera(s) abandoned past the stop deadline; exiting without "
+                         "unwinding so their threads keep valid references\n";
+            std::_Exit(1);
+        }
         stopping.store(true);
         queue.close();
         for (auto& worker : workers) worker.join();

@@ -54,7 +54,7 @@ namespace shipinfer {
         for (const IngestConfig& camera : cameras) add_camera(camera);
     }
 
-    void IngestManager::stop(std::chrono::milliseconds timeout) {
+    size_t IngestManager::stop(std::chrono::milliseconds timeout) {
         std::vector<std::shared_ptr<CameraActor>> actors;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -69,19 +69,22 @@ namespace shipinfer {
         // into fifty consecutive waits — the 250 s shutdown the header promises not to have.
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         for (const auto& actor : actors) actor->request_stop();
+        size_t abandoned = 0;
         for (auto& actor : actors) {
             const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline - std::chrono::steady_clock::now());
             if (!actor->stop(std::max(remaining, std::chrono::milliseconds(0)))) {
+                ++abandoned;
                 std::lock_guard<std::mutex> lock(mutex_);
                 abandoned_.push_back(std::move(actor));
             }
         }
         std::lock_guard<std::mutex> lock(mutex_);
         started_ = false;
+        return abandoned;
     }
 
-    CameraActor& IngestManager::add_camera(const IngestConfig& config) {
+    std::shared_ptr<CameraActor> IngestManager::add_camera(const IngestConfig& config) {
         config.validate();
         std::shared_ptr<CameraActor> actor;
         {
@@ -115,7 +118,7 @@ namespace shipinfer {
                                        "once the manager is running");
             }
         }
-        return *actor;
+        return actor;
     }
 
     void IngestManager::remove_camera(const std::string& camera_id,
@@ -141,7 +144,7 @@ namespace shipinfer {
         }
     }
 
-    CameraActor& IngestManager::actor(const std::string& camera_id) const {
+    std::shared_ptr<CameraActor> IngestManager::actor(const std::string& camera_id) const {
         std::lock_guard<std::mutex> lock(mutex_);
         auto found = actors_.find(camera_id);
         if (found == actors_.end()) {
@@ -150,7 +153,7 @@ namespace shipinfer {
             throw ConfigError("camera '" + camera_id + "' is not running; running: " +
                               (running.empty() ? "(none)" : running));
         }
-        return *found->second;
+        return found->second;
     }
 
     std::vector<std::string> IngestManager::camera_ids() const {

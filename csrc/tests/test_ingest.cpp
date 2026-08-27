@@ -24,6 +24,7 @@
 #include <thread>
 #include <vector>
 
+#include "shipinfer/core/redact.h"
 #include "shipinfer/core/stop_signal.h"
 #include "shipinfer/core/types.h"
 #include "shipinfer/ingest/base.h"
@@ -1349,6 +1350,141 @@ namespace {
     }
 
     // =====================================================================================
+    // L2. Redaction — no credential reaches a log, an error or the health API
+    // =====================================================================================
+    // `tests/ingest/test_redaction.py`, ported (#33 round 2: the one file with no tests was
+    // the one that failed open).
+
+    const std::string kSecret = "s3cr3t-fleet-password";
+    const std::string kUri = "rtsp://admin:" + kSecret + "@10.0.0.5/stream";
+
+    bool contains(const std::string& text, const std::string& needle) {
+        return text.find(needle) != std::string::npos;
+    }
+
+    void test_redact_uri_masks_the_password_and_nothing_else() {
+        const std::string out = redact_uri(kUri);
+        check(!contains(out, kSecret) && out == "rtsp://admin:***@10.0.0.5/stream",
+              "the password is replaced and the rest survives: " + out);
+        check(contains(out, "admin"), "the username is kept — it is not the secret");
+        check(
+            redact_uri("rtsp://u:a@h/s") == redact_uri("rtsp://u:aaaaaaaaaaaaaaaaaaaaaaa@h/s"),
+            "the mask does not leak the length");
+        for (const std::string quiet :
+             {std::string("rtsp://10.0.0.5/stream"), std::string("/data/frames"),
+              std::string("file:///data/clip.mp4"), std::string("")}) {
+            check(redact_uri(quiet) == quiet, "a uri with no password is untouched: " + quiet);
+        }
+        check(redact_uri("rtsp://admin:" + kSecret + "@10.0.0.5:8554/s") ==
+                  "rtsp://admin:***@10.0.0.5:8554/s",
+              "a port survives");
+        check(redact_uri("rtsp://admin:secret@") == "<unparseable uri>",
+              "a credential with nothing after it is not echoed — fail closed");
+    }
+
+    void test_redaction_never_throws_on_hostile_input() {
+        // It runs inside error construction and logging; throwing there turns a diagnostic
+        // into a second failure on the path that is already failing.
+        for (const std::string hostile :
+             {std::string("://"), std::string("rtsp://["), std::string("%%%"),
+              std::string("rtsp://u:p@"), std::string(1, '\0')}) {
+            bool threw = false;
+            try {
+                (void)redact_uri(hostile);
+                (void)redact_in(hostile);
+            } catch (...) {
+                threw = true;
+            }
+            check(!threw, "hostile input must not raise");
+        }
+    }
+
+    void test_the_passwords_that_break_the_easy_parse() {
+        // The three shapes that made the first Python implementation fail open. All three
+        // reach the health endpoint via SourceOpenError -> last_error, forever, on retry.
+        const std::string kSlash = "rtsp://admin:pa/ss@10.0.0.5/stream";
+        const std::string kAt = "rtsp://admin:p@ss123@10.0.0.5/stream";
+        const std::string kBoth = "rtsp://admin:Ab/c@123@cam.local:554/h264";
+        for (const std::string& uri : {kSlash, kAt, kBoth}) {
+            const std::string redacted = redact_uri(uri);
+            check(!contains(redacted, "pa/ss") && !contains(redacted, "ss123") &&
+                      !contains(redacted, "Ab/c") && contains(redacted, "***"),
+                  "no fragment of the password survives: " + redacted);
+            const std::string host = uri.substr(uri.rfind('@') + 1);
+            check(contains(redacted, "admin") &&
+                      contains(redacted, host.substr(0, host.find('/'))),
+                  "the host survives so the line is still diagnostic: " + redacted);
+            for (const std::string prefix :
+                 {std::string("[Errno 111] Connection refused: '"),
+                  std::string("could not set property \"location\" to \"")}) {
+                const std::string redacted_in = redact_in(prefix + uri + "'");
+                check(!contains(redacted_in, "pa/ss") && !contains(redacted_in, "ss123") &&
+                          !contains(redacted_in, "Ab/c") && contains(redacted_in, "***"),
+                      "the same holds embedded in a decoder message: " + redacted_in);
+            }
+        }
+    }
+
+    void test_an_embedded_uri_is_redacted_in_place() {
+        const std::string description =
+            "rtspsrc location=" + kUri + " latency=200 ! rtph264depay ! appsink";
+        const std::string out = redact_in(description);
+        check(!contains(out, kSecret) && contains(out, "latency=200"),
+              "only the password is replaced: " + out);
+    }
+
+    void test_a_scheme_behind_a_numeric_prefix_still_redacts() {
+        // #33 round 2, the fail-open: the scheme walk-back consumed the digits and dots of
+        // "2.rtsp" and then gave up because '2' is not alpha — Python anchors on the first
+        // alpha of the run and redacts. The two planes must fail in the same direction.
+        const std::string leaky =
+            "could not set property \"location\" to \"2.rtsp://admin:" + kSecret +
+            "@10.0.0.5/stream\"";
+        const std::string out = redact_in(leaky);
+        check(!contains(out, kSecret) && contains(out, "***") && contains(out, "10.0.0.5"),
+              "a numeric prefix glued to the scheme must not leak the password: " + out);
+        for (const std::string prefix :
+             {std::string("+"), std::string("-"), std::string(".")}) {
+            const std::string glued = prefix + "rtsp://u:pw@h/s";
+            check(!contains(redact_in(glued), "pw"),
+                  "a '" + prefix + "' prefix must not leak either");
+        }
+        check(redact_in("2://u:pw@h") == "2://u:pw@h",
+              "an all-digit token before :// is not a scheme and stays untouched");
+    }
+
+    void test_config_bounds_match_the_python_plane() {
+        // The five bounds pydantic enforces that the struct did not (#33 round 2).
+        struct Case {
+            const char* what;
+            std::function<void(IngestConfig&)> mutate;
+        };
+        const std::vector<Case> cases = {
+            {"width and height must be >= 16",
+             [](IngestConfig& c) {
+                 c.width = 8;
+                 c.height = 8;
+             }},
+            {"fps must be >= 0", [](IngestConfig& c) { c.fps = -1.0; }},
+            {"first_frame_id must be >= 0", [](IngestConfig& c) { c.first_frame_id = -1; }},
+            {"latency_ms must be >= 0", [](IngestConfig& c) { c.latency_ms = -1; }},
+            {"empty_read_sleep_ms must be >= 0",
+             [](IngestConfig& c) { c.empty_read_sleep_ms = -1; }},
+        };
+        for (const Case& one : cases) {
+            IngestConfig config = a_camera("cam0");
+            one.mutate(config);
+            bool named = false;
+            try {
+                config.validate();
+            } catch (const ConfigError& error) {
+                named = contains(error.what(), "cam0") && contains(error.what(), one.what);
+            }
+            check(named, std::string("refused, naming the camera and the rule: ") + one.what);
+        }
+    }
+
+    // =====================================================================================
     // M. The manager's lifecycle races (#33 round 1)
     // =====================================================================================
 
@@ -1422,7 +1558,7 @@ namespace {
             for (int i = 0; i < 400 && script.reads.load() == 0; ++i)
                 std::this_thread::sleep_for(5ms);
             check(script.reads.load() >= 1, "the camera is parked inside its decode read");
-            manager.stop(100ms);
+            check(manager.stop(100ms) == 1, "stop() reports the abandonment to its caller");
             check(manager.size() == 0, "the abandoned camera is forgotten by the fleet");
         }  // ~IngestManager — the leak under test: ~vector must NOT free the actor
         gate.set_value();
@@ -1464,8 +1600,9 @@ namespace {
                 std::this_thread::sleep_for(5ms);
             check(script.reads.load() >= 5, "all five cameras are parked inside a read");
             const auto start = Clock::now();
-            manager.stop(300ms);
+            const size_t abandoned = manager.stop(300ms);
             const double waited = ms_since(start);
+            check(abandoned == 5, "all five are reported abandoned, not silently detached");
             check(waited < 1200.0, "five hung cameras cost one 300 ms deadline (" +
                                        std::to_string(waited) +
                                        " ms), not five in sequence (1500+ ms)");
@@ -1521,6 +1658,13 @@ int main() {
     test_wait_ready_returns_once_every_camera_delivers();
 
     test_counting_sink_and_a_quiet_shutdown();
+
+    test_redact_uri_masks_the_password_and_nothing_else();
+    test_redaction_never_throws_on_hostile_input();
+    test_the_passwords_that_break_the_easy_parse();
+    test_an_embedded_uri_is_redacted_in_place();
+    test_a_scheme_behind_a_numeric_prefix_still_redacts();
+    test_config_bounds_match_the_python_plane();
 
     test_a_directly_built_actor_names_the_camera_in_its_refusal();
     test_a_camera_added_during_stop_never_keeps_running();

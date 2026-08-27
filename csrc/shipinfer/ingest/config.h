@@ -110,6 +110,23 @@ namespace shipinfer {
                 throw ConfigError("camera '" + camera_id +
                                   "': width and height must be set together, or neither");
             }
+            // The same bounds pydantic enforces on the Python plane (`settings/ingest.py`),
+            // so a config the server would refuse is refused here too (two planes, one rule).
+            if (width != 0 && (width < 16 || height < 16)) {
+                throw ConfigError("camera '" + camera_id +
+                                  "': width and height must be >= 16 when set");
+            }
+            if (fps < 0.0) throw ConfigError("camera '" + camera_id + "': fps must be >= 0");
+            if (first_frame_id < 0) {
+                throw ConfigError("camera '" + camera_id + "': first_frame_id must be >= 0");
+            }
+            if (latency_ms < 0) {
+                throw ConfigError("camera '" + camera_id + "': latency_ms must be >= 0");
+            }
+            if (empty_read_sleep_ms < 0) {
+                throw ConfigError("camera '" + camera_id +
+                                  "': empty_read_sleep_ms must be >= 0");
+            }
             if (reconnect_initial_ms <= 0) {
                 throw ConfigError("camera '" + camera_id +
                                   "': reconnect_initial_ms must be > 0");

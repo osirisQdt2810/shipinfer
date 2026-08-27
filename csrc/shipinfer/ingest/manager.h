@@ -65,7 +65,12 @@ namespace shipinfer {
         // stop; abandoning the thread" once per camera and marked each one STOPPED while it was
         // still reading and publishing. Fifty false alarms per shutdown is how a real abandoned
         // thread stops being noticed.
-        void stop(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+        //
+        // Returns how many actors had to be *abandoned* — detached past the deadline, still
+        // holding their sink and source references. 0 is the clean shutdown. A non-zero return
+        // is the caller's cue that references it lent to the fleet (the sink above all) must
+        // now outlive this manager; `bench` exits without unwinding for exactly that reason.
+        size_t stop(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
 
         // Start one camera. Throws ConfigError if a camera with this id is already running:
         // silently replacing it would leave two threads pulling one stream and two frame
@@ -75,14 +80,20 @@ namespace shipinfer {
         // lock (see `actors_`), then the map is re-checked — if the fleet forgot the camera in
         // the window, the freshly started actor is stopped here and ServerStateError says so,
         // rather than leaving a camera running that no shutdown will ever reach.
-        CameraActor& add_camera(const IngestConfig& config);
+        //
+        // Returns shared ownership, not a reference: `remove_camera` on another thread can
+        // erase the map's copy at any moment, and a reference into that map would dangle. The
+        // caller's `shared_ptr` keeps the actor alive for as long as the caller looks at it —
+        // the same rule `snapshot()` applies internally.
+        std::shared_ptr<CameraActor> add_camera(const IngestConfig& config);
 
         // Stop and forget one camera. Throws ConfigError naming what *is* running, because a
         // typo in an operator's API call deserves an answer rather than a silent no-op.
         void remove_camera(const std::string& camera_id,
                            std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
 
-        CameraActor& actor(const std::string& camera_id) const;
+        // Shared ownership for the same reason as `add_camera` — see there.
+        std::shared_ptr<CameraActor> actor(const std::string& camera_id) const;
         std::vector<std::string> camera_ids() const;
         size_t size() const;
         bool contains(const std::string& camera_id) const;
