@@ -6,9 +6,10 @@ from collections.abc import Sequence
 from typing import ClassVar
 
 from shipinfer.core.errors.base import ShipInferError
-from shipinfer.core.errors.inference import QueueFullError
+from shipinfer.core.errors.inference import QueueFullError, ServerStateError
 
 __all__ = [
+    "NoShardAvailableError",
     "PeerLostError",
     "RingClosedError",
     "RingFullError",
@@ -25,6 +26,28 @@ class ShardExitedError(ShipInferError):
     up and one down is a deployment reporting healthy while a quarter of the cameras go
     unread, which is exactly the state a supervisor exists to refuse to sit in.
     """
+
+
+class NoShardAvailableError(ServerStateError):
+    """Every shard refused a camera, so there is nowhere to place it *right now*.
+
+    A :class:`~shipinfer.core.errors.ServerStateError` and deliberately not a
+    :class:`~shipinfer.core.errors.ConfigurationError`, because the two say different things
+    to the caller and reach an HTTP client as different status codes (``api/errors.py``): a
+    duplicate camera id is the caller's mistake and will be a mistake on every retry (400),
+    while a fleet whose shards are all draining, full or gone is a *capacity* answer that a
+    load balancer should back off from and try again (503). Answering 400 for it is how a
+    control plane concludes its request was malformed and stops asking.
+
+    Carries what each shard said, because "no shard would take it" without the reasons sends
+    an operator to read sixteen logs to find out which of them was draining.
+    """
+
+    def __init__(self, camera_id: str, refusals: Sequence[str]) -> None:
+        listed = "; ".join(refusals) or "no shard was reachable"
+        super().__init__(f"no shard would take camera {camera_id!r} ({listed})")
+        self.camera_id = camera_id
+        self.refusals = tuple(refusals)
 
 
 class RingFullError(QueueFullError):

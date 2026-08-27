@@ -267,23 +267,29 @@ def refuse_if_it_manages_no_cameras(runner: Runner, cameras: Sequence[CameraSpec
 def place_cameras(runner: Runner, cameras: Sequence[CameraSpec]) -> None:
     """Start every camera on the runner, or refuse naming the first one that would not.
 
-    Stops at the first failure rather than placing the rest, because the failures reachable
-    here are configuration ones — a duplicate id, a source the chain names that nobody
-    registered — and each of them means the same thing about every camera behind it. Carrying
-    on would report the last one's message for a mistake made in the first.
+        Stops at the first failure rather than placing the rest, because the failures reachable
+        here are configuration ones — a duplicate id, a source the chain names that nobody
+        registered — and each of them means the same thing about every camera behind it. Carrying
+        on would report the last one's message for a mistake made in the first.
 
-    The capability refusal is :func:`refuse_if_it_manages_no_cameras`'s and is made before the
-    runner is started, but it is repeated here rather than assumed: this function is public and
-    a caller that placed cameras on a camera-less runner would otherwise get
-    ``Runner.add_camera``'s default ``ServerStateError`` per camera instead of one message
-    naming what to do about it.
+        The capability refusal is :func:`refuse_if_it_manages_no_cameras`'s and is made before the
+        runner is started, but it is repeated here rather than assumed: this function is public and
+        a caller that placed cameras on a camera-less runner would otherwise get
+        ``Runner.add_camera``'s default ``ServerStateError`` per camera instead of one message
+        naming what to do about it.
 
-    Raises:
-        ConfigurationError: the runner manages no cameras, or a camera was refused. In the
-            second case the original message is kept and prefixed with **both** the id and
-            the url, because ``ingest/manager.py``'s message names only the camera id — which
-            for an ``--inputs`` camera is minted from its position and appears nowhere in what
-            the operator typed.
+        Raises:
+            ConfigurationError: the runner manages no cameras, or a camera was refused. In the
+                second case the original message is kept and prefixed with **both** the id and
+                the url, because ``ingest/manager.py``'s message names only the camera id — which
+                for an ``--inputs`` camera is minted from its position and appears nowhere in what
+                the operator typed.
+            NoShardAvailableError: a fleet whose shards all refused. Deliberately **not**
+                re-labelled with the input path: it is not a fact about this input at all -- the
+                camera is fine and there is nowhere to put it -- and wrapping it in a
+                ``ConfigurationError`` would turn a 503 into a 400 for the same condition reached
+                over ``POST /streams`` (``api/errors.py``). Its own message names the camera and
+                what every shard said.
     """
     refuse_if_it_manages_no_cameras(runner, cameras)
     for camera in cameras:

@@ -41,6 +41,7 @@ from shipinfer.core.errors.ingest import (
     SourceUnavailableError,
 )
 from shipinfer.core.errors.launch import (
+    NoShardAvailableError,
     PeerLostError,
     RingClosedError,
     RingFullError,
@@ -70,6 +71,7 @@ __all__ = [
     "ModelControlError",
     "ModelNotFoundError",
     "ModelVersionNotFoundError",
+    "NoShardAvailableError",
     "PeerLostError",
     "QueueFullError",
     "RequestCancelledError",
