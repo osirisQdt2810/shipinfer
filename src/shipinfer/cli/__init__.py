@@ -120,7 +120,20 @@ def build_app() -> typer.Typer:
         ),
         repository: Path = repo_option,
         inputs: list[str] = typer.Option(
-            [], "--inputs", help="Files or URLs to shard at start (phase B; refused for now)."
+            [],
+            "--inputs",
+            help=(
+                "Files or URLs to run as cameras, named cam-000 by position. Placed after "
+                "the cameras ingest.cameras / ingest.camera_db already configure."
+            ),
+        ),
+        loop: bool = typer.Option(
+            True,
+            "--loop/--no-loop",
+            help=(
+                "Whether an --inputs file restarts at EOF. --no-loop processes it once. "
+                "A configured camera keeps its own ingest.cameras[].loop."
+            ),
         ),
         shards: int | None = typer.Option(
             None,
@@ -147,6 +160,7 @@ def build_app() -> typer.Typer:
                 runner=runner,
                 repository=repository,
                 inputs=list(inputs),
+                loop=loop,
                 shards=shards,
                 gpus=gpus,
                 policy=policy,

@@ -31,9 +31,41 @@ from shipinfer.ingest.camera.health import CameraHealth, CameraState, IngestSumm
 from shipinfer.ingest.metrics import IngestMetrics
 from shipinfer.ingest.sink import FrameSink
 
-__all__ = ["IngestManager"]
+__all__ = ["IngestManager", "configured_cameras"]
 
 _LOG = get_logger("ingest.manager")
+
+
+def configured_cameras(settings: IngestSettings) -> list[CameraConfig]:
+    """The enabled cameras a settings tree declares: the inline list plus ``camera_db``.
+
+    A module function rather than only a method because the camera set is a *question about
+    configuration*, and two callers have to ask it without owning a manager: the CLI, which
+    places the configured fleet on whichever runner the operator chose
+    (``cli/commands/run.py``), and :class:`~shipinfer.runners.inprocess.InprocessRunner`,
+    which reads each camera's priority band out of it. Both used to reach for
+    :meth:`IngestManager.configured_cameras`, which meant building the very object whose
+    ``start()`` would run the fleet.
+
+    Resolved eagerly and validated before a single thread is started, so a mistyped database
+    is a start-up failure rather than fifty actors failing one at a time.
+
+    Raises:
+        ConfigurationError: a camera id is declared both inline and in the database. Silently
+            preferring one would give the fleet a camera nobody configured.
+    """
+    cameras = list(settings.cameras)
+    if settings.camera_db is not None:
+        cameras.extend(load_camera_db(settings.camera_db))
+    seen: set[str] = set()
+    for camera in cameras:
+        if camera.camera_id in seen:
+            raise ConfigurationError(
+                f"camera {camera.camera_id!r} is declared both inline and in "
+                f"{settings.camera_db}"
+            )
+        seen.add(camera.camera_id)
+    return [camera for camera in cameras if camera.enabled]
 
 
 class IngestManager:
@@ -71,21 +103,10 @@ class IngestManager:
     def configured_cameras(self) -> list[CameraConfig]:
         """The cameras :meth:`start` will run: the settings list plus ``camera_db``.
 
-        Resolved eagerly and validated before a single thread is started, so a mistyped
-        database is a start-up failure rather than fifty actors failing one at a time.
+        :func:`configured_cameras` over this manager's own settings; see it for why the
+        resolution is a function first and a method second.
         """
-        cameras = list(self.settings.cameras)
-        if self.settings.camera_db is not None:
-            cameras.extend(load_camera_db(self.settings.camera_db))
-        seen: set[str] = set()
-        for camera in cameras:
-            if camera.camera_id in seen:
-                raise ConfigurationError(
-                    f"camera {camera.camera_id!r} is declared both inline and in "
-                    f"{self.settings.camera_db}"
-                )
-            seen.add(camera.camera_id)
-        return [camera for camera in cameras if camera.enabled]
+        return configured_cameras(self.settings)
 
     def start(self) -> None:
         """Start an actor for every enabled camera. Idempotent."""

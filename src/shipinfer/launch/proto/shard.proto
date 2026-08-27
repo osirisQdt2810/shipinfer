@@ -113,6 +113,15 @@ message CameraSpec {
   string url = 2;
   // Target frame rate; 0 means "whatever the source delivers".
   double fps = 3;
+  // `replay` only: restart the file at EOF. Carried per camera because it is the one field
+  // that decides whether a camera ever ends, and the cameras that need it - the files given
+  // to `shipinfer run --inputs` - appear in no `ingest.cameras` list a shard could read.
+  //
+  // `optional` FOR FIELD PRESENCE, and this is the RemoveCameraRequest.timeout_s trap in the
+  // other direction: the default here is TRUE, and an unset proto3 bool is false, so without
+  // presence a client that never set the field would ask every shard to stop each camera at
+  // EOF. Unset therefore reads as `true`, which is what CameraConfig.loop defaults to.
+  optional bool loop = 4;
 }
 
 message AddCameraRequest {

@@ -26,6 +26,6 @@ being the standing example. That one registers with
 
 from __future__ import annotations
 
-from shipinfer.topology.elements import mock, pool
+from shipinfer.topology.elements import decode, mock, pool
 
-__all__ = ["mock", "pool"]
+__all__ = ["decode", "mock", "pool"]

@@ -48,9 +48,31 @@ class TestTheIdentityRoundTrips:
 
 class TestACameraRoundTrips:
     def test_every_field_survives(self) -> None:
-        camera = CameraSpec(camera_id="cam-17", url="rtsp://10.0.0.4/live", fps=19.5)
+        camera = CameraSpec(
+            camera_id="cam-17", url="rtsp://10.0.0.4/live", fps=19.5, loop=False
+        )
 
         assert CameraSpec.from_pb(camera.to_pb()) == camera
+
+    def test_a_camera_nobody_set_loop_on_still_loops(self) -> None:
+        """proto3's default for a bool is false and this field's default is TRUE.
+
+        Without ``optional`` on the wire the two are the same bytes, so a client that never
+        set the field — every client written before it existed — would be asking each shard
+        to stop its cameras at EOF, which for an RTSP fleet means one pass and silence.
+        """
+        message = CameraSpec(camera_id="cam-1", url="rtsp://x").to_pb()
+        message.ClearField("loop")
+
+        assert not message.HasField("loop")
+        assert CameraSpec.from_pb(message).loop is True
+
+    def test_no_loop_survives_the_wire_rather_than_reading_as_unset(self) -> None:
+        """The other half: a deliberate ``false`` must not be indistinguishable from silence."""
+        message = CameraSpec(camera_id="cam-1", url="clip.mp4", loop=False).to_pb()
+
+        assert message.HasField("loop")
+        assert CameraSpec.from_pb(message).loop is False
 
     def test_fifty_cameras_survive_as_a_set(self) -> None:
         """The deployment's sizing, not a round number: 50 cameras is the fleet (arch.md)."""
@@ -163,7 +185,7 @@ class TestTheMessagesMatchTheProto:
         ("message", "expected"),
         [
             (shard_pb2.ShardIdentity, {"shard_id", "control_port", "pid"}),
-            (shard_pb2.CameraSpec, {"camera_id", "url", "fps"}),
+            (shard_pb2.CameraSpec, {"camera_id", "url", "fps", "loop"}),
             (shard_pb2.AddCameraReply, {"accepted", "reason"}),
             (shard_pb2.StopReply, {"abandoned", "detail"}),
             (

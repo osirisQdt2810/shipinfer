@@ -179,7 +179,19 @@ ALLOWED_INTERNAL: dict[str, set[str]] = {
     # `Runner.add_camera` takes a `CameraSpec` from it. The direction is the load-bearing
     # part — `launch` may NOT import `runners`, so the servicer lives here and the client
     # lives there, and a launcher never pays for the executor it launches.
-    "runners": {"core", "topology", "scheduling", "launch"},
+    # `ingest` joined in B1, and it is the one grant here that comes with a runtime condition
+    # attached: a runner owns the camera actors (arch.md §5①), but `shipinfer.ingest` reaches
+    # a decode runtime and `shipinfer.runtime` through its source registry — and, through
+    # that, torch on any host where a device source is importable — so every import of it is
+    # INSIDE a method (`inprocess.py::_ingest`) with
+    # `TYPE_CHECKING` for the annotations. This checker cannot see that difference; it walks
+    # the AST and a function-scope import counts the same as a module-scope one. The half that
+    # can is `tests/test_architecture.py`, which imports `shipinfer.runners` in a subprocess
+    # and refuses the run if `shipinfer.ingest` came with it. Both are needed: this row grants
+    # the edge, that test costs it nothing. The direction is one-way as usual — `ingest` may
+    # NOT import `runners`; it publishes into the `FrameSink` protocol it owns and a runner
+    # supplies the implementation (ADR-011, `runners/frames.py`).
+    "runners": {"core", "topology", "scheduling", "launch", "ingest"},
     # `cli` is the composition root: `serve` builds an engine, `run` builds a runner over a
     # topology, `shard` builds all three and hands them to a servicer. It is the one layer
     # whose job is wiring the others together, so its row is everything — and it exists

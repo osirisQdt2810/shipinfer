@@ -116,11 +116,19 @@ class ShardIdentity:
 class CameraSpec:
     """One camera, as a launcher hands it to a shard.
 
-    Deliberately three fields and not
+    Deliberately four fields and not
     :class:`shipinfer.core.settings.ingest.CameraConfig`'s twenty. The rest of a camera's
     configuration — codec, transport, decode size, priority — is *deployment* settings, and a
     shard resolves them from the settings tree it loaded (CONVENTIONS 2.6). What only the
     launcher knows is which camera goes where, and that is this.
+
+    :attr:`loop` is the field that had to join them, and the argument for it is the one the
+    rest of the class makes in reverse: it is not a deployment default, because it decides
+    whether *this* camera ever ends. ``shipinfer run --inputs clip.mp4`` mints its cameras in
+    ``cli/commands/run.py`` and they appear in no ``ingest.cameras`` list, so before this
+    field there was no configuration anywhere that could make a file be processed once —
+    and a configured camera placed across a fleet would have lost the ``loop: false`` its
+    operator wrote, because a shard is told its cameras and not the file they came from.
     """
 
     camera_id: str
@@ -128,15 +136,29 @@ class CameraSpec:
     url: str
     #: Target frame rate; ``0.0`` means "whatever the source delivers".
     fps: float = 0.0
+    #: ``replay`` only: restart the file at EOF. ``True`` keeps a stress test running;
+    #: ``False`` makes a finite input finish, which is what ``--no-loop`` asks for.
+    loop: bool = True
 
     def to_pb(self) -> shard_pb2.CameraSpec:
         shard_pb2 = load_pb()
 
-        return shard_pb2.CameraSpec(camera_id=self.camera_id, url=self.url, fps=self.fps)
+        return shard_pb2.CameraSpec(
+            camera_id=self.camera_id, url=self.url, fps=self.fps, loop=self.loop
+        )
 
     @classmethod
     def from_pb(cls, message: shard_pb2.CameraSpec) -> CameraSpec:
-        return cls(camera_id=message.camera_id, url=message.url, fps=message.fps)
+        # `HasField`, because the wire default for a `bool` is false and this field's default
+        # is TRUE: read literally, a client that simply did not set it would ask every shard
+        # to stop each camera at EOF. `optional` in the .proto buys that presence back — the
+        # same trap `RemoveCameraRequest.timeout_s` documents, in the other direction.
+        return cls(
+            camera_id=message.camera_id,
+            url=message.url,
+            fps=message.fps,
+            loop=message.loop if message.HasField("loop") else True,
+        )
 
 
 @dataclass(frozen=True, slots=True)

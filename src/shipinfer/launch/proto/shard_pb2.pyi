@@ -51,14 +51,16 @@ class TopologyReply(_message.Message):
     def __init__(self, accepted: bool = ..., reason: _Optional[str] = ..., topology: _Optional[str] = ...) -> None: ...
 
 class CameraSpec(_message.Message):
-    __slots__ = ("camera_id", "url", "fps")
+    __slots__ = ("camera_id", "url", "fps", "loop")
     CAMERA_ID_FIELD_NUMBER: _ClassVar[int]
     URL_FIELD_NUMBER: _ClassVar[int]
     FPS_FIELD_NUMBER: _ClassVar[int]
+    LOOP_FIELD_NUMBER: _ClassVar[int]
     camera_id: str
     url: str
     fps: float
-    def __init__(self, camera_id: _Optional[str] = ..., url: _Optional[str] = ..., fps: _Optional[float] = ...) -> None: ...
+    loop: bool
+    def __init__(self, camera_id: _Optional[str] = ..., url: _Optional[str] = ..., fps: _Optional[float] = ..., loop: bool = ...) -> None: ...
 
 class AddCameraRequest(_message.Message):
     __slots__ = ("camera",)

@@ -60,6 +60,7 @@ def reports_env_json(path_for):
         "-c",
         "import json, os, sys; names = ['CUDA_VISIBLE_DEVICES', 'SHIPINFER_DEVICES__VISIBLE_GPUS',"
         " 'SHIPINFER_DEVICES__SHARED_BY', 'SHIPINFER_DEVICES__SHARE_RANK',"
+        " 'SHIPINFER_INGEST__CAMERAS', 'SHIPINFER_INGEST__CAMERA_DB',"
         " 'SHIPINFER_SHARD_CAMERAS', 'SHIPINFER_DEVICES__ALLOW_CPU_ONLY'];"
         " open(sys.argv[1], 'w').write(json.dumps({n: os.environ.get(n) for n in names}))",
         str(path_for(shard)),
@@ -359,10 +360,14 @@ class TestTheChildInheritsNothingTheControlPlaneOwns:
     def _spawn_and_read(self, tmp_path, monkeypatch, shards: int, gpus: tuple[int, ...]):
         import json
 
-        # The operator's compose file exports all four; no child may see any of them.
+        # The operator's compose file exports all six; no child may see any of them.
         monkeypatch.setenv("SHIPINFER_DEVICES__VISIBLE_GPUS", "[2, 3, 4, 5]")
         monkeypatch.setenv("SHIPINFER_DEVICES__SHARED_BY", "[1]")
         monkeypatch.setenv("SHIPINFER_DEVICES__SHARE_RANK", "[0]")
+        monkeypatch.setenv(
+            "SHIPINFER_INGEST__CAMERAS", '[{"camera_id": "cam-1", "uri": "rtsp://x/live"}]'
+        )
+        monkeypatch.setenv("SHIPINFER_INGEST__CAMERA_DB", "/etc/shipinfer/cameras.yaml")
         monkeypatch.setenv("SHIPINFER_SHARD_CAMERAS", "cam0,cam1")
         # And one that is an ordinary setting: a child SHOULD inherit this.
         monkeypatch.setenv("SHIPINFER_DEVICES__ALLOW_CPU_ONLY", "false")
@@ -392,19 +397,26 @@ class TestTheChildInheritsNothingTheControlPlaneOwns:
             "SHIPINFER_DEVICES__VISIBLE_GPUS",
             "SHIPINFER_DEVICES__SHARED_BY",
             "SHIPINFER_DEVICES__SHARE_RANK",
+            "SHIPINFER_INGEST__CAMERAS",
+            "SHIPINFER_INGEST__CAMERA_DB",
             "SHIPINFER_SHARD_CAMERAS",
         ],
     )
     def test_an_inherited_copy_is_removed(self, tmp_path, monkeypatch, name: str) -> None:
         """`UpdateTopology` carries the sharing now, and `AddCamera` the cameras. A stale copy
         of either is worse than none: the child would load the wrong instance count, or name
-        devices it cannot see, and report healthy doing it."""
+        devices it cannot see, and report healthy doing it.
+
+        The two `INGEST` names are the ones that cost the most to leave behind. `ServerSettings`
+        is env-only, so a child that inherits `SHIPINFER_INGEST__CAMERA_DB` reads the whole
+        fifty-camera fleet the operator configured for a single-process run -- on every shard,
+        each one tagging frames `(camera_id, frame_id)` from its own counter."""
         _plan, seen = self._spawn_and_read(tmp_path, monkeypatch, shards=2, gpus=(2, 3))
 
         assert [child[name] for child in seen.values()] == [None, None]
 
     def test_an_ordinary_setting_still_reaches_the_child(self, tmp_path, monkeypatch) -> None:
-        """The removal is four names, not a prefix: `devices.allow_cpu_only`,
+        """The removal is six names, not a prefix: `devices.allow_cpu_only`,
         `devices.numa_affinity` and `devices.validate_on_start` are an operator's to set for
         the whole deployment, and a shard that lost them would be configured differently from
         the process that launched it for no reason anybody chose."""
