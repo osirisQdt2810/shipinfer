@@ -1,16 +1,21 @@
-"""How the deployment is laid out into processes, and how work crosses between them.
+"""Which runner executes the chain, and the knobs of the ones that have any.
 
-The three-plane architecture (ADR-014 and the operator's target, ledger Phase 7) puts the
-stateful streaming work — decode, detect-local, track — in a process pinned to one GPU, and the
-stateless crop work behind a queue whichever free instance pulls from. *Where* those processes
-are and *how* a crop reaches an instance on another GPU is the **topology**, and it is a
-registry (`shipinfer.server.topology.TOPOLOGIES`) for the same reason a placement policy is:
-adding one is a new file and a decorator, never a branch.
+*What* runs is the **topology** — the declarative chain of elements, a YAML file loaded by
+:mod:`shipinfer.topology`. *How and where* it runs is the **runner** (arch.md section 1):
+``inprocess`` walks the whole chain on a pool of threads in this process, ``fleet`` spawns one
+shard process per GPU and drives them over gRPC, ``deepstream`` compiles the chain into a
+GStreamer graph. One chain definition, three executions, and this section is the switch —
+env-overridable like the rest of the tree (``SHIPINFER_RUNNER__RUNNER``).
 
-This section is the switch, env-overridable like the rest of the tree — ``SHIPINFER_TOPOLOGY__KIND``.
-The one per-child value that is *not* a setting — which cameras a shard reads — is declared in
-`shipinfer.envs` (``SHARD_CAMERAS``) with the other non-settings variables, so it has a typed
-parse and a `describe()` entry for ``shipinfer doctor``.
+The section used to be called ``topology`` and named the *placement* instead of the chain,
+which is the collision V129/V132 resolved: "topology" now always means the chain, and this
+file was renamed with the vocabulary (A2 PR-6).
+
+Nothing here validates the name against the registry, and that is deliberate: ``core`` imports
+no runner, so :func:`shipinfer.runners.build_runner` is the single door that resolves it —
+exactly as ``build_topology`` was for the classes this replaces. A typo is therefore a
+start-up refusal that lists the registered names, not an import of ``shipinfer.runners`` from
+inside the settings tree.
 """
 
 from __future__ import annotations
@@ -20,11 +25,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-__all__ = ["DeepStreamSettings", "ServiceSettings", "TopologySettings"]
+__all__ = ["DeepStreamSettings", "RunnerSettings", "ServiceSettings"]
 
 
 class ServiceSettings(BaseModel):
-    """`service`: the fleet plus a cross-process inference tier for the crop-stage models.
+    """The cross-process inference tier for the crop-stage models (ADR-015).
 
     Every shard keeps serving its own GPU's instances of the shared models *and* offers them to
     its peers through pinned shared-memory rings (`runtime/memory/shared_ring.py`). The
@@ -70,7 +75,7 @@ class ServiceSettings(BaseModel):
 
 
 class DeepStreamSettings(BaseModel):
-    """`deepstream`: one DeepStream GStreamer graph per shard instead of one server.
+    """`deepstream`: one DeepStream GStreamer graph per shard instead of one chain walk.
 
     The fourth topology (T4, V108 — a first-class pipeline implementation, not a competitor
     benchmark). A shard's child process is not ``shipinfer serve`` at all: it
@@ -212,25 +217,35 @@ class DeepStreamSettings(BaseModel):
         return self
 
 
-class TopologySettings(BaseModel):
-    """Which topology ``shipinfer fleet`` runs, and its knobs."""
+class RunnerSettings(BaseModel):
+    """Which runner executes the chain (arch.md section 1), and the knobs of each."""
 
     model_config = ConfigDict(extra="forbid")
 
-    #: A name registered in `shipinfer.server.topology.TOPOLOGIES`. ``fleet`` is one process
-    #: per shard with everything local to its GPU — static balance by the plan, the topology
-    #: the multi-process launcher shipped with. Validated against the registry when the
-    #: topology is built, not here: settings import no server code.
-    kind: str = "fleet"
-    #: How many processes to split the cameras across. ``None`` means one per visible GPU,
-    #: which is the process-per-GPU shape (ADR-006) and the right answer unless the operator
-    #: knows otherwise.
+    #: A name registered in `shipinfer.runners.RUNNERS` (until PR-6b lands the ``fleet`` runner
+    #: and ``shipinfer run``, the placement classes' ``build_topology`` is still the door that
+    #: reads this field). ``fleet`` is one shard process per
+    #: GPU, driven over the gRPC control plane — the production default (arch.md section 1);
+    #: ``inprocess`` is the whole chain on a thread pool here, which is what a laptop and the
+    #: offline tier run. Validated when the runner is *built*
+    #: (:func:`shipinfer.runners.build_runner`), never here: `core` imports no runner, so a
+    #: typo becomes a refusal that lists the registered names rather than an import cycle.
+    #:
+    #: The doubled spelling (``runner.runner``, ``SHIPINFER_RUNNER__RUNNER``) is deliberate:
+    #: the section is *the runner's* configuration and the field is *which* runner, and
+    #: `shipinfer run --runner` is the flag that overrides it.
+    runner: str = "fleet"
+    #: How many shard processes to split the cameras across. ``None`` means one per visible
+    #: GPU, which is the process-per-GPU shape (ADR-006) and the right answer unless the
+    #: operator knows otherwise. Read by `fleet`; meaningless to `inprocess`.
     shards: int | None = Field(default=None, ge=1)
     #: Seconds a shard gets after SIGTERM before SIGKILL.
     drain_s: float = Field(default=20.0, gt=0.0)
-    #: The `service` topology's knobs; unused by `fleet`.
+    #: The cross-process inference tier's knobs (ADR-015's rings, `engine/spill/`). Filed
+    #: here because this is where the launcher's per-child keys have always lived; it belongs
+    #: beside the spill transport and moves there with the DataPool in phase D.
     service: ServiceSettings = Field(default_factory=ServiceSettings)
-    #: The `deepstream` topology's knobs; unused by the other three.
+    #: The `deepstream` runner's knobs; unused by the other two.
     deepstream: DeepStreamSettings = Field(default_factory=DeepStreamSettings)
 
 
@@ -250,13 +265,13 @@ SHARED_BY_ENV = "SHIPINFER_DEVICES__SHARED_BY"
 #: The shard's rank among the processes sharing each device, aligned with the ordinals. The
 #: remainder of a count that does not divide evenly goes to the lowest ranks.
 SHARE_RANK_ENV = "SHIPINFER_DEVICES__SHARE_RANK"
-#: The `service` topology's per-child keys, settings-tree spellings (`topology.service.*`).
-SERVICE_SHARD_ENV = "SHIPINFER_TOPOLOGY__SERVICE__SHARD"
-SERVICE_PEERS_ENV = "SHIPINFER_TOPOLOGY__SERVICE__PEERS"
-SERVICE_RUN_ENV = "SHIPINFER_TOPOLOGY__SERVICE__RUN_ID"
-#: The `deepstream` topology's per-child keys (`topology.deepstream.*`). The run id and the
+#: The `service` tier's per-child keys, settings-tree spellings (`runner.service.*`).
+SERVICE_SHARD_ENV = "SHIPINFER_RUNNER__SERVICE__SHARD"
+SERVICE_PEERS_ENV = "SHIPINFER_RUNNER__SERVICE__PEERS"
+SERVICE_RUN_ENV = "SHIPINFER_RUNNER__SERVICE__RUN_ID"
+#: The `deepstream` runner's per-child keys (`runner.deepstream.*`). The run id and the
 #: config directory are fleet-wide; the shard index is per child. Same rule as `service`: the
 #: launcher sets them, an operator does not.
-DEEPSTREAM_RUN_ENV = "SHIPINFER_TOPOLOGY__DEEPSTREAM__RUN_ID"
-DEEPSTREAM_SHARD_ENV = "SHIPINFER_TOPOLOGY__DEEPSTREAM__SHARD"
-DEEPSTREAM_CONFIG_DIR_ENV = "SHIPINFER_TOPOLOGY__DEEPSTREAM__CONFIG_DIR"
+DEEPSTREAM_RUN_ENV = "SHIPINFER_RUNNER__DEEPSTREAM__RUN_ID"
+DEEPSTREAM_SHARD_ENV = "SHIPINFER_RUNNER__DEEPSTREAM__SHARD"
+DEEPSTREAM_CONFIG_DIR_ENV = "SHIPINFER_RUNNER__DEEPSTREAM__CONFIG_DIR"

@@ -40,8 +40,7 @@ from shipinfer.core.errors.ingest import (
     SourceOpenError,
     SourceUnavailableError,
 )
-from shipinfer.core.errors.sink import SinkDeliveryError
-from shipinfer.core.errors.topology import (
+from shipinfer.core.errors.launch import (
     PeerLostError,
     RingClosedError,
     RingFullError,
@@ -49,6 +48,7 @@ from shipinfer.core.errors.topology import (
     ShardExitedError,
     WireRefusedError,
 )
+from shipinfer.core.errors.sink import SinkDeliveryError
 from shipinfer.core.errors.tracking import TrackingError
 
 __all__ = [

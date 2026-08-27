@@ -17,7 +17,7 @@ import pytest
 
 from shipinfer.cli.common import build_settings
 from shipinfer.core.errors import ConfigurationError
-from shipinfer.core.settings.topology import SHARE_RANK_ENV, SHARED_BY_ENV
+from shipinfer.core.settings.runner import SHARE_RANK_ENV, SHARED_BY_ENV
 from shipinfer.envs import SHARD_CAMERAS, describe
 
 FLEET = [

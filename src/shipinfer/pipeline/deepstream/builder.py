@@ -32,7 +32,7 @@ from typing import Any
 from shipinfer.core.errors import ConfigurationError, SourceUnavailableError
 from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.settings import CameraConfig, IngestSettings
-from shipinfer.core.settings.topology import DeepStreamSettings
+from shipinfer.core.settings.runner import DeepStreamSettings
 from shipinfer.pipeline.deepstream.configs import GeneratedConfigs, source_uri
 
 __all__ = ["Branch", "build_branch", "make"]

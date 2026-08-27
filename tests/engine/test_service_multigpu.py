@@ -149,12 +149,12 @@ class TestTwoShardsShareTheEmbedder:
             **topology.environment(settings),
             "SHIPINFER_INGEST__CAMERAS": json.dumps(CAMERAS),
             # The children read their configuration from the environment, as every shard does.
-            "SHIPINFER_TOPOLOGY__SERVICE__SHARED_MODELS": json.dumps(["emb"]),
-            "SHIPINFER_TOPOLOGY__SERVICE__HEARTBEAT_MS": "50",
+            "SHIPINFER_RUNNER__SERVICE__SHARED_MODELS": json.dumps(["emb"]),
+            "SHIPINFER_RUNNER__SERVICE__HEARTBEAT_MS": "50",
             # Small rings: the payload is four floats, and a container's /dev/shm is 64 MiB by default.
-            "SHIPINFER_TOPOLOGY__SERVICE__SLOTS_PER_PAIR": "4",
-            "SHIPINFER_TOPOLOGY__SERVICE__SLOT_BYTES": str(256 * 1024),
-            "SHIPINFER_TOPOLOGY__SERVICE__CONNECT_TIMEOUT_S": str(READY_TIMEOUT_S),
+            "SHIPINFER_RUNNER__SERVICE__SLOTS_PER_PAIR": "4",
+            "SHIPINFER_RUNNER__SERVICE__SLOT_BYTES": str(256 * 1024),
+            "SHIPINFER_RUNNER__SERVICE__CONNECT_TIMEOUT_S": str(READY_TIMEOUT_S),
             "SHIPINFER_SCHEDULER__PLACEMENT_POLICY": "locality_spillover",
             "SHIPINFER_SCHEDULER__PLACEMENT_POLICY_OPTIONS": json.dumps({"spill_threshold": 2}),
         }

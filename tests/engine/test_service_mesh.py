@@ -14,7 +14,7 @@ import pytest
 from shipinfer.core.errors import ConfigurationError, RingClosedError
 from shipinfer.core.request import InferenceRequest, InferenceResponse, RequestContext
 from shipinfer.core.request.future import ResponseFuture
-from shipinfer.core.settings.topology import ServiceSettings
+from shipinfer.core.settings.runner import ServiceSettings
 from shipinfer.core.types import Device, Tensor
 from shipinfer.engine.spill.mesh import ServiceMesh, ring_name
 from shipinfer.scheduling.dispatcher import Dispatcher

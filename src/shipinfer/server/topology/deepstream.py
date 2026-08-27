@@ -11,7 +11,7 @@ from typing import ClassVar
 
 from shipinfer.core.errors import ConfigurationError, ModelNotFoundError
 from shipinfer.core.settings import ServerSettings
-from shipinfer.core.settings.topology import (
+from shipinfer.core.settings.runner import (
     DEEPSTREAM_CONFIG_DIR_ENV,
     DEEPSTREAM_RUN_ENV,
     DEEPSTREAM_SHARD_ENV,
@@ -108,7 +108,7 @@ class DeepStreamTopology(Topology):
             from shipinfer.repository import ModelRepository
 
             repository = ModelRepository.load(settings.model_repository)
-            name = settings.topology.deepstream.detector
+            name = settings.runner.deepstream.detector
             return int(repository.entry(name).config.max_batch_size)
         except (ModelNotFoundError, OSError):
             # Only the other stated case — a repository directory without the configured
@@ -170,7 +170,7 @@ class DeepStreamTopology(Topology):
         repository, which is scanned as a repository and refuses stray config files in a model
         directory outright.
         """
-        configured = settings.topology.deepstream.config_dir
+        configured = settings.runner.deepstream.config_dir
         if configured is not None:
             return Path(configured)
         return Path(tempfile.gettempdir()) / f"shipinfer-ds-{self._run_id}"

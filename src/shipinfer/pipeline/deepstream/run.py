@@ -95,7 +95,7 @@ class MetadataProbe:
         self._sink = sink
         self._metrics = metrics
         self._settings = settings
-        self._deepstream = settings.topology.deepstream
+        self._deepstream = settings.runner.deepstream
         self._camera_by_pad = camera_by_pad
         self._cameras = cameras
         self._missing_stages = missing_stages
@@ -203,7 +203,7 @@ class DeepStreamPipeline:
         sink: where events go. ``None`` builds the one ``pipeline.result_sink`` names, which is
             how a deployment configures it; injected in tests and in a harness.
         config_root: where the generated nvinfer files are written. ``None`` takes
-            ``topology.deepstream.config_dir`` (which the launcher sets for every child), and
+            ``runner.deepstream.config_dir`` (which the launcher sets for every child), and
             failing that a per-run directory under ``$TMPDIR``.
     """
 
@@ -215,7 +215,7 @@ class DeepStreamPipeline:
         config_root: Path | None = None,
     ) -> None:
         self._settings = settings
-        self._deepstream = settings.topology.deepstream
+        self._deepstream = settings.runner.deepstream
         self._cameras = [c for c in settings.ingest.cameras if c.enabled]
         if not self._cameras:
             raise ConfigurationError(
