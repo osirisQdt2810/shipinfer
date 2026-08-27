@@ -30,8 +30,20 @@ FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
         "fastapi",
         "uvicorn",
         "confluent_kafka",
+        "grpc",
+        "google",
     },
-    "scheduling": {"torch", "tensorrt", "onnxruntime", "cuda", "cv2", "fastapi", "uvicorn"},
+    "scheduling": {
+        "torch",
+        "tensorrt",
+        "onnxruntime",
+        "cuda",
+        "cv2",
+        "fastapi",
+        "uvicorn",
+        "grpc",
+        "google",
+    },
     # `topology` is the Element ABC, the caps and the chain loader (arch.md §1). It is pure
     # for a reason that bites daily: `Topology.from_spec` instantiates every element in the
     # chain to read its declared caps, so a chain file has to be *validatable* on a host
@@ -50,22 +62,33 @@ FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
         "fastapi",
         "uvicorn",
         "confluent_kafka",
+        "grpc",
+        "google",
     },
-    "repository": {"torch", "tensorrt", "onnxruntime", "cuda", "fastapi", "uvicorn"},
-    "runtime": {"fastapi", "uvicorn", "confluent_kafka"},
-    "backends": {"fastapi", "uvicorn", "confluent_kafka"},
+    "repository": {
+        "torch",
+        "tensorrt",
+        "onnxruntime",
+        "cuda",
+        "fastapi",
+        "uvicorn",
+        "grpc",
+        "google",
+    },
+    "runtime": {"fastapi", "uvicorn", "confluent_kafka", "grpc", "google"},
+    "backends": {"fastapi", "uvicorn", "confluent_kafka", "grpc", "google"},
     # The engine is the model pool (arch.md §6) and the KServe endpoint is a *side-door* into
     # it, not part of it: the HTTP layer lives in `api/`. Naming fastapi here would put a web
     # framework behind `shipinfer.engine`, which is the import an in-process caller — a runner
     # walking a chain — must not pay for.
-    "engine": {"fastapi", "uvicorn", "confluent_kafka"},
+    "engine": {"fastapi", "uvicorn", "confluent_kafka", "grpc", "google"},
     # `api` is the KServe surface (arch.md §6): the engine's side-door for callers who bring
     # their own tensors. It is the one layer whose row *omits* fastapi and uvicorn — every
     # other row below and above it names them, so a web framework can enter this codebase at
     # exactly one seam and `import shipinfer.<anything else>` never pays for one. It keeps
     # `confluent_kafka` from the engine's row: publishing results is a `pipeline` sink's job,
     # and an HTTP handler that reached for a broker would be doing dispatch.
-    "api": {"confluent_kafka"},
+    "api": {"confluent_kafka", "grpc", "google"},
     # `launch` is the only layer that bans **torch**, and it is not a purity argument. The
     # whole reason a shard is a subprocess is that `CUDA_VISIBLE_DEVICES` has to be in the
     # child's environment before its interpreter imports torch (`launch/supervisor.py`); the
@@ -73,25 +96,33 @@ FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
     # in the deployment holds a CUDA context on every device it can see. `tensorrt` rides along
     # for the same reason, and the rest is `server`'s row: a launcher serves no HTTP and
     # publishes to no broker.
+    #
+    # `grpc` and `google` are absent from this row, and from `runners`' (minus `google`), and
+    # present in every other: the control plane enters this codebase at exactly two seams —
+    # the client here and the servicer in `runners/service.py` — the same way fastapi enters
+    # only at `api/`. Both extras are optional, so the rule is not just tidiness: an import
+    # that drifted into `engine` or `core` would make `import shipinfer` fail on a host that
+    # never installed grpcio. Note that neither seam names them at module scope either; the
+    # runtime half of that promise is in `tests/test_architecture.py`.
     "launch": {"torch", "tensorrt", "fastapi", "uvicorn", "confluent_kafka"},
     # `server` is what the split has not carried off yet — the argv-rendering half of the
     # launcher and the topology-as-placement classes (both leave in A2 PR-6; supervision left
     # in PR-4). It held the only fastapi import in the tree until `server/api/` became `api/`;
     # this row is what stops it growing a second one on the way out.
-    "server": {"fastapi", "uvicorn", "confluent_kafka"},
+    "server": {"fastapi", "uvicorn", "confluent_kafka", "grpc", "google"},
     # The three layers left without a ban, banned: an output sink pushes, a camera actor
     # pulls, and the CLI calls `serve_http` rather than building an app itself. Rows rather
     # than trust — "fastapi enters at `api/` and nowhere else" is worth being a statement this
     # script can check, and with these every layer on disk has a row.
-    "pipeline": {"fastapi", "uvicorn"},
-    "ingest": {"fastapi", "uvicorn"},
-    "cli": {"fastapi", "uvicorn"},
+    "pipeline": {"fastapi", "uvicorn", "grpc", "google"},
+    "ingest": {"fastapi", "uvicorn", "grpc", "google"},
+    "cli": {"fastapi", "uvicorn", "grpc", "google"},
     # A runner is the third of arch.md's three concepts (§1) and it is *scheduling* code: it
     # owns admission, placement and the walk, and it reaches the accelerator only through the
     # engine it is handed. Naming torch here would be wrong — the `fleet` runner will bind its
     # shard's device through `runtime` — but a web framework and a Kafka client never belong
     # behind a runner: an output *element* serialises, and it lives in `topology/elements/`.
-    "runners": {"fastapi", "uvicorn", "confluent_kafka"},
+    "runners": {"fastapi", "uvicorn", "confluent_kafka", "google"},
 }
 
 #: Top-level modules that are not layers, and may therefore be imported by any layer
@@ -144,7 +175,12 @@ ALLOWED_INTERNAL: dict[str, set[str]] = {
     # checks nothing. It must also NOT be imported *by* `topology`: an element receives its
     # runner's decisions through `ElementContext` and never reaches for them, which is what
     # keeps `topology` importable with no driver.
-    "runners": {"core", "topology", "scheduling"},
+    # `launch` joined in A2 PR-5, for `launch/control.py` alone: `runners/service.py` is the
+    # shard's half of the control plane and answers in the launcher's vocabulary, and
+    # `Runner.add_camera` takes a `CameraSpec` from it. The direction is the load-bearing
+    # part — `launch` may NOT import `runners`, so the servicer lives here and the client
+    # lives there, and a launcher never pays for the executor it launches.
+    "runners": {"core", "topology", "scheduling", "launch"},
     "server": {"core", "repository", "scheduling", "engine"},
     "pipeline": {"core", "repository", "runtime", "backends", "scheduling", "engine"},
     # `ingest` does NOT depend on `scheduling`: it publishes into the `FrameSink` protocol
