@@ -140,15 +140,21 @@ class _ShardProcess:
     ) -> Runner:
         """The :data:`~shipinfer.runners.service.RunnerFactory` this shard hands its servicer.
 
-        Called once, from inside ``UpdateTopology``, with the chain the launcher sent. The
-        order is load-bearing: the sharing goes into the settings **before** the engine is
-        built, because the engine decides how many instances of each model to load while it
-        starts and cannot be told afterwards.
+        Called from inside ``UpdateTopology``, with the chain the launcher sent. The order is
+        load-bearing: the sharing goes into the settings **before** the engine is built,
+        because the engine decides how many instances of each model to load while it starts
+        and cannot be told afterwards.
+
+        Called *again* after a start the servicer refused, which is why it releases first: a
+        second engine assigned over the first would leave the first one's CUDA context held by
+        nothing that can ever stop it (CLAUDE.md's GPU hygiene rule - this box is shared).
+        :meth:`release` is idempotent and safe when nothing was ever built.
         """
         from shipinfer.engine import InferenceServer
         from shipinfer.runners import build_runner
         from shipinfer.topology import Topology
 
+        self.release()
         settings = apply_sharing(self._settings, shared_by, share_rank)
         topology = Topology.from_spec(spec)
         engine = InferenceServer(settings).start()
@@ -183,7 +189,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         makes a launcher that renders the wrong argv fail loudly on the first shard rather
         than quietly on all of them.
     """
-    from shipinfer.launch.control import ShardState
     from shipinfer.runners.service import serve_shard
     from shipinfer.runtime.containment import require_container
 
@@ -212,7 +217,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # until the launcher's SIGTERM arrived, which is exactly the leak the fleet's
         # shared-deadline stop exists to avoid.
         while not shard.wait_for_termination(1.0):
-            if shard.service.state() == ShardState.STOPPED:
+            # `service.stopped`, not `service.state()`: the flag is the whole question here,
+            # and `state()` with no snapshot in hand takes one - a full `runner.health()`
+            # across every element, once a second, to answer a boolean.
+            if shard.service.stopped:
                 break
     except KeyboardInterrupt:  # pragma: no cover - the operator's Ctrl-C on a hand-run shard
         _LOG.info("shard %d interrupted", args.shard_id)

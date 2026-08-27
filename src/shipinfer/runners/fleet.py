@@ -110,10 +110,16 @@ class FleetRunner(Runner):
     LOCKING. :attr:`_lock` guards the two maps this class owns — the clients and the
     placements — and is **never held across an RPC**. A camera is placed by reserving it under
     the lock, asking the shard with the lock released, and committing (or releasing the
-    reservation) under it again. That is not decoration: ``AddCamera`` starts a decoder and
-    can take seconds on an RTSP source that is not answering, and a ``health`` probe that
-    waited behind it would make the one call an operator reaches for during an incident the
-    one call that hangs.
+    reservation) under it again. That is not decoration, and the reason is the *call* rather
+    than the peer: every RPC here is a network call with a deadline in seconds, and a shard
+    that is wedged, paging in an engine or unreachable takes all of it however quick its
+    handler would have been. A ``health`` probe that waited behind one would make the call an
+    operator reaches for during an incident the one call that hangs.
+
+    Every check that a shard exists is read under that same lock, for the same reason a
+    placement is: :meth:`_release` empties the client map while a stop is in flight, and a
+    guard that ran beside the lock rather than inside it handed the next line an ``IndexError``
+    where the caller was promised a typed refusal.
     """
 
     name: ClassVar[str] = "fleet"
@@ -386,9 +392,19 @@ class FleetRunner(Runner):
             ShardExitedError: a shard exited. The fleet is stopped before it is raised.
         """
         self._require_running()
-        assert self._fleet is not None  # _require_running checked the clients, which imply it
+        fleet = self._fleet
+        if fleet is None:
+            # Typed rather than asserted: `assert` vanishes under `python -O`, and what the
+            # next line would raise there is `AttributeError: 'NoneType' has no attribute
+            # 'supervise'` - on the one call whose job is to tell an operator what state the
+            # deployment is in. Reachable only through a stop that landed between the check
+            # above and this line, which is the same race the locked guard covers.
+            raise ServerStateError(
+                "the fleet's processes were released between the check and this call (a "
+                "concurrent stop); there is nothing left to supervise"
+            )
         stop = self._stop_requested.is_set
-        self._fleet.supervise(
+        fleet.supervise(
             poll_s=poll_s,
             until=stop if until is None else (lambda: stop() or until()),
         )
@@ -424,21 +440,24 @@ class FleetRunner(Runner):
         then the message carries what each of them said.
 
         RESERVE, ASK, COMMIT. :attr:`_lock` is taken three times for microseconds each and
-        never across the ``AddCamera`` itself. That call starts a decoder on the shard and can
-        sit for seconds on an RTSP source that is not answering; holding the lock across it
-        would block :meth:`health` and :meth:`stats` for exactly as long, which is to say it
-        would hang the one call an operator makes while wondering why a camera is dark. The
-        reservation is what keeps the placement honest in the meantime: the camera is in
-        :attr:`_placed` from the moment a shard is chosen, so a second placement counts it and
-        picks a different shard, and it is in :attr:`_pending` until the shard says yes, so
-        :meth:`health` reports "being placed" rather than "placed".
+        never across the ``AddCamera`` itself - the rule is *never hold a lock across an RPC*,
+        and it does not depend on how quick the servicer is. ``ShardService.AddCamera`` is in
+        fact short (``IngestManager.add_camera`` starts the camera's actor thread and returns
+        without waiting on the RTSP open), but a shard that is paging in an engine, wedged
+        behind a ``Stop`` or simply unreachable takes the whole deadline anyway - and holding
+        the lock across it would block :meth:`health` and :meth:`stats` for exactly as long,
+        which is to say it would hang the one call an operator makes while wondering why a
+        camera is dark. The reservation is what keeps the placement honest in the meantime:
+        the camera is in :attr:`_placed` from the moment a shard is chosen, so a second
+        placement counts it and picks a different shard, and it is in :attr:`_pending` until
+        the shard says yes, so :meth:`health` reports "being placed" rather than "placed".
 
         Raises:
-            ServerStateError: the fleet is not running.
+            ServerStateError: the fleet is not running, or was stopped mid-placement.
             ConfigurationError: the camera is already placed, or no shard would take it.
         """
-        self._require_running()
         with self._lock:
+            self._check_running()
             if camera.camera_id in self._placed:
                 raise ConfigurationError(
                     f"camera {camera.camera_id!r} is already on shard "
@@ -451,8 +470,16 @@ class FleetRunner(Runner):
         try:
             for shard_id in order:
                 with self._lock:
+                    # Re-checked every time the lock comes back, because the lock was down
+                    # for the whole of the last shard's RPC: a `stop()` in that window has
+                    # emptied the client map, and this used to be a `KeyError` on the next
+                    # line where the caller was promised a `ServerStateError`.
+                    self._check_running()
+                    client = self._clients.get(shard_id)
+                    if client is None:
+                        refusals.append(f"shard {shard_id}: no longer connected")
+                        continue
                     self._placed[camera.camera_id] = shard_id
-                    client = self._clients[shard_id]
                 result = client.add_camera(camera)
                 with self._lock:
                     if result.accepted:
@@ -493,10 +520,14 @@ class FleetRunner(Runner):
             Whether the camera's thread stopped within the deadline.
 
         Raises:
+            ServerStateError: the fleet is not running.
             ConfigurationError: no shard holds this camera.
         """
-        self._require_running()
         with self._lock:
+            # Inside the lock, like the placement it undoes: `_release()` empties the client
+            # map without emptying `_placed`, so a check that ran beside the lock left this
+            # method holding a shard id whose channel was gone - a `KeyError` two lines down.
+            self._check_running()
             shard_id = self._placed.get(camera_id)
             if shard_id is None or camera_id in self._pending:
                 raise ConfigurationError(
@@ -648,6 +679,16 @@ class FleetRunner(Runner):
         return sorted(counts, key=lambda shard_id: (counts[shard_id], shard_id))
 
     def _require_running(self) -> None:
+        """Refuse, typed, unless this fleet has shards to talk to. Takes :attr:`_lock`."""
+        with self._lock:
+            self._check_running()
+
+    def _check_running(self) -> None:
+        """The same refusal for a caller that already holds :attr:`_lock`.
+
+        One sentence, two entry points, so the guard a camera method takes under the lock and
+        the one a read-only method takes on its own cannot word the same refusal apart.
+        """
         if not self.is_running or not self._clients:
             raise ServerStateError(
                 f"the fleet is not running; call start() before managing cameras "

@@ -212,6 +212,37 @@ class TestTheStateIsDerivedNotRemembered:
         assert reply.state == ShardState.STARTING
 
 
+class TestTheShutdownPollReadsAFlag:
+    """``cli/shard.py`` polls once a second, only to learn whether it may exit and give its
+    CUDA context back. ``state()`` answers the same question and takes a full
+    ``runner.health()`` to do it - every element walked, the ingest manager snapshotted - for
+    every second the shard is alive."""
+
+    def test_stopped_costs_no_snapshot_and_state_costs_one(self) -> None:
+        runner = FakeRunner(chain())
+        svc = service(runner)
+        install(svc)
+        before = runner.health_calls
+
+        assert svc.stopped is False
+        assert runner.health_calls == before, "the poll took a health snapshot"
+
+        assert svc.state() == ShardState.READY
+        assert runner.health_calls == before + 1, "the expensive path stopped being expensive"
+
+    def test_it_answers_what_state_answers(self) -> None:
+        """Same meaning, so the cheaper read is a substitution and not a second opinion."""
+        runner = FakeRunner(chain())
+        svc = service(runner)
+        install(svc)
+
+        assert svc.stopped is (svc.state() == ShardState.STOPPED) is False
+
+        svc.Stop(pb.StopRequest(timeout_s=0.1))
+
+        assert svc.stopped is (svc.state() == ShardState.STOPPED) is True
+
+
 class TestHealthAsksTheRunnerExactlyOnce:
     """Two snapshots are two different moments, and a reply must be one moment.
 
@@ -954,6 +985,50 @@ class TestAShardThatIsToldWhatToRun:
         assert reply.accepted is False
         assert "ship_detector" in reply.reason
         assert svc.runner is None, "a failed build must not leave half a runner behind"
+
+    def test_a_start_that_failed_sends_the_retry_back_through_the_factory(self) -> None:
+        """Otherwise the retry records the NEW sharing over an engine built with the OLD one.
+
+        `shared_by` is the number that decides whether two shards on one GPU load two
+        instances each or four, so a shard that skipped the factory would report a sharing it
+        is not running - and `UpdateTopology` is the one RPC a launcher would retry.
+        """
+        built: list[tuple[int, ...]] = []
+
+        def build(spec: Any, shared: Any, rank: Any) -> Runner:
+            built.append(tuple(shared))
+            runner = FakeRunner(chain())
+            if len(built) == 1:
+                runner.start_error = RuntimeError("the decode element could not open")
+            return runner
+
+        svc = self._service(build)
+
+        first = install(svc, shared_by=[4], share_rank=[3])
+
+        assert first.accepted is False and "could not open" in first.reason
+        assert svc.runner is None, "a runner that could not start was left assigned"
+
+        second = install(svc, shared_by=[2], share_rank=[1])
+
+        assert second.accepted is True
+        assert built == [(4,), (2,)], "the retry skipped the factory"
+        assert svc.shared_by == (2,) and svc.share_rank == (1,)
+        assert svc.runner is not None and svc.runner.is_running
+
+    def test_a_runner_handed_in_at_construction_is_kept_across_a_failed_start(self) -> None:
+        """The other side of the same coin: this servicer has no factory, so dropping its one
+        runner would leave a shard answering `starting` forever with nothing to rebuild."""
+        runner = FakeRunner(chain())
+        runner.start_error = RuntimeError("the decode element could not open")
+        svc = service(runner)
+
+        assert install(svc).accepted is False
+        assert svc.runner is runner
+
+        runner.start_error = None
+
+        assert install(svc).accepted is True
 
     def test_a_chain_that_does_not_parse_never_reaches_the_factory(self) -> None:
         """The refusal that earns the RPC its keep: a mistyped chain fails the deploy."""

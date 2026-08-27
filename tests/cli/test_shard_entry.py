@@ -280,6 +280,23 @@ class TestTheHopThatActuallyCarriesTheSharing:
 
         assert seen["engine_settings"] is settings
 
+    def test_a_second_build_gives_the_first_engine_back_before_making_another(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`UpdateTopology` calls this again after a start it refused (``runners/service.py``
+        drops the runner so the retry rebuilds it). Assigning a second engine over the first
+        would leave the first one's CUDA context held by nothing that can ever stop it."""
+        process, seen = self._process(monkeypatch)
+
+        process.build(ChainSpec.from_yaml(CHAIN), (2,), (1,))
+        first = seen["engine"]
+
+        process.build(ChainSpec.from_yaml(CHAIN), (2,), (1,))
+
+        assert seen["engine"] is not first, "the second build reused the recorder"
+        assert first.stopped == 1, "the first engine was orphaned with its context held"
+        assert seen["engine"].stopped == 0
+
     def test_a_runner_that_cannot_be_built_gives_the_gpu_back(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -652,6 +652,98 @@ class TestTheLockIsNeverHeldAcrossAnRpc:
         assert runner.health()["cameras"] == {}
 
 
+class _HookedLock:
+    """A lock that runs a callback the first time it is taken.
+
+    The window N2 is about - between a guard read outside the lock and the lock that follows
+    it - is microseconds wide, so it is *provoked* rather than waited for. The callback (a
+    concurrent ``stop()``) runs before the lock is acquired, which is exactly where a real
+    stop would have landed, and every later acquisition is the plain lock again.
+    """
+
+    def __init__(self, inner: Any, once: Any) -> None:
+        self._inner = inner
+        self._once = once
+
+    def __enter__(self) -> Any:
+        once, self._once = self._once, None
+        if once is not None:
+            once()
+        return self._inner.__enter__()
+
+    def __exit__(self, *exc: Any) -> Any:
+        return self._inner.__exit__(*exc)
+
+
+class TestAStopRacingACameraCallIsATypedRefusal:
+    """`stop()` empties the client map. A guard that ran beside the lock rather than inside it
+    let the next line index that empty map, so the caller got an `IndexError`/`KeyError` where
+    the docstring promised a `ServerStateError` - the difference between "the fleet is down,
+    place this elsewhere" and a traceback a supervisor cannot classify."""
+
+    def test_a_stop_during_an_add_camera_rpc_refuses_the_next_shard_typed(
+        self, runner, clients
+    ) -> None:
+        """The real race: the lock is down for the whole of shard 0's RPC, and the stop lands
+        in that window. Shard 0 refuses, so the loop comes back for the lock - and the map it
+        used to index is empty."""
+        import threading
+
+        entered = threading.Event()
+        released = threading.Event()
+        raised: list[BaseException] = []
+
+        def blocking(camera: CameraSpec, **_: Any) -> AddCameraResult:
+            entered.set()
+            assert released.wait(10.0), "the test never released the fake shard"
+            return AddCameraResult(accepted=False, reason="draining")
+
+        def add() -> None:
+            try:
+                runner.add_camera(CameraSpec(camera_id="quay-1", url="rtsp://host"))
+            # Caught broadly on purpose: which type comes out is the whole assertion.
+            except BaseException as exc:
+                raised.append(exc)
+
+        runner.start()
+        clients[0].add_camera = blocking  # type: ignore[method-assign]
+        adding = threading.Thread(target=add)
+        adding.start()
+        try:
+            assert entered.wait(5.0), "the add never reached the shard"
+            runner.stop(timeout_s=5.0)
+        finally:
+            released.set()
+            adding.join(timeout=10.0)
+
+        assert raised, "the add returned as if the camera had been placed"
+        assert isinstance(raised[0], ServerStateError), f"got {raised[0]!r}"
+        assert "not running" in str(raised[0])
+
+    def test_a_stop_between_the_guard_and_the_lock_is_still_typed_on_remove(
+        self, runner, clients
+    ) -> None:
+        """`_release()` empties the client map without emptying the placements, so this is the
+        one where the old guard handed the next line a `KeyError`."""
+        runner.start()
+        runner.add_camera(CameraSpec(camera_id="quay-1", url="rtsp://host"))
+        runner._lock = _HookedLock(runner._lock, lambda: runner.stop(timeout_s=5.0))
+
+        with pytest.raises(ServerStateError, match="not running"):
+            runner.remove_camera("quay-1")
+
+    def test_a_stop_between_the_guard_and_the_lock_is_still_typed_on_add(
+        self, runner, clients
+    ) -> None:
+        """The same window on the placement side: `_by_load()` over an empty map returns an
+        empty order, and `order[0]` was an `IndexError`."""
+        runner.start()
+        runner._lock = _HookedLock(runner._lock, lambda: runner.stop(timeout_s=5.0))
+
+        with pytest.raises(ServerStateError, match="not running"):
+            runner.add_camera(CameraSpec(camera_id="quay-1", url="rtsp://host"))
+
+
 class TestStoppingCostsWhatItCosts:
     def test_every_shard_is_stopped_and_its_channel_closed(self, runner, clients) -> None:
         runner.start()
@@ -785,6 +877,18 @@ class TestSupervisingTheShards:
 
     def test_supervising_a_fleet_that_is_not_running_is_a_typed_refusal(self, runner) -> None:
         with pytest.raises(ServerStateError, match="not running"):
+            runner.supervise()
+
+    def test_a_fleet_released_under_the_guard_refuses_typed_and_not_by_assertion(
+        self, runner, clients
+    ) -> None:
+        """This used to be `assert self._fleet is not None`, which vanishes under `python -O`
+        and leaves an `AttributeError` on `None` in its place - on the one call whose job is
+        to tell an operator what state the deployment is in."""
+        runner.start()
+        runner._fleet = None  # what a stop that landed under the guard leaves behind
+
+        with pytest.raises(ServerStateError, match="nothing left to supervise"):
             runner.supervise()
 
 

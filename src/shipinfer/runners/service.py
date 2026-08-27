@@ -182,6 +182,20 @@ class ShardService:
         """This shard's rank among the processes sharing each device."""
         return self._share_rank
 
+    @property
+    def stopped(self) -> bool:
+        """Whether ``Stop`` has been accepted. The cheap read a shutdown poll needs.
+
+        Identical in *meaning* to ``state() == ShardState.STOPPED`` - :meth:`_lifecycle`
+        checks the same flag first and nothing overrides it - and not in *cost*: ``state()``
+        with no snapshot in hand falls through to :meth:`Runner.health`, which walks every
+        element of the chain and snapshots the ingest manager. The process entry point
+        (``cli/shard.py``) asks once a second, only to learn whether it may exit and give its
+        CUDA context back, and a full health report per second is not what that answer is
+        worth.
+        """
+        return self._stopped
+
     def state(self, report: dict[str, Any] | None = None) -> ShardState:
         """The shard's state, derived from the runner rather than remembered.
 
@@ -274,7 +288,9 @@ class ShardService:
         On acceptance the sharing lists are recorded (see :attr:`shared_by`) and the runner
         is started — installing a topology is precisely what makes a shard usable, and a
         parent that had to send a separate "now go" RPC would have a two-step handshake with
-        a failure state in the middle.
+        a failure state in the middle. On a *refused* start the runner this call built is
+        dropped again (:meth:`_discard_runner`), so a retry goes back through the factory with
+        the sharing that retry carries rather than recording new numbers over an old engine.
 
         **This call is slow, and the caller must budget for it.** Building the runner is
         where a shard loads its models and deserialises its engines: tens of seconds on a
@@ -298,12 +314,14 @@ class ShardService:
                         f"{self._runner.topology.name!r}; stop it before installing another"
                     ),
                 )
+            built_here = False
             if self._runner is None:
                 assert self._build is not None  # __init__ refuses without one
                 try:
                     self._runner = self._build(
                         spec, tuple(request.shared_by), tuple(request.share_rank)
                     )
+                    built_here = True
                 # Same rule as the start below: the launcher has to be told which shard
                 # could not be built and why, as data rather than as an UNKNOWN status.
                 except Exception as exc:
@@ -328,6 +346,8 @@ class ShardService:
             # which shard could not open its chain, and told it as data.
             except Exception as exc:
                 _LOG.exception("shard %d could not start", self._identity.shard_id)
+                if built_here:
+                    self._discard_runner()
                 return pb.TopologyReply(accepted=False, reason=f"{type(exc).__name__}: {exc}")
             self._chain_yaml = request.chain_yaml
             self._shared_by = tuple(request.shared_by)
@@ -346,6 +366,30 @@ class ShardService:
         )
         return pb.TopologyReply(accepted=True, topology=held or spec.name)
 
+    def _discard_runner(self) -> None:
+        """Forget a runner this ``UpdateTopology`` built and could not start. Under the lock.
+
+        Not tidiness. Leaving it assigned makes a **retried** ``UpdateTopology`` take the
+        "already built" path, skip the factory entirely, and then record the *new*
+        ``shared_by``/``share_rank`` over an engine the first call built with the old ones.
+        That is the number deciding whether two shards on one GPU load two instances each or
+        four (``cli/shard.py::apply_sharing``), so the shard would report a sharing it is not
+        running - the silent, expensive kind of wrong.
+
+        Only a runner *this call* made is dropped: one handed in at construction is the only
+        one this servicer will ever have, and forgetting it would leave a shard permanently
+        answering ``starting`` with no factory to rebuild from.
+
+        :meth:`Runner.start` has already run its own single unwind by the time we get here
+        (``runners/base.py`` - a subclass that released twice is how an abandonment count came
+        to be zeroed), so this only asks for a stop, best effort, in case the object holds
+        something ``start`` never acquired.
+        """
+        runner, self._runner = self._runner, None
+        if runner is not None:
+            with contextlib.suppress(Exception):
+                runner.stop(timeout_s=0.0)
+
     def AddCamera(self, request: Any, context: Any = None) -> Any:
         """Start one camera. Every refusal is an answer.
 
@@ -362,6 +406,15 @@ class ShardService:
         and stops looking for a home for it, and the camera is dark until an operator reads a
         dashboard. The runner cannot make that refusal for us: by then its own camera set is
         already gone, so what reaches it looks like an ordinary add.
+
+        **Holding the lock across the add is deliberate, and it is cheap.**
+        ``IngestManager.add_camera`` starts the camera's actor *thread* and returns - it does
+        not wait on the RTSP open, and the actor's own re-check is what makes a camera
+        forgotten mid-start safe (``ingest/manager.py``). So this handler is microseconds and
+        serialising it against ``Stop`` costs nothing. The launcher above still never holds
+        *its* lock across the RPC (``FleetRunner.add_camera``), for a different reason: a
+        network call takes its whole deadline when the peer is wedged or unreachable, however
+        quick the handler would have been.
 
         The guard is read **twice**, the same shape and for the same reason as ``Stop``'s.
         Once outside :attr:`_lock` as a fast path, so a camera offered to a shard that is
