@@ -260,10 +260,17 @@ class ServiceMesh:
         while True:
             try:
                 ring = SharedRing.open(name, layout)
-            except RingClosedError:
-                # Not created yet (peers start in no order) — or already unlinked, which the
-                # deadline turns into the same configuration answer.
+            except RingClosedError as not_ready:
+                # Not created yet (peers start in no order), mid-birth, or already unlinked —
+                # the deadline turns any of them into a configuration answer, and the answer
+                # names which one it was: "never appeared" and "appeared but never became
+                # ready" send the 3am operator to two different suspects (#37 round 1).
                 if time.monotonic() >= deadline:
+                    if not_ready.reason == "unborn":
+                        raise ConfigurationError(
+                            f"service mesh: peer ring {name!r} appeared but never became "
+                            f"ready (stuck mid-birth); is its creator shard healthy?"
+                        ) from None
                     raise ConfigurationError(
                         f"service mesh: peer ring {name!r} never appeared; is every shard up?"
                     ) from None

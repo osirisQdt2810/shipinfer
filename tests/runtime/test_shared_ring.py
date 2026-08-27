@@ -711,6 +711,47 @@ class TestARingMidBirth:
         finally:
             backing.unlink()
 
+    def test_the_magic_word_alone_completes_the_birth(self) -> None:
+        """The write order `create()` relies on (#37 round 1, the fourth window): a header
+        whose body is final but whose magic is still 0 must read as unborn — so a creator
+        that writes the body first and stores the magic word last is never observable in
+        the state that used to hit the terminal created-with-0-slots refusal (magic set,
+        slots still 0, mid-memcpy)."""
+        import importlib
+        import struct as struct_module
+        from multiprocessing import resource_tracker, shared_memory
+
+        name = _name()
+        layout = RingLayout(slots=2, slot_bytes=4096)
+        bare = shared_memory.SharedMemory(name=name, create=True, size=layout.total_bytes)
+        try:
+            # The fixed create()'s exact pre-magic state: full header body, magic 0.
+            module = importlib.import_module("shipinfer.runtime.memory.shared_ring")
+            bare.buf[: module._HEADER.size] = module._HEADER.pack(
+                0,
+                module.RING_VERSION,
+                layout.slots,
+                layout.slot_bytes,
+                0,
+                0,
+                0.0,
+                1,
+                0,
+                b"creator",
+            )
+            with pytest.raises(RingClosedError) as caught:
+                SharedRing.open(name, layout)
+            assert caught.value.reason == "unborn"
+
+            # The readiness signal, alone — after it, the same block opens clean.
+            struct_module.pack_into("<I", bare.buf, 0, module._MAGIC)
+            ring = SharedRing.open(name, layout)
+            ring.close()
+        finally:
+            resource_tracker.register(bare._name, "shared_memory")
+            bare.close()
+            bare.unlink()
+
     def test_a_sizeless_block_is_unborn_not_a_protocol_error(self) -> None:
         """Even earlier in the birth: the name exists at shm creation, BEFORE the creator
         sizes the block. A reader that wins that race must also be told to retry — raising
