@@ -365,6 +365,12 @@ class InprocessRunner(Runner):
         The slots drained are this cycle's for the same reason: :attr:`_inflight` holds the
         list handed to the workers by the matching :meth:`_do_start`, a worker abandoned here
         goes on writing into that same list, and the next start publishes a different one.
+        That list is also *replaced* here rather than only drained, because "goes on writing
+        into it" is not hypothetical: an abandoned worker's ``finally`` republishes the
+        remainder of its wake-up batch the moment it wakes, and while :attr:`_inflight` still
+        pointed at that object ``stats()["items"]["in_flight"]`` came back up after the stop
+        and stayed up forever — a stopped runner reporting work in flight that no shutdown
+        would ever resolve, because every one of those futures had already been failed here.
         """
         self._stopping.set()
         lost: int = 0
@@ -383,7 +389,15 @@ class InprocessRunner(Runner):
                     abandoned,
                     timeout_s,
                 )
-            stranded = self._fail_in_flight(self._inflight)
+            inflight = self._inflight
+            stranded = self._fail_in_flight(inflight)
+            # Drained *and replaced*. `_fail_in_flight` empties the slots, but an abandoned
+            # worker still holds a reference to `inflight` and its `finally` writes the
+            # remainder of its wake-up batch straight back into it -- so a `stats()` taken
+            # after that store read a non-zero `in_flight` for a runner that had stopped, and
+            # it never came back down. The stale thread goes on writing into the object it was
+            # handed; nothing reads that object any more.
+            self._inflight = [()] * self._wanted_workers
             if stranded:
                 # Counted against `failed`, and an abandoned worker that later finishes its
                 # walk counts the same item as `walked` too, so the two numbers can disagree
@@ -473,7 +487,11 @@ class InprocessRunner(Runner):
         Raises:
             QueueFullError: this camera's lane is full and the policy rejects. Propagated
                 untouched, and counted against **this** camera on the way past (ADR-005): the
-                number worth paging on is which camera flooded, not the shard total.
+                number worth paging on is which camera flooded, not the shard total. The
+                counter is ``items_dropped``, which this is the only writer of — the item was
+                refused at the door and never became one of ``accepted``, so it is not an
+                outcome the ``stats()`` ledger has to name. A model queue refusing an item
+                already inside the chain is ``items_backpressure``; see :meth:`_count_failure`.
             RequestCancelledError: the queue is closed — the runner is shutting down.
         """
         context = item.context
@@ -512,7 +530,15 @@ class InprocessRunner(Runner):
         (``pipeline.frames_per_wakeup``), not an inference batch: batching for a GPU is the
         engine's job, and a worker walks its items one after another.
 
-        Args:
+        **The stop signal is checked in front of every item, not only every wake-up.** A
+        worker holds a whole ``frames_per_wakeup`` batch, so a check at the top of the outer
+        loop alone let a worker abandoned at a shutdown deadline finish its *entire* batch when
+        whatever wedged it finally let go — up to ``frames_per_wakeup - 1`` further items,
+        walked through elements the runner had closed and emitted through a sink a restart had
+        re-opened. Breaking here instead leaves the remainder in the slot, which is precisely
+        where :meth:`_fail_in_flight` has already found it: those futures were failed at the
+        stop, so the item that is skipped is one whose producer has its answer.
+
         **Every piece of per-cycle state is an argument, and none of it is read off**
         ``self``. A worker abandoned at a shutdown deadline outlives its cycle — it is parked
         inside ``element.process()``, not gone — so whatever it reads from the runner it reads
@@ -562,6 +588,13 @@ class InprocessRunner(Runner):
             batch = tuple(items)
             inflight[slot] = batch
             for index, work in enumerate(batch):
+                if stopping.is_set():
+                    # Abandoned mid-batch. The remainder is left in the slot exactly as the
+                    # previous iteration's `finally` published it, so `_do_stop`'s drain --
+                    # which ran after the join deadline, before this thread woke -- has
+                    # already failed every one of these futures. Walking them anyway would
+                    # emit ghost events through a chain this cycle closed.
+                    break
                 try:
                     self._walk(work)
                 except Exception as exc:
@@ -836,25 +869,32 @@ class InprocessRunner(Runner):
         ``failed`` — which is what this did — hid the first two behind the third, so a shard
         under sustained overload looked like a shard full of bugs.
 
+        Backpressure lands on ``items_backpressure``, not on ``items_dropped``. Every item
+        this method sees was ``accepted`` — it is mid-walk, off the queue and inside the chain
+        — whereas ``items_dropped`` is the submission that never got in at all. One counter
+        for both is a defensible operational graph and an indefensible ledger: ``accepted``
+        could then only be reconciled against the outcomes by subtracting the queue's own
+        ``rejected`` first. See :meth:`_do_stats` for the identity that buys.
+
         The backpressure family is narrowed by hand, because inheritance does not carry the
         operator's response. ``core/errors/topology.py`` makes :class:`RingClosedError` and
         :class:`WireRefusedError` :class:`QueueFullError` subclasses so that phase D's
         dispatcher spill loop treats them as a refusal and tries the next candidate — the
         right call there, and the wrong label here: a ring whose peer died and a wire that
         cannot carry the payload are both "file a ticket", not "shed load or add capacity".
-        They count as ``failed``. :class:`RingFullError` stays with backpressure, which is
-        exactly what it is.
+        They count as ``failed``. :class:`RingFullError` stays with ``items_backpressure``,
+        which is exactly what it is.
 
         Args:
             work: the item being failed; its camera is the label.
             error: the failure. ``None``, or anything outside the backpressure and timeout
-                families, counts as ``failed``.
+                families, counts as ``items_failed``.
         """
         camera = work.request.context.camera_id
         if isinstance(error, (RingClosedError, WireRefusedError)):
             self._metrics.items_failed.inc(camera=camera)
         elif isinstance(error, QueueFullError):
-            self._metrics.items_dropped.inc(camera=camera)
+            self._metrics.items_backpressure.inc(camera=camera)
         elif isinstance(error, RequestTimeoutError):
             self._metrics.items_timed_out.inc(camera=camera)
         else:
@@ -906,18 +946,21 @@ class InprocessRunner(Runner):
         every outcome and the difference was indistinguishable from work still in flight. The
         three ``queue_*`` terms and ``in_flight`` are here so that it adds up::
 
-            accepted == walked + failed + expired + timed_out + dropped
+            accepted == walked + failed + expired + timed_out + backpressure
                         + queue_closed + queue_evicted + queue_expired + in_flight
 
+        ``dropped`` is deliberately *not* a term: it counts the submissions this runner's own
+        lane refused at the door, and those were never ``accepted``, so adding it would make
+        the right-hand side over-count by exactly ``queue["rejected"]``. It used to be one
+        counter with the mid-walk refusals, which is why that correction term used to be
+        written down here instead; :attr:`~shipinfer.runners.metrics.RunnerMetrics.
+        items_backpressure` is the half that *was* accepted, and both remain per camera because
+        the camera lost a frame to backpressure either way (ADR-005).
+
         That identity holds within one start cycle on a runner that abandoned no worker. The
-        three ways it does not are all deliberate, and naming them is cheaper than a term that
+        two ways it does not are both deliberate, and naming them is cheaper than a term that
         pretends they are not there:
 
-        * **``dropped`` counts two populations.** A submission this runner's own lane refused
-          was never ``accepted``; a ``pool`` element's model queue refusing mid-walk was. One
-          counter for both because the camera lost a frame to backpressure either way and that
-          is the ADR-005 number — so the right-hand side over-counts by the number of admission
-          refusals, which is ``queue["rejected"]`` for this cycle.
         * **an abandoned worker is counted twice** when it finishes its walk after
           :meth:`_do_stop` failed its items: once as ``failed``, once as ``walked``. See
           :meth:`_fail_in_flight`.
@@ -927,12 +970,18 @@ class InprocessRunner(Runner):
           describes every cycle. ``queue_closed`` is a runner counter for exactly that reason:
           it is the outcome a *previous* cycle's shutdown earned, and it has to survive.
 
-        ``in_flight`` is the queue's depth plus what the workers have published: a gauge, read
-        without a lock, and wrong by at most one wake-up batch in either direction. Short, for
-        the two stores between a drain returning and :meth:`_work` publishing the batch; long,
-        for the ones between an item's future being resolved at the end of its walk and the
-        ``finally`` that narrows the slot. Poll it to zero before reading the ledger as an
-        identity, which is what ``tests/runners/test_inprocess.py::settled`` does.
+        ``in_flight`` is the queue's depth plus what **the current cycle's** workers have
+        published: a gauge, read without a lock, and wrong by at most one wake-up batch in
+        either direction. Short, for the two stores between a drain returning and
+        :meth:`_work` publishing the batch; long, for the ones between an item's future being
+        resolved at the end of its walk and the ``finally`` that narrows the slot. Poll it to
+        zero before reading the ledger as an identity, which is what
+        ``tests/runners/test_inprocess.py::settled`` does.
+
+        *Current cycle's* is the load-bearing word. A worker abandoned at a shutdown deadline
+        keeps writing into the slot list it was handed, and after :meth:`_do_stop` that list is
+        no longer the one this reads — so a stopped runner reports zero even while a stale
+        thread is still republishing a batch whose futures the stop already failed.
         """
         queue = self._queue.stats()
         items = self._metrics.totals()

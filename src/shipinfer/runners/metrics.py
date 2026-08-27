@@ -41,6 +41,7 @@ class RunnerMetrics:
     items_expired: Counter = field(init=False)
     items_timed_out: Counter = field(init=False)
     items_dropped: Counter = field(init=False)
+    items_backpressure: Counter = field(init=False)
     items_queue_closed: Counter = field(init=False)
 
     def __post_init__(self) -> None:
@@ -76,10 +77,21 @@ class RunnerMetrics:
             "shipinfer_runner_items_dropped_total",
             # The single most important number here, and the reason these are labelled at
             # all: it names the camera that flooded, not the one that suffered.
-            "Chain items lost to backpressure, per camera: the runner's own lane refusing a "
-            "submission, and a `pool` element's model queue refusing a request mid-walk. One "
-            "counter for both because the camera lost a frame and the fix is capacity either "
-            "way; `stats()['queue']` says which side of the chain it was refused on.",
+            "Chain items the runner's own lane refused at submission, per camera. Admission "
+            "only: the item was never accepted, so it is not a term in the `stats()` ledger "
+            "identity. A model queue refusing mid-walk is `items_backpressure`.",
+        )
+        self.items_backpressure = r.counter(
+            "shipinfer_runner_items_backpressure_total",
+            # Split out of `items_dropped` because the two populations are not the same
+            # items: an admission refusal never entered the chain and never counted against
+            # `accepted`, while this one did both. Merged, `accepted` could not be reconciled
+            # against the outcomes without subtracting the queue's own `rejected` first, and a
+            # ledger that needs a correction term is a ledger nobody checks.
+            "Chain items an *accepted* item lost mid-walk to a `pool` element's model queue "
+            "refusing the request, per camera. The camera lost a frame to backpressure and "
+            "the fix is capacity, exactly as for `items_dropped`; this is the half of that "
+            "population the runner had already admitted.",
         )
         self.items_queue_closed = r.counter(
             "shipinfer_runner_items_queue_closed_total",
@@ -105,5 +117,6 @@ class RunnerMetrics:
             "expired": int(self.items_expired.total()),
             "timed_out": int(self.items_timed_out.total()),
             "dropped": int(self.items_dropped.total()),
+            "backpressure": int(self.items_backpressure.total()),
             "queue_closed": int(self.items_queue_closed.total()),
         }

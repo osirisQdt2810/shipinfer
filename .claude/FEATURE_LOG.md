@@ -5,6 +5,38 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-27 — `runners/inprocess.py`: the batch a stale worker must not finish, and a ledger with no caveat
+
+**What.** Three follow-ups to the entry below, from the review of #62. (1) `_work` read the
+stop signal only at the top of the outer `while`, so a worker abandoned at a shutdown deadline
+finished its **whole** wake-up batch when whatever wedged it let go — up to
+`frames_per_wakeup - 1` ghost events emitted through a chain a restart had re-opened, for
+futures `_fail_in_flight` had already resolved. The signal is now read in front of every item
+and the remainder is left in the slot, which is where the drain has already found it. (2)
+`_do_stop` drained the in-flight slots but kept `self._inflight` pointing at the list the
+abandoned worker still holds; its `finally` republished the remainder there, so
+`stats()["items"]["in_flight"]` came back up after the stop and never came down. The stopped
+cycle's list is now *replaced*, not merely emptied. (3) `items_dropped` counted two
+populations — an admission refusal (never `accepted`) and a `pool` element's model queue
+refusing mid-walk (`accepted`). Split: the new camera-labelled `items_backpressure` takes the
+mid-walk half, `items_dropped` stays admission-only.
+
+**Why.** (1) and (2) are the same failure as the abandon/restart bugs below, one level down: a
+worker the runner has stopped tracking must be inert on its next turn, and nothing a stopped
+cycle owns may still be read. (3) is what let the ledger identity drop its correction term —
+an operator who has to subtract `queue["rejected"]` before the numbers add up will not.
+
+**Contract change.** `RunnerMetrics` gained `items_backpressure`
+(`shipinfer_runner_items_backpressure_total`) and `totals()` gained `backpressure`.
+`stats()["items"]` therefore carries both keys, and the documented identity is now
+`accepted == walked + failed + expired + timed_out + backpressure + queue_closed +
+queue_evicted + queue_expired + in_flight`, with `dropped` deliberately outside it and two
+honest caveats left (an abandoned worker counted twice; the queue's own terms resetting on a
+restart). A dashboard that graphed `shipinfer_runner_items_dropped_total` as "all
+backpressure" now needs both series.
+
+---
+
 ## 2026-08-27 — `runners/inprocess.py`: the failure a submitter sees, and a ledger that adds up
 
 **What.** Three follow-ups to the runner above, from the review of #61. (1) `_walk` re-wrapped
