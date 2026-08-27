@@ -1,6 +1,7 @@
 """CLI commands — one module per command group."""
 
 from shipinfer.cli.commands.bench import bench
+from shipinfer.cli.commands.deepstream import deepstream
 from shipinfer.cli.commands.doctor import doctor
 from shipinfer.cli.commands.fleet import fleet
 from shipinfer.cli.commands.registries import (
@@ -14,6 +15,7 @@ from shipinfer.cli.commands.serve import serve
 
 __all__ = [
     "bench",
+    "deepstream",
     "doctor",
     "fleet",
     "list_backends",
