@@ -23,6 +23,7 @@ import pytest
 from pydantic import ValidationError
 
 from shipinfer.cli.shard import _ShardProcess, apply_sharing, build_parser
+from shipinfer.core.errors import ServerStateError
 from shipinfer.core.settings import ServerSettings
 from shipinfer.repository.model_config import (
     InstanceGroup,
@@ -314,4 +315,39 @@ class TestTheHopThatActuallyCarriesTheSharing:
 
         assert seen["engine"].stopped == 1
         process.release()  # idempotent: the engine is already gone, and this must not re-stop
+        assert seen["engine"].stopped == 1
+
+    def test_an_engine_whose_start_raises_is_still_given_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The engine is assigned **before** it is started, and this is why.
+
+        `InferenceServer.start()` loads models one at a time; a strict start that fails on
+        the fifth has four running, each with worker threads and a CUDA context. Those
+        belong to the engine object — so if `build` only assigns after `start()` returns,
+        the failure path assigns nothing at all and `release()` has nothing to reach. The
+        contexts are then held for the life of the process by an object no reference finds,
+        on a box other people share (CLAUDE.md's GPU hygiene rule).
+        """
+        process, seen = self._process(monkeypatch)
+
+        class HalfStartedEngine:
+            def __init__(self, engine_settings: ServerSettings) -> None:
+                seen["engine"] = self
+                self.stopped = 0
+
+            def start(self):
+                # What a strict start does with models already loaded: raise, holding them.
+                raise ServerStateError("instance ship_detector_0_cuda:1 failed to start")
+
+            def stop(self) -> None:
+                self.stopped += 1
+
+        monkeypatch.setattr("shipinfer.engine.InferenceServer", HalfStartedEngine)
+
+        with pytest.raises(ServerStateError, match="failed to start"):
+            process.build(ChainSpec.from_yaml(CHAIN), (2,), (1,))
+
+        assert seen["engine"].stopped == 1, "the half-started engine was never stopped"
+        process.release()  # idempotent, as on every other failure path
         assert seen["engine"].stopped == 1

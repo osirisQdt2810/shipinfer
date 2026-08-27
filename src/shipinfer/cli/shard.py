@@ -149,6 +149,14 @@ class _ShardProcess:
         second engine assigned over the first would leave the first one's CUDA context held by
         nothing that can ever stop it (CLAUDE.md's GPU hygiene rule - this box is shared).
         :meth:`release` is idempotent and safe when nothing was ever built.
+
+        The engine is **assigned before it is started**, not after. ``start()`` loads models
+        one at a time and can raise on the fifth with four already running; the object that
+        owns those four is the one this method is holding, and if the assignment waits for
+        ``start()`` to return there is no assignment at all on that path — the engine, its
+        threads and its contexts are unreachable, and :meth:`release` has nothing to give
+        back. Assigning first costs an unstarted engine on the failure path, which
+        :meth:`InferenceServer.stop` handles.
         """
         from shipinfer.engine import InferenceServer
         from shipinfer.runners import build_runner
@@ -157,9 +165,9 @@ class _ShardProcess:
         self.release()
         settings = apply_sharing(self._settings, shared_by, share_rank)
         topology = Topology.from_spec(spec)
-        engine = InferenceServer(settings).start()
-        self._engine = engine
+        engine = self._engine = InferenceServer(settings)
         try:
+            engine.start()
             # Always `inprocess`: a shard *is* the process the fleet placed, so a shard that
             # built a `fleet` runner would spawn shards of its own.
             return build_runner(
@@ -170,12 +178,16 @@ class _ShardProcess:
                 models=engine,
             )
         except BaseException:
-            self._engine = None
-            engine.stop()
+            self.release()
             raise
 
     def release(self) -> None:
-        """Give the GPU back. Idempotent, and safe when nothing was ever built."""
+        """Give the GPU back.
+
+        Idempotent, safe when nothing was ever built, and safe for an engine whose
+        ``start()`` raised: :meth:`InferenceServer.stop` unwinds a partial start and never
+        raises, which is what lets this be called unconditionally from a ``finally``.
+        """
         engine, self._engine = self._engine, None
         if engine is not None:
             engine.stop()
