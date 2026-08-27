@@ -22,9 +22,9 @@ fastapi = pytest.importorskip("fastapi")
 pytest.importorskip("httpx")
 from fastapi.testclient import TestClient  # noqa: E402
 
+from shipinfer.api import create_app  # noqa: E402
 from shipinfer.core.settings import ServerSettings  # noqa: E402
-from shipinfer.server import InferenceServer  # noqa: E402
-from shipinfer.server.api import create_app  # noqa: E402
+from shipinfer.engine import InferenceServer  # noqa: E402
 
 
 @pytest.fixture()

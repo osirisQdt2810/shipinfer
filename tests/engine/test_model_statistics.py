@@ -202,7 +202,7 @@ class TestPerModelStatsEndpoint:
         pytest.importorskip("httpx")
         from fastapi.testclient import TestClient
 
-        from shipinfer.server.api import create_app
+        from shipinfer.api import create_app
 
         with TestClient(create_app(server)) as test_client:
             yield test_client

@@ -58,7 +58,7 @@ def serve(
         out.print(f"[bold]{report.status.value}[/bold]: {report.detail}")
 
         if http:
-            from shipinfer.server.api import serve_http
+            from shipinfer.api import serve_http
 
             serve_http(server, host=host, port=port)
         else:

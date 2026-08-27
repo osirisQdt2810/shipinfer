@@ -226,7 +226,7 @@ class TestControlOverHttp:
         pytest.importorskip("httpx")
         from fastapi.testclient import TestClient
 
-        from shipinfer.server.api import create_app
+        from shipinfer.api import create_app
 
         with TestClient(create_app(explicit)) as test_client:
             yield test_client
@@ -271,7 +271,7 @@ class TestControlOverHttp:
         pytest.importorskip("httpx")
         from fastapi.testclient import TestClient
 
-        from shipinfer.server.api import create_app
+        from shipinfer.api import create_app
 
         with (
             InferenceServer(_settings(repository)) as server,
