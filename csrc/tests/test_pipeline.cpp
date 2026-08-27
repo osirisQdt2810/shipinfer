@@ -100,6 +100,26 @@ namespace {
         return state;
     }
 
+    void test_both_clocks_survive_the_capture() {
+        // ADR-002 in the reassembly path: the tag travels unchanged from decode to emission,
+        // and the tag now carries two clocks. `captured_ns` is what a latency measurement
+        // subtracts from; `captured_unix_ns` is what an event a human reads is stamped with.
+        // Dropping either here is invisible until somebody reports a latency of minus
+        // fifty-four years.
+        FrameTag tag;
+        tag.camera_id = "cam";
+        tag.frame_id = 9;
+        tag.captured_ns = monotonic_ns();
+        tag.captured_unix_ns = unix_ns();
+        FrameState state(tag, 8, 8, 20.f);
+        const EmissionInputs captured = state.capture();
+        check(captured.tag.camera_id == "cam" && captured.tag.frame_id == 9,
+              "the identity round-trips through capture()");
+        check(captured.tag.captured_ns == tag.captured_ns &&
+                  captured.tag.captured_unix_ns == tag.captured_unix_ns,
+              "and so do BOTH clocks — the steady one for latency, the wall one for humans");
+    }
+
     void test_a_stage_whose_input_is_empty_is_skipped_not_failed() {
         Dag dag;
         auto* detect = new FakeStage("detect", {FRAME_INPUT}, {FRAME_INPUT}, DETECTIONS, 2);
@@ -243,6 +263,7 @@ int main() {
     // The graph tests need no device and run first; the scratch tests allocate device
     // memory and skip — counted, on stderr — where there is none, so a device-less run
     // still exercises what this binary exists for instead of terminating on the way in.
+    test_both_clocks_survive_the_capture();
     test_a_stage_whose_input_is_empty_is_skipped_not_failed();
     test_a_failing_stage_does_not_end_the_frame();
     test_the_collector_sees_planned_delivered_and_missing();
