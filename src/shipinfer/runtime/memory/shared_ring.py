@@ -261,6 +261,14 @@ def _attach(name: str) -> shared_memory.SharedMemory:
             block = shared_memory.SharedMemory(name=name, create=False)
     except FileNotFoundError as exc:
         raise RingClosedError("unknown", name, reason="absent") from exc
+    except ValueError as exc:
+        # The window even before the sub-header one: shm_open creates the name at size 0 and
+        # the creator's ftruncate has not run yet, so the attach's own mmap refuses with
+        # ValueError('cannot mmap an empty file') — seen straight out of a mesh connect as
+        # CI's third spelling of the same birth race (27 Aug). Retryable for the same reason
+        # as absent and unborn; a persistently empty file becomes the connect deadline's
+        # configuration answer like the others.
+        raise RingClosedError("unknown", name, reason="unborn") from exc
     from multiprocessing import resource_tracker
 
     resource_tracker.unregister(block._name, "shared_memory")
@@ -378,8 +386,15 @@ class SharedRing:
         """
         block = _attach(name)
         if block.size < _HEADER.size:
+            # The name becomes visible at shm creation, BEFORE the creator sizes the block:
+            # a block shorter than the header is a ring seen even earlier in its birth than
+            # the all-zero header below — the same "not ready", retryable for the same
+            # reason. Raising the protocol error here killed the whole mesh connect on the
+            # first attach that won that race (twice on CI's runners, 27 Aug); the connect
+            # loop's deadline is what turns a persistently sizeless block into its own
+            # configuration answer.
             block.close()
-            raise RingProtocolError(f"ring {name!r} is {block.size} bytes: no header")
+            raise RingClosedError("unknown", name, reason="unborn")
         fields = _HEADER.unpack_from(block.buf, 0)
         magic, version, slots, slot_bytes = fields[0], fields[1], fields[2], fields[3]
         if magic == 0:

@@ -11,6 +11,7 @@ import gc
 import threading
 import time
 import uuid
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -689,6 +690,41 @@ class TestARingMidBirth:
         try:
             with pytest.raises(RingClosedError) as caught:
                 SharedRing.open(name, layout)
+            assert caught.value.reason == "unborn"
+        finally:
+            resource_tracker.register(bare._name, "shared_memory")
+            bare.close()
+            bare.unlink()
+
+    def test_an_empty_file_is_unborn_not_a_value_error(self) -> None:
+        """The window before even the sizeless one: shm_open creates the name at size 0 and
+        ftruncate has not run, so the attach's own mmap raises ValueError('cannot mmap an
+        empty file') — CI's third spelling of the birth race (27 Aug), which escaped the
+        mesh connect as a raw ValueError. It must be the same retryable 'unborn'."""
+        name = _name()
+        backing = Path("/dev/shm") / name
+        backing.touch()
+        try:
+            with pytest.raises(RingClosedError) as caught:
+                SharedRing.open(name, RingLayout(slots=2, slot_bytes=4096))
+            assert caught.value.reason == "unborn"
+        finally:
+            backing.unlink()
+
+    def test_a_sizeless_block_is_unborn_not_a_protocol_error(self) -> None:
+        """Even earlier in the birth: the name exists at shm creation, BEFORE the creator
+        sizes the block. A reader that wins that race must also be told to retry — raising
+        the protocol error here killed the whole mesh connect on the first sub-header
+        attach, twice on CI's runners (27 Aug), while the peer then reported 'never
+        appeared'. A persistently sizeless block still errors, via the connect deadline."""
+        from multiprocessing import resource_tracker, shared_memory
+
+        name = _name()
+        # A 1-byte block: the smallest thing shm will make, well under the header.
+        bare = shared_memory.SharedMemory(name=name, create=True, size=1)
+        try:
+            with pytest.raises(RingClosedError) as caught:
+                SharedRing.open(name, RingLayout(slots=2, slot_bytes=4096))
             assert caught.value.reason == "unborn"
         finally:
             resource_tracker.register(bare._name, "shared_memory")
