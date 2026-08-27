@@ -18,9 +18,12 @@ namespace shipinfer {
 
     // An integer option, or `fallback` when the key is absent.
     //
-    // The message names the placement policy because that is still the only family that calls
-    // this; the next caller should take a subject rather than assume one.
-    int option_int(const KeywordOptions& options, const std::string& key, int fallback);
+    // `subject` is what the refusal names — "placement policy" for a policy, "camera 'cam0':
+    // gstreamer" for a video source. It became a parameter when the second family arrived, as
+    // the comment here asked it to: a camera told "placement policy option max_buffers must be
+    // an integer" is a camera told to go and read the wrong file.
+    int option_int(const std::string& subject, const KeywordOptions& options,
+                   const std::string& key, int fallback);
 
     // A keyword the constructor does not take is a configuration error, as the Python
     // constructors' `TypeError` is one. Silently ignoring it is how a deployment runs for

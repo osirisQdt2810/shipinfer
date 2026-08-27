@@ -14,8 +14,8 @@ namespace shipinfer {
                 auto seed = options.find("seed");
                 return seed == options.end()
                            ? std::make_unique<PowerOfTwoChoicesPolicy>()
-                           : std::make_unique<PowerOfTwoChoicesPolicy>(
-                                 static_cast<unsigned>(option_int(options, "seed", 0)));
+                           : std::make_unique<PowerOfTwoChoicesPolicy>(static_cast<unsigned>(
+                                 option_int("placement policy", options, "seed", 0)));
             });
     }  // namespace
 }  // namespace shipinfer

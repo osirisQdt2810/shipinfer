@@ -4,13 +4,14 @@
 
 namespace shipinfer {
 
-    int option_int(const KeywordOptions& options, const std::string& key, int fallback) {
+    int option_int(const std::string& subject, const KeywordOptions& options,
+                   const std::string& key, int fallback) {
         auto it = options.find(key);
         if (it == options.end()) return fallback;
         try {
             return std::stoi(it->second);
         } catch (const std::exception&) {
-            throw ConfigError("placement policy option " + key + " must be an integer, got '" +
+            throw ConfigError(subject + " option " + key + " must be an integer, got '" +
                               it->second + "'");
         }
     }

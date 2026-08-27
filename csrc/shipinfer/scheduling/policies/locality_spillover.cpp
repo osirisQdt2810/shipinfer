@@ -12,7 +12,8 @@ namespace shipinfer {
             "stay on the resident GPU until its queue backs up, then spill",
             [](const PolicyOptions& options) -> std::unique_ptr<PlacementPolicy> {
                 refuse_unknown_options("locality_spillover", options, {"spill_threshold"});
-                const int threshold = option_int(options, "spill_threshold", 4);
+                const int threshold =
+                    option_int("placement policy", options, "spill_threshold", 4);
                 if (threshold < 0) {
                     throw ConfigError("locality_spillover: spill_threshold must be >= 0");
                 }
