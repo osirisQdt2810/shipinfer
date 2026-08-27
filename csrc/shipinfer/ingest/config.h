@@ -170,6 +170,12 @@ namespace shipinfer {
             if (read_timeout_ms < 1) {
                 throw ConfigError("camera '" + camera_id + "': read_timeout_ms must be >= 1");
             }
+            if (open_timeout_ms < 1) {
+                // Harmless while nothing used it; the gst source makes it the
+                // gst_element_get_state timeout, where 0 returns ASYNC immediately and every
+                // camera fails with "stream did not start within 0s" (#46 round 1).
+                throw ConfigError("camera '" + camera_id + "': open_timeout_ms must be >= 1");
+            }
         }
 
         double read_timeout_s() const { return read_timeout_ms / 1000.0; }

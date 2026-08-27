@@ -2082,6 +2082,206 @@ namespace {
         check(default_passes, "the default codec passes, so no existing camera has to change");
     }
 
+    // =====================================================================================
+    // O. The gst-linked source, in the binaries that have it (PR2b)
+    // =====================================================================================
+    //
+    // Everything here goes through `SOURCES()` and the `FrameSource` contract, so this file
+    // still includes no GStreamer header and still may not include `sources/gstreamer.h` (the
+    // offline-closure invariant at the top of `ingest/registry.cpp`). Whether the source is
+    // *linked* is a build decision, so the section is guarded and the skip is counted: on the
+    // host, `build_csrc.py --offline` leaves the unit out and these report a skip; inside
+    // `shipinfer-gst:jammy`, `--offline --with-external gstreamer` links it and they run.
+    //
+    // WHAT IS NOT HERE, AND WHY IT IS NOT HERE: a real decode. Every check below stops at the
+    // first thing that would need a camera. A `videotestsrc` cannot stand in — `build_pipeline`
+    // builds an `rtspsrc` pipeline by construction, which is the whole reason the string is
+    // assertable — so a decoded frame needs a real RTSP session on a real socket. PR2c's
+    // `gst-rtsp-server` loopback owns that, exactly as the Python plane's
+    // `tests/ingest/test_rtsp_loopback.py` does. Until then: no check in this file has ever
+    // seen a pixel come out of GStreamer, and saying so is more useful than a test that
+    // pretends otherwise.
+
+    IngestConfig a_gst_camera(const std::string& id) {
+        IngestConfig config;
+        config.camera_id = id;
+        // Port 1 is privileged and nothing listens there, so `rtspsrc` fails its connect
+        // immediately rather than after a DNS timeout — a fast, offline, deterministic refusal.
+        config.uri = "rtsp://127.0.0.1:1/nothing-here";
+        config.source = "gstreamer";
+        // Software decode, so the element the pipeline names is one this image can actually
+        // *create*: `avdec_h264`, from gstreamer1.0-libav. Observed while writing these: with
+        // hwaccel on, `select_decoder` picked `nvh264dec` because its factory was in the plugin
+        // registry, and `gst_parse_launch` then failed with `no element "nvh264dec"` because
+        // the plugin will not load without a driver. Both outcomes are a `SourceOpenError` and
+        // both are correct, but a check that does not know which site it exercised is a check
+        // whose message is a guess.
+        config.hwaccel = false;
+        // Short, because these checks wait one out and the suite is not a place to spend ten
+        // seconds proving a socket is closed.
+        config.open_timeout_ms = 2000;
+        config.read_timeout_ms = 100;
+        return config;
+    }
+
+    void test_the_gstreamer_source_where_it_is_linked() {
+        if (!SOURCES().contains("gstreamer")) {
+            skip(
+                "the gstreamer source lives in a gst-facing unit the offline build does not "
+                "compile (see ingest/registry.cpp); build with `--with-external gstreamer` "
+                "inside shipinfer-gst:jammy to run these");
+            return;
+        }
+
+        check(SOURCES().canonical("gst") == "gstreamer",
+              "the short alias an operator actually types resolves to the canonical name");
+
+        StopSignal stop;
+        {
+            // Construction touches no GStreamer: nothing is initialised, no plugin registry is
+            // read, no socket is opened. That is what lets `shipinfer repo ls`'s equivalent
+            // list this backend on a host that cannot run it (`ingest/registry.h`).
+            FrameCounter counter("cam0");
+            std::unique_ptr<FrameSource> source =
+                create_source(a_gst_camera("cam0"), counter, stop);
+            check(source != nullptr && !source->is_open(), "a constructed source is not open");
+            check(source->height() == 0 && source->width() == 0,
+                  "and reports no size until it has negotiated one");
+            check(source->supports_hwaccel() && !source->hwaccel(),
+                  "this backend can decode on a GPU, and a camera that turned that off gets "
+                  "software decode");
+            IngestConfig wants_gpu = a_gst_camera("cam0");
+            wants_gpu.hwaccel = true;
+            FrameCounter other("cam0");
+            check(create_source(wants_gpu, other, stop)->hwaccel(),
+                  "and a camera that asks for it gets it, because this backend can");
+            check(!source->is_exhausted(),
+                  "and it is never exhausted: EOS on a live camera is a fault to reconnect "
+                  "through, not a job that finished");
+
+            bool refused = false;
+            try {
+                (void)source->read();
+            } catch (const SourceOpenError& error) {
+                refused = contains(error.what(), "before open");
+            }
+            check(refused, "read() before open() is a typed error, not an empty result");
+
+            source->close();
+            source->close();
+            check(!source->is_open(), "and close() before open() is a no-op, twice over");
+        }
+
+        {
+            // The distinction the actor's whole reconnect policy rests on: a camera that will
+            // not connect is RETRYABLE, so it must not arrive as the SourceUnavailableError
+            // that means "a library is missing" and makes the actor give up for good.
+            FrameCounter counter("cam1");
+            std::unique_ptr<FrameSource> source =
+                create_source(a_gst_camera("cam1"), counter, stop);
+            std::string message;
+            bool fatal = false;
+            try {
+                source->open();
+            } catch (const SourceUnavailableError& error) {
+                fatal = true;
+                message = error.what();
+            } catch (const SourceOpenError& error) {
+                message = error.what();
+            }
+            check(!fatal && !message.empty(),
+                  "a URI nothing answers is a SourceOpenError, not a fatal "
+                  "SourceUnavailableError: " +
+                      message);
+            check(contains(message, "cam1") && contains(message, "127.0.0.1"),
+                  "and it names the camera and the URI, because an ingest log with fifty "
+                  "cameras in it is useless without them: " +
+                      message);
+            // PLAYING is asynchronous — `rtspsrc` has not even sent DESCRIBE when `set_state`
+            // returns — so a source that did not block on the state change would report a
+            // successful open for a camera that never connects, and the fault would arrive
+            // later as "this camera is slow". Both spellings below are this plane's own
+            // strings, not GStreamer's, so the check does not move when a message upstream
+            // does.
+            check(contains(message, "did not start") || contains(message, "PLAYING"),
+                  "and it failed on the state change rather than reporting an open it did not "
+                  "get: " +
+                      message);
+            check(!source->is_open(), "the failed open left the source closed");
+            source->close();
+            check(!source->is_open(), "and closing it again is still a no-op");
+        }
+
+        {
+            // A knob wired to nothing is the failure `refuse_unknown_options` exists to
+            // prevent, and it is refused before GStreamer is initialised at all.
+            FrameCounter counter("cam2");
+            IngestConfig config = a_gst_camera("cam2");
+            config.options["bogus"] = "1";
+            std::unique_ptr<FrameSource> source = create_source(config, counter, stop);
+            std::string message;
+            try {
+                source->open();
+            } catch (const ConfigError& error) {
+                message = error.what();
+            }
+            check(contains(message, "cam2") && contains(message, "unknown option 'bogus'"),
+                  "an option this source does not take is refused, naming the camera and the "
+                  "key: " +
+                      message);
+        }
+
+        {
+            // The two knobs it does take. Both are accepted here and neither is reachable
+            // without a camera, so this is as far as an offline check can honestly go: it pins
+            // that the accepted set is the documented one, not that the values work.
+            FrameCounter counter("cam3");
+            IngestConfig config = a_gst_camera("cam3");
+            config.options["max_buffers"] = "4";
+            config.options["decoder"] = "avdec_h264";
+            std::unique_ptr<FrameSource> source = create_source(config, counter, stop);
+            bool accepted = true;
+            try {
+                source->open();
+            } catch (const ConfigError&) {
+                accepted = false;  // an option refusal
+            } catch (const IngestError&) {
+                // The expected outcome: it got past the options and failed on the socket.
+            }
+            check(accepted, "`decoder` and `max_buffers` are accepted options");
+
+            config.options["max_buffers"] = "two";
+            std::unique_ptr<FrameSource> typo = create_source(config, counter, stop);
+            std::string message;
+            try {
+                typo->open();
+            } catch (const ConfigError& error) {
+                message = error.what();
+            }
+            check(contains(message, "cam3") && contains(message, "max_buffers") &&
+                      contains(message, "must be an integer"),
+                  "and a non-numeric one names the camera, not somebody's placement policy: " +
+                      message);
+        }
+        {
+            FrameCounter counter("cam4");
+            IngestConfig config = a_gst_camera("cam4");
+            config.options["max_buffers"] = "0";
+            std::unique_ptr<FrameSource> unbounded = create_source(config, counter, stop);
+            std::string message;
+            try {
+                unbounded->open();
+            } catch (const ConfigError& error) {
+                message = error.what();
+            }
+            check(
+                contains(message, "max_buffers must be >= 1") && contains(message, "unlimited"),
+                "and max_buffers=0 is refused as GStreamer's 'unlimited' — an unbounded "
+                "decoder queue, the opposite of ADR-005 (#46 round 1): " +
+                    message);
+        }
+    }
+
 }  // namespace
 
 int main() {
@@ -2151,6 +2351,8 @@ int main() {
     test_build_pipeline_refuses_what_would_never_negotiate();
     test_the_decoder_and_converter_are_probed_not_assumed();
     test_an_unsupported_codec_is_refused_before_a_thread_starts();
+
+    test_the_gstreamer_source_where_it_is_linked();
 
     std::printf("%d checks, %d failure(s), %d skipped\n", checks, failures, skips);
     return failures == 0 ? 0 : 1;

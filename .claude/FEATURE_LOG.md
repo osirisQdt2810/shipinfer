@@ -5,6 +5,33 @@ edits, typo fixes and pure docs.
 
 ---
 
+## feat: the GStreamer camera source crosses to the C++ plane (27 Aug 2026, P4-PR2a+b)
+
+**What it is.** `ingest/sources/gstreamer.py`, ported: the pure half first (#45 —
+`gstreamer_pipeline.h`, a header with no GStreamer in it, so the offline tier asserts the
+exact `gst-launch-1.0` strings an operator pastes, cross-checked byte-identical against the
+Python function over a 12-case matrix), then the gst-linked `GStreamerSource` (this PR):
+parse_launch → appsink → PLAYING with the open timeout as a state wait, reads bounded by
+`try_pull_sample`, the bus's EOS/ERROR both `FrameDecodeError` (EOS on a live camera is a
+fault to reconnect from, never exhaustion), the 4-byte row-stride undone and every frame
+copied out of the decoder pool with the vector as `HostFrame.owner`.
+
+**The build grows lanes.** `EXTERNAL` in `scripts/build_csrc.py` declares per-unit
+`pkg-config` dependencies; `--with-external gstreamer` opts the lane into an otherwise
+offline build — which is how `shipinfer-gst:jammy` (now carrying `libopencv-dev`, extended
+by the same run+commit shape that built it) becomes the one place that compiles and RUNS
+the gst tests: 233 checks there, 217 plus a counted skip on the driverless host. A full
+build leaves an implicitly-missing lane out with a loud warning naming the consequence; a
+lane asked for by name that cannot be resolved stays a hard failure.
+
+**Honesty about scope.** No decoded pixel is claimed: `build_pipeline` builds `rtspsrc`
+pipelines by construction, so a real frame needs a real RTSP session — PR2c's
+`gst-rtsp-server` loopback owns that, and the test section's docstring says so instead of
+implying coverage. The two #45 review notes are honoured in code: redaction stays at the
+call sites (`SourceOpenError`'s constructor), and the out-of-table codec keeps
+byte-faithful parity with Python.
+
+
 ## ingest: the C++ ingest core — contract, registry, actor, manager (27 Aug 2026)
 
 `csrc/shipinfer/ingest/` is now the Python plane's ingest seam, port for port, and it builds
