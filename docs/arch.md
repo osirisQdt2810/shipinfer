@@ -194,12 +194,16 @@ it, and budget it** rather than to avoid it:
   pinned-staged path (the ADR-015 transport, unchanged). Reach is fleet-wide; the VRAM
   transport is tiered. A shard therefore holds **K + 1 contexts, not G**; box-wide the
   context line is `G × (K + 1) × C_ctx` rather than `G² × C_ctx`.
-- **C_ctx is a measured input**, not folklore: REPLACE_CTX_MIB MiB per foreign context on
-  this box (A5000, CUDA 12.6, measured 2026-08-27 in-container, Appendix A). At K = 3 that
-  is ≈ 4 × REPLACE_CTX_MIB MiB per shard, against ADR-015's feared 16 × ~300 MiB on a
-  16-GPU node.
+- **C_ctx is a measured input**, not folklore: **208 MiB** per foreign context, and it
+  lands on the **owner's** device, not the opener's (A5000, CUDA 12.6, torch 2.7.1, measured
+  2026-08-27 in-container — `benchmarks/link/ipc_context_cost.py`, Appendix A). A shard's
+  own context is 243 MiB. So a device is charged once by every peer that opens *its* slabs:
+  with symmetric K-neighbourhoods that is `K × 208 MiB` — **≈ 0.6 GB at K = 3**, against
+  the `(G−1) × 208 MiB ≈ 3.1 GB` an unbounded 16-GPU mesh would take (ADR-015 feared
+  ~4.8 GB at an assumed 300 MiB).
 - **The budget is enforced at start-up.** Each shard writes its VRAM budget into its
-  Health report — `slabs + (K+1) × C_ctx + engines ≤ device memory − reserve` — and
+  Health report — `slabs + own_ctx + K × C_ctx + engines ≤ device memory − reserve`, the
+  `K × C_ctx` term being what its K openers will cost it — and
   refuses to open a camera if the inequality fails; a runtime OOM is never how this is
   discovered.
 - **Handle lifecycle.** Slabs are opened at mesh join and **closed only at drain**, after
@@ -406,12 +410,17 @@ no-GPU/no-gst guarantees throughout (element ABCs and the chain loader are pure)
 `cudaDeviceCanAccessPeer` returns true for *every* pair above, including the poison ones.
 The PXB rows were reproduced on pairs **0-3, 1-3 and 2-4**; the dev trio (GPUs 3,4,5)
 contains no PXB pair *among its own members*, which is why no benchmark ever tripped it;
-a 16-GPU deployment would. Probe script, raw log and `nvidia-smi topo -m` output:
-REPLACE_PROBE_PATHS (run inside the container per CLAUDE.md).
+a 16-GPU deployment would. The rows above are the 2026-08-27 12:38 UTC re-run of the
+probe, inside the `pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime` container per CLAUDE.md
+(GPUs verified idle before and after): script `benchmarks/link/link_probe.py`, runner
+`benchmarks/link/run.sh`, raw JSON + `nvidia-smi topo -m` in
+`benchmarks/link/results/2026-08-27/link_probe.log` (pairs probed: 0-1, 3-4 NV4; 0-3, 1-3,
+2-4 PXB; 3-5, 4-6 SYS; same-device baseline 47 µs / 267 GB/s).
 
-| Context cost (ADR-016 input) | measured |
+| Context cost (ADR-016 input, `benchmarks/link/ipc_context_cost.py`, same run) | measured |
 |---|---|
-| one foreign CUDA context (peer IPC handle opened from another process) | REPLACE_CTX_MIB MiB on the opener's device, REPLACE_CTX_OWNER_MIB MiB on the owner's |
+| one foreign CUDA context — GPU 4's process opens a 64 MiB slab owned by GPU 3 | **+208 MiB on the owner's device (GPU 3)**, **+0 MiB on the opener's (GPU 4)** |
+| a process's own context on its own device (child before opening anything) | 243 MiB |
 
 Production nodes are expected all-NVLink (V139); the probe stays regardless.
 

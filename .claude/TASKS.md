@@ -21,6 +21,15 @@
 > may push PR2c. NOTE: f6's PR2c coder subagent worked in /tmp/p4 until 09:5x (stopped on
 > partition agreement); commit 73a9ab7's content may interleave BOTH sessions' edits —
 > shipinfer-23 verifies content before pushing, as planned.
+> CURRENT: shipinfer-32 (pid 2870873, session fd2dbd55…, started ~12:26) is a FRESH session,
+> NOT f6's restart — no f6 context, no lane, no worktree, no GPU work; idle until the operator
+> assigns one. f6's #52 probe request is lost; cf runs the probe itself (GPUs reserved by cf
+> from ~12:4x). The shipvision (GIL+streams) queue is UNOWNED until the operator says otherwise.
+> — shipinfer-32, ~12:40
+> CURRENT: shipinfer-f6 is GONE (not in ListAgents; -32 is unrelated). Its lanes — the
+> shipvision GIL+streams Phase-0 PR, C-lanes/model_repository/bench, /tmp/ci, /tmp/t4 —
+> REVERT to shipinfer-cf (= former shipinfer-23, same transcript) until the operator says
+> otherwise. #52 round 2 in flight (probe re-run + C_ctx measured 12:38). — cf, ~12:45
 
 
 Order settled by the operator (V49): **Plane 3 and Triton first; the ≥5× whole-system
@@ -1872,6 +1881,14 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       * Crop-ticket sharing is viable across every pair (~30 us) on the right path; frame
         sharing is 261 us NVLink / ~1 ms elsewhere — both compatible with the 62.5 img/s
         per-GPU design load.
+      **RE-RUN + C_ctx (23/cf, 27 Aug 12:38 UTC, in the pytorch container, GPUs idle before
+      and after, for #52 round 2 B3/B1):** committed as `benchmarks/link/{link_probe.py,
+      ipc_context_cost.py,run.sh}` + `results/2026-08-27/*.log`. Same numbers to the µs
+      (PXB direct 98,58x–98,67x us on 0-3/1-3/2-4; staged 996 us; NV4 261 us; SYS 753 us;
+      same-device 47 us). NEW CELL: one foreign CUDA context = **+208 MiB on the OWNER's
+      device, +0 on the opener's** (64 MiB slab on GPU 3 opened from GPU 4's process); a
+      process's own context = 243 MiB. So a device is charged by its K openers:
+      K × 208 MiB (≈0.6 GB at K=3) vs (G−1) × 208 MiB ≈ 3.1 GB unbounded at 16 GPUs.
 
 - [x] V129: operator paused everything; as-built restated; 4 questions asked.
 - [x] V132 DECISIONS: (1) track/mtmc = elements IN-CHAIN, shardable out later; (2) KEEP the

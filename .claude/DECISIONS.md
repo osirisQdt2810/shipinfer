@@ -530,8 +530,9 @@ VRAM must not be staged through RAM to reach another GPU ("gây down performance
 mạnh"); cross-GPU access is permitted, the only criteria being perf and accuracy. And the
 topology caveat is no longer folklore — it was measured on this box (Appendix A of
 `docs/arch.md`): NVLink pairs move a 12 MB frame in 261 µs; a PXB pair moves it in
-**98.6 ms** over direct P2P (three orders of magnitude, three pairs reproduced) and in
-996 µs when staged; `cudaDeviceCanAccessPeer` says "yes" to all of them.
+**98.6 ms** over direct P2P (three orders of magnitude, reproduced on pairs 0-3, 1-3 and
+2-4; `benchmarks/link/link_probe.py`, in-container) and in 996 µs when staged;
+`cudaDeviceCanAccessPeer` says "yes" to all of them.
 
 **Decision.**
 
@@ -548,12 +549,16 @@ topology caveat is no longer folklore — it was measured on this box (Appendix 
    (NVLink partners first). Every other peer is reached over the pinned-staged path (the
    ADR-015 transport, unchanged). So a shard holds **K + 1 contexts**, not G, and the
    box-wide context cost is `G × (K + 1) × C_ctx` instead of `G² × C_ctx`. The per-context
-   cost `C_ctx` is a **measured input** (REPLACE_CTX_MIB MiB per foreign context on this
-   box's A5000s under CUDA 12.6 — measured 2026-08-27, appendix), and the resulting
-   **per-shard VRAM budget is written down at start-up** in the shard's Health report:
-   `slabs + (K+1) × C_ctx + engines ≤ device memory − reserve`, refused before any camera
-   opens if it does not hold. At K = 3 and C_ctx ≈ 300 MiB the context line is ~1.2 GB per
-   shard on a 16-GPU node, against ADR-015's feared 4.8 GB.
+   cost `C_ctx` is a **measured input**: **208 MiB per foreign context, charged to the
+   owner's device** (a 64 MiB slab on GPU 3 opened from GPU 4's process: +208 MiB on GPU 3,
+   +0 on GPU 4; a process's own context is 243 MiB — A5000, CUDA 12.6, torch 2.7.1,
+   2026-08-27 in-container, `benchmarks/link/ipc_context_cost.py`, log under
+   `benchmarks/link/results/2026-08-27/`). The resulting **per-shard VRAM budget is written
+   down at start-up** in the shard's Health report:
+   `slabs + own_ctx + K × C_ctx + engines ≤ device memory − reserve` — `K × C_ctx` being
+   what the shard's K openers cost it — refused before any camera opens if it does not
+   hold. At K = 3 the context line is ≈ 0.6 GB per device on a 16-GPU node, against
+   ≈ 3.1 GB for an unbounded mesh (ADR-015 feared 4.8 GB at an assumed 300 MiB).
 4. **Every pair is timed at handshake — this is the topology caveat, made a routine.** One
    12 MB and one 128 KB copy per pair (a few ms, once) fill a route table:
    `direct` (NVLink/PIX-class) or `staged`. "Capable" is never trusted as "fast"; NCCL's
