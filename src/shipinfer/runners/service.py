@@ -38,6 +38,7 @@ from typing import Any
 from shipinfer.core.errors import ConfigurationError, ShipInferError
 from shipinfer.core.logging import get_logger, log_context
 from shipinfer.launch.control import CameraSpec, ShardHealth, ShardIdentity, ShardState
+from shipinfer.launch.proto import load_grpc, load_pb
 from shipinfer.runners.base import Runner
 from shipinfer.topology import ChainSpec
 
@@ -49,20 +50,6 @@ _LOG = get_logger("runners.service")
 #: wedged RPC cannot spawn a pool. Every handler here is either instant or bounded by the
 #: deadline its request carries.
 _DEFAULT_MAX_WORKERS = 8
-
-#: What to tell an operator who cannot use the extra. The same sentence
-#: ``launch/client.py`` uses, because the two halves of one control plane refusing
-#: differently is one more thing to look up.
-_MISSING_GRPCIO = 'the gRPC control plane needs grpcio: pip install "shipinfer[grpc]"'
-
-#: How a lazy import of the generated stubs fails. ``ImportError`` is the extra being absent;
-#: ``RuntimeError`` is it being present and too old - protoc's output compares
-#: ``grpc.__version__`` against its own ``GRPC_GENERATED_VERSION`` at import and raises a bare
-#: ``RuntimeError`` below it, and ``shard_pb2`` does the same for the protobuf runtime. The
-#: floors in ``pyproject.toml`` are set so a supported install never sees the second
-#: (``tests/launch/test_generated_floor.py``); catching it anyway means a floor that drifts
-#: reaches an operator as a typed refusal naming the extra rather than as a raw traceback.
-_UNUSABLE_GRPCIO = (ImportError, RuntimeError)
 
 
 class ShardService:
@@ -178,7 +165,7 @@ class ShardService:
         which is what the parent is waiting to learn; whether it can yet take a camera is
         ``state``.
         """
-        pb = _pb()
+        pb = load_pb()
         return pb.ReadyReply(identity=self._identity.to_pb(), state=str(self._safe_state()))
 
     def UpdateTopology(self, request: Any, context: Any = None) -> Any:
@@ -200,7 +187,7 @@ class ShardService:
         parent that had to send a separate "now go" RPC would have a two-step handshake with
         a failure state in the middle.
         """
-        pb = _pb()
+        pb = load_pb()
         try:
             spec = ChainSpec.from_yaml(
                 request.chain_yaml, source=f"shard {self._identity.shard_id} UpdateTopology"
@@ -266,7 +253,7 @@ class ShardService:
         dashboard. The runner cannot make that refusal for us: by then its own camera set is
         already gone, so what reaches it looks like an ordinary add.
         """
-        pb = _pb()
+        pb = load_pb()
         lifecycle = self._lifecycle()
         if lifecycle is not None:
             return pb.AddCameraReply(
@@ -298,18 +285,45 @@ class ShardService:
         return pb.AddCameraReply(accepted=True)
 
     def RemoveCamera(self, request: Any, context: Any = None) -> Any:
-        """Stop and forget one camera. ``clean=False`` means its thread was abandoned."""
-        pb = _pb()
+        """Stop and forget one camera. ``clean=False`` means its thread was abandoned.
+
+        ``removed`` answers exactly the question ``shard.proto`` says it does - **whether the
+        shard knew this camera at all** - and two things mean it did not: the runner's
+        ``ConfigurationError`` ("no such camera", ``runners/base.py``), and a runner that
+        manages no cameras in the first place, which refuses everything with a
+        ``ServerStateError`` and has therefore never heard of this one. That second case is
+        the same reading :meth:`_drain` already takes of the same refusal.
+
+        Anything else went wrong *while removing a camera this shard has*, and answers
+        ``removed=True, clean=False`` with the reason. The distinction is the operator's:
+        "there is no cam-7 here" sends them to look for a typo or at another shard, while
+        "cam-7 raised on the way out" is this shard's problem and the camera may still be
+        holding a thread. Collapsing the two into ``removed=False`` sent them to the wrong
+        place - the client turns ``removed=False`` into "this shard does not run that
+        camera", in precisely those words.
+        """
+        pb = load_pb()
         try:
             clean = self._runner.remove_camera(request.camera_id, timeout_s=request.timeout_s)
-        except ShipInferError as exc:
+        except ConfigurationError as exc:
             return pb.RemoveCameraReply(removed=False, clean=False, reason=str(exc))
+        except ShipInferError as exc:
+            if not self._runner.manages_cameras:
+                return pb.RemoveCameraReply(removed=False, clean=False, reason=str(exc))
+            _LOG.warning(
+                "shard %d could not remove camera %s: %s",
+                self._identity.shard_id,
+                request.camera_id,
+                exc,
+                extra=log_context(camera_id=request.camera_id),
+            )
+            return pb.RemoveCameraReply(removed=True, clean=False, reason=str(exc))
         except Exception as exc:  # see the module docstring: no traceback reaches the wire
             _LOG.exception(
                 "shard %d failed removing camera %s", self._identity.shard_id, request.camera_id
             )
             return pb.RemoveCameraReply(
-                removed=False, clean=False, reason=f"{type(exc).__name__}: {exc}"
+                removed=True, clean=False, reason=f"{type(exc).__name__}: {exc}"
             )
         return pb.RemoveCameraReply(removed=True, clean=bool(clean))
 
@@ -346,7 +360,7 @@ class ShardService:
 
     def Stats(self, request: Any, context: Any = None) -> Any:
         """Counters an operator would page on, as the runner reports them."""
-        pb = _pb()
+        pb = load_pb()
         reply = pb.StatsReply()
         try:
             reply.stats.update(self._runner.stats())
@@ -370,7 +384,7 @@ class ShardService:
         whole deadline. Only a fresh ``UpdateTopology`` clears it - a drained shard is done,
         and refuses cameras (``AddCamera``) until it is given something to run again.
         """
-        pb = _pb()
+        pb = load_pb()
         with self._lock:
             self._draining = True
             try:
@@ -393,16 +407,27 @@ class ShardService:
         asking a stopped runner to drain and stop again would re-enter two idempotent-but-not-
         free paths only to report a zero this class already knows.
 
+        The flag is read **twice**: once outside the lock as a fast path, and once inside it
+        as the check that is actually load-bearing. The servicer runs on a thread pool, so two
+        Stops - a supervisor's and a signal handler's - are an ordinary wire event, and with
+        the outer check alone both pass it while the flag is still false. The second would
+        then re-drain a runner with nothing left to release and answer ``abandoned=0``, which
+        ``StopResult.clean`` and ``shard.proto`` both define as "the clean shutdown, safe to
+        unwind" - for a shard that abandoned threads still referencing its buffers. It would
+        also burn a second full ``timeout_s`` doing it.
+
         :attr:`_lock` is held across both blocking waits - the drain and the executor stop -
         for the whole of ``timeout_s``. That is deliberate: it is what serialises a Stop
         against a concurrent Drain or UpdateTopology. The probes an operator needs *during* a
         shutdown (``Ready``, ``Health``, ``Stats``) take no lock at all, so a shard that is
         stopping still says so instead of timing out the supervisor watching it.
         """
-        pb = _pb()
-        if self._stopped:
+        pb = load_pb()
+        if self._stopped:  # fast path only; the check that decides is the one below
             return pb.StopReply(abandoned=0, detail="already stopped")
         with self._lock:
+            if self._stopped:
+                return pb.StopReply(abandoned=0, detail="already stopped")
             self._draining = True
             abandoned, detail = self._drain(request.timeout_s)
             try:
@@ -511,12 +536,7 @@ def serve_shard(
     """
     from concurrent import futures
 
-    try:
-        import grpc
-
-        from shipinfer.launch.proto import shard_pb2_grpc
-    except _UNUSABLE_GRPCIO as exc:
-        raise ConfigurationError(f"{_MISSING_GRPCIO} ({type(exc).__name__}: {exc})") from exc
+    grpc, shard_pb2_grpc = load_grpc()
 
     # `grpc.so_reuseport` is ON by default in grpc-python, and it is wrong for this server:
     # with it, a second shard handed a port an earlier run still holds binds SUCCESSFULLY,
@@ -589,24 +609,3 @@ def _release(server: Any) -> None:
         server.start()
     with contextlib.suppress(Exception):
         server.stop(0).wait(1.0)
-
-
-def _pb() -> Any:
-    """The generated messages. Imported per call, never at module scope.
-
-    ``shard_pb2`` needs ``protobuf`` and ``shard_pb2_grpc`` needs ``grpc``; both are the
-    optional ``grpc`` extra, and ``import shipinfer.runners`` must not require either — the
-    in-process runner is the one a laptop uses.
-
-    Raises:
-        ConfigurationError: the extra is missing or too old (:data:`_UNUSABLE_GRPCIO`). Typed
-            here as well as in :func:`serve_shard`, because a servicer can be constructed
-            directly - a test does it, and so will an embedded shard - without ever passing
-            through the function that binds a port.
-    """
-    try:
-        from shipinfer.launch.proto import shard_pb2
-    except _UNUSABLE_GRPCIO as exc:
-        raise ConfigurationError(f"{_MISSING_GRPCIO} ({type(exc).__name__}: {exc})") from exc
-
-    return shard_pb2

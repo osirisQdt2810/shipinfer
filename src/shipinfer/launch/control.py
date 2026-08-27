@@ -10,8 +10,9 @@ read in a failure report, and — the one that decides it — an import of ``goo
 Keeping the vocabulary here means a caller in ``runners/`` or a test can name a
 :class:`CameraSpec` without the optional extra installed, and the two ``to_pb`` /
 ``from_pb`` helpers are the only code in the project that has to know a wire format exists.
-Both helpers import the generated module **inside** the function body for exactly that
-reason.
+Both helpers reach the generated module through
+:mod:`shipinfer.launch.proto`'s loaders - lazily, and behind the guard that turns a missing
+extra into a typed refusal - for exactly that reason.
 
 **The dicts stay dicts.** ``ShardHealth`` carries three of them —
 ``engine`` (``engine/health.py::HealthReport.as_dict``), ``cameras`` (the ingest manager's
@@ -28,6 +29,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
+
+from shipinfer.launch.proto import load_json_format, load_pb
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; never imported at runtime
     from shipinfer.launch.proto import shard_pb2
@@ -96,7 +99,7 @@ class ShardIdentity:
     pid: int = 0
 
     def to_pb(self) -> shard_pb2.ShardIdentity:
-        from shipinfer.launch.proto import shard_pb2
+        shard_pb2 = load_pb()
 
         return shard_pb2.ShardIdentity(
             shard_id=self.shard_id, control_port=self.control_port, pid=self.pid
@@ -127,7 +130,7 @@ class CameraSpec:
     fps: float = 0.0
 
     def to_pb(self) -> shard_pb2.CameraSpec:
-        from shipinfer.launch.proto import shard_pb2
+        shard_pb2 = load_pb()
 
         return shard_pb2.CameraSpec(camera_id=self.camera_id, url=self.url, fps=self.fps)
 
@@ -153,7 +156,7 @@ class AddCameraResult:
     reason: str = ""
 
     def to_pb(self) -> shard_pb2.AddCameraReply:
-        from shipinfer.launch.proto import shard_pb2
+        shard_pb2 = load_pb()
 
         return shard_pb2.AddCameraReply(accepted=self.accepted, reason=self.reason)
 
@@ -184,7 +187,7 @@ class StopResult:
         return self.abandoned == 0 and not self.detail
 
     def to_pb(self) -> shard_pb2.StopReply:
-        from shipinfer.launch.proto import shard_pb2
+        shard_pb2 = load_pb()
 
         return shard_pb2.StopReply(abandoned=self.abandoned, detail=self.detail)
 
@@ -216,7 +219,7 @@ class ShardHealth:
     detail: str = ""
 
     def to_pb(self) -> shard_pb2.HealthReply:
-        from shipinfer.launch.proto import shard_pb2
+        shard_pb2 = load_pb()
 
         reply = shard_pb2.HealthReply(state=str(self.state), detail=self.detail)
         reply.engine.update(self.engine)
@@ -226,7 +229,7 @@ class ShardHealth:
 
     @classmethod
     def from_pb(cls, message: shard_pb2.HealthReply) -> ShardHealth:
-        from google.protobuf import json_format
+        json_format = load_json_format()
 
         return cls(
             state=message.state,

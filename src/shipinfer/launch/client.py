@@ -37,23 +37,11 @@ from shipinfer.launch.control import (
     ShardIdentity,
     StopResult,
 )
+from shipinfer.launch.proto import load_grpc, load_json_format, load_pb
 
 __all__ = ["ShardClient"]
 
 _LOG = get_logger("launch.client")
-
-#: What to tell an operator who has not installed the extra. One string, so the message in
-#: the refusal and the message a test asserts on cannot drift.
-_MISSING_GRPCIO = 'the gRPC control plane needs grpcio: pip install "shipinfer[grpc]"'
-
-#: What a lazy import of the generated stubs can fail with. ``ImportError`` is the extra
-#: being absent; ``RuntimeError`` is it being present and too old — protoc's output compares
-#: ``grpc.__version__`` against its own ``GRPC_GENERATED_VERSION`` at import and raises a
-#: bare ``RuntimeError`` below it, and ``shard_pb2`` does the same for the protobuf runtime.
-#: The floors in ``pyproject.toml`` are set so a supported install never sees the second
-#: (``tests/launch/test_generated_floor.py``); catching it anyway means a floor that drifts
-#: reaches an operator as a typed refusal naming the extra rather than as a raw traceback.
-_UNUSABLE_GRPCIO = (ImportError, RuntimeError)
 
 #: How long to sleep between the first two `Ready` polls, and the cap it backs off to. A
 #: freshly spawned interpreter takes O(1s) to import and bind, so polling every 50 ms wastes
@@ -96,6 +84,9 @@ class ShardClient:
         self._timeout_s = timeout_s
         self._channel: Any = None
         self._stub: Any = None
+        #: The ``grpc`` module itself, cached by :meth:`_rpc` next to the stub so the error
+        #: type :meth:`_call` catches comes from the same guarded import.
+        self._grpc: Any = None
         self._identity: ShardIdentity | None = None
 
     # -- what the launcher already knows -------------------------------------------------
@@ -123,6 +114,10 @@ class ShardClient:
     def _rpc(self) -> Any:
         """The stub, connecting on first use.
 
+        The module it caches matters as much as the stub: :meth:`_call` needs ``grpc`` to
+        name ``grpc.RpcError``, and importing it there would be a second door into the
+        optional extra whose refusal rested on this method having run first.
+
         Lazy for two reasons, both load-bearing. ``grpc`` is an optional extra, so importing
         it at module scope would make ``import shipinfer.launch`` fail on a host without it;
         and a client is constructed by the launcher *before* the child it addresses has
@@ -130,19 +125,14 @@ class ShardClient:
 
         Raises:
             ConfigurationError: grpcio is not installed, or is older than the committed
-                stubs were generated against (see :data:`_UNUSABLE_GRPCIO`).
+                stubs were generated against
+                (:data:`~shipinfer.launch.proto.UNUSABLE_GRPCIO`).
         """
         if self._stub is not None:
             return self._stub
-        try:
-            import grpc
+        grpc, shard_pb2_grpc = load_grpc()
 
-            from shipinfer.launch.proto import shard_pb2_grpc
-        except _UNUSABLE_GRPCIO as exc:
-            raise ConfigurationError(
-                f"{_MISSING_GRPCIO} ({type(exc).__name__}: {exc})"
-            ) from exc
-
+        self._grpc = grpc
         self._channel = grpc.insecure_channel(self.address)
         # protoc emits no annotations for the grpc stub, and mypy is strict here.
         self._stub = shard_pb2_grpc.ShardStub(self._channel)  # type: ignore[no-untyped-call]
@@ -151,13 +141,17 @@ class ShardClient:
     @staticmethod
     def _pb() -> Any:
         """The generated messages, imported here for the same reason :meth:`_rpc` is lazy."""
-        try:
-            from shipinfer.launch.proto import shard_pb2
-        except _UNUSABLE_GRPCIO as exc:  # protobuf rides with grpcio, and has its own floor
-            raise ConfigurationError(
-                f"{_MISSING_GRPCIO} ({type(exc).__name__}: {exc})"
-            ) from exc
-        return shard_pb2
+        return load_pb()
+
+    @staticmethod
+    def _json_format() -> Any:
+        """``json_format``, behind the same guard as :meth:`_pb`.
+
+        A ``Struct`` field is decoded with it, and protobuf is a *separate* distribution from
+        grpcio even though one extra installs both. Reached through the loader so that no
+        method on this class can refuse untyped, whatever order its statements end up in.
+        """
+        return load_json_format()
 
     def _call(self, name: str, request: Any, timeout_s: float | None) -> Any:
         """One RPC, with the shard named in whatever goes wrong.
@@ -169,11 +163,9 @@ class ShardClient:
                 library exception carrying a channel state does not help it decide.
         """
         stub = self._rpc()
-        import grpc
-
         try:
             return getattr(stub, name)(request, timeout=self._deadline(timeout_s))
-        except grpc.RpcError as exc:
+        except self._grpc.RpcError as exc:
             # `grpc.RpcError` is not required to be a `Call`, so `code`/`details` may be
             # absent; the string form is the fallback rather than an AttributeError on the
             # error path, which is the worst place to raise a second exception.
@@ -190,6 +182,7 @@ class ShardClient:
     def close(self) -> None:
         """Release the channel. Idempotent, and safe before the first call."""
         channel, self._channel, self._stub = self._channel, None, None
+        self._grpc = None
         if channel is not None:
             channel.close()
 
@@ -323,6 +316,13 @@ class ShardClient:
         Raises:
             ConfigurationError: no such camera on this shard. A typo in an operator's call
                 deserves an answer rather than a silent no-op.
+            ServerStateError: the shard has this camera and the removal itself failed. A
+                different exception from a different sentence on purpose: an operator told
+                "shard 3 does not run cam-7" goes looking for a typo, and the truth is that
+                cam-7 is on shard 3 and may still be holding a thread. The two arrive as
+                ``removed=False`` and ``removed=True`` with a reason respectively
+                (``runners/service.py::RemoveCamera``); a non-empty reason on a removal the
+                shard *did* own is what marks the second.
         """
         request = self._pb().RemoveCameraRequest(camera_id=camera_id, timeout_s=timeout_s)
         reply = self._call(
@@ -332,6 +332,10 @@ class ShardClient:
             raise ConfigurationError(
                 f"shard {self._shard_id} does not run camera {camera_id!r}: {reply.reason}"
             )
+        if reply.reason:
+            raise ServerStateError(
+                f"shard {self._shard_id} could not remove camera {camera_id!r}: {reply.reason}"
+            )
         return bool(reply.clean)
 
     def health(self, *, timeout_s: float | None = None) -> ShardHealth:
@@ -340,8 +344,7 @@ class ShardClient:
 
     def stats(self, *, timeout_s: float | None = None) -> dict[str, Any]:
         """Counters an operator would page on."""
-        from google.protobuf import json_format
-
+        json_format = self._json_format()
         reply = self._call("Stats", self._pb().StatsRequest(), timeout_s)
         stats: dict[str, Any] = json_format.MessageToDict(reply.stats)
         if reply.detail:

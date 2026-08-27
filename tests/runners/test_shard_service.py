@@ -102,6 +102,9 @@ class CameraRunner(FakeRunner):
         self.drain_error: Exception | None = None
         self.drains = 0
         self.removed_with: list[tuple[str, float]] = []
+        #: Raised by `remove_camera` for a camera this runner *does* have, which is how the
+        #: servicer's "the shard knew it, the removal failed" branch is reached.
+        self.remove_error: Exception | None = None
         self.drain_delay_s = 0.0
         #: The highest number of threads ever inside `drain` at once. 1 is the assertion:
         #: the servicer's lock is what keeps two Drains out of one camera set.
@@ -121,6 +124,8 @@ class CameraRunner(FakeRunner):
         self.removed_with.append((camera_id, timeout_s))
         if camera_id not in self.cameras:
             raise ConfigurationError(f"camera {camera_id!r} is not running")
+        if self.remove_error is not None:
+            raise self.remove_error
         del self.cameras[camera_id]
         return self.abandoned == 0
 
@@ -482,6 +487,53 @@ class TestRemovingACamera:
 
         assert runner.removed_with == [("cam-1", 0.25)]
 
+    def test_a_runner_that_owns_no_cameras_also_answers_not_removed(self) -> None:
+        """ "I manage no cameras" is still "I never knew this one", not a failed removal.
+
+        The same reading `_drain` takes of the same refusal: a runner whose
+        `manages_cameras` is False has no camera set for `cam-1` to be missing from.
+        """
+        svc = service(FakeRunner(chain()))
+        install(svc)
+
+        reply = svc.RemoveCamera(pb.RemoveCameraRequest(camera_id="cam-1", timeout_s=1.0))
+
+        assert not reply.removed
+        assert "does not manage cameras" in reply.reason
+
+    def test_a_removal_that_raises_is_not_an_unknown_camera(self) -> None:
+        """`removed` means "the shard knew this camera", and it did - the removal failed.
+
+        Answering `removed=False` here made the client say "shard 3 does not run camera
+        cam-1", which sends an operator looking for a typo while cam-1 sits on this shard
+        possibly still holding a thread.
+        """
+        runner = CameraRunner(chain())
+        runner.remove_error = ServerStateError("the manager is stopping")
+        svc = service(runner)
+        install(svc)
+        svc.AddCamera(pb.AddCameraRequest(camera=CameraSpec("cam-1", "rtsp://x").to_pb()))
+
+        reply = svc.RemoveCamera(pb.RemoveCameraRequest(camera_id="cam-1", timeout_s=1.0))
+
+        assert reply.removed
+        assert not reply.clean
+        assert reply.reason == "the manager is stopping"
+
+    def test_an_unexpected_failure_is_reported_the_same_way_with_its_type(self) -> None:
+        """A bug in a decoder is still a camera this shard has; no traceback on the wire."""
+        runner = CameraRunner(chain())
+        runner.remove_error = RuntimeError("the decoder segfaulted its way out")
+        svc = service(runner)
+        install(svc)
+        svc.AddCamera(pb.AddCameraRequest(camera=CameraSpec("cam-1", "rtsp://x").to_pb()))
+
+        reply = svc.RemoveCamera(pb.RemoveCameraRequest(camera_id="cam-1", timeout_s=1.0))
+
+        assert reply.removed
+        assert not reply.clean
+        assert reply.reason == "RuntimeError: the decoder segfaulted its way out"
+
     def test_an_abandoned_thread_is_reported_as_not_clean(self) -> None:
         runner = CameraRunner(chain())
         runner.abandoned = 1
@@ -493,6 +545,9 @@ class TestRemovingACamera:
 
         assert reply.removed
         assert not reply.clean
+        # Empty, and load-bearing: a non-empty reason on a removed camera is how the client
+        # tells "the thread was abandoned" from "the removal raised".
+        assert reply.reason == ""
 
 
 # -- shutdown -----------------------------------------------------------------------------
@@ -614,6 +669,47 @@ class TestDrainAndStopAreSerialisedAndIdempotent:
         assert first.abandoned == 2
         assert (second.abandoned, second.detail) == (0, "already stopped")
         assert runner.drains == drains_after_the_first_stop
+        assert runner.stopped == 1
+
+    def test_two_concurrent_stops_produce_exactly_one_shutdown(self) -> None:
+        """The idempotence check has to be re-read *under* the lock, not only outside it.
+
+        The servicer is bound to a thread pool, so two Stops - a supervisor's drain-then-stop
+        and a signal handler's - are an ordinary wire event. With the guard read only outside
+        the lock, both threads passed it while `_stopped` was still false: the second then
+        re-drained a runner with nothing left to release and answered `abandoned=0`, which
+        `StopResult.clean` and `shard.proto` both define as "the clean shutdown, safe to
+        unwind" - for a shard that had just abandoned two threads still holding its buffers.
+
+        The drain is slow on purpose: 0.3 s is long enough that the second thread is reliably
+        inside the window the first one owns.
+        """
+        runner = CameraRunner(chain())
+        runner.abandoned = 2
+        runner.drain_delay_s = 0.3
+        svc = service(runner)
+        install(svc)
+        replies: list[Any] = []
+        lock = threading.Lock()
+
+        def stop() -> None:
+            reply = svc.Stop(pb.StopRequest(timeout_s=2.0))
+            with lock:
+                replies.append(reply)
+
+        threads = [threading.Thread(target=stop) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10.0)
+
+        assert [thread.is_alive() for thread in threads] == [False, False]
+        assert len(replies) == 2
+        answers = sorted((reply.abandoned, reply.detail) for reply in replies)
+        assert answers == [(0, "already stopped"), (2, "")]
+        # The count is a lifetime signal, so the shutdown that produced it must have happened
+        # exactly once - and the second caller must not be told a clean zero.
+        assert runner.drains == 1
         assert runner.stopped == 1
 
     def test_a_health_probe_answers_while_a_stop_holds_the_lock(self) -> None:
