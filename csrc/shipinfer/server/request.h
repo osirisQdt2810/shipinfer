@@ -20,11 +20,9 @@
 
 namespace shipinfer {
 
-    inline int64_t monotonic_ns() {
-        return std::chrono::duration_cast<std::chrono::nanoseconds>(
-                   std::chrono::steady_clock::now().time_since_epoch())
-            .count();
-    }
+    // `monotonic_ns()` is `core/types.h`'s: the clock that stamps a frame and the clock a
+    // deadline is measured against have to be the same one, and there is exactly one
+    // definition of it so they cannot drift apart.
 
     struct InferenceRequest {
         std::string model_name;
@@ -126,10 +124,9 @@ namespace shipinfer {
         bool settled_ = false;
     };
 
-    // `core.errors.RequestCancelledError`: the request left the system without an answer.
-    struct RequestCancelledError : std::runtime_error {
-        using std::runtime_error::runtime_error;
-    };
+    // `RequestCancelledError` is in `core/types.h`: the camera actor treats a closed sink as a
+    // reason to finish, and `ingest/` may not include `server/`.
+    //
     // `core.errors.RequestTimeoutError`: a stage waited its whole budget for a model.
     struct RequestTimeoutError : std::runtime_error {
         using std::runtime_error::runtime_error;

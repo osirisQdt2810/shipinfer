@@ -36,10 +36,16 @@ Python, and that is the discrepancy this directory closes.
 
 **Not in scope — everything that runs once, at start-up:**
 
-the settings tree, the model repository reader, the registries, the CLI, the KServe HTTP
-surface. Porting those buys nothing measurable and would lose the pydantic validation that
-makes a bad `config.yaml` fail at load with a readable message. The Python layer keeps
-owning them; it hands this plane a resolved configuration and gets out of the way.
+the settings tree, the model repository reader, the CLI, the KServe HTTP surface. Porting
+those buys nothing measurable and would lose the pydantic validation that makes a bad
+`config.yaml` fail at load with a readable message. The Python layer keeps owning them; it
+hands this plane a resolved configuration and gets out of the way.
+
+The registries for the families that *do* live here are the exception: `POLICIES()` for
+placement and `SOURCES()` for video sources. They are twenty lines apiece and exist for the
+same reason the Python ones do — adding a policy or a source must be a new file and a
+registrar, never an edit to a switch statement (seam 1). They resolve a *name* the Python
+layer already validated; they do not read configuration.
 
 That split is not a way of doing less. It is where the 1000-frames-a-second boundary actually
 falls, and it is what `CLAUDE.md` specified before any of this was written.

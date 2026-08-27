@@ -11,12 +11,15 @@
 #include <string>
 #include <vector>
 
+#include "shipinfer/core/options.h"
 #include "shipinfer/scheduling/policies/base.h"
 
 namespace shipinfer {
 
     // Constructor keywords, as the settings tree carries them: `placement_policy_options`.
-    using PolicyOptions = std::map<std::string, std::string>;
+    // The alias is kept so that moving the map type, `option_int` and
+    // `refuse_unknown_options` into `core/` changed no policy file.
+    using PolicyOptions = KeywordOptions;
     using PolicyFactory = std::function<std::unique_ptr<PlacementPolicy>(const PolicyOptions&)>;
 
     class PolicyRegistry {
@@ -54,11 +57,5 @@ namespace shipinfer {
             POLICIES().add(name, aliases, description, std::move(factory));
         }
     };
-
-    // Option parsing shared by the policies: a keyword the constructor does not take is a
-    // configuration error, as the Python constructors' TypeError becomes one.
-    int option_int(const PolicyOptions& options, const std::string& key, int fallback);
-    void refuse_unknown_options(const std::string& policy, const PolicyOptions& options,
-                                const std::vector<std::string>& accepted);
 
 }  // namespace shipinfer
