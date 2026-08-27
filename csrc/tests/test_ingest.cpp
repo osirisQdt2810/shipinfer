@@ -2166,18 +2166,22 @@ namespace {
                     message);
             {
                 // The table's other row, end to end (#48 round 1): the opencv lane's names
-                // answer the same way in a binary that omitted it.
-                std::string replay_message;
-                try {
-                    FrameCounter counter("cam-r");
-                    StopSignal stop;
-                    IngestConfig config = a_camera("cam-r");
-                    config.source = "replay";
-                    create_source(config, counter, stop);
-                } catch (const ConfigError& error) {
-                    replay_message = error.what();
-                }
+                // answer the same way in a binary that omitted it. The construction sits
+                // INSIDE the guard (#49 round 1 N1): a `--with-external opencv` build with
+                // gstreamer omitted still enters this branch, and constructing a real
+                // ReplaySource for nothing was harmless only via another unit's detail
+                // (replay throws from do_open, not its constructor).
                 if (!SOURCES().contains("replay")) {
+                    std::string replay_message;
+                    try {
+                        FrameCounter counter("cam-r");
+                        StopSignal stop;
+                        IngestConfig config = a_camera("cam-r");
+                        config.source = "replay";
+                        (void)create_source(config, counter, stop);
+                    } catch (const ConfigError& error) {
+                        replay_message = error.what();
+                    }
                     check(
                         contains(replay_message, "the 'opencv' external lane"),
                         "and the opencv row of the lane table answers too: " + replay_message);
