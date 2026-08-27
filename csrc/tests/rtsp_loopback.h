@@ -18,8 +18,9 @@
 // C++ RTSP server in this tree could not be built in the one image that can run these tests,
 // and extending the image is a different PR's decision.
 //
-// **And because the server already exists.** `scripts/rtsp_serve.py` is the sanctioned RTSP
-// fixture for the Python ingest tests and for `benchmarks/harness/rtsp.py`, with its pacing
+// **And because the server already exists.** `scripts/rtsp_serve.py` is the RTSP fixture
+// `benchmarks/harness/rtsp.py` stands up and `tests/test_rtsp_serve.py` pins (its two real
+// callers — #48 round 1 trimmed a wider claim), with its pacing
 // (`identity single-segment=true sync=true`) and its looping (`multifilesrc loop=true`) already
 // argued out in its docstring — including the two bugs that produced a 170%-of-target
 // measurement. A second server written here would be a second set of those bugs. `ffmpeg -f
@@ -95,9 +96,39 @@ namespace shipinfer::testsupport {
         // the server blocks in `write()` and every camera stalls — which a test would report as
         // "no frames arrived", nowhere near the cause. `benchmarks/harness/rtsp.py` documents
         // the same decision for the same reason, one `GST_DEBUG` setting away from happening.
+        // `argv[0]` resolved against PATH — in the PARENT, where malloc is legal. The child
+        // used to `execvp`, whose PATH walk is not on the async-signal-safe list and may
+        // allocate; this binary demonstrably forks with live detached threads (#48/#49
+        // rounds: six "abandoning the thread" lines before section P in a reviewer run), so
+        // the fork can land while an abandoned thread holds a malloc lock — the child then
+        // deadlocks instead of exec'ing and section P hangs intermittently. Empty when not
+        // found: absence is known before any child exists.
+        inline std::string resolve_on_path(const std::string& name) {
+            if (name.find('/') != std::string::npos) return name;
+            const char* raw_path = ::getenv("PATH");
+            if (raw_path == nullptr) return "";
+            const std::string path(raw_path);
+            size_t begin = 0;
+            while (begin <= path.size()) {
+                const size_t end = path.find(':', begin);
+                const std::string dir = path.substr(
+                    begin, end == std::string::npos ? std::string::npos : end - begin);
+                if (!dir.empty()) {
+                    const std::string candidate = dir + "/" + name;
+                    if (::access(candidate.c_str(), X_OK) == 0) return candidate;
+                }
+                if (end == std::string::npos) break;
+                begin = end + 1;
+            }
+            return "";
+        }
+
         inline pid_t spawn(const std::vector<std::string>& argv, const std::string& log) {
-            // Built before the fork: after it, this process has one thread and may only call
-            // async-signal-safe functions, which `new` is not.
+            // Everything that may allocate happens before the fork: after it, this process
+            // has one thread and may only call async-signal-safe functions — which `new`,
+            // and `execvp`'s PATH walk, are not (`execv` on a pre-resolved path is).
+            const std::string resolved = resolve_on_path(argv.front());
+            if (resolved.empty()) return -1;  // absence known before any child exists
             std::vector<char*> raw;
             raw.reserve(argv.size() + 1);
             for (const std::string& argument : argv) {
@@ -123,9 +154,9 @@ namespace shipinfer::testsupport {
             // leave an RTSP server holding a port: the *kernel* kills this child when its
             // parent dies, whatever the parent's last instruction turned out to be.
             ::prctl(PR_SET_PDEATHSIG, SIGKILL);
-            ::execvp(raw[0], raw.data());
-            // 127 is the shell's "command not found", and it is the usual outcome here: no
-            // ffmpeg, or no python3, on a host that was never going to serve RTSP.
+            ::execv(resolved.c_str(), raw.data());
+            // 127 is the shell's "command not found". Rare now that the parent resolved the
+            // path: reaching here means the file vanished or is not executable after all.
             ::_exit(127);
         }
 
