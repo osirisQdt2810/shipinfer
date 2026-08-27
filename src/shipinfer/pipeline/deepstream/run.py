@@ -259,7 +259,7 @@ class DeepStreamPipeline:
 
     @property
     def sink(self) -> ResultSink:
-        return self._sink
+        return self._ensure_sink()
 
     @property
     def gpu_id(self) -> int:
@@ -331,7 +331,7 @@ class DeepStreamPipeline:
         probe = MetadataProbe(
             gst=self._gst,
             pyds=self._pyds,
-            sink=self._sink,
+            sink=self._ensure_sink(),
             metrics=self._metrics,
             settings=self._settings,
             camera_by_pad=dict(branch.camera_by_pad),

@@ -1103,3 +1103,153 @@ class TestEverySecondaryClaimsItsLabels:
                 cameras=settings.ingest.cameras,
                 root=tmp_path,
             )
+
+
+class TestStartWiresTheSink:
+    def test_start_builds_the_sink_and_the_probe_reaches_it(
+        self, tmp_path: Path, monkeypatch, repository: ModelRepository
+    ) -> None:
+        """#32 rounds 2-3: `_ensure_sink` existed with zero callers, so a real shard wired
+        the probe with `sink=None` and published nothing for its whole lifetime while the
+        GPU burned — the module docstring's own failure through a different door. This is
+        the seam test the review asked for: with gst/pyds/build_branch faked, start() must
+        leave the sink built, an injected sink must be the one wired, and a buffer must
+        reach it."""
+        from shipinfer.pipeline.deepstream import run as run_module
+        from shipinfer.pipeline.deepstream.run import DeepStreamPipeline
+
+        class FakePad:
+            def __init__(self) -> None:
+                self.probes: list = []
+
+            def add_probe(self, _kind, callback):
+                self.probes.append(callback)
+
+        class FakeElement:
+            def get_bus(self):
+                return types.SimpleNamespace(
+                    add_signal_watch=lambda: None, connect=lambda *_: None
+                )
+
+            def set_state(self, _state):
+                return None
+
+        fake_gst = types.SimpleNamespace(
+            Pipeline=types.SimpleNamespace(new=lambda name: FakeElement()),
+            PadProbeType=types.SimpleNamespace(BUFFER=1),
+            State=types.SimpleNamespace(PLAYING=3, NULL=0),
+            StateChangeReturn=types.SimpleNamespace(FAILURE="failure"),
+            PadProbeReturn=types.SimpleNamespace(OK=0),
+            MessageType=types.SimpleNamespace(ERROR=1, EOS=2),
+        )
+        pad = FakePad()
+        branch = types.SimpleNamespace(
+            probe_pad=pad, camera_by_pad={0: CAMERAS[0]["camera_id"]}
+        )
+        monkeypatch.setattr(run_module, "load_pyds", lambda: (fake_gst, None, object()))
+        monkeypatch.setattr(run_module, "build_branch", lambda *a, **k: branch)
+
+        class RecordingSink:
+            name = "recording"
+
+            def __init__(self) -> None:
+                self.events: list = []
+
+            def emit(self, event) -> bool:
+                self.events.append(event)
+                return True
+
+            def drain_delivery_failures(self):
+                return []
+
+            def flush(self) -> None: ...
+            def close(self) -> None: ...
+
+        injected = RecordingSink()
+        settings = ServerSettings(
+            model_repository=tmp_path / "model_repository",  # the fixture built it here
+            ingest={"cameras": CAMERAS},
+            topology={"kind": "deepstream", "deepstream": dict(PARSER)},
+        )
+        pipeline = DeepStreamPipeline(settings, sink=injected, config_root=tmp_path / "cfg")
+        pipeline.start()
+        try:
+            assert pipeline.sink is injected, "the injected sink is the one wired"
+            assert pad.probes, "the probe reached the pad"
+            # A buffer with no batch meta walks the no-op path but MUST touch the probe's
+            # sink attribute existing — the AttributeError-on-None regression.
+            assert pipeline._probe is not None
+            assert pipeline._probe._sink is injected
+        finally:
+            pipeline.stop()
+
+    def test_start_without_an_injected_sink_builds_the_configured_one(
+        self, tmp_path: Path, monkeypatch, repository: ModelRepository
+    ) -> None:
+        from shipinfer.pipeline.deepstream import run as run_module
+        from shipinfer.pipeline.deepstream.run import DeepStreamPipeline
+
+        fake_gst = types.SimpleNamespace(
+            Pipeline=types.SimpleNamespace(
+                new=lambda name: types.SimpleNamespace(
+                    get_bus=lambda: types.SimpleNamespace(
+                        add_signal_watch=lambda: None, connect=lambda *_: None
+                    ),
+                    set_state=lambda _state: None,
+                )
+            ),
+            PadProbeType=types.SimpleNamespace(BUFFER=1),
+            State=types.SimpleNamespace(PLAYING=3, NULL=0),
+            StateChangeReturn=types.SimpleNamespace(FAILURE="failure"),
+        )
+        branch = types.SimpleNamespace(
+            probe_pad=types.SimpleNamespace(add_probe=lambda *_: None), camera_by_pad={}
+        )
+        monkeypatch.setattr(run_module, "load_pyds", lambda: (fake_gst, None, object()))
+        monkeypatch.setattr(run_module, "build_branch", lambda *a, **k: branch)
+
+        out = tmp_path / "events.jsonl"
+        settings = ServerSettings(
+            model_repository=tmp_path / "model_repository",
+            ingest={"cameras": CAMERAS},
+            pipeline={
+                "result_sink": "jsonlines",
+                "result_sink_options": {"path": str(out)},
+            },
+            topology={"kind": "deepstream", "deepstream": dict(PARSER)},
+        )
+        pipeline = DeepStreamPipeline(settings, config_root=tmp_path / "cfg")
+        pipeline.start()
+        try:
+            assert pipeline.sink is not None
+            assert out.exists(), "the configured sink was built at start(), not before"
+        finally:
+            pipeline.stop()
+
+
+class TestThePrimaryBatchIsBounded:
+    def test_more_cameras_than_the_engine_can_bind_is_refused(
+        self, repository: ModelRepository, tmp_path: Path
+    ) -> None:
+        """#32 rounds 2-3: the pgie's batch is the shard's camera count; a 13-camera shard
+        against a static-batch-8 detector died inside the GStreamer element seconds into
+        the deploy, and --dry-run reported nothing. Refused in pure Python instead."""
+        many = [
+            {"camera_id": f"cam{i:02d}", "uri": f"rtsp://host/{i}"} for i in range(9)
+        ]  # ship_detector's engine declares max_batch_size 8
+        settings = ServerSettings(
+            model_repository=tmp_path / "model_repository",
+            ingest={"cameras": many},
+            topology={"kind": "deepstream", "deepstream": dict(PARSER)},
+        )
+        from shipinfer.pipeline.deepstream import write_configs
+
+        with pytest.raises(ConfigurationError, match="max_batch_size 8"):
+            write_configs(
+                repository,
+                settings=settings,
+                shard_index=0,
+                gpu_id=0,
+                cameras=settings.ingest.cameras,
+                root=tmp_path,
+            )
