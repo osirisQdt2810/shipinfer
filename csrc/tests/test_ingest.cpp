@@ -1579,6 +1579,69 @@ namespace {
             std::this_thread::sleep_for(5ms);
     }
 
+    void test_a_refused_add_pays_the_abandonment_debt() {
+        // #33 round 3: the deadly interleaving is a stop() landing between add_camera's map
+        // insert and its start() — the stop signal is aimed at a thread that does not exist
+        // yet, start() then clears it, and the re-check has to stop an actor whose do_open
+        // is already blocked. If that stop has to DETACH, the throw must not drop the last
+        // reference; the actor is parked with the others the destructor deliberately leaks.
+        // The window is ~100 ns wide and unreachable by hammering (400 ASan rounds in
+        // review landed zero hits), so the manager exposes it as a seam instead.
+        static FakeScript script;
+        static CountingSink sink;
+        static std::promise<void> gate;
+        static std::shared_future<void> opened = gate.get_future().share();
+        script.on_open = [](int) { opened.wait(); };
+        script.on_read = [](int) { return 1; };
+
+        class StopsInTheWindow : public IngestManager {
+          public:
+            using IngestManager::IngestManager;
+
+          protected:
+            void between_publish_and_start() override {
+                // The concurrent stop(): strips the map, signals the not-yet-existing
+                // thread, parks nothing (the actor is not joinable yet), reports 0.
+                stop(0ms);
+            }
+            void between_start_and_recheck() override {
+                // The other half of the interleaving: the fresh thread must be INSIDE its
+                // blocked do_open before the re-check's stop request lands, or it exits
+                // cleanly at its first signal check and the safe sub-case is all that runs.
+                for (int i = 0; i < 600 && script.opens.load() == 0; ++i)
+                    std::this_thread::sleep_for(5ms);
+            }
+        };
+
+        bool refused = false;
+        {
+            StopsInTheWindow manager({}, sink, scripted(script));
+            const auto start = Clock::now();
+            try {
+                manager.add_camera(a_camera("cam0"));
+            } catch (const ServerStateError&) {
+                refused = true;
+            }
+            check(refused, "the add is refused, not returned as a camera nobody tracks");
+            check(ms_since(start) < 2000.0,
+                  "and the refusal used the short re-check grace, not the full shutdown one");
+            check(manager.size() == 0, "the fleet holds nothing");
+        }  // ~IngestManager — must leak the parked actor, not free it under its thread
+        gate.set_value();
+        bool resumed = false;
+        for (int i = 0; i < 600; ++i) {
+            if (script.closes.load() >= 1) {
+                resumed = true;
+                break;
+            }
+            std::this_thread::sleep_for(5ms);
+        }
+        check(resumed,
+              "the detached thread resumed AFTER the refusal and the manager's death, and "
+              "closed its source — the actor it stands on was parked and leaked, not freed "
+              "by the throw");
+    }
+
     void test_stop_charges_one_deadline_to_the_fleet_not_one_per_camera() {
         // Five cameras all hung in a decoder read: the 300 ms budget is the *fleet's*, so
         // the shutdown costs one deadline, not five in sequence — the header's "one read
@@ -1669,6 +1732,7 @@ int main() {
     test_a_directly_built_actor_names_the_camera_in_its_refusal();
     test_a_camera_added_during_stop_never_keeps_running();
     test_the_managers_death_leaks_the_abandoned_rather_than_freeing_them();
+    test_a_refused_add_pays_the_abandonment_debt();
     test_stop_charges_one_deadline_to_the_fleet_not_one_per_camera();
 
     std::printf("%d checks, %d failure(s), %d skipped\n", checks, failures, skips);

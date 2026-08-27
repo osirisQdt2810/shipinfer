@@ -93,7 +93,7 @@ class IngestManager:
             self.add_camera(camera)
         _LOG.info("ingest started with %d camera(s)", len(cameras))
 
-    def stop(self, timeout_s: float = 5.0) -> None:
+    def stop(self, timeout_s: float = 5.0) -> int:
         """Stop every actor. Idempotent, and safe before :meth:`start`.
 
         Stop requests are issued to *all* actors first and only then joined, so shutting
@@ -104,18 +104,33 @@ class IngestManager:
         clean shutdown logged "did not stop within 0.0s; abandoning the thread" once per
         camera and marked each one STOPPED while it was still reading and publishing. Fifty
         false alarms per shutdown is how a real abandoned thread stops being noticed.
+
+        ``timeout_s`` is one deadline for the whole fleet, not one per actor — synced from
+        the C++ plane (#33): because the first pass signals everyone at t0, an actor still
+        unfinished at t0+timeout is genuinely stuck, and charging the budget per actor would
+        turn one stuck decoder into fifty consecutive waits. Returns how many actors had to
+        be abandoned; 0 is the clean shutdown.
         """
         with self._lock:
             actors = list(self._actors.values())
             self._actors.clear()
         for actor in actors:
             actor.request_stop()
+        deadline = time.monotonic() + timeout_s
+        abandoned = 0
         for actor in actors:
-            actor.stop(timeout_s=timeout_s)
+            remaining = max(0.0, deadline - time.monotonic())
+            if not actor.stop(timeout_s=remaining):
+                abandoned += 1
         self._started = False
         self._refresh_gauges([])
         if actors:
-            _LOG.info("ingest stopped %d camera(s)", len(actors))
+            _LOG.info(
+                "ingest stopped %d camera(s)%s",
+                len(actors),
+                f", {abandoned} abandoned" if abandoned else "",
+            )
+        return abandoned
 
     def __enter__(self) -> IngestManager:
         self.start()
