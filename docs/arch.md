@@ -104,6 +104,16 @@ cách dùng gọi command giữa 2 tiến trình"*). What this buys, concretely:
 vLLM's engine-core split is the pattern reference: processes talk RPC; nothing meaningful
 rides argv.
 
+**The RPC surface wraps invariants that already exist — do not rediscover them.** The C++
+ingest manager hardened exactly this lifecycle across #33–#41, and the RPCs are thin skins
+over it: `Stop` wraps the fleet-deadline stop that charges ONE timeout to the whole camera
+set and *returns the abandonment count* (a lifetime signal — the caller must not unwind
+buffers a detached thread still references); `AddCamera` wraps the insert→start→re-check
+sequence that refuses, typed, a camera the fleet forgot mid-add instead of leaving it
+running untracked; `Health` wraps the per-camera snapshot that is safe against concurrent
+removal. A re-implementation that reuses these keeps four review rounds of concurrency
+fixes; one that rewrites them buys the same bugs back.
+
 ---
 
 ## 3. The DataPool — one shared-data abstraction, VRAM-first (V137/V138)
