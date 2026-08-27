@@ -50,6 +50,20 @@ _LOG = get_logger("runners.service")
 #: deadline its request carries.
 _DEFAULT_MAX_WORKERS = 8
 
+#: What to tell an operator who cannot use the extra. The same sentence
+#: ``launch/client.py`` uses, because the two halves of one control plane refusing
+#: differently is one more thing to look up.
+_MISSING_GRPCIO = 'the gRPC control plane needs grpcio: pip install "shipinfer[grpc]"'
+
+#: How a lazy import of the generated stubs fails. ``ImportError`` is the extra being absent;
+#: ``RuntimeError`` is it being present and too old - protoc's output compares
+#: ``grpc.__version__`` against its own ``GRPC_GENERATED_VERSION`` at import and raises a bare
+#: ``RuntimeError`` below it, and ``shard_pb2`` does the same for the protobuf runtime. The
+#: floors in ``pyproject.toml`` are set so a supported install never sees the second
+#: (``tests/launch/test_generated_floor.py``); catching it anyway means a floor that drifts
+#: reaches an operator as a typed refusal naming the extra rather than as a raw traceback.
+_UNUSABLE_GRPCIO = (ImportError, RuntimeError)
+
 
 class ShardService:
     """The eight RPCs of ``shard.proto``, over one runner.
@@ -61,16 +75,25 @@ class ShardService:
         identity: who this shard is. ``control_port`` must be the port actually bound, which
             is why :func:`serve_shard` fills it in after binding rather than before.
 
-    The state machine is derived, not stored — apart from the two facts nothing else can
-    know, which is whether ``Drain`` or ``Stop`` has been called. Deriving it means a runner
-    that dies on its own cannot leave this class asserting ``running``.
+    The state machine is derived, not stored — apart from the three facts nothing else can
+    know, which is whether ``Drain`` is in flight, whether one completed, and whether ``Stop``
+    has been called. Deriving the rest means a runner that dies on its own cannot leave this
+    class asserting ``running``.
     """
 
     def __init__(self, runner: Runner, identity: ShardIdentity) -> None:
         self._runner = runner
         self._identity = identity
         self._lock = threading.Lock()
+        #: A ``Drain`` is in flight *right now*. Set and cleared under :attr:`_lock`, and read
+        #: without it by the lock-free probes, which is the point: a ``Health`` arriving
+        #: during a slow drain must answer ``draining`` rather than block behind it.
         self._draining = False
+        #: A ``Drain`` completed. Distinct from :attr:`_draining` because "still releasing
+        #: cameras" and "released them, still serving nothing" are different answers to a
+        #: launcher deciding whether to wait or to place the cameras elsewhere. Cleared only
+        #: by a fresh ``UpdateTopology``, which is what makes the shard usable again.
+        self._drained = False
         self._stopped = False
         #: What the last accepted ``UpdateTopology`` carried. Read by the process entry point
         #: (A2 PR-6's ``launch/shard.py``), which is what builds a runner from it; kept here
@@ -110,18 +133,38 @@ class ShardService:
         """This shard's rank among the processes sharing each device."""
         return self._share_rank
 
-    def state(self) -> ShardState:
-        """The shard's state, derived from the runner rather than remembered."""
+    def state(self, report: dict[str, Any] | None = None) -> ShardState:
+        """The shard's state, derived from the runner rather than remembered.
+
+        Args:
+            report: a snapshot from :meth:`Runner.health` the caller *already holds*. Passed
+                in rather than fetched again because a caller that has one and lets this
+                method take a second (``Health`` did) can report a camera count from one
+                snapshot beside a state derived from another — the self-contradicting report
+                the one-snapshot rule exists to prevent (arch.md section 2). ``None`` means
+                "nobody has asked yet", and only then is the runner asked.
+        """
+        lifecycle = self._lifecycle()
+        if lifecycle is not None:
+            return lifecycle
+        if not self._runner.is_running:
+            return ShardState.STARTING
+        return ShardState.READY if not self._cameras(report) else ShardState.RUNNING
+
+    def _lifecycle(self) -> ShardState | None:
+        """The states only this class can know, or ``None`` when the runner decides."""
         if self._stopped:
             return ShardState.STOPPED
         if self._draining:
             return ShardState.DRAINING
-        if not self._runner.is_running:
-            return ShardState.STARTING
-        return ShardState.READY if not self._cameras() else ShardState.RUNNING
+        if self._drained:
+            return ShardState.DRAINED
+        return None
 
-    def _cameras(self) -> dict[str, Any]:
-        report = self._runner.health()
+    def _cameras(self, report: dict[str, Any] | None = None) -> dict[str, Any]:
+        """The camera map out of a snapshot, taking one only if the caller has none."""
+        if report is None:
+            report = self._runner.health()
         cameras = report.get("cameras", {})
         return cameras if isinstance(cameras, dict) else {}
 
@@ -195,6 +238,7 @@ class ShardService:
             self._share_rank = tuple(request.share_rank)
             self._stopped = False
             self._draining = False
+            self._drained = False
 
         _LOG.info(
             "shard %d installed topology %r (shared_by=%s share_rank=%s)",
@@ -214,8 +258,24 @@ class ShardService:
         (``ingest/manager.py``). Both mean the same thing to a launcher — this camera is not
         running here, place it elsewhere — and both must reach it as data, because a gRPC
         error status would put them in the same bucket as a dead process.
+
+        The first refusal is this class's own: a shard that is draining, drained or stopped
+        takes no cameras. Without it a ``Stop`` racing an ``AddCamera`` answers
+        ``accepted=True`` for a camera nothing will ever read - the launcher marks it placed
+        and stops looking for a home for it, and the camera is dark until an operator reads a
+        dashboard. The runner cannot make that refusal for us: by then its own camera set is
+        already gone, so what reaches it looks like an ordinary add.
         """
         pb = _pb()
+        lifecycle = self._lifecycle()
+        if lifecycle is not None:
+            return pb.AddCameraReply(
+                accepted=False,
+                reason=(
+                    f"shard {self._identity.shard_id} is {lifecycle} and takes no cameras; "
+                    "place this one on another shard"
+                ),
+            )
         camera = CameraSpec.from_pb(request.camera)
         try:
             self._runner.add_camera(camera)
@@ -254,27 +314,35 @@ class ShardService:
         return pb.RemoveCameraReply(removed=True, clean=bool(clean))
 
     def Health(self, request: Any, context: Any = None) -> Any:
-        """What this shard is doing, from one snapshot.
+        """What this shard is doing, from **one** snapshot.
 
-        One call to ``runner.health()``, split rather than two calls merged: asking twice
-        would let a camera be removed between the two halves and produce a report that
-        contradicts itself.
+        Exactly one call to ``runner.health()`` per RPC, split into state, engine and cameras
+        rather than two calls merged: :meth:`state` is handed the report this method already
+        holds, so a camera removed between two would-be halves makes the whole reply smaller
+        instead of making ``state`` disagree with ``cameras``.
+
+        The encoding is inside the guard with the fetch. ``Struct`` accepts string keys and
+        JSON-shaped values only, so a report carrying an int key or a set raises out of
+        ``to_pb`` — and a runner's health dict is the *least* controlled data this class
+        handles. Encoded outside the guard, that reaches the wire as UNKNOWN plus a
+        traceback, which is the one thing this servicer promises never to do.
         """
         try:
             report = self._runner.health()
+            state = str(self.state(report))
             cameras = report.pop("cameras", {})
             health = ShardHealth(
-                state=str(self.state()),
+                state=state,
                 engine=report,
                 cameras=cameras if isinstance(cameras, dict) else {},
                 vram_budget={},
             )
+            return health.to_pb()
         except Exception as exc:  # see the module docstring: no traceback reaches the wire
             _LOG.exception("shard %d could not report health", self._identity.shard_id)
-            health = ShardHealth(
+            return ShardHealth(
                 state=str(ShardState.UNKNOWN), detail=f"{type(exc).__name__}: {exc}"
-            )
-        return health.to_pb()
+            ).to_pb()
 
     def Stats(self, request: Any, context: Any = None) -> Any:
         """Counters an operator would page on, as the runner reports them."""
@@ -288,10 +356,28 @@ class ShardService:
         return reply
 
     def Drain(self, request: Any, context: Any = None) -> Any:
-        """Stop reading cameras; let what is in flight finish."""
+        """Stop reading cameras; let what is in flight finish.
+
+        Under :attr:`_lock`, exactly as ``Stop`` is. Two drains are then serialised instead of
+        both being inside the runner's camera set at once, and a ``Drain`` racing a ``Stop``
+        cannot have the executor pulled out from under its in-flight work. The lock-free
+        probes (``Ready``, ``Health``, ``Stats``) still answer throughout, which is what makes
+        holding a lock across a blocking wait acceptable here.
+
+        A completed drain leaves the shard ``drained``, not ``draining``: the flag used to be
+        set and never cleared, so a shard that had finished releasing its cameras reported
+        "still finishing" forever and a launcher waiting for the drain to end waited out its
+        whole deadline. Only a fresh ``UpdateTopology`` clears it - a drained shard is done,
+        and refuses cameras (``AddCamera``) until it is given something to run again.
+        """
         pb = _pb()
-        self._draining = True
-        abandoned, detail = self._drain(request.timeout_s)
+        with self._lock:
+            self._draining = True
+            try:
+                abandoned, detail = self._drain(request.timeout_s)
+            finally:
+                self._draining = False
+                self._drained = True
         return pb.DrainReply(abandoned=abandoned, detail=detail)
 
     def Stop(self, request: Any, context: Any = None) -> Any:
@@ -301,8 +387,21 @@ class ShardService:
         the executor together, because everything is signalled at t0 and a worker still
         unfinished at the deadline is genuinely stuck (``ingest/manager.py``,
         ``runners/base.py``). The returned count is a lifetime signal, not a statistic.
+
+        Idempotence is **answered here**, not delegated to the runner. A second Stop returns
+        before touching it: the count belongs to the shutdown that actually happened, and
+        asking a stopped runner to drain and stop again would re-enter two idempotent-but-not-
+        free paths only to report a zero this class already knows.
+
+        :attr:`_lock` is held across both blocking waits - the drain and the executor stop -
+        for the whole of ``timeout_s``. That is deliberate: it is what serialises a Stop
+        against a concurrent Drain or UpdateTopology. The probes an operator needs *during* a
+        shutdown (``Ready``, ``Health``, ``Stats``) take no lock at all, so a shard that is
+        stopping still says so instead of timing out the supervisor watching it.
         """
         pb = _pb()
+        if self._stopped:
+            return pb.StopReply(abandoned=0, detail="already stopped")
         with self._lock:
             self._draining = True
             abandoned, detail = self._drain(request.timeout_s)
@@ -312,6 +411,7 @@ class ShardService:
                 _LOG.exception("shard %d could not stop its runner", self._identity.shard_id)
                 detail = f"{detail}; {type(exc).__name__}: {exc}".lstrip("; ")
             self._draining = False
+            self._drained = False
             self._stopped = True
         _LOG.info(
             "shard %d stopped%s",
@@ -403,7 +503,7 @@ def serve_shard(
     cameras, rather than silently running an empty chain.
 
     Raises:
-        ConfigurationError: grpcio is not installed, or the port is already bound. The port
+        ConfigurationError: grpcio is unusable, or the port is already bound. The port
             check is why this function exists rather than four lines at a call site — the
             refusal has to happen **before any camera is opened**, or a shard that cannot be
             controlled is already holding decoder threads and a CUDA context that nothing
@@ -415,10 +515,8 @@ def serve_shard(
         import grpc
 
         from shipinfer.launch.proto import shard_pb2_grpc
-    except ImportError as exc:
-        raise ConfigurationError(
-            'the gRPC control plane needs grpcio: pip install "shipinfer[grpc]"'
-        ) from exc
+    except _UNUSABLE_GRPCIO as exc:
+        raise ConfigurationError(f"{_MISSING_GRPCIO} ({type(exc).__name__}: {exc})") from exc
 
     # `grpc.so_reuseport` is ON by default in grpc-python, and it is wrong for this server:
     # with it, a second shard handed a port an earlier run still holds binds SUCCESSFULLY,
@@ -448,8 +546,7 @@ def serve_shard(
     else:
         detail = None
     if bound == 0:
-        with contextlib.suppress(Exception):
-            server.stop(0)
+        _release(server)
         raise ConfigurationError(
             f"shard {shard_id} could not bind its control port {host}:{control_port}; "
             "another shard or an earlier run still holds it"
@@ -457,12 +554,41 @@ def serve_shard(
 
     identity = ShardIdentity(shard_id=shard_id, control_port=bound, pid=os.getpid())
     service = ShardService(runner, identity)
-    # No annotations on protoc's output, and no `isinstance` inside it either: this is
-    # what binds the duck-typed servicer above by attribute name.
-    shard_pb2_grpc.add_ShardServicer_to_server(service, server)  # type: ignore[no-untyped-call]
-    server.start()
+    # Everything after a successful bind is unwound on failure. The port is held from the
+    # `add_insecure_port` above, so a servicer that cannot be attached or a `start()` that
+    # raises would otherwise leave a listening socket and a thread pool owned by nothing -
+    # and the caller's retry, or the next shard handed this port, would be refused by a
+    # server no object references any more.
+    try:
+        # No annotations on protoc's output, and no `isinstance` inside it either: this is
+        # what binds the duck-typed servicer above by attribute name.
+        shard_pb2_grpc.add_ShardServicer_to_server(service, server)  # type: ignore[no-untyped-call]
+        server.start()
+    except BaseException:
+        _release(server)
+        raise
     _LOG.info("shard %d control plane on %s:%d", shard_id, host, bound)
     return ShardServer(server=server, identity=identity, service=service)
+
+
+def _release(server: Any) -> None:
+    """Give back whatever a half-built server took, and never raise doing it.
+
+    ``stop()`` releases a listening socket only on a server that was **started**: a grpc
+    server that bound a port and then failed before ``start()`` keeps that socket until the
+    process exits, even once the last reference to it is gone (measured against grpcio
+    1.83 - ``stop(0).wait()``, ``del``, ``gc.collect()``, all still EADDRINUSE). So the
+    unwind starts it first. A server with no servicer attached answers UNIMPLEMENTED for the
+    microseconds before it is stopped, which is the price of not stranding a port that the
+    operator's retry - or the next shard given this number - would then be refused.
+
+    Both calls are best-effort: this runs on a failure path, and an exception here would
+    replace the diagnosis the caller is in the middle of raising.
+    """
+    with contextlib.suppress(Exception):
+        server.start()
+    with contextlib.suppress(Exception):
+        server.stop(0).wait(1.0)
 
 
 def _pb() -> Any:
@@ -471,7 +597,16 @@ def _pb() -> Any:
     ``shard_pb2`` needs ``protobuf`` and ``shard_pb2_grpc`` needs ``grpc``; both are the
     optional ``grpc`` extra, and ``import shipinfer.runners`` must not require either — the
     in-process runner is the one a laptop uses.
+
+    Raises:
+        ConfigurationError: the extra is missing or too old (:data:`_UNUSABLE_GRPCIO`). Typed
+            here as well as in :func:`serve_shard`, because a servicer can be constructed
+            directly - a test does it, and so will an embedded shard - without ever passing
+            through the function that binds a port.
     """
-    from shipinfer.launch.proto import shard_pb2
+    try:
+        from shipinfer.launch.proto import shard_pb2
+    except _UNUSABLE_GRPCIO as exc:
+        raise ConfigurationError(f"{_MISSING_GRPCIO} ({type(exc).__name__}: {exc})") from exc
 
     return shard_pb2

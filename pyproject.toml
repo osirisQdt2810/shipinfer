@@ -74,11 +74,17 @@ cli = ["typer>=0.12", "rich>=13.7"]                      # `shipinfer ...`
 # The shard control plane (arch.md §2). Optional because the in-process runner needs no
 # RPC at all, and the launcher must stay importable on a host that installed neither —
 # `launch/client.py` refuses with a typed ConfigurationError naming this extra.
-# protobuf is pinned at >=5.29 rather than the >=4.25 the wire format would allow: the
-# COMMITTED stubs in `launch/proto/` declare a 5.29 gencode version and validate it at
-# import, so an older runtime fails loudly there. Regenerate with a matching
-# grpcio-tools if that floor ever has to move down.
-grpc = ["grpcio>=1.60,<2", "protobuf>=5.29,<6"]          # shard control plane (arch.md §2)
+# Both floors are set by the COMMITTED stubs in `launch/proto/`, not by the wire format,
+# and both are checked at import by the generated code itself:
+#   * protobuf >=5.29 - `shard_pb2.py` declares a 5.29 gencode version and calls
+#     `ValidateProtobufRuntimeVersion` on it;
+#   * grpcio >=1.71.2 - `shard_pb2_grpc.py` carries GRPC_GENERATED_VERSION = '1.71.2' and
+#     raises at import below it. Declaring a lower floor here would let a *supported* install
+#     resolve grpcio 1.60 and then die on a raw traceback out of protoc's output.
+# `tests/launch/test_generated_floor.py` reads both numbers out of the stubs and fails if
+# these declarations drift below them. Regenerate with a matching grpcio-tools if either
+# floor ever has to move.
+grpc = ["grpcio>=1.71.2,<2", "protobuf>=5.29,<6"]        # shard control plane (arch.md §2)
 
 # Everything a developer needs, and nothing that needs a GPU to install.
 dev = [
@@ -96,12 +102,21 @@ dev = [
     "typer>=0.12",
     "rich>=13.7",
     "httpx>=0.27",               # TestClient transport for the HTTP facade
+    # `tests/launch/test_generated_floor.py` reads this file back to check the dependency
+    # floors against the committed stubs. `tomllib` is stdlib from 3.11; on the 3.10 CI leg
+    # the test would otherwise be skipped on the one axis most likely to resolve an old
+    # grpcio.
+    'tomli>=2.0; python_version < "3.11"',
     # The control-plane tests, and the guard that says the committed stubs match the
     # .proto. In `dev` and not only in `grpc` on purpose: CI installs `.[dev,cli]`, so
     # without these every proto test would skip there and the regeneration guard would
     # never run on the one machine that gates a merge.
-    "grpcio>=1.60,<2",
-    "grpcio-tools>=1.60,<2",
+    # Same floors as the `grpc` extra, and for the same reason: the committed stubs
+    # validate GRPC_GENERATED_VERSION = '1.71.2' and a 5.29 gencode version at import, so
+    # anything lower fails loudly rather than being merely old. grpcio-tools matches grpcio
+    # because it is what regenerates them.
+    "grpcio>=1.71.2,<2",
+    "grpcio-tools>=1.71.2,<2",
     "protobuf>=5.29,<6",
 ]
 

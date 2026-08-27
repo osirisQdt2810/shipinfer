@@ -58,8 +58,13 @@ class ShardState(str, Enum):
     READY = "ready"
     #: At least one camera is being served.
     RUNNING = "running"
-    #: Told to stop reading; finishing what is in flight.
+    #: Told to stop reading; still finishing what is in flight.
     DRAINING = "draining"
+    #: A drain **completed**: the cameras are released and the executor is still up. Distinct
+    #: from :attr:`DRAINING` because a launcher waiting for a drain to end needs to be able
+    #: to tell "still finishing" from "finished", and distinct from :attr:`STOPPED` because
+    #: the process is alive and can be given a new topology.
+    DRAINED = "drained"
     #: Executor stopped. Terminal for this process.
     STOPPED = "stopped"
     #: The shard could not ask its executor what state it is in.

@@ -18,7 +18,9 @@ for "an ephemeral port" is the one that fails.
 
 from __future__ import annotations
 
+import socket
 import textwrap
+import time
 from collections.abc import Iterator
 
 import pytest
@@ -40,6 +42,13 @@ elements:
   detect: {impl: mock, model: ship_detector}
   output: {impl: mock}
 """
+
+
+def _free_port() -> int:
+    """A port nothing is listening on. The usual trick: bind 0, read it back, release it."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
 
 
 @pytest.fixture()
@@ -152,7 +161,66 @@ class TestABoundPortIsRefusedBeforeAnyCamera:
         assert not intruder.is_running
 
 
+class TestTheBoundPortIsReleasedWhenTheWiringFails:
+    def test_a_servicer_that_cannot_be_attached_leaves_no_listening_socket(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Everything after a successful bind has to be unwound, or the port is held forever.
+
+        ``add_insecure_port`` takes the port; ``add_ShardServicer_to_server`` and ``start``
+        come after it. If either raises, the ``grpc.Server`` goes out of scope holding a
+        listening socket and a thread pool that nothing references and nothing can stop - and
+        the operator's retry, or the next shard handed this port, is refused by a server that
+        no longer exists as far as the program is concerned.
+
+        Asserted the only way that means anything: bind the port afterwards, from this test.
+        """
+        from shipinfer.launch.proto import shard_pb2_grpc
+
+        def boom(servicer: object, server: object) -> None:
+            raise RuntimeError("the generated stub and the servicer disagree")
+
+        monkeypatch.setattr(shard_pb2_grpc, "add_ShardServicer_to_server", boom)
+        chain = Topology.from_spec(ChainSpec.from_yaml(textwrap.dedent(CHAIN)))
+        runner = InprocessRunner(chain, workers=1)
+        port = _free_port()
+
+        with pytest.raises(RuntimeError, match="disagree"):
+            serve_shard(runner, shard_id=6, control_port=port)
+
+        assert not runner.is_running
+        with socket.socket() as probe:
+            # No SO_REUSEADDR: a leaked *listening* socket must make this raise.
+            probe.bind(("127.0.0.1", port))
+            probe.listen(1)
+
+
 class TestAnUnreachableShard:
+    def test_wait_ready_stops_polling_when_its_budget_is_spent(self) -> None:
+        """``timeout_s`` is the budget for the whole call, including the poll in flight.
+
+        A port that is **bound but never answers** is what a wedged child looks like, and it
+        is the case the clip exists for: the per-poll RPC deadline backs off towards 5 s, so
+        one unanswered poll used to run past the caller's entire budget before the loop got
+        to check it. A launcher supervising fifty shards with a 0.3 s probe cannot spend
+        seconds on each.
+        """
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)  # accepts the TCP connection, then says nothing at all
+            port = listener.getsockname()[1]
+
+            with ShardClient(port, shard_id=9, timeout_s=0.2) as client:
+                started = time.monotonic()
+
+                assert not client.wait_ready(timeout_s=0.3)
+
+                elapsed = time.monotonic() - started
+
+        assert elapsed < 0.5, f"wait_ready overran its 0.3s budget by far: {elapsed:.2f}s"
+        assert elapsed >= 0.2, "it cannot have polled at all in that time"
+        assert client.identity is None
+
     def test_wait_ready_gives_up_rather_than_blocking_forever(self) -> None:
         """A never-ready child is a decision for the caller (kill it), not an exception.
 

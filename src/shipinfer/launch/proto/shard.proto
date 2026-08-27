@@ -50,6 +50,9 @@ service Shard {
   rpc Stats (StatsRequest) returns (StatsReply);
 
   // Stop reading cameras, let in-flight work finish. Returns the abandonment count.
+  // A shard reports `draining` while the call is in flight and `drained` once it returns;
+  // only a later UpdateTopology makes it take cameras again. Serialised with Stop on the
+  // shard, so two of these cannot be inside the camera set at once.
   rpc Drain (DrainRequest) returns (DrainReply);
 
   // Drain, then stop the executor. Idempotent: a second Stop reports 0 abandoned.
@@ -70,9 +73,10 @@ message ReadyRequest {}
 
 message ReadyReply {
   ShardIdentity identity = 1;
-  // One of `starting`, `ready`, `running`, `draining`, `stopped`, `unknown` — the same
-  // vocabulary `HealthReply.state` uses. Deliberately a string rather than an enum: a
-  // launcher must be able to read a state a newer shard invented without failing to parse.
+  // One of `starting`, `ready`, `running`, `draining`, `drained`, `stopped`, `unknown` —
+  // the same vocabulary `HealthReply.state` uses. Deliberately a string rather than an
+  // enum: a launcher must be able to read a state a newer shard invented without failing
+  // to parse — `drained` was added after the first shards shipped, and is the proof.
   string state = 2;
 }
 

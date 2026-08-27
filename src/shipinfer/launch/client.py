@@ -46,6 +46,15 @@ _LOG = get_logger("launch.client")
 #: the refusal and the message a test asserts on cannot drift.
 _MISSING_GRPCIO = 'the gRPC control plane needs grpcio: pip install "shipinfer[grpc]"'
 
+#: What a lazy import of the generated stubs can fail with. ``ImportError`` is the extra
+#: being absent; ``RuntimeError`` is it being present and too old — protoc's output compares
+#: ``grpc.__version__`` against its own ``GRPC_GENERATED_VERSION`` at import and raises a
+#: bare ``RuntimeError`` below it, and ``shard_pb2`` does the same for the protobuf runtime.
+#: The floors in ``pyproject.toml`` are set so a supported install never sees the second
+#: (``tests/launch/test_generated_floor.py``); catching it anyway means a floor that drifts
+#: reaches an operator as a typed refusal naming the extra rather than as a raw traceback.
+_UNUSABLE_GRPCIO = (ImportError, RuntimeError)
+
 #: How long to sleep between the first two `Ready` polls, and the cap it backs off to. A
 #: freshly spawned interpreter takes O(1s) to import and bind, so polling every 50 ms wastes
 #: little and answers fast; a child that is going to take two minutes should not be polled
@@ -120,7 +129,8 @@ class ShardClient:
         bound its port, so connecting in ``__init__`` would connect to nothing.
 
         Raises:
-            ConfigurationError: grpcio is not installed.
+            ConfigurationError: grpcio is not installed, or is older than the committed
+                stubs were generated against (see :data:`_UNUSABLE_GRPCIO`).
         """
         if self._stub is not None:
             return self._stub
@@ -128,8 +138,10 @@ class ShardClient:
             import grpc
 
             from shipinfer.launch.proto import shard_pb2_grpc
-        except ImportError as exc:
-            raise ConfigurationError(_MISSING_GRPCIO) from exc
+        except _UNUSABLE_GRPCIO as exc:
+            raise ConfigurationError(
+                f"{_MISSING_GRPCIO} ({type(exc).__name__}: {exc})"
+            ) from exc
 
         self._channel = grpc.insecure_channel(self.address)
         # protoc emits no annotations for the grpc stub, and mypy is strict here.
@@ -141,8 +153,10 @@ class ShardClient:
         """The generated messages, imported here for the same reason :meth:`_rpc` is lazy."""
         try:
             from shipinfer.launch.proto import shard_pb2
-        except ImportError as exc:  # pragma: no cover - protobuf rides with grpcio
-            raise ConfigurationError(_MISSING_GRPCIO) from exc
+        except _UNUSABLE_GRPCIO as exc:  # protobuf rides with grpcio, and has its own floor
+            raise ConfigurationError(
+                f"{_MISSING_GRPCIO} ({type(exc).__name__}: {exc})"
+            ) from exc
         return shard_pb2
 
     def _call(self, name: str, request: Any, timeout_s: float | None) -> Any:
@@ -203,12 +217,19 @@ class ShardClient:
 
         The deadline is generous by default: a shard imports torch and deserialises engines
         before it binds, which is tens of seconds on a cold page cache.
+
+        ``timeout_s`` is a **budget for the whole call**, and each poll's RPC deadline is
+        clipped to what is left of it. Without the clip a caller that asked for 0.3 s could
+        wait several seconds: the per-poll deadline grows to 5 s as the backoff does, and one
+        poll that hangs (a bound-but-not-answering port, which is what a wedged child looks
+        like) burns its own deadline in full before the budget is even consulted.
         """
         deadline = time.monotonic() + timeout_s
         sleep_s = max(poll_s, 0.001)
         while True:
             try:
-                reply = self._call("Ready", self._pb().ReadyRequest(), min(sleep_s * 4, 5.0))
+                poll_deadline = min(sleep_s * 4, 5.0, max(0.05, deadline - time.monotonic()))
+                reply = self._call("Ready", self._pb().ReadyRequest(), poll_deadline)
             except ServerStateError:
                 if time.monotonic() >= deadline:
                     _LOG.warning(

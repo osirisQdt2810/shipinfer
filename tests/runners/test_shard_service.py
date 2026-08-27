@@ -16,6 +16,8 @@ a ``Mock`` would happily return a truthy answer for a method the ABC refuses.
 from __future__ import annotations
 
 import textwrap
+import threading
+import time
 from typing import Any, ClassVar
 
 import pytest
@@ -63,9 +65,10 @@ class FakeRunner(Runner):
         super().__init__(topology, **kwargs)
         self.started = 0
         self.stopped = 0
+        self.health_calls = 0
         self.start_error: Exception | None = None
         self.health_error: Exception | None = None
-        self.extra_health: dict[str, Any] = {}
+        self.extra_health: dict[Any, Any] = {}
 
     def _do_start(self) -> None:
         if self.start_error is not None:
@@ -79,6 +82,9 @@ class FakeRunner(Runner):
         raise NotImplementedError
 
     def _do_health(self) -> dict[str, Any]:
+        # Counted here rather than by overriding `health`, because `health` is the template
+        # method every caller goes through and `_do_health` is called exactly once by it.
+        self.health_calls += 1
         if self.health_error is not None:
             raise self.health_error
         return dict(self.extra_health)
@@ -94,6 +100,14 @@ class CameraRunner(FakeRunner):
         self.cameras: dict[str, CameraSpec] = {}
         self.abandoned = 0
         self.drain_error: Exception | None = None
+        self.drains = 0
+        self.removed_with: list[tuple[str, float]] = []
+        self.drain_delay_s = 0.0
+        #: The highest number of threads ever inside `drain` at once. 1 is the assertion:
+        #: the servicer's lock is what keeps two Drains out of one camera set.
+        self.drain_concurrency = 0
+        self._inside = 0
+        self._counter = threading.Lock()
 
     def add_camera(self, camera: CameraSpec) -> None:
         if camera.camera_id in self.cameras:
@@ -104,16 +118,27 @@ class CameraRunner(FakeRunner):
         self.cameras[camera.camera_id] = camera
 
     def remove_camera(self, camera_id: str, *, timeout_s: float = 5.0) -> bool:
+        self.removed_with.append((camera_id, timeout_s))
         if camera_id not in self.cameras:
             raise ConfigurationError(f"camera {camera_id!r} is not running")
         del self.cameras[camera_id]
         return self.abandoned == 0
 
     def drain(self, timeout_s: float = 20.0) -> int:
-        if self.drain_error is not None:
-            raise self.drain_error
-        self.cameras.clear()
-        return self.abandoned
+        with self._counter:
+            self.drains += 1
+            self._inside += 1
+            self.drain_concurrency = max(self.drain_concurrency, self._inside)
+        try:
+            if self.drain_delay_s:
+                time.sleep(self.drain_delay_s)
+            if self.drain_error is not None:
+                raise self.drain_error
+            self.cameras.clear()
+            return self.abandoned
+        finally:
+            with self._counter:
+                self._inside -= 1
 
     def _do_health(self) -> dict[str, Any]:
         health = super()._do_health()
@@ -176,6 +201,62 @@ class TestTheStateIsDerivedNotRemembered:
 
         assert ShardIdentity.from_pb(reply.identity) == ShardIdentity(5, 50105, 99)
         assert reply.state == ShardState.STARTING
+
+
+class TestHealthAsksTheRunnerExactlyOnce:
+    """Two snapshots are two different moments, and a reply must be one moment.
+
+    ``Health`` used to call ``runner.health()`` for the engine report and then again, through
+    ``state()``, to count the cameras. A removal landing between them produces a reply whose
+    ``state`` says ``running`` and whose ``cameras`` map is empty - self-contradicting, and
+    the contradiction is invisible in any test that only reads one field.
+    """
+
+    def test_one_snapshot_per_rpc(self) -> None:
+        runner = CameraRunner(chain())
+        svc = service(runner)
+        install(svc)
+        svc.AddCamera(pb.AddCameraRequest(camera=CameraSpec("cam-1", "rtsp://x").to_pb()))
+        runner.health_calls = 0
+
+        svc.Health(pb.HealthRequest())
+
+        assert runner.health_calls == 1
+
+    def test_ready_costs_one_snapshot_too(self) -> None:
+        """`Ready` derives the same state, and is the RPC a launcher polls in a loop."""
+        runner = CameraRunner(chain())
+        svc = service(runner)
+        install(svc)
+        runner.health_calls = 0
+
+        svc.Ready(pb.ReadyRequest())
+
+        assert runner.health_calls == 1
+
+    def test_the_cameras_on_the_reply_are_the_ones_the_state_was_derived_from(self) -> None:
+        """A non-empty camera map, consistent with `running` - the half never asserted."""
+        runner = CameraRunner(chain())
+        svc = service(runner)
+        install(svc)
+        for index in (1, 2):
+            svc.AddCamera(
+                pb.AddCameraRequest(
+                    camera=CameraSpec(
+                        f"cam-{index}", f"rtsp://10.0.0.{index}/live", 20.0
+                    ).to_pb()
+                )
+            )
+
+        health = ShardHealth.from_pb(svc.Health(pb.HealthRequest()))
+
+        assert health.state == ShardState.RUNNING
+        assert set(health.cameras) == {"cam-1", "cam-2"}
+        assert health.cameras["cam-2"]["url"] == "rtsp://10.0.0.2/live"
+        # Struct numbers are doubles; 20.0 is what a double round trip gives back.
+        assert health.cameras["cam-1"]["fps"] == 20.0
+        # The camera map is not left in the engine report as well as beside it.
+        assert "cameras" not in health.engine
 
 
 # -- the topology -------------------------------------------------------------------------
@@ -300,6 +381,81 @@ class TestAddingACamera:
         assert runner.cameras["cam-9"] == CameraSpec("cam-9", "rtsp://10.0.0.9/live", 19.5)
 
 
+class TestAShardThatIsGoingDownTakesNoCameras:
+    """`accepted=True` from a stopped shard is a camera nobody will ever read.
+
+    The runner cannot make this refusal: by the time `Stop` has run, its camera set is empty
+    and an add looks entirely ordinary to it. So the servicer makes it, and names the state
+    in the reason - the launcher's cue is "place it elsewhere", and it needs to know why.
+    """
+
+    def test_a_stopped_shard_refuses_and_says_so(self) -> None:
+        runner = CameraRunner(chain())
+        svc = service(runner)
+        install(svc)
+        svc.Stop(pb.StopRequest(timeout_s=1.0))
+
+        reply = svc.AddCamera(
+            pb.AddCameraRequest(camera=CameraSpec("cam-1", "rtsp://x").to_pb())
+        )
+
+        assert not reply.accepted
+        assert ShardState.STOPPED in reply.reason
+        assert runner.cameras == {}
+
+    def test_a_drained_shard_refuses_and_says_so(self) -> None:
+        runner = CameraRunner(chain())
+        svc = service(runner)
+        install(svc)
+        svc.Drain(pb.DrainRequest(timeout_s=1.0))
+
+        reply = svc.AddCamera(
+            pb.AddCameraRequest(camera=CameraSpec("cam-1", "rtsp://x").to_pb())
+        )
+
+        assert not reply.accepted
+        assert ShardState.DRAINED in reply.reason
+        assert runner.cameras == {}
+
+    def test_a_drain_in_flight_refuses_with_draining(self) -> None:
+        """The window that matters: the camera arrives while the drain is still running."""
+        runner = CameraRunner(chain())
+        runner.drain_delay_s = 0.2
+        svc = service(runner)
+        install(svc)
+        draining = threading.Thread(target=svc.Drain, args=(pb.DrainRequest(timeout_s=1.0),))
+        draining.start()
+        try:
+            time.sleep(0.05)
+
+            reply = svc.AddCamera(
+                pb.AddCameraRequest(camera=CameraSpec("cam-1", "rtsp://x").to_pb())
+            )
+        finally:
+            draining.join(timeout=5.0)
+
+        assert not reply.accepted
+        assert ShardState.DRAINING in reply.reason
+        assert runner.cameras == {}
+
+    def test_a_fresh_topology_makes_the_shard_usable_again(self) -> None:
+        """`drained` is not terminal: it is cleared by being told what to run next."""
+        runner = CameraRunner(chain())
+        svc = service(runner)
+        install(svc)
+        svc.Drain(pb.DrainRequest(timeout_s=1.0))
+        runner.stop(timeout_s=1.0)
+
+        install(svc)
+
+        reply = svc.AddCamera(
+            pb.AddCameraRequest(camera=CameraSpec("cam-1", "rtsp://x").to_pb())
+        )
+
+        assert reply.accepted
+        assert svc.Health(pb.HealthRequest()).state == ShardState.RUNNING
+
+
 class TestRemovingACamera:
     def test_an_unknown_camera_is_a_typed_answer_not_a_silent_no_op(self) -> None:
         runner = CameraRunner(chain())
@@ -310,6 +466,21 @@ class TestRemovingACamera:
 
         assert not reply.removed
         assert "cam-x" in reply.reason
+
+    def test_the_requested_deadline_is_the_one_the_runner_is_given(self) -> None:
+        """`timeout_s` is the whole point of the field, and it crossed no boundary before.
+
+        A launcher that asks for a 0.5 s stop and gets the runner's 5 s default waits ten
+        times as long per camera, and nothing anywhere says so.
+        """
+        runner = CameraRunner(chain())
+        svc = service(runner)
+        install(svc)
+        svc.AddCamera(pb.AddCameraRequest(camera=CameraSpec("cam-1", "rtsp://x").to_pb()))
+
+        svc.RemoveCamera(pb.RemoveCameraRequest(camera_id="cam-1", timeout_s=0.25))
+
+        assert runner.removed_with == [("cam-1", 0.25)]
 
     def test_an_abandoned_thread_is_reported_as_not_clean(self) -> None:
         runner = CameraRunner(chain())
@@ -376,7 +547,99 @@ class TestStopReportsTheAbandonmentCount:
 
         assert reply.abandoned == 1
         assert runner.stopped == 0
-        assert svc.Health(pb.HealthRequest()).state == ShardState.DRAINING
+        # `drained`, not `draining`: the call has returned, so "still finishing" would be a
+        # lie a launcher would wait out its whole deadline on.
+        assert svc.Health(pb.HealthRequest()).state == ShardState.DRAINED
+
+
+class TestDrainAndStopAreSerialisedAndIdempotent:
+    """Both mutate the camera set, so both take the lock; neither may be entered twice.
+
+    `Drain` used to take no lock at all while `Stop` did, which meant two drains could be
+    inside the runner's camera set at once and a drain could have the executor stopped out
+    from under its in-flight work.
+    """
+
+    def test_two_concurrent_drains_never_overlap(self) -> None:
+        runner = CameraRunner(chain())
+        runner.drain_delay_s = 0.1
+        svc = service(runner)
+        install(svc)
+        replies: list[Any] = []
+
+        def drain() -> None:
+            replies.append(svc.Drain(pb.DrainRequest(timeout_s=1.0)))
+
+        threads = [threading.Thread(target=drain) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5.0)
+
+        assert [thread.is_alive() for thread in threads] == [False, False]
+        assert len(replies) == 2
+        assert runner.drains == 2
+        assert runner.drain_concurrency == 1
+        assert svc.Health(pb.HealthRequest()).state == ShardState.DRAINED
+
+    def test_a_second_drain_answers_the_same_way(self) -> None:
+        """Idempotent as a launcher sees it: a repeat is an answer, not a second shutdown."""
+        runner = CameraRunner(chain())
+        svc = service(runner)
+        install(svc)
+        svc.AddCamera(pb.AddCameraRequest(camera=CameraSpec("cam-1", "rtsp://x").to_pb()))
+
+        first = svc.Drain(pb.DrainRequest(timeout_s=1.0))
+        second = svc.Drain(pb.DrainRequest(timeout_s=1.0))
+
+        assert (first.abandoned, first.detail) == (0, "")
+        assert (second.abandoned, second.detail) == (0, "")
+        assert runner.cameras == {}
+
+    def test_a_second_stop_answers_without_touching_the_runner(self) -> None:
+        """The count belongs to the shutdown that happened; a repeat re-runs nothing.
+
+        Delegating idempotence to the runner meant a second `Stop` re-entered the drain and
+        the executor stop, and reported whatever the runner happened to say the second time.
+        """
+        runner = CameraRunner(chain())
+        runner.abandoned = 2
+        svc = service(runner)
+        install(svc)
+        first = svc.Stop(pb.StopRequest(timeout_s=1.0))
+        drains_after_the_first_stop = runner.drains
+
+        second = svc.Stop(pb.StopRequest(timeout_s=1.0))
+
+        assert first.abandoned == 2
+        assert (second.abandoned, second.detail) == (0, "already stopped")
+        assert runner.drains == drains_after_the_first_stop
+        assert runner.stopped == 1
+
+    def test_a_health_probe_answers_while_a_stop_holds_the_lock(self) -> None:
+        """The reason holding the lock across two blocking waits is acceptable.
+
+        A supervisor watching a shard shut down must keep getting answers, or it concludes
+        the process is wedged and kills it mid-drain - which is precisely the abandonment
+        the deadline exists to avoid.
+        """
+        runner = CameraRunner(chain())
+        runner.drain_delay_s = 0.3
+        svc = service(runner)
+        install(svc)
+        stopping = threading.Thread(target=svc.Stop, args=(pb.StopRequest(timeout_s=2.0),))
+        stopping.start()
+        try:
+            time.sleep(0.05)
+            started = time.monotonic()
+
+            state = svc.Health(pb.HealthRequest()).state
+            elapsed = time.monotonic() - started
+        finally:
+            stopping.join(timeout=5.0)
+
+        assert state == ShardState.DRAINING
+        assert elapsed < 0.2, "Health blocked behind the stop instead of answering"
 
 
 # -- nothing reaches the wire as a traceback ----------------------------------------------
@@ -400,6 +663,35 @@ class TestAnUnexpectedFailureBecomesAReply:
         assert reply.state == ShardState.UNKNOWN
         assert "the executor is wedged" in reply.detail
         assert ShardHealth.from_pb(reply).engine == {}
+
+    def test_a_report_that_cannot_be_encoded_is_a_detail_and_not_a_traceback(self) -> None:
+        """The failure is in `to_pb`, not in `health()`, and it used to escape the guard.
+
+        A `Struct` takes string keys and JSON-shaped values only, and a runner's health dict
+        is the least controlled data this class handles - an int key or a set is a plain bug
+        one layer down. Encoding outside the try turned that into UNKNOWN plus a traceback on
+        the wire, which is the one thing this servicer promises never to do.
+        """
+        runner = FakeRunner(chain())
+        runner.extra_health = {1: "an int key a Struct cannot take"}
+        svc = service(runner)
+
+        reply = svc.Health(pb.HealthRequest())
+
+        assert reply.state == ShardState.UNKNOWN
+        assert "TypeError" in reply.detail
+        assert ShardHealth.from_pb(reply).engine == {}
+
+    def test_a_value_a_struct_cannot_take_is_the_same_answer(self) -> None:
+        """The other half of the same door: a set raises ValueError rather than TypeError."""
+        runner = FakeRunner(chain())
+        runner.extra_health = {"queues": {1, 2, 3}}
+        svc = service(runner)
+
+        reply = svc.Health(pb.HealthRequest())
+
+        assert reply.state == ShardState.UNKNOWN
+        assert "ValueError" in reply.detail
 
     def test_ready_still_answers_when_the_state_cannot_be_determined(self) -> None:
         runner = FakeRunner(chain())

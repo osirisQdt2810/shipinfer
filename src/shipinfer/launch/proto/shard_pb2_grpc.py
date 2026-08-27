@@ -128,6 +128,9 @@ class ShardServicer(object):
 
     def Drain(self, request, context):
         """Stop reading cameras, let in-flight work finish. Returns the abandonment count.
+        A shard reports `draining` while the call is in flight and `drained` once it returns;
+        only a later UpdateTopology makes it take cameras again. Serialised with Stop on the
+        shard, so two of these cannot be inside the camera set at once.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
