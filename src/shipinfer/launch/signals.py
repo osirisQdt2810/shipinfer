@@ -20,10 +20,8 @@ from shipinfer.core.logging import get_logger
 
 __all__ = ["Stoppable", "forward_signals"]
 
-# The logger name stays "server.launcher" on purpose: an operator's log filter is
-# behaviour, and this move promises none changed. It is retargeted to "launch…" when
-# server/ is deleted (A2 PR-6).
-_LOG = get_logger("server.launcher")
+# Renamed with `server/` itself; the reason is in `launch/supervisor.py`, once.
+_LOG = get_logger("launch.signals")
 
 
 class Stoppable(Protocol):

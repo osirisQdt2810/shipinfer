@@ -821,8 +821,12 @@ class TestItIsReachedThroughTheRegistry:
         assert isinstance(runner, FleetRunner) and runner.name == "fleet"
 
     def test_the_plan_is_readable_before_anything_is_spawned(self, runner) -> None:
-        assert runner.describe_plan() == "no plan yet"
+        """`--dry-run` is the same computation the start does, not a second description of
+        it: planning is pure, so asking before spawning gives the plan that would be run."""
+        planned = runner.describe_plan()
+
+        assert "2 shard(s)" in planned and "gpu(s) [2]" in planned
 
         runner.start()
 
-        assert "2 shard(s)" in runner.describe_plan()
+        assert runner.describe_plan() == planned

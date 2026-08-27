@@ -1,4 +1,4 @@
-"""``shipinfer backends|policies|queues|topologies`` — what is pluggable, and what is plugged in."""
+"""``shipinfer backends|policies|queues|runners`` — what is pluggable, and what is plugged in."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any
 from shipinfer.cli.common import print_table
 from shipinfer.core.registry import Registry
 
-__all__ = ["list_backends", "list_policies", "list_queues", "list_topologies"]
+__all__ = ["list_backends", "list_policies", "list_queues", "list_runners"]
 
 
 def _render(title: str, registry: Registry[Any]) -> int:
@@ -37,8 +37,13 @@ def list_queues() -> int:
     return _render("Request queues", QUEUES)
 
 
-def list_topologies() -> int:
-    """Every registered process topology — the names `shipinfer fleet --topology` accepts."""
-    from shipinfer.server.topology import TOPOLOGIES
+def list_runners() -> int:
+    """Every registered runner — the names `shipinfer run --runner` accepts.
 
-    return _render("Topologies", TOPOLOGIES)
+    "Topologies" used to be listed here and meant *placement*. A topology is the chain now
+    (arch.md section 1) and it is a file, not a registry entry; what an operator picks by name
+    is the runner.
+    """
+    from shipinfer.runners import RUNNERS
+
+    return _render("Runners", RUNNERS)

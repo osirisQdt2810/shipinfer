@@ -160,11 +160,19 @@ class InprocessRunner(Runner):
         shard_id: int = 0,
         device: Device | None = None,
         models: ModelResolver | None = None,
+        chain_yaml: str = "",
         queue: RequestQueue | None = None,
         workers: int | None = None,
         metrics: RunnerMetrics | None = None,
     ) -> None:
-        super().__init__(topology, settings, shard_id=shard_id, device=device, models=models)
+        super().__init__(
+            topology,
+            settings,
+            shard_id=shard_id,
+            device=device,
+            models=models,
+            chain_yaml=chain_yaml,
+        )
         pipeline = self._settings.pipeline
         if workers is not None and workers < 1:
             raise ConfigurationError(

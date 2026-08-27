@@ -82,6 +82,12 @@ class Runner(abc.ABC):
         models: the model pool, for elements of kind ``pool``. A
             :class:`~shipinfer.topology.base.ModelResolver` — structural, so ``runners`` need
             not import the engine and a test satisfies it with a dict.
+        chain_yaml: the text ``topology`` was loaded from, when the caller has it. Provenance
+            for a runner that executes here; **required** by one that hands the chain to other
+            processes, because the loader is the single door through which a chain becomes
+            trustworthy (ADR-017) and on a fleet that door is on the shard. Re-rendering a
+            ``Topology`` back to YAML would be a second writer of the format its loader is
+            the only reader of.
 
     Subclasses implement :meth:`_do_start`, :meth:`_do_stop` and :meth:`_do_submit`, and may
     add to :meth:`health` and :meth:`stats` through the two optional hooks.
@@ -109,8 +115,10 @@ class Runner(abc.ABC):
         shard_id: int = 0,
         device: Device | None = None,
         models: ModelResolver | None = None,
+        chain_yaml: str = "",
     ) -> None:
         self._topology = topology
+        self._chain_yaml = chain_yaml
         self._settings = settings if settings is not None else ServerSettings()
         self._shard_id = shard_id
         self._device = device
@@ -135,6 +143,11 @@ class Runner(abc.ABC):
     @property
     def topology(self) -> Topology:
         return self._topology
+
+    @property
+    def chain_yaml(self) -> str:
+        """The text the topology was loaded from, or ``""`` when the caller had none."""
+        return self._chain_yaml
 
     @property
     def settings(self) -> ServerSettings:

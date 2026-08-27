@@ -196,15 +196,16 @@ class DeepStreamPipeline:
     """One shard's graph, from the model repository to the result sink.
 
     Args:
-        settings: the whole tree, already narrowed to this shard's cameras by
-            :func:`shipinfer.cli.common.build_settings` — the same ``SHIPINFER_SHARD_CAMERAS``
-            every other topology's child is narrowed by, so one fleet description drives all of
-            them.
+        settings: the whole tree. It carries the cameras this process is to decode —
+            *every* configured camera since A2 PR-6, because narrowing a shard's slice was the
+            argv mechanism's job and that is deleted (arch.md section 2). Until the DeepStream
+            runner is a chain compiler (phase E), this command is a hand-run one and its
+            configuration names the cameras it should read.
         sink: where events go. ``None`` builds the one ``pipeline.result_sink`` names, which is
             how a deployment configures it; injected in tests and in a harness.
         config_root: where the generated nvinfer files are written. ``None`` takes
-            ``runner.deepstream.config_dir`` (which the launcher sets for every child), and
-            failing that a per-run directory under ``$TMPDIR``.
+            ``runner.deepstream.config_dir``, and failing that a per-run directory under
+            ``$TMPDIR``.
     """
 
     def __init__(
@@ -220,8 +221,7 @@ class DeepStreamPipeline:
         if not self._cameras:
             raise ConfigurationError(
                 "this configuration defines no enabled cameras, so there is nothing for a "
-                "DeepStream graph to decode. `shipinfer fleet` narrows each shard's cameras "
-                "through SHIPINFER_SHARD_CAMERAS; check that this shard was given some"
+                "DeepStream graph to decode. Name them under `ingest.cameras`"
             )
         self._shard_index = self._deepstream.shard or 0
         self._gpu_id = _single_gpu(settings)

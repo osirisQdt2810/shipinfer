@@ -32,10 +32,9 @@ from __future__ import annotations
 import contextlib
 import os
 import threading
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
-
-from collections.abc import Callable, Sequence
 
 from shipinfer.core.errors import ConfigurationError, ShipInferError
 from shipinfer.core.logging import get_logger, log_context

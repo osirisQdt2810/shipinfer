@@ -40,20 +40,24 @@ downstream, because cameras are independent of each other all the way to MTMC �
 separate plane consuming tracklets rather than frames. A launcher that collected results would
 be reintroducing the single process this exists to escape.
 
-AND IT DOES NOT TALK TO ITS CHILDREN — YET
-------------------------------------------
-This is the spawn-and-supervise half of arch.md §2, moved out of ``server/`` unchanged. The
-*control* half — ``AddCamera``, ``UpdateTopology``, ``Health``, ``Drain``, ``Stop`` as RPCs
-on a live shard — arrives beside it in :mod:`shipinfer.launch.client`. Until it does, a
-child is configured the only way a process with no control channel can be: argv and the
-environment it inherits at ``exec``. Everything :meth:`Fleet._spawn` puts in the child's
-environment except ``CUDA_VISIBLE_DEVICES`` is therefore temporary, and ``Fleet`` itself is
-not: spawning and reaping stay exactly this shape once the RPCs exist.
+AND IT SAYS ALMOST NOTHING AT ``exec``
+--------------------------------------
+This is the spawn-and-supervise half of arch.md §2; the *control* half — ``AddCamera``,
+``UpdateTopology``, ``Health``, ``Drain``, ``Stop`` — is :mod:`shipinfer.launch.client`, on a
+child that is already running. So a child is told **one thing** in its environment:
+``CUDA_VISIBLE_DEVICES``, because that has to be set before the child imports torch and there
+is no RPC that early. Its cameras, its topology and its device sharing arrive as calls
+afterwards.
+
+The inherited copies of what those calls now carry are **removed** rather than merely not
+set (:data:`_NOT_INHERITED`). An operator who exported
+``SHIPINFER_DEVICES__VISIBLE_GPUS=[2,3,4,5]`` for a single-process run — the documented way to
+configure one — would otherwise have every child read it *after* the remap renumbered its
+devices to ``0..n-1``, and fail at start-up naming devices it cannot see.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import threading
@@ -63,8 +67,6 @@ from dataclasses import dataclass, field
 
 from shipinfer.core.errors import ConfigurationError, ShardExitedError
 from shipinfer.core.logging import get_logger
-from shipinfer.core.settings.runner import SHARE_RANK_ENV, SHARED_BY_ENV, VISIBLE_GPUS_ENV
-from shipinfer.envs import SHARD_CAMERAS
 from shipinfer.scheduling.sharding import Shard, ShardPlan
 
 __all__ = [
@@ -73,10 +75,23 @@ __all__ = [
     "ShardProcess",
 ]
 
-# The logger name stays "server.launcher" on purpose: an operator's log filter is
-# behaviour, and this move promises none changed. It is retargeted to "launch…" when
-# server/ is deleted (A2 PR-6).
-_LOG = get_logger("server.launcher")
+# Renamed from "server.launcher" here, with `server/` itself (A2 PR-6). The name was kept
+# through the move so that an operator's log filter — which is behaviour — changed exactly
+# once, at the deletion, rather than at every step of the split. `launch/signals.py` is the
+# other half of that rename; this comment is the only copy of the reason.
+_LOG = get_logger("launch.supervisor")
+
+#: What a child must NOT inherit, because the control plane owns what these used to say
+#: (arch.md §2). Removed from the child's environment rather than overwritten: there is no
+#: value to overwrite them *with* any more, and an inherited one is worse than absent —
+#: ``visible_gpus`` naming physical ordinals fails a child whose devices have been renumbered,
+#: and a stale ``shared_by`` would have it load the wrong number of instances silently.
+_NOT_INHERITED = (
+    "SHIPINFER_DEVICES__VISIBLE_GPUS",
+    "SHIPINFER_DEVICES__SHARED_BY",
+    "SHIPINFER_DEVICES__SHARE_RANK",
+    "SHIPINFER_SHARD_CAMERAS",
+)
 
 #: How long a shard gets to drain after SIGTERM before it is killed. Longer than a request,
 #: shorter than a deploy's patience: a shard mid-batch has one batch to finish, not one video.
@@ -112,17 +127,21 @@ class Fleet:
         command: given a shard, the argv for its process. Injected rather than hardcoded so the
             offline tier can supervise a process that is not a server: everything below this
             line is about *supervision*, and testing it against a real server would test CUDA.
-        env: extra environment for every child, on top of the parent's. ``CUDA_VISIBLE_DEVICES``
-            is added per shard and overrides anything here — a shard's device set is the one
-            thing the plan, not the operator, decides.
+        env: extra environment for every child, on top of the parent's (minus
+            :data:`_NOT_INHERITED`). ``CUDA_VISIBLE_DEVICES`` is added per shard and overrides
+            anything here — a shard's device set is the one thing the plan, not the operator,
+            decides.
         drain_s: how long a shard gets after SIGTERM before SIGKILL.
     """
 
     plan: ShardPlan
     command: Callable[[Shard], Sequence[str]]
     env: Mapping[str, str] = field(default_factory=dict)
-    #: Extra environment for one shard, decided by the topology (the `service` tier's shard
-    #: index). Injected as a callable so `Fleet` keeps depending on nothing above the plan.
+    #: Extra environment for one shard, when a caller genuinely has something a child can
+    #: only learn at ``exec``. The fleet runner passes none — everything it has to say is an
+    #: RPC — and the one caller left is the benchmark harness, whose children join the spill
+    #: tier by ring name (`runner.service.shard`) before they answer anything. Injected as a
+    #: callable so `Fleet` keeps depending on nothing above the plan.
     shard_env: Callable[[Shard], Mapping[str, str]] | None = None
     drain_s: float = DEFAULT_DRAIN_S
     _running: list[ShardProcess] = field(default_factory=list, init=False, repr=False)
@@ -170,17 +189,9 @@ class Fleet:
         # Built from the parent's environment rather than replacing it: a child needs PATH,
         # HOME and whatever the container set, and `CUDA_VISIBLE_DEVICES` is the one value this
         # module owns outright.
-        child_env = {**os.environ, **self.env}
+        child_env = {k: v for k, v in os.environ.items() if k not in _NOT_INHERITED}
+        child_env.update(self.env)
         child_env["CUDA_VISIBLE_DEVICES"] = shard.cuda_visible_devices
-        # The remap above renumbers the child's devices to 0..n-1, so an inherited
-        # `SHIPINFER_DEVICES__VISIBLE_GPUS` naming *physical* ordinals — the documented way to
-        # configure a single-process `serve` — would now name devices the child cannot see and
-        # fail it at start-up. The child's logical view replaces it, and the sharing rides
-        # beside it so a shard loads its share of every model's instances, not the whole count.
-        child_env[VISIBLE_GPUS_ENV] = json.dumps(list(range(len(shard.gpus))))
-        child_env[SHARED_BY_ENV] = json.dumps(list(self.plan.sharing_for(shard)))
-        child_env[SHARE_RANK_ENV] = json.dumps(list(self.plan.rank_for(shard)))
-        child_env[SHARD_CAMERAS.name] = ",".join(shard.cameras)
         if self.shard_env is not None:
             child_env.update(self.shard_env(shard))
         # Its own process group, so a Ctrl-C in the parent's terminal does not deliver SIGINT
