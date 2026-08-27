@@ -18,8 +18,9 @@
 // C++ RTSP server in this tree could not be built in the one image that can run these tests,
 // and extending the image is a different PR's decision.
 //
-// **And because the server already exists.** `scripts/rtsp_serve.py` is the sanctioned RTSP
-// fixture for the Python ingest tests and for `benchmarks/harness/rtsp.py`, with its pacing
+// **And because the server already exists.** `scripts/rtsp_serve.py` is the RTSP fixture
+// `benchmarks/harness/rtsp.py` stands up and `tests/test_rtsp_serve.py` pins (its two real
+// callers — #48 round 1 trimmed a wider claim), with its pacing
 // (`identity single-segment=true sync=true`) and its looping (`multifilesrc loop=true`) already
 // argued out in its docstring — including the two bugs that produced a 170%-of-target
 // measurement. A second server written here would be a second set of those bugs. `ffmpeg -f
