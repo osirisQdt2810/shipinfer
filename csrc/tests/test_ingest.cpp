@@ -1518,11 +1518,10 @@ namespace {
             script.on_read = [](int) { return 1; };
             CountingSink sink;
             IngestManager manager({}, sink, scripted(script));
-            std::atomic<bool> added{false};
+            std::shared_ptr<CameraActor> added;
             std::thread adder([&] {
                 try {
-                    manager.add_camera(a_camera("cam0"));
-                    added.store(true);
+                    added = manager.add_camera(a_camera("cam0"));
                 } catch (const ServerStateError&) {
                     // the documented refusal: the fleet forgot the camera mid-add
                 }
@@ -1530,13 +1529,18 @@ namespace {
             if (round % 2 == 0) std::this_thread::yield();
             manager.stop(2000ms);
             adder.join();
-            if (added.load() && !manager.contains("cam0")) ++orphans;
+            // The orphan this pins is a camera RUNNING behind a manager that forgot it.
+            // `added && !contains` alone is not that: on a slow machine the add completes
+            // first and the stop then legitimately empties the map with the camera cleanly
+            // stopped — 12 of 100 rounds on CI's two-core runner, which is how this
+            // assertion's first version failed on main (#34's first run).
+            if (added && !manager.contains("cam0") && added->is_running()) ++orphans;
             manager.stop(2000ms);
         }
         check(orphans == 0,
               "100 add-vs-stop races produced " + std::to_string(orphans) +
-                  " camera(s) running behind a manager that forgot them (want 0: a "
-                  "successful add is tracked, an untracked add throws)");
+                  " camera(s) RUNNING behind a manager that forgot them (want 0: a "
+                  "successful add is tracked or stopped, never running untracked)");
     }
 
     void test_the_managers_death_leaks_the_abandoned_rather_than_freeing_them() {
