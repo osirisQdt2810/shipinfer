@@ -201,12 +201,21 @@ class TestImportIsCheap:
         This runtime check is the load-bearing half: the static rule is about module scope,
         and the ``fleet`` runner will legitimately bind its shard's device through ``runtime``
         one day. This is the test that notices the day that changes.
+
+        ``shipinfer.ingest`` is in the list and is the reason it is load-bearing *today*. The
+        layering hook grants ``runners -> ingest`` — the in-process runner owns the camera
+        actors (arch.md §5①) — and an AST checker cannot tell a module-scope import from one
+        inside a method, so the whole cost of that grant is checked here and nowhere else.
+        Importing ``shipinfer.ingest`` reaches ``sources/gstreamer.py`` and through it
+        ``shipinfer.runtime`` and torch, so a single import moved to module scope in
+        ``runners/`` would put a CUDA-capable stack behind ``import shipinfer.runners`` and
+        take the offline tier's no-driver promise with it.
         """
         code = (
             "import sys, shipinfer.runners as r; "
             "assert 'inprocess' in r.RUNNERS, r.RUNNERS.names(); "
             "heavy = [m for m in ('torch', 'tensorrt', 'cv2', 'fastapi', 'shipinfer.engine', "
-            "'shipinfer.runtime', 'shipinfer.backends') if m in sys.modules]; "
+            "'shipinfer.runtime', 'shipinfer.backends', 'shipinfer.ingest') if m in sys.modules]; "
             "assert not heavy, heavy"
         )
         result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)

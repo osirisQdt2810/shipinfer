@@ -1234,3 +1234,94 @@ class TestAddCameraIsSerialisedAgainstTheLifecycle:
             draining.join(timeout=5.0)
 
         assert not reply.accepted and ShardState.DRAINING in reply.reason
+
+
+class TestOverARealInprocessRunner:
+    """The one class here that does not use a double, because a double cannot show this.
+
+    Every other test in this file asserts a *mapping* — a typed refusal into a reason string,
+    an abandonment count onto a reply — and :class:`CameraRunner` is the right shape for that
+    because the servicer's job is the mapping. What it cannot show is whether the runner the
+    fleet actually ships emits the key the mapping reads: ``state()`` derives ``running`` from
+    ``health()["cameras"]``, so an ``InprocessRunner`` that reported no such key would leave
+    every shard answering ``ready`` forever while it read fifty cameras, and no fake would
+    ever notice. That is a contract between two files, so it is tested across both.
+    """
+
+    CHAIN_YAML = textwrap.dedent("""
+        name: replayed
+        elements:
+          decode: {impl: replay}
+          detect: {impl: mock, model: ship_detector}
+          output: {impl: mock}
+        """)
+
+    def _runner(self) -> Any:
+        """A real runner over a source that opens, delivers nothing, and never blocks.
+
+        The camera's *state* is what is under test, not its frames, so the source is the
+        cheapest thing that keeps an actor alive without a decoder anywhere near it.
+        """
+        from shipinfer.core.settings import ServerSettings
+        from shipinfer.ingest.base import FrameSource
+        from shipinfer.runners.inprocess import InprocessRunner
+        from shipinfer.topology import ChainSpec as Spec
+        from shipinfer.topology import Topology as Chain
+
+        class SilentSource(FrameSource):
+            name = "silent"
+
+            def _do_open(self) -> None:
+                self._set_format(4, 4, 20.0)
+
+            def _do_read(self) -> None:
+                return None
+
+            def _do_close(self) -> None:
+                return None
+
+        return InprocessRunner(
+            Chain.from_spec(Spec.from_yaml(self.CHAIN_YAML)),
+            ServerSettings(
+                pipeline={"workers": 1},
+                ingest={"read_timeout_ms": 20, "empty_read_sleep_ms": 5},
+            ),
+            source_factory=lambda config, counter: SilentSource(config, counter),
+        )
+
+    def test_a_camera_makes_the_shard_running_and_appears_in_its_health(self) -> None:
+        runner = self._runner()
+        svc = service(runner)
+        install(svc, yaml=self.CHAIN_YAML)
+        try:
+            assert svc.state() == ShardState.READY
+
+            reply = svc.AddCamera(
+                pb.AddCameraRequest(camera=CameraSpec("cam-1", "injected://one", 20.0).to_pb())
+            )
+
+            assert reply.accepted, reply.reason
+            health = ShardHealth.from_pb(svc.Health(pb.HealthRequest()))
+            assert health.state == ShardState.RUNNING
+            assert set(health.cameras) == {"cam-1"}
+            assert health.cameras["cam-1"]["camera_id"] == "cam-1"
+        finally:
+            svc.Stop(pb.StopRequest(timeout_s=5.0))
+
+    def test_removing_the_last_camera_takes_it_back_to_ready(self) -> None:
+        """Derived, not remembered: the shard has nothing to read, and says so."""
+        runner = self._runner()
+        svc = service(runner)
+        install(svc, yaml=self.CHAIN_YAML)
+        try:
+            svc.AddCamera(
+                pb.AddCameraRequest(camera=CameraSpec("cam-1", "injected://one").to_pb())
+            )
+            assert svc.state() == ShardState.RUNNING
+
+            reply = svc.RemoveCamera(pb.RemoveCameraRequest(camera_id="cam-1", timeout_s=5.0))
+
+            assert reply.removed and reply.clean
+            assert svc.state() == ShardState.READY
+        finally:
+            svc.Stop(pb.StopRequest(timeout_s=5.0))
