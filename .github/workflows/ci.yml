@@ -15,6 +15,11 @@ name: CI
 on:
   push:
     branches: [main]
+  # A push made with GITHUB_TOKEN creates no workflow run, so a PR merged by the pipeline's
+  # Auto-merge job never triggered this workflow: #52, #53 and #57 landed with no main run at
+  # all, while manually merged PRs got one. workflow_dispatch is the documented exception, so
+  # the Auto-merge job dispatches this workflow after it merges (pr-pipeline.yml).
+  workflow_dispatch:
 
 concurrency:
   group: ci-main
