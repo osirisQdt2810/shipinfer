@@ -39,7 +39,9 @@ class RunnerMetrics:
     items_walked: Counter = field(init=False)
     items_failed: Counter = field(init=False)
     items_expired: Counter = field(init=False)
+    items_timed_out: Counter = field(init=False)
     items_dropped: Counter = field(init=False)
+    items_queue_closed: Counter = field(init=False)
 
     def __post_init__(self) -> None:
         r = self.registry
@@ -62,11 +64,29 @@ class RunnerMetrics:
             "Chain items whose deadline passed before the walk reached them, per camera. "
             "Rising here means the shard is behind, not that anything is broken.",
         )
+        self.items_timed_out = r.counter(
+            "shipinfer_runner_items_timed_out_total",
+            # Split out of `failed` because the two ask for opposite responses: a model that
+            # did not answer within `pipeline.stage_timeout_ms` is a saturation signal and the
+            # fix is capacity, while `failed` is a bug and the fix is code. Merged, neither
+            # number answers "should I add a GPU or open a ticket".
+            "Chain items whose model did not answer within the stage timeout, per camera.",
+        )
         self.items_dropped = r.counter(
             "shipinfer_runner_items_dropped_total",
             # The single most important number here, and the reason these are labelled at
             # all: it names the camera that flooded, not the one that suffered.
-            "Submissions the lane refused because it was full, per camera.",
+            "Chain items lost to backpressure, per camera: the runner's own lane refusing a "
+            "submission, and a `pool` element's model queue refusing a request mid-walk. One "
+            "counter for both because the camera lost a frame and the fix is capacity either "
+            "way; `stats()['queue']` says which side of the chain it was refused on.",
+        )
+        self.items_queue_closed = r.counter(
+            "shipinfer_runner_items_queue_closed_total",
+            # Without this, everything the queue itself resolved was invisible in `stats()`:
+            # the items had typed futures and no counter, so `accepted` outran every outcome.
+            "Chain items still queued when the runner stopped, failed by the queue's close, "
+            "per camera.",
         )
 
     def totals(self) -> dict[str, int]:
@@ -83,5 +103,7 @@ class RunnerMetrics:
             "walked": int(self.items_walked.total()),
             "failed": int(self.items_failed.total()),
             "expired": int(self.items_expired.total()),
+            "timed_out": int(self.items_timed_out.total()),
             "dropped": int(self.items_dropped.total()),
+            "queue_closed": int(self.items_queue_closed.total()),
         }

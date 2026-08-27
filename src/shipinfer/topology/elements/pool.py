@@ -198,16 +198,25 @@ class _PoolElement(Element):
         Returns:
             The successor item — same tag, same payload, one metadata key richer.
 
+        **Every one of these is raised as itself and reaches the submitter as itself.** The
+        runner that walks this element re-raises a
+        :class:`~shipinfer.core.errors.ShipInferError` unchanged into the item's future
+        and wraps only a foreign exception, because "the detector's queue is full", "the
+        detector never answered" and "the detector has a bug" are three events a caller
+        responds to in three different ways. It charges them to three different counters too,
+        so an overloaded shard does not read as a shard full of bugs.
+
         Raises:
             ValidationError: the item's payload is not a tensor this element can submit. A
                 device-resident frame handle becomes a submittable tensor with the DataPool
                 (arch.md §3, phase D); until then the chain in front of a pool element has to
                 hand over a :class:`~shipinfer.core.types.Tensor`.
             QueueFullError: the pool is saturated. Propagated untouched — it is backpressure,
-                and the runner turns it into a counted, per-camera drop (ADR-005). It must
-                never become a ``None``: "no ships in this frame" and "the detector is full"
-                demand opposite responses.
-            RequestTimeoutError: the pool did not answer within ``timeout_s``.
+                and the runner turns it into a counted, per-camera drop (ADR-005) whose depth
+                and capacity name the queue that refused. It must never become a ``None``:
+                "no ships in this frame" and "the detector is full" demand opposite responses.
+            RequestTimeoutError: the pool did not answer within ``timeout_s``. A saturation
+                signal, not a fault: counted apart from ``items_failed`` for that reason.
             ServerStateError: called before :meth:`Element.open` — the base class's refusal.
         """
         payload = item.payload
