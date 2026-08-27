@@ -93,7 +93,7 @@ silently: an `infer-dims` that no longer matches the engine fails at start-up, a
 | `labelfile-path` | generated from `pipeline.class_labels` | positional; gaps filled with `unknown` |
 | `pre-cluster-threshold` | `pipeline.score_threshold` | |
 | `topk` | `pipeline.max_detections` | the fan-out cap, same as the Python DAG's |
-| `cluster-mode=4` | fixed | no clustering: yolo26 applied NMS in the engine |
+| `cluster-mode` | by layout | 4 (none) when a parser decodes boxes — yolo26 applied NMS in the engine; 2 (NMS, `nms-iou-threshold=0.5`, NVIDIA's DetectNet_v2 sample values) for the parserless coverage/bbox grid |
 | `net-scale-factor`, `model-color-format=0` | fixed at 1/255 and RGB | matches `NormalizeParams`' defaults — with one stated exception: nvinfer's letterbox pads with 0 where `ImageOps` pads with 114, so the bar pixels differ between planes (#32 r5); everything inside the image is identical |
 | `maintain-aspect-ratio=1`, `symmetric-padding=1` | fixed | the letterbox `ImageOps.letterbox` does |
 | `operate-on-class-ids` | `operate_on` labels reversed through `class_labels` | labels, not ids: an id is a checkpoint property |
