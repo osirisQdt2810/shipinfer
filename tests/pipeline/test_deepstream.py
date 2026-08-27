@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import configparser
 import hashlib
+import itertools
 import json
 import subprocess
 import sys
@@ -1394,3 +1395,228 @@ class TestStopIsAFinallyNotAHappyPath:
         pipeline.stop()
         pipeline.stop()  # idempotent
         assert InjectedSink.closed == 0, "an injected sink belongs to its injector"
+
+
+# -- the builder, driven by a fake Gst (#32 round 6) --------------------------------------
+
+
+class FakeCaps:
+    def __init__(self, media: str | None) -> None:
+        self._media = media
+
+    def get_size(self) -> int:
+        return 1 if self._media else 0
+
+    def get_structure(self, _index: int):
+        return types.SimpleNamespace(get_name=lambda: self._media)
+
+
+class FakePad:
+    def __init__(self, name: str, media: str | None = None, refuse: bool = False) -> None:
+        self._name = name
+        self._media = media
+        self._refuse = refuse
+        self.linked_to: object | None = None
+
+    def get_name(self) -> str:
+        return self._name
+
+    def get_current_caps(self) -> FakeCaps:
+        return FakeCaps(self._media)
+
+    def query_caps(self) -> FakeCaps:
+        return FakeCaps(self._media)
+
+    def link(self, target):
+        if self._refuse:
+            return "REFUSED"
+        self.linked_to = target
+        return "OK"
+
+
+class FakeElement:
+    def __init__(self, factory: str, name: str, *, missing_props: set[str] = frozenset()):
+        self.factory = factory
+        self._name = name
+        self._missing = set(missing_props)
+        self.props: dict[str, object] = {}
+        self.links: list[FakeElement] = []
+        self.pad_added: list[tuple] = []
+        self.requested_pads: dict[str, FakePad] = {}
+        self.refuse_links = False
+
+    def get_name(self) -> str:
+        return self._name
+
+    def find_property(self, name: str):
+        return None if name in self._missing else object()
+
+    def set_property(self, name: str, value) -> None:
+        self.props[name] = value
+
+    def link(self, downstream) -> bool:
+        if self.refuse_links:
+            return False
+        self.links.append(downstream)
+        return True
+
+    def connect(self, signal: str, callback, target) -> None:
+        self.pad_added.append((signal, callback, target))
+
+    def request_pad_simple(self, name: str) -> FakePad:
+        pad = FakePad(name)
+        self.requested_pads[name] = pad
+        return pad
+
+    def get_static_pad(self, name: str) -> FakePad:
+        return FakePad(name)
+
+    def list_properties(self):
+        return []
+
+
+class FakeBuilderGst:
+    """The exact surface `build_branch` touches — the module is injected for this."""
+
+    def __init__(
+        self, *, missing: set[str] = frozenset(), mux_missing_props: set[str] = frozenset()
+    ):
+        self.missing = set(missing)
+        self.mux_missing_props = set(mux_missing_props)
+        self.made: list[FakeElement] = []
+        gstself = self
+
+        class _Factory:
+            @staticmethod
+            def make(factory: str, name: str):
+                if factory in gstself.missing:
+                    return None
+                missing_props = (
+                    gstself.mux_missing_props if factory == "nvstreammux" else frozenset()
+                )
+                element = FakeElement(factory, name, missing_props=missing_props)
+                gstself.made.append(element)
+                return element
+
+        self.ElementFactory = _Factory
+        self.PadLinkReturn = types.SimpleNamespace(OK="OK")
+
+
+class FakePipeline:
+    def __init__(self) -> None:
+        self.added: list[FakeElement] = []
+
+    def add(self, element) -> None:
+        self.added.append(element)
+
+
+class TestBuildBranchOffline:
+    """#32 round 6: builder.py is dependency-injected precisely so a fake Gst can drive it
+    offline — and it had zero tests, which is how the pad-naming bug shipped."""
+
+    def _build(self, repository: ModelRepository, tmp_path: Path, gst: FakeBuilderGst):
+        from shipinfer.pipeline.deepstream.builder import build_branch
+
+        settings = settings_for()
+        configs = generate(repository, tmp_path)
+        pipeline = FakePipeline()
+        branch = build_branch(
+            gst,
+            pipeline,
+            cameras=settings.ingest.cameras,
+            gpu_id=3,
+            configs=configs,
+            deepstream=settings.topology.deepstream,
+            ingest=settings.ingest,
+        )
+        return branch, pipeline, gst
+
+    def test_the_chain_links_in_graph_order(self, repository, tmp_path) -> None:
+        branch, pipeline, _gst = self._build(repository, tmp_path, FakeBuilderGst())
+        chain = [branch.mux, branch.pgie, branch.tracker, *branch.sgies, branch.sink]
+        for upstream, downstream in itertools.pairwise(chain):
+            assert upstream.links and upstream.links[0] is downstream
+        assert [e.factory for e in chain] == [
+            "nvstreammux",
+            "nvinfer",
+            "nvtracker",
+            "nvinfer",
+            "nvinfer",
+            "fakesink",
+        ]
+        assert all(element in pipeline.added for element in chain)
+        assert branch.mux.props["batch-size"] == len(settings_for().ingest.cameras)
+        assert branch.mux.props["gpu-id"] == 3
+
+    def test_a_video_pad_links_and_an_audio_pad_does_not(self, repository, tmp_path) -> None:
+        """The round-6 bug: nvurisrcbin's pads are named vsrc_%u, and a name-prefix match
+        on 'src' linked nothing — every camera dark, nothing logged. The match is caps now."""
+        _branch, _pipeline, gst = self._build(repository, tmp_path, FakeBuilderGst())
+        sources = [e for e in gst.made if e.factory == "nvurisrcbin"]
+        assert sources, "the branch made a source per camera"
+        signal, callback, target = sources[0].pad_added[0]
+        assert signal == "pad-added"
+
+        video = FakePad("vsrc_0", media="video/x-raw(memory:NVMM)")
+        callback(sources[0], video, target)
+        assert video.linked_to is target, "a vsrc_%u video pad links to the muxer"
+
+        audio = FakePad("asrc_0", media="audio/x-raw")
+        callback(sources[0], audio, target)
+        assert audio.linked_to is None, "an audio pad is skipped by caps, not by name"
+
+    def test_a_missing_element_names_the_factory(self, repository, tmp_path) -> None:
+        with pytest.raises(SourceUnavailableError, match="nvtracker"):
+            self._build(repository, tmp_path, FakeBuilderGst(missing={"nvtracker"}))
+
+    def test_the_new_muxer_is_refused_by_its_missing_batch_size(
+        self, repository, tmp_path
+    ) -> None:
+        with pytest.raises(ConfigurationError, match="USE_NEW_NVSTREAMMUX"):
+            self._build(repository, tmp_path, FakeBuilderGst(mux_missing_props={"batch-size"}))
+
+    def test_a_refused_link_raises_rather_than_running_a_silent_graph(
+        self, repository, tmp_path
+    ) -> None:
+        from shipinfer.pipeline.deepstream.builder import build_branch
+
+        gst = FakeBuilderGst()
+        settings = settings_for()
+        configs = generate(repository, tmp_path)
+        pipeline = FakePipeline()
+
+        class RefusingFactory:
+            @staticmethod
+            def make(factory: str, name: str):
+                element = FakeElement(factory, name)
+                gst.made.append(element)
+                if factory == "nvstreammux":
+                    element.refuse_links = True
+                return element
+
+        gst.ElementFactory = RefusingFactory
+        with pytest.raises(ConfigurationError, match="link"):
+            build_branch(
+                gst,
+                pipeline,
+                cameras=settings.ingest.cameras,
+                gpu_id=0,
+                configs=configs,
+                deepstream=settings.topology.deepstream,
+                ingest=settings.ingest,
+            )
+
+
+class TestSecondaryOutputsMustBeFP32:
+    def test_a_half_precision_output_is_refused_at_generation(
+        self, repository: ModelRepository, tmp_path: Path
+    ) -> None:
+        """#32 round 6 (non-blocking, taken): the probe reads secondary tensor meta as
+        float32; a HALF output would publish garbage vectors at full confidence."""
+        config_path = repository.root / "person_embedder" / "config.yaml"
+        text = config_path.read_text().replace("data_type: FP32", "data_type: FP16")
+        assert "FP16" in text, "the fixture edit must take"
+        config_path.write_text(text)
+        reloaded = ModelRepository.load(repository.root)
+        with pytest.raises(ConfigurationError, match="FP16"):
+            generate(reloaded, tmp_path)

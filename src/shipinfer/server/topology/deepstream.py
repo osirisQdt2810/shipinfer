@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import pathlib
 import tempfile
 import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import ClassVar
 
-from shipinfer.core.errors import ConfigurationError
+from shipinfer.core.errors import ConfigurationError, ModelNotFoundError
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.settings.topology import (
     DEEPSTREAM_CONFIG_DIR_ENV,
@@ -99,13 +100,22 @@ class DeepStreamTopology(Topology):
         whose configs exist but whose engines do not, and the *plan* is still worth
         printing — the child's config generation is the refusal of record.
         """
+        if not pathlib.Path(settings.model_repository).is_dir():
+            # The stated case, checked for what it is: a control box has no repository at
+            # the configured path, and the plan is still worth printing.
+            return None
         try:
             from shipinfer.repository import ModelRepository
 
             repository = ModelRepository.load(settings.model_repository)
             name = settings.topology.deepstream.detector
             return int(repository.entry(name).config.max_batch_size)
-        except Exception:
+        except (ModelNotFoundError, OSError):
+            # Only the other stated case — a repository directory without the configured
+            # model (or one the process cannot read). A malformed config.yaml raises
+            # ConfigurationError and surfaces here, once, as intended; the child's
+            # generation remains the refusal of record (#32 round 6: a bare Exception
+            # silently skipped the very check this method adds).
             return None
 
     def adopt(self, plan: ShardPlan) -> None:

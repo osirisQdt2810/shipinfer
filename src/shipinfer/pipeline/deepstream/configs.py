@@ -329,6 +329,17 @@ def sgie_config(
             fitting on the GPU and not.
     """
     tensor = _single_image_input(artifact)
+    for output in artifact.config.outputs:
+        if output.data_type.name != "FP32":
+            # The probe reinterprets secondary tensor meta as float32; a HALF output
+            # would read as garbage at double the byte span and publish silently (#32
+            # round 6) — re-id would match arbitrary ships at full confidence. Both
+            # shipped embedders declare FP32; anything else is refused here, offline.
+            raise ConfigurationError(
+                f"{artifact.name} output {output.name!r} is {output.data_type.name}, "
+                f"and the probe reads secondary tensor meta as FP32 — export the "
+                f"embedding head in FP32, or teach the probe the dtype first"
+            )
     batch_size = artifact.config.max_batch_size
     if batch_size < 1:
         raise ConfigurationError(

@@ -269,3 +269,22 @@ class TestThePlanRefusesWhatTheEngineCannotBind:
         cameras = {f"cam{i:02d}": 5.0 for i in range(9)}
         plan = topology.plan(settings, cameras=cameras, gpus=[0], shards=1)
         assert len(plan.shards) == 1
+
+    def test_a_malformed_repository_surfaces_at_the_parent(self, tmp_path) -> None:
+        """#32 round 6 (non-blocking, taken): the old `except Exception` swallowed a broken
+        config.yaml too, so the parent printed a happy plan and every child refused
+        identically. A repository that IS there but cannot be read surfaces here, once."""
+        import pytest as _pytest
+
+        from shipinfer.core.errors import ConfigurationError
+        from shipinfer.core.settings import ServerSettings
+        from shipinfer.server.topology.deepstream import DeepStreamTopology
+
+        broken = tmp_path / "repo" / "ship_detector"
+        broken.mkdir(parents=True)
+        (broken / "config.yaml").write_text("batching: [unclosed")
+        topology = DeepStreamTopology()
+        settings = ServerSettings(model_repository=tmp_path / "repo")
+        cameras = {f"cam{i:02d}": 5.0 for i in range(9)}
+        with _pytest.raises(ConfigurationError):
+            topology.plan(settings, cameras=cameras, gpus=[0], shards=1)

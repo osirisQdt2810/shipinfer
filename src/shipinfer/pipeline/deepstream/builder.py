@@ -219,8 +219,20 @@ def _add_source(
     sink_pad = _request_pad(mux, f"sink_{index}")
 
     def _on_pad_added(_element: Any, pad: Any, target: Any) -> None:
-        # nvurisrcbin's pads appear when the stream negotiates, which is after PLAYING.
-        if not pad.get_name().startswith("src"):
+        # nvurisrcbin's pads appear when the stream negotiates, which is after PLAYING —
+        # and they are named `vsrc_%u`/`asrc_%u`, NOT uridecodebin's `src_%u` (#32 round 6:
+        # a name-prefix test matched nothing, no camera ever linked, and the pipeline sat
+        # in PLAYING publishing zero frames with nothing in the log). Match on CAPS, which
+        # is correct under either naming, and make every skip visible.
+        caps = pad.get_current_caps() or pad.query_caps()
+        media = caps.get_structure(0).get_name() if caps and caps.get_size() else ""
+        if not media.startswith("video/"):
+            _LOG.debug(
+                "camera %s: ignoring non-video pad %s (%s)",
+                camera.camera_id,
+                pad.get_name(),
+                media or "no caps yet",
+            )
             return
         result = pad.link(target)
         if result != gst.PadLinkReturn.OK:
