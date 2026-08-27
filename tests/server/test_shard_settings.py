@@ -6,7 +6,7 @@ disagreement is silent — a camera in the plan and not in the config is simply 
 every shard reporting healthy.
 
 So the split travels as one environment variable, ``SHIPINFER_SHARD_CAMERAS``, set by
-:class:`~shipinfer.server.launcher.Fleet` beside ``CUDA_VISIBLE_DEVICES``, and
+:class:`~shipinfer.launch.Fleet` beside ``CUDA_VISIBLE_DEVICES``, and
 ``build_settings`` narrows the fleet to it. Unset, it is the identity — which is what a
 single-process run is, and why nothing had to change for one.
 """

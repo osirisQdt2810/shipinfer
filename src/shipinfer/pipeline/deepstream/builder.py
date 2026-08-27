@@ -5,7 +5,7 @@ a failure mode that reference has.
 
 **Every make and every link is checked, and the failure is typed.** The reference calls
 ``sys.exit`` when an element is missing. A shard is supervised by
-:class:`~shipinfer.server.launcher.Fleet`, which reports which shard died and stops the rest;
+:class:`~shipinfer.launch.Fleet`, which reports which shard died and stops the rest;
 an exit code with a message on stderr tells it a shard exited, and a
 :class:`~shipinfer.core.errors.SourceUnavailableError` naming ``nvinfer`` tells an operator to
 install the SDK. Same outcome, one of them actionable.

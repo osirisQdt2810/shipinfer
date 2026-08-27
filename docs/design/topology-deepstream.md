@@ -49,7 +49,7 @@ The reference sketch (`mtmc_deepstream.py`) puts two GPU branches in one process
 
 1. **`CUDA_VISIBLE_DEVICES` is already the mechanism.** `Fleet` sets it before the child's
    interpreter starts, which is the only way to win the race against a module-scope `import
-   torch` (see `server/launcher.py`). The child therefore sees exactly one device, numbered 0,
+   torch` (see `launch/supervisor.py`). The child therefore sees exactly one device, numbered 0,
    and a per-element physical `gpu-id` would name a device it cannot see.
 2. **Contexts cost.** A process touching G devices holds G CUDA contexts at ~300 MiB each.
    Sixteen GPUs in one process is ~5 GiB of context for nothing.

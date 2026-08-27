@@ -26,7 +26,8 @@ from pathlib import Path
 import pytest
 
 from shipinfer.core.settings import ServerSettings
-from shipinfer.server.launcher import Fleet, serve_command
+from shipinfer.launch import Fleet
+from shipinfer.server.launcher import serve_command
 from shipinfer.server.topology import ServiceTopology
 
 pytestmark = [pytest.mark.multigpu, pytest.mark.timeout(300)]

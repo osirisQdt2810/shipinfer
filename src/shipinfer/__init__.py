@@ -15,9 +15,14 @@ Layering, one-way, enforced by ``tests/test_architecture.py``::
       ^
     backends/     TensorRT / ONNX Runtime / TorchScript / mock
       ^
-    server/       instances, models, the engine, health, HTTP
+    engine/       the model pool: instances, models, ensembles, cache, health (arch.md §6)
       ^
-    pipeline/     the ship+person DAG built on top of the server
+    api/          KServe v2 over FastAPI — the engine's side-door
+    launch/       spawn + supervise shard processes (arch.md §2)
+    topology/     the element chain: Element ABC, caps, chain loader          [pure]
+      ^
+    pipeline/     the ship+person DAG built on top of the engine (retires in phase C)
+    server/       dissolving: the argv commands and placement classes, deleted in A2 PR-6
 
 Quick start::
 
