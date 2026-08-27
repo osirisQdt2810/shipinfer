@@ -72,7 +72,8 @@ class ServiceSettings(BaseModel):
 class DeepStreamSettings(BaseModel):
     """`deepstream`: one DeepStream GStreamer graph per shard instead of one server.
 
-    The competitor topology (T4). A shard's child process is not ``shipinfer serve`` at all: it
+    The fourth topology (T4, V108 — a first-class pipeline implementation, not a competitor
+    benchmark). A shard's child process is not ``shipinfer serve`` at all: it
     is ``nvurisrcbin -> nvstreammux -> nvinfer -> nvtracker -> nvinfer(sgies)``, with decode,
     detection, tracking and embedding all inside one NVIDIA-owned graph and only *metadata*
     leaving it, through a pad probe. Everything below is what that graph needs to be generated

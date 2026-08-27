@@ -336,7 +336,8 @@ def sgie_config(
     lines += [
         f"batch-size={batch_size}",
         f"network-mode={_NETWORK_MODE[deepstream.network_mode]}",
-        f"interval={deepstream.interval}",
+        # No `interval` on a process-mode=2 GIE: for secondaries it skips batches of
+        # OBJECTS, not frames — not what the knob's docstring promises (#32 round 4).
         f"gie-unique-id={gie_unique_id}",
         "operate-on-gie-id=1",
         "process-mode=2",

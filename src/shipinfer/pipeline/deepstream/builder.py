@@ -121,9 +121,13 @@ def build_branch(
     _set(mux, "batched-push-timeout", deepstream.mux_batched_push_timeout_us)
     _set(mux, "live-source", int(deepstream.live_source))
     _set(mux, "enable-padding", int(deepstream.mux_enable_padding))
-    # NTP on the frame meta rather than the arrival time: the event's `captured_unix_ns` is
-    # meant to be when the camera captured the frame, and without this it is when we received
-    # it — a latency that reports the network as zero.
+    # `attach-sys-ts=false` means "use the source's NTP stamp IF ONE EXISTS, else stamp
+    # NOTHING" — not "fall back to arrival time" (#32 round 4 corrected the inversion here
+    # and in the design doc). A file source never has one, and an RTSP source has one only
+    # once sender reports flow (DeepStream's samples call configure_source_for_ntp_sync;
+    # verifying whether nvurisrcbin does it internally is a §6 live-run item). The probe
+    # covers the absence: an unstamped frame gets the probe's own receipt as its capture
+    # time, labelled `extra.capture_origin="probe"`, so latency is never a silent zero.
     _set_if_present(mux, "attach-sys-ts", False)
     pipeline.add(mux)
 

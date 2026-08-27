@@ -1,6 +1,7 @@
 # T4 — topology D, `deepstream`: one NVIDIA graph per shard
 
-The competitor. `fleet` (B) and `service` (C) run *this* project's scheduler over TensorRT
+The fourth topology (V108: a first-class pipeline implementation, not a competitor
+benchmark). `fleet` (B) and `service` (C) run *this* project's scheduler over TensorRT
 engines; `deepstream` (D) hands the whole per-frame path to NVIDIA's GStreamer graph and keeps
 only the two ends — the model repository that describes the models, and the result sink that
 publishes the events. It exists so the architecture question ("is our scheduler worth having,
@@ -233,8 +234,19 @@ that is PR2 (§5).
 * **`pyds` is not on PyPI.** It ships with the SDK's `deepstream_python_apps`. Absent, the
   shard fails at start with a typed `SourceUnavailableError` naming the install — never at
   import, which is what keeps this whole package in the offline tier.
-* **NTP timestamps need `attach-sys-ts=0` and RTCP sender reports.** Without them
-  `captured_unix_ns` is arrival time, and the reported latency excludes the network.
+* **NTP timestamps: `attach-sys-ts=0` means "the source's NTP stamp if one exists, else
+  NOTHING"** — not a fall-back to arrival time (#32 round 4 corrected this inversion). A file
+  source never stamps; an RTSP source stamps only once RTCP sender reports flow, and
+  DeepStream's own samples additionally call `pyds.configure_source_for_ntp_sync()` on the
+  source bin — whether `nvurisrcbin` does that internally is a live-run check. The probe
+  covers every absence: an unstamped frame gets the probe's receipt as its capture time,
+  labelled `extra.capture_origin="probe"` (a source stamp is `"source"`), so `latency_us`
+  is never a silent zero and the bench can tell the two clocks apart.
+* **`num-detected-classes` comes from the label map (9), not from the engine.** A COCO
+  yolo26 engine emits ids up to 79; ids at or above the declared count are dropped by
+  nvinfer's contract, which here filters the classes this deployment ignores — a useful
+  coincidence, not a decision. What a *custom* parser does with `classId >=
+  num-detected-classes` is a live-run check.
 
 ---
 

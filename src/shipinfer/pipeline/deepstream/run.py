@@ -258,8 +258,11 @@ class DeepStreamPipeline:
         return self._metrics
 
     @property
-    def sink(self) -> ResultSink:
-        return self._ensure_sink()
+    def sink(self) -> ResultSink | None:
+        # A plain getter on purpose (#32 round 4): an accessor that constructs the
+        # configured sink would re-open the dry-run footgun through a property read.
+        # `start()` is the only builder.
+        return self._sink
 
     @property
     def gpu_id(self) -> int:

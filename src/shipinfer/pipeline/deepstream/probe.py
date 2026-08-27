@@ -29,6 +29,7 @@ Three things, and each has been a silent bug in a DeepStream deployment somewher
 from __future__ import annotations
 
 import ctypes
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -337,7 +338,21 @@ def build_event(
         )
         for index, obj in enumerate(view.objects)
     )
-    return PerceptionEvent.build(
+    # A missing NTP stamp must not become a zero that reads as a measured zero (#32
+    # round 4): with `attach-sys-ts=false` a file source NEVER stamps, so every event
+    # would publish latency_us=0 on the axis this project exists to optimise, and the
+    # bench comparing topologies would read "no latency" as a result. When the source
+    # gave no capture time, the probe's own receipt is the capture time — the latency
+    # then measures probe→emit, and `extra.capture_origin` says which clock it was so a
+    # consumer can tell the two apart instead of trusting one field with two meanings.
+    if captured_unix_ns:
+        origin = "source"
+        captured_ns = captured_unix_ns - epoch_offset_ns
+    else:
+        origin = "probe"
+        captured_ns = time.monotonic_ns()
+        captured_unix_ns = captured_ns + epoch_offset_ns
+    event = PerceptionEvent.build(
         camera_id=camera_id,
         frame_id=frame_id,
         source_id=source_id,
@@ -345,12 +360,12 @@ def build_event(
         width=geometry.source_width,
         height=geometry.source_height,
         fps=fps,
-        # A source with no sender report yet stamps 0; `build` reads that as "no capture time"
-        # and reports latency 0 rather than the seconds since the epoch.
-        captured_ns=(captured_unix_ns - epoch_offset_ns) if captured_unix_ns else 0,
+        captured_ns=captured_ns,
         captured_unix_ns=captured_unix_ns,
         missing_stages=missing_stages,
     )
+    event.extra["capture_origin"] = origin
+    return event
 
 
 def _clamp(value: float, limit: int) -> float:

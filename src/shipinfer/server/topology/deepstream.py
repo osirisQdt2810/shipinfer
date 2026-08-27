@@ -29,7 +29,9 @@ __all__ = ["DeepStreamTopology"]
 class DeepStreamTopology(Topology):
     """One process per shard, running a DeepStream graph rather than ``shipinfer serve``.
 
-    This is topology **D** (ledger T4, `docs/design/topology-deepstream.md`): the competitor.
+    This is topology **D** (ledger T4, `docs/design/topology-deepstream.md`): NVIDIA's graph
+    in place of this project's pipeline, the same events out (V108: a first-class topology,
+    not a competitor benchmark).
     `fleet` and `service` both run *this* server's scheduler over TensorRT engines; `deepstream`
     hands the whole per-frame path to NVIDIA's graph — ``nvurisrcbin -> nvstreammux ->
     nvinfer(detector) -> nvtracker -> nvinfer(embedders)`` — and keeps only the two ends: the
@@ -74,7 +76,37 @@ class DeepStreamTopology(Topology):
     ) -> ShardPlan:
         plan = plan_shards(cameras, shards=shards, gpus=gpus)
         self.adopt(plan)
+        # The parent refuses a shard the primary GIE cannot bind ONCE, here, instead of
+        # every child refusing identically at config generation (#32 round 4). The children
+        # keep their own refusal — a hand-started child bypasses this method.
+        limit = self._detector_batch_limit(settings)
+        if limit is not None:
+            for shard in plan.shards:
+                if len(shard.cameras) > limit:
+                    raise ConfigurationError(
+                        f"shard {shard.index} muxes {len(shard.cameras)} cameras, and the "
+                        f"detector's engine declares max_batch_size {limit} — nvstreammux's "
+                        f"batch is the primary GIE's batch. Use more shards (at most {limit} "
+                        f"cameras each), or rebuild the engine with a larger max_batch_size"
+                    )
         return plan
+
+    @staticmethod
+    def _detector_batch_limit(settings: ServerSettings) -> int | None:
+        """The detector's declared max batch, or None when the repository cannot say.
+
+        Best-effort on purpose: a --dry-run on a control box may point at a repository
+        whose configs exist but whose engines do not, and the *plan* is still worth
+        printing — the child's config generation is the refusal of record.
+        """
+        try:
+            from shipinfer.repository import ModelRepository
+
+            repository = ModelRepository.load(settings.model_repository)
+            name = settings.topology.deepstream.detector
+            return int(repository.entry(name).config.max_batch_size)
+        except Exception:
+            return None
 
     def adopt(self, plan: ShardPlan) -> None:
         """Record the plan, and refuse one this topology cannot honour.

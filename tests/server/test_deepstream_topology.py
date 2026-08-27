@@ -239,3 +239,33 @@ class TestTheFleetCommandRunsIt:
                 gpus="0,1,2,3",
                 dry_run=True,
             )
+
+
+class TestThePlanRefusesWhatTheEngineCannotBind:
+    def test_nine_cameras_on_one_gpu_refuse_at_the_parent(self, monkeypatch) -> None:
+        """#32 round 4 (non-blocking, taken): the parent refuses ONCE what every child
+        would refuse identically at config generation — the pgie's batch is the shard's
+        camera count, bounded by the detector engine's declared max_batch_size (8)."""
+        import pytest as _pytest
+
+        from shipinfer.core.errors import ConfigurationError
+        from shipinfer.core.settings import ServerSettings
+        from shipinfer.server.topology.deepstream import DeepStreamTopology
+
+        topology = DeepStreamTopology()
+        settings = ServerSettings(model_repository=Path("model_repository"))
+        cameras = {f"cam{i:02d}": 5.0 for i in range(9)}
+        with _pytest.raises(ConfigurationError, match="max_batch_size 8"):
+            topology.plan(settings, cameras=cameras, gpus=[0], shards=1)
+
+    def test_a_missing_repository_leaves_the_plan_printable(self, tmp_path) -> None:
+        """Best-effort on purpose: a control box may hold configs but no repository at the
+        configured path — the plan still prints, and the child's generation refuses."""
+        from shipinfer.core.settings import ServerSettings
+        from shipinfer.server.topology.deepstream import DeepStreamTopology
+
+        topology = DeepStreamTopology()
+        settings = ServerSettings(model_repository=tmp_path / "nowhere")
+        cameras = {f"cam{i:02d}": 5.0 for i in range(9)}
+        plan = topology.plan(settings, cameras=cameras, gpus=[0], shards=1)
+        assert len(plan.shards) == 1

@@ -797,11 +797,24 @@ class TestOneEventPerFrame:
         assert event.captured_unix_ns == ntp
         assert 20_000 <= event.latency_us <= 200_000
 
-    def test_a_source_with_no_sender_report_yet_reports_no_latency(self) -> None:
-        """NTP 0 must not read as "captured in 1970" and produce a 56-year latency."""
-        event = an_event(ntp=0, epoch_offset_ns=10**18)
+    def test_an_unstamped_frame_gets_the_probes_receipt_never_a_silent_zero(self) -> None:
+        """#32 round 4: with `attach-sys-ts=false` a FILE source never stamps, so NTP 0 is
+        the steady state there, not a transient — and a latency of 0 reads as a measured
+        zero on the axis this project optimises. The probe's receipt becomes the capture
+        time, and `extra.capture_origin` says which clock it was, so the two cases are
+        distinguishable instead of one field carrying two meanings. (The 56-year 1970
+        failure stays foreclosed: nothing subtracts the epoch from a zero.)"""
+        unstamped = an_event(ntp=0, epoch_offset_ns=10**18)
+        assert unstamped.extra["capture_origin"] == "probe"
+        assert unstamped.captured_unix_ns > 10**18, "the probe's wall clock, not 1970"
+        assert unstamped.latency_us >= 0
+        assert unstamped.latency_us < 60_000_000, "probe-to-emit, not seconds-since-epoch"
 
-        assert (event.captured_unix_ns, event.latency_us) == (0, 0)
+        stamped = an_event(ntp=1_000_000, epoch_offset_ns=10**18)
+        assert stamped.extra["capture_origin"] == "source"
+        assert stamped.captured_unix_ns == 1_000_000
+        # The consumer's question: can I tell them apart? One field answers it.
+        assert stamped.extra["capture_origin"] != unstamped.extra["capture_origin"]
 
     def test_the_event_carries_every_v1_key_the_deployed_consumer_reads(self) -> None:
         """One sink serves every topology, so this event has to be that event."""
