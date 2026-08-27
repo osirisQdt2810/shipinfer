@@ -139,13 +139,14 @@ class TestImportIsCheap:
     def test_importing_runners_pulls_in_neither_the_engine_nor_torch(self) -> None:
         """``import shipinfer.runners`` must cost no accelerator and no model pool.
 
-        The static rule (``runners`` may import ``core``, ``topology``, ``scheduling``,
-        ``engine`` and ``runtime``) is an *allowance* for the runners still to come — the
-        ``fleet`` runner binds its shard's device through ``runtime`` — not a prediction that
-        the allowance is used. Today none of it is: the ``inprocess`` runner reaches the model
-        pool through the ``ModelResolver`` it is *handed*, which is what lets a chain be
-        started with mock elements on a host with no driver, and what lets ``tests/runners/``
-        run in the offline tier at all. This is the test that notices the day that changes.
+        The static rule is the narrow one — ``runners`` may import ``core``, ``topology``
+        and ``scheduling``, and neither ``engine`` nor ``runtime`` — because the ``inprocess``
+        runner reaches the model pool through the ``ModelResolver`` it is *handed* rather than
+        by importing anything. That is what lets a chain be started with mock elements on a
+        host with no driver, and what lets ``tests/runners/`` run in the offline tier at all.
+        This runtime check is the load-bearing half: the static rule is about module scope,
+        and the ``fleet`` runner will legitimately bind its shard's device through ``runtime``
+        one day. This is the test that notices the day that changes.
         """
         code = (
             "import sys, shipinfer.runners as r; "

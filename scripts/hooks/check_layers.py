@@ -135,13 +135,16 @@ ALLOWED_INTERNAL: dict[str, set[str]] = {
     # reads the model repository to plan its shards — a config question, answered without a
     # device. `pipeline` names `engine` rather than `server` for the same reason the row above
     # exists: it wants the pool, and the two stopped being the same package.
-    # `runners` executes a topology (arch.md §1): it needs `topology` for the chain it walks,
-    # `scheduling` for the bounded fair lane in front of it (ADR-005 — there is no second
-    # fairness mechanism), `engine` for the pool a `pool` element submits to, and `runtime` for
-    # the device binding the `fleet` runner's shard does. It must NOT be imported *by*
-    # `topology`: an element receives its runner's decisions through `ElementContext` and
-    # never reaches for them, which is what keeps `topology` importable with no driver.
-    "runners": {"core", "topology", "scheduling", "engine", "runtime"},
+    # `runners` executes a topology (arch.md §1): it needs `topology` for the chain it walks
+    # and `scheduling` for the bounded fair lane in front of it (ADR-005 — there is no second
+    # fairness mechanism). Deliberately NOT `engine` or `runtime`, though both are plausible:
+    # the model pool arrives as the structural `ModelResolver` a runner is *handed*, and the
+    # `fleet` runner's device binding does not exist yet. The PR that needs one adds the row
+    # with its argument — a standing allowance for an import nobody makes is a rule that
+    # checks nothing. It must also NOT be imported *by* `topology`: an element receives its
+    # runner's decisions through `ElementContext` and never reaches for them, which is what
+    # keeps `topology` importable with no driver.
+    "runners": {"core", "topology", "scheduling"},
     "server": {"core", "repository", "scheduling", "engine"},
     "pipeline": {"core", "repository", "runtime", "backends", "scheduling", "engine"},
     # `ingest` does NOT depend on `scheduling`: it publishes into the `FrameSink` protocol
