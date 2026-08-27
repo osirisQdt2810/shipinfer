@@ -1280,8 +1280,14 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
             `manager.size()` reports 0 and no later `stop()` can reach it. No UAF (the bound
             method keeps the actor alive) — the orphaned camera is the whole defect. Mirror
             the C++ re-check + `ServerStateError` + tests.
-      - [ ] **P4-NB3 · `CameraActor::stop` is not safe against a concurrent stop, and the
-            manager now enters it from two threads** (#35 round 2; ESCALATED round 3: the
+      - [x] **P4-NB3 · DONE in #39** (merged 27 Aug 06:03:03; `lifecycle_mutex_` serialises
+            start's assignment + stop's joinable/join/detach; the fate flag
+            `thread_abandoned_` means every stopper reports a detach whichever performed
+            it; child-published atomic thread id, cleared at the join only; flip-proofs:
+            lock removed → SIGABRT 3/3, pre-round-1 only-the-detacher-reports semantics →
+            189 checks / 1 failure; four review rounds). Was: `CameraActor::stop` is not
+            safe against a concurrent stop, and the manager now enters it from two
+            threads (#35 round 2; ESCALATED round 3: the
             race is a latent std::terminate inside the hammer test itself — a crashing CI
             job, not UB-on-paper — so this is the NEXT ingest fix, before PR2; fold in the
             stop-docstring "later actors may get zero" wording and the kRecheckStopGrace
@@ -1296,6 +1302,11 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       - [ ] **P4-NB4 · Python `remove_camera` discards `actor.stop()`'s now-meaningful
             bool** (#35 round 2 nit) — the C++ counterpart parks on it; Python has nothing to
             park but should at least surface the abandonment to its caller.
+      - [ ] **P4-NB5 · The self-stop branch is the one stopper that does not report the
+            fate** (#39 round 4 NB; unreachable in-tree — the sink path sets `stop_`
+            directly and a self-stop's answer never reaches the fleet count — but the
+            header promises "by ANY stopper"). Fix: `thread_abandoned_` as
+            `std::atomic<bool>` so the lockless self-stop path can read it.
 - [ ] **P5 · Resolved config in, same events out.** The binary takes the settings tree and the
       model repository (`config.yaml`) the Python plane reads, not CLI flags; emits the same
       event schema (`pipeline/schema.py`) so one sink serves both planes.
