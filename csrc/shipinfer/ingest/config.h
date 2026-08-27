@@ -50,6 +50,12 @@ namespace shipinfer {
         // RTSP lower transport. TCP by default: UDP loses packets under load and the resulting
         // decode artefacts look exactly like a model regression.
         std::string transport = "tcp";
+        // The video codec, which is what picks the depayloader, the parser and the decoder
+        // (`sources/gstreamer_pipeline.h`). `auto` builds a `decodebin` pipeline that
+        // negotiates the codec at connect time: the safe choice for a mixed fleet and the
+        // slightly slower one, because the decoder is then chosen by plugin rank rather than by
+        // us.
+        std::string codec = "h264";
         // Prefer hardware decode where the backend supports it. A backend that cannot always
         // resolves this to false, so a log line says "software decode" instead of implying an
         // NVDEC path that does not exist.
@@ -106,6 +112,15 @@ namespace shipinfer {
             }
             if (uri.empty())
                 throw ConfigError("camera '" + camera_id + "': uri must not be empty");
+            // `Codec` is a pydantic `Literal` on the Python plane (`settings/ingest.py`), so a
+            // typo is refused there before a camera object exists. There is no Literal here, so
+            // this is where it lands — and it lands at start-up rather than at the first
+            // connect, because a codec no source can build a pipeline for never negotiates and
+            // the camera would otherwise spend its reconnect budget discovering that.
+            if (codec != "auto" && codec != "h264" && codec != "h265") {
+                throw ConfigError("camera '" + camera_id + "': unsupported codec '" + codec +
+                                  "'; expected one of [auto, h264, h265]");
+            }
             if ((width == 0) != (height == 0)) {
                 throw ConfigError("camera '" + camera_id +
                                   "': width and height must be set together, or neither");

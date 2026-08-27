@@ -19,6 +19,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -35,6 +36,9 @@
 #include "shipinfer/ingest/manager.h"
 #include "shipinfer/ingest/registry.h"
 #include "shipinfer/ingest/sink.h"
+// The pure half of the GStreamer source: strings and element choices, no `libgstreamer`. The
+// gst-linked unit is what an offline binary may not reach; this sibling header is free of it.
+#include "shipinfer/ingest/sources/gstreamer_pipeline.h"
 #include "shipinfer/ingest/timing/backoff.h"
 #include "shipinfer/ingest/timing/pacing.h"
 
@@ -1842,6 +1846,242 @@ namespace {
             std::this_thread::sleep_for(5ms);
     }
 
+    // =====================================================================================
+    // N. The GStreamer pipeline strings (pure, PR2a)
+    // =====================================================================================
+    // `tests/ingest/test_sources_gstreamer.py`'s `TestPipelineString` and
+    // `TestElementSelection`, ported check for check.
+    //
+    // Every string here is one an operator can paste into `gst-launch-1.0`, which is exactly
+    // why they are worth pinning: a silent change to element order or to `drop=true` is a
+    // behaviour change nobody would notice until a camera fell behind. And like the Python
+    // file, this runs with **no GStreamer installed** — the header under test links against
+    // nothing, which is what keeps it inside the offline closure while PR2b's gst-linked
+    // `FrameSource` stays outside it.
+
+    const std::string kGstUri = "rtsp://operator:REDACTED@10.0.0.100/stream";
+    const std::string kAppsinkTail = "appsink name=" + std::string(kAppsinkName) +
+                                     " emit-signals=false sync=false drop=true max-buffers=2";
+
+    // A pipeline line is 200 characters, and the one that changed is not findable in a
+    // boolean — so a failure prints both.
+    void check_exact(const std::string& built, const std::string& wanted,
+                     const std::string& what) {
+        check(built == wanted,
+              what + "\n       built:  " + built + "\n       wanted: " + wanted);
+    }
+
+    // The C++ spelling of the Python tests' `{"nvv4l2decoder", "avdec_h264"}.__contains__`.
+    // Captured by value, so the predicate outlives the temporary that built it.
+    ElementAvailable installed(const std::set<std::string>& elements) {
+        return [elements](const std::string& element) { return elements.count(element) != 0; };
+    }
+    ElementAvailable an_empty_host() {
+        return [](const std::string&) { return false; };
+    }
+
+    // The Python tests read `build_pipeline(URI, codec="h265", decoder="nvv4l2decoder")`. This
+    // plane has neither keyword arguments nor, in C++17, designated initialisers, so a named
+    // local is the closest honest spelling.
+    PipelineOptions for_codec(const std::string& codec) {
+        PipelineOptions options;
+        options.codec = codec;
+        return options;
+    }
+
+    void test_the_exact_pipeline_line_per_codec() {
+        PipelineOptions h264 = for_codec("h264");
+        h264.decoder = "nvv4l2decoder";
+        h264.converter = "nvvideoconvert";
+        check_exact(build_pipeline(kGstUri, h264),
+                    "rtspsrc location=" + kGstUri +
+                        " latency=200 protocols=tcp ! rtph264depay ! h264parse ! "
+                        "nvv4l2decoder ! nvvideoconvert ! video/x-raw,format=BGR ! " +
+                        kAppsinkTail,
+                    "h264 through the DeepStream decoder");
+
+        PipelineOptions h265 = for_codec("h265");
+        h265.decoder = "nvv4l2decoder";
+        h265.converter = "nvvideoconvert";
+        check_exact(build_pipeline(kGstUri, h265),
+                    "rtspsrc location=" + kGstUri +
+                        " latency=200 protocols=tcp ! rtph265depay ! h265parse ! "
+                        "nvv4l2decoder ! nvvideoconvert ! video/x-raw,format=BGR ! " +
+                        kAppsinkTail,
+                    "h265 through the DeepStream decoder");
+
+        check_exact(build_pipeline(kGstUri, for_codec("h264")),
+                    "rtspsrc location=" + kGstUri +
+                        " latency=200 protocols=tcp ! rtph264depay ! h264parse ! avdec_h264 "
+                        "! videoconvert ! video/x-raw,format=BGR ! " +
+                        kAppsinkTail,
+                    "h264 with no decoder named falls back to software decode");
+
+        // A default that paired H.265 with `avdec_h264` would build a pipeline that never
+        // links — and it would do it at the fiftieth camera, not the first.
+        check(
+            contains(build_pipeline(kGstUri, for_codec("h265")), " h265parse ! avdec_h265 ! "),
+            "the h265 software fallback is the h265 decoder");
+    }
+
+    void test_the_gl_trap_and_the_deepstream_nvmm_handoff() {
+        // nvcodec's `nvh264dec` opens a GL display when downstream leaves the memory choice
+        // open, and a headless container has no DRM device to open: `gst_gl_display_gbm_new`
+        // and then a segfault, on the first RTSP benchmark run. The `video/x-raw` filter with
+        // no memory feature is what pins it to system memory.
+        PipelineOptions nvcodec = for_codec("h264");
+        nvcodec.decoder = "nvh264dec";
+        nvcodec.latency_ms = 100;
+        nvcodec.transport = "udp";
+        nvcodec.width = 1280;
+        nvcodec.height = 720;
+        nvcodec.max_buffers = 4;
+        check_exact(build_pipeline(kGstUri, nvcodec),
+                    "rtspsrc location=" + kGstUri +
+                        " latency=100 protocols=udp ! rtph264depay ! h264parse ! nvh264dec ! "
+                        "video/x-raw ! videoconvert ! videoscale ! "
+                        "video/x-raw,format=BGR,width=1280,height=720 ! appsink name=" +
+                        std::string(kAppsinkName) +
+                        " emit-signals=false sync=false drop=true max-buffers=4",
+                    "a GL-capable decoder, scaled, over UDP");
+
+        // `decodebin` leaves the choice open by definition, so it gets the filter too.
+        const std::string automatic = build_pipeline(kGstUri, for_codec("auto"));
+        check(contains(automatic, "decodebin ! video/x-raw !"),
+              "decodebin must be told to negotiate system memory: " + automatic);
+        check(!contains(automatic, "depay") && !contains(automatic, "parse"),
+              "auto has no depayloader and no parser — decodebin is both: " + automatic);
+
+        // But NOT the DeepStream pair: `nvv4l2decoder ! nvvideoconvert` passes NVMM memory
+        // between them, and forcing system memory there would undo the reason for choosing
+        // them.
+        PipelineOptions deepstream = for_codec("h264");
+        deepstream.decoder = "nvv4l2decoder";
+        deepstream.converter = "nvvideoconvert";
+        const std::string nvmm = build_pipeline(kGstUri, deepstream);
+        check(contains(nvmm, "nvv4l2decoder ! nvvideoconvert"),
+              "the NVMM hand-off is direct: " + nvmm);
+        check(!contains(nvmm, "video/x-raw ! nvvideoconvert"),
+              "no system-memory filter between the DeepStream pair: " + nvmm);
+
+        PipelineOptions software = for_codec("h264");
+        software.decoder = "avdec_h264";
+        const std::string plain = build_pipeline(kGstUri, software);
+        check(contains(plain, "avdec_h264 ! videoconvert"),
+              "a software decoder is already system memory and needs no filter: " + plain);
+    }
+
+    void test_a_property_gstreamer_has_no_value_for_is_omitted() {
+        // `protocols=auto` is not a GStreamer value; leaving the property out is what "let
+        // rtspsrc decide" is.
+        PipelineOptions automatic = for_codec("h264");
+        automatic.transport = "auto";
+        const std::string built = build_pipeline(kGstUri, automatic);
+        check(!contains(built, "protocols="), "auto transport emits no property: " + built);
+        check(contains(build_pipeline(kGstUri, for_codec("h264")), " protocols=tcp !"),
+              "tcp and udp still say so");
+    }
+
+    void test_build_pipeline_refuses_what_would_never_negotiate() {
+        bool refused = false;
+        try {
+            (void)build_pipeline(kGstUri, for_codec("vp9"));
+        } catch (const ConfigError& error) {
+            refused = contains(error.what(), "unsupported codec") &&
+                      contains(error.what(), "[auto, h264, h265]");
+        }
+        check(refused, "an unknown codec fails loudly, naming what is accepted");
+
+        // Half a scale has no meaning downstream: `videoscale` needs both.
+        PipelineOptions half = for_codec("h264");
+        half.width = 640;
+        refused = false;
+        try {
+            (void)build_pipeline(kGstUri, half);
+        } catch (const ConfigError& error) {
+            refused = contains(error.what(), "together");
+        }
+        check(refused, "width without height is refused");
+    }
+
+    void test_the_decoder_and_converter_are_probed_not_assumed() {
+        check(select_decoder("h264", true, installed({"nvv4l2decoder", "avdec_h264"})) ==
+                  "nvv4l2decoder",
+              "the hardware decoder is preferred when present");
+        check(
+            select_decoder("h265", true, installed({"nvh265dec", "avdec_h265"})) == "nvh265dec",
+            "the second hardware choice is tried before software");
+        check(select_decoder("h264", false, installed({"nvv4l2decoder", "avdec_h264"})) ==
+                  "avdec_h264",
+              "hwaccel off goes straight to software, whatever else is installed");
+        check(select_decoder("h264", true, installed({"avdec_h264", "videoconvert"})) ==
+                  "avdec_h264",
+              "software decode is the fallback when no NVIDIA plugin exists");
+
+        // An install problem, not a camera problem: the actor must not spend its reconnect
+        // budget on a library that will never appear on its own.
+        bool told_what_to_install = false;
+        try {
+            (void)select_decoder("h264", true, an_empty_host());
+        } catch (const SourceUnavailableError& error) {
+            told_what_to_install =
+                contains(error.what(), "gstreamer1.0-libav") &&
+                contains(error.what(), "[nvv4l2decoder, nvh264dec, avdec_h264]");
+        }
+        check(told_what_to_install,
+              "no decoder at all names everything it tried and the package to install");
+
+        check(
+            select_converter(installed({"nvvideoconvert", "videoconvert"})) == "nvvideoconvert",
+            "the converter prefers the one that can read NVMM");
+        check(select_converter(installed({"nvvidconv", "videoconvert"})) == "nvvidconv",
+              "then the Tegra one");
+        check(select_converter(installed({"videoconvert"})) == "videoconvert",
+              "then the portable one, which is always present");
+        bool refused = false;
+        try {
+            (void)select_converter(an_empty_host());
+        } catch (const SourceUnavailableError& error) {
+            refused = contains(error.what(), "gstreamer1.0-plugins-base");
+        }
+        check(refused, "a host with no converter at all is an install problem too");
+    }
+
+    void test_an_unsupported_codec_is_refused_before_a_thread_starts() {
+        IngestConfig config = a_camera("cam3");
+        config.codec = "vp9";
+        bool named = false;
+        try {
+            config.validate();
+        } catch (const ConfigError& error) {
+            named = contains(error.what(), "cam3") &&
+                    contains(error.what(), "unsupported codec 'vp9'") &&
+                    contains(error.what(), "[auto, h264, h265]");
+        }
+        check(named, "the refusal names the camera, the typo and what is accepted");
+
+        bool all_accepted = true;
+        for (const std::string codec :
+             {std::string("auto"), std::string("h264"), std::string("h265")}) {
+            IngestConfig ok = a_camera("cam3");
+            ok.codec = codec;
+            try {
+                ok.validate();
+            } catch (const ConfigError&) {
+                all_accepted = false;
+            }
+        }
+        check(all_accepted, "every codec a pipeline can be built for is accepted");
+
+        bool default_passes = true;
+        try {
+            a_camera("cam3").validate();
+        } catch (const ConfigError&) {
+            default_passes = false;
+        }
+        check(default_passes, "the default codec passes, so no existing camera has to change");
+    }
+
 }  // namespace
 
 int main() {
@@ -1904,6 +2144,13 @@ int main() {
     test_a_stop_racing_the_recheck_still_counts_the_abandonment();
     test_a_refused_add_pays_the_abandonment_debt();
     test_stop_charges_one_deadline_to_the_fleet_not_one_per_camera();
+
+    test_the_exact_pipeline_line_per_codec();
+    test_the_gl_trap_and_the_deepstream_nvmm_handoff();
+    test_a_property_gstreamer_has_no_value_for_is_omitted();
+    test_build_pipeline_refuses_what_would_never_negotiate();
+    test_the_decoder_and_converter_are_probed_not_assumed();
+    test_an_unsupported_codec_is_refused_before_a_thread_starts();
 
     std::printf("%d checks, %d failure(s), %d skipped\n", checks, failures, skips);
     return failures == 0 ? 0 : 1;
