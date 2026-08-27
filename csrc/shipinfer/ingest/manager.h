@@ -66,6 +66,11 @@ namespace shipinfer {
         // still reading and publishing. Fifty false alarms per shutdown is how a real abandoned
         // thread stops being noticed.
         //
+        // The deadline is the fleet's, so later actors may be handed a remaining budget of
+        // zero — that is not mistreatment: the signal pass already reached them at t0, so
+        // one that is still running at the deadline would have missed a per-actor budget
+        // too, and one that has finished joins instantly on zero.
+        //
         // Returns how many actors had to be *abandoned* — detached past the deadline, still
         // holding their sink and source references. 0 is the clean shutdown. A non-zero return
         // is the caller's cue that references it lent to the fleet (the sink above all) must

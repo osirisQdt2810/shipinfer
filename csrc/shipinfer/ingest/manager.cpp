@@ -9,6 +9,17 @@
 
 namespace shipinfer {
 
+    namespace {
+
+        // The re-check's stop grace (#35): a freshly started actor that got its stop signal
+        // before its first wait is gone in microseconds; one that is not is inside a blocked
+        // `do_open` (whose budget, 10 s by default, outlives any stop grace) and will have
+        // to be detached. Long enough to tell those apart, short enough not to stall the
+        // error path of an API call for the full shutdown grace.
+        constexpr std::chrono::milliseconds kRecheckStopGrace{250};
+
+    }  // namespace
+
     IngestManager::IngestManager(std::vector<IngestConfig> cameras, FrameSink& sink,
                                  SourceFactory factory)
         : cameras_(std::move(cameras)), sink_(sink), factory_(std::move(factory)) {}
@@ -113,12 +124,7 @@ namespace shipinfer {
             auto found = actors_.find(config.camera_id);
             if (found == actors_.end() || found->second != actor) {
                 lock.unlock();
-                // A freshly started actor that got its stop signal before its first wait is
-                // gone in microseconds; one that is not is blocked inside `do_open` (whose
-                // budget, 10 s by default, outlives any stop grace) and will have to be
-                // DETACHED. 250 ms is enough to tell those apart without stalling the error
-                // path of an API call for the full shutdown grace.
-                if (!actor->stop(std::chrono::milliseconds(250))) {
+                if (!actor->stop(kRecheckStopGrace)) {
                     // The abandonment debt (#33 round 3): the detached thread is still
                     // standing on this actor, and the throw below drops our last reference —
                     // park it with the others `~IngestManager` deliberately leaks, exactly

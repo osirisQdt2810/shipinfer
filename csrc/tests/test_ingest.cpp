@@ -1583,6 +1583,48 @@ namespace {
             std::this_thread::sleep_for(5ms);
     }
 
+    void test_two_concurrent_stops_agree_on_one_abandonment() {
+        // #35 rounds 2-3, escalated: the manager itself enters CameraActor::stop from two
+        // threads (its own stop() and add_camera's re-check). Without the lifecycle lock
+        // both pass the unsynchronised joinable() read, and one joins while the other
+        // detaches — or both detach: std::terminate, in this binary. With it, the second
+        // caller waits out the first and finds the thread already handled; exactly ONE
+        // caller performs and reports the detach, so an actor cannot be counted or parked
+        // twice.
+        static FakeScript script;
+        static CountingSink sink;
+        static std::promise<void> gate;
+        static std::shared_future<void> opened = gate.get_future().share();
+        script.on_read = [](int index) {
+            if (index == 0) opened.wait();
+            return 1;
+        };
+        // Heap-built and deliberately leaked: after the detach the actor's thread still
+        // stands on its members, and this test has no manager (and so no abandoned_) to
+        // park it in — the leak plays that role here.
+        auto* actor = new CameraActor(a_camera("cam0"), sink, scripted(script));
+        actor->start();
+        for (int i = 0; i < 400 && script.reads.load() == 0; ++i)
+            std::this_thread::sleep_for(5ms);
+        check(script.reads.load() >= 1, "the camera is parked inside its decode read");
+        bool first = true, second = true;
+        std::thread one([&] { first = actor->stop(150ms); });
+        std::thread two([&] { second = actor->stop(150ms); });
+        one.join();
+        two.join();
+        check(first != second,
+              "exactly one concurrent stop reports the abandonment (got " +
+                  std::string(first ? "true" : "false") + "/" +
+                  std::string(second ? "true" : "false") +
+                  ") — a double detach would have been std::terminate, a double report "
+                  "would park one actor twice");
+        gate.set_value();
+        for (int i = 0; i < 600 && script.closes.load() == 0; ++i)
+            std::this_thread::sleep_for(5ms);
+        check(script.closes.load() >= 1,
+              "and the detached thread resumed against alive memory and closed its source");
+    }
+
     void test_a_refused_add_pays_the_abandonment_debt() {
         // #33 round 3: the deadly interleaving is a stop() landing between add_camera's map
         // insert and its start() — the stop signal is aimed at a thread that does not exist
@@ -1753,6 +1795,7 @@ int main() {
     test_a_directly_built_actor_names_the_camera_in_its_refusal();
     test_a_camera_added_during_stop_never_keeps_running();
     test_the_managers_death_leaks_the_abandoned_rather_than_freeing_them();
+    test_two_concurrent_stops_agree_on_one_abandonment();
     test_a_refused_add_pays_the_abandonment_debt();
     test_stop_charges_one_deadline_to_the_fleet_not_one_per_camera();
 

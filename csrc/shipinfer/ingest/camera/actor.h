@@ -21,6 +21,7 @@
 // camera fleet, and treating "opened" as "healthy" is precisely how it stays invisible.
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -117,6 +118,19 @@ namespace shipinfer {
         ExponentialBackoff backoff_;
         std::unique_ptr<FrameSource> source_;
         std::thread thread_;
+        // Serialises the thread's lifecycle — `start()`'s assignment, `stop()`'s
+        // joinable/join/detach — against a concurrent `stop()`. The fleet manager itself
+        // enters `stop()` from two threads (its own `stop()` and `add_camera`'s re-check,
+        // #35 rounds 2–3): without this, both pass the unsynchronised `joinable()` read and
+        // one joins while the other detaches, or both detach — `std::terminate` on the
+        // shutdown path. Distinct from `mutex_` (the state lock): a stopper holds this
+        // across its whole grace wait, and health reads must not queue behind that.
+        std::mutex lifecycle_mutex_;
+        // The self-stop guard's own copy of the id, atomic because the guard cannot take
+        // `lifecycle_mutex_` (a stopper holds it across its grace wait FOR this thread —
+        // taking it here would deadlock the shutdown), yet reading `thread_.get_id()` bare
+        // would race `start()`'s assignment.
+        std::atomic<std::thread::id> thread_id_{};
 
         // Everything below is written by the actor thread and read by anyone; the lock is taken
         // once per frame at most, which at 20 fps per camera is free.
