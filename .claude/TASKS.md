@@ -34,7 +34,89 @@
 > native + per-instance owned streams), worktree /tmp/sv0, branch feat/gil-release-streams.
 > #52 MERGED 12:53 UTC (round 3; ADR-016 + benchmarks/link in main). Shipinfer queue CLAIMED by cf for
 > the A1 `topology/` PR (opens when the /tmp/a1 coder reports). — cf, ~13:2x
-> IN BUILD (local, not open): A1 `topology/` package in /tmp/a1 (branch feat/topology-package, coder).
+> **#53 MERGED 14:46 UTC** (A1 `topology/` package + V142/ADR-017 docs, two review rounds); /tmp/a1 removed. Round 1 BLOCKING (unconditional embed_ship/recognize ran on person crops
+> under skip-and-continue) fixed the fixture way + 4 NBs + model= threading; round 2 pushed 1e40d57, 1809 passed. Shipinfer queue held by cf until it merges. — cf, ~14:2x
+> A2 PLAN (scratchpad/plan-A2-six-prs.md): PR-0 workflows one-liner (pr-pipeline.yml:179 "runtime must not
+> import server" -> engine; MANUAL merge, V109) -> PR-1 engine/ (git mv pool + csrc mirror + silent server/ shim)
+> -> PR-2 api/ -> PR-3 runners/ + inprocess + pool element -> PR-4 launch/ (Fleet moved, no gRPC) -> PR-5 gRPC
+> contract (launch/proto committed stubs, grpcio optional extra) -> PR-6 fleet runner over gRPC, argv + server/
+> DELETED. CUDA_VISIBLE_DEVICES stays in the spawn env (must precede torch import); everything else = RPC.
+> Watch: filterwarnings error::DeprecationWarning:shipinfer.* (shim silent, pb2 ignored); shared_by/share_rank must
+> ride TopologyRequest or two shards on one GPU double-load instances (silent VRAM).
+> IN BUILD (local, not open): A2 PR-1 engine/ move in /tmp/e1 (branch refactor/engine-package, based on
+> feat/topology-package; rebase onto main after #53 merges). Opens after PR-0.
+> **#54 MERGED ~15:0x UTC** (A2 PR-0, workflows-only; tests green, review job cannot run on a workflows edit —
+> self-merged per V109). Shipinfer queue held by cf for PR-1 (engine/ move, /tmp/e1 in build).
+> **#56 MERGED ~15:3x UTC** = A2 PR-0c: #55's glob also matched test_<name>.o and broke main's cpp-offline
+> (Permission denied); executables-only filter, rehearsed locally against a fake build dir (memory rule 8).
+> **#55 MERGED ~15:1x UTC** (tests green; review job even passed this time) = A2 PR-0b (workflows-only: cpp-offline runs csrc/build/test_* by glob, so the test_server ->
+> test_engine rename needs no workflow edit inside PR-1); self-merge after tests green. PR-1 built in /tmp/e1
+> (74 files, 38 renames; rebased onto main after #56; internal review BLOCKING items fixed in 9ec9bcc: CLAUDE.md
+> tree, non-vacuous shim test, no Engine alias). main run 33087431149 green (4 binaries by glob) →
+> **FOUND (~15:5x): main's ci.yml NEVER runs after an auto-merge** — #52, #53, #57 (merged by github-actions)
+> have no CI run; only my manual merges (#54-#56) triggered it: pushes made with GITHUB_TOKEN do not create
+> workflow runs. cpp-offline/gst-lane/kernels on main have been silent for every auto-merged PR. Fix = **PR #58 MERGED ~16:0x**
+> (PR-0d, workflows-only): ci.yml gains workflow_dispatch; the Auto-merge job dispatches it after merging.
+> Hand-dispatched run 33090174778 on 7706b15: all 8 jobs green; cpp-offline ran test_engine (27 checks). The
+> Auto-merge-dispatch half VERIFIED on #59: Auto-merge log 'Dispatched ci.yml on main.', run 33090868138
+> (workflow_dispatch, c61031b) success. Main CI is whole again.
+> **#57 MERGED 15:37 UTC** (A2 PR-1 engine/ move; APPROVE on round 1; size exception accepted). /tmp/e1 removed.
+> Shipinfer queue: PR-2 (api/) next, then PR-3.
+> **#59 MERGED 15:59 UTC** = A2 PR-2 api/ move (APPROVE round 1). /tmp/a2 removed. Queue: PR-3 or PR-4 next,
+> whichever build finishes first.
+> **#60 MERGED 16:37 UTC** = A2 PR-4 launch/ move (APPROVE round 1). /tmp/l4 removed. PR-3 opens when its fix pass
+> lands (rebase onto main first). Deferred to PR-6 (noted in #60's body): cli ALLOWED_INTERNAL row + twin test;
+> stale `observability` key.
+> **#61 MERGED 17:33 UTC** = A2 PR-3 runners/ + inprocess + pool (9 commits; two review rounds; APPROVE r2 with
+> should-fixes carried to PR-6). /tmp/r3 removed (local branch kept until /tmp/g5 rebases onto main).
+> **#62 MERGED 18:33 UTC** = A2 PR-3b (two rounds; APPROVE r2). /tmp/r3b removed. PR-5 opening now.
+> Round 1 BLOCKING (real): a stale abandoned worker reads the NEW cycle's self._stopping/self._queue after restart
+> and publishes into the OLD inflight list — future lost after stop(). Fix: per-cycle Event+queue+inflight passed as
+> thread args. NBs: Ring*/Wire* subclasses of QueueFullError must not read as backpressure; per-camera eviction
+> attribution = LEDGER ITEM for phase B (queue reports per-camera evictions). Round 2 pushed 6960680 (1923 passed).
+> **#63 MERGED 19:20 UTC** = A2 PR-5 gRPC control plane (7 commits; two CI rounds; APPROVE r2). /tmp/g5 removed.
+> Opening now: PR-3c; then PR-6a, PR-6b (p6 rebases --onto main from 703f6a3).
+> CI r1 BLOCKING x2 (real): client.stats() imports google.protobuf unguarded BEFORE the typed path -> offline tier
+> fails on a host without the extra (the venv/CI have it, so nobody saw it — the mask fixture masked only grpc);
+> Stop's idempotence check outside the lock -> a concurrent second Stop answers abandoned=0 'clean'. + 3 NBs. Fix
+> Round 2 pushed f7f4559 (one guarded door launch/proto/__init__; Stop re-check in lock; 2028 passed). LESSON (memory
+> rule 9): the no-extra path must be tested by masking the whole dependency set, not the entry module.
+> BUILT: A2 PR-6 in /tmp/p6 (4 commits, 74 files: 15 deleted, server/ gone, argv gone; child entry = cli/shard.py
+> not launch/shard.py (layering); ShardService RunnerFactory; 1989 passed) — under internal review. Base is g5's
+> PRE-rebase head (703f6a3): rebase onto feat/grpc-control-plane then main before opening. SPLIT: PR-6a = a30ca7d
+> (core renames, 26 files) then PR-6b. Opening order after #63: PR-3c (small) -> PR-6a -> PR-6b.
+> PR-6 internal review BLOCKING x3 (stale base reverted #63's fixes -> rebase --onto main 703f6a3; FleetRunner._do_stop
+> ASSIGNS the abandonment count and zeroes it on a failed start; FEATURE_LOG entry for PR-3b was overwritten — append-only)
+> + 11 NBs (sharing tested off the RPC path; lock across RPC; serial installs; forward_signals orphaned; getattr probes;
+> SHIPINFER_RUNNER__* undocumented; --drain dropped ...). Fix coder running; PR-6a = a30ca7d is a real behaviour change
+> too (spill gate drops the kind=='service' half) — its body must say so.
+> PR-6 fix pass DONE (rebased onto #64's main; B2/B3 + 11 NBs + #63/#64 carries; 2059 passed at tip). **#65 MERGED 20:35 UTC** = PR-6a (two rounds). CI r1 BLOCKING x2 (operator-facing strings still said
+> topology.deepstream.*; the spill-gate change had no test) fixed in b740666 + NBs (design doc = frozen record);
+> round 2 pushed, 2033 passed. **#66 MERGED 21:24 UTC** = PR-6b (two rounds). **PHASE A2 COMPLETE** (#52 arch.md, #53 A1, #54-#58 CI, #57 engine/, #59 api/,
+> #60 launch/, #61/#62/#64 runners/, #63 gRPC, #65/#66 fleet + deletion): server/ and the argv mechanism are gone; the
+> child takes --shard-id --control-port only. /tmp/p6 removed; B1 (/tmp/b1) and B2 (/tmp/b2) rebase --onto origin/main 4fc39c1.
+> CI r1 BLOCKING (real regression): `shipinfer run` asked the driver for GPUs BEFORE building settings and injected
+> the answer at flag priority, silently overriding SHIPINFER_DEVICES__VISIBLE_GPUS (8 shards instead of 2). + 5 NBs
+> (UpdateTopology retry after a failed start records a sharing the engine is not running; running-check outside the
+> lock; assert -> typed; shutdown poll cost; AddCamera docstrings). Round 2 pushed 4fc39c1 (2072 passed).
+> B1 (runner owns cameras) IN BUILD in /tmp/b1 on top of feat/fleet-over-grpc; rebases onto main after #66.
+> B2 (per-camera QueueStats, both planes; scheduling half) BUILT + rebased onto main (3 commits, 2084 passed, C++
+> test_scheduling 80 checks) — internal review APPROVE; nits being applied (greedy-eviction test could not detect
+> charging the submitter; BLOCK-policy producer woken by close() was charged as a rejection in both planes; wire test
+> with a populated map; fifo.h camera string on the accepted path). Opens after #67 merges. Opening order after #66: B1 -> B2 -> B3 -> B4.
+> PHASE B PLANNED (scratchpad/plan-B-streams.md; 4 PRs B1-B4; decisions: runner owns cameras, decode element stays
+> declarative and selects the ingest source; runners imports ingest LAZILY (arch test); /streams via `shipinfer run
+> --http`; api grows launch only via a CameraController Protocol; B4 reports loss, never re-places = ADR-018): B1 runner owns cameras (IngestManager + FrameSink ->
+> ChainItem; `shipinfer run --inputs` end to end offline), B2 per-camera queue attribution, B3 /streams API, B4 fleet
+> camera lifecycle. Opens after #66 merges.
+> CI review round 1 BLOCKING (real): the in-flight slot held ONE item per worker but a worker holds a whole
+> frames_per_wakeup batch — items 1..n-1 stranded on stop. + 4 NBs (settings not reaching pool elements; timeout does
+> not cancel; expiry checked once; _inbound second fallback under an unnegotiated cap). Round 2 pushed (dfdb491; 1912 passed; N2 = no
+> cancellation path exists, documented + deferred to phase B). Poll running. PR-5 (gRPC contract) BUILT in /tmp/g5 (4 commits, +71 tests, 1972 passed on top of #61's tree; real finding:
+> grpc's default so_reuseport lets two shards share a port — turned off so the typed refusal is possible; protobuf
+> floor 5.29 from the gencode) — under internal review; rebases onto #61 after its round-2 fix.
+> Worktrees of MERGED PRs removed (#19 #20 #23 #27 #31 #44 branches; /tmp/ci main): only /tmp/mps (ledger
+> working copy) and /tmp/a1 (#53) remain. Any new lane gets a fresh worktree from origin/main. — cf, ~14:3x
 > **V142 (~13:3x): Phase-0 shipvision GIL PR CANCELLED — operator: no GIL code in shipvision, ever; V70 stands,
 > V140 (i) revoked; slowness accepted. Coder stopped, /tmp/sv0 discarded (no commits, no push). SHIPVISION QUEUE
 > RELEASED.** Follow-ups: docs/arch.md §7 + §10 phase-0 row must be rewritten (server-side answer to the convoy,
@@ -1899,6 +1981,26 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       process's own context = 243 MiB. So a device is charged by its K openers:
       K × 208 MiB (≈0.6 GB at K=3) vs (G−1) × 208 MiB ≈ 3.1 GB unbounded at 16 GPUs.
 
+- [x] RUNNER FOLLOW-UPS = **#64 MERGED 19:38 UTC** (A2 PR-3c, APPROVE round 1) (from #62 r2 observations): a stale abandoned worker finishes its
+      whole wake-up batch after a restart (add `if stopping.is_set(): break` in the item loop so the remainder is
+      failed by _fail_in_flight); `in_flight` can stay non-zero after an abandoned stop (clear self._inflight after the
+      drain or document); `items_dropped` mixes admission refusals with mid-walk backpressure (separate counter);
+      `_work` docstring has two Args: headings.
+- [x] ENGINE START UNWIND — **#67 MERGED 21:54 UTC** (APPROVE round 1) (from #66 r2): pool.start() has no unwind of its own and stop() early-returns on not
+      _started, so a strict_startup failure at model 3 of 5 leaves models 1-2 running unreferenced; cli/shard.py should
+      also assign the engine before starting it. Own PR (engine/).
+- [ ] ENGINE (from #67 review, pre-existing): stop() takes _lock but not _control_lock, so a load_model past its
+      _started check can publish a started model AFTER stop() cleared the table (take _control_lock around the drain);
+      stop() leaves self._traces on a closed sink (reset to NullTraceSink after close). Own small PR.
+- [ ] LEDGER SYNC: the repo's .claude/TASKS.md / JOURNAL.md / docs/qa/user.md snapshots lag the /tmp/mps working copies
+      (#67's reviewer noticed the promised ledger line was not in the diff) — sync them in the next docs-carrying PR.
+- [ ] NON-STRICT WARM-UP (from the engine-unwind coder): with strict_startup=false a model whose warm-up sample cannot
+      be built is published with ZERO ready instances and is_ready stays false forever — decide: refuse the model or
+      report it degraded; today it is silent.
+- [ ] B4: fleet.drain() vs an in-flight add_camera reservation (see plan-B-streams.md carry list).
+- [ ] PHASE C/E: `shipinfer run --runner inprocess` builds no engine; a pool element fails at open().
+- [ ] PHASE B (from #62 review N2): the fair queue reports per-camera evictions/expiries so the runner's
+      `stats()` attributes `queue_evicted`/`queue_expired` to the camera that lost the frame (ADR-005's number).
 - [x] V129: operator paused everything; as-built restated; 4 questions asked.
 - [x] V132 DECISIONS: (1) track/mtmc = elements IN-CHAIN, shardable out later; (2) KEEP the
       KServe tensor endpoint as the engine's side door; (3) NAMES: `topology` = the
