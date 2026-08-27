@@ -5,6 +5,49 @@ edits, typo fixes and pure docs.
 
 ---
 
+## feat: topology D, `deepstream` — one NVIDIA graph per shard, the same events out (26 Aug 2026)
+
+**What it is.** The fourth topology — a first-class pipeline implementation, not a competitor benchmark (V108): `@TOPOLOGIES.register("deepstream")`,
+whose child is not `shipinfer serve` at all but a DeepStream GStreamer graph — `nvurisrcbin ->
+nvstreammux -> nvinfer(detector) -> nvtracker -> nvinfer(embedders) -> fakesink` — with frames
+never leaving device memory and only `NvDsBatchMeta` crossing into Python, through one src-pad
+probe. Two ends are kept from the rest of the project, and they are what make the comparison a
+comparison: the **model repository** generates the nvinfer configs (so the engine paths, dims,
+output names, class labels and thresholds have one owner, not two), and the **result sink**
+receives the same `PerceptionEvent` every other topology publishes (V108).
+`docs/design/topology-deepstream.md` carries the mapping table, the inert-knob table and the
+ladder.
+
+**The decisions worth knowing.** *One process per shard, one GPU per shard*, refused at plan
+time rather than the reference's one-process-many-branches: `Fleet` sets `CUDA_VISIBLE_DEVICES`
+before the child's interpreter starts so the child sees logical 0, per-element physical
+`gpu-id` would name devices it cannot see, G contexts are ~300 MiB each, and one plugin
+segfault should cost K cameras not fifty. *`nvinfer`, not `nvinferserver`*: the latter needs a
+Triton-protocol server we do not run, and `nvinfer` reads the same `model.plan` the `tensorrt`
+backend does. *`http_port_base` is refused, not ignored* — a DS shard serves no KServe API.
+`server` may not import `pipeline`, so `deepstream_command` names its child by argv only; and
+`pipeline` may not import `ingest`, so the GStreamer loader moved verbatim to
+`runtime/gstreamer.py` (`load_gst` plus a new `load_pyds`) with the ingest source delegating.
+
+**Honesty about scope (V110).** PR1 is detector + tracker + the two embedder sgies. The
+segmenter and the recogniser do not run, and **every event this topology emits names them in
+`missing_stages`** rather than passing a partial frame off as a complete one. **No performance
+claim is made**: there is no DeepStream image on this box and not one frame has run. What is
+verified is everything that can be without one — 73 offline tests (53 pipeline + 20 topology) —
+and the live run is the operator/infra step, recipe in `deploy/deepstream/image.sh` (the
+`docker run` + `docker commit`, `--network=host` shape `gst-image.sh` established).
+
+**The parts that would have been silent bugs, pinned offline.** `rect_params` is
+`(left, top, w, h)` in *muxed* pixels and `ObjectRecord.bbox` is `(x1, y1, x2, y2)` in *source*
+pixels — publishing it unchanged halves every box on a 4K camera and puts extents in a corners
+field; `object_id`'s "untracked" is 2^64-1, not 0; `frame_num` restarts at 0 on a reconnect and
+`(camera, frame)` is the tag everything keys on (ADR-002), so `FrameNumbering` keeps it
+monotonic; NTP 0 means "no capture time", not 1970. The probe runs on a streaming thread, so it
+catches everything, counts `build_failures` and always returns `PadProbeReturn.OK`; `_emit` is
+`PipelineRunner._emit_resolved`/`_record` copied deliberately, return-value check and delayed
+drain included. Config generation refuses eight ways before a GPU is involved — the sharpest
+being a single-output detector with no `bbox_parser`, which otherwise runs and reports zero
+detections on every frame.
 ## perf: multi-chunk copies home go through pinned ping-pong staging (26 Aug 2026)
 
 C44's lever 2, converged over three review rounds. The pageable D2H tails were the ops

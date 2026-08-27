@@ -144,6 +144,29 @@ def build_app() -> typer.Typer:
         )
 
     @app.command()
+    def deepstream(
+        repository: Path = repo_option,
+        gpus: str = gpus_option,
+        config_dir: Path | None = typer.Option(
+            None, "--config-dir", help="Where the generated DeepStream configs are written."
+        ),
+        dry_run: bool = typer.Option(
+            False, "--dry-run", help="Generate the configs, print where they are, and stop."
+        ),
+        log_level: str = log_option,
+    ) -> None:
+        """Run one shard's cameras through a DeepStream graph."""
+        raise typer.Exit(
+            commands.deepstream(
+                repository,
+                gpus=gpus,
+                config_dir=config_dir,
+                dry_run=dry_run,
+                log_level=log_level,
+            )
+        )
+
+    @app.command()
     def bench(
         model: str,
         repository: Path = repo_option,

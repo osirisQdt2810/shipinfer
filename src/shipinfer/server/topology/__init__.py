@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from shipinfer.core.errors import ConfigurationError
 from shipinfer.server.topology.base import TOPOLOGIES, TOPOLOGY_ENV, Topology
+from shipinfer.server.topology.deepstream import DeepStreamTopology
 from shipinfer.server.topology.fleet import FleetTopology
 from shipinfer.server.topology.service import ServiceTopology
 
 __all__ = [
     "TOPOLOGIES",
     "TOPOLOGY_ENV",
+    "DeepStreamTopology",
     "FleetTopology",
     "ServiceTopology",
     "Topology",

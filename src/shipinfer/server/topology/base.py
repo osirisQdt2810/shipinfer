@@ -22,7 +22,8 @@ one (`DPCoordinator`, `DPLBAsyncMPClient.get_core_engine_for_request`). Triton k
 per model that instances on several GPUs pull from (`instance_group`, `DynamicBatchScheduler`).
 `fleet` is the first of those without the second: static balance by the plan, everything local.
 `service` (ledger T3) adds the second — every shard serves its GPU's crop-stage instances to
-its peers, so a crop goes to whichever GPU is free — and `deepstream` (T4) is the competitor.
+its peers, so a crop goes to whichever GPU is free — and `deepstream` (T4) runs NVIDIA's
+graph in place of this project's pipeline, same events out.
 """
 
 from __future__ import annotations

@@ -17,8 +17,6 @@ this one can use the video engine when it is there and still start when it is no
 
 from __future__ import annotations
 
-import os
-import threading
 from typing import Any, ClassVar
 
 import numpy as np
@@ -35,6 +33,7 @@ from shipinfer.core.redact import redact_in
 from shipinfer.ingest.base import FrameSource
 from shipinfer.ingest.registry import SOURCES
 from shipinfer.ingest.resolve import resolve_latency_ms, resolve_transport
+from shipinfer.runtime.gstreamer import load_gst
 
 __all__ = [
     "APPSINK_NAME",
@@ -65,9 +64,11 @@ _SW_DECODERS: dict[str, tuple[str, ...]] = {
     "h265": ("avdec_h265",),
 }
 
-#: Colour-space converters, in preference order. The first two are NVIDIA's and can take
-#: Serialises GStreamer's one-time initialisation across camera threads (see `_load_gst`).
-_GST_INIT_LOCK = threading.Lock()
+#: Import and initialise GStreamer. One process-wide loader, in
+#: :mod:`shipinfer.runtime.gstreamer`, because the DeepStream topology's graph needs the same
+#: one and ``pipeline`` may not import ``ingest``. Aliased rather than called through the
+#: module so this name keeps meaning what it has always meant here.
+_load_gst = load_gst
 
 #: Decoders that can output GL memory and open a GL display to do it. See `build_pipeline`.
 _GL_CAPABLE_DECODERS: frozenset[str] = frozenset({"nvh264dec", "nvh265dec"})
@@ -197,61 +198,6 @@ def select_converter(available: Any) -> str:
         f"none of {list(_CONVERTERS)} is installed; "
         "install gstreamer1.0-plugins-base for videoconvert",
     )
-
-
-def _load_gst() -> tuple[Any, Any]:
-    """Import and initialise GStreamer, or explain what is missing.
-
-    Deliberately inside a function: importing this module must work on a host with no
-    PyGObject, so the whole offline test tier can exercise the pipeline builder and the
-    camera actor.
-
-    The whole body runs under one lock. Fifty camera actors call this from fifty threads at
-    start-up, and neither half is safe to race: PyGObject resolves ``gi.repository`` members
-    lazily and a concurrent first touch has come back as ``'GLib' object has no attribute
-    'Idle'``; and ``Gst.is_initialized()`` turns true as soon as *some* thread has begun
-    initialising, before the plugin registry is populated — a thread that saw "initialised"
-    and probed the registry found no decoder and gave its camera up as "no h264 decoder
-    found" on an image that has three. One lock, one import, one init, and every caller
-    returns only after the registry exists.
-    """
-    with _GST_INIT_LOCK:
-        # `rtspsrc` asks GIO for a proxy resolver before it connects, and GIO's default on a
-        # desktop-less system is libproxy, which throws a C++ `std::runtime_error("Unable to
-        # read configuration")` when it finds no GSettings or D-Bus to read — uncaught across
-        # the C boundary, that is `terminate` for the whole process, which is how the first
-        # RTSP run inside the container died with fifty cameras connected and zero frames
-        # decoded. GIO's documented override selects its no-op resolver instead; `setdefault`
-        # so an operator who has configured a real proxy keeps it.
-        os.environ.setdefault("GIO_USE_PROXY_RESOLVER", "dummy")
-        try:
-            import gi
-
-            gi.require_version("Gst", "1.0")
-            from gi.repository import GLib, Gst
-
-            # The appsink's *methods* (`try_pull_sample`) exist on the Python side only when the
-            # GstApp typelib has been loaded; without it `get_by_name` returns a bare element
-            # whose Python type knows the signals but not the methods, and every read failed
-            # with "'GstAppSink' object has no attribute 'try_pull_sample'" on the first
-            # containerised RTSP run that reached a read. Loaded here, once; `_do_read` still
-            # falls back to the signal when the typelib is absent.
-            try:
-                gi.require_version("GstApp", "1.0")
-                from gi.repository import GstApp  # noqa: F401 - loading it is the effect
-            except (ImportError, ValueError):
-                pass
-        except (ImportError, ValueError) as exc:
-            raise SourceUnavailableError(
-                "gstreamer",
-                "PyGObject with GStreamer 1.0 typelibs is not importable "
-                f"({redact_in(str(exc))}). Install python3-gi and "
-                "gstreamer1.0-plugins-{base,good,bad}, or select the 'pyav' backend with "
-                "SHIPINFER_INGEST_BACKEND=pyav",
-            ) from exc
-        if not Gst.is_initialized():
-            Gst.init(None)
-        return Gst, GLib
 
 
 def _try_pull_sample(appsink: Any, timeout_ns: int) -> Any:
