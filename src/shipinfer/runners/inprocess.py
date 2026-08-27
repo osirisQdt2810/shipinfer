@@ -69,7 +69,9 @@ from shipinfer.core.errors import (
     InferenceError,
     QueueFullError,
     RequestCancelledError,
+    RequestTimeoutError,
     ServerStateError,
+    ShipInferError,
 )
 from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.request import InferenceRequest, ResponseFuture
@@ -183,13 +185,20 @@ class InprocessRunner(Runner):
         self._stopping = threading.Event()
         self._metrics = RunnerMetrics() if metrics is None else metrics
         #: What each worker still owes an answer for, one slot per worker, indexed by the
-        #: worker's own number. Sized once, written only by the worker that owns the slot and
-        #: read only by `_do_stop` after the join deadline, so the hot path takes no lock —
-        #: the same single-writer discipline `pipeline/runner.py` gets from `_awaiting` being
-        #: keyed by the tag. It exists so that a worker abandoned at the deadline does not
-        #: take its items' futures with it: an unresolved future is exactly the frame that
-        #: vanishes with no typed outcome that ADR-005 exists to prevent, and `base.py`'s
-        #: `submit` promises there is always one.
+        #: worker's own number. Written only by the worker that owns the slot and read only by
+        #: `_do_stop` after the join deadline, so the hot path takes no lock — the same
+        #: single-writer discipline `pipeline/runner.py` gets from `_awaiting` being keyed by
+        #: the tag. It exists so that a worker abandoned at the deadline does not take its
+        #: items' futures with it: an unresolved future is exactly the frame that vanishes
+        #: with no typed outcome that ADR-005 exists to prevent, and `base.py`'s `submit`
+        #: promises there is always one.
+        #:
+        #: **One list per start cycle, handed to the workers as an argument.** This attribute
+        #: is only where `_do_stop` finds the *current* cycle's list; a worker never reads it.
+        #: It used to, and an abandoned worker then wrote its `()` into whatever list the
+        #: attribute pointed at *now* — so abandon, restart, abandon cleared a live worker's
+        #: slot in the new cycle and the second shutdown had nothing left to fail. Binding the
+        #: list at thread start is what makes a slot belong to one cycle.
         #:
         #: A **tuple of the undelivered remainder**, not the one item being walked. A worker
         #: takes a whole wake-up batch off the queue (`pipeline.frames_per_wakeup`), and the
@@ -280,11 +289,15 @@ class InprocessRunner(Runner):
                 raise
 
         self._stopping.clear()
-        self._inflight = [()] * self._wanted_workers
+        # Built here and passed *by value* to every worker of this cycle, so an abandoned
+        # worker from the previous one cannot reach it. See the `_inflight` note in
+        # `__init__` for the bug that shape fixes.
+        inflight: list[tuple[WorkItem, ...]] = [()] * self._wanted_workers
+        self._inflight = inflight
         for index in range(self._wanted_workers):
             thread = threading.Thread(
                 target=self._work,
-                args=(index,),
+                args=(index, inflight),
                 name=f"chain-worker-{self._shard_id}-{index}",
                 daemon=True,
             )
@@ -328,11 +341,22 @@ class InprocessRunner(Runner):
         the queue uses. The race with a worker that finishes a microsecond later is benign
         because :meth:`_fail` and :meth:`_finish` both refuse a future that is already
         resolved, whichever of the two got there first.
+
+        The slots drained are **this cycle's**: :attr:`_inflight` holds the list handed to the
+        workers by the matching :meth:`_do_start`, a worker abandoned here goes on writing into
+        that same list, and the next start publishes a different one.
         """
         self._stopping.set()
         lost: int = 0
         if self._threads:
-            lost = len(self._queue.close())
+            drained = self._queue.close()
+            lost = len(drained)
+            for item in drained:
+                # Counted, not just logged: `close` has already failed these futures with a
+                # typed error, and until this loop existed that outcome had no counter at all
+                # — `stats()["items"]["accepted"]` outran the sum of every outcome by exactly
+                # the number of items a shutdown caught in the lane.
+                self._metrics.items_queue_closed.inc(camera=item.request.context.camera_id)
             deadline = time.monotonic() + timeout_s
             abandoned = 0
             for thread in self._threads:
@@ -346,14 +370,14 @@ class InprocessRunner(Runner):
                     abandoned,
                     timeout_s,
                 )
-            stranded = self._fail_in_flight()
+            stranded = self._fail_in_flight(self._inflight)
             if stranded:
                 # Counted against `failed`, and an abandoned worker that later finishes its
-                # walk counts the same item as `walked` too: a restart re-arms the slots, so
-                # the two numbers can disagree by the number of items abandoned. That is the
-                # honest shape — the item did fail for its producer *and* did eventually run
-                # — and the alternative, suppressing the walk's own count from a thread the
-                # runner has stopped tracking, would need the hot path to check a flag.
+                # walk counts the same item as `walked` too, so the two numbers can disagree
+                # by the number of items abandoned. That is the honest shape — the item did
+                # fail for its producer *and* did eventually run — and the alternative,
+                # suppressing the walk's own count from a thread the runner has stopped
+                # tracking, would need the hot path to check a flag.
                 _LOG.warning(
                     "%d in-flight item(s) failed with the runner; their workers were "
                     "abandoned mid-walk",
@@ -375,21 +399,27 @@ class InprocessRunner(Runner):
             totals["failed"],
         )
 
-    def _fail_in_flight(self) -> int:
+    def _fail_in_flight(self, inflight: list[tuple[WorkItem, ...]]) -> int:
         """Fail everything the abandoned workers still owed an answer for. Returns how many.
 
         Each slot holds the item being walked *and* the rest of its wake-up batch, because
         neither is in the queue any more. An abandoned worker that finishes its current item a
         microsecond later is benign: :meth:`_fail` and :meth:`_finish` both refuse a future
         that is already resolved, whichever of the two arrived first.
+
+        Args:
+            inflight: the slot list of the cycle being stopped, passed rather than read off
+                ``self`` so that this drains the same object its workers write to even when a
+                restart has already published a newer one.
         """
         stranded = 0
-        for slot, batch in enumerate(self._inflight):
-            self._inflight[slot] = ()
+        for slot, batch in enumerate(inflight):
+            inflight[slot] = ()
             for work in batch:
                 stranded += 1
-                self._metrics.items_failed.inc(camera=work.request.context.camera_id)
-                self._fail(work, RequestCancelledError("the runner stopped"))
+                error = RequestCancelledError("the runner stopped")
+                self._count_failure(work, error)
+                self._fail(work, error)
         return stranded
 
     # -- submission --------------------------------------------------------------------
@@ -431,7 +461,7 @@ class InprocessRunner(Runner):
 
     # -- the worker loop ---------------------------------------------------------------
 
-    def _work(self, slot: int) -> None:
+    def _work(self, slot: int, inflight: list[tuple[WorkItem, ...]]) -> None:
         """Drain the admission queue and walk one item at a time.
 
         ``get_batch`` returning an empty list means the queue closed, which is how a worker
@@ -440,9 +470,14 @@ class InprocessRunner(Runner):
         engine's job, and a worker walks its items one after another.
 
         Args:
-            slot: this worker's index into :attr:`_inflight`. Owned exclusively by this
-                thread, which is what lets the publish be a plain store: :meth:`_do_stop`
-                reads the slots only after its join deadline has passed.
+            slot: this worker's index into ``inflight``. Owned exclusively by this thread,
+                which is what lets the publish be a plain store: :meth:`_do_stop` reads the
+                slots only after its join deadline has passed.
+            inflight: the slot list of the start cycle this thread belongs to, taken as an
+                argument rather than read off ``self``. A worker abandoned at a shutdown
+                deadline outlives its cycle, and reading the attribute made its last store
+                land in the *next* cycle's list — clearing a live worker's slot, so the
+                following shutdown found nothing to fail and those futures never resolved.
         """
         while not self._stopping.is_set():
             items = self._queue.get_batch(self._window, poll_s=0.05)
@@ -463,7 +498,7 @@ class InprocessRunner(Runner):
             # one-tuple is the empty-tuple singleton, so the hot path allocates one tuple per
             # wake-up and none per item.
             batch = tuple(items)
-            self._inflight[slot] = batch
+            inflight[slot] = batch
             for index, work in enumerate(batch):
                 try:
                     self._walk(work)
@@ -472,11 +507,11 @@ class InprocessRunner(Runner):
                     # dies stops serving every camera on this shard, so the loop survives it
                     # — and the item's future is resolved, because a frame that vanishes with
                     # no typed outcome is the failure ADR-005 exists to prevent.
-                    self._count_failure(work)
+                    self._count_failure(work, exc)
                     _LOG.exception("runner failed on %s", work.request.context.key)
-                    self._fail(work, InferenceError(f"the runner failed: {exc}"))
+                    self._fail(work, self._typed(exc, "the runner failed"))
                 finally:
-                    self._inflight[slot] = batch[index + 1 :]
+                    inflight[slot] = batch[index + 1 :]
 
     def _walk(self, work: WorkItem) -> None:
         """Walk one item through every element that admits it, in topological order.
@@ -498,6 +533,17 @@ class InprocessRunner(Runner):
         the ``(camera, frame)`` tag, and its future carries the typed failure. Walking on
         would produce a plausible event with no boxes in it, which is worse than a reported
         failure.
+
+        **The failure the submitter sees is the element's own, whenever the element raised
+        one of ours.** A :class:`~shipinfer.core.errors.QueueFullError` from a ``pool``
+        element carries the depth and the capacity of the model queue that refused it, a
+        :class:`~shipinfer.core.errors.RequestTimeoutError` says the model never answered, and
+        a :class:`~shipinfer.core.errors.ValidationError` says the payload was wrong — three
+        different events with three different responses (shed load, add capacity, fix the
+        chain). This wrapped all three in ``InferenceError`` and flattened them into one, which
+        also made ``pool.py``'s "propagated untouched" promise false. Only a failure that is
+        *not* ours — the ordinary bug, ``RuntimeError`` and friends — is wrapped, and then the
+        wrapper names the element and the tag because nothing else will.
         """
         # Taken off the work item, and checked rather than assumed: the queue's element type
         # is `WorkItem`, so anything that reached it without going through `submit` — a test
@@ -522,7 +568,7 @@ class InprocessRunner(Runner):
                 # failed like an element failure, because it is the same shape: one item, a
                 # typed reason naming the node, and the walk stops rather than handing a
                 # payload on under a cap nobody negotiated.
-                self._count_failure(work)
+                self._count_failure(work, exc)
                 _LOG.error(
                     "fan-in %s could not be merged for %s: %s",
                     node.name,
@@ -556,7 +602,7 @@ class InprocessRunner(Runner):
             try:
                 result = node.element.process(incoming)
             except Exception as exc:
-                self._count_failure(work)
+                self._count_failure(work, exc)
                 _LOG.exception(
                     "element %s failed on %s",
                     node.name,
@@ -564,8 +610,7 @@ class InprocessRunner(Runner):
                     extra=log_context(camera_id=incoming.key[0], frame_id=incoming.key[1]),
                 )
                 self._fail(
-                    work,
-                    InferenceError(f"element {node.name!r} failed on {incoming.key}: {exc}"),
+                    work, self._typed(exc, f"element {node.name!r} failed on {incoming.key}")
                 )
                 return
             produced[node.name] = result
@@ -701,8 +746,46 @@ class InprocessRunner(Runner):
         self._fail(work, RequestCancelledError(f"the item's deadline passed {where}"))
         return True
 
-    def _count_failure(self, work: WorkItem) -> None:
-        self._metrics.items_failed.inc(camera=work.request.context.camera_id)
+    @staticmethod
+    def _typed(error: Exception, context: str) -> BaseException:
+        """The failure this item's future should carry.
+
+        One of ours travels untouched: the submitter is meant to branch on it, and re-wrapping
+        turns backpressure, a stage timeout and a bug into the same ``InferenceError``. A
+        foreign exception is wrapped, because ``RuntimeError('the detector fell over')`` on its
+        own says neither which element fell over nor for which frame.
+
+        Args:
+            error: whatever was raised.
+            context: the prefix for the wrapper — the element and the tag, or the walk.
+        """
+        return (
+            error
+            if isinstance(error, ShipInferError)
+            else InferenceError(f"{context}: {error}")
+        )
+
+    def _count_failure(self, work: WorkItem, error: BaseException | None = None) -> None:
+        """Charge one lost item to the counter its *kind* of failure belongs on, per camera.
+
+        Three destinations, because an operator does three different things about them:
+        backpressure means shed load or add lanes, a stage timeout means the model is
+        saturated, and anything else means read a stack trace. Counting all of them as
+        ``failed`` — which is what this did — hid the first two behind the third, so a shard
+        under sustained overload looked like a shard full of bugs.
+
+        Args:
+            work: the item being failed; its camera is the label.
+            error: the failure. ``None``, or anything outside the backpressure and timeout
+                families, counts as ``failed``.
+        """
+        camera = work.request.context.camera_id
+        if isinstance(error, QueueFullError):
+            self._metrics.items_dropped.inc(camera=camera)
+        elif isinstance(error, RequestTimeoutError):
+            self._metrics.items_timed_out.inc(camera=camera)
+        else:
+            self._metrics.items_failed.inc(camera=camera)
 
     def _fail(self, work: WorkItem, error: BaseException) -> None:
         """Resolve this item's future with a typed failure, unless it is already resolved.
@@ -741,8 +824,50 @@ class InprocessRunner(Runner):
         }
 
     def _do_stats(self) -> dict[str, Any]:
+        """Every outcome an accepted item can reach, including the queue's own.
+
+        ``items`` used to be :meth:`~shipinfer.runners.metrics.RunnerMetrics.totals` alone, and
+        that under-reported: an item the *queue* resolved — failed by ``close()`` at shutdown,
+        dropped at the drain because its deadline had passed, evicted to make room under
+        ``DROP_OLDEST`` — got a typed future and no counter, so ``accepted`` outran the sum of
+        every outcome and the difference was indistinguishable from work still in flight. The
+        three ``queue_*`` terms and ``in_flight`` are here so that it adds up::
+
+            accepted == walked + failed + expired + timed_out + dropped
+                        + queue_closed + queue_evicted + queue_expired + in_flight
+
+        That identity holds within one start cycle on a runner that abandoned no worker. The
+        three ways it does not are all deliberate, and naming them is cheaper than a term that
+        pretends they are not there:
+
+        * **``dropped`` counts two populations.** A submission this runner's own lane refused
+          was never ``accepted``; a ``pool`` element's model queue refusing mid-walk was. One
+          counter for both because the camera lost a frame to backpressure either way and that
+          is the ADR-005 number — so the right-hand side over-counts by the number of admission
+          refusals, which is ``queue["rejected"]`` for this cycle.
+        * **an abandoned worker is counted twice** when it finishes its walk after
+          :meth:`_do_stop` failed its items: once as ``failed``, once as ``walked``. See
+          :meth:`_fail_in_flight`.
+        * **the ``queue_*`` terms read from the queue reset on a restart** and the runner's
+          counters do not — a queue this runner built is rebuilt by :meth:`_do_start`. So
+          ``queue_evicted`` and ``queue_expired`` describe the current cycle while ``accepted``
+          describes every cycle. ``queue_closed`` is a runner counter for exactly that reason:
+          it is the outcome a *previous* cycle's shutdown earned, and it has to survive.
+
+        ``in_flight`` is the queue's depth plus what the workers have published: a gauge, read
+        without a lock, and wrong by at most one wake-up batch in either direction. Short, for
+        the two stores between a drain returning and :meth:`_work` publishing the batch; long,
+        for the ones between an item's future being resolved at the end of its walk and the
+        ``finally`` that narrows the slot. Poll it to zero before reading the ledger as an
+        identity, which is what ``tests/runners/test_inprocess.py::settled`` does.
+        """
+        queue = self._queue.stats()
+        items = self._metrics.totals()
+        items["queue_evicted"] = queue.evicted
+        items["queue_expired"] = queue.expired
+        items["in_flight"] = queue.depth + sum(len(batch) for batch in self._inflight)
         return {
-            "items": self._metrics.totals(),
-            "queue": self._queue.stats().as_dict(),
+            "items": items,
+            "queue": queue.as_dict(),
             "workers": self._wanted_workers,
         }

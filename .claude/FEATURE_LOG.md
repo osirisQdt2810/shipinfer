@@ -5,6 +5,38 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-27 — `runners/inprocess.py`: the failure a submitter sees, and a ledger that adds up
+
+**What.** Three follow-ups to the runner above, from the review of #61. (1) `_walk` re-wrapped
+**every** element exception in `InferenceError`, flattening the `ShipInferError` family — a
+`QueueFullError` from a saturated `pool` element lost its depth and capacity, a
+`RequestTimeoutError` became indistinguishable from a bug, and `pool.py`'s "propagated
+untouched" promise was false. One of ours now travels as itself (`_typed`) and is charged to
+its own counter: `items_dropped` for backpressure, the new `items_timed_out` for a stage
+timeout, `items_failed` for everything else. (2) The per-worker in-flight slot list was
+**rebound** on every `_do_start` while workers read it off `self`, so an abandoned worker from
+cycle one wrote its "nothing left" into cycle two's list at the same index — abandon, restart,
+abandon left a live worker's futures unresolved. The list is built in `_do_start` and passed to
+`_work(slot, inflight)`. (3) `stats()["items"]` counted only what the *runner* resolved; items
+the queue failed on its own (`close()`, `drop_expired`, `DROP_OLDEST` eviction) had typed
+futures and no counter, so `accepted` outran the sum of the outcomes. `items` now carries
+`queue_closed` (a camera-labelled runner counter, because the queue keeps no such total),
+`queue_evicted`, `queue_expired` and `in_flight`.
+
+**Why.** All three are the same failure in three places: a producer holding a future cannot act
+on an outcome the runner refuses to name. Shed-load, add-capacity and open-a-ticket are three
+responses, and one `InferenceError` picks none of them.
+
+**Contract change.** `InprocessRunner.stats()["items"]` gained five keys and is documented with
+the identity it satisfies — `accepted == walked + failed + expired + timed_out + dropped +
+queue_closed + queue_evicted + queue_expired + in_flight` — together with the three ways it
+does not hold (`dropped` counting both admission refusals and mid-walk backpressure, an
+abandoned worker counted twice, the queue's own terms resetting on a restart). `in_flight` is a
+gauge and lags by at most one wake-up batch in either direction; the test helper `settled()`
+polls it to zero before asserting the ledger.
+
+---
+
 ## 2026-08-27 — `runners/`: the in-process runner, and the chain's client of the model pool (Phase A2, PR-3)
 
 **What.** `src/shipinfer/runners/` — the third of arch.md's three concepts (§1). `Runner` is a

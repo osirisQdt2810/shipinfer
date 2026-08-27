@@ -39,7 +39,9 @@ from shipinfer.core.errors import (
     InferenceError,
     QueueFullError,
     RequestCancelledError,
+    RequestTimeoutError,
     ServerStateError,
+    ValidationError,
 )
 from shipinfer.core.request import InferenceRequest, RequestContext, ResponseFuture
 from shipinfer.core.settings import ServerSettings
@@ -152,6 +154,48 @@ class GateDetect(MockDetect):
     def _do_process(self, item: ChainItem) -> ChainItem | None:
         self.entered.set()
         self.release.wait(10.0)
+        return super()._do_process(item)
+
+    def rearm(self) -> threading.Event:
+        """Fresh latches for the next start cycle; returns the *previous* release event.
+
+        Replacing the objects rather than clearing them, which is the whole point: a worker
+        abandoned in the previous cycle is already inside ``release.wait()`` on the old event,
+        so clearing would leave the two cycles sharing one latch and releasing the new
+        worker's item would release the old worker's too. Returning the old one is how a test
+        drives exactly one of the two.
+        """
+        previous = self.release
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        return previous
+
+
+@registry_for(ElementKind.DETECT).register("runner-typed")
+class TypedFailureDetect(MockDetect):
+    """A detector that raises one nominated typed error, exactly as a ``pool`` element does.
+
+    ``pool.py`` promises a ``QueueFullError`` from a saturated model queue reaches the
+    submitter untouched; the mock chain runs offline with no model pool, so this is what makes
+    that promise testable in the offline tier. Params-driven so one chain covers every member
+    of the family — including a plain ``ValueError``, which is the case that *must* still be
+    wrapped.
+    """
+
+    #: What each ``params.raises`` name costs the runner. Constructed here rather than in the
+    #: element so the test can read the expected type off the same table the element raises
+    #: from, instead of the two drifting apart.
+    ERRORS: ClassVar[dict[str, Any]] = {
+        "queue_full": lambda: QueueFullError("model:ship_detector", 64, 64),
+        "timeout": lambda: RequestTimeoutError("model 'ship_detector' did not answer"),
+        "validation": lambda: ValidationError("the payload is not a tensor"),
+        "foreign": lambda: ValueError("something nobody typed"),
+    }
+
+    def _do_process(self, item: ChainItem) -> ChainItem | None:
+        which = str(self.params.get("raises", ""))
+        if which:
+            raise self.ERRORS[which]()
         return super()._do_process(item)
 
 
@@ -272,6 +316,44 @@ def submit_all(runner: InprocessRunner, chain: Topology) -> list[ResponseFuture]
     _, not_done = wait(futures, timeout=15.0)
     assert not not_done, f"{len(not_done)} item(s) never finished walking"
     return futures
+
+
+#: The right-hand side of the ledger identity `InprocessRunner._do_stats` documents. Every
+#: accepted item is in exactly one of these, or still in flight; the identity used to be false
+#: because the three the *queue* resolves on its own had typed futures and no counter.
+OUTCOMES = (
+    "walked",
+    "failed",
+    "expired",
+    "timed_out",
+    "dropped",
+    "queue_closed",
+    "queue_evicted",
+    "queue_expired",
+    "in_flight",
+)
+
+
+def accounted(stats: dict[str, Any]) -> int:
+    """How many accepted items ``stats()`` can name an outcome for."""
+    return sum(stats["items"][key] for key in OUTCOMES)
+
+
+def settled(runner: InprocessRunner, timeout_s: float = 5.0) -> dict[str, Any]:
+    """``runner.stats()`` once the workers' slots have caught up with their futures.
+
+    ``items["in_flight"]`` is a gauge, and the runner's docstring says so: a worker resolves
+    an item's future at the end of its walk and narrows its slot on the way out of the loop
+    body, so a ``stats()`` taken the instant a future completes can still count that item as
+    in flight. Polling for zero rather than sleeping keeps the exact-dictionary assertions
+    below both meaningful and non-flaky.
+    """
+    deadline = time.monotonic() + timeout_s
+    stats = runner.stats()
+    while stats["items"]["in_flight"] and time.monotonic() < deadline:
+        time.sleep(0.005)
+        stats = runner.stats()
+    return stats
 
 
 @pytest.fixture()
@@ -650,13 +732,92 @@ class TestBackpressureAndFailure:
         assert [future.exception() for future in survived] == [None] * 3
         assert emitted_tags(chain) == {("cam-1", 1), ("cam-2", 1), ("cam-3", 1)}
         assert runner.is_running
-        assert runner.stats()["items"] == {
+        assert settled(runner)["items"] == {
             "accepted": 6,
             "walked": 3,
             "failed": 3,
             "expired": 0,
+            "timed_out": 0,
             "dropped": 0,
+            "queue_closed": 0,
+            "queue_evicted": 0,
+            "queue_expired": 0,
+            "in_flight": 0,
         }
+
+    @pytest.mark.parametrize(
+        ("raises", "expected", "counter"),
+        [
+            ("queue_full", QueueFullError, "items_dropped"),
+            ("timeout", RequestTimeoutError, "items_timed_out"),
+            ("validation", ValidationError, "items_failed"),
+        ],
+    )
+    def test_an_element_s_own_typed_failure_reaches_the_submitter_as_itself(
+        self, running, raises, expected, counter
+    ) -> None:
+        """Backpressure, a stage timeout and a bad payload are three events, not one.
+
+        The walk used to wrap *every* element exception in ``InferenceError``, which flattened
+        the whole :class:`~shipinfer.core.errors.base.ShipInferError` family into one type: a
+        submitter could not tell "the detector's queue is full, back off" from "the detector
+        never answered, it is saturated" from "I handed it the wrong payload, fix the chain",
+        and ``topology/elements/pool.py`` promised in as many words that a ``QueueFullError``
+        is "propagated untouched". It was not. Each one is also charged to its own counter, so
+        an overloaded shard does not read as a shard full of bugs.
+        """
+        chain = load(detect="runner-typed", params=f"{{class: ship, raises: {raises}}}")
+        runner = running(chain, settings(workers=1))
+
+        error = runner.submit(item("cam-1", 1)).exception(timeout=10.0)
+
+        assert type(error) is expected, f"wrapped into {type(error).__name__}"
+        assert getattr(runner.metrics, counter).value(camera="cam-1") == 1
+        for other in ("items_dropped", "items_timed_out", "items_failed"):
+            if other != counter:
+                assert getattr(runner.metrics, other).value(camera="cam-1") == 0
+        assert emitted_tags(chain) == set(), "the walk stopped at the element that raised"
+
+    def test_backpressure_from_an_element_keeps_the_depth_and_capacity_it_carried(
+        self, running
+    ) -> None:
+        """The numbers are the whole reason ``QueueFullError`` is not a bare exception.
+
+        "We dropped a frame" is not actionable; "the queue that refused holds 64 and had 64 in
+        it" is. Re-wrapping the error kept the *text* in the message and threw the fields away,
+        so the one consumer that matters — a producer deciding whether to shed or to retry —
+        had to parse a string.
+        """
+        chain = load(detect="runner-typed", params="{class: ship, raises: queue_full}")
+        runner = running(chain, settings(workers=1))
+
+        error = runner.submit(item("cam-1", 1)).exception(timeout=10.0)
+
+        assert isinstance(error, QueueFullError)
+        assert (error.queue_name, error.depth, error.capacity) == (
+            "model:ship_detector",
+            64,
+            64,
+        )
+
+    def test_an_exception_that_is_not_ours_is_still_wrapped_and_still_names_the_element(
+        self, running
+    ) -> None:
+        """The other half: a bare ``ValueError`` says neither which element nor which frame.
+
+        Without this, "preserve typed errors" could be implemented as "preserve everything",
+        and the message an operator gets for an ordinary bug would lose the two facts that
+        make it diagnosable.
+        """
+        chain = load(detect="runner-typed", params="{class: ship, raises: foreign}")
+        runner = running(chain, settings(workers=1))
+
+        error = runner.submit(item("cam-1", 7)).exception(timeout=10.0)
+
+        assert type(error) is InferenceError
+        assert "detect" in str(error) and "cam-1" in str(error) and "7" in str(error)
+        assert "something nobody typed" in str(error), "the original is not lost either"
+        assert runner.metrics.items_failed.value(camera="cam-1") == 1
 
     def test_an_item_past_its_deadline_never_reaches_the_chain(self, running) -> None:
         """Spending a GPU on a frame that is already too late to act on is pure waste.
@@ -830,6 +991,66 @@ class TestBackpressureAndFailure:
         # Release the abandoned worker and let it exit, so the test leaves no thread behind.
         gate.release.set()
         for worker in workers:
+            worker.join(10.0)
+            assert not worker.is_alive()
+
+    def test_a_worker_abandoned_before_a_restart_cannot_clear_the_new_worker_s_slot(
+        self,
+    ) -> None:
+        """abandon -> restart -> abandon used to lose the second cycle's futures entirely.
+
+        Each worker publishes what it still owes an answer for into a slot indexed by its own
+        number, and ``stop`` drains those slots so an abandoned worker does not take its items'
+        futures with it. The slot list was **rebound** on every start while a worker read it
+        off ``self`` — so an abandoned worker from cycle one, finishing its walk after cycle
+        two had begun, wrote its "nothing left" into cycle *two's* list at the same index. The
+        new worker's batch was erased by a thread the runner had stopped tracking, and the next
+        shutdown found an empty slot: the second item's future never resolved, which is exactly
+        the frame that vanishes with no typed outcome that ADR-005 exists to prevent.
+
+        Two independent latches are what make the sequence deterministic — ``rearm`` hands back
+        the old one, so the first cycle's worker can be released while the second's stays
+        parked.
+        """
+        chain = load(detect="runner-gate")
+        gate = chain.node("detect").element
+        assert isinstance(gate, GateDetect)
+        runner = InprocessRunner(chain, settings(workers=1, queue_capacity=8))
+
+        runner.start()
+        first = runner.submit(item("cam-1", 1))
+        stale_worker = runner._threads[0]
+        assert gate.entered.wait(10.0), "the first cycle's worker never reached the gate"
+        runner.stop(timeout_s=0.2)
+        assert isinstance(first.exception(timeout=1.0), RequestCancelledError)
+
+        stale_release = gate.rearm()
+        runner.start()
+        fresh_worker = runner._threads[0]
+        second = runner.submit(item("cam-2", 1))
+        assert gate.entered.wait(10.0), "the second cycle's worker never reached the gate"
+
+        # Let cycle one's worker out. It walks its item to the sink -- the future is already
+        # resolved, so nothing is delivered twice -- and then runs the `finally` whose store
+        # used to land in cycle two's list, at cycle two's worker's index.
+        stale_release.set()
+        deadline = time.monotonic() + 10.0
+        while ("cam-1", 1) not in emitted_tags(chain) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ("cam-1", 1) in emitted_tags(chain), "the abandoned worker never finished"
+        # The clobber is the two stores after `_finish`, so give the stale thread its shot at
+        # them before asking the question. With the fix this changes nothing.
+        time.sleep(0.1)
+
+        runner.stop(timeout_s=0.2)
+
+        assert second.done(), "cycle two's item lost its owner to cycle one's worker"
+        error = second.exception(timeout=1.0)
+        assert isinstance(error, RequestCancelledError)
+        assert "the runner stopped" in str(error)
+        # Release cycle two's worker and let both threads exit, so the test leaves none behind.
+        gate.release.set()
+        for worker in (stale_worker, fresh_worker):
             worker.join(10.0)
             assert not worker.is_alive()
 
@@ -1009,13 +1230,99 @@ class TestHealthAndStats:
 
         submit_all(runner, chain)
 
-        stats = runner.stats()
+        stats = settled(runner)
         assert stats["items"] == {
             "accepted": 6,
             "walked": 6,
             "failed": 0,
             "expired": 0,
+            "timed_out": 0,
             "dropped": 0,
+            "queue_closed": 0,
+            "queue_evicted": 0,
+            "queue_expired": 0,
+            "in_flight": 0,
         }
         assert stats["queue"]["accepted"] == 6
         assert stats["workers"] == 2
+
+    def test_the_ledger_names_an_outcome_for_every_item_that_was_accepted(self) -> None:
+        """``accepted`` used to outrun the sum of the outcomes, and the gap looked like work.
+
+        Three items on one held worker: one taken off the queue and inside the chain, two still
+        queued. ``stop`` fails the first from its in-flight slot and the queue's ``close``
+        fails the other two — and *that* outcome had a typed future and no counter at all, so
+        an operator reading ``stats()`` saw ``accepted: 3`` against one outcome and could not
+        tell two lost frames from two slow ones. The same gap swallows what ``drop_expired``
+        drops at the drain and what ``DROP_OLDEST`` evicts.
+
+        The identity is checked twice on purpose: once while the items are alive, where
+        ``in_flight`` is the whole of it, and once after the shutdown has resolved them.
+        """
+        chain = load(detect="runner-gate")
+        gate = chain.node("detect").element
+        assert isinstance(gate, GateDetect)
+        runner = InprocessRunner(chain, settings(workers=1, queue_capacity=8)).start()
+        held = runner.submit(item("cam-1", 1))
+        assert gate.entered.wait(10.0), "the worker never reached the gate"
+        queued = [runner.submit(item("cam-2", frame)) for frame in (1, 2)]
+        workers = list(runner._threads)
+
+        live = runner.stats()
+        assert live["items"]["accepted"] == 3
+        assert live["items"]["in_flight"] == 3, "one inside the chain, two still in the lane"
+        assert accounted(live) == 3
+
+        runner.stop(timeout_s=0.2)
+
+        assert isinstance(held.exception(timeout=1.0), RequestCancelledError)
+        for future in queued:
+            assert isinstance(future.exception(timeout=1.0), RequestCancelledError)
+        stats = runner.stats()
+        assert stats["items"]["failed"] == 1, "the one the abandoned worker was walking"
+        assert stats["items"]["queue_closed"] == 2, "and the two the queue itself failed"
+        assert stats["items"]["in_flight"] == 0
+        assert accounted(stats) == stats["items"]["accepted"] == 3
+        # The camera is the number that matters, not the shard total (ADR-005).
+        assert runner.metrics.items_queue_closed.value(camera="cam-2") == 2
+        assert runner.metrics.items_queue_closed.value(camera="cam-1") == 0
+        gate.release.set()
+        for worker in workers:
+            worker.join(10.0)
+            assert not worker.is_alive()
+
+    def test_the_ledger_counts_what_drop_oldest_sacrificed_to_make_room(self) -> None:
+        """An eviction is a lost frame with a typed future, and it had no counter either.
+
+        ``DROP_OLDEST`` is the policy whose silent version is the bug this whole system was
+        rebuilt to remove, so "the lane evicted one of camera 1's frames" has to be readable
+        somewhere. It is the queue that evicts, not the runner, so the runner's own counters
+        could never see it — ``stats()["items"]`` now carries the queue's number next to its
+        own.
+        """
+        chain = load(detect="runner-gate")
+        gate = chain.node("detect").element
+        assert isinstance(gate, GateDetect)
+        runner = InprocessRunner(
+            chain,
+            settings(workers=1, queue_capacity=1, overflow_policy="drop_oldest"),
+        ).start()
+        workers = list(runner._threads)
+        try:
+            held = runner.submit(item("cam-1", 1))
+            assert gate.entered.wait(10.0), "the worker never reached the gate"
+            sacrificed = runner.submit(item("cam-1", 2))
+            runner.submit(item("cam-1", 3))
+
+            assert isinstance(sacrificed.exception(timeout=5.0), QueueFullError)
+            stats = runner.stats()
+            assert stats["items"]["accepted"] == 3, "all three were admitted"
+            assert stats["items"]["dropped"] == 0, "nothing was refused at the door"
+            assert stats["items"]["queue_evicted"] == 1
+            assert accounted(stats) == 3
+        finally:
+            gate.release.set()
+            runner.stop(timeout_s=5.0)
+        assert held.exception(timeout=5.0) is None
+        for worker in workers:
+            worker.join(10.0)
