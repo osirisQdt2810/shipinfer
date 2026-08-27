@@ -52,7 +52,7 @@ from shipinfer.ingest.camera import (
     load_camera_db,
 )
 from shipinfer.ingest.frame import Frame, FrameCounter
-from shipinfer.ingest.manager import IngestManager
+from shipinfer.ingest.manager import IngestManager, configured_cameras
 from shipinfer.ingest.metrics import IngestMetrics
 from shipinfer.ingest.registry import SOURCES, create_source
 from shipinfer.ingest.resolve import (
@@ -89,6 +89,7 @@ __all__ = [
     "PyAvSource",
     "ReplaySource",
     "SourceFactory",
+    "configured_cameras",
     "create_source",
     "load_camera_db",
     "resolve_hwaccel",

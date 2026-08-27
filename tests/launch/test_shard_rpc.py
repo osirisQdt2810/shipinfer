@@ -33,12 +33,16 @@ from shipinfer.runners.inprocess import InprocessRunner
 from shipinfer.runners.service import ShardServer, serve_shard
 from shipinfer.topology import ChainSpec, Topology
 
-#: A straight line of mock elements: the smallest chain a real runner will start, and enough
-#: to prove the shard is executing something rather than answering from an empty object.
+#: A straight line of mock elements behind a real decode element: the smallest chain a real
+#: runner will start, and enough to prove the shard is executing something rather than
+#: answering from an empty object. The head is ``replay`` rather than ``mock`` so that
+#: ``AddCamera`` reaches a real ingest source — a path that does not exist, which the replay
+#: source refuses before it imports a codec, so the actor retries on its own thread and this
+#: file needs no OpenCV and no network.
 CHAIN = """
 name: rpc_linear
 elements:
-  decode: {impl: mock}
+  decode: {impl: replay}
   detect: {impl: mock, model: ship_detector}
   output: {impl: mock}
 """
@@ -105,11 +109,18 @@ class TestALauncherTalksToAShard:
         assert health.cameras == {}
         assert health.detail == ""
 
-        # The in-process runner manages no cameras, and the refusal is the launcher's cue to
-        # place this one elsewhere. It arrives as data, not as an RPC error status.
-        refusal = client.add_camera(CameraSpec("cam-1", "rtsp://10.0.0.1/live", 20.0))
-        assert not refusal.accepted
-        assert "this runner does not manage cameras" in refusal.reason
+        # The in-process runner owns an ingest manager (phase B1), so the camera is taken and
+        # the shard's state follows from the camera map rather than from a flag.
+        accepted = client.add_camera(CameraSpec("cam-1", "/nonexistent/clip.mp4", 20.0))
+        assert accepted.accepted, accepted.reason
+        assert client.health().state == ShardState.RUNNING
+        assert set(client.health().cameras) == {"cam-1"}
+
+        # A camera that is not running is a typed refusal reaching the launcher as data, and
+        # the id it names is the one the launcher asked about.
+        duplicate = client.add_camera(CameraSpec("cam-1", "/nonexistent/clip.mp4", 20.0))
+        assert not duplicate.accepted
+        assert "already running" in duplicate.reason
 
         result = client.stop(timeout_s=2.0)
         assert result.abandoned == 0

@@ -72,11 +72,7 @@ class TestWhatItResolves:
 
 
 class TestWhatItRefuses:
-    def test_inputs_are_refused_rather_than_silently_ignored(self, chain_file: Path) -> None:
-        """Phase B wires them. A flag that accepted a video and never opened it would be
-        worse than one that says it cannot yet."""
-        with pytest.raises(ConfigurationError, match="--inputs is not wired yet"):
-            run(chain_file, runner="inprocess", inputs=["a.mp4"], dry_run=True)
+    # `--inputs` has its own file now that it does something: `tests/cli/test_run_inputs.py`.
 
     def test_an_unknown_runner_lists_the_ones_there_are(self, chain_file: Path) -> None:
         with pytest.raises(ConfigurationError, match="inprocess"):

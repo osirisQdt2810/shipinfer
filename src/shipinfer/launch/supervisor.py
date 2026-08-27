@@ -53,7 +53,10 @@ The inherited copies of what those calls now carry are **removed** rather than m
 set (:data:`_NOT_INHERITED`). An operator who exported
 ``SHIPINFER_DEVICES__VISIBLE_GPUS=[2,3,4,5]`` for a single-process run — the documented way to
 configure one — would otherwise have every child read it *after* the remap renumbered its
-devices to ``0..n-1``, and fail at start-up naming devices it cannot see.
+devices to ``0..n-1``, and fail at start-up naming devices it cannot see. The same operator's
+``SHIPINFER_INGEST__CAMERA_DB`` would have given every shard the whole fleet, which is worse
+than a failed start-up because it succeeds: fifty cameras opened eight times over, each shard
+tagging frames ``(camera_id, frame_id)`` from its own counter (ADR-002).
 """
 
 from __future__ import annotations
@@ -86,10 +89,19 @@ _LOG = get_logger("launch.supervisor")
 #: value to overwrite them *with* any more, and an inherited one is worse than absent —
 #: ``visible_gpus`` naming physical ordinals fails a child whose devices have been renumbered,
 #: and a stale ``shared_by`` would have it load the wrong number of instances silently.
+#:
+#: The two ``INGEST`` names are here for exactly the same argument, and they were the
+#: expensive omission: a shard's cameras arrive by ``AddCamera``, but ``ServerSettings`` is
+#: env-only, so a child that inherited ``SHIPINFER_INGEST__CAMERA_DB`` read the operator's
+#: whole fifty-camera fleet — the documented way to configure a single-process run — on every
+#: one of eight shards. Absent is the honest value: this child's camera set is whatever its
+#: launcher has placed on it, and nothing in its environment is entitled to an opinion.
 _NOT_INHERITED = (
     "SHIPINFER_DEVICES__VISIBLE_GPUS",
     "SHIPINFER_DEVICES__SHARED_BY",
     "SHIPINFER_DEVICES__SHARE_RANK",
+    "SHIPINFER_INGEST__CAMERAS",
+    "SHIPINFER_INGEST__CAMERA_DB",
     "SHIPINFER_SHARD_CAMERAS",
 )
 

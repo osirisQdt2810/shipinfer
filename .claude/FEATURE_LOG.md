@@ -5,6 +5,141 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-27 — the launcher places the fleet; a shard opens only what it was sent (B1 review)
+
+**What.** Round-1 review of PR #71 found a blocking defect in the entry above and this is the
+correction. `InprocessRunner._do_start` no longer starts `ingest.cameras` / `ingest.camera_db`;
+`cli/commands/run.py::cameras_to_place` derives `CameraSpec`s from the settings tree and places
+them — configured first, `--inputs` after — through the same `place_cameras` both already used,
+so `add_camera` is the single door on every runner. `launch/supervisor.py::_NOT_INHERITED`
+gains `SHIPINFER_INGEST__CAMERAS` and `SHIPINFER_INGEST__CAMERA_DB`. `CameraSpec` gains
+`loop: bool = True`, carried on the wire as `optional bool loop = 4`, and `shipinfer run` gains
+`--loop/--no-loop` — which supersedes the "Not done here" note in the entry below.
+
+**Why.** A shard *is* an `InprocessRunner` (`cli/shard.py` hard-codes `build_runner("inprocess",
+…)`) whose settings come from `build_settings()` with no arguments — env-only, so every child
+inherited the operator's whole fleet. `UpdateTopology` → `runner.start()` → the auto-start
+branch therefore opened all fifty cameras on all eight shards: 400 RTSP sessions, eight
+`FrameCounter`s minting identical `(camera_id, frame_id)` tags for one camera (the ADR-002
+misattribution, by construction rather than by race), and a control plane that could then place
+nothing because `FleetRunner.add_camera` met "already running" everywhere. The old tests could
+not see it: the shard-shaped ones configured no cameras.
+
+**Decisions.**
+
+- **The camera set is a launcher decision, not a property of whichever settings a process
+  loaded.** Option (a) of the review, plus the defence from (b): the runner starts nothing, and
+  the `IngestManager` is *built* with `cameras=[]`/`camera_db=None` so that even a future
+  `start()` on it cannot open a fleet. `_priorities` is still filled from the **full** settings,
+  because a band is deployment configuration keyed by camera id — a shard told `cam-7` still
+  admits it into the band its config names.
+- **The two `SHIPINFER_INGEST__*` names are stripped from a child.** The same argument already
+  written for `visible_gpus`: a child is told one thing at `exec`, and an inherited copy of what
+  an RPC now carries is worse than absent. Both halves are pinned — the supervisor test asserts
+  the child cannot see them, and a shard-shaped `InprocessRunner` handed the whole fleet in its
+  settings still reports `cameras == ()` with no `ingest-*` thread until `AddCamera` arrives.
+- **`loop` joins `CameraSpec` rather than the help text being corrected.** An `--inputs` camera
+  is minted in the CLI and appears in no `ingest.cameras` entry, so the knob the help named was
+  unreachable for exactly the cameras that needed it; and now that a configured camera is
+  *placed*, a fleet would otherwise have dropped the `loop: false` its operator wrote. Presence
+  (`optional`) because the wire default for a bool is false and this field's default is true.
+- **A decode root declaring more than one `produces` is refused.** Every decode element hands
+  the frame on untouched, so the cap the sink stamps is a claim about a buffer nothing converts;
+  with two declarations the loader picks whichever the consumer prefers and stamps *that* on the
+  same array. Refused in `_head()` with the reason; a converting decode is phase D. The
+  consequence for the test below it is stated rather than hidden: with one `produces` the edge
+  and the declaration agree by construction, so "read the edge, not `output_caps[0]`" is now
+  pinned by the refusal instead of by a difference.
+
+**Not done here.** `CameraSpec` still carries no `priority`, so a camera placed on a *fleet*
+shard whose environment no longer names the fleet is admitted at `NORMAL` unless that shard's
+own settings configure it. The bands still work for `inprocess` and for any shard given the
+config by other means; carrying the band on the wire is a wire change with a falsy-zero trap in
+it (`TRACKING_CRITICAL == 0`) and belongs in its own PR.
+
+---
+
+## 2026-08-27 — the runner owns the cameras: decode elements, `ChainFrameSink`, `--inputs` (Phase B1)
+
+**What.** `shipinfer run --topology c.yaml --inputs a.mp4 b.mp4` now opens the videos, and a
+shard's `AddCamera` RPC starts a real camera actor. Five pieces:
+
+| Piece | Delivered |
+|---|---|
+| `topology/elements/decode.py` | `ReplayDecode` / `GStreamerDecode` / `PyAvDecode` — a `source` ClassVar naming an entry in `SOURCES`, `produces = ("bgr@cpu",)`, and `item.derive()` at walk time |
+| `runners/frames.py` | the `TaggedFrame` protocol and `ChainFrameSink`: frame → `ChainItem(context, head caps, Tensor.from_numpy(frame.as_batch()))` → `submit` |
+| `runners/inprocess.py` | `manages_cameras = True`; `add_camera`/`remove_camera`/`drain`/`cameras` over an `IngestManager`; `_head()`; `_camera_config`; `_priority_for`; `_do_health["cameras"]`; `_do_stats["ingest"]` |
+| `cli/commands/run.py` | `cameras_from_inputs` + `place_cameras`, and the deletion of the `--inputs` refusal |
+| `check_layers.py` + `tests/test_architecture.py` | `runners -> ingest`, granted statically and costed dynamically |
+
+**Why.** Phase A2 left a runner that executed a chain nobody could feed: `--inputs` raised
+"not wired yet", and `InprocessRunner.add_camera` was the ABC's typed refusal. arch.md §2 has
+two doors into the system and neither one worked.
+
+**Decisions.**
+
+- **The runner owns the cameras; the decode element only names a source.** The rejected
+  alternative — a decode element that opens its own camera — would drag the camera set and the
+  admission door into `topology`, which has to stay pure enough to validate a chain on a
+  laptop. So `decode: {impl: replay}` is two declarations (a source name and the chain's head
+  cap) and a pass-through, and everything with a thread in it lives in `runners/`.
+- **`runners` may import `ingest`, but only inside a method.** `shipinfer.ingest` reaches
+  `sources/gstreamer.py` and `shipinfer.runtime` (and, through it, torch on a host where a
+  device source is importable — measured on this box, `import shipinfer.ingest` pulls
+  `shipinfer.runtime` and not torch), and `import shipinfer.runners` must cost none of them.
+  `check_layers.py` grants the edge and cannot see the difference between a module-scope
+  import and a function-scope one; `tests/test_architecture.py` adds
+  `shipinfer.ingest` to the heavy list it refuses in a subprocess, which is the half that can.
+  Both are needed and the hook's comment says so.
+- **The head cap comes from `Topology.edges`, never from `root.element.output_caps[0]`.** A cap
+  belongs to an edge; an element with two `produces` hands a different one to each consumer.
+  A chain whose decode roots disagree — on the cap or on the source — is refused at `start()`,
+  because one ingest manager publishes one item and every root sees it.
+- **`_do_health()` emits `"cameras"`, and that key is load-bearing.** `ShardService.state()`
+  derives `running` from it, so the previous runner would have answered `ready` forever while
+  reading fifty cameras. Asserted across both files, over a real `InprocessRunner`.
+- **`_do_submit` finally passes a priority.** It was left at the default, so `priority:` on a
+  camera applied to nothing and every camera shared one lane — the one customisation ADR-005
+  says a generic server cannot express, configured and then ignored. Resolved per camera from
+  `IngestManager.configured_cameras()`, with `is not None` and never `or`, because
+  `TRACKING_CRITICAL` is `0`.
+- **One dropped frame is counted twice, deliberately.** `items_dropped{camera}` at the
+  admission door and `ingest_frames_dropped{camera,reason=sink_full}` in the actor answer two
+  different operator questions; the pair is documented in `runners/frames.py` and asserted in
+  `tests/runners/test_camera_lifecycle.py`.
+- **Start opens elements, then workers, then cameras; stop releases cameras first.** Cameras
+  are the producers, so joining workers while frames keep arriving is a shutdown racing its own
+  input. They get half the shutdown budget against the *same* deadline, so a wedged decoder
+  cannot spend the time the workers need. The manager is dropped at the stop rather than
+  reused, for the reason the queue and the stop event are rebuilt per cycle.
+- **The sink discards the future, and the sink calls `_do_submit`.** An actor cannot wait on a
+  future without becoming the chain's pacer; and the manager is started by `_do_start`, which
+  runs before `Runner.start` publishes `_running`, so routing through the public `submit` would
+  hand a camera a `ServerStateError` the `FrameSink` contract does not name.
+
+- **The three camera methods take the lifecycle lock, and the manager is built lazily.**
+  Found in review, and the two are one fix. `add_camera` read `_running` outside
+  `Runner._lifecycle` while `_ingest()` builds a manager unconditionally, so an add that
+  passed the check just before a `stop()` cleared the flag built a *fresh* `IngestManager` on
+  a torn-down runner and started a decoder thread into it — which nothing then stops, because
+  `_stop_ingest` has already run and a second `stop()` returns at the idempotence check. B3's
+  `POST /streams` calls this from a threadpool, so the race is ordinary rather than exotic.
+  `add_camera` / `remove_camera` / `drain` now hold the (re-entrant) lifecycle lock and
+  `add_camera` re-checks `_running` under it; `submit`, `health`, `stats` and `cameras`
+  deliberately still take nothing.
+- **`_do_start` starts the ingest manager only when cameras are configured.** It used to call
+  `self._ingest().start()` unconditionally, so every start — including a chain of mock
+  elements with no camera in it — imported `shipinfer.ingest` and `shipinfer.runtime`, which
+  is the whole cost `_NO_INGEST` and the method-scope import exist to avoid. First use is now
+  `_do_start` when `ingest.cameras`/`ingest.camera_db` says so, and `add_camera` otherwise;
+  a subprocess test asserts a started, camera-less runner has neither a manager nor the
+  modules.
+
+**Not done here.** No `csrc` change: the native ingest halves already exist and are reused
+unchanged, and `runners/` has no native mirror. `_camera_config` carries no `loop:` — a
+`CameraSpec` has three fields, so a replayed file loops by `CameraConfig`'s default. `--http`
+and `POST /streams` are B3.
+
 ## 2026-08-27 — `QueueStats` names the camera that paid for each drop (both planes)
 
 **What.** `scheduling.queues.QueueStats` gains four `Mapping[str, int]` fields —
