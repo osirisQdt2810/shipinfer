@@ -17,6 +17,10 @@ What a runner owns, and nothing else:
   the drop to whichever camera happens to be in the buffer (ADR-005).
 * **the walk** — one item through the chain's elements, in an order the loader has already
   proved legal, honouring each ``when:`` with skip-and-continue.
+* **the camera set**, for the runners that have one. ``add_camera`` / ``remove_camera`` /
+  ``drain`` are the control plane's per-camera RPCs (arch.md §2) as methods, so
+  :mod:`shipinfer.runners.service` can answer them over *any* runner. The default is a typed
+  refusal, because "no" is a real answer: the launcher places the camera on another shard.
 
 What a runner must **not** own: batching (the engine's, arch.md §5④), what a cap means (the
 loader's), or any per-element knowledge. A runner that special-cased a kind would make the
@@ -50,6 +54,7 @@ from shipinfer.core.errors import ServerStateError
 from shipinfer.core.request import ResponseFuture
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Device
+from shipinfer.launch.control import CameraSpec
 from shipinfer.topology import ChainItem, ElementContext, ModelResolver, Topology
 
 __all__ = ["Runner"]
@@ -82,6 +87,15 @@ class Runner(abc.ABC):
     #: tree and the name in a log line cannot drift. Mirrors
     #: :attr:`shipinfer.scheduling.queues.base.RequestQueue.name`.
     name: ClassVar[str] = "abstract"
+
+    #: Whether :meth:`add_camera`, :meth:`remove_camera` and :meth:`drain` do anything.
+    #: ``False`` here, and the three methods refuse; a runner that owns an ingest manager
+    #: sets it True and implements them. It exists so a caller can tell "this runner does not
+    #: manage cameras, so it abandoned none of them" from "this runner manages cameras and
+    #: could not release them" — both arrive as a ``ServerStateError`` otherwise, and the
+    #: shard's ``Stop`` reply has to report 0 for the first and a failure for the second
+    #: (``runners/service.py``).
+    manages_cameras: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -233,6 +247,70 @@ class Runner(abc.ABC):
                 "call start() or use it as a context manager"
             )
         return self._do_submit(item)
+
+    # -- cameras -----------------------------------------------------------------------
+    #
+    # The control plane's three per-camera RPCs (arch.md section 2), as runner methods. They
+    # live on the ABC rather than only on the runner that implements them because the shard
+    # servicer must be able to call them on *any* runner: `runners/service.py` is handed a
+    # runner and answers `AddCamera` over it, and a servicer that first asked "are you the
+    # kind of runner that..." would be the if/elif the registry exists to prevent
+    # (CONVENTIONS 2.3).
+    #
+    # The default is a typed refusal rather than a silent success, because "no" is a real
+    # answer here: the launcher places the camera on another shard. Returning None would
+    # leave it believing a camera is being read that nobody is reading (ADR-005's failure
+    # mode, one layer up).
+
+    def add_camera(self, camera: CameraSpec) -> None:
+        """Start one camera on this runner.
+
+        Raises:
+            ServerStateError: this runner does not manage cameras.
+            ConfigurationError: a camera with this id is already running, or its source
+                cannot be resolved. Both reach the launcher as ``accepted=False`` with the
+                reason, because both mean "place it elsewhere" rather than "this shard is
+                broken" (``ingest/manager.py``).
+        """
+        raise self._no_camera_management()
+
+    def remove_camera(self, camera_id: str, *, timeout_s: float = 5.0) -> bool:
+        """Stop and forget one camera.
+
+        Returns:
+            Whether its thread stopped within the deadline. ``False`` means it was abandoned
+            and still references this runner's buffers — the caller's to know, not the log's
+            to bury (``ingest/manager.py``).
+
+        Raises:
+            ServerStateError: this runner does not manage cameras.
+            ConfigurationError: no such camera. Naming what is running turns a typo in an
+                operator's call into an answer instead of a silent no-op.
+        """
+        raise self._no_camera_management()
+
+    def drain(self, timeout_s: float = 20.0) -> int:
+        """Stop reading cameras and let what is in flight finish.
+
+        ``timeout_s`` is ONE deadline for the whole camera set, not one per camera: everyone
+        is signalled at t0, so a camera still unfinished at the deadline is genuinely stuck,
+        and charging the budget per camera would turn one stuck decoder into fifty
+        consecutive waits (``ingest/manager.py``).
+
+        Returns:
+            How many camera threads had to be abandoned; ``0`` is the clean drain.
+
+        Raises:
+            ServerStateError: this runner does not manage cameras.
+        """
+        raise self._no_camera_management()
+
+    def _no_camera_management(self) -> ServerStateError:
+        return ServerStateError(
+            f"this runner does not manage cameras ({self.name!r}); frames enter its chain "
+            "through a decode element, and only a runner that owns an ingest manager can "
+            "add, remove or drain one while it runs"
+        )
 
     # -- observability -----------------------------------------------------------------
 
