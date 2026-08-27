@@ -603,3 +603,62 @@ topology caveat is no longer folklore — it was measured on this box (Appendix 
   node does not, and pays a few ms once for it anyway.
 - **Not decided here:** K's default beyond 3, and whether the deepstream runner's graphs
   publish their NVMM buffers into the same slabs (phase E of the migration plan).
+
+---
+
+## ADR-017 — The topology is a pure, validated object: one registry per element kind, caps that never bridge memories
+
+**Status:** Accepted · 2026-08-27 · phase A1 of the reset (`docs/arch.md` §1, §8, §9);
+builds on ADR-001 (pure layers), the registry primitive (`core/registry.py`), ADR-005 (a
+refusal is typed and carried).
+
+**Context.** The operator's model (V131/V132) is *input → topology → output*, where the
+topology is a declarative chain of elements and every element has interchangeable OOP
+implementations (decode: gstreamer | cv; detect: pool | nvinfer | nvinferserver; …). The
+old `server/topology/` named process placement; the runner owns that now. Three questions
+had to be settled before any runner could be written: how implementations are found, how
+a chain is validated, and where the "no silent download to CPU" promise (§8) is enforced.
+
+**Decision.**
+
+1. **`topology/` is a pure layer**, alongside `core`, `scheduling` and `repository`: it
+   imports only `core`, no torch, no GStreamer, no server. The engine and the ingest plane
+   reach an element through `ElementContext` handed to `open()`, never as an import. Both
+   enforcement points (`scripts/hooks/check_layers.py`, `tests/test_architecture.py`) name
+   it, and a subprocess test asserts `import shipinfer.topology` loads no accelerator —
+   the guarantee that survives when phase C's real element implementations relax the
+   static rule for `topology/elements/`.
+2. **One `ElementRegistry` per element kind**, not one flat registry with composite keys.
+   Implementation names repeat across kinds (`pool` is a detect, segment, embed and
+   recognize impl; `shipvision` is a track and an mtmc impl) and `Registry` refuses duplicate
+   names by design; the per-kind error text lists the four detect impls, not all twenty;
+   registration stamps `cls.impl` and checks `cls.kind`, and `create_element` re-checks both
+   so a lazily registered class cannot be built under the wrong kind.
+3. **Caps are two words, `<format>@<location>`**; `location` is closed to `gpu | cpu`,
+   `format` is an open lowercase token (`nv12`, `bgr`, `tensor`, `meta`). An edge is
+   compatible when producer and consumer agree on both halves; a `*` matches either half
+   but **never bridges `gpu` and `cpu`**, a wildcard `produces` half is resolved from the
+   node's negotiated inbound cap before its outbound edges are negotiated (so a passthrough
+   cannot launder a download), and a root must say what it makes. Declaration order is
+   preference order. Converts are never inserted implicitly; they are spelled as elements.
+4. **The chain is validated once, at load, by one door** (`Topology.from_spec`): kind
+   inferred from the slot name, a model required for model kinds, predecessors default to
+   the previously declared slot with `after:` overriding, a topological order, structure
+   (a `decode` root, every element reaches an `output`, an output is a sink), and every
+   edge negotiated — including the bypass edge around a `when:` element, whose semantics
+   are skip-and-continue. Each failure is one typed error under `TopologyError`, and the
+   message names the fix.
+
+**Consequences.**
+
+- A runner (phase A2) receives a `Topology` it can trust: ordered nodes, edges carrying a
+  concrete cap each, and the guarantee that nothing downstream will silently move a frame
+  to host memory. Fan-in edges negotiate independently and may carry different caps.
+- Adding an element implementation is a new file and a decorator; adding an element kind is
+  an enum member and a registry — never an edit to the loader.
+- `topology/ship_person.yaml` is the design's example and the loader's fixture in one; a
+  test loads its exact wiring with mock implementations, so the document and the code
+  cannot drift apart again (they did once, in review: §1's snippet under-specified the
+  rejoin after the `embed` fork).
+- Not decided here: a `convert` element kind (added when the first real convert is needed),
+  and whether the deepstream runner's graph compiler reads caps or GStreamer's own.

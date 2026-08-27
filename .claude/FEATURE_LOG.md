@@ -5,6 +5,41 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-27 — `topology/`: the element chain as a validated, declarative object (Phase A1)
+
+**What.** `src/shipinfer/topology/` — the first package of the architecture reset (#52,
+`docs/arch.md` §1/§8/§9): `Element` template-method ABC with declared caps
+(`<format>@<location>`), one `ElementRegistry` per element kind, a pydantic `ChainSpec`
+loaded from YAML and a `Topology` that validates the chain at load time — kind inference from
+slot names, declaration-order predecessors with `after:` override, Kahn sort, structure
+(decode root, output sink, every element reaches an output), and per-edge caps negotiation
+that never bridges `gpu` and `cpu`. Ten typed refusals in `core/errors/chain.py`. Mock
+elements only; `topology/ship_person.yaml` is the production chain, refused today with the
+impl name it is waiting for.
+
+**Why.** The operator's V131 model is "input → topology → output" where every element has
+interchangeable OOP implementations; the loader is where a chain that would silently download
+a frame to CPU is refused instead (§8). Pure and offline by design — the layering rule gains a
+fourth pure layer, enforced by the hook and the architecture tests plus a runtime import guard.
+
+**Decisions.** Registry per kind (impl names repeat across kinds); no implicit converts; default
+predecessor = declaration order; `meta@cpu` added to the caps vocabulary; `ElementContext`
+inverts the engine dependency. Next: A2 (`runners/inprocess`, `engine/`+`api/` split), A3
+(gRPC launch supervisor, argv-command deleted).
+
+**Round-1 review fixes.** A `when:` guards exactly one element — skip-and-continue is the
+semantics `admits` fixes — so `topology/ship_person.yaml` (and §1's snippet) now repeat
+`when: class == ship` on `embed_ship` and `recognize`; without them the ship embedder and the
+ship recogniser ran on every person crop and emitted a ship identity for a person, and two
+walk tests (one per class) are what that defect fails. Plus: a root carrying a `when:` is
+refused at load (it can never be true, so the chain would ingest nothing); one class
+registered under two implementation names is refused instead of having `Element.impl`
+rewritten under instances already built; and `Element.__init__` gained a keyword-only
+`model:`, so a `pool` element is handed the repository model name the loader validated
+instead of having to reach back into the node's spec.
+
+---
+
 ## test: a decoded pixel over a real RTSP session, and refusals that name the build (P4-PR2c)
 
 **The evidence #32 and #46 owed.** `csrc/tests/test_ingest.cpp` section P stands up an RTSP

@@ -6,6 +6,18 @@ of appending to a 300-line file every layer has to read.
 
 from shipinfer.core.errors.backend import BackendLoadError, BackendUnavailableError
 from shipinfer.core.errors.base import ShipInferError
+from shipinfer.core.errors.chain import (
+    CapsMismatchError,
+    CapsSyntaxError,
+    ChainCycleError,
+    ChainSpecError,
+    ChainStructureError,
+    ConditionSyntaxError,
+    TopologyError,
+    UnknownElementError,
+    UnknownElementImplError,
+    UnknownElementKindError,
+)
 from shipinfer.core.errors.config import (
     ConfigurationError,
     ModelControlError,
@@ -43,6 +55,12 @@ __all__ = [
     "BackendLoadError",
     "BackendUnavailableError",
     "CameraUnavailableError",
+    "CapsMismatchError",
+    "CapsSyntaxError",
+    "ChainCycleError",
+    "ChainSpecError",
+    "ChainStructureError",
+    "ConditionSyntaxError",
     "ConfigurationError",
     "DeviceError",
     "DeviceOutOfMemoryError",
@@ -65,7 +83,11 @@ __all__ = [
     "SinkDeliveryError",
     "SourceOpenError",
     "SourceUnavailableError",
+    "TopologyError",
     "TrackingError",
+    "UnknownElementError",
+    "UnknownElementImplError",
+    "UnknownElementKindError",
     "ValidationError",
     "WireRefusedError",
 ]

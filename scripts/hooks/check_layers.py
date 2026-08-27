@@ -32,6 +32,25 @@ FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
         "confluent_kafka",
     },
     "scheduling": {"torch", "tensorrt", "onnxruntime", "cuda", "cv2", "fastapi", "uvicorn"},
+    # `topology` is the Element ABC, the caps and the chain loader (arch.md §1). It is pure
+    # for a reason that bites daily: `Topology.from_spec` instantiates every element in the
+    # chain to read its declared caps, so a chain file has to be *validatable* on a host
+    # with no accelerator, no GStreamer and no engine. Implementations honour that by
+    # importing their runtime inside `_do_open`, never at module scope — see
+    # `src/shipinfer/topology/elements/__init__.py`. If a future implementation genuinely
+    # cannot (a module whose import needs `pyds`), it registers lazily; and if that ever
+    # stops being enough, the relaxation is a separate `topology.elements` layer with its
+    # own row here, never a hole in this one.
+    "topology": {
+        "torch",
+        "tensorrt",
+        "onnxruntime",
+        "cuda",
+        "cv2",
+        "fastapi",
+        "uvicorn",
+        "confluent_kafka",
+    },
     "repository": {"torch", "tensorrt", "onnxruntime", "cuda", "fastapi", "uvicorn"},
     "runtime": {"fastapi", "uvicorn", "confluent_kafka"},
     "backends": {"fastapi", "uvicorn", "confluent_kafka"},
@@ -49,6 +68,7 @@ ALLOWED_INTERNAL: dict[str, set[str]] = {
     "core": set(),
     "repository": {"core"},
     "scheduling": {"core"},
+    "topology": {"core"},
     "runtime": {"core"},
     "backends": {"core", "repository", "runtime"},
     "server": {"core", "repository", "runtime", "backends", "scheduling"},
