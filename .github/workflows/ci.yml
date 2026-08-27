@@ -105,6 +105,37 @@ jobs:
             "$binary"
           done
 
+  cpp-gst-lane:
+    name: C++ gst lane (section O + the pixel)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the gstreamer lane's packages
+        # The dev pair is what `--with-external gstreamer` pkg-configs; the rest is what
+        # section P's loopback needs at runtime: the RTSP server (PyGObject + its typelib),
+        # software decode for the h264 stream, and ffmpeg for the JPEG fixtures. Mirrors
+        # deploy/rootless/gst-image.sh minus the DeepStream-adjacent extras.
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev             gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad             gstreamer1.0-libav gstreamer1.0-rtsp             python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0             gir1.2-gst-rtsp-server-1.0 ffmpeg
+      - name: Build the gst lane (still g++ alone — no CUDA, no TensorRT)
+        run: python scripts/build_csrc.py --offline --with-external gstreamer
+      - name: Run it, and require the pixel
+        # `grep PIXEL` is load-bearing: a run where section P silently skipped would still
+        # print a green count, and a green count that looked at no pixel is the failure
+        # mode #48 added the PIXEL line to prevent. stdout carries the line; the count and
+        # any SKIPs stay visible in the log either way.
+        run: |
+          set -o pipefail
+          ./csrc/build/test_ingest 2>&1 | tee /tmp/gst-lane.log
+          grep -q "PIXEL:" /tmp/gst-lane.log
+
   kernels:
     name: Fused kernels (compile only)
     runs-on: ubuntu-latest
