@@ -5,6 +5,50 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-27 — `QueueStats` names the camera that paid for each drop (both planes)
+
+**What.** `scheduling.queues.QueueStats` gains four `Mapping[str, int]` fields —
+`depth_by_camera`, `rejected_by_camera`, `evicted_by_camera`, `expired_by_camera` — and
+`as_dict()` carries them onto the wire. `FairPriorityQueue` and `FifoQueue` count at all three
+drop sites (refusal at capacity, `DROP_OLDEST` eviction, expiry at the drain); `Lane.depths()`
+is the fair queue's half of the depth walk. `csrc/shipinfer/scheduling/queues/` mirrors it:
+`base.h` gains the two maps it was missing, both queues count at the expiry site, and
+`Lane::add_depths` fills the breakdown.
+
+**Why.** The totals said a queue refused, evicted or expired work. They could not say *whose*,
+and that is precisely the question ADR-005 exists to answer: the inherited failure was observed
+per camera — "camera đông người được nhận diện đầy đủ, camera vắng người thỉnh thoảng bị miss"
+— and a per-queue counter can neither confirm nor refute a per-camera claim. Under
+`DROP_OLDEST` the fair queue's victim is the greediest camera *by construction*, so
+`evicted_by_camera` is now the direct evidence that the eviction inversion works, rather than a
+property asserted in a docstring.
+
+**Decisions.**
+
+- **Keyed by `WorkItem.fairness_key`, so a camera-less caller lands in `"-"`.** That is the same
+  lane the drain already puts it in; a second, subtly different notion of identity in the stats
+  view would make the two readings of one queue disagree.
+- **All four maps default to empty.** A queue that cannot attribute an outcome — a third
+  implementation, a compiled adapter — constructs unchanged and reports nothing. Reporting a
+  zero it never measured would be worse than silence.
+- **`close()` feeds none of them.** Shutdown loss is not a per-camera fault and the runner's
+  `items_queue_closed` already owns that outcome; charging it here would make an orderly stop
+  read like a flood in the one view an operator uses to find floods.
+- **`depth_by_camera` is computed inside `stats()`, not maintained.** O(cameras x priorities) —
+  200 dict entries at the design point — once per stats call, against bookkeeping on a path that
+  runs 15 000 times a second. Same trade in both planes.
+- **`stats()` and `as_dict()` hand out copies.** `/v2/statistics` serialises this document and a
+  health handler nests it into its own; either is free to trim what it was given, and neither
+  may be editing a live queue's counters by doing so.
+- **`peak` remains a C++-only field.** Noted, not fixed: closing that parity gap is its own
+  change and belongs with the parity harness, not with this one.
+
+**Not covered here.** The runner's `_do_stats` per-camera identity (`items["per_camera"]`) is a
+follow-up: `runners/inprocess.py` was under concurrent edit, and the queue's attribution is
+useful on its own through `/v2/statistics`.
+
+---
+
 ## 2026-08-27 — `server/` dissolved: `engine/` + `api/` + `launch/` + `runners/`, and a gRPC control plane (Phase A2, PR-1…PR-6)
 
 **What.** The package `server/` no longer exists. Its parts moved to the seams arch.md §9 names,
