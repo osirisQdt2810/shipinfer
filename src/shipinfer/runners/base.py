@@ -138,8 +138,22 @@ class Runner(abc.ABC):
         One object for the whole chain, built once here rather than per element, because it
         is the *runner's* decision and two elements of one chain disagreeing about which GPU
         they are on is not a state worth being able to represent.
+
+        The two settings-derived fields are **resolved here** rather than read by the element:
+        ``topology`` is pure and may not import the settings tree, so a knob an operator turns
+        reaches an element only if a runner carries it. ``pipeline.stage_timeout_ms`` becomes
+        :attr:`~shipinfer.topology.base.ElementContext.stage_timeout_s` and
+        ``ingest.input_name`` becomes ``input_name``; an element still prefers its own
+        ``params:`` over both, because a tensor name belongs to the model and not to the
+        deployment.
         """
-        return ElementContext(shard_id=self._shard_id, device=self._device, models=self._models)
+        return ElementContext(
+            shard_id=self._shard_id,
+            device=self._device,
+            models=self._models,
+            stage_timeout_s=self._settings.pipeline.stage_timeout_ms / 1000.0,
+            input_name=self._settings.ingest.input_name,
+        )
 
     # -- lifecycle ---------------------------------------------------------------------
 

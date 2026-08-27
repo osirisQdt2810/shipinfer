@@ -38,6 +38,17 @@ front of a ``pool`` element and an ``nv12@gpu``-only tracker behind it is now re
 The corollary is that :meth:`_PoolElement._do_process` must not stamp a cap on the item it
 derives: the cap on an item is the cap of the edge it is travelling, and the edge is the
 loader's (:class:`~shipinfer.topology.chain.Edge`).
+
+**Two knobs, and where each one comes from.** The wait and the input tensor name are resolved
+at :meth:`~shipinfer.topology.base.Element.open`, in a fixed precedence: this slot's
+``params:`` first, then the runner's :class:`~shipinfer.topology.base.ElementContext`
+(``stage_timeout_s`` from ``pipeline.stage_timeout_ms``, ``input_name`` from
+``ingest.input_name``), then the module default below. Params win because a tensor name
+belongs to the *model* and one slot may need a longer wait than the rest of the chain; the
+context wins over the default because an operator who lowers ``stage_timeout_ms`` to 500 ms
+means it — before the context carried the value, every ``pool`` element still waited 5 s and
+the settings key applied to nothing. The default is the floor for an element opened outside a
+runner, which is what a chain-validation test does.
 """
 
 from __future__ import annotations
@@ -59,15 +70,15 @@ __all__ = [
     "PoolSegment",
 ]
 
-#: Where the model's outputs are read from in the request. Mirrors the default of
-#: ``ingest.input_name``, and is overridable per slot with ``params: {input: ...}`` because
-#: the tensor name belongs to the *model*, not to the deployment.
+#: Where the model's outputs are read from in the request. The **last** resort: mirrors the
+#: default of ``ingest.input_name`` for an element opened with a context that carries no
+#: resolved value at all.
 _DEFAULT_INPUT = "images"
 
-#: Seconds to wait for the pool. Mirrors the default of ``pipeline.stage_timeout_ms``, and is
-#: a bound rather than ``None`` on purpose: a worker blocked forever on one model takes a
-#: whole shard's throughput with it, and the queue's own expiry cannot help a request that
-#: has already been dispatched.
+#: Seconds to wait for the pool. The last resort in the same way, mirroring the default of
+#: ``pipeline.stage_timeout_ms``, and a bound rather than ``None`` on purpose: a worker
+#: blocked forever on one model takes a whole shard's throughput with it, and the queue's own
+#: expiry cannot help a request that has already been dispatched.
 _DEFAULT_TIMEOUT_S = 5.0
 
 
@@ -82,7 +93,9 @@ class _PoolElement(Element):
 
     Args:
         name: the chain slot.
-        params: ``input`` (the model's input tensor name) and ``timeout_s``.
+        params: ``input`` (the model's input tensor name) and ``timeout_s``. Both override
+            whatever the runner resolved from the settings — see the module docstring for the
+            precedence.
         model: the repository model to run. Required — the loader already refuses a model kind
             that names none, so a missing one here is a programming error and says so.
     """
@@ -106,12 +119,32 @@ class _PoolElement(Element):
         model: str | None = None,
     ) -> None:
         super().__init__(name, params, model=model)
+        # The params-or-default answer, so an element that is never opened still has both.
+        # `_do_open` re-resolves them against the runner's context, which is the only place
+        # the deployment's settings exist.
         self._input = str(self.params.get("input", _DEFAULT_INPUT))
         self._timeout_s = float(self.params.get("timeout_s", _DEFAULT_TIMEOUT_S))
         self._handle: Any = None
 
+    def _resolve_settings(self, context: ElementContext) -> None:
+        """Fix the wait and the input name for this run: params, then context, then default.
+
+        Recomputed from scratch on every open rather than filled in where it is still unset,
+        so that a chain reopened under a different context does not keep the previous one's
+        numbers.
+        """
+        fallback_timeout = (
+            _DEFAULT_TIMEOUT_S if context.stage_timeout_s is None else context.stage_timeout_s
+        )
+        fallback_input = _DEFAULT_INPUT if context.input_name is None else context.input_name
+        self._timeout_s = float(self.params.get("timeout_s", fallback_timeout))
+        self._input = str(self.params.get("input", fallback_input))
+
     def _do_open(self, context: ElementContext) -> None:
         """Resolve the model **now**, so a bad name stops the deploy.
+
+        Also fixes the wait and the input tensor name from the context the runner built — the
+        one moment the deployment's settings are visible to a pure element.
 
         Raises:
             ConfigurationError: the runner handed no model pool, or this element carries no
@@ -126,6 +159,7 @@ class _PoolElement(Element):
                 f"pool element {self.name!r} has no model; a {type(self).__name__} runs a "
                 "repository model and the chain must name it with `model: <name>`"
             )
+        self._resolve_settings(context)
         if context.models is None:
             raise ConfigurationError(
                 f"pool element {self.name!r} needs a model pool, and the runner passed none. "
@@ -146,6 +180,20 @@ class _PoolElement(Element):
         **by identity**, not a copy: that tag is what reassembly, tracing and every log line
         group on (ADR-002), and a copy would let the two drift the moment anything stamped a
         timestamp on one of them.
+
+        **A timeout abandons the request; it does not cancel it.** There is no cancellation
+        path to call: :class:`~shipinfer.core.request.ResponseFuture` is a plain
+        :class:`concurrent.futures.Future` and neither
+        :class:`~shipinfer.scheduling.queues.base.RequestQueue` nor the engine's model exposes
+        a "remove this one" — an item that has been queued is dequeued, assembled and executed
+        whatever its future says, and only the *result* is discarded
+        (``engine/instance.py::_complete``'s ``set_running_or_notify_cancel``). So a frame that
+        times out here still costs the instance slot that made it late, and under sustained
+        overload that compounds: every timed-out frame keeps consuming the capacity that caused
+        the timeout, which is a queue that never drains rather than one that sheds. The bound
+        is still worth having — it frees the *worker* — and phase B adds the real cancellation
+        path (a queue-side removal plus a pre-dispatch check) once its bench has measured how
+        much of the overload this accounts for. It is deliberately not guessed at here.
 
         Returns:
             The successor item — same tag, same payload, one metadata key richer.

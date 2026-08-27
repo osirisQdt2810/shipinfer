@@ -25,6 +25,7 @@ runner package.
 from __future__ import annotations
 
 import textwrap
+import time
 from typing import ClassVar
 
 import numpy as np
@@ -58,6 +59,7 @@ from shipinfer.topology import (
 )
 from shipinfer.topology.elements.mock import MockDecode
 from shipinfer.topology.elements.pool import (
+    _DEFAULT_INPUT,
     _DEFAULT_TIMEOUT_S,
     PoolDetect,
     PoolEmbed,
@@ -276,6 +278,86 @@ class TestSubmittingOneItem:
         """
         assert ServerSettings().pipeline.stage_timeout_ms / 1000.0 == _DEFAULT_TIMEOUT_S
         assert PoolDetect("detect", model="m")._timeout_s == _DEFAULT_TIMEOUT_S
+
+
+class TestWhereTheTwoKnobsComeFrom:
+    """Params, then the runner's context, then the module default — and nothing else.
+
+    The middle step is the one that used not to exist: the two literals above mirrored the
+    settings *defaults*, so an operator who lowered ``stage_timeout_ms`` to 500 ms got 5 s
+    waits from every ``pool`` element and the key applied to nothing but the docstring.
+    """
+
+    def test_the_context_supplies_both_when_the_slot_declares_neither(self) -> None:
+        element = PoolDetect("detect", model="ship_detector")
+
+        element.open(
+            ElementContext(
+                models=FakePool(ship_detector=FakeModel()),
+                stage_timeout_s=0.5,
+                input_name="pixels",
+            )
+        )
+
+        assert element._timeout_s == 0.5
+        assert element._input == "pixels"
+
+    def test_the_slot_s_params_win_over_the_deployment_s_settings(self) -> None:
+        """A tensor name belongs to the model and one slot may need a longer wait."""
+        element = PoolDetect(
+            "detect", {"timeout_s": 2.0, "input": "frames"}, model="ship_detector"
+        )
+
+        element.open(
+            ElementContext(
+                models=FakePool(ship_detector=FakeModel()),
+                stage_timeout_s=0.5,
+                input_name="pixels",
+            )
+        )
+
+        assert element._timeout_s == 2.0
+        assert element._input == "frames"
+
+    def test_a_context_that_says_nothing_leaves_the_module_defaults(self) -> None:
+        """What a chain-validation test and a hand-built context get."""
+        element = PoolDetect("detect", model="ship_detector")
+
+        element.open(ElementContext(models=FakePool(ship_detector=FakeModel())))
+
+        assert element._timeout_s == _DEFAULT_TIMEOUT_S
+        assert element._input == _DEFAULT_INPUT
+
+    def test_reopening_under_a_different_context_takes_the_new_numbers(self) -> None:
+        """A restarted shard must not keep the previous run's timeout."""
+        pool = FakePool(ship_detector=FakeModel())
+        element = PoolDetect("detect", model="ship_detector")
+
+        element.open(ElementContext(models=pool, stage_timeout_s=0.25))
+        element.close()
+        element.open(ElementContext(models=pool, stage_timeout_s=1.5))
+
+        assert element._timeout_s == 1.5
+
+    def test_the_context_s_timeout_is_the_one_actually_waited_on(self) -> None:
+        """Asserting the attribute is not enough: this is the value ``result()`` is given.
+
+        The fake model hands back a future nobody resolves, so the only thing that can end
+        this call is the bound — and the bound has to be the context's 10 ms rather than the
+        module's five seconds, or the test would hang for five seconds before passing.
+        """
+        element = PoolDetect("detect", model="ship_detector")
+        element.open(
+            ElementContext(
+                models=FakePool(ship_detector=FakeModel(answer=False)), stage_timeout_s=0.01
+            )
+        )
+
+        started = time.monotonic()
+        with pytest.raises(RequestTimeoutError, match=r"0\.01s"):
+            element.process(item())
+        elapsed = time.monotonic() - started
+        assert elapsed < 1.0, "it waited the module default rather than the context's bound"
 
 
 class TestFailuresAreCarriedNotSwallowed:
