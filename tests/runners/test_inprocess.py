@@ -90,6 +90,22 @@ elements:
   output:  {impl: mock}
 """
 
+#: A fan-in whose two inbound edges carry **different** negotiated caps: ``detect`` hands
+#: ``track`` the frame (``nv12@gpu``) and ``track_a`` hands it metadata (``meta@cpu``). The
+#: loader nominates ``detect`` as ``track``'s donor, because ``track`` accepts ``nv12@gpu``
+#: first — so when ``detect`` consumes an item there is a contributor left, but not one that
+#: donates under the cap the loader negotiated for the donor's edge. ``MOCK_CHAIN`` cannot
+#: show this: both of *its* fan-in edges are ``nv12@gpu``, so any contributor would do.
+FAN_IN_CHAIN = """
+name: donor_gap
+elements:
+  decode:  {impl: mock}
+  detect:  {impl: runner-drops, model: ship_detector, params: {drop_camera: __DROP__}}
+  track_a: {impl: mock, after: decode}
+  track:   {impl: mock, after: [detect, track_a]}
+  output:  {impl: mock}
+"""
+
 #: The slots in the order the loader resolves them, which is the order elements are opened in
 #: and the reverse of the order they are closed in. ``embed_person`` before ``embed_ship``
 #: because Kahn's algorithm keeps declaration order *among the elements that are ready*, and
@@ -136,6 +152,22 @@ class GateDetect(MockDetect):
     def _do_process(self, item: ChainItem) -> ChainItem | None:
         self.entered.set()
         self.release.wait(10.0)
+        return super()._do_process(item)
+
+
+@registry_for(ElementKind.DETECT).register("runner-drops")
+class DroppingDetect(MockDetect):
+    """A detector that *consumes* the item for one class instead of handing it on.
+
+    An element returning ``None`` is ordinary — a filter, a sink — and it is what makes a
+    fan-in lose its nominated donor mid-run. Params-driven so the same chain can be loaded
+    with the donor producing and with it dropping, which is the only way to show the merge
+    rule refuses one and not the other.
+    """
+
+    def _do_process(self, item: ChainItem) -> ChainItem | None:
+        if item.context.camera_id == str(self.params.get("drop_camera", "")):
+            return None
         return super()._do_process(item)
 
 
@@ -198,6 +230,12 @@ def load(
 def load_linear(*, klass: str) -> Topology:
     """The straight-line chain, with the class its detector stamps on every item."""
     text = textwrap.dedent(LINEAR_CHAIN).replace("__CLASS__", klass)
+    return Topology.from_spec(ChainSpec.from_yaml(text))
+
+
+def load_fan_in(*, drop_camera: str) -> Topology:
+    """The two-cap fan-in, with the camera whose items the donor consumes."""
+    text = textwrap.dedent(FAN_IN_CHAIN).replace("__DROP__", drop_camera)
     return Topology.from_spec(ChainSpec.from_yaml(text))
 
 
@@ -668,6 +706,12 @@ class TestBackpressureAndFailure:
         deadline has passed — so the second must be failed without a model ever seeing it.
         Spending a GPU on a frame that is already too late to act on is pure waste, and this
         is the only check that can catch this one: the queue is done with the item.
+
+        The two capture clocks differ by design. A 500 ms budget and a second item captured
+        400 ms ago means the gap the gate opens (250 ms) expires *that* one and leaves the
+        held one with budget to spare — so this test still says "the item behind the gate
+        expired" and not "everything in the batch expired", which is what makes it discriminate
+        from the re-check in front of each model element.
         """
         chain = load(detect="runner-gate")
         gate = chain.node("detect").element
@@ -677,12 +721,13 @@ class TestBackpressureAndFailure:
             chain,
             ServerSettings(
                 pipeline={"workers": 1, "frames_per_wakeup": 2},
-                ingest={"frame_deadline_ms": 100},
+                ingest={"frame_deadline_ms": 500},
             ),
             queue=queue,
         )
-        held = runner.submit(item("cam-1", 1, captured_ns=time.monotonic_ns()))
-        late = runner.submit(item("cam-1", 2, captured_ns=time.monotonic_ns()))
+        now = time.monotonic_ns()
+        held = runner.submit(item("cam-1", 1, captured_ns=now))
+        late = runner.submit(item("cam-1", 2, captured_ns=now - 400_000_000))
 
         queue.ready.set()
         assert gate.entered.wait(10.0), "the worker never reached the gate"
@@ -740,6 +785,121 @@ class TestBackpressureAndFailure:
             worker.join(10.0)
             assert not worker.is_alive()
 
+    def test_stopping_fails_every_item_of_an_abandoned_worker_s_wake_up_batch(self) -> None:
+        """A worker does not hold one item off the queue — it holds a whole wake-up batch.
+
+        With ``frames_per_wakeup: 4`` one drain hands the worker four items, and the three
+        behind the one it is wedged inside are no longer in the queue either. Closing the queue
+        cannot resolve them, and the worker never will. A registry with one slot per worker
+        failed only the first, and three producers were left holding futures nobody owned —
+        exactly the frame that vanishes with no typed outcome that ADR-005 and ``base.py``'s
+        ``submit`` contract exist to prevent.
+
+        ``PausedQueue`` is what makes "one batch" a fact rather than a race: the worker is held
+        out of the queue until all four items are in it, so the drain returns four and not one
+        followed by three.
+        """
+        chain = load(detect="runner-gate")
+        gate = chain.node("detect").element
+        assert isinstance(gate, GateDetect)
+        queue = PausedQueue("held", 8)
+        runner = InprocessRunner(
+            chain,
+            settings(workers=1, frames_per_wakeup=4),
+            queue=queue,
+        ).start()
+        futures = [runner.submit(item("cam-1", frame)) for frame in (1, 2, 3, 4)]
+        workers = list(runner._threads)
+
+        queue.ready.set()
+        assert gate.entered.wait(10.0), "the worker never reached the gate"
+        started = time.monotonic()
+        runner.stop(timeout_s=0.2)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 5.0, "stop waited for the gate instead of failing the batch"
+        assert [future.done() for future in futures] == [
+            True
+        ] * 4, "all four, not just the first"
+        for future in futures:
+            error = future.exception(timeout=1.0)
+            assert isinstance(error, RequestCancelledError), error
+            assert "the runner stopped" in str(error)
+        assert runner.stats()["items"]["failed"] == 4
+        assert runner.metrics.items_failed.value(camera="cam-1") == 4
+        # Release the abandoned worker and let it exit, so the test leaves no thread behind.
+        gate.release.set()
+        for worker in workers:
+            worker.join(10.0)
+            assert not worker.is_alive()
+
+    def test_the_walk_re_checks_the_deadline_in_front_of_every_model_element(
+        self, running
+    ) -> None:
+        """One check at the top of a nine-element walk is a check for the first element only.
+
+        Every model element submits to the pool and *sleeps* on the answer, so a chain can
+        spend several stage timeouts between the top of the walk and the segmenter. Here the
+        gate holds the item inside ``detect`` well past its 100 ms budget: it was fresh when
+        the walk began and when the detector ran, and it must be failed at ``segment`` — the
+        next element that would submit — rather than walked to the sink having consumed the
+        whole chain's GPU on a frame nobody can act on any more.
+        """
+        chain = load(detect="runner-gate")
+        gate = chain.node("detect").element
+        assert isinstance(gate, GateDetect)
+        segment = chain.node("segment").element
+        runner = running(
+            chain,
+            ServerSettings(pipeline={"workers": 1}, ingest={"frame_deadline_ms": 100}),
+        )
+
+        late = runner.submit(item("cam-1", 1, captured_ns=time.monotonic_ns()))
+        assert gate.entered.wait(10.0), "the worker never reached the gate"
+        time.sleep(0.25)
+        gate.release.set()
+
+        error = late.exception(timeout=10.0)
+        assert isinstance(error, RequestCancelledError)
+        assert "before element 'segment'" in str(error), "the element it had reached"
+        assert segment.processes == 0, "no model saw a frame that was already too late"
+        assert emitted_tags(chain) == set(), "failed, not walked to the sink"
+        assert runner.stats()["items"]["expired"] == 1
+        assert runner.metrics.items_expired.value(camera="cam-1") == 1
+
+    def test_a_fan_in_refuses_to_donate_under_a_cap_nobody_negotiated(self, running) -> None:
+        """The donor consumed its item, and the branch left over carries a different cap.
+
+        ``track`` takes the frame from ``detect`` (``nv12@gpu``) and metadata from ``track_a``
+        (``meta@cpu``), and the loader nominated ``detect`` as its donor. With ``detect``
+        consuming this camera's items the only contribution left is the ``meta@cpu`` one — and
+        handing *that* payload on as the donation would label an item with a cap the loader
+        never negotiated for the donor's edge, which is the relabelling the ``*@*`` fix on the
+        ``pool`` element was about. So the item fails, typed, naming both sides.
+        """
+        chain = load_fan_in(drop_camera="cam-1")
+        runner = running(chain, settings(workers=1))
+
+        dropped = runner.submit(item("cam-1", 1))
+
+        error = dropped.exception(timeout=10.0)
+        assert isinstance(error, InferenceError)
+        assert "track" in str(error) and "detect" in str(error), "both sides are named"
+        assert "nv12@gpu" in str(error), "and the cap that was negotiated"
+        assert emitted_tags(chain) == set(), "nothing travelled under an unnegotiated cap"
+        assert runner.stats()["items"]["failed"] == 1
+        assert runner.metrics.items_failed.value(camera="cam-1") == 1
+
+    def test_the_same_fan_in_merges_normally_when_its_donor_produces(self, running) -> None:
+        """The other half, so the refusal above cannot pass by the chain never working."""
+        chain = load_fan_in(drop_camera="cam-9")
+        runner = running(chain, settings(workers=1))
+
+        assert runner.submit(item("cam-1", 1)).exception(timeout=10.0) is None
+        emitted = sink(chain).emitted[0]
+        assert emitted.meta["boxes"], "the donor's branch is in the merge"
+        assert emitted.meta["tracks"], "and so is the other one"
+
     def test_a_work_item_that_did_not_come_through_submit_is_refused_by_name(self) -> None:
         """A typed refusal on a worker thread, not an ``AttributeError`` from inside one.
 
@@ -762,6 +922,40 @@ class TestBackpressureAndFailure:
         assert isinstance(error, InferenceError)
         assert "carries no chain item" in str(error)
         assert "submit()" in str(error), "the message says how items are meant to arrive"
+
+
+class TestWhatTheElementsAreTold:
+    def test_the_settings_the_elements_cannot_read_are_resolved_onto_the_context(self) -> None:
+        """``topology`` is pure, so a knob reaches an element only if the runner carries it.
+
+        ``pipeline.stage_timeout_ms`` and ``ingest.input_name`` are the two the ``pool``
+        elements need and cannot look up: an element that imported the settings tree would be
+        choosing its own configuration, which is what
+        :class:`~shipinfer.topology.base.ElementContext` being frozen and runner-built exists
+        to prevent. Before this was carried, lowering ``stage_timeout_ms`` to 500 ms changed
+        nothing and every ``pool`` element still waited the module default of five seconds.
+        """
+        runner = InprocessRunner(
+            load(),
+            ServerSettings(
+                pipeline={"workers": 1, "stage_timeout_ms": 500},
+                ingest={"input_name": "pixels"},
+            ),
+            shard_id=3,
+        )
+
+        context = runner.element_context()
+
+        assert context.stage_timeout_s == 0.5, "milliseconds in the settings, seconds here"
+        assert context.input_name == "pixels"
+        assert context.shard_id == 3, "and the fields that were already carried still are"
+
+    def test_the_default_settings_resolve_to_the_defaults_the_elements_mirror(self) -> None:
+        """The two literals in ``topology/elements/pool.py`` are the fallback, not a fiction."""
+        context = InprocessRunner(load()).element_context()
+
+        assert context.stage_timeout_s == 5.0
+        assert context.input_name == "images"
 
 
 # -- observability ------------------------------------------------------------------------

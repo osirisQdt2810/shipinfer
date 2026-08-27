@@ -80,7 +80,13 @@ from shipinfer.runners.metrics import RunnerMetrics
 from shipinfer.runners.registry import RUNNERS
 from shipinfer.scheduling.queues import QUEUES, BatchWindow, RequestQueue
 from shipinfer.scheduling.work import WorkItem
-from shipinfer.topology import ChainItem, ElementNode, ModelResolver, Topology
+from shipinfer.topology import (
+    MODEL_KINDS,
+    ChainItem,
+    ElementNode,
+    ModelResolver,
+    Topology,
+)
 
 __all__ = ["InprocessRunner"]
 
@@ -176,15 +182,26 @@ class InprocessRunner(Runner):
         self._threads: list[threading.Thread] = []
         self._stopping = threading.Event()
         self._metrics = RunnerMetrics() if metrics is None else metrics
-        #: What each worker is walking right now, one slot per worker, indexed by the
+        #: What each worker still owes an answer for, one slot per worker, indexed by the
         #: worker's own number. Sized once, written only by the worker that owns the slot and
         #: read only by `_do_stop` after the join deadline, so the hot path takes no lock —
         #: the same single-writer discipline `pipeline/runner.py` gets from `_awaiting` being
         #: keyed by the tag. It exists so that a worker abandoned at the deadline does not
-        #: take its item's future with it: an unresolved future is exactly the frame that
+        #: take its items' futures with it: an unresolved future is exactly the frame that
         #: vanishes with no typed outcome that ADR-005 exists to prevent, and `base.py`'s
         #: `submit` promises there is always one.
-        self._inflight: list[_ChainWork | None] = [None] * self._wanted_workers
+        #:
+        #: A **tuple of the undelivered remainder**, not the one item being walked. A worker
+        #: takes a whole wake-up batch off the queue (`pipeline.frames_per_wakeup`), and the
+        #: items behind the current one are no longer in the queue either — so with a single
+        #: slot, `frames_per_wakeup: 4` and a worker wedged on item 0, closing the queue would
+        #: resolve nothing and three producers would wait forever on futures nobody owns.
+        self._inflight: list[tuple[WorkItem, ...]] = [()] * self._wanted_workers
+        #: The cap the loader negotiated per edge, read by :meth:`_inbound` when a fan-in has
+        #: to substitute for a donor that produced nothing. Snapshotted here because a
+        #: topology is immutable once built, and the alternative is a dict comprehension per
+        #: fan-in per frame.
+        self._edge_caps = {(edge.producer, edge.consumer): edge.caps for edge in topology.edges}
 
     def _build_queue(self) -> RequestQueue:
         """The configured admission queue, named after the chain it fronts."""
@@ -263,7 +280,7 @@ class InprocessRunner(Runner):
                 raise
 
         self._stopping.clear()
-        self._inflight = [None] * self._wanted_workers
+        self._inflight = [()] * self._wanted_workers
         for index in range(self._wanted_workers):
             thread = threading.Thread(
                 target=self._work,
@@ -301,12 +318,13 @@ class InprocessRunner(Runner):
         refuses before ``start`` returns — so closing it would buy nothing and would poison
         an injected queue for the restart that follows the fix.
 
-        **An abandoned worker's item is failed, not forgotten.** Closing the queue resolves
-        what is still *queued*; the one item each worker is inside the chain with is not in
-        the queue any more, and a worker still stuck at the deadline will never resolve it.
-        Leaving it is the one case where this runner would break the promise ``submit``
-        makes — a future that never completes, on a producer that is waiting for it — so
-        every in-flight slot still occupied is failed here with the same typed cancellation
+        **An abandoned worker's items are failed, not forgotten.** Closing the queue resolves
+        what is still *queued*; the wake-up batch a worker took off it is not in the queue any
+        more, and a worker still stuck at the deadline will never resolve any of it — not the
+        item it is wedged inside, and not the ``frames_per_wakeup - 1`` behind that one.
+        Leaving them is the one case where this runner would break the promise ``submit``
+        makes — a future that never completes, on a producer that is waiting for it — so every
+        in-flight slot is drained here and each item failed with the same typed cancellation
         the queue uses. The race with a worker that finishes a microsecond later is benign
         because :meth:`_fail` and :meth:`_finish` both refuse a future that is already
         resolved, whichever of the two got there first.
@@ -358,15 +376,20 @@ class InprocessRunner(Runner):
         )
 
     def _fail_in_flight(self) -> int:
-        """Fail whatever the abandoned workers were still walking. Returns how many."""
+        """Fail everything the abandoned workers still owed an answer for. Returns how many.
+
+        Each slot holds the item being walked *and* the rest of its wake-up batch, because
+        neither is in the queue any more. An abandoned worker that finishes its current item a
+        microsecond later is benign: :meth:`_fail` and :meth:`_finish` both refuse a future
+        that is already resolved, whichever of the two arrived first.
+        """
         stranded = 0
-        for slot, work in enumerate(self._inflight):
-            if work is None:
-                continue
-            self._inflight[slot] = None
-            stranded += 1
-            self._metrics.items_failed.inc(camera=work.request.context.camera_id)
-            self._fail(work, RequestCancelledError("the runner stopped"))
+        for slot, batch in enumerate(self._inflight):
+            self._inflight[slot] = ()
+            for work in batch:
+                stranded += 1
+                self._metrics.items_failed.inc(camera=work.request.context.camera_id)
+                self._fail(work, RequestCancelledError("the runner stopped"))
         return stranded
 
     # -- submission --------------------------------------------------------------------
@@ -427,12 +450,21 @@ class InprocessRunner(Runner):
                 if self._queue.is_closed:
                     return
                 continue
-            for work in items:
-                # Published *before* the walk and retracted in a `finally`, so that between
-                # those two lines this item has an owner a shutdown can find. Off the queue
-                # and not yet in a slot is the window where a frame's future could go
-                # unresolved, and it is two stores wide.
-                self._inflight[slot] = work
+            # The whole batch is published *before* the first walk and narrowed to the
+            # remainder in a `finally` after each item, so that from the drain to the last
+            # resolution every item this worker owes an answer for has an owner a shutdown
+            # can find. The window where a frame's future could go unresolved is the two
+            # stores between `get_batch` returning and this line.
+            #
+            # The *remainder*, not the item being walked: the ones behind it left the queue in
+            # the same drain, so a slot holding only the current item would strand them —
+            # `frames_per_wakeup: 4` with a worker wedged on item 0 loses three futures. Both
+            # slices are free at the default `frames_per_wakeup = 1`: `batch[1:]` on a
+            # one-tuple is the empty-tuple singleton, so the hot path allocates one tuple per
+            # wake-up and none per item.
+            batch = tuple(items)
+            self._inflight[slot] = batch
+            for index, work in enumerate(batch):
                 try:
                     self._walk(work)
                 except Exception as exc:
@@ -444,7 +476,7 @@ class InprocessRunner(Runner):
                     _LOG.exception("runner failed on %s", work.request.context.key)
                     self._fail(work, InferenceError(f"the runner failed: {exc}"))
                 finally:
-                    self._inflight[slot] = None
+                    self._inflight[slot] = batch[index + 1 :]
 
     def _walk(self, work: WorkItem) -> None:
         """Walk one item through every element that admits it, in topological order.
@@ -477,20 +509,32 @@ class InprocessRunner(Runner):
                 f"the work item for {work.request.context.key} carries no chain item; "
                 "items enter a runner through submit()"
             )
-        if work.request.is_expired():
-            # The queue drops expired items on the way out too (`drop_expired`); this catches
-            # one that expired while a worker was busy with the frame before it. Spending a
-            # GPU on a frame that is already too late to act on is pure waste.
-            self._metrics.items_expired.inc(camera=work.request.context.camera_id)
-            self._fail(
-                work, RequestCancelledError("the item's deadline passed before the walk")
-            )
+        if self._expired(work, "before the walk"):
             return
 
         produced: dict[str, ChainItem | None] = {}
         last = item
         for node in self._topology.nodes:
-            incoming = item if node.is_root else self._inbound(node, produced)
+            try:
+                incoming = item if node.is_root else self._inbound(node, produced)
+            except InferenceError as exc:
+                # A fan-in the loader's donor rule cannot answer for this item. Counted and
+                # failed like an element failure, because it is the same shape: one item, a
+                # typed reason naming the node, and the walk stops rather than handing a
+                # payload on under a cap nobody negotiated.
+                self._count_failure(work)
+                _LOG.error(
+                    "fan-in %s could not be merged for %s: %s",
+                    node.name,
+                    work.request.context.key,
+                    exc,
+                    extra=log_context(
+                        camera_id=work.request.context.camera_id,
+                        frame_id=work.request.context.frame_id,
+                    ),
+                )
+                self._fail(work, exc)
+                return
             if incoming is None:
                 continue
             if not node.admits(incoming):
@@ -499,6 +543,16 @@ class InprocessRunner(Runner):
                 # negotiated that bypass pair, which is why it is safe to do here.
                 produced[node.name] = incoming
                 continue
+            if node.kind in MODEL_KINDS and self._expired(
+                work, f"before element {node.name!r}"
+            ):
+                # Re-checked in front of every element that can *wait*. The four model kinds
+                # are the ones that submit to the pool and sleep on the answer, so a nine-step
+                # chain can spend several stage timeouts between the check at the top of the
+                # walk and this element — and a frame that is already too late to act on must
+                # not be given another GPU. The other four kinds are local work with no wait
+                # in them, so checking in front of them would only cost a clock read.
+                return
             try:
                 result = node.element.process(incoming)
             except Exception as exc:
@@ -546,9 +600,13 @@ class InprocessRunner(Runner):
           frame.
         * **a skipped predecessor contributes its own inbound item**, because that is what
           skip-and-continue means — the walk stored it under that predecessor's name.
+
+        Raises:
+            InferenceError: the nominated donor produced nothing and no other contributor
+                donates under the same negotiated cap. See :meth:`_substitute_donor`.
         """
         contributors = [
-            contributed
+            (name, contributed)
             for name in node.inputs
             if (contributed := produced.get(name)) is not None
         ]
@@ -556,20 +614,92 @@ class InprocessRunner(Runner):
             return None
         donor = produced.get(node.donor) if node.donor is not None else None
         if donor is None:
-            donor = contributors[0]
+            donor = self._substitute_donor(node, contributors)
         if len(contributors) == 1:
             # The common case — a straight line — allocates nothing.
             return donor
 
         meta: dict[str, Any] = {}
-        for contributed in contributors:
+        for _, contributed in contributors:
             for key, value in contributed.meta.items():
                 meta.setdefault(key, value)
         return ChainItem(
             context=donor.context, caps=donor.caps, payload=donor.payload, meta=meta
         )
 
+    def _substitute_donor(
+        self, node: ElementNode, contributors: list[tuple[str, ChainItem]]
+    ) -> ChainItem:
+        """Who donates payload and caps when the nominated donor did not, or a typed refusal.
+
+        The loader nominated one predecessor (:attr:`~shipinfer.topology.chain.ElementNode.
+        donor`) by walking this element's ``accepts`` in order against the negotiated cap of
+        each inbound edge. Reached only when that one contributed nothing — it consumed its
+        item, or it never received one — so this is off the ordinary path by construction.
+
+        A **substitute is only legal if it donates under the same negotiated cap**. That cap
+        is not decoration: it is what the loader resolved this element's own ``produces: *@*``
+        from, what it checked every bypass pair against, and what every element downstream
+        was validated against. Handing the payload over under a *different* one relabels it exactly the way
+        a concrete ``produces`` on a ``pool`` element used to — the item claims a format and a
+        location it does not have, and the device-to-host download arch.md §8 exists to refuse
+        becomes invisible. This used to take ``contributors[0]`` unconditionally, which is the
+        one place an item could travel under a cap nobody negotiated.
+
+        So: the donor, else the first contributor whose edge into ``node`` carries the donor's
+        cap, else a typed failure for this item alone. A chain where that failure is reachable
+        on every frame is a chain whose fan-in the loader cannot resolve, and phase B's
+        load-time check is where it will be caught before a deploy rather than per frame.
+
+        Args:
+            node: the fan-in being merged.
+            contributors: ``(predecessor name, its contribution)``, in ``node.inputs`` order.
+
+        Raises:
+            InferenceError: no contributor donates under the donor's negotiated cap. Names the
+                node, the donor and both caps, because the fix is in the chain file.
+        """
+        wanted = self._edge_caps.get((node.donor, node.name)) if node.donor else None
+        if wanted is None:
+            # No nominated donor, or no negotiated edge to read a cap from — a root, or a node
+            # the loader wired without one. There is nothing to be inconsistent with, so the
+            # first contributor donates, as it always did.
+            return contributors[0][1]
+        for name, contributed in contributors:
+            if self._edge_caps.get((name, node.name)) == wanted:
+                return contributed
+        offered = ", ".join(
+            f"{name} [{self._edge_caps.get((name, node.name))}]" for name, _ in contributors
+        )
+        raise InferenceError(
+            f"fan-in {node.name!r} has no donor for this item: {node.donor!r} produced "
+            f"nothing and none of the predecessors that did ({offered}) donates under the "
+            f"negotiated cap [{wanted}]. Handing the payload on under another cap would "
+            f"relabel it; declare {node.name!r}'s inbound edges with one cap, or make "
+            f"{node.donor!r} produce for every item it admits"
+        )
+
     # -- failure and observability -----------------------------------------------------
+
+    def _expired(self, work: WorkItem, where: str) -> bool:
+        """Fail and count ``work`` if its deadline has passed. Returns whether it did.
+
+        One helper and not two checks written out, because the counter and the typed error
+        have to stay identical wherever the walk asks: an expiry that was counted at the top
+        of the walk and merely logged in the middle would make ``stats()["items"]["expired"]``
+        answer a different question depending on where the frame died.
+
+        Args:
+            work: the queued item.
+            where: named in the message, so an operator reading the failure can tell the
+                deadline the queue enforces from the one the walk re-checks, and can tell
+                *which* element the frame had already reached.
+        """
+        if not work.request.is_expired():
+            return False
+        self._metrics.items_expired.inc(camera=work.request.context.camera_id)
+        self._fail(work, RequestCancelledError(f"the item's deadline passed {where}"))
+        return True
 
     def _count_failure(self, work: WorkItem) -> None:
         self._metrics.items_failed.inc(camera=work.request.context.camera_id)
