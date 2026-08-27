@@ -252,6 +252,8 @@ class DeepStreamPipeline:
         self._pipeline: Any = None
         self._loop: Any = None
         self._probe: MetadataProbe | None = None
+        self._probe_id: int | None = None
+        self._probe_pad: Any | None = None
         self._configs: GeneratedConfigs | None = None
         self._exit_code = 0
 
@@ -348,7 +350,10 @@ class DeepStreamPipeline:
         # The bound method, not a lambda over `self._probe`: the probe outlives this frame only
         # because the pad holds this reference, and a closure reading an attribute that a later
         # `stop()` could clear would be a NoneType call on a streaming thread.
-        branch.probe_pad.add_probe(self._gst.PadProbeType.BUFFER, probe.on_buffer)
+        self._probe_id = branch.probe_pad.add_probe(
+            self._gst.PadProbeType.BUFFER, probe.on_buffer
+        )
+        self._probe_pad = branch.probe_pad
 
         bus = self._pipeline.get_bus()
         bus.add_signal_watch()
@@ -404,6 +409,15 @@ class DeepStreamPipeline:
         """
         if self._loop is not None and self._loop.is_running():
             self._loop.quit()
+        # The probe comes off BEFORE the sink closes (#32 round 7): a buffer in flight
+        # after NULL would otherwise raise inside emit against the closed sink, be caught
+        # by on_buffer's safety net, and be counted as a BUILD failure — misattributed,
+        # not lost, but a lie in the one counter that distinguishes our bugs from the
+        # sink's health.
+        if self._probe_pad is not None and self._probe_id is not None:
+            self._probe_pad.remove_probe(self._probe_id)
+            self._probe_pad = None
+            self._probe_id = None
         if self._pipeline is not None and self._gst is not None:
             self._pipeline.set_state(self._gst.State.NULL)
             self._pipeline = None
