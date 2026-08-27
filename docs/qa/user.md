@@ -864,6 +864,17 @@ QUYẾT ĐỊNH V140 (ràng buộc):
 artifact truy vết. Đang sửa: ADR-016, snapshot user.md+TASKS.md, K-neighborhood + ngân sách
 context, chờ artifacts probe từ shipinfer-f6.)
 
+### V142 · 27 Aug 2026, ~13:3x UTC — BỎ HẾT GIL trong shipvision (đảo V140 (i); V70 khôi phục)
+
+> note: bỏ hết mọi GIL, có chậm cũng kệ, tôi không muốn nhìn thây GIL ở trong repo của tôi, shipvission chỉ có duy nhất nhiệm vụ là deliver thuật toán - nhiều nhất chỉ có đặt muxer quanh các bước tracker.track()
+
+(Quyết định: V140 (i) — "release GIL trong shipvision + per-thread streams" — bị HỦY. V70 đứng
+nguyên: shipvision không đụng GIL, chỉ deliver thuật toán; tối đa một mutex quanh
+tracker.track(). Hậu quả chấp nhận: convoy C1b còn đó; đường xử lý được phép là phía server
+(V34: port hot plane sang C++ trong csrc/ của shipinfer) chứ không phải trong shipvision.
+Hành động: dừng coder Phase-0 ở /tmp/sv0, xóa worktree/branch, nhả queue shipvision, sửa
+docs/arch.md §7/§10 ở PR tiếp theo.)
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
@@ -1076,6 +1087,13 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 | **`bindings/` holds pybind declarations and nothing else.** The pybind-type → C++-type conversion and the algorithm both live under `csrc/shipvision/`: a shared dtype at the top level if several algorithm families use it, otherwise per-algorithm | V79, V69 |
 | **No `gil_scoped_release` anywhere in shipvision.** It is an algorithm library; thread discipline belongs to the caller. A `std::mutex` on a stateful tracker base is the most it may hold | V79 |
 | If the GIL is what caps throughput, port the hot plane to C++ under `csrc/` in this repository | V34 |
+| **Cross-GPU / cross-process VRAM access is ALLOWED**; the only criteria are perf and accuracy. Shared data is VRAM-first (CUDA-IPC slab handles once at mesh join, per-buffer tickets); RAM is the fallback mode, never the default payload path | V137, V138, V139 |
+| **Default decode is GStreamer → NV12 straight into VRAM** (subfaceid-style); BGR-on-CPU is the fallback | V137 |
+| **No GIL code in shipvision, ever** — it only delivers algorithms; at most a mutex around `tracker.track()`. V140 (i) was revoked the same day; V70 stands. If the GIL caps throughput, the fix lives on the server side (V34: `csrc/` in shipinfer), and slowness is accepted over GIL code in shipvision | **V142**, V70 |
+| **Names are fixed:** `topology` = the declarative element chain; `runner` = how it executes (inprocess · fleet · deepstream-compiler). track/mtmc are in-chain elements; the KServe tensor endpoint stays as the engine's side door | V132 |
+| **`docs/arch.md` is the design of record**; implementation proceeds top-down from it, OOP, packaging readable from api → sharding | V140 |
+| **Processes talk gRPC (vLLM style); the argv "command" mechanism between parent and child is deleted**, not wrapped | V140 |
+| Explanations of the system: say WHO does it and HOW MANY, use flowcharts, walk one frame through — no prose-only descriptions | V135, V136 |
 | Port the system to C++ under `csrc/` and measure it there, then resume the remaining tasks. Finish without being told to continue | V38 |
 | After all tasks: check and carry out `docs/qa/triton.md` | V26 |
 | Deferred: justify or remove every `std::memcpy` — prefer zero-copy/in-place | V28 |

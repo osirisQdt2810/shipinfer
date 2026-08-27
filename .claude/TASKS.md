@@ -30,6 +30,15 @@
 > shipvision GIL+streams Phase-0 PR, C-lanes/model_repository/bench, /tmp/ci, /tmp/t4 —
 > REVERT to shipinfer-cf (= former shipinfer-23, same transcript) until the operator says
 > otherwise. #52 round 2 in flight (probe re-run + C_ctx measured 12:38). — cf, ~12:45
+> CURRENT: shipinfer-cf CLAIMS the SHIPVISION queue for the V140 (i) Phase-0 PR (GIL release around
+> native + per-instance owned streams), worktree /tmp/sv0, branch feat/gil-release-streams.
+> #52 MERGED 12:53 UTC (round 3; ADR-016 + benchmarks/link in main). Shipinfer queue CLAIMED by cf for
+> the A1 `topology/` PR (opens when the /tmp/a1 coder reports). — cf, ~13:2x
+> IN BUILD (local, not open): A1 `topology/` package in /tmp/a1 (branch feat/topology-package, coder).
+> **V142 (~13:3x): Phase-0 shipvision GIL PR CANCELLED — operator: no GIL code in shipvision, ever; V70 stands,
+> V140 (i) revoked; slowness accepted. Coder stopped, /tmp/sv0 discarded (no commits, no push). SHIPVISION QUEUE
+> RELEASED.** Follow-ups: docs/arch.md §7 + §10 phase-0 row must be rewritten (server-side answer to the convoy,
+> V34 csrc/); the parent may still pass the worker's torch stream to NativeImageOps(stream=) — that is not GIL code.
 
 
 Order settled by the operator (V49): **Plane 3 and Triton first; the ≥5× whole-system

@@ -1,5 +1,34 @@
 # Journal
 
+## 2026-08-27 (afternoon) — #52 round 2: ADR-016, the committed link probe, C_ctx measured
+
+- **Merged 12:53 UTC after round 3.** Round 3's blocker was mine: the cited probe logs were
+  gitignored (`*.log`) and never in the tree; fixed by un-ignoring `benchmarks/link/results/`
+  and pointing the runner there. Reviewer's NBs adopted: timed-vs-inferred pairs, PXB as a
+  fixed ~49 ms per-copy penalty, C_ctx annotated as whole-context at K = 1.
+
+- Review round 1 of #52 (docs/arch.md) had three real blockers: the DataPool reversed
+  ADR-002/ADR-015 without naming them (and left ADR-015's per-peer-context-cost and
+  handle-lifecycle objections unanswered); V127–V140 were not in the repo's user.md; the
+  P2P table had no traceable artefact. All three were correct.
+- Wrote **ADR-016** (supersedes ADR-015's payload transport, amends ADR-002's payload
+  clauses, threading core intact): K-neighbourhood (K = 3 default) bounds the contexts;
+  the cost is a measured input; the budget is enforced at start-up; lifecycle = open at
+  join / close at drain after quiesce / generation-stamped tickets / death-notice
+  invalidation / graph-I/O carves pinned (ADR-008).
+- f6's probe scripts existed in the shared scratchpad but no raw log did, so the probe was
+  **re-run in the pytorch container** and committed as `benchmarks/link/` with logs. Same
+  numbers to the µs. New cell: **one foreign CUDA context costs 208 MiB on the OWNER's
+  device and 0 on the opener's** (own context 243 MiB) — so a device is charged by its K
+  openers, `K × 208 MiB`, not by how many peers it opens. That inverted the budget formula
+  in both documents (`slabs + own_ctx + K × C_ctx + engines ≤ device − reserve`).
+- Two-session state: shipinfer-f6 vanished (not in ListAgents); shipinfer-32 is an
+  unrelated fresh session with no lane. f6's lanes (shipvision GIL+streams Phase 0,
+  C-lanes, /tmp/ci, /tmp/t4) revert to this session. Recorded in the QUEUE block.
+- Lesson (memory rule 6 again, positive case): the probe artefacts were written to the
+  branch in the SAME command as the run, before any prose cited them.
+
+
 Newest on top. One entry per working session: what changed, what it cost, what is next.
 
 ---
@@ -21,6 +50,54 @@ Newest on top. One entry per working session: what changed, what it cost, what i
   branch — synced; drift into torch_ops acknowledged, lanes V124a/V124b opened) and **V125
   honored + indexed** (shipvision checkout stays on main).
 - **P4-PR1 pre-flighted**: already based on #31's merge commit; pushes the moment #32 lands.
+
+## 27 Aug (midday) — two workers, the C1 answers, and the architecture pause
+
+- **The session forked**: a process restart left two live workers sharing one lineage
+  (shipinfer-23 = pre-restart, shipinfer-f6 = continuation). A live /tmp/p4 write collision
+  was caught (f6's resumed coder vs 23's session), the coder stopped, and a QUEUE protocol
+  went to the top of TASKS.md: one open PR, announce before opening, partitioned lanes
+  (23: P4/P-lanes; f6: C-lanes/model_repository/bench).
+- **P4-PR2 completed by 23**: #48 (the RTSP loopback pixel — the oldest owed evidence),
+  then #49/#50/#51 CI fixes; the kernels job passed for the first time in its existence;
+  main fully green, 8/8 acceptance.
+- **f6's C-lane answers**: C1c — fleet floor 95.9 img/s/3 GPUs; segmenter's single
+  instance was the binding stage; count:2 → 143.8 (+50%), shipped as #47 with the
+  measurement in the comment (and the expand()-divides caveat from its review). C1a —
+  closed with all three tiers run; algo tier: crop 52.3 ms/frame > detect 45.8, pools
+  buying 8.4×. C1b — the 8.4× ROOT-CAUSED as a GIL convoy (shipvision bindings never
+  release the GIL; Little's law pins ρ≈1.0) and CONFIRMED by a workers=1 discriminator
+  (crop 52.1→8.5 ms, serial 140.5→51.6 ms); the fix collides with V70 and awaits the
+  operator; true serial DAG cost 51.6 ms/frame.
+- **V129 pause**: the operator questioned the whole architecture (server/ tangled,
+  topology-vs-command, their 4-point model). 23 restated as-built (converging
+  independently with f6's three facts), and the discussion ran V130–V136 live. V132
+  DECIDED: `topology` = the declared element chain, `runner` = the execution mode
+  (inprocess/fleet/deepstream); track/MTMC are chain elements yet shardable; KServe stays
+  as the engine's second face. All new PRs held until the discussion resolves.
+
+## 27 Aug (late morning) — the review loop as a grinder: #39–#44, fourteen merges on the day
+
+- **#39 (P4-NB3)**: four rounds. The reviewer reverted my fix under ASan to validate it,
+  then proved my regression couldn't tell fix from no-fix in the plain build (their
+  weak_ptr witness applied; flip-proven both ways); round 2 blocked ONLY on a ledger claim
+  that wasn't in the diff — the rule's letter, enforced; round 3 found the guard's own
+  docstring arguing for its defeat (measured, not asserted). Merged 06:03.
+- **#40 (ring hygiene R1+R2)**: magic lands last (the fourth birth window unobservable);
+  the mesh names absent vs stuck-mid-birth. Merged 06:17 round 1.
+- **#41 (ingest parity)**: Python re-check (deadly order driven by a monkeypatched start),
+  remove_camera returns the answer, self-stop reads the atomic fate (flip 191/1). Merged
+  06:34 round 1. The P4 review-debt ledger emptied.
+- **#42→#43→#44 (the DetectNet chain)**: each round's findings real — the EfficientNMS
+  quartet slipping the arity gate; my body claiming a pin that didn't exist (reviewer
+  measured !=2→<2 green); then MY tightened gate false-accepting swapped-role and
+  cov_bbox pairs (their table reproduced as 2 test failures); then V86 re-sourcing that
+  CHANGED the answer — NVIDIA's own DetectNet_v2 sample uses NMS+iou 0.5, not DBSCAN.
+  Merged 06:42 / 06:53 / 07:19. Chain closed; the take-or-leave trio ledgered (T4-NB1c).
+- Process rules that had to be relearned got memory entries: body-before-push (review
+  reads the body at trigger time — bit twice), commit-before-flip-proof (a checkout
+  restore ate an uncommitted fix once), grep the sentence's FAMILY across code+tests+body.
+- P4-PR2 (the GStreamer C++ source) exploration launched.
 
 ## 27 Aug (morning) — five merges, the CI-health sweep, V124a phase 1 landed
 

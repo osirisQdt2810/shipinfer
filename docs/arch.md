@@ -37,12 +37,19 @@ elements:
   detect:    {impl: pool, model: ship_detector}
   segment:   {impl: pool, model: ship_segmenter, when: class == ship}
   embed_ship:   {impl: pool, model: ship_embedder,   after: segment}
-  embed_person: {impl: pool, model: person_embedder, when: class == person}
+  embed_person: {impl: pool, model: person_embedder, when: class == person, after: detect}
   recognize: {impl: pool, model: ship_recognizer, after: embed_ship}
-  track:     {impl: shipvision, per: camera}        # stateful — pinned to the home shard
+  track:     {impl: shipvision, per: camera, after: [recognize, embed_person]}  # stateful — home shard
   mtmc:      {impl: shipvision, scope: global}
   output:    {impl: kafka}
 ```
+
+Two rules make this file unambiguous: an element's predecessor is the **previously declared
+slot** unless `after:` says otherwise, and every element must reach `output`. The two
+`after:` lines on `embed_person` and `track` are the fork and the rejoin — without them the
+person branch would end in `embed_person` and the loader refuses the chain
+(`ChainStructureError`). `topology/ship_person.yaml` in the repository is this file, and a
+test loads its exact wiring.
 
 **Runner** — *how* a topology executes. Three runners, one chain definition:
 
@@ -324,7 +331,7 @@ callers who bring their own tensors (V132 kept it deliberately).
 
 ---
 
-## 7. Threading and the GIL contract (V70 revised → V140)
+## 7. Threading and the GIL contract (V70, reaffirmed by V142)
 
 The old contract said worker threads spend their time inside TensorRT or CUDA memcpy,
 "both of which release the GIL". Measurement (C1b) proved this false for our own kernel
@@ -333,21 +340,45 @@ sync and D2H — a **GIL convoy** that serialized every worker (52 ms/frame appa
 cost that is 8.5 ms real; true chain cost 51.6 ms/frame; extra workers bought queueing,
 not throughput).
 
-**The revised law (V140, operator's decision):** shipvision releases the GIL around the
-pure-native section of every binding, **and** moves to per-thread CUDA streams *in the
-same change* — stream-0 co-tenancy was survivable only because the convoy hid it; release
-the lock without splitting streams and the serializer just moves into CUDA. The
-architecture test flips from "never touch the GIL" to "release around native, never
-acquire". VRAM-first parallelism (§3–§4) is meaningless without this; it lands first.
+**The law (V70, reaffirmed by V142 — operator's decision):** shipvision contains **no GIL
+code, ever**. It delivers algorithms; the most it may hold is a `std::mutex` around a
+stateful `tracker.track()`, which it already does. A proposal to release the GIL inside
+shipvision (V140 (i)) was revoked the same day it was made, before any code landed; its
+architecture test — "nothing in `csrc/` names `gil_scoped_*`" — stands. **Slowness is
+accepted over GIL code in the library.**
+
+The convoy is therefore a *server-side* problem, and the server has three levers, none of
+them in shipvision:
+
+1. **Fewer, fatter native calls per frame** — an element submits one batch, not one call
+   per crop; the fair-lane worker (§5③) already walks a whole frame at a time.
+2. **The hot plane in C++ under shipinfer's own `csrc/` (V34, ADR-014)** — where the call
+   into the native kernels is made from C++, no Python frame holds the lock across it. The
+   ingest plane already lives there (#33); the decode→preprocess→submit path of a shard is
+   the next candidate when the measurement says the convoy binds. Whether `csrc/` links
+   shipvision's C++ core directly or crosses its Python surface is a phase-D decision, made
+   on a measurement.
+3. **Per-worker streams, passed from the server** — `NativeImageOps(stream=…)` already
+   accepts a raw stream handle and forwards it to every op; shipinfer today passes nothing,
+   so every worker shares the legacy stream. Passing the worker's `Stream.handle` is one
+   line in `runtime/ops/__init__.py` and is not GIL code.
+
+VRAM-first parallelism (§3–§4) rests on 2 and 3; it does not need the library to change.
 
 ---
 
 ## 8. Formats and caps
 
-Every element declares input/output caps: `nv12@gpu` (default end-to-end), `bgr@cpu`
-(fallback), `tensor@gpu`. The chain loader validates adjacent caps at load time and
-inserts explicit converts only where declared caps disagree — a chain that would silently
-download to CPU refuses to load instead. The kernels for the default path
+Every element declares input/output caps as `<format>@<location>`: `nv12@gpu` (default
+end-to-end), `bgr@cpu` (fallback), `tensor@gpu`, and `meta@cpu` for the result plane that
+`track`, `mtmc` and `output` consume. `location` is closed to `gpu | cpu`; `format` is an
+open lowercase token. The chain loader validates adjacent caps at load time: an edge is
+compatible when producer and consumer share a format and a location (a `*` wildcard matches
+either half but **never bridges `gpu` and `cpu`**), and the first compatible pair in
+declaration order wins — so declaring `nv12@gpu` first is how an element says "VRAM
+preferred". A chain that would silently download to CPU refuses to load with a
+`CapsMismatchError` that names both sides; converts are never inserted implicitly — they
+are spelled as elements (A1 decision). The kernels for the default path
 (`nv12_letterbox`, device-resident crop, `letterbox_into`) already exist in shipvision.
 
 ---
@@ -389,7 +420,7 @@ Nothing below rewrites an algorithm; the work is moving proven parts under the n
 
 | Phase | Delivers | Reuses |
 |---|---|---|
-| **0** | shipvision GIL release + per-thread streams (§7) — the prerequisite | C1b dossier, arch test update |
+| **0** | *dropped (V142)* — no shipvision change; the server passes its worker stream to `NativeImageOps(stream=)` (§7 lever 3) when phase B wires the runners | the existing `stream` parameter |
 | **A** | skeleton: `topology/` (Element ABC, caps, YAML loader), `runners/inprocess`, `engine/` + `api/` split out of `server/`, gRPC proto + launch supervisor; argv-command deleted | pool, scheduler, stages, ingest as-is |
 | **B** | `/streams` API + round-robin add/remove over gRPC | ingest add/remove_camera (built, both planes) |
 | **C** | track + mtmc + recognize elements in-chain | shipvision mot/mtmc |
@@ -448,5 +479,7 @@ full-DAG floor **48 img/s per GPU** with segmenter×2 (#47: 96 → 143.8 img/s a
 | Cross-GPU VRAM access allowed (perf+accuracy the only criteria); VRAM-first sharing via CUDA-IPC slab handles + tickets; RAM demoted to fallback; decode default = gstreamer→NV12 in VRAM | V137 |
 | Two-tier spill (frame + crop); imbalance-prone stages: embedding, detect, segment | V138 |
 | Production nodes all-NVLink; probe kept | V139 |
-| GIL fix inside shipvision with per-thread streams (V70 revised); this document; top-down re-implementation; gRPC control plane, argv-command deleted | V140 |
+| ~~GIL fix inside shipvision with per-thread streams~~ (revoked by V142); this document; top-down re-implementation; gRPC control plane, argv-command deleted | V140 |
+| **No GIL code in shipvision, ever**; it only delivers algorithms; at most a mutex around `tracker.track()`; slowness accepted — V70 stands, V140 (i) revoked | V142 |
+| `topology/` package landed: Element ABC, caps, registry per kind, chain loader; default predecessor = declaration order, `after` overrides; no implicit converts | A1 |
 | ADR-016 (this PR): supersedes ADR-015's payload transport, amends ADR-002's payload clauses, K-neighbourhood context budget, handle lifecycle | `.claude/DECISIONS.md` |
