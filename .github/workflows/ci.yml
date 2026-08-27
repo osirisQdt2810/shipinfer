@@ -100,7 +100,13 @@ jobs:
       - name: Run them
         run: |
           set -e
-          for binary in csrc/build/test_scheduling csrc/build/test_server csrc/build/test_containment csrc/build/test_ingest; do
+          # Run every offline binary the build produced rather than a fixed name list: the
+          # csrc/ tree mirrors the Python packages (arch.md §9), so a package rename renames
+          # its test binary too, and a hard-coded name would fail main the moment it lands.
+          # The count guard keeps a build that produced nothing from passing silently.
+          binaries=(csrc/build/test_*)
+          test "${#binaries[@]}" -ge 4 || { echo "expected at least 4 offline binaries, found ${#binaries[@]}"; exit 1; }
+          for binary in "${binaries[@]}"; do
             echo "== $binary"
             "$binary"
           done
