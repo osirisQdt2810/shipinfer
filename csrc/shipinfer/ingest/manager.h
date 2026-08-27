@@ -70,6 +70,11 @@ namespace shipinfer {
         // Start one camera. Throws ConfigError if a camera with this id is already running:
         // silently replacing it would leave two threads pulling one stream and two frame
         // counters producing duplicate tags.
+        //
+        // Safe against a concurrent `stop()`/`remove_camera`: the actor is started outside the
+        // lock (see `actors_`), then the map is re-checked — if the fleet forgot the camera in
+        // the window, the freshly started actor is stopped here and ServerStateError says so,
+        // rather than leaving a camera running that no shutdown will ever reach.
         CameraActor& add_camera(const IngestConfig& config);
 
         // Stop and forget one camera. Throws ConfigError naming what *is* running, because a
@@ -100,13 +105,20 @@ namespace shipinfer {
         FrameSink& sink_;
         SourceFactory factory_;
         mutable std::mutex mutex_;
-        std::map<std::string, std::unique_ptr<CameraActor>> actors_;
+        // `shared_ptr`, not `unique_ptr`, and the difference is lifetime under concurrency:
+        // `add_camera` starts the actor outside the lock (a thread launch under the fleet's
+        // lock would serialise every health read against the scheduler), and `snapshot` reads
+        // `health()` outside it for the same reason — so a concurrent `stop`/`remove_camera`
+        // can strip the map while another thread still holds the actor. The map drops its
+        // reference; the thread's own reference keeps the actor alive until it is done.
+        std::map<std::string, std::shared_ptr<CameraActor>> actors_;
         // Actors whose thread had to be detached. They are kept — not destroyed — because the
         // detached thread is still using `this`, and freeing it under a live thread is a
         // use-after-free on the shutdown path. It is a deliberate, bounded leak: an abandoned
         // thread is already a bug being contained, and the containment must not be worse than
-        // the bug.
-        std::vector<std::unique_ptr<CameraActor>> abandoned_;
+        // the bug. The destructor makes the leak literal — it releases these rather than
+        // letting `~vector` free memory a live thread is standing on.
+        std::vector<std::shared_ptr<CameraActor>> abandoned_;
         bool started_ = false;
     };
 

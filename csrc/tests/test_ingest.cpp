@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -1347,6 +1348,133 @@ namespace {
               "and after stop() no actor is left running");
     }
 
+    // =====================================================================================
+    // M. The manager's lifecycle races (#33 round 1)
+    // =====================================================================================
+
+    void test_a_directly_built_actor_names_the_camera_in_its_refusal() {
+        FakeScript script;
+        CountingSink sink;
+        IngestConfig config = a_camera("cam7");
+        config.reconnect_factor = 1.0;
+        bool named = false;
+        try {
+            CameraActor actor(config, sink, scripted(script));
+            check(false, "a reconnect_factor of 1.0 must refuse at construction");
+        } catch (const ConfigError& error) {
+            named = std::string(error.what()).find("cam7") != std::string::npos;
+        }
+        check(named,
+              "and the refusal names the camera — the backoff's own anonymous \"factor must "
+              "be > 1\" from a fifty-camera fleet is a search where this is an answer");
+    }
+
+    void test_a_camera_added_during_stop_never_keeps_running() {
+        // `add_camera` starts its actor outside the lock, so a concurrent stop() can strip
+        // the map in the window — and the stop request it sent was aimed at a thread that
+        // did not exist yet, which start() then cleared. The invariant under every
+        // interleaving: a successful add is a *tracked* camera. The failure this pins was
+        // worse than a leak: a camera running behind a manager that had forgotten it, with
+        // no shutdown left that could ever reach it.
+        int orphans = 0;
+        for (int round = 0; round < 100; ++round) {
+            FakeScript script;
+            script.on_read = [](int) { return 1; };
+            CountingSink sink;
+            IngestManager manager({}, sink, scripted(script));
+            std::atomic<bool> added{false};
+            std::thread adder([&] {
+                try {
+                    manager.add_camera(a_camera("cam0"));
+                    added.store(true);
+                } catch (const ServerStateError&) {
+                    // the documented refusal: the fleet forgot the camera mid-add
+                }
+            });
+            if (round % 2 == 0) std::this_thread::yield();
+            manager.stop(2000ms);
+            adder.join();
+            if (added.load() && !manager.contains("cam0")) ++orphans;
+            manager.stop(2000ms);
+        }
+        check(orphans == 0,
+              "100 add-vs-stop races produced " + std::to_string(orphans) +
+                  " camera(s) running behind a manager that forgot them (want 0: a "
+                  "successful add is tracked, an untracked add throws)");
+    }
+
+    void test_the_managers_death_leaks_the_abandoned_rather_than_freeing_them() {
+        // The containment invariant, at the moment it is needed: an abandoned actor's
+        // detached thread is still standing on the actor's members when the manager dies.
+        // Static locals because the leaked thread also touches the script and the sink
+        // after this function would otherwise have destroyed them.
+        static FakeScript script;
+        static CountingSink sink;
+        static std::promise<void> gate;
+        static std::shared_future<void> opened = gate.get_future().share();
+        script.on_read = [](int index) {
+            if (index == 0) opened.wait();
+            return 1;
+        };
+        {
+            IngestManager manager({}, sink, scripted(script));
+            manager.add_camera(a_camera("cam0"));
+            for (int i = 0; i < 400 && script.reads.load() == 0; ++i)
+                std::this_thread::sleep_for(5ms);
+            check(script.reads.load() >= 1, "the camera is parked inside its decode read");
+            manager.stop(100ms);
+            check(manager.size() == 0, "the abandoned camera is forgotten by the fleet");
+        }  // ~IngestManager — the leak under test: ~vector must NOT free the actor
+        gate.set_value();
+        bool resumed = false;
+        for (int i = 0; i < 600; ++i) {
+            if (sink.total() >= 1 || script.closes.load() >= 1) {
+                resumed = true;
+                break;
+            }
+            std::this_thread::sleep_for(5ms);
+        }
+        check(resumed,
+              "the detached thread resumed AFTER the manager died and still published its "
+              "frame and closed its source — i.e. the actor it stands on was leaked alive, "
+              "not freed under it");
+        // Give the thread a beat to leave run() before the harness moves on.
+        for (int i = 0; i < 600 && script.closes.load() == 0; ++i)
+            std::this_thread::sleep_for(5ms);
+    }
+
+    void test_stop_charges_one_deadline_to_the_fleet_not_one_per_camera() {
+        // Five cameras all hung in a decoder read: the 300 ms budget is the *fleet's*, so
+        // the shutdown costs one deadline, not five in sequence — the header's "one read
+        // timeout rather than fifty" made literal.
+        static FakeScript script;
+        static CountingSink sink;
+        static std::promise<void> gate;
+        static std::shared_future<void> opened = gate.get_future().share();
+        script.on_read = [](int) {
+            opened.wait();
+            return 1;
+        };
+        std::vector<IngestConfig> cameras;
+        for (int i = 0; i < 5; ++i) cameras.push_back(a_camera("cam" + std::to_string(i)));
+        {
+            IngestManager manager(cameras, sink, scripted(script));
+            manager.start();
+            for (int i = 0; i < 400 && script.reads.load() < 5; ++i)
+                std::this_thread::sleep_for(5ms);
+            check(script.reads.load() >= 5, "all five cameras are parked inside a read");
+            const auto start = Clock::now();
+            manager.stop(300ms);
+            const double waited = ms_since(start);
+            check(waited < 1200.0, "five hung cameras cost one 300 ms deadline (" +
+                                       std::to_string(waited) +
+                                       " ms), not five in sequence (1500+ ms)");
+        }
+        gate.set_value();
+        for (int i = 0; i < 600 && script.closes.load() < 5; ++i)
+            std::this_thread::sleep_for(5ms);
+    }
+
 }  // namespace
 
 int main() {
@@ -1393,6 +1521,11 @@ int main() {
     test_wait_ready_returns_once_every_camera_delivers();
 
     test_counting_sink_and_a_quiet_shutdown();
+
+    test_a_directly_built_actor_names_the_camera_in_its_refusal();
+    test_a_camera_added_during_stop_never_keeps_running();
+    test_the_managers_death_leaks_the_abandoned_rather_than_freeing_them();
+    test_stop_charges_one_deadline_to_the_fleet_not_one_per_camera();
 
     std::printf("%d checks, %d failure(s), %d skipped\n", checks, failures, skips);
     return failures == 0 ? 0 : 1;

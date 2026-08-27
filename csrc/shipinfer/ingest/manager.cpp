@@ -15,6 +15,14 @@ namespace shipinfer {
 
     IngestManager::~IngestManager() {
         stop();
+        // Deliberate leak, and the point of `abandoned_` (see the header): each of these holds
+        // a detached thread that is still standing on the actor's members. Letting `~vector`
+        // free them here would be a use-after-free at the exact moment the containment is
+        // needed — so the references are parked on the heap instead, keeping the refcount
+        // pinned for the life of the process.
+        for (auto& actor : abandoned_) {
+            new std::shared_ptr<CameraActor>(std::move(actor));
+        }
     }
 
     std::vector<IngestConfig> IngestManager::configured_cameras() const {
@@ -47,7 +55,7 @@ namespace shipinfer {
     }
 
     void IngestManager::stop(std::chrono::milliseconds timeout) {
-        std::vector<std::unique_ptr<CameraActor>> actors;
+        std::vector<std::shared_ptr<CameraActor>> actors;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             for (auto& [id, actor] : actors_) actors.push_back(std::move(actor));
@@ -55,9 +63,16 @@ namespace shipinfer {
         }
         // Pass one: signal everybody. Pass two: wait for everybody. See the header for the
         // shutdown this ordering fixed.
+        //
+        // One deadline for the whole fleet, not one per actor: the timeout exists for the
+        // camera that genuinely hangs, and charging it per actor would turn one stuck decoder
+        // into fifty consecutive waits — the 250 s shutdown the header promises not to have.
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
         for (const auto& actor : actors) actor->request_stop();
         for (auto& actor : actors) {
-            if (!actor->stop(timeout)) {
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+            if (!actor->stop(std::max(remaining, std::chrono::milliseconds(0)))) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 abandoned_.push_back(std::move(actor));
             }
@@ -68,26 +83,44 @@ namespace shipinfer {
 
     CameraActor& IngestManager::add_camera(const IngestConfig& config) {
         config.validate();
-        CameraActor* actor = nullptr;
+        std::shared_ptr<CameraActor> actor;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (actors_.count(config.camera_id) != 0) {
                 throw ConfigError("camera '" + config.camera_id +
                                   "' is already running; remove it before adding it again");
             }
-            auto owned = std::make_unique<CameraActor>(config, sink_, factory_);
-            actor = owned.get();
-            actors_[config.camera_id] = std::move(owned);
+            actor = std::make_shared<CameraActor>(config, sink_, factory_);
+            actors_[config.camera_id] = actor;
         }
         // Started outside the lock: `start()` spawns a thread, and holding the fleet's lock
-        // across a thread launch makes every health read wait on the scheduler.
+        // across a thread launch makes every health read wait on the scheduler. The local
+        // `shared_ptr` is what makes that safe — a concurrent `stop()` can strip the map in
+        // this window, and without it the actor would be freed under our feet.
         actor->start();
+        {
+            // The re-check. If the fleet forgot this camera while it was starting — a
+            // `stop()` or `remove_camera` landed in the window — its stop request was aimed
+            // at a thread that did not exist yet (`start()` clears the signal), so honour it
+            // here: stop the actor we just started and say what happened, rather than return
+            // a camera that keeps running after the manager has forgotten it.
+            std::unique_lock<std::mutex> lock(mutex_);
+            auto found = actors_.find(config.camera_id);
+            if (found == actors_.end() || found->second != actor) {
+                lock.unlock();
+                actor->stop();
+                throw ServerStateError("camera '" + config.camera_id +
+                                       "' was removed while it was starting; the fleet is "
+                                       "stopping or the camera was removed — add it again "
+                                       "once the manager is running");
+            }
+        }
         return *actor;
     }
 
     void IngestManager::remove_camera(const std::string& camera_id,
                                       std::chrono::milliseconds timeout) {
-        std::unique_ptr<CameraActor> actor;
+        std::shared_ptr<CameraActor> actor;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             auto found = actors_.find(camera_id);
@@ -140,15 +173,17 @@ namespace shipinfer {
     std::vector<CameraHealth> IngestManager::snapshot() const {
         // The actors are collected under the lock and read outside it: `CameraActor::health`
         // takes the actor's own lock, and holding the fleet's lock across fifty of those would
-        // serialise a health endpoint against every camera in the fleet.
-        std::vector<CameraActor*> actors;
+        // serialise a health endpoint against every camera in the fleet. The copies are
+        // `shared_ptr`, not raw pointers, so a `remove_camera` that lands mid-read cannot free
+        // an actor this loop is still asking about.
+        std::vector<std::shared_ptr<CameraActor>> actors;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            for (const auto& [id, actor] : actors_) actors.push_back(actor.get());
+            for (const auto& [id, actor] : actors_) actors.push_back(actor);
         }
         std::vector<CameraHealth> out;
         out.reserve(actors.size());
-        for (CameraActor* actor : actors) out.push_back(actor->health());
+        for (const auto& actor : actors) out.push_back(actor->health());
         return out;
     }
 

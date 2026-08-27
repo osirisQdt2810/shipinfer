@@ -28,16 +28,29 @@ namespace shipinfer {
 
     }  // namespace
 
+    namespace {
+
+        // Validation runs *before* the backoff is built from these numbers: the backoff's own
+        // constructor also checks them, but it cannot name the camera, and "backoff factor
+        // must be > 1" from a fifty-camera fleet is a search where "camera 'cam7':
+        // reconnect_factor must be > 1" is an answer. The manager validates earlier still —
+        // this covers direct construction, which is public API.
+        const IngestConfig& validated(const IngestConfig& config) {
+            config.validate();
+            return config;
+        }
+
+    }  // namespace
+
     CameraActor::CameraActor(IngestConfig config, FrameSink& sink, SourceFactory factory,
                              WaitFn wait)
         : config_(std::move(config)),
           sink_(sink),
           factory_(std::move(factory)),
           wait_(std::move(wait)),
-          counter_(config_.camera_id, config_.first_frame_id),
+          counter_(validated(config_).camera_id, config_.first_frame_id),
           backoff_(config_.reconnect_initial_ms / 1000.0, config_.reconnect_max_ms / 1000.0,
                    config_.reconnect_factor, config_.reconnect_jitter) {
-        config_.validate();
         if (!factory_) {
             factory_ = [](const IngestConfig& config, FrameCounter& counter, StopSignal& stop) {
                 return create_source(config, counter, stop);
