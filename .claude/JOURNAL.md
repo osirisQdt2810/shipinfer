@@ -1,5 +1,93 @@
 # Journal
 
+## 2026-08-27 (evening) — A2 begins: PR-0…PR-2 landed; main's CI had been silent after every auto-merge
+
+- **A2 PR-0 (#54), PR-0b (#55), PR-0c (#56):** workflow-only prerequisites. #55's glob for the
+  C++ offline binaries also matched the `.o` files and broke main (`Permission denied`) — my
+  error; #56 fixed it after rehearsing the exact step against a fake build dir (memory rule 8).
+- **PR-1 (#57, `engine/`):** 74 files, 38 renames, Python + csrc mirror in one PR, silent shim;
+  internal review found a vacuous shim test and a stale CLAUDE.md tree before opening; CI
+  review APPROVE round 1, and it recorded that a source-first/tests-second split would have
+  left the suite red (seven tests import engine submodules the shim does not re-export).
+- **Found: a push made with GITHUB_TOKEN creates no workflow run**, so #52, #53 and #57 — every
+  PR the pipeline merged itself — landed with no main CI at all (cpp-offline, gst lane, kernels
+  never ran). Only hand merges triggered it. **#58** adds `workflow_dispatch` to ci.yml and has
+  the Auto-merge job dispatch it; a hand dispatch for `7706b15` was green on all eight jobs and
+  ran `test_engine` (27 checks). The self-dispatch half is checked on #59.
+- **PR-2 (#59, `api/`):** open. No shim (callers edited); `api` is the only layer allowed to name
+  fastapi — every other layer got a row, and a new test asserts every package on disk has one.
+- **PR-4 (#60, `launch/`):** merged 16:37, APPROVE round 1 — the supervisor moved byte-for-byte
+  with the #33–#41 invariants' tests; its new arch test catches a top-level `import torch` the
+  static hook is blind to.
+- **PR-3 (#61, `runners/`):** open. Internal review found two real blockers — the `pool` element
+  relabelled its payload's cap (`produces` now `*@*`, resolved from the inbound edge) and an
+  abandoned worker's in-flight future never resolved (now failed at the stop deadline) — plus
+  seven nits (skip-and-continue was untested on a linear chain; expiry re-check and reverse close
+  untested; per-camera counters; donor map into the loader; `per:`/`scope:` and the batch ≤ workers
+  bound named). Every fix revert-checked.
+- **PR-3 merged (#61, 17:33)** after a second CI round: the in-flight registry held one item per
+  worker while a worker holds a whole `frames_per_wakeup` batch — fixed to hold the remainder;
+  settings now reach the `pool` elements; expiry re-checked per model element; no unnegotiated-cap
+  fallback. Round-2 should-fixes (typed errors flattened by the walk; `_inflight` cross-write after
+  restart; stats under-reporting queue losses) → PR-3b in build.
+- **PR-5 (gRPC contract)** built on #61's tree; internal review found the grpcio floor (1.60) below
+  the committed stub's requirement (1.71.2) and a double snapshot in `Health`; fix pass running.
+- **PR-3b (#62) merged 18:33** after two rounds: round 1 found the deeper form of the restart bug
+  (a stale abandoned worker read the new cycle's stop event and queue) — fixed by handing every piece
+  of per-cycle state to the worker thread as arguments. Its approval left four observations → PR-3c
+  in build (stale worker breaks out of its batch; `in_flight` after an abandoned stop; a separate
+  backpressure counter so the stats identity holds; one `Args:` heading).
+- **PR-5 (#63, gRPC control plane)** opened 18:4x on #62's main: 2017 passed; the internal review's
+  two blockers (grpcio floor below the stubs' requirement; `Health` double snapshot) fixed first.
+- **PR-5 (#63) merged 19:20** after two CI rounds: round 1 found `stats()` importing protobuf
+  before the typed path (the venv and CI both carry the extra, the mask fixture masked only `grpc`
+  — memory rule 9) and `Stop`'s idempotence check outside the lock; fixed with one guarded door.
+- **PR-3c (#64) merged 19:38**, APPROVE round 1 (stale worker breaks out of its batch; `in_flight`
+  after an abandoned stop; `items_backpressure`; one `Args:`).
+- **PR-6** built (server/ and the argv mechanism gone; child entry `python -m shipinfer.cli.shard
+  --shard-id N --control-port P`; `ShardService` with a `RunnerFactory`); internal review BLOCKING
+  x3 (stale base reverting #63's fixes; abandonment count zeroed on a failed start; FEATURE_LOG entry
+  overwritten) + 11 nits; fix pass running. Split: PR-6a = the two core/ renames (a real behaviour
+  change hides in it: the spill gate drops its `kind == "service"` half), PR-6b = the rest.
+- **PR-6a (#65)** opened ~20:0x (the two `core/` renames + the deliberately narrowed spill gate);
+  CI round 1 found operator-facing error messages still naming the deleted `topology.deepstream.*`
+  key and the gate change untested — both fixed (`b740666`), the service-tier design doc frozen
+  as the pre-A2 record; round 2 under review.
+- **PR-6a (#65) merged 20:35** (round 2). **PR-6b (#66) opened ~20:5x**: `server/` and the argv
+  mechanism deleted, the fleet over gRPC, `shipinfer run`, the two-flag shard entry — the last A2
+  slice. Phase B planning started on its tree.
+- **PR-6b (#66) merged 21:24 — phase A2 complete.** Round 1 caught a real regression: `shipinfer run`
+  asked the driver for GPUs before the settings existed and overrode `SHIPINFER_DEVICES__VISIBLE_GPUS`
+  at flag priority (8 shards instead of 2); fixed in the deleted command's shape. From #52 (the
+  design of record) to #66: `server/` and the argv mechanism are gone, the fleet runs over gRPC, the
+  shard child takes exactly `--shard-id --control-port`, `topology/`, `engine/`, `api/`, `launch/`,
+  `runners/` are the packages arch.md §9 names. Every PR went through the CI review loop; nine of the
+  fifteen needed a second round, each for a real finding.
+- **Phase B** planned and started: B1 (runner owns cameras, `--inputs`) and B2 (per-camera queue
+  attribution, both planes) in build.
+- Main CI dispatch after auto-merge verified on #59–#66.
+
+## 2026-08-27 (late afternoon) — V142 reverses the GIL plan; A1 `topology/` lands as #53; A2 planned as six PRs
+
+- **V142:** the operator revoked V140 (i) the same day — no GIL code in shipvision, ever; it
+  delivers algorithms, at most a mutex around `tracker.track()`; slowness accepted. The Phase-0
+  coder was stopped before any commit; worktree discarded; shipvision `main` untouched. arch.md
+  §7 rewritten to the server-side answer (fewer fatter calls; the hot plane in `csrc/`, V34;
+  per-worker streams passed from the server — `NativeImageOps(stream=)` already exists).
+- **#53 (A1 `topology/`):** Element ABC + caps + registry per kind + chain loader, offline-only,
+  ADR-017. Internal review before opening found three real blockers (fixture refused by its own
+  loader; wildcard passthrough laundering a gpu→cpu download; `register_lazy` bypassing the kind
+  check), all fixed with revert checks. CI review round 1 found a fourth — under skip-and-continue
+  the unconditional `embed_ship`/`recognize` ran on every person crop — fixed the fixture way
+  (every element on a class branch guards itself) with person/ship walk tests. Round 2 pushed.
+- **A2 planned as six PRs** (engine/ → api/ → runners/+inprocess+pool → launch/ → gRPC contract
+  → fleet-over-gRPC + argv deletion), with PR-0 a workflows-only prompt fix. Key traps: the
+  `filterwarnings` error rule vs shims/pb2; `shared_by`/`share_rank` must ride the RPC or two
+  shards on one GPU double-load instances silently; `CUDA_VISIBLE_DEVICES` is the one thing that
+  stays in the spawn env.
+- Housekeeping: worktrees of merged PRs removed; only `/tmp/mps` (ledger), `/tmp/a1` (#53),
+  `/tmp/pr0`, `/tmp/e1` remain.
+
 ## 2026-08-27 (afternoon) — #52 round 2: ADR-016, the committed link probe, C_ctx measured
 
 - **Merged 12:53 UTC after round 3.** Round 3's blocker was mine: the cited probe logs were
