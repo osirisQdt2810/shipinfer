@@ -99,7 +99,8 @@ def run(
 
     Raises:
         ConfigurationError: an unknown runner, an invalid chain, a runner that manages no
-            cameras given ``--inputs``, or an input the runner refuses.
+            cameras given ``--inputs``, an input the runner refuses, or ``--http`` on a host
+            where the ``server`` extra was never installed.
     """
     from shipinfer.runners import build_runner
     from shipinfer.runtime.containment import require_container
@@ -155,6 +156,17 @@ def run(
     # *placement* still happens after `start()` -- a camera is placed on a running runner --
     # so the two halves of the check sit either side of it deliberately.
     refuse_if_it_manages_no_cameras(built, cameras)
+    if http:
+        # The same argument one flag further out, and the same place to make it: whether this
+        # host can serve HTTP at all is a fact about the host, not about this execution. Asked
+        # inside `_wait` -- after `built.start()` -- it cost a fleet sixteen spawned shards, a
+        # placed camera set and a full shutdown to learn that `pip install "shipinfer[server]"`
+        # had never been run. Imported here rather than at module scope for `_wait`'s reason:
+        # `shipinfer.api` reaches the engine, and `shipinfer run` without `--http` must not pay
+        # for it.
+        from shipinfer.api import require_server_extra
+
+        require_server_extra()
     configured = len(cameras) - len(from_inputs)
     if configured:
         out.print(f"cameras: {configured} configured ({cameras[0].camera_id} ...)")
@@ -392,7 +404,10 @@ def _wait(
     Raises:
         ShardExitedError: a shard exited; the fleet is already stopped.
         ConfigurationError: ``--http`` was asked for and FastAPI or uvicorn is not installed.
-            Typed and naming the extra, raised before the supervise loop starts.
+            Typed and naming the extra, raised before the supervise loop starts. This is the
+            last line of defence and not where an operator meets it: :func:`run` probes both
+            imports before it starts anything, so a real ``shipinfer run --http`` refuses with
+            no shard spawned. It stays here for a caller that reached ``_wait`` directly.
     """
     from shipinfer.launch import forward_signals
 

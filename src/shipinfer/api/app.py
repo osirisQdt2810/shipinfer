@@ -11,11 +11,44 @@ from shipinfer.core.errors import ConfigurationError
 from shipinfer.core.logging import get_logger
 from shipinfer.engine.pool import InferenceServer
 
-__all__ = ["BackgroundHttpServer", "create_app", "serve_http"]
+__all__ = ["BackgroundHttpServer", "create_app", "require_server_extra", "serve_http"]
 
 # The logger name stays "server.api" on purpose: an operator's log filter is behaviour,
 # and this move promises none changed. It is retargeted when server/ is deleted (A2 PR-6).
 _LOG = get_logger("api")
+
+#: One message for the one missing thing, so a host that installed neither is told about
+#: whichever import failed first and always about the same extra.
+_MISSING = 'the HTTP API needs {name}: pip install "shipinfer[server]"'
+
+
+def require_server_extra() -> None:
+    """Refuse now if FastAPI or uvicorn is missing. Builds nothing, binds nothing.
+
+    For the composition root, which learns whether it can serve HTTP *before* it starts
+    anything: ``shipinfer run --http`` on a host without the extra used to get as far as
+    sixteen shard processes and a placed camera set, and only then failed on the import
+    inside :class:`BackgroundHttpServer` -- so the operator paid a full start-up and a full
+    shutdown to be told about a ``pip install``. The refusal is a *fact about the host*, known
+    as soon as the flag is read, which is the same argument
+    ``cli/commands/run.py::refuse_if_it_manages_no_cameras`` makes one line above the call.
+
+    It does not replace the checks in :func:`create_app` and :class:`BackgroundHttpServer`.
+    Those are where the import actually happens and they are reachable from a library caller
+    who never went through the CLI; this is the early word, and a probe that let them be
+    deleted would be a probe every other entry point has to remember to call.
+
+    Raises:
+        ConfigurationError: either import failed. Typed and naming the extra, never an
+            ``ImportError``: the caller asked for something this host is not set up to do.
+    """
+    import importlib
+
+    for name, shown in (("fastapi", "FastAPI"), ("uvicorn", "uvicorn")):
+        try:
+            importlib.import_module(name)
+        except ImportError as exc:
+            raise ConfigurationError(_MISSING.format(name=shown)) from exc
 
 
 def create_app(
@@ -44,9 +77,7 @@ def create_app(
     try:
         from fastapi import FastAPI
     except ImportError as exc:
-        raise ConfigurationError(
-            'the HTTP API needs FastAPI: pip install "shipinfer[server]"'
-        ) from exc
+        raise ConfigurationError(_MISSING.format(name="FastAPI")) from exc
     if server is None and cameras is None:
         raise ConfigurationError(
             "create_app was given neither an engine nor a camera controller, so the "
@@ -74,9 +105,7 @@ def serve_http(server: InferenceServer, *, host: str = "0.0.0.0", port: int = 80
     try:
         import uvicorn
     except ImportError as exc:
-        raise ConfigurationError(
-            'the HTTP API needs uvicorn: pip install "shipinfer[server]"'
-        ) from exc
+        raise ConfigurationError(_MISSING.format(name="uvicorn")) from exc
 
     _LOG.info("serving KServe v2 on http://%s:%d (docs at /docs)", host, port)
     uvicorn.run(
@@ -134,9 +163,7 @@ class BackgroundHttpServer:
         try:
             import uvicorn
         except ImportError as exc:
-            raise ConfigurationError(
-                'the HTTP API needs uvicorn: pip install "shipinfer[server]"'
-            ) from exc
+            raise ConfigurationError(_MISSING.format(name="uvicorn")) from exc
 
         self._host = host
         self._port = port

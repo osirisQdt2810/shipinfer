@@ -31,11 +31,12 @@ import sys
 import threading
 import types
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
 
-from shipinfer.cli.commands.run import _wait
+from shipinfer.cli.commands.run import _wait, run
 from shipinfer.core.errors import ConfigurationError
 from shipinfer.core.request import ResponseFuture
 from shipinfer.runners.base import Runner
@@ -136,6 +137,14 @@ def restore_signal_handlers():
 
 
 @pytest.fixture()
+def chain_file(tmp_path: Path) -> Path:
+    """A chain on disk, for the tests that go through ``run()`` rather than ``_wait``."""
+    path = tmp_path / "mock_chain.yaml"
+    path.write_text(CHAIN)
+    return path
+
+
+@pytest.fixture()
 def runner() -> SupervisingRunner:
     return SupervisingRunner(Topology.from_spec(ChainSpec.from_yaml(CHAIN))).start()
 
@@ -232,11 +241,78 @@ class TestTheSignalHandlersStayTheRunners:
         assert handlers["sigterm"] is handlers["sigint"]
 
 
+class TestTheUvicornBehaviourAllOfThisRestsOn:
+    def test_uvicorn_installs_no_handler_from_a_non_main_thread(self) -> None:
+        """The mechanism every test above depends on, pinned against the installed uvicorn.
+
+        Those tests assert the *outcome* over a fake server, which is the right level -- but
+        the outcome is only true because ``Server.capture_signals`` early-returns off the main
+        thread. uvicorn 0.52 removed ``install_signal_handlers``, the flag that used to say so
+        out loud; if a release ever drops the thread check as well, ``shipinfer run --http``
+        goes quietly back to a Ctrl-C that stops the web server and leaves fifty decoder
+        threads reading. This is the guard that would notice, and it costs one import.
+        """
+        uvicorn = pytest.importorskip("uvicorn")
+        server = uvicorn.Server(uvicorn.Config(app=None))
+        before = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+        during: dict[Any, Any] = {}
+
+        def enter() -> None:
+            with server.capture_signals():
+                during.update({sig: signal.getsignal(sig) for sig in before})
+
+        thread = threading.Thread(target=enter, name="not-the-main-thread")
+        thread.start()
+        thread.join(5.0)
+
+        assert not thread.is_alive(), "capture_signals never returned"
+        assert during == before, "uvicorn installed a handler from a non-main thread"
+
+
 class TestWhenTheExtraIsMissing:
+    def test_the_command_refuses_before_it_builds_or_starts_anything(
+        self, chain_file: Path, capsys, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Where an operator actually meets this: ``shipinfer run --http`` on a bare host.
+
+        Probed beside the ``manages_cameras`` refusal and for its argument -- whether this
+        host can serve HTTP is a fact about the host, not about this execution. Asked inside
+        ``_wait``, which runs after ``built.start()``, a fleet spawned sixteen shard processes
+        and placed every camera before anything looked for FastAPI, and the operator paid a
+        full start-up and shutdown to be told about a ``pip install``.
+
+        ``--dry-run`` is what makes the *ordering* visible: the refusal comes out ahead of the
+        plan, which is itself ahead of ``start()``.
+        """
+
+        def never(self: Runner) -> Runner:  # pragma: no cover - the assertion is that it is
+            raise AssertionError("the runner was started")
+
+        monkeypatch.setitem(sys.modules, "fastapi", None)
+        monkeypatch.setattr(Runner, "start", never)
+
+        with pytest.raises(ConfigurationError, match=r"shipinfer\[server\]"):
+            run(chain_file, runner="inprocess", http=True, dry_run=True)
+
+        assert "no plan" not in capsys.readouterr().out, "it got as far as printing the plan"
+
+    def test_a_dry_run_without_http_still_needs_no_extra(
+        self, chain_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The probe is behind the flag: a chain driven by ``--inputs`` serves nothing."""
+        for name in ("fastapi", "uvicorn"):
+            monkeypatch.setitem(sys.modules, name, None)
+
+        assert run(chain_file, runner="inprocess", dry_run=True) == 0
+
     def test_http_without_the_server_extra_is_a_typed_refusal_naming_it(
         self, runner, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Raised before the supervise loop, so the operator is told at start-up.
+        """``_wait``'s own refusal: the last line of defence, not where an operator meets it.
+
+        It stays because ``_wait`` is reachable without going through :func:`run`, and because
+        the import that fails belongs next to the refusal. Raised before the supervise loop,
+        so nothing supervises with no ingress up.
 
         ``None`` in ``sys.modules`` is the interpreter's own "this import is blocked" marker.
         """

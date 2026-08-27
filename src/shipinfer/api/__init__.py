@@ -21,7 +21,12 @@ where the ``server`` extra was never installed and the failure is a typed
 ``ConfigurationError`` naming the extra rather than an ``ImportError`` at start-up.
 """
 
-from shipinfer.api.app import BackgroundHttpServer, create_app, serve_http
+from shipinfer.api.app import (
+    BackgroundHttpServer,
+    create_app,
+    require_server_extra,
+    serve_http,
+)
 from shipinfer.api.errors import http_error
 from shipinfer.api.routes import build_router
 from shipinfer.api.streams import CameraController, build_streams_router
@@ -33,5 +38,6 @@ __all__ = [
     "build_streams_router",
     "create_app",
     "http_error",
+    "require_server_extra",
     "serve_http",
 ]
