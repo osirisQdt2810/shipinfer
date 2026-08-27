@@ -363,7 +363,13 @@ class InferenceServer:
                 traces=self._traces,
             )
         try:
-            model.start()
+            if isinstance(model, Model):
+                # Only a plain model's start spawns worker threads and waits on engine
+                # deserialisation, which is the start that can run for minutes; the
+                # ensemble's is a DAG walk over models that are already up.
+                model.start(should_abort=self._is_stopping)
+            else:
+                model.start()
         except BaseException:
             # A model starts its instances one at a time and then waits for each; a failure
             # on the third leaves the first two with live worker threads holding backends,
@@ -377,6 +383,19 @@ class InferenceServer:
         with self._lock:
             self._models[name] = model
         return model
+
+    def _is_stopping(self) -> bool:
+        """Whether a :meth:`stop` has begun — the abort signal a long model start polls.
+
+        Both flags, not just ``_started``: an in-progress :meth:`start` runs with
+        ``_starting`` set and ``_started`` still false, and a model loaded by *that* start
+        must not read its own server as stopping.
+
+        Read without a lock on purpose. It is a hint checked between instance starts, both
+        flags are plain bools assigned under the GIL, and the worst a stale read can do is
+        start one more instance that the unwind then stops.
+        """
+        return not (self._started or self._starting)
 
     def stop(self) -> None:
         """Drain and release. Never raises.

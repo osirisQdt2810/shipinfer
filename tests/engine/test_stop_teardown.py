@@ -18,7 +18,7 @@ does, so the first scrape after a shutdown asked a closed sink for numbers. The 
 fixed it then threw the run's totals away, which is its own wrong answer: a dashboard's last
 sample read ``recorded: 0`` for a run that traced thousands of requests.
 
-Two more arrived with the review of that work, all the same shape — a caller that has
+Three more arrived with the review of that work, all the same shape — a caller that has
 already passed a check, waiting on the control lock:
 
 * **An unload racing the stop** got ``ModelNotFoundError`` ("no such model") for a model that
@@ -28,6 +28,9 @@ already passed a check, waiting on the control lock:
   *before* the lock is taken, so the second thread saw "already stopped" while the first was
   still queued behind a slow load. A caller pairing ``stop()`` with an immediate ``start()``
   then gets the first thread's teardown landing on its fresh server.
+* **A stop waiting out a long start.** ``stop()`` queues behind a ``load_model`` that may be
+  minutes inside TensorRT, and the fleet drains its shards on a shared deadline — so the
+  polite wait is what gets the shard SIGKILLed. ``Model.start`` now polls an abort.
 
 Offline throughout — the mock backend, ``KIND_CPU`` instances and real worker threads,
 because the evidence for the first one is ``threading.enumerate()``.
@@ -50,6 +53,7 @@ from shipinfer.core.settings import ServerSettings
 from shipinfer.core.tracing import NullTraceSink, RequestTrace, TraceSink
 from shipinfer.core.types import Tensor
 from shipinfer.engine import InferenceServer, pool
+from shipinfer.engine.instance import ModelInstance
 from shipinfer.engine.model import Model
 
 _MODEL = """
@@ -167,17 +171,24 @@ class TestALoadRacingAStop:
         self, explicit: InferenceServer, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The load wins the lock: it completes, and the stop that queued behind it drains
-        the model it published — worker threads included."""
+        the model it published — worker threads included.
+
+        The block sits *after* ``Model.start`` returns, not before it. Before it is now the
+        abort's window (``TestALongStartAbortsWhenTheServerIsStopping`` below): a stop
+        arriving while the instances are still coming up refuses the load rather than
+        finishing it. What is left here is the narrower race the control lock exists for —
+        a model fully started, not yet published, and a drain that has already run.
+        """
         inside_start = threading.Event()
         release = threading.Event()
         original_start = Model.start
 
-        def blocking_start(self: Model) -> None:
+        def blocking_start(self: Model, **kwargs: Any) -> None:
             # Called from `_build_and_start`, so the control lock is held for the whole of
             # this wait: a `stop()` on another thread cannot get past it until we return.
+            original_start(self, **kwargs)
             inside_start.set()
             assert release.wait(_TIMEOUT), "the test never released the model's start"
-            original_start(self)
 
         monkeypatch.setattr(Model, "start", blocking_start)
 
@@ -322,11 +333,11 @@ class TestASecondStopWaitsForTheFirstOnesTeardown:
         original_start = Model.start
         original_teardown = InferenceServer._teardown
 
-        def blocking_start(self: Model) -> None:
+        def blocking_start(self: Model, **kwargs: Any) -> None:
             """Holds the control lock, so both stops queue behind it."""
             inside_start.set()
             assert release.wait(_TIMEOUT), "the test never released the model's start"
-            original_start(self)
+            original_start(self, **kwargs)
 
         def recording_teardown(self: InferenceServer) -> None:
             original_teardown(self)
@@ -384,6 +395,67 @@ class TestASecondStopWaitsForTheFirstOnesTeardown:
         server.stop()
 
         assert time.monotonic() - began < 1.0
+
+
+class TestALongStartAbortsWhenTheServerIsStopping:
+    """A ``load_model`` holding the control lock can be minutes inside TensorRT. ``stop()``
+    queues behind it, and the fleet's supervisor drains every shard on one shared deadline —
+    so the shard that waits politely is the shard that gets SIGKILLed, in-flight requests
+    unresolved. ``Model.start`` polls the server's stopping flag between instances instead.
+    """
+
+    def test_the_remaining_instances_are_never_started_and_the_first_is_stopped(
+        self, explicit: InferenceServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        attempted: list[str] = []
+        original_start = ModelInstance.start
+
+        def gated_start(self: ModelInstance) -> None:
+            attempted.append(self.name)
+            if len(attempted) == 1:
+                # Instance 1 is slow — the TensorRT deserialisation, in miniature.
+                entered.set()
+                assert release.wait(_TIMEOUT), "the test never released instance 1"
+            original_start(self)
+
+        monkeypatch.setattr(ModelInstance, "start", gated_start)
+
+        outcome = _Outcome()
+        loader = threading.Thread(target=outcome.run, args=(explicit, "echo"), name="loader")
+        loader.start()
+        assert entered.wait(_TIMEOUT), "the load never reached the first instance's start"
+        stopper = threading.Thread(target=explicit.stop, name="stopper")
+        stopper.start()
+        _await_stop_flags(explicit)
+        release.set()
+        loader.join(_TIMEOUT)
+        stopper.join(_TIMEOUT)
+
+        assert not loader.is_alive() and not stopper.is_alive()
+        # The model declares two KIND_CPU instances; only the first was ever attempted.
+        assert len(attempted) == 1, f"the abort did not stop instance 2: {attempted}"
+        assert isinstance(outcome.error, ServerStateError), f"got {outcome.error!r}"
+        assert "start aborted" in str(outcome.error)
+        assert _live_workers("echo") == [], "the aborted start left instance 1 running"
+        assert explicit.models() == []
+
+    def test_an_ordinary_load_does_not_trip_the_abort(self, explicit: InferenceServer) -> None:
+        """The predicate reads both lifecycle flags; a load on a running server, and the
+        models a `start()` itself loads (``_starting`` set, ``_started`` still false), must
+        both read as *not* stopping or nothing would ever load."""
+        model = explicit.load_model("echo")
+
+        assert model.is_ready
+        assert len(_live_workers("echo")) == 2
+
+    def test_a_start_with_no_abort_predicate_is_unchanged(self, repository: Path) -> None:
+        """`Model.start()` is called without one by tests and by the ensemble path."""
+        with InferenceServer(_settings(repository)) as server:
+            server.load_model("echo")
+            model = server.model("echo")
+            assert model.is_ready
 
 
 class _RecordingSink(TraceSink):
