@@ -14,14 +14,11 @@ regardless of what the stopping consists of.
 from __future__ import annotations
 
 import signal
-from typing import TYPE_CHECKING
+from typing import Protocol
 
 from shipinfer.core.logging import get_logger
 
-if TYPE_CHECKING:  # the handler only calls request_stop(); no runtime coupling to Fleet
-    from shipinfer.launch.supervisor import Fleet
-
-__all__ = ["forward_signals"]
+__all__ = ["Stoppable", "forward_signals"]
 
 # The logger name stays "server.launcher" on purpose: an operator's log filter is
 # behaviour, and this move promises none changed. It is retargeted to "launch…" when
@@ -29,18 +26,31 @@ __all__ = ["forward_signals"]
 _LOG = get_logger("server.launcher")
 
 
-def forward_signals(fleet: Fleet) -> None:
-    """Make Ctrl-C and SIGTERM stop the fleet instead of orphaning it.
+class Stoppable(Protocol):
+    """Anything that can be *asked* to stop without being stopped on the caller's thread.
 
-    Installed by the caller rather than by ``Fleet`` itself: signal handlers are process-global
-    and a library that installs them behind your back is a library you cannot embed.
+    Structural rather than a base class, and one method wide, because that is the whole of
+    what a signal handler may do. :class:`~shipinfer.launch.supervisor.Fleet` satisfies it and
+    so does every :class:`~shipinfer.runners.base.Runner`, which is what lets ``shipinfer run``
+    install these handlers over the runner it holds without ``launch`` importing ``runners``.
+    """
+
+    def request_stop(self) -> None: ...
+
+
+def forward_signals(target: Stoppable) -> None:
+    """Make Ctrl-C and SIGTERM stop ``target`` instead of orphaning it.
+
+    Installed by the caller rather than by the target itself: signal handlers are
+    process-global and a library that installs them behind your back is a library you cannot
+    embed.
     """
 
     def _handle(signum: int, _frame: object) -> None:
         # Record only. The terminating happens on the supervising thread, which is the one
         # that can block: a handler that drains would deadlock on the second signal.
-        _LOG.info("received signal %d; stopping fleet", signum)
-        fleet.request_stop()
+        _LOG.info("received signal %d; stopping", signum)
+        target.request_stop()
 
     signal.signal(signal.SIGINT, _handle)
     signal.signal(signal.SIGTERM, _handle)

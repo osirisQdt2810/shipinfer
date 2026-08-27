@@ -40,7 +40,10 @@ wrong.
 * ``submit`` before ``start`` is a typed refusal, never an implicit start: opening a chain on
   a producer's thread is how a CUDA context ends up on the wrong thread (ADR-002);
 * ``health`` and ``stats`` answer *while running and while stopped*, because the first
-  question asked of a runner that will not start is what state it thinks it is in.
+  question asked of a runner that will not start is what state it thinks it is in;
+* ``request_stop`` **records** and ``supervise`` **blocks**, so a signal handler never does
+  the stopping — the invariant ``launch/signals.py`` was written around, moved onto the
+  contract so ``forward_signals`` works over any runner and not only over a fleet.
 """
 
 from __future__ import annotations
@@ -48,6 +51,7 @@ from __future__ import annotations
 import abc
 import contextlib
 import threading
+from collections.abc import Callable
 from typing import Any, ClassVar
 
 from shipinfer.core.errors import ServerStateError
@@ -118,6 +122,13 @@ class Runner(abc.ABC):
         # first is the hot path and the other two must answer while `stop` is joining
         # workers, which is exactly when someone wants to know what is happening.
         self._lifecycle = threading.RLock()
+        #: Somebody asked this runner to stop, without doing any of the stopping. Set by
+        #: :meth:`request_stop` and read by :meth:`supervise`; an `Event` because the setter
+        #: is a signal handler and the only thing a handler may safely do is record
+        #: (``launch/signals.py`` makes the whole argument). Cleared by `start`, so a runner
+        #: that was asked to stop and then restarted supervises again instead of returning at
+        #: once.
+        self._stop_requested = threading.Event()
 
     # -- what the runner was told ------------------------------------------------------
 
@@ -180,6 +191,13 @@ class Runner(abc.ABC):
         failure, which is the one worth reading. Same shape as
         :meth:`shipinfer.topology.base.Element.open`, for the same reason.
 
+        **This is the only unwind.** A subclass that catches its own partial start and
+        released things itself would run the release twice, and the second pass would see the
+        state the first one cleared — which is how a fleet came to report zero abandoned
+        camera threads after unwinding six of them. :meth:`_do_stop` is the single owner, and
+        :meth:`_unwind_timeout_s` is how a subclass whose release is not instantaneous says
+        what budget that pass gets.
+
         Raises:
             ShipInferError: whatever the implementation needs to say — a missing model, a
                 camera that will not open, a port already bound. Nothing is swallowed.
@@ -187,11 +205,12 @@ class Runner(abc.ABC):
         with self._lifecycle:
             if self._running:
                 return self
+            self._stop_requested.clear()
             try:
                 self._do_start()
             except BaseException:
                 with contextlib.suppress(Exception):
-                    self._do_stop(0.0)
+                    self._do_stop(self._unwind_timeout_s())
                 raise
             self._running = True
             return self
@@ -220,6 +239,62 @@ class Runner(abc.ABC):
 
     def __exit__(self, *exc: object) -> None:
         self.stop()
+
+    # -- supervision -------------------------------------------------------------------
+
+    @property
+    def stop_requested(self) -> bool:
+        """Whether :meth:`request_stop` has been called since the last :meth:`start`."""
+        return self._stop_requested.is_set()
+
+    def request_stop(self) -> None:
+        """Ask :meth:`supervise` to return. Records only; does none of the stopping.
+
+        Thread-safe and non-blocking by construction, because the caller is a **signal
+        handler**: :func:`shipinfer.launch.signals.forward_signals` routes Ctrl-C here, and a
+        handler that called :meth:`stop` directly would block up to the whole shutdown budget
+        inside the lock it takes — a second Ctrl-C then re-enters that frame and waits on
+        itself. Setting an event cannot block. The stopping happens on the supervising thread,
+        which is the one allowed to take its time.
+        """
+        self._stop_requested.set()
+
+    def supervise(
+        self, *, poll_s: float = 1.0, until: Callable[[], bool] | None = None
+    ) -> None:
+        """Block while this runner runs; return when it should not any more.
+
+        Returns when :meth:`request_stop` is called, when ``until()`` says so, or when the
+        runner has stopped. Does **not** stop anything: the caller's ``finally: stop()`` owns
+        that, so "supervise returned" means the same thing on every runner.
+
+        This default is the in-process shape — the workers are threads in this process, and a
+        thread that dies takes the process with it, so there is nothing to watch for beyond
+        being told to go. :class:`~shipinfer.runners.fleet.FleetRunner` overrides it, because
+        for a fleet there *is*: a shard that exits while the rest keep reporting healthy is
+        the state a supervisor exists to refuse to sit in.
+
+        Args:
+            poll_s: how often ``until()`` is consulted. A request to stop is not polled — it
+                wakes the wait immediately.
+            until: an extra reason to return, consulted every ``poll_s``.
+        """
+        while not self._stop_requested.is_set():
+            if until is not None and until():
+                return
+            if not self._running:
+                return
+            self._stop_requested.wait(poll_s)
+
+    def describe_plan(self) -> str:
+        """What this runner would do, for ``shipinfer run --dry-run``. Spawns nothing.
+
+        The default is the honest answer for a runner that places nothing: there is one
+        process, and it is this one. A runner that *does* decide a placement overrides it with
+        the plan itself — computed, not described a second time, so a dry run and a real start
+        cannot disagree.
+        """
+        return "no plan: one process"
 
     # -- submission --------------------------------------------------------------------
 
@@ -346,6 +421,17 @@ class Runner(abc.ABC):
     @abc.abstractmethod
     def _do_start(self) -> None:
         """Open the chain and start whatever executes it. Called at most once per cycle."""
+
+    def _unwind_timeout_s(self) -> float:
+        """The budget :meth:`start` gives :meth:`_do_stop` when it unwinds a partial start.
+
+        Zero for a runner whose release is local and immediate — closing elements, joining
+        threads that were never handed work. A runner whose release is a *conversation*
+        overrides it: a fleet's unwind is a ``Stop`` RPC to every shard that did come up, and
+        those shards have frames in flight whether or not their sibling ever answered, so
+        giving them no budget would abandon work a shutdown would have finished.
+        """
+        return 0.0
 
     @abc.abstractmethod
     def _do_stop(self, timeout_s: float) -> None:

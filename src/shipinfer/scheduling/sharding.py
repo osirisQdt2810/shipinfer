@@ -222,19 +222,25 @@ def plan_shards(
     same assignment on every start-up, which is what makes a per-camera actor's state worth
     keeping.
 
+    **An empty fleet is a legal plan, and names no cameras.** Under the gRPC control plane a
+    shard is spawned before anybody has decided what it reads: the cameras arrive later, one
+    ``AddCamera`` at a time, placed on the least-loaded shard (arch.md section 2). So "no
+    cameras" now means "not yet" rather than "a process that will read nothing", and the plan
+    is the device assignment alone. Naming *some* cameras and asking for more shards than
+    there are is still refused — that is a fleet whose split is already known to leave a shard
+    idle, which is the failure the refusal was written for.
+
     Raises:
-        ConfigurationError: no cameras, no GPUs, fewer than one shard, or more shards than
-            cameras — the last because a shard with no cameras is a process that starts, loads
+        ConfigurationError: no GPUs, fewer than one shard, or more shards than the cameras
+            named — the last because a shard with no cameras is a process that starts, loads
             engines, holds a CUDA context and reads nothing.
     """
     load = dict(cameras) if isinstance(cameras, Mapping) else dict.fromkeys(cameras, 1.0)
-    if not load:
-        raise ConfigurationError("cannot plan shards for an empty fleet")
     if shards < 1:
         raise ConfigurationError(f"a plan needs at least one shard, got {shards}")
     if not gpus:
         raise ConfigurationError("cannot plan shards with no gpus")
-    if shards > len(load):
+    if load and shards > len(load):
         raise ConfigurationError(
             f"{shards} shards for {len(load)} camera(s): a shard with no cameras still "
             f"loads engines and holds a CUDA context. Use at most {len(load)} shards."
