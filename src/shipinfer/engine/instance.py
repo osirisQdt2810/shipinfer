@@ -24,13 +24,13 @@ from shipinfer.core.request import InferenceResponse
 from shipinfer.core.settings import SchedulerSettings
 from shipinfer.core.tracing import NullTraceSink, RequestTrace, TraceSink
 from shipinfer.core.types import Device
+from shipinfer.engine.statistics import ModelStatistics
 from shipinfer.runtime.device import DeviceManager
 from shipinfer.runtime.profiling import PhaseTimer, phase_timer
 from shipinfer.scheduling.batching import AssembledBatch, Batcher
 from shipinfer.scheduling.limits import RateLimiter, UnlimitedRateLimiter
 from shipinfer.scheduling.queues import BatchWindow, RequestQueue
 from shipinfer.scheduling.work import WorkItem
-from shipinfer.server.statistics import ModelStatistics
 
 __all__ = ["ModelInstance"]
 

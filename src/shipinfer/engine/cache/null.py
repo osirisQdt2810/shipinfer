@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from shipinfer.core.types import Tensor
-from shipinfer.server.cache.base import ResponseCache
-from shipinfer.server.cache.registry import RESPONSE_CACHES
+from shipinfer.engine.cache.base import ResponseCache
+from shipinfer.engine.cache.registry import RESPONSE_CACHES
 
 __all__ = ["NullResponseCache"]
 
@@ -28,7 +28,7 @@ class NullResponseCache(ResponseCache):
         This override is the point of the null object. The base implementation runs
         BLAKE2b over every input byte, and a model with caching off — which is every model
         by default — must not pay that on each of the ~1000 requests a second the server
-        accepts. Returning ``None`` here tells :class:`~shipinfer.server.model.Model` the
+        accepts. Returning ``None`` here tells :class:`~shipinfer.engine.model.Model` the
         request is not cacheable, so neither :meth:`get` nor :meth:`put` is reached.
         """
         return

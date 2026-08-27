@@ -57,9 +57,9 @@ from shipinfer.core.errors import (
 from shipinfer.core.logging import get_logger
 from shipinfer.core.request import InferenceRequest, InferenceResponse
 from shipinfer.core.types import Device
+from shipinfer.engine.spill import wire
 from shipinfer.runtime.memory.shared_ring import SharedRing
 from shipinfer.scheduling.work import WorkItem
-from shipinfer.server import remote_wire as wire
 
 __all__ = ["RemoteInstance", "ResultReader", "RingIngress"]
 

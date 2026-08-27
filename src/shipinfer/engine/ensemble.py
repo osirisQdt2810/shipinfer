@@ -64,8 +64,8 @@ from shipinfer.core.request import InferenceRequest, InferenceResponse, Response
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.tracing import NullTraceSink, RequestTrace, TraceSink
 from shipinfer.core.types import Tensor, TensorSpec, validate_against
+from shipinfer.engine.statistics import ModelStatistics
 from shipinfer.repository import EnsembleStep, ModelArtifact
-from shipinfer.server.statistics import ModelStatistics
 
 __all__ = ["EnsembleModel"]
 
@@ -144,7 +144,7 @@ class _Execution:
 class EnsembleModel:
     """Executes a declared DAG of other models.
 
-    Presents the same surface as :class:`~shipinfer.server.model.Model` — ``start``,
+    Presents the same surface as :class:`~shipinfer.engine.model.Model` — ``start``,
     ``stop``, ``infer``, ``stats``, ``is_ready`` — so :class:`InferenceServer` holds both
     in one table and callers cannot tell which they are talking to.
     """

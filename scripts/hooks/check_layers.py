@@ -54,6 +54,11 @@ FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
     "repository": {"torch", "tensorrt", "onnxruntime", "cuda", "fastapi", "uvicorn"},
     "runtime": {"fastapi", "uvicorn", "confluent_kafka"},
     "backends": {"fastapi", "uvicorn", "confluent_kafka"},
+    # The engine is the model pool (arch.md §6) and the KServe endpoint is a *side-door* into
+    # it, not part of it: the HTTP layer lives in `server/api/` and moves to `api/`. Naming
+    # fastapi here would put a web framework behind `shipinfer.engine`, which is the import an
+    # in-process caller — a runner walking a chain — must not pay for.
+    "engine": {"fastapi", "uvicorn"},
 }
 
 #: Top-level modules that are not layers, and may therefore be imported by any layer
@@ -71,8 +76,15 @@ ALLOWED_INTERNAL: dict[str, set[str]] = {
     "topology": {"core"},
     "runtime": {"core"},
     "backends": {"core", "repository", "runtime"},
-    "server": {"core", "repository", "runtime", "backends", "scheduling"},
-    "pipeline": {"core", "repository", "runtime", "backends", "scheduling", "server"},
+    "engine": {"core", "repository", "runtime", "backends", "scheduling"},
+    # What is left of `server` is the KServe surface, the launcher and the topology classes;
+    # they sit *on* the engine and may not reach past it into a `runtime` device or a
+    # `backends` engine any more. `repository` stays because `server/topology/deepstream.py`
+    # reads the model repository to plan its shards — a config question, answered without a
+    # device. `pipeline` names `engine` rather than `server` for the same reason the row above
+    # exists: it wants the pool, and the two stopped being the same package.
+    "server": {"core", "repository", "scheduling", "engine"},
+    "pipeline": {"core", "repository", "runtime", "backends", "scheduling", "engine"},
     # `ingest` does NOT depend on `scheduling`: it publishes into the `FrameSink` protocol
     # it owns, and `pipeline` supplies the queue-backed implementation. Mapping a frame onto
     # a request is dispatch policy, and it belongs next to the code that undoes the mapping.

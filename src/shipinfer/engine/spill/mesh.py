@@ -8,9 +8,9 @@ shared model ``M`` present in this process:
   run id and the two shard indices, so a peer can open them by name;
 * it **opens** the mirror images that ``P`` created — ``me → P`` to submit and ``P ← me`` to
   answer — retrying until they appear, because peers start in no particular order;
-* it runs one :class:`~shipinfer.server.remote_instance.RingIngress` per ``(P, M)`` over the
-  requests P sends — into the model's *local* instances, so a request never crosses twice — one :class:`~shipinfer.server.remote_instance.ResultReader` for every result
-  ring it owns, and hands each shared model a :class:`~shipinfer.server.remote_instance.RemoteInstance`
+* it runs one :class:`~shipinfer.engine.spill.remote_instance.RingIngress` per ``(P, M)`` over the
+  requests P sends — into the model's *local* instances, so a request never crosses twice — one :class:`~shipinfer.engine.spill.remote_instance.ResultReader` for every result
+  ring it owns, and hands each shared model a :class:`~shipinfer.engine.spill.remote_instance.RemoteInstance`
   per peer.
 
 Two phases, because creation must precede any peer's open: :meth:`create` first, in every
@@ -28,13 +28,13 @@ from typing import Any, Protocol
 from shipinfer.core.errors import ConfigurationError, RingClosedError
 from shipinfer.core.logging import get_logger
 from shipinfer.core.settings.topology import ServiceSettings
-from shipinfer.runtime.memory.shared_ring import RingLayout, SharedRing, reap_pending_closes
-from shipinfer.server.remote_instance import (
+from shipinfer.engine.spill.remote_instance import (
     IngressLane,
     RemoteInstance,
     ResultReader,
     RingIngress,
 )
+from shipinfer.runtime.memory.shared_ring import RingLayout, SharedRing, reap_pending_closes
 
 __all__ = ["ServiceMesh", "ring_name", "wire_slot_bytes"]
 

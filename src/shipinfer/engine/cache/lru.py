@@ -7,8 +7,8 @@ from collections import OrderedDict
 from collections.abc import Mapping
 
 from shipinfer.core.types import Tensor
-from shipinfer.server.cache.base import ResponseCache, freeze_outputs
-from shipinfer.server.cache.registry import RESPONSE_CACHES
+from shipinfer.engine.cache.base import ResponseCache, freeze_outputs
+from shipinfer.engine.cache.registry import RESPONSE_CACHES
 
 __all__ = ["LruResponseCache"]
 
@@ -23,7 +23,7 @@ class LruResponseCache(ResponseCache):
 
     The lock is held only for the ``OrderedDict`` operations, never across a copy, so a
     lookup costs a hash and a move-to-end. What :meth:`get` returns is read-only, sealed
-    once on the way in by :func:`~shipinfer.server.cache.base.freeze_outputs`.
+    once on the way in by :func:`~shipinfer.engine.cache.base.freeze_outputs`.
     """
 
     name = "lru"

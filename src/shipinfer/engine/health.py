@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from shipinfer.server.engine import InferenceServer
+from shipinfer.engine.pool import InferenceServer
 
 __all__ = ["HealthReport", "HealthStatus", "check_health"]
 

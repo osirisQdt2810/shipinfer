@@ -18,12 +18,12 @@ from shipinfer.core.metrics import EXPORTERS, ServerMetrics
 from shipinfer.core.request import InferenceRequest, InferenceResponse, ResponseFuture
 from shipinfer.core.settings import ModelControlMode, ServerSettings
 from shipinfer.core.tracing import NullTraceSink, TraceSink, build_trace_sink
+from shipinfer.engine.ensemble import EnsembleModel
+from shipinfer.engine.model import Model
 from shipinfer.repository import ModelRepository
 from shipinfer.runtime.device import DeviceManager
 from shipinfer.runtime.memory import MemoryPool
 from shipinfer.runtime.native import is_native_available, native_version, resolve_provider
-from shipinfer.server.ensemble import EnsembleModel
-from shipinfer.server.model import Model
 
 __all__ = ["InferenceServer"]
 
@@ -191,7 +191,7 @@ class InferenceServer:
         topology = self._settings.topology
         if topology.kind != "service" or topology.service.shard is None:
             return None
-        from shipinfer.server.service_mesh import ServiceMesh, wire_slot_bytes
+        from shipinfer.engine.spill.mesh import ServiceMesh, wire_slot_bytes
 
         shared = {
             name: self._models[name]

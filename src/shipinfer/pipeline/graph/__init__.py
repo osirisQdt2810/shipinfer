@@ -1,6 +1,6 @@
 """The perception DAG: the stages, the fan-out, and what runs on which frame.
 
-The application layer above the inference server. :mod:`shipinfer.server` knows how to run
+The application layer above the inference server. :mod:`shipinfer.engine` knows how to run
 *a model*; this package knows that a ship needs segmenting and a person does not, that one
 frame becomes a variable number of crops, and that a frame with no ships must not reach the
 segmenter at all.

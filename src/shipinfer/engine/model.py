@@ -21,6 +21,9 @@ from shipinfer.core.request import InferenceRequest, InferenceResponse, Response
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.tracing import NullTraceSink, TraceSink
 from shipinfer.core.types import Tensor, TensorSpec, validate_against
+from shipinfer.engine.cache import RESPONSE_CACHES, NullResponseCache, ResponseCache
+from shipinfer.engine.instance import ModelInstance
+from shipinfer.engine.statistics import ModelStatistics
 from shipinfer.repository import ModelArtifact
 from shipinfer.runtime.device import DeviceManager
 from shipinfer.runtime.graphs import GRAPH_CACHES, GraphSpec, resolve_graph_spec
@@ -33,9 +36,6 @@ from shipinfer.scheduling.policies import build_policy
 from shipinfer.scheduling.policies.base import Placeable
 from shipinfer.scheduling.queues import QUEUES, BatchWindow
 from shipinfer.scheduling.work import WorkItem
-from shipinfer.server.cache import RESPONSE_CACHES, NullResponseCache, ResponseCache
-from shipinfer.server.instance import ModelInstance
-from shipinfer.server.statistics import ModelStatistics
 
 __all__ = ["Model"]
 

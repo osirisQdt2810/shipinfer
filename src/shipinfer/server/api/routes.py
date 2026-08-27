@@ -17,6 +17,8 @@ from shipinfer.core.errors import (
 )
 from shipinfer.core.logging import get_logger
 from shipinfer.core.request import InferenceRequest, RequestContext
+from shipinfer.engine.health import check_health
+from shipinfer.engine.pool import InferenceServer
 from shipinfer.server.api.schemas import (
     InferenceRequestBody,
     InferenceResponseBody,
@@ -27,8 +29,6 @@ from shipinfer.server.api.schemas import (
     tensor_from_wire,
     tensor_to_wire,
 )
-from shipinfer.server.engine import InferenceServer
-from shipinfer.server.health import check_health
 
 __all__ = ["build_router"]
 

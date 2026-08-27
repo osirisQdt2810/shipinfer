@@ -58,7 +58,7 @@ class ResponseCache(abc.ABC):
         Hashing lives behind the cache object rather than at the call site so the disabled
         case costs one virtual call instead of a BLAKE2b pass over every input byte. That
         pass is by far the expensive half of a lookup, and a model with caching off must
-        not pay it — see :class:`~shipinfer.server.cache.null.NullResponseCache`.
+        not pay it — see :class:`~shipinfer.engine.cache.null.NullResponseCache`.
         """
         try:
             return cache_key(model, version, inputs)

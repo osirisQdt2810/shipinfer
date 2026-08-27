@@ -344,7 +344,7 @@ def deepstream_command(
     both already in the child's environment before its interpreter starts.
 
     What is missing compared to `serve` is the HTTP port, and that is not an oversight. A
-    DeepStream shard runs no :class:`~shipinfer.server.InferenceServer`: there is no model
+    DeepStream shard runs no :class:`~shipinfer.engine.InferenceServer`: there is no model
     table, no KServe v2 endpoint and nothing for ``base + shard.index`` to bind, so a port on
     this line would be a flag the child parses and ignores. The topology refuses
     ``http_port_base`` outright rather than dropping it silently — an operator who asks a
