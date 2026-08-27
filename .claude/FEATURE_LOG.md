@@ -20,7 +20,7 @@ copied out of the decoder pool with the vector as `HostFrame.owner`.
 `pkg-config` dependencies; `--with-external gstreamer` opts the lane into an otherwise
 offline build — which is how `shipinfer-gst:jammy` (now carrying `libopencv-dev`, extended
 by the same run+commit shape that built it) becomes the one place that compiles and RUNS
-the gst tests: 233 checks there, 217 plus a counted skip on the driverless host. A full
+the gst tests: 234 checks there, 217 plus a counted skip on the driverless host. A full
 build leaves an implicitly-missing lane out with a loud warning naming the consequence; a
 lane asked for by name that cannot be resolved stays a hard failure.
 
