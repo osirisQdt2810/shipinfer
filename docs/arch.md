@@ -393,8 +393,8 @@ directory:
 
 ```
 src/shipinfer/
-├── api/            # §2  HTTP: /streams, /health, KServe side-door; gRPC service defs (.proto)
-├── launch/         # §2  spawn + supervise shards; gRPC clients; round-robin placement
+├── api/            # §2  HTTP: /streams, /health, KServe side-door
+├── launch/         # §2  spawn + supervise shards; gRPC client + proto/ (.proto + stubs); placement
 ├── topology/       # §1  Element ABC + caps; chain loader (YAML); element registries
 │   └── elements/   #     decode/ detect/ segment/ embed/ recognize/ track/ mtmc/ output/
 ├── runners/        # §1  inprocess.py · fleet.py · deepstream/ (the chain→graph compiler)
@@ -403,6 +403,11 @@ src/shipinfer/
 ├── ingest/         # §5① camera actors + source implementations (used by decode elements)
 └── core/           #     types, errors, settings, registry, logging, metrics (unchanged)
 ```
+
+The `.proto` and its generated stubs live under `launch/proto/`, not `api/`: `api/` will
+import `launch` in phase B so `POST /streams` can reach the shards, and putting the stubs in
+`api/` would make `launch` import `api` for them — a cycle. The servicer that answers those
+RPCs is `runners/service.py`, because it holds a runner and a launcher must not.
 
 `server/` disappears: its pool becomes `engine/`, its KServe surface moves under `api/`,
 its topology-as-placement classes dissolve into `launch/` + `runners/`, and the

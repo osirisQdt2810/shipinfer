@@ -46,6 +46,12 @@ repos:
     rev: 8.0.1
     hooks:
       - id: isort
+        # protoc's output is regenerated, byte-compared and committed
+        # (`scripts/gen_proto.py --check`), so a hook that reorders its imports breaks the
+        # regeneration guard on a file nobody edited. `[tool.isort]` says the same thing, and
+        # deliberately twice: this line does not depend on isort honouring a skip for a
+        # filename pre-commit passed it explicitly.
+        exclude: '^src/shipinfer/launch/proto/.*_pb2.*'
 
   # Formatter.
   - repo: https://github.com/psf/black

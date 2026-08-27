@@ -261,6 +261,94 @@ class TestTheLauncherNeedsNoDeviceAndNoEngine:
         assert result.returncode == 0, result.stdout + result.stderr
 
 
+class TestTheControlPlaneEntersAtTwoSeams:
+    """grpcio and protobuf are an optional extra, and no import may make them mandatory.
+
+    Exactly the argument `TestTheWebFrameworkEntersAtOneSeam` makes for FastAPI, one layer
+    over. The static half is in `check_layers.py`: `grpc` and `google` are named in every
+    `FORBIDDEN_EXTERNAL` row but `launch`'s, and `grpc` additionally in `runners`'. These are
+    the runtime halves, and they catch what a string check cannot — an import that arrives
+    transitively, or one at module scope inside the two layers that *are* allowed to name it.
+
+    That second case is the interesting one. `launch/client.py` and `runners/service.py` may
+    import grpc; they must not do it at module scope, because `import shipinfer.launch` runs
+    in the launcher — the one CPU-only process in the deployment, on a host that may well
+    have installed neither package — and `import shipinfer.runners` runs on a laptop driving
+    the in-process runner. The refusal, when a call is finally made, is
+    `tests/launch/test_client_without_grpcio.py`.
+    """
+
+    def test_importing_launch_loads_no_grpc_and_no_protobuf(self) -> None:
+        code = (
+            "import sys, shipinfer.launch as launch; "
+            "assert callable(launch.ShardClient); "
+            "assert launch.CameraSpec('c', 'rtsp://x').camera_id == 'c'; "
+            "eager = [m for m in sys.modules if m == 'grpc' or m.startswith('grpc.') "
+            "or m == 'google.protobuf' or m.startswith('google.protobuf.') "
+            "or m.startswith('shipinfer.launch.proto.')]; "
+            "assert not eager, eager"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_importing_runners_loads_no_grpc_and_no_protobuf(self) -> None:
+        """Including `runners.service`, which is the module that holds the servicer."""
+        code = (
+            "import sys, shipinfer.runners, shipinfer.runners.service as service; "
+            "assert callable(service.serve_shard); "
+            "eager = [m for m in sys.modules if m == 'grpc' or m.startswith('grpc.') "
+            "or m == 'google.protobuf' or m.startswith('google.protobuf.') "
+            "or m.startswith('shipinfer.launch.proto.')]; "
+            "assert not eager, eager"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_the_layer_rows_say_where_the_control_plane_may_be_named(self) -> None:
+        """`launch` may name both; `runners` may name grpc; nobody else may name either.
+
+        Asserted against the checker's own tables rather than restated, so a row deleted in
+        `check_layers.py` fails here instead of quietly switching the rule off.
+        """
+        import importlib.util
+
+        hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "check_layers.py"
+        spec = importlib.util.spec_from_file_location("check_layers", hook)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        may_name_grpc = {
+            layer for layer, banned in module.FORBIDDEN_EXTERNAL.items() if "grpc" not in banned
+        }
+        may_name_protobuf = {
+            layer
+            for layer, banned in module.FORBIDDEN_EXTERNAL.items()
+            if "google" not in banned
+        }
+
+        assert may_name_grpc == {"launch", "runners"}
+        assert may_name_protobuf == {"launch"}
+
+    def test_the_launcher_may_not_import_the_runner_it_launches(self) -> None:
+        """The direction is what decides where the client and the servicer live.
+
+        `runners` -> `launch` for the control vocabulary; never the reverse. A launcher that
+        imported the executor would pay for it in the parent process, and a cycle between the
+        two would make the generated stubs' home ambiguous (arch.md §9).
+        """
+        import importlib.util
+
+        hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "check_layers.py"
+        spec = importlib.util.spec_from_file_location("check_layers", hook)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        assert "launch" in module.ALLOWED_INTERNAL["runners"]
+        assert "runners" not in module.ALLOWED_INTERNAL["launch"]
+
+
 class TestTheServerShimIsTheSameObjects:
     """`shipinfer.server` re-exports `shipinfer.engine`, and re-export means *identity*.
 

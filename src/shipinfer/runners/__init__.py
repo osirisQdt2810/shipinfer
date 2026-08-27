@@ -31,4 +31,17 @@ from shipinfer.runners.base import Runner
 from shipinfer.runners.inprocess import InprocessRunner
 from shipinfer.runners.registry import RUNNERS, build_runner
 
-__all__ = ["RUNNERS", "InprocessRunner", "Runner", "build_runner"]
+# The shard's half of the gRPC control plane (arch.md §2). It lives here rather than in
+# `launch/` because it holds a runner, and a launcher that imported the thing it launches
+# would pay for the executor in the parent process. Nothing it imports needs grpcio at module
+# scope, so this re-export costs a laptop nothing.
+from shipinfer.runners.service import ShardService, serve_shard
+
+__all__ = [
+    "RUNNERS",
+    "InprocessRunner",
+    "Runner",
+    "ShardService",
+    "build_runner",
+    "serve_shard",
+]

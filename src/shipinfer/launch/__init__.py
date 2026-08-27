@@ -1,19 +1,29 @@
 """The launcher: spawn the shards, supervise them, stop them together (arch.md §2).
 
 A node runs one launcher process and *n* shard processes, one per GPU, and this package is
-the parent's half of that arrangement. It owns exactly two things today:
+the parent's half of that arrangement. It owns three things:
 
 * :class:`~shipinfer.launch.supervisor.Fleet` — spawn one process per shard, notice when one
   dies, and take the rest down rather than serve three quarters of the cameras behind a green
   dashboard;
-* :func:`~shipinfer.launch.signals.forward_signals` — make the operator's Ctrl-C mean that.
+* :func:`~shipinfer.launch.signals.forward_signals` — make the operator's Ctrl-C mean that;
+* :class:`~shipinfer.launch.client.ShardClient` — the parent's half of the gRPC control
+  plane (arch.md §2), with :mod:`~shipinfer.launch.control`'s transport-free vocabulary and
+  the generated stubs under :mod:`shipinfer.launch.proto`. A shard receives nothing in argv
+  beyond its own identity; its camera set, topology and configuration arrive as RPCs after it
+  reports ready, and this is what sends them.
 
-**What it deliberately does not own yet is the conversation with the children.** arch.md §2
-puts the control plane on gRPC: a shard receives nothing in argv beyond its own identity, and
-its camera set, topology and configuration arrive as RPCs after it reports ready. That client
-lands here in A2 PR-5, the runner that drives it in PR-6, and the argv-rendering
-``server/topology/`` classes are deleted in the same change. Until then the supervisor is
-what it was under ``server/``: unchanged code, in the package it belongs to.
+The shard's *other* half — the servicer that answers these calls — is
+:mod:`shipinfer.runners.service`, and the direction is deliberate: a launcher that imported
+the thing it launches would pay for the executor in the parent process. The runner that
+drives this client across a whole fleet arrives in A2 PR-6, together with the deletion of the
+argv-rendering ``server/topology/`` classes.
+
+**grpcio and protobuf are an optional extra** (``pip install "shipinfer[grpc]"``) and nothing
+here imports either at module scope, so ``import shipinfer.launch`` works on a host that has
+neither. The first call on a :class:`ShardClient` raises a typed
+:class:`~shipinfer.core.errors.ConfigurationError` naming the extra — the same shape
+``api/app.py`` uses for FastAPI.
 
 **Nothing here may import torch, and that is not tidiness.** The whole reason a shard is a
 subprocess rather than a thread is that ``CUDA_VISIBLE_DEVICES`` has to be in the child's
@@ -23,7 +33,28 @@ it can see, on the one process in the deployment that needs no device at all —
 ``FORBIDDEN_EXTERNAL["launch"]`` in ``scripts/hooks/check_layers.py`` is what keeps that true.
 """
 
+from shipinfer.launch.client import ShardClient
+from shipinfer.launch.control import (
+    AddCameraResult,
+    CameraSpec,
+    ShardHealth,
+    ShardIdentity,
+    ShardState,
+    StopResult,
+)
 from shipinfer.launch.signals import forward_signals
 from shipinfer.launch.supervisor import DEFAULT_DRAIN_S, Fleet, ShardProcess
 
-__all__ = ["DEFAULT_DRAIN_S", "Fleet", "ShardProcess", "forward_signals"]
+__all__ = [
+    "DEFAULT_DRAIN_S",
+    "AddCameraResult",
+    "CameraSpec",
+    "Fleet",
+    "ShardClient",
+    "ShardHealth",
+    "ShardIdentity",
+    "ShardProcess",
+    "ShardState",
+    "StopResult",
+    "forward_signals",
+]
