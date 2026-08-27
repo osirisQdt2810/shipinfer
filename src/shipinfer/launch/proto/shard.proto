@@ -1,0 +1,187 @@
+// The shard control plane (arch.md section 2).
+//
+// A shard is spawned with nothing in argv beyond its own identity
+// (`--shard-id N --control-port P`); its camera set, topology and configuration arrive
+// here, as RPCs, after it reports ready. That is the whole point of the file: an operator
+// can add, remove and drain a camera on a live shard, and the launcher learns *ready* vs
+// *running* vs *draining* as typed answers instead of inferring them from exit codes.
+//
+// Three of these RPCs are skins over lifecycle invariants the C++ ingest manager already
+// hardened across #33-#41, and the field lists say so:
+//
+//   * `Stop` charges ONE deadline to the whole camera set and returns how many threads had
+//     to be abandoned (`StopReply.abandoned`). It is a lifetime signal, not a statistic: a
+//     caller that sees a non-zero count must NOT unwind buffers a detached thread still
+//     references.
+//   * `AddCamera` wraps insert -> start -> re-check, so a camera the fleet forgot mid-add is
+//     refused (`accepted = false`) rather than left reading behind a manager that has
+//     forgotten it. A refusal is an ordinary answer here, which is why it is a field and not
+//     a gRPC error status.
+//   * `Health` answers from a snapshot, so it is safe against a concurrent removal.
+//
+// Regenerate the Python stubs with:  python scripts/gen_proto.py
+// The stubs are COMMITTED; `tests/launch/test_proto_is_current.py` fails if they drift.
+
+syntax = "proto3";
+
+package shipinfer.launch.v1;
+
+import "google/protobuf/struct.proto";
+
+// The control surface a shard process exposes to its launcher.
+service Shard {
+  // Polled by the parent after the spawn: the first reply that arrives is the readiness
+  // signal, because a process that answers has finished importing and bound its port.
+  rpc Ready (ReadyRequest) returns (ReadyReply);
+
+  // Install the chain this shard runs, and the device-sharing it must honour.
+  rpc UpdateTopology (TopologyRequest) returns (TopologyReply);
+
+  // Start one camera on this shard. A refusal is `accepted = false`, never an exception.
+  rpc AddCamera (AddCameraRequest) returns (AddCameraReply);
+
+  // Stop and forget one camera.
+  rpc RemoveCamera (RemoveCameraRequest) returns (RemoveCameraReply);
+
+  // What state this shard is in. Safe against a concurrent removal.
+  rpc Health (HealthRequest) returns (HealthReply);
+
+  // Counters an operator would page on.
+  rpc Stats (StatsRequest) returns (StatsReply);
+
+  // Stop reading cameras, let in-flight work finish. Returns the abandonment count.
+  rpc Drain (DrainRequest) returns (DrainReply);
+
+  // Drain, then stop the executor. Idempotent: a second Stop reports 0 abandoned.
+  rpc Stop (StopRequest) returns (StopReply);
+}
+
+// Who this shard is. Assigned by the launcher except for `pid`, which only the child knows.
+message ShardIdentity {
+  int32 shard_id = 1;
+  // The port this shard's gRPC server is actually bound to. Not necessarily the one the
+  // launcher asked for: a shard may be told 0 and pick an ephemeral port, and the parent
+  // learns the real one here rather than by guessing.
+  int32 control_port = 2;
+  int32 pid = 3;
+}
+
+message ReadyRequest {}
+
+message ReadyReply {
+  ShardIdentity identity = 1;
+  // One of `starting`, `ready`, `running`, `draining`, `stopped`, `unknown` — the same
+  // vocabulary `HealthReply.state` uses. Deliberately a string rather than an enum: a
+  // launcher must be able to read a state a newer shard invented without failing to parse.
+  string state = 2;
+}
+
+message TopologyRequest {
+  // The chain file's text, verbatim. The YAML rather than a parsed structure because the
+  // loader is the single door through which a chain becomes trustworthy (ADR-017), and it
+  // lives on the shard; sending a pre-parsed graph would put a second parser on the wire.
+  string chain_yaml = 1;
+
+  // How many shard processes share each of this shard's devices, aligned with its logical
+  // ordinals. Two shards on one GPU must each load HALF the configured instances, or the
+  // device holds twice the engines for the same throughput and nothing says so — a silent
+  // VRAM doubling. This used to ride in the child's environment
+  // (`SHIPINFER_DEVICES__SHARED_BY`); it rides here now.
+  repeated int32 shared_by = 2;
+
+  // This shard's rank among the processes sharing each device, aligned with the same
+  // ordinals. The remainder of a count that does not divide evenly goes to the lowest ranks.
+  repeated int32 share_rank = 3;
+}
+
+message TopologyReply {
+  bool accepted = 1;
+  // Why not, when `accepted` is false. Empty on success.
+  string reason = 2;
+  // The name of the chain that was installed. Echoed so a launcher's log names what the
+  // shard understood, not what the launcher believes it sent.
+  string topology = 3;
+}
+
+message CameraSpec {
+  string camera_id = 1;
+  // `rtsp://...` for a camera, or a file path for a replayed video.
+  string url = 2;
+  // Target frame rate; 0 means "whatever the source delivers".
+  double fps = 3;
+}
+
+message AddCameraRequest {
+  CameraSpec camera = 1;
+}
+
+message AddCameraReply {
+  bool accepted = 1;
+  // Why not. A duplicate id, a shard that is stopping, a fleet that forgot the camera while
+  // it was starting - all ordinary answers, all typed refusals on the shard side.
+  string reason = 2;
+}
+
+message RemoveCameraRequest {
+  string camera_id = 1;
+  // One deadline for this camera's stop.
+  double timeout_s = 2;
+}
+
+message RemoveCameraReply {
+  // Whether the shard knew this camera at all.
+  bool removed = 1;
+  // Whether its thread stopped within the deadline. `removed && !clean` means the thread was
+  // abandoned - the caller's to know, not the log's to bury.
+  bool clean = 2;
+  string reason = 3;
+}
+
+message HealthRequest {}
+
+message HealthReply {
+  string state = 1;
+  // What the shard's executor reports about the models it holds
+  // (`engine/health.py::HealthReport.as_dict`).
+  google.protobuf.Struct engine = 2;
+  // One entry per camera, from a snapshot taken under the manager's lock.
+  google.protobuf.Struct cameras = 3;
+  // `slabs + own_ctx + K * C_ctx + engines <= device memory - reserve` (ADR-016 section 3.4).
+  // Empty until the DataPool lands in phase D.
+  google.protobuf.Struct vram_budget = 4;
+  // Empty on a healthy answer; the shard's own failure text when it could not ask its
+  // executor. A `Struct` cannot carry that, and an empty health report must not read as a
+  // healthy one.
+  string detail = 5;
+}
+
+message StatsRequest {}
+
+message StatsReply {
+  google.protobuf.Struct stats = 1;
+  string detail = 2;
+}
+
+message DrainRequest {
+  // ONE deadline for the whole camera set, not one per camera: everyone is signalled at t0,
+  // so a camera still unfinished at t0+timeout is genuinely stuck, and charging the budget
+  // per camera would turn one stuck decoder into fifty consecutive waits.
+  double timeout_s = 1;
+}
+
+message DrainReply {
+  int32 abandoned = 1;
+  string detail = 2;
+}
+
+message StopRequest {
+  double timeout_s = 1;
+}
+
+message StopReply {
+  // How many camera threads had to be abandoned; 0 is the clean shutdown. A LIFETIME
+  // SIGNAL: while this is non-zero, a detached thread still references this shard's buffers
+  // and the caller must not unwind them (arch.md section 2).
+  int32 abandoned = 1;
+  string detail = 2;
+}

@@ -71,6 +71,14 @@ server = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]   # KServe v2 HTTP facade
 video = ["opencv-python-headless>=4.9", "av>=12.0"]      # RTSP/file ingest + decode
 kafka = ["confluent-kafka>=2.3"]                         # result publishing (Plane 3 feed)
 cli = ["typer>=0.12", "rich>=13.7"]                      # `shipinfer ...`
+# The shard control plane (arch.md §2). Optional because the in-process runner needs no
+# RPC at all, and the launcher must stay importable on a host that installed neither —
+# `launch/client.py` refuses with a typed ConfigurationError naming this extra.
+# protobuf is pinned at >=5.29 rather than the >=4.25 the wire format would allow: the
+# COMMITTED stubs in `launch/proto/` declare a 5.29 gencode version and validate it at
+# import, so an older runtime fails loudly there. Regenerate with a matching
+# grpcio-tools if that floor ever has to move down.
+grpc = ["grpcio>=1.60,<2", "protobuf>=5.29,<6"]          # shard control plane (arch.md §2)
 
 # Everything a developer needs, and nothing that needs a GPU to install.
 dev = [
@@ -88,6 +96,13 @@ dev = [
     "typer>=0.12",
     "rich>=13.7",
     "httpx>=0.27",               # TestClient transport for the HTTP facade
+    # The control-plane tests, and the guard that says the committed stubs match the
+    # .proto. In `dev` and not only in `grpc` on purpose: CI installs `.[dev,cli]`, so
+    # without these every proto test would skip there and the regeneration guard would
+    # never run on the one machine that gates a merge.
+    "grpcio>=1.60,<2",
+    "grpcio-tools>=1.60,<2",
+    "protobuf>=5.29,<6",
 ]
 
 [project.scripts]
@@ -100,7 +115,10 @@ Homepage = "https://github.com/osirisQdt2810/shipinfer"
 where = ["src"]
 
 [tool.setuptools.package-data]
-shipinfer = ["py.typed", "resources/**/*"]
+# The .proto ships with the wheel although nothing at runtime reads it: it is the
+# contract, and an operator writing a client in another language should not have to
+# clone the repository to get it.
+shipinfer = ["py.typed", "resources/**/*", "launch/proto/*.proto"]
 
 # ---------------------------------------------------------------------------
 # Formatting / linting / typing
@@ -118,6 +136,15 @@ extend-exclude = '''
   | benchmarks/baseline
 )/
 '''
+# `force-exclude`, not `extend-exclude`: pre-commit passes staged files to black by name, and
+# `extend-exclude` does not apply to a file named on the command line. The generated protobuf
+# stubs are protoc's output verbatim — reformatting them makes every regeneration a diff and
+# `scripts/gen_proto.py --check` a false alarm.
+force-exclude = '''
+/(
+    src/shipinfer/launch/proto/.*_pb2.*\.pyi?
+)
+'''
 
 [tool.ruff]
 line-length = 96
@@ -125,7 +152,14 @@ target-version = "py310"
 # `benchmarks/baseline` is the counting-simulation submodule — the system we are measured
 # against. Linting or reformatting it would rewrite the baseline, and a baseline we edited
 # is not a baseline.
-extend-exclude = [".venv", "build", "dist", "references", "3rdparty", "benchmarks/baseline"]
+# The generated protobuf stubs are excluded for the same reason as the baseline: they are
+# a compiler's output, put back by `python scripts/gen_proto.py`, and a lint fix applied
+# to one would be silently reverted by the next regeneration.
+extend-exclude = [
+    ".venv", "build", "dist", "references", "3rdparty", "benchmarks/baseline",
+    "src/shipinfer/launch/proto/*_pb2*",
+]
+force-exclude = true
 
 [tool.ruff.lint]
 # Import sorting (I) is delegated to standalone isort, not ruff, so pre-commit has one
@@ -172,19 +206,26 @@ ignore = [
 "tests/**" = ["ANN", "ARG", "N802", "N803", "N806", "RUF012", "DTZ", "PERF"]
 "benchmarks/**" = ["ANN", "T201", "PERF"]
 "scripts/**" = ["ANN", "T201"]
+# gRPC handler names are protobuf's, and protobuf's are CamelCase. `add_ShardServicer_
+# to_server` binds them by exact attribute name, so renaming them to snake_case would
+# unbind the service. One file, one rule, rather than eight noqa comments.
+"src/shipinfer/runners/service.py" = ["N802"]
 
 [tool.isort]
 profile = "black"
 line_length = 96
 src_paths = ["src", "tests", "scripts", "benchmarks"]
-skip_glob = [".venv/*", "build/*", "dist/*", "references/*", "3rdparty/*", "benchmarks/baseline/*"]
+skip_glob = [
+    ".venv/*", "build/*", "dist/*", "references/*", "3rdparty/*", "benchmarks/baseline/*",
+    "src/shipinfer/launch/proto/*_pb2*",
+]
 
 [tool.mypy]
 python_version = "3.10"
 strict = true
 # tensorrt / cuda-python / torch are optional extras that are simply absent in CI.
 ignore_missing_imports = true
-exclude = '(^|/)(\.venv|build|dist|references|3rdparty)/'
+exclude = '((^|/)(\.venv|build|dist|references|3rdparty)/|_pb2(_grpc)?\.pyi?$)'
 # Do NOT set `files = [...]` — run mypy on changed paths (touch-it-fix-it).
 
 [[tool.mypy.overrides]]
@@ -216,7 +257,13 @@ markers = [
     "slow: takes more than ~2s.",
     "bench: a throughput/latency measurement, not a pass/fail assertion.",
 ]
-filterwarnings = ["error::DeprecationWarning:shipinfer.*"]
+# Later filters win, so the ignore must follow the error. protobuf 5.29 emits nothing on
+# import today; the line is here because a generated module is not ours to fix, and a
+# DeprecationWarning from a future protoc would otherwise fail the whole offline tier.
+filterwarnings = [
+    "error::DeprecationWarning:shipinfer.*",
+    "ignore::DeprecationWarning:shipinfer.launch.proto.*",
+]
 
 [tool.coverage.run]
 branch = true
