@@ -248,6 +248,9 @@ queue's wait exceeds that, which is what `spill_threshold` encodes in queue dept
 
 ## 6. The PR cut
 
+_(The commit plan as written at the time; the paths below are spelled as they are today,
+under `engine/`, so a reader can find the files — the commits themselves said `server/`.)_
+
 1. **`feat(runtime): the pinned shared ring`** — `runtime/memory/shared_ring.py`,
    `core/errors/topology.py` (+2 errors), `tests/runtime/test_shared_ring.py` (+gpu class).
    ~6 files.

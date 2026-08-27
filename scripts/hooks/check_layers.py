@@ -58,7 +58,7 @@ FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
     # it, not part of it: the HTTP layer lives in `server/api/` and moves to `api/`. Naming
     # fastapi here would put a web framework behind `shipinfer.engine`, which is the import an
     # in-process caller — a runner walking a chain — must not pay for.
-    "engine": {"fastapi", "uvicorn"},
+    "engine": {"fastapi", "uvicorn", "confluent_kafka"},
 }
 
 #: Top-level modules that are not layers, and may therefore be imported by any layer
@@ -78,8 +78,9 @@ ALLOWED_INTERNAL: dict[str, set[str]] = {
     "backends": {"core", "repository", "runtime"},
     "engine": {"core", "repository", "runtime", "backends", "scheduling"},
     # What is left of `server` is the KServe surface, the launcher and the topology classes;
-    # they sit *on* the engine and may not reach past it into a `runtime` device or a
-    # `backends` engine any more. `repository` stays because `server/topology/deepstream.py`
+    # they sit *on* the engine and may not import `runtime` or `backends` directly any more
+    # (transitively they still reach both through the engine — this check is about direct
+    # imports, which is what keeps the remaining callers greppable). `repository` stays because `server/topology/deepstream.py`
     # reads the model repository to plan its shards — a config question, answered without a
     # device. `pipeline` names `engine` rather than `server` for the same reason the row above
     # exists: it wants the pool, and the two stopped being the same package.

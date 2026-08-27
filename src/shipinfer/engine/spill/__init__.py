@@ -7,7 +7,8 @@ a local one. :mod:`~shipinfer.engine.spill.wire` is the byte format,
 ``Placeable`` plus the two threads that serve it, and :mod:`~shipinfer.engine.spill.mesh`
 is the rings and threads one shard runs to join the tier.
 
-Nothing is re-exported here on purpose: ``remote_instance`` imports ``wire`` through this
-package, and the tier is built lazily by :meth:`InferenceServer._join_service_tier` so a
-single-process ``serve`` never pays for it.
+Nothing is re-exported here on purpose: the tier is built lazily by
+:meth:`InferenceServer._join_service_tier` so that ``import shipinfer.engine`` — and a
+single-process ``serve`` — never pays for the ring machinery or its ``/dev/shm`` sizing.
+A caller spells the module it wants.
 """

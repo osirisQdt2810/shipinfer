@@ -18,18 +18,16 @@ from shipinfer.engine.model import Model
 from shipinfer.engine.pool import InferenceServer
 from shipinfer.engine.statistics import DurationStat, ModelStatistics
 
-#: The name arch.md §6 uses for this package's subject. `InferenceServer` keeps the name it
-#: has because it is the KServe server — it is what `/v2/health/ready` reports on and what
-#: every caller of `shipinfer.InferenceServer` already holds — and renaming a class that is
-#: in a public signature is a separate, breaking change from moving a package. The alias
-#: lets code inside the new layout read the way the document does without either name being
-#: a second implementation.
-Engine = InferenceServer
+# `InferenceServer` keeps its name: it is the KServe server — what `/v2/health/ready`
+# reports on and what every caller of `shipinfer.InferenceServer` holds — and renaming a
+# class in a public signature is a separate, breaking change from moving a package. No
+# `Engine` alias either: `csrc/shipinfer/backends/engine_api.h` already has `class Engine`
+# for the *backend contract*, and ADR-014 wants the two planes to mean the same thing by
+# the same name.
 
 __all__ = [
     "RESPONSE_CACHES",
     "DurationStat",
-    "Engine",
     "EnsembleModel",
     "HealthReport",
     "HealthStatus",

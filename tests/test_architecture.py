@@ -175,7 +175,6 @@ class TestTheServerShimIsTheSameObjects:
 
         assert shipinfer.server.InferenceServer is shipinfer.engine.InferenceServer
         assert shipinfer.InferenceServer is shipinfer.engine.InferenceServer
-        assert shipinfer.engine.Engine is shipinfer.engine.InferenceServer
 
     def test_the_shim_does_not_export_a_submodule_named_engine(self) -> None:
         """`from shipinfer.server import engine` used to reach the pool module.
@@ -185,8 +184,16 @@ class TestTheServerShimIsTheSameObjects:
         remaining caller would then be invisible to the grep that has to find them. The
         spelling is `from shipinfer.engine import pool`.
         """
-        import shipinfer.engine.pool  # populates the attribute if it can
+        import importlib
+
+        import shipinfer.engine.pool
         import shipinfer.server
+
+        # The attribute check alone is vacuous: importing `shipinfer.engine.pool` sets
+        # `pool` on `shipinfer.engine`, never `engine` on `shipinfer.server`, so it would
+        # pass even with a `server/engine.py` re-export on disk. Ask for the module itself.
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("shipinfer.server.engine")
 
         assert not hasattr(shipinfer.server, "engine")
 
