@@ -243,6 +243,23 @@ class TestPerModelStatsEndpoint:
         assert per_model["inference_count"] == 1
         assert "models" in whole_server  # the server view still exists, unchanged
 
+    def test_the_queues_per_camera_attribution_reaches_the_wire(self, client, server) -> None:
+        """`QueueStats.as_dict()` grew four nested maps; this is the endpoint that serialises
+        them.
+
+        The four totals were plain ints and the response was flat. A `Mapping` field that is
+        not JSON-serialisable, or a live dict mutated while FastAPI walks it, turns
+        `/v2/statistics` into a 500 — and the only place that shows up is here, over a real
+        client, on a real instance's queue.
+        """
+        server.infer_sync(_request(), timeout=10)
+
+        queue = client.get("/v2/statistics").json()["models"][0]["instances"][0]["queue"]
+
+        assert queue["depth_by_camera"] == {}, "nothing is still queued after a sync infer"
+        for key in ("rejected_by_camera", "evicted_by_camera", "expired_by_camera"):
+            assert queue[key] == {}, f"{key} is present and empty on a healthy queue"
+
 
 class TestABatchedRequestIsNotChargedItsOwnWaitTwice:
     """Two of the five spans handed to `record_execution` are already summed across the

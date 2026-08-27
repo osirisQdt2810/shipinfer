@@ -15,7 +15,12 @@ import pytest
 from shipinfer.core.errors import QueueFullError
 from shipinfer.core.request import Priority
 from shipinfer.core.settings import OverflowPolicy
-from shipinfer.scheduling.queues import BatchWindow, FairPriorityQueue, FifoQueue
+from shipinfer.scheduling.queues import (
+    BatchWindow,
+    FairPriorityQueue,
+    FifoQueue,
+    QueueStats,
+)
 from shipinfer.scheduling.work import summarise_fairness
 
 
@@ -175,3 +180,193 @@ class TestQueueLifecycle:
         assert len(drained) == 3
         assert all(item.future.done() for item in items)
         assert all(isinstance(item.future.exception(), Exception) for item in items)
+
+
+class TestPerCameraAttribution:
+    """Who paid for each drop — the reading that turns ADR-005 from a claim into a number.
+
+    The totals already say a queue refused, evicted or expired work. They cannot say
+    *whose*, and that is the exact question the inherited bug hid: "camera đông người được
+    nhận diện đầy đủ, camera vắng người thỉnh thoảng bị miss" is a per-camera observation
+    that a per-queue counter can never confirm or refute. Each test here drops work with a
+    known owner and asserts the queue named that owner and nobody else.
+    """
+
+    def test_eviction_is_charged_to_the_greedy_camera_alone(self, make_item) -> None:
+        """Three loud frames and one quiet one at capacity; the loud camera pays."""
+        queue = FairPriorityQueue("q", capacity=4, overflow=OverflowPolicy.DROP_OLDEST)
+        for i in range(3):
+            queue.put(make_item(camera="loud", frame=i))
+        queue.put(make_item(camera="quiet", frame=0))
+
+        queue.put(make_item(camera="loud", frame=99))
+
+        stats = queue.stats()
+        assert stats.evicted == 1
+        assert stats.evicted_by_camera == {"loud": 1}, "the flood must pay for its own flood"
+        assert stats.depth_by_camera["quiet"] == 1, "the quiet camera's frame is untouched"
+
+    def test_expiry_names_only_the_camera_that_was_late(self, make_item) -> None:
+        queue = FairPriorityQueue("q", capacity=8, drop_expired=True)
+        queue.put(make_item(camera="late", frame=0, deadline_ns=1))  # long past
+        queue.put(make_item(camera="ontime", frame=0))
+
+        queue.get_batch(BatchWindow(max_batch_size=8))
+
+        stats = queue.stats()
+        assert stats.expired == 1
+        assert stats.expired_by_camera == {"late": 1}
+
+    def test_a_refusal_names_the_camera_that_was_refused(self, make_item) -> None:
+        """Not the camera that filled the queue — the one whose frame was turned away.
+
+        Both readings are defensible and they answer different questions; this one answers
+        "which camera is losing frames right now", which is what an operator watching a gap
+        in a stream is asking.
+        """
+        queue = FairPriorityQueue("q", capacity=2, overflow=OverflowPolicy.REJECT)
+        queue.put(make_item(camera="resident", frame=0))
+        queue.put(make_item(camera="resident", frame=1))
+
+        with pytest.raises(QueueFullError):
+            queue.put(make_item(camera="newcomer", frame=0))
+
+        assert queue.stats().rejected_by_camera == {"newcomer": 1}
+
+    def test_depth_by_camera_sums_to_depth_across_priority_bands(self, make_item) -> None:
+        """The breakdown is of the whole queue, not of one lane.
+
+        A camera whose critical frames sit in one lane and whose normal frames sit in
+        another is one camera; reporting it twice, or reporting only the lane the walk
+        happened to reach, would make the sum disagree with `depth` — and a breakdown that
+        does not add up is worse than none.
+        """
+        queue = FairPriorityQueue("q", capacity=32)
+        for i in range(3):
+            queue.put(make_item(camera="cam_a", frame=i))
+        queue.put(make_item(camera="cam_a", frame=9, priority=Priority.TRACKING_CRITICAL))
+        for i in range(2):
+            queue.put(make_item(camera="cam_b", frame=i, priority=Priority.BACKGROUND))
+
+        stats = queue.stats()
+
+        assert stats.depth_by_camera == {"cam_a": 4, "cam_b": 2}
+        assert sum(stats.depth_by_camera.values()) == stats.depth == 6
+
+    def test_a_caller_with_no_camera_lands_in_the_shared_bucket(self, make_item) -> None:
+        """`"-"`, not `""` and not a private lane per caller.
+
+        `WorkItem.fairness_key` already collapses camera-less callers into one lane so they
+        queue together instead of each inventing their own; the attribution has to use the
+        same key or the two views of the same queue would disagree.
+        """
+        queue = FairPriorityQueue("q", capacity=1, overflow=OverflowPolicy.REJECT)
+        queue.put(make_item(camera="", frame=0))
+
+        with pytest.raises(QueueFullError):
+            queue.put(make_item(camera="", frame=1))
+
+        stats = queue.stats()
+        assert stats.depth_by_camera == {"-": 1}
+        assert stats.rejected_by_camera == {"-": 1}
+
+    def test_close_does_not_charge_anybody(self, make_item) -> None:
+        """Shutdown loss is not a per-camera fault.
+
+        The runner's `items_queue_closed` owns that outcome. Charging it here too would
+        double-count it and, worse, make an orderly stop read like a flood in the one view
+        an operator uses to find floods.
+        """
+        queue = FairPriorityQueue("q", capacity=8)
+        for i in range(3):
+            queue.put(make_item(camera="cam_a", frame=i))
+
+        queue.close()
+
+        stats = queue.stats()
+        assert stats.evicted_by_camera == {}
+        assert stats.expired_by_camera == {}
+        assert stats.rejected_by_camera == {}
+        assert stats.depth_by_camera == {}
+
+    def test_fifo_attributes_the_same_four_outcomes(self, make_item) -> None:
+        """The fairness-blind control reports the same four maps.
+
+        It has to: the benchmark compares the two queues, and a comparison where only one
+        side can name a victim is not a comparison. What differs is *who* gets named under
+        DROP_OLDEST — FIFO evicts the globally oldest, which is exactly the behaviour the
+        fair queue exists to replace, and this test is where that shows up as data.
+        """
+        queue = FifoQueue("q", capacity=4, overflow=OverflowPolicy.DROP_OLDEST)
+        queue.put(make_item(camera="quiet", frame=0))  # oldest, and blameless
+        for i in range(3):
+            queue.put(make_item(camera="loud", frame=i))
+
+        queue.put(make_item(camera="loud", frame=99))
+
+        stats = queue.stats()
+        assert stats.evicted_by_camera == {
+            "quiet": 1
+        }, "FIFO sacrifices the blameless head — the inherited bug, now visible"
+        assert stats.depth_by_camera == {"loud": 4}
+        assert sum(stats.depth_by_camera.values()) == stats.depth
+
+    def test_fifo_attributes_refusals_and_expiries(self, make_item) -> None:
+        queue = FifoQueue("q", capacity=2, overflow=OverflowPolicy.REJECT, drop_expired=True)
+        queue.put(make_item(camera="late", frame=0, deadline_ns=1))
+        queue.put(make_item(camera="ontime", frame=0))
+
+        with pytest.raises(QueueFullError):
+            queue.put(make_item(camera="newcomer", frame=0))
+        queue.get_batch(BatchWindow(max_batch_size=8))
+
+        stats = queue.stats()
+        assert stats.rejected_by_camera == {"newcomer": 1}
+        assert stats.expired_by_camera == {"late": 1}
+
+
+class TestQueueStatsIsASnapshotNotAView:
+    """`stats()` and `as_dict()` hand out copies.
+
+    `/v2/statistics` serialises this document and a health handler nests it into its own,
+    and both are free to trim or re-key what they were given. If the maps were the queue's
+    live counters, one such caller would be silently editing the attribution every other
+    caller reads — the same class of bug as the staging pool's `stats()` iterating its live
+    dict, which 500'd `/v2/statistics` with "dictionary changed size during iteration".
+    """
+
+    def test_as_dict_carries_the_four_maps(self, make_item) -> None:
+        queue = FairPriorityQueue("q", capacity=8)
+        queue.put(make_item(camera="cam_a", frame=0))
+
+        body = queue.stats().as_dict()
+
+        assert body["depth_by_camera"] == {"cam_a": 1}
+        assert body["rejected_by_camera"] == {}
+        assert body["evicted_by_camera"] == {}
+        assert body["expired_by_camera"] == {}
+
+    def test_mutating_the_result_does_not_reach_the_queue(self, make_item) -> None:
+        queue = FairPriorityQueue("q", capacity=1, overflow=OverflowPolicy.REJECT)
+        queue.put(make_item(camera="cam_a", frame=0))
+        with pytest.raises(QueueFullError):
+            queue.put(make_item(camera="cam_b", frame=0))
+
+        body = queue.stats().as_dict()
+        body["rejected_by_camera"]["cam_b"] = 999
+        body["rejected_by_camera"]["ghost"] = 1
+        body["depth_by_camera"].clear()
+
+        assert queue.stats().rejected_by_camera == {"cam_b": 1}
+        assert queue.stats().depth_by_camera == {"cam_a": 1}
+
+    def test_a_third_queue_may_report_no_attribution_at_all(self) -> None:
+        """The maps default to empty so a queue that cannot attribute still constructs.
+
+        Reporting nothing is honest; reporting a zero it never measured is not, and a
+        required field would force exactly that on the compiled adapter and on anybody's
+        third queue.
+        """
+        stats = QueueStats(depth=1, capacity=8, accepted=1, rejected=0, evicted=0, expired=0)
+
+        assert stats.as_dict()["evicted_by_camera"] == {}
