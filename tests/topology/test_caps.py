@@ -3,6 +3,11 @@
 The property worth pinning here is the *refusal*, not the parse: a wildcard must never
 bridge ``gpu`` and ``cpu``. That single rule is what makes a chain that would silently
 download 1000 frames a second to host memory fail at load instead of at 3 a.m.
+
+Scope, because these tests cannot see it and the module they test cannot enforce it:
+everything here is about **one pair** of caps. The chain-level guarantee — that a wildcard
+element in the middle cannot launder a device frame into a host-only sink — needs cap
+propagation across the whole graph, and lives in ``tests/topology/test_chain.py``.
 """
 
 from __future__ import annotations
@@ -63,12 +68,15 @@ class TestMatching:
         assert not Caps.parse("nv12@*").matches(Caps.parse("bgr@cpu"))
 
     @pytest.mark.parametrize("accepted", ["nv12@cpu", "bgr@cpu"])
-    def test_nothing_bridges_the_two_memories(self, accepted: str) -> None:
-        """A device cap never matches a host cap. This is the rule of arch.md §8.
+    def test_no_pair_bridges_the_two_memories(self, accepted: str) -> None:
+        """A device cap never matches a host cap. Half of arch.md §8's rule.
 
-        No wildcard *elsewhere* helps either: matching is decided by the pair, so a chain
-        cannot be talked into an implicit device-to-host copy by declaring ``*`` somewhere
-        upstream.
+        Only half, and the docstring says so because the other half is easy to assume from
+        here. Matching is decided by the **pair**, so nothing in this module stops a chain
+        from evading §8 with an intermediate element that wildcards both of its sides: each
+        of its two edges would pass this test. That is a chain-level property, pinned in
+        ``tests/topology/test_chain.py`` by
+        ``test_a_wildcard_passthrough_cannot_launder_a_gpu_frame_to_a_cpu_sink``.
         """
         assert not Caps.parse("nv12@gpu").matches(Caps.parse(accepted))
         assert negotiate([Caps.parse("nv12@gpu")], [Caps.parse(accepted)]) is None
