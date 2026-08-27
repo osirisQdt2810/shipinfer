@@ -24,6 +24,11 @@ import (the DeepStream compiler) registers lazily, as the element registries do.
 from __future__ import annotations
 
 from shipinfer.runners.base import Runner
+
+# Imported for the side effect: this is what puts `inprocess` in the registry. Not
+# re-exported as a class -- a runner is reached through `build_runner`, by the name a
+# settings tree uses, which is what keeps the registry the seam.
+from shipinfer.runners.inprocess import InprocessRunner
 from shipinfer.runners.registry import RUNNERS, build_runner
 
-__all__ = ["RUNNERS", "Runner", "build_runner"]
+__all__ = ["RUNNERS", "InprocessRunner", "Runner", "build_runner"]
