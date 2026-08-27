@@ -1,0 +1,27 @@
+{
+ "before": {
+  "owner": 323,
+  "opener": 261
+ },
+ "after": {
+  "owner": 531,
+  "opener": 261
+ },
+ "first_byte": 7,
+ "delta_owner_MiB": 208,
+ "delta_opener_MiB": 0,
+ "slab_MiB": 64,
+ "parent_view_before": {
+  "owner": 323,
+  "opener": 18
+ },
+ "parent_view_after": {
+  "owner": 531,
+  "opener": 261
+ },
+ "owner": 3,
+ "opener": 4,
+ "torch": "2.7.1+cu126",
+ "cuda": "12.6",
+ "note": "delta_owner_MiB is the foreign-context cost the opener pays on the owner's device (slab bytes already resident before the baseline); delta_opener_MiB is what the mapping adds on the opener's own device."
+}
