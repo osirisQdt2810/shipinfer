@@ -101,7 +101,6 @@ namespace shipinfer {
             // join/detach below it.
             std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
             thread_ = std::thread([this] { run(); });
-            thread_id_.store(thread_.get_id());
         }
     }
 
@@ -139,11 +138,15 @@ namespace shipinfer {
                     thread_.join();
                 } else {
                     thread_.detach();
-                    abandoned = true;
+                    thread_abandoned_ = true;
                     shout("camera " + config_.camera_id + " did not stop within " +
                           std::to_string(timeout.count()) + "ms; abandoning the thread");
                 }
             }
+            // Read under the same lock: the thread's fate, whichever stopper sealed it. A
+            // loser that answered "clean" for a thread its rival detached would zero the
+            // fleet count that keeps the sink alive (#39 round 1).
+            abandoned = thread_abandoned_;
         }
         if (!state_is_final()) set_state(CameraState::Stopped);
         return !abandoned;
@@ -156,6 +159,12 @@ namespace shipinfer {
     }
 
     void CameraActor::run() {
+        // The child publishes its own id: the parent's store after the spawn left a window
+        // where a self-stop from the first frames (a sink calling stop() from publish) read
+        // the default id, missed the self-stop guard, and waited its grace for itself
+        // (#39 round 1). An external stopper reading the default id simply proceeds, which
+        // is the correct outcome.
+        thread_id_.store(std::this_thread::get_id());
         try {
             while (!stop_.is_set()) {
                 try {

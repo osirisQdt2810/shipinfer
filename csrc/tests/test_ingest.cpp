@@ -1612,17 +1612,73 @@ namespace {
         std::thread two([&] { second = actor->stop(150ms); });
         one.join();
         two.join();
-        check(first != second,
-              "exactly one concurrent stop reports the abandonment (got " +
+        check(!first && !second,
+              "BOTH concurrent stops report the abandonment (got " +
                   std::string(first ? "true" : "false") + "/" +
                   std::string(second ? "true" : "false") +
-                  ") — a double detach would have been std::terminate, a double report "
-                  "would park one actor twice");
+                  ") — the flag is the thread's fate, not the caller's work: a loser that "
+                  "answered clean would zero the fleet count that keeps the sink alive "
+                  "(#39 round 1), while a double detach would have been std::terminate");
         gate.set_value();
         for (int i = 0; i < 600 && script.closes.load() == 0; ++i)
             std::this_thread::sleep_for(5ms);
         check(script.closes.load() >= 1,
               "and the detached thread resumed against alive memory and closed its source");
+    }
+
+    void test_a_stop_racing_the_recheck_still_counts_the_abandonment() {
+        // #39 round 1, the manager-level consequence: the fleet stop() and add_camera's
+        // re-check both stop the same actor; whichever loses the lifecycle lock must still
+        // learn the thread was abandoned, or IngestManager::stop() returns 0 and bench
+        // unwinds the frame that owns the sink under the detached thread. Both lock orders
+        // end with count >= 1; the actor-level fate-flag test above is the discriminating
+        // guard for the loser's answer itself.
+        static FakeScript script;
+        static CountingSink sink;
+        static std::promise<void> gate;
+        static std::shared_future<void> opened = gate.get_future().share();
+        static size_t fleet_count = 0;
+        script.on_open = [](int) { opened.wait(); };
+        script.on_read = [](int) { return 1; };
+
+        class StopsAfterStart : public IngestManager {
+          public:
+            using IngestManager::IngestManager;
+            std::thread fleet_stop;
+
+          protected:
+            void between_start_and_recheck() override {
+                for (int i = 0; i < 600 && script.opens.load() == 0; ++i)
+                    std::this_thread::sleep_for(5ms);
+                // The fleet stop launches HERE, after the thread is parked in its open:
+                // it strips the map (so the re-check will refuse) and races the re-check
+                // into CameraActor::stop on the same actor.
+                fleet_stop = std::thread([this] { fleet_count = stop(150ms); });
+                std::this_thread::sleep_for(30ms);  // let it reach the lifecycle wait
+            }
+        };
+
+        bool refused = false;
+        {
+            StopsAfterStart manager({}, sink, scripted(script));
+            try {
+                manager.add_camera(a_camera("cam0"));
+            } catch (const ServerStateError&) {
+                refused = true;
+            }
+            manager.fleet_stop.join();
+            check(refused, "the add is refused after the fleet stop stripped the map");
+            check(fleet_count == 1,
+                  "and the fleet stop counted the abandonment (got " +
+                      std::to_string(fleet_count) +
+                      ") whichever stopper performed the detach — 0 would tell bench to "
+                      "unwind the sink under the detached thread");
+        }
+        gate.set_value();
+        for (int i = 0; i < 600 && script.closes.load() == 0; ++i)
+            std::this_thread::sleep_for(5ms);
+        check(script.closes.load() >= 1,
+              "and the thread resumed against alive memory — parked by whoever detached");
     }
 
     void test_a_refused_add_pays_the_abandonment_debt() {
@@ -1796,6 +1852,7 @@ int main() {
     test_a_camera_added_during_stop_never_keeps_running();
     test_the_managers_death_leaks_the_abandoned_rather_than_freeing_them();
     test_two_concurrent_stops_agree_on_one_abandonment();
+    test_a_stop_racing_the_recheck_still_counts_the_abandonment();
     test_a_refused_add_pays_the_abandonment_debt();
     test_stop_charges_one_deadline_to_the_fleet_not_one_per_camera();
 
