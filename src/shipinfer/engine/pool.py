@@ -372,14 +372,32 @@ class InferenceServer:
 
         Every step is guarded, because this runs on the failure path of :meth:`start` and a
         teardown error there would replace the load error the operator needs to read.
+
+        **The teardown runs under the control lock**, so it cannot interleave with a
+        :meth:`load_model` that is in progress. Without that, the two overlap in exactly the
+        way that leaks: a load passes its started check, spends seconds building a backend
+        and starting worker threads, and publishes the model into a table this method has
+        already drained — a running model, with live threads, on a server that reports
+        itself stopped and holds no reference to stop it. Taking the lock makes the two
+        orderings the only two: the load finishes first and this drains it, or it finds
+        ``_started`` false under the lock and is refused. The cost is that a stop arriving
+        mid-load waits for that load to finish, which is bounded by model start-up and is
+        the right trade against dropping a GPU context on the floor.
         """
         if not (self._started or self._starting):
             return
         _LOG.info("stopping shipinfer (%d model(s))", len(self._models))
-        # Cleared first, so a second call is a no-op even if a step below raises something
-        # this method deliberately does not catch.
+        # Cleared *before* the lock is taken, not inside it, so a `load_model` already
+        # blocked on the control lock sees the false flag the moment it gets in. Clearing it
+        # also makes a second call a no-op even if a step below raises something this method
+        # deliberately does not catch.
         self._started = False
         self._starting = False
+        with self._control_lock:
+            self._teardown()
+
+    def _teardown(self) -> None:
+        """Release everything the server holds. Called by :meth:`stop`, under the lock."""
         if self._mesh is not None:
             # Leave the tier first: peers see the closed rings and fail their in-flight
             # requests to us with the tags, instead of waiting on a model that is stopping.
@@ -406,6 +424,14 @@ class InferenceServer:
             self._traces.close()
         except Exception:
             _LOG.exception("error closing the trace sink")
+        finally:
+            # Back to the null sink, rather than leaving the field pointing at a closed one.
+            # `stats()` is served on a stopped server — a scrape does not stop when the
+            # server does — and it reads `self._traces.stats()`, so a closed sink is asked
+            # for numbers after its file handle has gone. The null sink answers that
+            # honestly and costs nothing, and it is also the state `start()` expects, so a
+            # server that is started again does not inherit the previous run's dead sink.
+            self._traces = NullTraceSink()
         try:
             self._memory.close()
         except Exception:
@@ -432,12 +458,24 @@ class InferenceServer:
             ModelControlError: when the server was not started with
                 ``model_control='explicit'``, or the model is already loaded.
             ModelNotFoundError: when the repository has no such model.
-            ServerStateError: before :meth:`start`.
+            ServerStateError: before :meth:`start`, and when :meth:`stop` ran between this
+                call's started check and the lock — see the re-check below.
             ConfigurationError: when the model's config or artefacts are wrong. The server
                 keeps serving everything else.
         """
         self._require_control("load", name)
         with self._control_lock:
+            # Checked twice, and the second one is the one that matters. Between
+            # `_require_control` above and this lock the server can have stopped — the whole
+            # of `stop()`'s teardown runs under this same lock — and building the model
+            # anyway would publish live worker threads into a table nothing drains again.
+            # Refuse instead, with the state error the caller can act on; the first check
+            # stays because it gives the same answer without waiting behind a slow load.
+            if not self._started:
+                raise ServerStateError(
+                    f"cannot load model {name!r}: the server stopped while the request was "
+                    "waiting"
+                )
             if name in self._models:
                 raise ModelControlError(
                     f"model {name!r} is already loaded; unload it first if you meant to "
