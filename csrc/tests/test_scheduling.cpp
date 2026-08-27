@@ -195,17 +195,34 @@ namespace {
     // Who paid for each drop. The totals already say a queue refused, evicted or expired
     // work; they cannot say whose, and that is the exact question the inherited bug hid.
     // Namesakes of `TestPerCameraAttribution` in `tests/scheduling/test_queue_fairness.py`.
+    //
+    // ONE NAMESAKE IS MISSING ON PURPOSE: the Python test for the shared `"-"` bucket. Python
+    // keys the maps on `WorkItem.fairness_key`, which collapses a camera-less caller into
+    // `"-"`; here `base.h` makes `item.camera()` itself the fairness key, so whatever the
+    // adapter hands back *is* the bucket and there is nothing for this plane to fall back
+    // from. Do not add a second fallback here — two notions of identity over one queue is
+    // exactly the disagreement the shared bucket exists to prevent, and the adapter is the
+    // single place that owns the mapping.
 
     void test_eviction_is_charged_to_the_greedy_camera_alone() {
+        // The submitter is deliberately *not* the victim: `quiet` arrives first, `loud` fills
+        // the rest, and it is `quiet` whose next frame forces the eviction. Ordered the other
+        // way round — three `loud` then a `loud` submission — submitter and victim are the
+        // same camera, and a queue that charged the camera it was making room *for* would
+        // pass. `make_room_locked` here has no handle on the submitted item at all, which is
+        // what makes that mistake unspellable in this plane; the ordering keeps the check
+        // honest anyway, so the two planes' tests read as one trace.
         FairPriorityQueue<Item> queue("q", 4, Overflow::DropOldest);
-        for (int i = 0; i < 3; ++i) queue.put(Item{"loud", i});
         queue.put(Item{"quiet", 10});
-        queue.put(Item{"loud", 99});
+        for (int i = 0; i < 3; ++i) queue.put(Item{"loud", i});
+        queue.put(Item{"quiet", 11});
         const QueueStats stats = queue.stats();
         check(stats.evicted == 1 && stats.evicted_by_camera.size() == 1 &&
                   stats.evicted_by_camera.at("loud") == 1,
               "the flood pays for its own flood, and nobody else is named");
-        check(stats.depth_by_camera.at("quiet") == 1, "the quiet camera's frame is untouched");
+        check(stats.depth_by_camera.size() == 2 && stats.depth_by_camera.at("quiet") == 2 &&
+                  stats.depth_by_camera.at("loud") == 2,
+              "the quiet camera's first frame survived; the loud camera lost one");
     }
 
     void test_expiry_names_only_the_camera_that_was_late() {
@@ -244,6 +261,47 @@ namespace {
         check(stats.evicted_by_camera.empty() && stats.expired_by_camera.empty() &&
                   stats.rejected_by_camera.empty() && stats.depth_by_camera.empty(),
               "an orderly stop must not read like a flood");
+    }
+
+    void test_a_producer_woken_by_close_is_closed_not_charged() {
+        // Under Block a producer sleeps inside `make_room_locked` until a slot frees or
+        // `block_timeout_ms` expires — and `close()` wakes it too. Both wakes left that path
+        // with the same `false`, so `put` charged `rejected_by_camera[<the blocked camera>]`
+        // and answered Rejected: an orderly stop read as a camera flooding, in the one view
+        // an operator uses to find floods, and in flat contradiction of the promise in
+        // `base.h` that close() feeds none of the maps. The 5 s timeout is long enough that
+        // a timeout-shaped exit cannot explain the result.
+        FairPriorityQueue<Item> fair("q", 1, Overflow::Block, /*block_timeout_ms=*/5000);
+        fair.put(Item{"resident", 1});
+        std::atomic<int> fair_status{-1};
+        std::thread fair_producer(
+            [&] { fair_status.store(static_cast<int>(fair.put(Item{"waiting", 2}))); });
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        check(fair_status.load() == -1,
+              "the producer is still blocked while the queue is full");
+        (void)fair.close();
+        fair_producer.join();
+        check(fair_status.load() == static_cast<int>(PutStatus::Closed),
+              "a shutdown answers Closed, not Rejected");
+        const QueueStats fair_stats = fair.stats();
+        check(fair_stats.rejected == 0 && fair_stats.rejected_by_camera.empty(),
+              "nobody pays for a shutdown");
+
+        // The fairness-blind control has the same two exits and had the same confusion.
+        FifoQueue<Item> fifo("q", 1, Overflow::Block, /*block_timeout_ms=*/5000);
+        fifo.put(Item{"resident", 1});
+        std::atomic<int> fifo_status{-1};
+        std::thread fifo_producer(
+            [&] { fifo_status.store(static_cast<int>(fifo.put(Item{"waiting", 2}))); });
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        check(fifo_status.load() == -1, "the FIFO producer is blocked too");
+        (void)fifo.close();
+        fifo_producer.join();
+        check(fifo_status.load() == static_cast<int>(PutStatus::Closed),
+              "and it is closed, not refused");
+        const QueueStats fifo_stats = fifo.stats();
+        check(fifo_stats.rejected == 0 && fifo_stats.rejected_by_camera.empty(),
+              "with nobody charged");
     }
 
     void test_fifo_attributes_the_same_four_outcomes() {
@@ -699,6 +757,7 @@ int main() {
     test_expiry_names_only_the_camera_that_was_late();
     test_depth_by_camera_sums_to_depth_across_priority_bands();
     test_close_does_not_charge_anybody();
+    test_a_producer_woken_by_close_is_closed_not_charged();
     test_fifo_attributes_the_same_four_outcomes();
     test_stats_hands_out_copies_not_the_live_maps();
 

@@ -127,6 +127,15 @@ class FairPriorityQueue(RequestQueue):
                 raise RequestCancelledError(f"queue {self.name!r} is closed")
 
             if self._size >= self.capacity and not self._make_room_locked():
+                # `_make_room_locked` has two false exits and they are different events.
+                # Under BLOCK a producer asleep in it is woken by `close()` as well as by
+                # the timeout, and the two were indistinguishable here: a shutdown charged
+                # `rejected_by_camera` and raised `QueueFullError("full (0/1)")`, so an
+                # orderly stop read as a camera flooding in the one view an operator uses
+                # to find floods. `QueueStats` promises close() charges nobody; this is
+                # where that promise is kept for the producer that was still asleep.
+                if self._closed:
+                    raise RequestCancelledError(f"queue {self.name!r} is closed")
                 self._rejected += 1
                 self._rejected_by_camera[item.fairness_key] += 1
                 raise QueueFullError(self.name, self._size, self.capacity)

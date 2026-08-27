@@ -95,6 +95,10 @@ class FifoQueue(RequestQueue):
             if self._closed:
                 raise RequestCancelledError(f"queue {self.name!r} is closed")
             if len(self._items) >= self.capacity and not self._make_room_locked():
+                # A BLOCK producer woken by `close()` is cancelled, not refused — see
+                # `FairPriorityQueue.put` for what charging it instead reported.
+                if self._closed:
+                    raise RequestCancelledError(f"queue {self.name!r} is closed")
                 self._rejected += 1
                 self._rejected_by_camera[item.fairness_key] += 1
                 raise QueueFullError(self.name, len(self._items), self.capacity)

@@ -55,13 +55,16 @@ namespace shipinfer {
         PutStatus put(T&& item) {
             std::unique_lock<std::mutex> lock(mutex_);
             if (closed_) return PutStatus::Closed;
-            const std::string camera = item.camera();
             if (items_.size() >= capacity_ && !make_room_locked(lock)) {
+                // A BLOCK producer woken by `close()` is closed, not refused — see
+                // `FairPriorityQueue::put` for what charging it instead reported.
+                if (closed_) return PutStatus::Closed;
                 ++stats_.rejected;
-                ++stats_.rejected_by_camera[camera];
+                // Read here, not at the top of `put`: this is the one branch that needs
+                // it, and the item is still ours to read from on it.
+                ++stats_.rejected_by_camera[item.camera()];
                 return PutStatus::Rejected;
             }
-            if (closed_) return PutStatus::Closed;
             items_.push_back(std::move(item));
             size_.store(items_.size(), std::memory_order_relaxed);
             ++stats_.accepted;

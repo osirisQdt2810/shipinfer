@@ -17,11 +17,11 @@ is the fair queue's half of the depth walk. `csrc/shipinfer/scheduling/queues/` 
 
 **Why.** The totals said a queue refused, evicted or expired work. They could not say *whose*,
 and that is precisely the question ADR-005 exists to answer: the inherited failure was observed
-per camera — "camera đông người được nhận diện đầy đủ, camera vắng người thỉnh thoảng bị miss"
-— and a per-queue counter can neither confirm nor refute a per-camera claim. Under
-`DROP_OLDEST` the fair queue's victim is the greediest camera *by construction*, so
-`evicted_by_camera` is now the direct evidence that the eviction inversion works, rather than a
-property asserted in a docstring.
+per camera — "camera đông người được nhận diện đầy đủ, camera vắng người thỉnh thoảng bị miss",
+the crowded cameras recognised in full while the quiet ones occasionally miss — and a per-queue
+counter can neither confirm nor refute a per-camera claim. Under `DROP_OLDEST` the fair queue's
+victim is the greediest camera *by construction*, so `evicted_by_camera` is now the direct
+evidence that the eviction inversion works, rather than a property asserted in a docstring.
 
 **Decisions.**
 
@@ -33,7 +33,12 @@ property asserted in a docstring.
   zero it never measured would be worse than silence.
 - **`close()` feeds none of them.** Shutdown loss is not a per-camera fault and the runner's
   `items_queue_closed` already owns that outcome; charging it here would make an orderly stop
-  read like a flood in the one view an operator uses to find floods.
+  read like a flood in the one view an operator uses to find floods. Keeping that promise took
+  a code change on the `BLOCK` path in both planes: a producer asleep in the make-room wait is
+  woken by `close()` as well as by the timeout, and the two exits were indistinguishable, so a
+  shutdown charged `rejected_by_camera` and raised `QueueFullError("full (0/1)")`. The closed
+  exit is now named before any counter moves — `RequestCancelledError` in Python,
+  `PutStatus::Closed` in C++.
 - **`depth_by_camera` is computed inside `stats()`, not maintained.** O(cameras x priorities) —
   200 dict entries at the design point — once per stats call, against bookkeeping on a path that
   runs 15 000 times a second. Same trade in both planes.

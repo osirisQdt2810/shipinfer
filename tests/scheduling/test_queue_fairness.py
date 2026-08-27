@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from shipinfer.core.errors import QueueFullError
+from shipinfer.core.errors import QueueFullError, RequestCancelledError
 from shipinfer.core.request import Priority
 from shipinfer.core.settings import OverflowPolicy
 from shipinfer.scheduling.queues import (
@@ -187,24 +187,35 @@ class TestPerCameraAttribution:
 
     The totals already say a queue refused, evicted or expired work. They cannot say
     *whose*, and that is the exact question the inherited bug hid: "camera đông người được
-    nhận diện đầy đủ, camera vắng người thỉnh thoảng bị miss" is a per-camera observation
+    nhận diện đầy đủ, camera vắng người thỉnh thoảng bị miss" — the crowded cameras are
+    recognised in full while the quiet ones occasionally miss — is a per-camera observation
     that a per-queue counter can never confirm or refute. Each test here drops work with a
     known owner and asserts the queue named that owner and nobody else.
     """
 
     def test_eviction_is_charged_to_the_greedy_camera_alone(self, make_item) -> None:
-        """Three loud frames and one quiet one at capacity; the loud camera pays."""
+        """The loud camera pays for an eviction the quiet camera's frame triggered.
+
+        The submitter is deliberately *not* the victim. An earlier version of this test put
+        the three loud frames first and then submitted from `loud`, which makes submitter
+        and victim the same camera — so a queue that charged the camera it was making room
+        *for*, rather than the camera it took the slot *from*, passed it. Here `quiet` is
+        the one asking for space and `loud` is the one that must be named.
+        """
         queue = FairPriorityQueue("q", capacity=4, overflow=OverflowPolicy.DROP_OLDEST)
+        queue.put(make_item(camera="quiet", frame=0))
         for i in range(3):
             queue.put(make_item(camera="loud", frame=i))
-        queue.put(make_item(camera="quiet", frame=0))
 
-        queue.put(make_item(camera="loud", frame=99))
+        queue.put(make_item(camera="quiet", frame=99))
 
         stats = queue.stats()
         assert stats.evicted == 1
         assert stats.evicted_by_camera == {"loud": 1}, "the flood must pay for its own flood"
-        assert stats.depth_by_camera["quiet"] == 1, "the quiet camera's frame is untouched"
+        assert stats.depth_by_camera == {
+            "quiet": 2,
+            "loud": 2,
+        }, "the quiet camera's first frame survived; the loud camera lost one"
 
     def test_expiry_names_only_the_camera_that_was_late(self, make_item) -> None:
         queue = FairPriorityQueue("q", capacity=8, drop_expired=True)
@@ -288,6 +299,49 @@ class TestPerCameraAttribution:
         assert stats.expired_by_camera == {}
         assert stats.rejected_by_camera == {}
         assert stats.depth_by_camera == {}
+
+    @pytest.mark.parametrize("queue_class", [FairPriorityQueue, FifoQueue])
+    def test_a_producer_woken_by_close_is_cancelled_not_charged(
+        self, make_item, queue_class
+    ) -> None:
+        """A shutdown that catches a blocked producer is still a shutdown.
+
+        Under `BLOCK` a producer sleeps inside the make-room path until a slot frees or
+        `block_timeout_ms` expires — and `close()` wakes it too. Both wakes left that path
+        with the same `False`, so `put` charged `rejected_by_camera[<the blocked camera>]`
+        and raised `QueueFullError("full (0/1)")`: a stopping server reported as a camera
+        flooding, in the one view an operator uses to find floods, and in flat contradiction
+        of `QueueStats`'s own promise that `close()` charges nobody. The timeout here is
+        long enough that a timeout-shaped exit could not have produced this result.
+        """
+        queue = queue_class(
+            "q", capacity=1, overflow=OverflowPolicy.BLOCK, block_timeout_ms=5000
+        )
+        queue.put(make_item(camera="resident", frame=0))
+        raised: list[BaseException] = []
+
+        def produce() -> None:
+            try:
+                queue.put(make_item(camera="waiting", frame=0))
+            except Exception as exc:
+                raised.append(exc)
+
+        producer = threading.Thread(target=produce, daemon=True)
+        producer.start()
+        time.sleep(0.1)
+        assert not raised, "the producer never blocked, so close() is not what freed it"
+
+        queue.close()
+        producer.join(timeout=5.0)
+
+        assert not producer.is_alive(), "the producer was not woken by close()"
+        assert len(raised) == 1
+        assert isinstance(
+            raised[0], RequestCancelledError
+        ), f"a shutdown surfaced as {type(raised[0]).__name__}: {raised[0]}"
+        stats = queue.stats()
+        assert stats.rejected_by_camera == {}, "nobody pays for a shutdown"
+        assert stats.rejected == 0
 
     def test_fifo_attributes_the_same_four_outcomes(self, make_item) -> None:
         """The fairness-blind control reports the same four maps.
