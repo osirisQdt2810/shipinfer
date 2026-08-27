@@ -94,7 +94,7 @@ silently: an `infer-dims` that no longer matches the engine fails at start-up, a
 | `pre-cluster-threshold` | `pipeline.score_threshold` | |
 | `topk` | `pipeline.max_detections` | the fan-out cap, same as the Python DAG's |
 | `cluster-mode=4` | fixed | no clustering: yolo26 applied NMS in the engine |
-| `net-scale-factor`, `model-color-format=0` | fixed at 1/255 and RGB | matches `NormalizeParams`' defaults, so both planes feed the engine the same pixels |
+| `net-scale-factor`, `model-color-format=0` | fixed at 1/255 and RGB | matches `NormalizeParams`' defaults — with one stated exception: nvinfer's letterbox pads with 0 where `ImageOps` pads with 114, so the bar pixels differ between planes (#32 r5); everything inside the image is identical |
 | `maintain-aspect-ratio=1`, `symmetric-padding=1` | fixed | the letterbox `ImageOps.letterbox` does |
 | `operate-on-class-ids` | `operate_on` labels reversed through `class_labels` | labels, not ids: an id is a checkpoint property |
 | `process-mode=2`, `network-type=100`, `output-tensor-meta=1` | fixed, sgies | objects not frames; no built-in postprocess; the embedding is reachable |
@@ -242,7 +242,7 @@ that is PR2 (§5).
   covers every absence: an unstamped frame gets the probe's receipt as its capture time,
   labelled `extra.capture_origin="probe"` (a source stamp is `"source"`), so `latency_us`
   is never a silent zero and the bench can tell the two clocks apart.
-* **`num-detected-classes` comes from the label map (9), not from the engine.** A COCO
+* **`num-detected-classes` truncates the class space to the labelled ids — a deliberate cross-plane divergence.** The Python plane keeps out-of-map ids and publishes `UNKNOWN_LABEL`; this topology drops them at the parser, its only pre-tracker gate. Same engine, same frame, two object sets on the default COCO checkpoint — stated here so a parity comparison reads the difference as a decision, not a bug. A COCO
   yolo26 engine emits ids up to 79; ids at or above the declared count are dropped by
   nvinfer's contract, which here filters the classes this deployment ignores — a useful
   coincidence, not a decision. What a *custom* parser does with `classId >=

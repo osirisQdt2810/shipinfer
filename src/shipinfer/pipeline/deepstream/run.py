@@ -33,6 +33,7 @@ publish loss is never charged to another's frame.
 
 from __future__ import annotations
 
+import os
 import signal
 import tempfile
 import time
@@ -231,7 +232,10 @@ class DeepStreamPipeline:
                 self._deepstream.config_dir
                 if self._deepstream.config_dir is not None
                 else Path(tempfile.gettempdir())
-                / f"shipinfer-ds-{self._deepstream.run_id or 'local'}"
+                # The pid keeps two HAND-started shards (no launcher, no run id, both
+                # defaulting to shard 0) from overwriting each other's generated configs —
+                # the loser's nvinfer would read a config with the wrong gpu-id (#32 r5).
+                / f"shipinfer-ds-{self._deepstream.run_id or f'local-{os.getpid()}'}"
             )
         )
         self._metrics = PipelineMetrics()
@@ -366,8 +370,17 @@ class DeepStreamPipeline:
             :class:`~shipinfer.core.errors.ShardExitedError` for it and stops the rest of the
             fleet — the same failure story a dying ``serve`` shard has.
         """
+        self._exit_code = 0  # a second run() must not return the previous run's verdict
         if self._pipeline is None:
-            self.start()
+            try:
+                self.start()
+            except BaseException:
+                # A failed start has already built the sink and walked elements toward
+                # READY; without this, the truncated-and-open results file and the
+                # half-risen graph both leak — stop()'s docstring says it is a finally,
+                # and on this path it was neither (#32 round 5).
+                self.stop()
+                raise
         assert self._glib is not None
         self._loop = self._glib.MainLoop()
         previous = {
@@ -394,10 +407,11 @@ class DeepStreamPipeline:
         if self._pipeline is not None and self._gst is not None:
             self._pipeline.set_state(self._gst.State.NULL)
             self._pipeline = None
-        # Only a sink that was ever built gets closed, and only once: a dry construction
-        # never builds one, and stop() advertises idempotency.
+        # Only a sink WE built gets closed, and only once: a dry construction never
+        # builds one, an injected sink belongs to its injector (#32 round 5), and stop()
+        # advertises idempotency.
         sink, self._sink = self._sink, None
-        if sink is not None:
+        if sink is not None and sink is not self._injected_sink:
             sink.close()
 
     # -- the bus -------------------------------------------------------------------------

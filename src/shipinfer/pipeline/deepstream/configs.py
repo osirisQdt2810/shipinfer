@@ -256,6 +256,11 @@ def pgie_config(
         f"labelfile-path={labels_path}",
         f"batch-size={batch_size}",
         f"network-mode={_NETWORK_MODE[deepstream.network_mode]}",
+        # Deliberately the label MAP's extent, not the network's class count: a COCO
+        # yolo26 emits ids up to 79, and declaring 9 makes nvinfer drop everything this
+        # deployment does not label. The Python plane keeps those ids and publishes
+        # UNKNOWN_LABEL instead — a stated cross-plane divergence (design doc §6), not
+        # an accident: filtering at the parser is this topology's only pre-tracker gate.
         f"num-detected-classes={max(pipeline.class_labels) + 1}",
         f"interval={deepstream.interval}",
         # 1 is the primary GIE by convention, and every secondary's `operate-on-gie-id` says 1.
@@ -268,6 +273,15 @@ def pgie_config(
         "symmetric-padding=1",
         f"cluster-mode={_CLUSTER_MODE_NONE}",
     ]
+    if bool(deepstream.bbox_parser) != bool(deepstream.custom_lib):
+        # Belt and braces beside the settings validator (the unfiltered-secondary
+        # shape from round 1): a hand-built settings object must not generate a
+        # config nvinfer can only fail to dlsym.
+        raise ConfigurationError(
+            f"{artifact.name}: bbox_parser and custom_lib travel together (one names "
+            f"the function, the other the library it is dlsym'd from); got "
+            f"parser={deepstream.bbox_parser!r} lib={deepstream.custom_lib!r}"
+        )
     if deepstream.bbox_parser:
         lines.append(f"parse-bbox-func-name={deepstream.bbox_parser}")
     if deepstream.custom_lib:

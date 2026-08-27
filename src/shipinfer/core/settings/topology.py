@@ -158,6 +158,22 @@ class DeepStreamSettings(BaseModel):
     shard: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
+    def _the_parser_and_its_library_travel_together(self) -> DeepStreamSettings:
+        if bool(self.bbox_parser) != bool(self.custom_lib):
+            given, missing = (
+                ("bbox_parser", "custom_lib")
+                if self.bbox_parser
+                else ("custom_lib", "bbox_parser")
+            )
+            raise ValueError(
+                f"{given} is set but {missing} is not: nvinfer dlsym()s the parse function "
+                f"out of the custom library, so one without the other fails with "
+                f"NVDSINFER_CUSTOM_LIB_FAILED inside the GStreamer element on every shard, "
+                f"seconds into the deploy. Set both or neither"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _secondaries_are_the_ones_operated_on(self) -> DeepStreamSettings:
         unknown = sorted(set(self.operate_on) - set(self.secondaries))
         if unknown:

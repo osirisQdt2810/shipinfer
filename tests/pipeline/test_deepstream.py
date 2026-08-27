@@ -1126,8 +1126,8 @@ class TestStartWiresTheSink:
         the probe with `sink=None` and published nothing for its whole lifetime while the
         GPU burned — the module docstring's own failure through a different door. This is
         the seam test the review asked for: with gst/pyds/build_branch faked, start() must
-        leave the sink built, an injected sink must be the one wired, and a buffer must
-        reach it."""
+        leave the sink built and an injected sink must be the one the probe holds — the
+        wiring seam, asserted through the probe's own reference."""
         from shipinfer.pipeline.deepstream import run as run_module
         from shipinfer.pipeline.deepstream.run import DeepStreamPipeline
 
@@ -1266,3 +1266,131 @@ class TestThePrimaryBatchIsBounded:
                 cameras=settings.ingest.cameras,
                 root=tmp_path,
             )
+
+
+class TestTheParserAndItsLibraryTravelTogether:
+    @pytest.mark.parametrize(
+        ("given", "settings_kwargs"),
+        [
+            ("bbox_parser", {"bbox_parser": "NvDsInferParseYolo26"}),
+            ("custom_lib", {"custom_lib": "libparse.so"}),
+        ],
+    )
+    def test_half_the_pair_is_refused_in_the_settings(self, given, settings_kwargs) -> None:
+        """#32 round 5: one without the other passes generation and dies with
+        NVDSINFER_CUSTOM_LIB_FAILED inside the element on every shard — nvinfer dlsym()s
+        the function out of the library, so the pair is atomic."""
+        from shipinfer.core.settings.topology import DeepStreamSettings
+
+        with pytest.raises(ValueError, match=r"travel together|Set both or neither"):
+            DeepStreamSettings(**settings_kwargs)
+
+    def test_the_generation_mirror_refuses_a_hand_built_half_pair(
+        self, repository: ModelRepository, tmp_path: Path
+    ) -> None:
+        from shipinfer.core.settings.topology import DeepStreamSettings
+        from shipinfer.pipeline.deepstream import write_configs
+
+        settings = settings_for()
+        settings.topology.deepstream = DeepStreamSettings.model_construct(
+            **{**settings.topology.deepstream.model_dump(), "custom_lib": ""}
+        )
+        with pytest.raises(ConfigurationError, match="travel together"):
+            write_configs(
+                repository,
+                settings=settings,
+                shard_index=0,
+                gpu_id=0,
+                cameras=settings.ingest.cameras,
+                root=tmp_path,
+            )
+
+
+class TestStopIsAFinallyNotAHappyPath:
+    def _fakes(self, monkeypatch, playing_result="ok"):
+        from shipinfer.pipeline.deepstream import run as run_module
+
+        transitions: list = []
+
+        class FakeElement:
+            def get_bus(self):
+                return types.SimpleNamespace(
+                    add_signal_watch=lambda: None, connect=lambda *_: None
+                )
+
+            def set_state(self, state):
+                transitions.append(state)
+                if state == 3 and playing_result == "fail":
+                    return "FAILURE"
+                return "ok"
+
+        fake_gst = types.SimpleNamespace(
+            Pipeline=types.SimpleNamespace(new=lambda name: FakeElement()),
+            PadProbeType=types.SimpleNamespace(BUFFER=1),
+            State=types.SimpleNamespace(PLAYING=3, NULL=0),
+            StateChangeReturn=types.SimpleNamespace(FAILURE="FAILURE"),
+        )
+        branch = types.SimpleNamespace(
+            probe_pad=types.SimpleNamespace(add_probe=lambda *_: None), camera_by_pad={}
+        )
+        monkeypatch.setattr(run_module, "load_pyds", lambda: (fake_gst, None, object()))
+        monkeypatch.setattr(run_module, "build_branch", lambda *a, **k: branch)
+        return transitions
+
+    def test_a_failed_playing_transition_still_nulls_the_graph_and_closes_the_sink(
+        self, tmp_path: Path, monkeypatch, repository: ModelRepository
+    ) -> None:
+        """#32 round 5: start() outside run()'s try left a truncated-and-open results
+        file and a half-risen graph when PLAYING failed. run() now stops on a failed
+        start — NULL runs, the sink WE built closes."""
+        from shipinfer.pipeline.deepstream.run import DeepStreamPipeline
+
+        transitions = self._fakes(monkeypatch, playing_result="fail")
+        out = tmp_path / "events.jsonl"
+        settings = ServerSettings(
+            model_repository=tmp_path / "model_repository",
+            ingest={"cameras": CAMERAS},
+            pipeline={
+                "result_sink": "jsonlines",
+                "result_sink_options": {"path": str(out)},
+            },
+            topology={"kind": "deepstream", "deepstream": dict(PARSER)},
+        )
+        pipeline = DeepStreamPipeline(settings, config_root=tmp_path / "cfg")
+        with pytest.raises(ConfigurationError, match="refused to enter PLAYING"):
+            pipeline.run()
+        assert 0 in transitions, "the graph was NULLed on the failure path"
+        assert pipeline.sink is None, "the sink we built was closed and released"
+
+    def test_stop_does_not_close_a_sink_it_does_not_own(
+        self, tmp_path: Path, monkeypatch, repository: ModelRepository
+    ) -> None:
+        from shipinfer.pipeline.deepstream.run import DeepStreamPipeline
+
+        self._fakes(monkeypatch)
+
+        class InjectedSink:
+            name = "injected"
+            closed = 0
+
+            def emit(self, event) -> bool:
+                return True
+
+            def drain_delivery_failures(self):
+                return []
+
+            def flush(self) -> None: ...
+            def close(self) -> None:
+                type(self).closed += 1
+
+        injected = InjectedSink()
+        settings = ServerSettings(
+            model_repository=tmp_path / "model_repository",
+            ingest={"cameras": CAMERAS},
+            topology={"kind": "deepstream", "deepstream": dict(PARSER)},
+        )
+        pipeline = DeepStreamPipeline(settings, sink=injected, config_root=tmp_path / "cfg")
+        pipeline.start()
+        pipeline.stop()
+        pipeline.stop()  # idempotent
+        assert InjectedSink.closed == 0, "an injected sink belongs to its injector"
