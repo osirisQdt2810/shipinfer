@@ -207,9 +207,11 @@ class TestImportIsCheap:
         actors (arch.md §5①) — and an AST checker cannot tell a module-scope import from one
         inside a method, so the whole cost of that grant is checked here and nowhere else.
         Importing ``shipinfer.ingest`` reaches ``sources/gstreamer.py`` and through it
-        ``shipinfer.runtime`` and torch, so a single import moved to module scope in
-        ``runners/`` would put a CUDA-capable stack behind ``import shipinfer.runners`` and
-        take the offline tier's no-driver promise with it.
+        ``shipinfer.runtime`` — and, through that, torch on any host where a device source is
+        importable — so a single import moved to module scope in ``runners/`` would put a
+        CUDA-capable stack behind ``import shipinfer.runners`` and take the offline tier's
+        no-driver promise with it. ``shipinfer.runtime`` is the module the assertion below
+        actually catches today, which is why it is in the list in its own right.
         """
         code = (
             "import sys, shipinfer.runners as r; "

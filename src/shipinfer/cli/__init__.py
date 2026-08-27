@@ -122,7 +122,10 @@ def build_app() -> typer.Typer:
         inputs: list[str] = typer.Option(
             [],
             "--inputs",
-            help="Files or URLs to run as cameras, named cam-000 by position.",
+            help=(
+                "Files or URLs to run as cameras, named cam-000 by position. A file "
+                "replays in a loop by default (ingest.cameras[].loop)."
+            ),
         ),
         shards: int | None = typer.Option(
             None,

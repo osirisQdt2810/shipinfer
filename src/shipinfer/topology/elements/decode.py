@@ -13,6 +13,16 @@ So an element of this family is two declarations and a pass-through:
   the :class:`~shipinfer.core.settings.ingest.CameraConfig` of every camera it starts. A
   string and not an import, for the same reason ``model:`` is a string: a *name* is data a
   laptop can validate, and a decoder is not.
+
+  **``source`` is the contract a runner reads, and it is deliberately an attribute rather
+  than a base class.** ``InprocessRunner._head`` takes it off every root of the chain with
+  ``getattr(root.element, "source", "")``, having first checked the root is an
+  :attr:`~shipinfer.topology.base.ElementKind.DECODE` element. The empty default is what a
+  decode element outside this family means — ``MockDecode`` invents a frame handle and names
+  no decoder — and the runner reads it as "the chain did not say", leaving ``ingest.backend``
+  and then the environment to decide (``ingest/resolve.py``). An ``isinstance`` against
+  ``_IngestDecode`` would make a private class part of a public seam and would refuse the mock
+  chains every runner test is built on.
 * :attr:`~shipinfer.topology.base.Element.produces` is the head cap of the whole chain — what
   the frames the runner submits actually are. All three implementations here say ``bgr@cpu``,
   because all three of today's sources deliver a host-memory BGR image

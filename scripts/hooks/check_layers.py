@@ -181,8 +181,9 @@ ALLOWED_INTERNAL: dict[str, set[str]] = {
     # lives there, and a launcher never pays for the executor it launches.
     # `ingest` joined in B1, and it is the one grant here that comes with a runtime condition
     # attached: a runner owns the camera actors (arch.md §5①), but `shipinfer.ingest` reaches
-    # a decode runtime and `shipinfer.runtime` — and therefore torch — through its source
-    # registry, so every import of it is INSIDE a method (`inprocess.py::_ingest`) with
+    # a decode runtime and `shipinfer.runtime` through its source registry — and, through
+    # that, torch on any host where a device source is importable — so every import of it is
+    # INSIDE a method (`inprocess.py::_ingest`) with
     # `TYPE_CHECKING` for the annotations. This checker cannot see that difference; it walks
     # the AST and a function-scope import counts the same as a module-scope one. The half that
     # can is `tests/test_architecture.py`, which imports `shipinfer.runners` in a subprocess

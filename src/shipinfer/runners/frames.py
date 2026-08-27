@@ -53,9 +53,10 @@ class TaggedFrame(Protocol):
     Structural rather than an import of :class:`shipinfer.ingest.frame.Frame`, and for a
     harder reason than the identical protocol in ``pipeline/sink.py`` has: importing
     ``shipinfer.ingest`` at module scope would pull a decode runtime — and through
-    ``sources/gstreamer.py``, ``shipinfer.runtime`` and torch — behind ``import
-    shipinfer.runners``, which ``tests/test_architecture.py`` refuses. A protocol satisfies
-    the dependency without asking for the import. ``Frame`` satisfies it exactly as written.
+    ``sources/gstreamer.py``, ``shipinfer.runtime``, and torch behind that on a host where a
+    device source is importable — behind ``import shipinfer.runners``, which
+    ``tests/test_architecture.py`` refuses. A protocol satisfies the dependency without asking
+    for the import. ``Frame`` satisfies it exactly as written.
 
     Four members is also the honest measure of how narrow the seam is.
     """

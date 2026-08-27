@@ -30,9 +30,11 @@ two doors into the system and neither one worked.
   laptop. So `decode: {impl: replay}` is two declarations (a source name and the chain's head
   cap) and a pass-through, and everything with a thread in it lives in `runners/`.
 - **`runners` may import `ingest`, but only inside a method.** `shipinfer.ingest` reaches
-  `sources/gstreamer.py`, `shipinfer.runtime` and torch, and `import shipinfer.runners` must
-  cost none of them. `check_layers.py` grants the edge and cannot see the difference between a
-  module-scope import and a function-scope one; `tests/test_architecture.py` adds
+  `sources/gstreamer.py` and `shipinfer.runtime` (and, through it, torch on a host where a
+  device source is importable — measured on this box, `import shipinfer.ingest` pulls
+  `shipinfer.runtime` and not torch), and `import shipinfer.runners` must cost none of them.
+  `check_layers.py` grants the edge and cannot see the difference between a module-scope
+  import and a function-scope one; `tests/test_architecture.py` adds
   `shipinfer.ingest` to the heavy list it refuses in a subprocess, which is the half that can.
   Both are needed and the hook's comment says so.
 - **The head cap comes from `Topology.edges`, never from `root.element.output_caps[0]`.** A cap
@@ -60,6 +62,24 @@ two doors into the system and neither one worked.
   future without becoming the chain's pacer; and the manager is started by `_do_start`, which
   runs before `Runner.start` publishes `_running`, so routing through the public `submit` would
   hand a camera a `ServerStateError` the `FrameSink` contract does not name.
+
+- **The three camera methods take the lifecycle lock, and the manager is built lazily.**
+  Found in review, and the two are one fix. `add_camera` read `_running` outside
+  `Runner._lifecycle` while `_ingest()` builds a manager unconditionally, so an add that
+  passed the check just before a `stop()` cleared the flag built a *fresh* `IngestManager` on
+  a torn-down runner and started a decoder thread into it — which nothing then stops, because
+  `_stop_ingest` has already run and a second `stop()` returns at the idempotence check. B3's
+  `POST /streams` calls this from a threadpool, so the race is ordinary rather than exotic.
+  `add_camera` / `remove_camera` / `drain` now hold the (re-entrant) lifecycle lock and
+  `add_camera` re-checks `_running` under it; `submit`, `health`, `stats` and `cameras`
+  deliberately still take nothing.
+- **`_do_start` starts the ingest manager only when cameras are configured.** It used to call
+  `self._ingest().start()` unconditionally, so every start — including a chain of mock
+  elements with no camera in it — imported `shipinfer.ingest` and `shipinfer.runtime`, which
+  is the whole cost `_NO_INGEST` and the method-scope import exist to avoid. First use is now
+  `_do_start` when `ingest.cameras`/`ingest.camera_db` says so, and `add_camera` otherwise;
+  a subprocess test asserts a started, camera-less runner has neither a manager nor the
+  modules.
 
 **Not done here.** No `csrc` change: the native ingest halves already exist and are reused
 unchanged, and `runners/` has no native mirror. `_camera_config` carries no `loop:` — a
