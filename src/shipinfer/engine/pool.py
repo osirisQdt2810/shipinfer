@@ -63,6 +63,12 @@ class InferenceServer:
         self._control_lock = threading.Lock()
         self._traces: TraceSink = NullTraceSink()
         self._started = False
+        # Distinct from `_started`, and the distinction is the whole of the unwind below:
+        # `_started` means "the start finished", `_starting` means "the start got far enough
+        # to be holding something". Between them is the window `stop()` used to refuse — a
+        # strict start that failed on model 3 of 5 left models 1 and 2 running, and the only
+        # handle on them was a server that answered `is_started == False`.
+        self._starting = False
         self._started_at = 0.0
 
     # -- properties ----------------------------------------------------------------------
@@ -171,7 +177,24 @@ class InferenceServer:
     # -- lifecycle -----------------------------------------------------------------------
 
     def start(self) -> InferenceServer:
-        """Scan the repository, load the selected models, and wait for readiness."""
+        """Scan the repository, load the selected models, and wait for readiness.
+
+        **A start that fails releases what it had already taken.** Under
+        ``strict_startup`` the first model that will not load aborts the whole start, and
+        the models loaded before it are running: worker threads bound to devices, holding
+        backends and CUDA contexts. The caller has no handle on them — ``start()`` raised,
+        so nothing was returned and nothing was assigned — so unless this method cleans up
+        after itself, those contexts are held for the life of the process by an object
+        nothing references. On a shared box that is somebody else's job failing to fit.
+
+        So a failure here calls :meth:`stop`, which stops every model that did start (and
+        the trace sink and the memory pool), and then the original error is re-raised
+        unchanged: the operator must still see *why* model 3 would not load, not a teardown
+        error from the clean-up that followed.
+
+        ``strict_startup=false`` is untouched — a model that fails is logged and skipped,
+        and the server starts with the rest, which is what a heterogeneous fleet needs.
+        """
         if self._started:
             return self
 
@@ -183,23 +206,34 @@ class InferenceServer:
             f" (shipinfer._C {native_version()})" if is_native_available() else "",
         )
 
-        observability = self._settings.observability
-        self._traces = build_trace_sink(
-            observability.trace_sink, **observability.trace_sink_options
-        )
+        # Set *before* the first thing that can fail, so `stop()` below knows there is
+        # something to release even when the failure was the repository scan.
+        self._starting = True
+        try:
+            observability = self._settings.observability
+            self._traces = build_trace_sink(
+                observability.trace_sink, **observability.trace_sink_options
+            )
 
-        self._repository = ModelRepository.load(self._settings.model_repository)
-        names = self._startup_names()
+            self._repository = ModelRepository.load(self._settings.model_repository)
+            names = self._startup_names()
 
-        # Plain models first, then ensembles: an ensemble validates its DAG against the
-        # models it composes, so those have to exist before it starts.
-        plain = [n for n in names if not self._repository.entry(n).config.is_ensemble]
-        ensembles = [n for n in names if self._repository.entry(n).config.is_ensemble]
-        for name in (*plain, *ensembles):
-            self._load(name)
-        self._mesh = self._join_service_tier()
+            # Plain models first, then ensembles: an ensemble validates its DAG against the
+            # models it composes, so those have to exist before it starts.
+            plain = [n for n in names if not self._repository.entry(n).config.is_ensemble]
+            ensembles = [n for n in names if self._repository.entry(n).config.is_ensemble]
+            for name in (*plain, *ensembles):
+                self._load(name)
+            self._mesh = self._join_service_tier()
+        except BaseException:
+            # `BaseException`, not `Exception`: a KeyboardInterrupt during a two-minute
+            # engine load is the *likeliest* way this path is taken by hand, and it leaks
+            # exactly the same contexts.
+            self.stop()
+            raise
 
         self._started = True
+        self._starting = False
         self._started_at = time.monotonic()
         _LOG.info("shipinfer ready: %d model(s) — %s", len(self._models), self.models())
         return self
@@ -311,34 +345,71 @@ class InferenceServer:
                 metrics=self._metrics,
                 traces=self._traces,
             )
-        model.start()
+        try:
+            model.start()
+        except BaseException:
+            # A model starts its instances one at a time and then waits for each; a failure
+            # on the third leaves the first two with live worker threads holding backends,
+            # and this model is about to become unreachable. Stop it before letting the
+            # error out, guarded so the teardown cannot replace the reason.
+            try:
+                model.stop()
+            except Exception:
+                _LOG.exception("error stopping model %s after a failed start", name)
+            raise
         with self._lock:
             self._models[name] = model
         return model
 
     def stop(self) -> None:
-        """Drain and release. Safe to call twice, and never raises."""
-        if not self._started:
+        """Drain and release. Never raises.
+
+        Safe to call twice, on a server that was never started, and — the case that matters
+        — on one whose :meth:`start` raised half-way. It used to return early on
+        ``not self._started``, which is exactly false for a partial start: the flag is only
+        set once every model is up, so the one situation in which models were running and
+        unreachable was the one situation ``stop()`` refused to handle.
+
+        Every step is guarded, because this runs on the failure path of :meth:`start` and a
+        teardown error there would replace the load error the operator needs to read.
+        """
+        if not (self._started or self._starting):
             return
         _LOG.info("stopping shipinfer (%d model(s))", len(self._models))
+        # Cleared first, so a second call is a no-op even if a step below raises something
+        # this method deliberately does not catch.
+        self._started = False
+        self._starting = False
         if self._mesh is not None:
             # Leave the tier first: peers see the closed rings and fail their in-flight
             # requests to us with the tags, instead of waiting on a model that is stopping.
-            self._mesh.stop()
-            self._mesh = None
+            mesh, self._mesh = self._mesh, None
+            try:
+                mesh.stop()
+            except Exception:
+                _LOG.exception("error leaving the service tier")
         with self._lock:
             models = list(self._models.values())
             self._models.clear()
-        for model in models:
+        # Reverse of the order `start()` loaded them in, which is dependents before
+        # dependencies: `start()` loads plain models and then the ensembles that compose
+        # them, so an ensemble is stopped while every step it may still dispatch to is
+        # alive, rather than after they have gone.
+        for model in reversed(models):
             try:
                 model.stop()
             except Exception:
                 _LOG.exception("error stopping model %s", model.name)
         # After the models, so a trace written by a worker finishing its last batch still
         # has somewhere to go; closing it flushes whatever the sink had buffered.
-        self._traces.close()
-        self._memory.close()
-        self._started = False
+        try:
+            self._traces.close()
+        except Exception:
+            _LOG.exception("error closing the trace sink")
+        try:
+            self._memory.close()
+        except Exception:
+            _LOG.exception("error closing the memory pool")
 
     # -- explicit model control ------------------------------------------------------------
 
