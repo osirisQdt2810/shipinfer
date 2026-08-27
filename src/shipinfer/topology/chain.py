@@ -48,7 +48,7 @@ from __future__ import annotations
 import re
 from collections import deque
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -174,8 +174,17 @@ class ElementSpec(_Strict):
     after: Optional[list[str]] = None
     #: Statefulness hint for the runner: ``camera`` pins this element to the camera's home
     #: shard (arch.md §5⑥). Not interpreted here; the runner reads it.
+    #:
+    #: **Not honoured by any runner yet.** ``InprocessRunner`` shares one element instance
+    #: across every worker, so with ``workers > 1`` two frames of one camera can be inside a
+    #: ``per: camera`` element at the same time and its per-camera order can invert. Nothing
+    #: stateful ships today (the mocks are stateless and a ``pool`` element holds only a model
+    #: handle), so this is a promise not yet kept rather than a live bug. Resolved in phase C,
+    #: either as a per-camera element instance or as a camera-keyed lock around a
+    #: ``per: camera`` element.
     per: Optional[Literal["camera", "frame", "global"]] = None
-    #: ``global`` marks an element with one instance for the whole fleet (mtmc).
+    #: ``global`` marks an element with one instance for the whole fleet (mtmc). Carried, not
+    #: yet interpreted — same phase C caveat as :attr:`per`.
     scope: Optional[Literal["shard", "global"]] = None
     #: Implementation-specific settings, handed to the element untouched.
     params: dict[str, Any] = Field(default_factory=dict)
@@ -279,6 +288,9 @@ class ElementNode:
         inputs: predecessor slot names, resolved.
         outputs: successor slot names, resolved.
         condition: the parsed ``when:``, or ``None``.
+        donor: which predecessor donates payload and caps at a fan-in. Filled in by
+            :class:`Topology`, which is the only object that knows the negotiated edge caps
+            this is resolved from; ``None`` on a root.
     """
 
     name: str
@@ -288,6 +300,7 @@ class ElementNode:
     inputs: tuple[str, ...]
     outputs: tuple[str, ...]
     condition: Condition | None = None
+    donor: str | None = None
 
     @property
     def is_root(self) -> bool:
@@ -363,8 +376,14 @@ class Topology:
 
     def __init__(self, name: str, nodes: Sequence[ElementNode], edges: Sequence[Edge]) -> None:
         self._name = name
-        self._nodes = tuple(nodes)
         self._edges = tuple(edges)
+        # Donors are resolved *here* rather than in a runner, for the reason
+        # `ElementNode.admits` gives for itself: it is topology data, and three runners that
+        # each resolved it would eventually disagree about which branch donated a frame. It
+        # cannot be resolved by `from_spec` before this point, because it reads the caps the
+        # loader negotiated per edge, and it cannot live on the node's constructor, because a
+        # node is built before its edges exist.
+        self._nodes = _with_donors(nodes, self._edges)
         self._by_name = {node.name: node for node in self._nodes}
 
     # -- construction ------------------------------------------------------------------
@@ -883,3 +902,39 @@ def _negotiate_edges(nodes: Sequence[ElementNode]) -> tuple[Edge, ...]:
                     _Arrival(arrival.origin, arrival.caps, skipped=node.name)
                 )
     return tuple(edges)
+
+
+def _with_donors(
+    nodes: Sequence[ElementNode], edges: Sequence[Edge]
+) -> tuple[ElementNode, ...]:
+    """Fill in every node's :attr:`ElementNode.donor` from the negotiated edge caps.
+
+    The donor is the first predecessor, **in the consumer's ``accepts`` order**, whose edge
+    carries a cap this element prefers. ``Element.accepts`` is a preference list and
+    :func:`~shipinfer.topology.caps.negotiate` already treats it as one, so this reads the
+    same order the loader read when it negotiated. A node whose predecessors all carry the
+    same cap therefore adopts the first one *declared*, which is what a reader of the chain
+    file would expect.
+
+    Why it matters at all: at a fan-in the metadata is the union of every branch, but the
+    payload and caps have to come from exactly one of them — half a frame handle plus half a
+    metadata dict is not a payload — and picking by the negotiated cap makes that choice the
+    loader's rather than a runner's.
+
+    Resolved once per topology, so a runner's per-frame merge is an attribute read.
+    """
+    caps_by_edge = {(edge.producer, edge.consumer): edge.caps for edge in edges}
+    return tuple(
+        node if node.is_root else replace(node, donor=_donor_for(node, caps_by_edge))
+        for node in nodes
+    )
+
+
+def _donor_for(node: ElementNode, caps_by_edge: Mapping[tuple[str, str], Caps]) -> str:
+    """One node's donor. Falls back to the first predecessor when no edge cap is known."""
+    for declared in node.element.input_caps:
+        for name in node.inputs:
+            caps = caps_by_edge.get((name, node.name))
+            if caps is not None and caps.matches(declared):
+                return name
+    return node.inputs[0]

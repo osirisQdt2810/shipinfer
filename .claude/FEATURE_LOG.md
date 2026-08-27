@@ -5,6 +5,45 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-27 — `runners/`: the in-process runner, and the chain's client of the model pool (Phase A2, PR-3)
+
+**What.** `src/shipinfer/runners/` — the third of arch.md's three concepts (§1). `Runner` is a
+template-method ABC over one validated `Topology` (`start` idempotent and unwinding a partial
+start, `stop` on one shared deadline, `submit` refusing before `start`, `health`/`stats`,
+context manager) plus `RUNNERS`/`build_runner`. `runners/inprocess.py` is the first
+implementation: the fair bounded lane of §5② in front of N workers, each of which walks **one**
+item through `topology.nodes` in topological order (§5③), skipping what `node.admits` rejects
+and merging a fan-in deterministically. `topology/elements/pool.py` adds the `pool`
+implementation of all four model kinds — one request per item, the model resolved once at
+`open()` — and `InferenceServer.get(name)` is the one-method `ModelResolver` it reaches it
+through.
+
+**Why.** A topology that nothing executes is a data structure. This is also where the two
+properties the reset is for become testable offline: admission is the *existing* fair queue
+(ADR-005 — there is no second fairness mechanism), and the whole runner runs with mock elements
+on a host with no driver, which is why `tests/runners/` is in the offline tier.
+
+**Decisions.** The queue stays typed on `WorkItem`; an item is *wrapped* (a `_ChainWork`
+subclass) exactly as `QueueFrameSink` wraps a frame, and the `ChainItem` is taken off it at the
+top of `_walk` — the queue's lane, band and expiry are all request fields, so the wrap buys the
+per-camera fair lane for free. Fan-in: metadata is the union in `node.inputs` order with
+first-writer-wins, payload and caps come from the predecessor whose edge carries the cap the
+element prefers, and a skipped `when:` predecessor contributes its own inbound item. An element
+that raises costs one item — logged with the tag, counted, its future carrying the typed
+failure — never the worker. `runners` may import `core`, `topology`, `scheduling`, `engine` and
+`runtime`, but imports none of the last two today: an architecture test asserts
+`import shipinfer.runners` loads neither torch nor the engine, and `topology` still imports only
+`core` with `pool.py` present.
+
+**Not here, on purpose.** Reassembly (§5⑤) — the walk is synchronous; ingest wiring
+(`runners/sink.py`) — `submit()` is the entry until phase B; per-camera priority; and the host
+(`bgr@cpu`) path of the pool element, whose `produces: nv12@gpu` is honest only for the device
+caps and is named as such in its module docstring. The queue-and-workers shape duplicates
+`pipeline/runner.py` deliberately until phase C supersedes `pipeline/graph/`'s hard-coded DAG;
+both module docstrings say so.
+
+---
+
 ## 2026-08-27 — `topology/`: the element chain as a validated, declarative object (Phase A1)
 
 **What.** `src/shipinfer/topology/` — the first package of the architecture reset (#52,

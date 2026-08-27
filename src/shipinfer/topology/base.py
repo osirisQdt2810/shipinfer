@@ -207,11 +207,26 @@ class ElementContext:
             logs, metrics and the one decision ``scope: global`` needs.
         device: the GPU this shard owns, or ``None`` on a host with no accelerator.
         models: the model pool, for elements of kind ``pool``.
+        stage_timeout_s: how long an element may wait for one model call, resolved by the
+            runner from ``pipeline.stage_timeout_ms``. ``None`` means the runner did not say,
+            and an element falls back to its own module default.
+        input_name: the input tensor name a decoded frame is submitted under, resolved by the
+            runner from ``ingest.input_name``. ``None`` means the runner did not say.
+
+    The last two are **resolved settings, not settings**. ``topology`` is a pure package and
+    must not import :mod:`shipinfer.core.settings` — an element that read the settings tree
+    itself would also be choosing its own configuration, which is the thing this frozen object
+    exists to prevent. So the runner reads the tree once and hands over the two numbers an
+    element cannot otherwise know, and an element resolves them with a fixed precedence:
+    its own ``params:``, then this context, then its module default. Without them the two
+    settings keys mirrored in ``topology/elements/pool.py`` would apply to nothing.
     """
 
     shard_id: int = 0
     device: Device | None = None
     models: ModelResolver | None = None
+    stage_timeout_s: float | None = None
+    input_name: str | None = None
 
 
 class Element(abc.ABC):
