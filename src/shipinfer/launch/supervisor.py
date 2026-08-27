@@ -70,7 +70,6 @@ from shipinfer.scheduling.sharding import Shard, ShardPlan
 __all__ = [
     "DEFAULT_DRAIN_S",
     "Fleet",
-    "ShardExitedError",
     "ShardProcess",
 ]
 

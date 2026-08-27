@@ -14,9 +14,12 @@ regardless of what the stopping consists of.
 from __future__ import annotations
 
 import signal
+from typing import TYPE_CHECKING
 
 from shipinfer.core.logging import get_logger
-from shipinfer.launch.supervisor import Fleet
+
+if TYPE_CHECKING:  # the handler only calls request_stop(); no runtime coupling to Fleet
+    from shipinfer.launch.supervisor import Fleet
 
 __all__ = ["forward_signals"]
 
