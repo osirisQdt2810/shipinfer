@@ -136,9 +136,12 @@ src/shipinfer/
 │   ├── cache/             # response cache (off by default)
 │   └── spill/             # the ADR-015 ring tier (kept as the control channel, ADR-016)
 │
-├── server/                # DISSOLVING (A2): api/ -> api/, launcher -> launch/, topology
-│   ├── api/               #   classes -> runners/; __init__ is an import shim onto engine/
-│   └── topology/          #   process placement (the OLD meaning; deleted in A2 PR-6)
+├── api/                   # KServe v2 over FastAPI — the engine's side-door, arch.md §6
+│                          #   the ONE layer that may import fastapi/uvicorn, and lazily
+│
+├── server/                # DISSOLVING (A2): launcher.py -> launch/ (PR-4), the topology
+│   └── topology/          #   classes -> runners/ (PR-6); __init__ is a shim onto engine/
+│                          #   topology/ here = process placement, the OLD sense of the word
 │
 └── pipeline/, ingest/     # the ship+person application on top of the server
 
