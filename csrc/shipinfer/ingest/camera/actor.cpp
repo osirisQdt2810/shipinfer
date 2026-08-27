@@ -95,7 +95,13 @@ namespace shipinfer {
             state_ = CameraState::Connecting;
         }
         stop_.clear();
-        thread_ = std::thread([this] { run(); });
+        {
+            // Under the lifecycle lock: a concurrent `stop()` reads `thread_.joinable()`,
+            // and an unsynchronised read against this write is the race, not just the
+            // join/detach below it.
+            std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
+            thread_ = std::thread([this] { run(); });
+        }
     }
 
     void CameraActor::request_stop() {
@@ -107,21 +113,50 @@ namespace shipinfer {
         bool abandoned = false;
         // A stop from the actor's own thread can only signal: joining would deadlock on the
         // thread doing the joining. The Python original guards the same way on
-        // `threading.current_thread()`.
-        if (thread_.joinable() && thread_.get_id() != std::this_thread::get_id()) {
-            bool finished = false;
-            {
-                std::unique_lock<std::mutex> lock(mutex_);
-                finished = finished_.wait_for(lock, timeout, [this] { return is_finished_; });
+        // `threading.current_thread()` — the id is read from its atomic copy because this
+        // guard cannot take the lifecycle lock (a stopper holds it across its grace wait FOR
+        // this very thread), yet a bare `thread_.get_id()` would race `start()`'s write.
+        //
+        // The whole joinable/join/detach section sits under the lifecycle lock: the manager
+        // itself can enter here from two threads at once (its `stop()` and `add_camera`'s
+        // re-check, #35), and without the lock one caller joins while the other detaches —
+        // or both detach — which is `std::terminate`, in CI's own hammer test (flip-proven:
+        // removing this lock aborts this binary 3/3). The second caller blocks for at most
+        // its rival's grace, then finds the thread already joined or detached and returns.
+        // Exactly one caller PERFORMS the detach, but every caller REPORTS it —
+        // `thread_abandoned_` is the thread's fate, not this call's work — so a losing
+        // stopper can never answer clean for a detached thread (#39 round 1: that lie
+        // zeroes the fleet count that keeps the sink alive). Double-parking on the race
+        // path is deliberate and harmless; the never-counted-twice property lives on the
+        // fleet count, which increments once per actor.
+        if (thread_id_.load() != std::this_thread::get_id()) {
+            std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
+            if (thread_.joinable()) {
+                bool finished = false;
+                {
+                    std::unique_lock<std::mutex> lock(mutex_);
+                    finished =
+                        finished_.wait_for(lock, timeout, [this] { return is_finished_; });
+                }
+                if (finished) {
+                    thread_.join();
+                    // The id is cleared at the join and only at the join: a joined thread
+                    // is gone, and glibc may hand its pthread_t to an unrelated thread
+                    // whose later stop() on this actor would then take the self-stop branch
+                    // (#39 round 3). A DETACHED thread's id stays — the abandoned thread
+                    // may still self-stop, and that must keep hitting the guard.
+                    thread_id_.store(std::thread::id{});
+                } else {
+                    thread_.detach();
+                    thread_abandoned_ = true;
+                    shout("camera " + config_.camera_id + " did not stop within " +
+                          std::to_string(timeout.count()) + "ms; abandoning the thread");
+                }
             }
-            if (finished) {
-                thread_.join();
-            } else {
-                thread_.detach();
-                abandoned = true;
-                shout("camera " + config_.camera_id + " did not stop within " +
-                      std::to_string(timeout.count()) + "ms; abandoning the thread");
-            }
+            // Read under the same lock: the thread's fate, whichever stopper sealed it. A
+            // loser that answered "clean" for a thread its rival detached would zero the
+            // fleet count that keeps the sink alive (#39 round 1).
+            abandoned = thread_abandoned_;
         }
         if (!state_is_final()) set_state(CameraState::Stopped);
         return !abandoned;
@@ -134,6 +169,12 @@ namespace shipinfer {
     }
 
     void CameraActor::run() {
+        // The child publishes its own id: the parent's store after the spawn left a window
+        // where a self-stop from the first frames (a sink calling stop() from publish) read
+        // the default id, missed the self-stop guard, and waited its grace for itself
+        // (#39 round 1). An external stopper reading the default id simply proceeds, which
+        // is the correct outcome.
+        thread_id_.store(std::this_thread::get_id());
         try {
             while (!stop_.is_set()) {
                 try {

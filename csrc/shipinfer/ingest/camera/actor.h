@@ -21,6 +21,7 @@
 // camera fleet, and treating "opened" as "healthy" is precisely how it stays invisible.
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -80,15 +81,21 @@ namespace shipinfer {
         // Ask the actor to finish, and wait for it. Idempotent, and a no-op on an actor that
         // was never started, because shutdown paths call this from more than one place and
         // neither may hang. Safe to call from the actor's own thread (it signals and returns
-        // rather than joining itself), but **not** safe against a concurrent `stop` from
-        // another thread — the owner serialises it, which for a fleet is `IngestManager`.
+        // rather than joining itself), and safe against a concurrent `stop` from another
+        // thread: the lifecycle lock serialises the join/detach, and the fleet manager
+        // genuinely enters here from two threads at once (its own `stop()` and
+        // `add_camera`'s re-check — #35/#39, the race that used to be `std::terminate`).
         //
-        // Returns **false when the thread had to be abandoned**. A thread still alive after
-        // `timeout` is one blocked inside a decoder, and holding up the whole process's
-        // shutdown behind it would be the worse failure — so it is detached (never left
-        // joinable: `~thread` on a joinable thread calls `std::terminate`) and reported. The
-        // caller then owes the detached thread a `this` that stays valid; `IngestManager` is
-        // what pays that debt.
+        // Returns **false when the thread had to be abandoned — by ANY stopper, not only
+        // this call**: the flag is the thread's fate, not this caller's work. A concurrent
+        // loser that reported "clean" for a thread its rival detached would let the fleet
+        // count read 0, and the fleet count is a lifetime signal (`bench` unwinds the frame
+        // that owns the sink on 0 — a use-after-free under the detached thread). A thread still
+        // alive after `timeout` is one blocked inside a decoder, and holding up the whole
+        // process's shutdown behind it would be the worse failure — so it is detached (never
+        // left joinable: `~thread` on a joinable thread calls `std::terminate`) and reported.
+        // The caller then owes the detached thread a `this` that stays valid; `IngestManager`
+        // is what pays that debt.
         bool stop(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
 
       private:
@@ -117,6 +124,27 @@ namespace shipinfer {
         ExponentialBackoff backoff_;
         std::unique_ptr<FrameSource> source_;
         std::thread thread_;
+        // Serialises the thread's lifecycle — `start()`'s assignment, `stop()`'s
+        // joinable/join/detach — against a concurrent `stop()`. The fleet manager itself
+        // enters `stop()` from two threads (its own `stop()` and `add_camera`'s re-check,
+        // #35 rounds 2–3): without this, both pass the unsynchronised `joinable()` read and
+        // one joins while the other detaches, or both detach — `std::terminate` on the
+        // shutdown path. Distinct from `mutex_` (the state lock): a stopper holds this
+        // across its whole grace wait, and health reads must not queue behind that.
+        std::mutex lifecycle_mutex_;
+        // The thread's fate, written at the detach under `lifecycle_mutex_` and read by
+        // every stopper under the same lock: once abandoned, every `stop()` answers false —
+        // STICKY, deliberately, where the Python plane's stop() re-reads live is_alive():
+        // a detach is irreversible and the lifetime debt it creates is permanent, so "it
+        // has since finished" does not un-abandon it. The planes diverge only on a repeat
+        // stop() after an abandoned thread later exits (C++ false forever, Python true);
+        // a parity harness must not read that as a bug.
+        bool thread_abandoned_ = false;
+        // The self-stop guard's own copy of the id, atomic because the guard cannot take
+        // `lifecycle_mutex_` (a stopper holds it across its grace wait FOR this thread —
+        // taking it here would deadlock the shutdown), yet reading `thread_.get_id()` bare
+        // would race `start()`'s assignment.
+        std::atomic<std::thread::id> thread_id_{};
 
         // Everything below is written by the actor thread and read by anyone; the lock is taken
         // once per frame at most, which at 20 fps per camera is free.
