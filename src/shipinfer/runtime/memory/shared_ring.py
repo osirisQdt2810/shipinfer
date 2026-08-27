@@ -359,16 +359,27 @@ class SharedRing:
                 f"process; remove it or use a fresh run id"
             ) from exc
         ring = cls(block, layout, name=name, owner=owner, is_owner=True)
-        # States first, header last: writing the magic IS the readiness signal (`open` retries
-        # until it lands), so everything a peer may touch must be final before it. POSIX shm
-        # is zero-filled and FREE == 0, so the loop is belt-and-braces, but the *order* is the
-        # contract — a peer that wins the open race and publishes must never have its slot
-        # stamped back to FREE by the creator's own initialisation.
+        # States first, header body next, magic LAST — because writing the magic IS the
+        # readiness signal (`open` retries until it lands), everything a peer may touch must
+        # be final before it. That includes the rest of the header itself: the one-slice
+        # pack writes magic at offset 0 *first* in a forward memcpy, so a peer catching the
+        # copy mid-flight could see magic set with slots still 0 and sail past the unborn
+        # branch into the terminal created-with-0-slots refusal — the fourth spelling of the
+        # birth race (#37 round 1). So the header is written with magic=0 (still "unborn" to
+        # every reader), and the magic word is stored on its own afterwards. POSIX shm is
+        # zero-filled and FREE == 0, so the state loop is belt-and-braces, but the *order*
+        # is the contract — a peer that wins the open race and publishes must never have its
+        # slot stamped back to FREE by the creator's own initialisation.
         for index in range(layout.slots):
             ring._set_state(index, SlotState.FREE)
         ring._write_header(
-            depth=0, ewma_latency_us=0.0, heartbeat_ns=time.monotonic_ns(), closed=False
+            depth=0,
+            ewma_latency_us=0.0,
+            heartbeat_ns=time.monotonic_ns(),
+            closed=False,
+            magic=0,
         )
+        struct.pack_into("<I", block.buf, 0, _MAGIC)
         return ring
 
     @classmethod
@@ -530,7 +541,13 @@ class SharedRing:
             )
 
     def _write_header(
-        self, *, depth: int, ewma_latency_us: float, heartbeat_ns: int, closed: bool
+        self,
+        *,
+        depth: int,
+        ewma_latency_us: float,
+        heartbeat_ns: int,
+        closed: bool,
+        magic: int = _MAGIC,
     ) -> None:
         with self._view_lock:
             if self._detached:
@@ -538,7 +555,7 @@ class SharedRing:
             # Pack first, one memcpy: see `stamp` — `pack_into` memsets the region, and a
             # peer's `header()` mid-write would read slots == 0, slot_bytes == 0.
             self._view[: _HEADER.size] = _HEADER.pack(
-                _MAGIC,
+                magic,
                 RING_VERSION,
                 self._layout.slots,
                 self._layout.slot_bytes,

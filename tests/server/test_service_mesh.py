@@ -231,6 +231,26 @@ class TestConnectWaitsForPeers:
         finally:
             lonely.stop()
 
+    def test_a_peer_stuck_mid_birth_is_named_as_such(self, monkeypatch) -> None:
+        """#37 round 1's note: "never appeared" is the wrong sentence for a ring that DID
+        appear and never got a header — the two send the 3am operator to different
+        suspects (a shard that never started vs one wedged during start-up)."""
+        from shipinfer.runtime.memory import shared_ring as ring_module
+        from shipinfer.runtime.memory.shared_ring import RingClosedError
+
+        def stuck_mid_birth(name, layout):
+            raise RingClosedError("unknown", name, reason="unborn")
+
+        monkeypatch.setattr(ring_module.SharedRing, "open", staticmethod(stuck_mid_birth))
+        run = uuid.uuid4().hex[:8]
+        lonely = ServiceMesh(_settings(run, 0, [0, 1]), 0, {"emb": FakeModel("emb", 0)})
+        lonely.create()
+        try:
+            with pytest.raises(ConfigurationError, match="stuck mid-birth"):
+                lonely.connect(timeout_s=0.3)
+        finally:
+            lonely.stop()
+
 
 class TestSlotSizing:
     """Both processes derive a ring's slot size from the model's own config — no negotiation."""
