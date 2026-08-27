@@ -113,9 +113,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      # NO setup-python here, deliberately (the job's first main run failed on this): the
+      # loopback resolves `python3` on PATH to spawn scripts/rtsp_serve.py, and
+      # setup-python's hermetic interpreter shadows the system one — which is the only
+      # python that can see apt's python3-gi/gir typelibs. ModuleNotFoundError: 'gi', the
+      # pixel skips, and the grep gate goes red exactly as designed. The system python3 on
+      # ubuntu-latest runs build_csrc.py fine.
       - name: Install the gstreamer lane's packages
         # The dev pair is what `--with-external gstreamer` pkg-configs; the rest is what
         # section P's loopback needs at runtime: the RTSP server (PyGObject + its typelib),
@@ -175,7 +178,15 @@ jobs:
         # pinned commit — it cannot prove they are correct. Correctness is the parity tests
         # in shipvision's own GPU tier, which run on real hardware before a release.
         # What this job is really for is catching a submodule bump that does not build.
-        run: python 3rdparty/shipvision/build.py --arch 86
+        # The entrypoint the submodule actually has (its README's own line): the old
+        # `build.py --arch 86` predates shipvision's restructure and never existed in any
+        # revision this repository has pinned — the job could not reach it until #36 fixed
+        # the clone, so today's red main was its first honest compile attempt.
+        run: |
+          python -m pip install --quiet pybind11
+          cmake -S 3rdparty/shipvision -B 3rdparty/shipvision/build \
+            -DCMAKE_CUDA_ARCHITECTURES=86
+          cmake --build 3rdparty/shipvision/build -j
 
   coverage:
     name: Coverage
