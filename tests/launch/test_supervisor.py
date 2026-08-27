@@ -54,12 +54,13 @@ def ignores_sigterm():
 
 
 def reports_env_json(path_for):
-    """A child that writes every variable the launcher owns, as JSON, where the test can read it."""
+    """A child that writes the variables this contract is about, where the test can read them."""
     return lambda shard: [
         sys.executable,
         "-c",
         "import json, os, sys; names = ['CUDA_VISIBLE_DEVICES', 'SHIPINFER_DEVICES__VISIBLE_GPUS',"
-        " 'SHIPINFER_DEVICES__SHARED_BY', 'SHIPINFER_DEVICES__SHARE_RANK', 'SHIPINFER_SHARD_CAMERAS'];"
+        " 'SHIPINFER_DEVICES__SHARED_BY', 'SHIPINFER_DEVICES__SHARE_RANK',"
+        " 'SHIPINFER_SHARD_CAMERAS', 'SHIPINFER_DEVICES__ALLOW_CPU_ONLY'];"
         " open(sys.argv[1], 'w').write(json.dumps({n: os.environ.get(n) for n in names}))",
         str(path_for(shard)),
     ]
@@ -344,18 +345,27 @@ class TestStoppingLeavesNothingBehind:
             Fleet(plan=plan(), command=sleeps(), drain_s=0.0)
 
 
-class TestTheChildsDeviceViewIsCoherent:
-    """`CUDA_VISIBLE_DEVICES` renumbers the child's GPUs to 0..n-1, so every other device
-    setting it inherits must describe *that* view: an inherited
-    `SHIPINFER_DEVICES__VISIBLE_GPUS` naming physical ordinals would fail the child at start-up
-    (`visible_gpus names device(s) [3, 4, 5] but torch reports [0]`) with a configuration that
-    is correct for a single-process `serve`."""
+class TestTheChildInheritsNothingTheControlPlaneOwns:
+    """A child is told **one** thing at ``exec``: ``CUDA_VISIBLE_DEVICES`` (arch.md section 2).
+
+    Its cameras, its topology and its device sharing arrive as RPCs afterwards, and the
+    variables that used to carry them are *removed* from the child's environment rather than
+    merely not set. The removal is the load-bearing half: an operator who exported
+    ``SHIPINFER_DEVICES__VISIBLE_GPUS=[2,3,4,5]`` for a single-process run — the documented way
+    to configure one — would otherwise have every child read it after the remap renumbered its
+    devices to ``0..n-1`` and fail at start-up naming devices it cannot see.
+    """
 
     def _spawn_and_read(self, tmp_path, monkeypatch, shards: int, gpus: tuple[int, ...]):
         import json
 
-        # The operator's compose file exports the physical list; the child must not see it.
+        # The operator's compose file exports all four; no child may see any of them.
         monkeypatch.setenv("SHIPINFER_DEVICES__VISIBLE_GPUS", "[2, 3, 4, 5]")
+        monkeypatch.setenv("SHIPINFER_DEVICES__SHARED_BY", "[1]")
+        monkeypatch.setenv("SHIPINFER_DEVICES__SHARE_RANK", "[0]")
+        monkeypatch.setenv("SHIPINFER_SHARD_CAMERAS", "cam0,cam1")
+        # And one that is an ordinary setting: a child SHOULD inherit this.
+        monkeypatch.setenv("SHIPINFER_DEVICES__ALLOW_CPU_ONLY", "false")
         written = {}
 
         def path_for(shard):
@@ -369,57 +379,49 @@ class TestTheChildsDeviceViewIsCoherent:
         fleet.stop()
         return fleet.plan, {i: json.loads(path.read_text()) for i, path in written.items()}
 
-    def test_the_logical_view_replaces_the_inherited_physical_one(
-        self, tmp_path, monkeypatch
-    ) -> None:
+    def test_the_devices_are_the_one_thing_it_is_told(self, tmp_path, monkeypatch) -> None:
+        """And it is told them at ``exec`` because there is no RPC before ``import torch``."""
         _plan, seen = self._spawn_and_read(tmp_path, monkeypatch, shards=2, gpus=(2, 3, 4, 5))
 
         assert seen[0]["CUDA_VISIBLE_DEVICES"] == "2,3"
-        assert seen[0]["SHIPINFER_DEVICES__VISIBLE_GPUS"] == "[0, 1]"
         assert seen[1]["CUDA_VISIBLE_DEVICES"] == "4,5"
-        assert seen[1]["SHIPINFER_DEVICES__VISIBLE_GPUS"] == "[0, 1]"
 
-    def test_an_unshared_device_is_shared_by_one(self, tmp_path, monkeypatch) -> None:
-        _plan, seen = self._spawn_and_read(tmp_path, monkeypatch, shards=2, gpus=(2, 3, 4, 5))
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "SHIPINFER_DEVICES__VISIBLE_GPUS",
+            "SHIPINFER_DEVICES__SHARED_BY",
+            "SHIPINFER_DEVICES__SHARE_RANK",
+            "SHIPINFER_SHARD_CAMERAS",
+        ],
+    )
+    def test_an_inherited_copy_is_removed(self, tmp_path, monkeypatch, name: str) -> None:
+        """`UpdateTopology` carries the sharing now, and `AddCamera` the cameras. A stale copy
+        of either is worse than none: the child would load the wrong instance count, or name
+        devices it cannot see, and report healthy doing it."""
+        _plan, seen = self._spawn_and_read(tmp_path, monkeypatch, shards=2, gpus=(2, 3))
 
-        assert seen[0]["SHIPINFER_DEVICES__SHARED_BY"] == "[1, 1]"
+        assert [child[name] for child in seen.values()] == [None, None]
 
-    def test_shards_sharing_a_gpu_are_told_so(self, tmp_path, monkeypatch) -> None:
-        """Six shards over four GPUs: two shards each on GPUs 2 and 3. Each is told `[2]`, so
-        each loads half of every model's configured instances — not the whole count twice."""
-        fleet_plan, seen = self._spawn_and_read(
-            tmp_path, monkeypatch, shards=6, gpus=(2, 3, 4, 5)
-        )
+    def test_an_ordinary_setting_still_reaches_the_child(self, tmp_path, monkeypatch) -> None:
+        """The removal is four names, not a prefix: `devices.allow_cpu_only`,
+        `devices.numa_affinity` and `devices.validate_on_start` are an operator's to set for
+        the whole deployment, and a shard that lost them would be configured differently from
+        the process that launched it for no reason anybody chose."""
+        _plan, seen = self._spawn_and_read(tmp_path, monkeypatch, shards=2, gpus=(2, 3))
 
-        for shard in fleet_plan.shards:
-            expected = list(fleet_plan.sharing_for(shard))
-            assert seen[shard.index]["SHIPINFER_DEVICES__SHARED_BY"] == str(expected)
-            assert seen[shard.index]["SHIPINFER_DEVICES__SHARE_RANK"] == str(
-                list(fleet_plan.rank_for(shard))
-            )
-            assert seen[shard.index]["SHIPINFER_DEVICES__VISIBLE_GPUS"] == "[0]"
-        assert sorted(seen[i]["SHIPINFER_DEVICES__SHARE_RANK"] for i in seen) == [
-            "[0]",
-            "[0]",
-            "[0]",
-            "[0]",
-            "[1]",
-            "[1]",
-        ]
-        assert sorted(seen[i]["SHIPINFER_DEVICES__SHARED_BY"] for i in seen) == [
-            "[1]",
-            "[1]",
-            "[2]",
-            "[2]",
-            "[2]",
-            "[2]",
+        assert [c["SHIPINFER_DEVICES__ALLOW_CPU_ONLY"] for c in seen.values()] == [
+            "false",
+            "false",
         ]
 
-    def test_the_cameras_still_ride_beside_the_devices(self, tmp_path, monkeypatch) -> None:
-        fleet_plan, seen = self._spawn_and_read(tmp_path, monkeypatch, shards=2, gpus=(2, 3))
+    def test_the_sharing_the_plan_computed_is_still_available_to_the_caller(self) -> None:
+        """It is not sent at ``exec`` any more; it is sent by ``UpdateTopology``. The plan is
+        still where it is *decided*, and `runners/fleet.py` is what puts it on the wire."""
+        fleet_plan = plan(shards=6, gpus=(2, 3, 4, 5))
 
-        for shard in fleet_plan.shards:
-            assert seen[shard.index]["SHIPINFER_SHARD_CAMERAS"] == ",".join(shard.cameras)
+        sharing = sorted(fleet_plan.sharing_for(s) for s in fleet_plan.shards)
+        assert sharing == [(1,), (1,), (2,), (2,), (2,), (2,)]
 
 
 class TestStopEndsSupervision:
@@ -458,9 +460,15 @@ class TestStopEndsSupervision:
         with pytest.raises(ShardExitedError, match="exited with 3"):
             fleet.supervise(poll_s=0.02)
 
-    def test_ctrl_c_through_forward_signals_ends_the_command(self) -> None:
-        """The caller shape the CLI actually uses: `forward_signals`, then `supervise()` with
-        no `until`. SIGINT is delivered to this process by a timer thread."""
+    def test_ctrl_c_through_forward_signals_ends_the_supervising_loop(self) -> None:
+        """`forward_signals`, then `supervise()` with no `until`, over a `Fleet` directly.
+
+        The CLI installs the same handlers over its *runner* — `forward_signals` takes
+        anything with `request_stop()` (`launch/signals.py::Stoppable`) and `shipinfer run`
+        holds a `FleetRunner`, which forwards to the fleet underneath. This is the same shape
+        one layer down, which is where the loop being tested lives. SIGINT is delivered to
+        this process by a timer thread.
+        """
         import os
         import signal
         import threading

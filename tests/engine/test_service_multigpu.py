@@ -1,4 +1,26 @@
-"""Two real shard processes on two GPUs, the `service` topology between them.
+"""Two real shard processes on two GPUs, the `service` spill tier between them.
+
+SKIPPED SINCE A2 PR-6 — REINSTATED IN PHASE D
+----------------------------------------------
+This test drove the tier the only way there was: `ServiceTopology` rendered a `shipinfer
+serve` command line for each child and put the run id, the peer set and the shard index in
+its environment. Both of those are gone (arch.md section 2: the child gets `--shard-id` and
+`--control-port`, and nothing else), so there is no longer a supported way for a *shard* to be
+told who its peers are before it starts — which is precisely what phase D's `JoinMesh` RPC is
+for: run id, peer set and shard index as a call on a process that is already up.
+
+The body below is kept as the specification of that run, and updated only enough to name
+nothing that was deleted: the plan comes from `plan_shards` and the children's argv is spelled
+out where `ServiceTopology.command` used to render it. It is **not executed** — nothing here
+has been run since the skip went on.
+
+The tier itself is untouched and still covered offline and on one GPU —
+`tests/engine/test_service_mesh.py`, `test_service_engine.py`, `test_remote_instance.py`,
+`test_remote_wire.py` all pass. What is not covered until phase D is the two-process,
+two-GPU run. Deleting the file instead would have lost the only description of that run;
+skipping it keeps the specification and names the RPC that will restore it.
+
+The original description follows.
 
 The first end-to-end run of the tier: `shipinfer fleet`'s own launcher starts two `serve`
 processes through the real `ServiceTopology` (run id, peer set, shard index in the environment),
@@ -17,6 +39,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sys
 import threading
 import time
 import urllib.error
@@ -25,12 +48,25 @@ from pathlib import Path
 
 import pytest
 
-from shipinfer.core.settings import ServerSettings
+from shipinfer.core.settings.runner import (
+    SERVICE_PEERS_ENV,
+    SERVICE_RUN_ENV,
+    SERVICE_SHARD_ENV,
+)
 from shipinfer.launch import Fleet
-from shipinfer.server.launcher import serve_command
-from shipinfer.server.topology import ServiceTopology
+from shipinfer.scheduling.sharding import plan_shards
 
-pytestmark = [pytest.mark.multigpu, pytest.mark.timeout(300)]
+pytestmark = [
+    pytest.mark.multigpu,
+    pytest.mark.timeout(300),
+    pytest.mark.skip(
+        reason=(
+            "needs a way to tell a shard its peers before it starts; the argv-and-environment "
+            "mechanism this used is deleted (arch.md section 2) and phase D's JoinMesh RPC is "
+            "the replacement. The tier's own tests still run."
+        )
+    ),
+]
 
 REQUESTS = 24
 READY_TIMEOUT_S = 150.0
@@ -138,15 +174,12 @@ class TestTwoShardsShareTheEmbedder:
         gpus = _gpus()
         root = tmp_path / "model_repository"
         _write_repository(root)
-        settings = ServerSettings(model_repository=root, ingest={"cameras": CAMERAS})
-        topology = ServiceTopology()
-        plan = topology.plan(
-            settings, cameras={c["camera_id"]: 1.0 for c in CAMERAS}, gpus=gpus, shards=2
-        )
+        plan = plan_shards({c["camera_id"]: 1.0 for c in CAMERAS}, shards=2, gpus=gpus)
         base = _two_free_ports()
         ports = [base + shard.index for shard in plan.shards]
         env = {
-            **topology.environment(settings),
+            SERVICE_RUN_ENV: "multigpu-test",
+            SERVICE_PEERS_ENV: json.dumps([0, 1]),
             "SHIPINFER_INGEST__CAMERAS": json.dumps(CAMERAS),
             # The children read their configuration from the environment, as every shard does.
             "SHIPINFER_RUNNER__SERVICE__SHARED_MODELS": json.dumps(["emb"]),
@@ -160,11 +193,19 @@ class TestTwoShardsShareTheEmbedder:
         }
         fleet = Fleet(
             plan=plan,
-            command=lambda shard: serve_command(
-                shard, repository=str(root), http_port_base=base
-            ),
+            command=lambda shard: [
+                sys.executable,
+                "-m",
+                "shipinfer",
+                "serve",
+                "-r",
+                str(root),
+                "--http",
+                "--port",
+                str(base + shard.index),
+            ],
             env=env,
-            shard_env=topology.shard_environment,
+            shard_env=lambda shard: {SERVICE_SHARD_ENV: str(shard.index)},
             drain_s=15.0,
         )
         fleet.start()

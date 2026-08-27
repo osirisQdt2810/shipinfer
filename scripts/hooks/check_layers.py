@@ -105,17 +105,16 @@ FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
     # never installed grpcio. Note that neither seam names them at module scope either; the
     # runtime half of that promise is in `tests/test_architecture.py`.
     "launch": {"torch", "tensorrt", "fastapi", "uvicorn", "confluent_kafka"},
-    # `server` is what the split has not carried off yet — the argv-rendering half of the
-    # launcher and the topology-as-placement classes (both leave in A2 PR-6; supervision left
-    # in PR-4). It held the only fastapi import in the tree until `server/api/` became `api/`;
-    # this row is what stops it growing a second one on the way out.
-    "server": {"fastapi", "uvicorn", "confluent_kafka", "grpc", "google"},
     # The three layers left without a ban, banned: an output sink pushes, a camera actor
     # pulls, and the CLI calls `serve_http` rather than building an app itself. Rows rather
     # than trust — "fastapi enters at `api/` and nowhere else" is worth being a statement this
     # script can check, and with these every layer on disk has a row.
     "pipeline": {"fastapi", "uvicorn", "grpc", "google"},
     "ingest": {"fastapi", "uvicorn", "grpc", "google"},
+    # `cli` may not name grpc either, and the shard entry point is why the line is worth
+    # drawing: `cli/shard.py` runs the child of a gRPC control plane and still reaches it only
+    # through `runners.serve_shard`, which imports the stubs lazily. A `import grpc` here
+    # would make the optional extra mandatory for `shipinfer repo ls`.
     "cli": {"fastapi", "uvicorn", "grpc", "google"},
     # A runner is the third of arch.md's three concepts (§1) and it is *scheduling* code: it
     # owns admission, placement and the walk, and it reaches the accelerator only through the
@@ -181,13 +180,33 @@ ALLOWED_INTERNAL: dict[str, set[str]] = {
     # part — `launch` may NOT import `runners`, so the servicer lives here and the client
     # lives there, and a launcher never pays for the executor it launches.
     "runners": {"core", "topology", "scheduling", "launch"},
-    "server": {"core", "repository", "scheduling", "engine"},
+    # `cli` is the composition root: `serve` builds an engine, `run` builds a runner over a
+    # topology, `shard` builds all three and hands them to a servicer. It is the one layer
+    # whose job is wiring the others together, so its row is everything — and it exists
+    # because a *missing* row means the internal check is silently off for that package,
+    # which is what it was for `cli` until A2 PR-6 (`tests/test_architecture.py` now checks
+    # that every package has one). What the row still forbids is the reverse: nothing may
+    # import `cli`, because a library whose layers reach for the command line cannot be
+    # embedded.
+    "cli": {
+        "api",
+        "backends",
+        "core",
+        "engine",
+        "ingest",
+        "launch",
+        "pipeline",
+        "repository",
+        "runners",
+        "runtime",
+        "scheduling",
+        "topology",
+    },
     "pipeline": {"core", "repository", "runtime", "backends", "scheduling", "engine"},
     # `ingest` does NOT depend on `scheduling`: it publishes into the `FrameSink` protocol
     # it owns, and `pipeline` supplies the queue-backed implementation. Mapping a frame onto
     # a request is dispatch policy, and it belongs next to the code that undoes the mapping.
     "ingest": {"core", "runtime"},
-    "observability": {"core"},
 }
 
 

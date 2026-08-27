@@ -126,22 +126,6 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
-def _camera_list(value: str) -> tuple[str, ...]:
-    """Comma-separated ``camera_id``s, whitespace tolerated, empties dropped.
-
-    Raises:
-        ValueError: nothing but separators — a shard told to read no cameras still loads
-            engines and holds a CUDA context; unset the variable to serve the whole fleet.
-    """
-    names = tuple(name for name in value.replace(" ", "").split(",") if name)
-    if not names:
-        raise ValueError(
-            "names no camera. A shard with no cameras still loads engines and holds a CUDA "
-            "context; unset the variable to serve the whole fleet"
-        )
-    return names
-
-
 def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
@@ -296,19 +280,11 @@ GST_APPSINK_MAX_BUFFERS: EnvVar[int] = EnvVar(
 )
 
 #: Every variable this module owns, for :func:`describe` and for the drift test.
-SHARD_CAMERAS: EnvVar[tuple[str, ...]] = EnvVar(
-    name="SHIPINFER_SHARD_CAMERAS",
-    default=(),
-    parse=_camera_list,
-    doc=(
-        "Which cameras this process reads, as a comma-separated list of camera_id — set by "
-        "`shipinfer fleet` for each shard beside CUDA_VISIBLE_DEVICES. Every shard starts from "
-        "the same configuration and keeps only this slice; unset means the whole fleet, which "
-        "is a single-process `serve`."
-    ),
-)
-
-
+#:
+#: ``SHIPINFER_SHARD_CAMERAS`` used to be here. It is gone with the argv-and-environment
+#: mechanism (arch.md section 2, A2 PR-6): a shard is told which cameras to read by
+#: ``AddCamera``, one at a time, on a process that is already running — which is what lets a
+#: camera be added to a live fleet at all.
 ALL: tuple[EnvVar[object], ...] = (
     INGEST_BACKEND,
     INGEST_HWACCEL,
@@ -325,7 +301,6 @@ ALL: tuple[EnvVar[object], ...] = (
     PROFILE_DIR,
     PROFILE_STEPS,
     PROFILE_PHASES,
-    SHARD_CAMERAS,
 )
 
 

@@ -44,8 +44,10 @@ _GRPC_GENERATED = re.compile(r"^GRPC_GENERATED_VERSION = '([^']+)'", re.MULTILIN
 _PROTOBUF_GENCODE = re.compile(
     r"ValidateProtobufRuntimeVersion\(\s*[\w.]+,\s*(\d+),\s*(\d+),\s*(\d+),", re.DOTALL
 )
-#: ``grpcio>=1.71.2,<2`` -> ``("grpcio", "1.71.2")``.
-_REQUIREMENT = re.compile(r"^([A-Za-z0-9_.-]+)\s*>=\s*([0-9][0-9A-Za-z.]*)")
+#: ``grpcio>=1.71.2,<2`` -> ``("grpcio", "1.71.2")``. ``==`` counts as a floor too: a pin is
+#: the tightest floor there is, and ``grpcio-tools`` is pinned so that the byte-for-byte
+#: regeneration guard compares against one protoc and not whichever one resolved today.
+_REQUIREMENT = re.compile(r"^([A-Za-z0-9_.-]+)\s*[=>]=\s*([0-9][0-9A-Za-z.]*)")
 
 #: Which distribution's floor is set by which generated file. ``grpcio-tools`` is what
 #: *produces* the stub, so a floor below the stub's own version means a regeneration on a
@@ -76,11 +78,16 @@ def generated_floors() -> dict[str, str]:
     return {"grpc": grpc_match.group(1), "protobuf": ".".join(pb_match.groups())}
 
 
-def declared_floors() -> dict[str, dict[str, str]]:
-    """The ``>=`` floors of every optional dependency, keyed by extra then distribution."""
+def declared_specs() -> dict[str, list[str]]:
+    """Every optional dependency's requirement string, verbatim, keyed by extra."""
     with (ROOT / "pyproject.toml").open("rb") as handle:
         pyproject = tomllib.load(handle)
-    extras = pyproject["project"]["optional-dependencies"]
+    return dict(pyproject["project"]["optional-dependencies"])
+
+
+def declared_floors() -> dict[str, dict[str, str]]:
+    """The ``>=``/``==`` floors of every optional dependency, keyed by extra then dist."""
+    extras = declared_specs()
     return {
         extra: {
             match.group(1).lower(): match.group(2)
@@ -140,6 +147,19 @@ class TestTheDeclaredFloorsMatchTheCommittedStubs:
 
         assert version_key(declared["dev"]["grpcio-tools"]) >= version_key(
             generated_floors()["grpc"]
+        )
+
+    def test_grpcio_tools_is_pinned_exactly_so_the_byte_compare_means_something(self) -> None:
+        """`gen_proto.py --check` regenerates and compares BYTES, so it is only a guard while
+        every machine runs one protoc: grpcio-tools 1.83 emits a different `shard_pb2_grpc.py`
+        for the same .proto and would fail the check on a tree nobody touched. Today the pin
+        also happens to be what resolves anyway - `protobuf<6` drags grpcio-tools back - and
+        an accident is not a guarantee. This is what makes it one."""
+        pins = [spec for spec in declared_specs()["dev"] if spec.startswith("grpcio-tools")]
+
+        assert pins == [f"grpcio-tools=={generated_floors()['grpc']}"], (
+            "grpcio-tools must be pinned to the version the committed stubs were generated "
+            f"with; found {pins}"
         )
 
 

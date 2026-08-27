@@ -2,12 +2,18 @@
 
 `run_shipinfer` measures one process over every GPU. That is topology A, and it is also the
 generator's ceiling: one interpreter reading fifty replay cameras delivers ~2% of 50 x 20 fps.
-The multi-process topologies (`fleet`, `service` — ledger T2/T3) are measured the way they are
+The multi-process shapes (`fleet`, `service` — ledger T2/T3) are measured the way they are
 deployed: the parent plans the shards, starts one child per shard through
-:class:`shipinfer.launch.Fleet` with the topology's own environment (so `service`
-children join the tier), and each child runs today's `run_shipinfer` on **its** cameras and
-**its** GPU, writing its own occupancy log and a `summary.json`. The parent waits for every
-child to finish, re-analyses each shard's log, and sums.
+:class:`shipinfer.launch.Fleet`, and each child runs today's `run_shipinfer` on **its**
+cameras and **its** GPU, writing its own occupancy log and a `summary.json`. The parent waits
+for every child to finish, re-analyses each shard's log, and sums.
+
+**This harness is not the product's control plane, and says so on its own argv.** A shard of
+a *deployment* is told what to read over gRPC (arch.md section 2); a shard of a *benchmark*
+is this module, run with `--config` and `--out`, and its cameras go on the same line — one
+more flag on a command the harness both writes and parses. The `service` tier's per-child
+keys still travel in the environment, because a child joins the tier while it starts up,
+before it could answer anything.
 
 Per-device by construction: a shard is a GPU, so "per-device execution" is the per-shard table,
 and under `service` a request that left its shard shows up in the peer's counts.
@@ -42,6 +48,7 @@ __all__ = [
     "child_config",
     "plan_for",
     "run_sharded",
+    "tier_env",
 ]
 
 #: Set in every child's environment, so `run_shipinfer` can tell a shard child from a run of
@@ -54,29 +61,22 @@ def camera_names(config: BenchConfig) -> list[str]:
     return [f"cam{index:02d}" for index in range(config.cameras)]
 
 
-def plan_for(config: BenchConfig) -> tuple[Any, Any]:
-    """The topology and the plan it will launch.
+def plan_for(config: BenchConfig) -> Any:
+    """The plan the harness will launch.
 
-    Returns:
-        ``(topology, plan)``. With ``config.shard_cameras`` the plan is the explicit split —
-        contiguous slices of the camera list, one GPU per shard — and the topology is told
-        about it (:meth:`Topology.adopt`), so `service` still names the right peers.
+    With ``config.shard_cameras`` it is the explicit split — contiguous slices of the camera
+    list, one GPU per shard — and otherwise the launcher's own LPT balance, which is `fleet`
+    doing its job. Either way the split is data and both go through the same code.
     """
-    from shipinfer.core.settings import ServerSettings
-    from shipinfer.scheduling.sharding import Shard, ShardPlan
-    from shipinfer.server.topology import build_topology
+    from shipinfer.scheduling.sharding import Shard, ShardPlan, plan_shards
 
     if config.topology == "single":
         raise ValueError("plan_for: `single` has no shards; call run_shipinfer directly")
     names = camera_names(config)
     gpus = list(config.gpus)
     count = config.shards or len(gpus)
-    topology = build_topology(config.topology)
     if not config.shard_cameras:
-        plan = topology.plan(
-            ServerSettings(), cameras=dict.fromkeys(names, config.fps), gpus=gpus, shards=count
-        )
-        return topology, plan
+        return plan_shards(dict.fromkeys(names, config.fps), shards=count, gpus=gpus)
     shards = []
     start = 0
     for index, size in enumerate(config.shard_cameras):
@@ -87,9 +87,38 @@ def plan_for(config: BenchConfig) -> tuple[Any, Any]:
                 index=index, cameras=cameras, gpus=(gpus[index],), offered_fps=size * config.fps
             )
         )
-    plan = ShardPlan(shards=tuple(shards), shards_per_gpu=dict.fromkeys(gpus[: len(shards)], 1))
-    topology.adopt(plan)
-    return topology, plan
+    return ShardPlan(shards=tuple(shards), shards_per_gpu=dict.fromkeys(gpus[: len(shards)], 1))
+
+
+def tier_env(config: BenchConfig, plan: Any) -> tuple[dict[str, str], Any]:
+    """What a `service` child needs before it starts: the ring names and its own index.
+
+    Returns:
+        ``(fleet-wide env, per-shard env callable)``. Empty and ``None`` for `fleet`, which
+        tells its children nothing — under the benchmark as under a deployment, the shape
+        differs in what the children are told, not in how they are supervised.
+
+    This is the one thing the control plane cannot carry (see the module docstring): a shard
+    opens its peers' rings while the engine starts, which is before its first RPC. One run id
+    per launch names the rings, so two benchmark runs on one box cannot open each other's
+    memory and a restarted run cannot attach to a dead one's leftovers.
+    """
+    if config.topology != "service":
+        return {}, None
+    import uuid
+
+    from shipinfer.core.settings.runner import (
+        SERVICE_PEERS_ENV,
+        SERVICE_RUN_ENV,
+        SERVICE_SHARD_ENV,
+    )
+
+    run_id = uuid.uuid4().hex[:12]
+    env = {
+        SERVICE_RUN_ENV: run_id,
+        SERVICE_PEERS_ENV: json.dumps(list(range(len(plan.shards)))),
+    }
+    return env, lambda shard: {SERVICE_SHARD_ENV: str(shard.index)}
 
 
 def child_config(
@@ -112,7 +141,14 @@ def child_config(
 
 
 def child_command(shard: Any, config_path: Path, out_dir: Path) -> list[str]:
-    """The argv of one shard child: this interpreter, this module, the parent's config."""
+    """The argv of one shard child: this interpreter, this module, its slice of the run.
+
+    The cameras are on the line. They used to ride in ``SHIPINFER_SHARD_CAMERAS``, because the
+    command being launched was ``shipinfer serve``, which has no camera flag and could not
+    grow one for a benchmark. This child is the harness's own module, so the harness gives it
+    a flag — and the variable that existed for the other case is gone with the argv mechanism
+    it belonged to (arch.md section 2).
+    """
     return [
         sys.executable,
         "-m",
@@ -121,6 +157,8 @@ def child_command(shard: Any, config_path: Path, out_dir: Path) -> list[str]:
         str(config_path),
         "--out",
         str(out_dir / f"shard-{shard.index}"),
+        "--cameras",
+        ",".join(shard.cameras),
     ]
 
 
@@ -136,22 +174,21 @@ def run_sharded(
         RuntimeError: a child exited non-zero (its own traceback is on stderr), or did not
             finish within start-up plus the run plus a margin.
     """
-    from shipinfer.core.settings import ServerSettings
     from shipinfer.launch import Fleet
 
-    topology, plan = plan_for(config)
+    plan = plan_for(config)
     out_dir.mkdir(parents=True, exist_ok=True)
     config_path = out_dir / "config.json"
     config_path.write_text(json.dumps(config.as_dict(), indent=1))
-    env = {**topology.environment(ServerSettings()), CHILD_ENV: "1"}
+    tier, per_shard = tier_env(config, plan)
     fleet = Fleet(
         plan=plan,
         command=lambda shard: child_command(shard, config_path, out_dir),
-        env=env,
-        shard_env=topology.shard_environment,
+        env={**tier, CHILD_ENV: "1"},
+        shard_env=per_shard,
         drain_s=30.0,
     )
-    print(f"topology: {topology.name} — {topology.describe()}", flush=True)
+    print(f"topology: {config.topology}", flush=True)
     print(plan.describe(), flush=True)
     fleet.start()
     children = list(fleet.running)
@@ -248,16 +285,15 @@ def _child_main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--cameras", default="", help="comma-separated ids; set by the parent")
     args = parser.parse_args(argv)
 
-    from shipinfer.envs import SHARD_CAMERAS
-
-    cameras = tuple(c for c in os.environ.get(SHARD_CAMERAS.name, "").split(",") if c)
+    cameras = tuple(c for c in args.cameras.split(",") if c)
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     gpus = tuple(int(g) for g in visible.split(",") if g.strip())
     if not cameras or not gpus:
         print(
-            f"shard child: {SHARD_CAMERAS.name}={cameras!r} CUDA_VISIBLE_DEVICES={visible!r} — "
+            f"shard child: --cameras={args.cameras!r} CUDA_VISIBLE_DEVICES={visible!r} — "
             "this module is started by run_sharded, not by hand",
             file=sys.stderr,
         )

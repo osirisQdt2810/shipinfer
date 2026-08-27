@@ -10,10 +10,10 @@ an exit code with a message on stderr tells it a shard exited, and a
 :class:`~shipinfer.core.errors.SourceUnavailableError` naming ``nvinfer`` tells an operator to
 install the SDK. Same outcome, one of them actionable.
 
-**One branch per process, not many per process.** See
-:class:`~shipinfer.server.topology.deepstream.DeepStreamTopology` for why: the child sees one
-device because ``CUDA_VISIBLE_DEVICES`` was set before its interpreter started, so per-element
-physical ``gpu-id`` values would name devices it cannot see.
+**One branch per process, not many per process.** A shard sees one device, because
+``CUDA_VISIBLE_DEVICES`` was set before its interpreter started
+(``launch/supervisor.py``), so per-element *physical* ``gpu-id`` values would name devices it
+cannot see — they are always the logical ``0``.
 
 **The old/new muxer split is detected rather than met at run time.** DeepStream 6.1 introduced
 a second ``nvstreammux`` behind ``USE_NEW_NVSTREAMMUX=1``, and it has no ``batch-size``,

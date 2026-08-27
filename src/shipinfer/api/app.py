@@ -13,7 +13,7 @@ __all__ = ["create_app", "serve_http"]
 
 # The logger name stays "server.api" on purpose: an operator's log filter is behaviour,
 # and this move promises none changed. It is retargeted when server/ is deleted (A2 PR-6).
-_LOG = get_logger("server.api")
+_LOG = get_logger("api")
 
 
 def create_app(server: InferenceServer) -> Any:

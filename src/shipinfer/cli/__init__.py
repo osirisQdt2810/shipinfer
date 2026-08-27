@@ -68,9 +68,9 @@ def build_app() -> typer.Typer:
         raise typer.Exit(commands.list_queues())
 
     @app.command()
-    def topologies() -> None:
-        """List registered process topologies."""
-        raise typer.Exit(commands.list_topologies())
+    def runners() -> None:
+        """List registered runners — the names `shipinfer run --runner` accepts."""
+        raise typer.Exit(commands.list_runners())
 
     @repo_app.command("ls")
     def repo_ls(repository: Path = repo_option) -> None:
@@ -106,39 +106,52 @@ def build_app() -> typer.Typer:
         )
 
     @app.command()
-    def fleet(
+    def run(
+        topology: Path = typer.Option(
+            ...,
+            "--topology",
+            "-t",
+            help="The chain file to run, e.g. topology/ship_person.yaml.",
+        ),
+        runner: str | None = typer.Option(
+            None,
+            "--runner",
+            help="Which runner executes it: a name from `shipinfer runners` (default: settings).",
+        ),
         repository: Path = repo_option,
+        inputs: list[str] = typer.Option(
+            [], "--inputs", help="Files or URLs to shard at start (phase B; refused for now)."
+        ),
         shards: int | None = typer.Option(
             None,
             "--shards",
             "-n",
-            help="How many processes to split the fleet across (default: one per visible GPU).",
+            help="How many shard processes for `fleet` (default: one per visible GPU).",
         ),
         gpus: str = gpus_option,
         policy: str = policy_option,
-        topology: str | None = typer.Option(
+        drain_s: float | None = typer.Option(
             None,
-            "--topology",
-            help="Which topology to run: a name from `shipinfer topologies` (default: settings).",
+            "--drain-s",
+            help="Seconds a shard gets to drain before it is killed (default: settings).",
         ),
         dry_run: bool = typer.Option(
-            False, "--dry-run", help="Print the plan and stop, without spawning anything."
-        ),
-        drain_s: float | None = typer.Option(
-            None, "--drain", help="Seconds a shard gets to drain before it is killed."
+            False, "--dry-run", help="Print what would run, and spawn nothing."
         ),
         log_level: str = log_option,
     ) -> None:
-        """Split the fleet across several processes, under one topology, and supervise them."""
+        """Run a topology under a runner: in this process, or across a fleet of shards."""
         raise typer.Exit(
-            commands.fleet(
-                repository,
+            commands.run(
+                topology,
+                runner=runner,
+                repository=repository,
+                inputs=list(inputs),
                 shards=shards,
                 gpus=gpus,
                 policy=policy,
-                topology=topology,
-                dry_run=dry_run,
                 drain_s=drain_s,
+                dry_run=dry_run,
                 log_level=log_level,
             )
         )

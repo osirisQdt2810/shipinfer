@@ -84,8 +84,8 @@ class TestTheConfigKnowsItsShape:
 
 class TestThePlanTheHarnessLaunches:
     def test_the_explicit_split_is_contiguous_one_gpu_per_shard(self) -> None:
-        topology, plan = shards.plan_for(_config(topology="fleet", shard_cameras=(4, 2, 2)))
-        assert topology.name == "fleet" and len(plan) == 3
+        plan = shards.plan_for(_config(topology="fleet", shard_cameras=(4, 2, 2)))
+        assert len(plan) == 3
         assert [s.cameras for s in plan.shards] == [
             ("cam00", "cam01", "cam02", "cam03"),
             ("cam04", "cam05"),
@@ -96,7 +96,7 @@ class TestThePlanTheHarnessLaunches:
         assert plan.sharing_for(plan.shards[0]) == (1,), "one shard per GPU: nothing is shared"
 
     def test_the_default_plan_is_the_launchers_balanced_one(self) -> None:
-        _, plan = shards.plan_for(_config(topology="fleet"))
+        plan = shards.plan_for(_config(topology="fleet"))
         assert len(plan) == 3 and sorted(
             c for s in plan.shards for c in s.cameras
         ) == shards.camera_names(_config())
@@ -105,12 +105,18 @@ class TestThePlanTheHarnessLaunches:
     def test_service_is_told_the_explicit_plan_so_it_names_every_peer(self) -> None:
         import json
 
-        from shipinfer.core.settings import ServerSettings
-        from shipinfer.core.settings.runner import SERVICE_PEERS_ENV
+        from shipinfer.core.settings.runner import SERVICE_PEERS_ENV, SERVICE_SHARD_ENV
 
-        topology, _plan = shards.plan_for(_config(topology="service", shard_cameras=(6, 2)))
-        env = topology.environment(ServerSettings())
+        config = _config(topology="service", shard_cameras=(6, 2))
+        plan = shards.plan_for(config)
+        env, per_shard = shards.tier_env(config, plan)
+
         assert json.loads(env[SERVICE_PEERS_ENV]) == [0, 1]
+        assert per_shard is not None
+        assert [per_shard(s) for s in plan.shards] == [
+            {SERVICE_SHARD_ENV: "0"},
+            {SERVICE_SHARD_ENV: "1"},
+        ]
 
     def test_single_has_no_plan(self) -> None:
         with pytest.raises(ValueError, match="single"):
@@ -150,11 +156,23 @@ class TestTheChild:
             )
 
     def test_its_command_is_this_interpreter_running_this_module(self, tmp_path: Path) -> None:
-        _, plan = shards.plan_for(_config(topology="fleet", shard_cameras=(4, 2, 2)))
+        plan = shards.plan_for(_config(topology="fleet", shard_cameras=(4, 2, 2)))
         argv = shards.child_command(plan.shards[2], tmp_path / "config.json", tmp_path)
         assert argv[:3] == [sys.executable, "-m", "benchmarks.harness.shards"]
         assert argv[argv.index("--out") + 1] == str(tmp_path / "shard-2")
         assert argv[argv.index("--config") + 1] == str(tmp_path / "config.json")
+        assert argv[argv.index("--cameras") + 1] == "cam06,cam07"
+
+    def test_the_child_parses_the_cameras_the_parent_put_on_its_line(
+        self, tmp_path: Path
+    ) -> None:
+        """The two ends of the harness's own contract. They used to be joined by
+        `SHIPINFER_SHARD_CAMERAS`, which is gone with the argv mechanism it belonged to."""
+        plan = shards.plan_for(_config(topology="fleet", shard_cameras=(4, 2, 2)))
+        argv = shards.child_command(plan.shards[1], tmp_path / "config.json", tmp_path)
+        index = argv.index("--cameras")
+
+        assert tuple(argv[index + 1].split(",")) == plan.shards[1].cameras
 
 
 def _summary(

@@ -298,10 +298,31 @@ class TestTheLauncherIsToldHowManyShardsShareEachGpu:
         assert all(plan.rank_for(s) == (0, 0) for s in plan.shards)
 
 
+class TestAFleetWithNoCamerasYet:
+    """A shard is spawned before anybody has decided what it reads (arch.md section 2).
+
+    Under the gRPC control plane the cameras arrive one ``AddCamera`` at a time, so an empty
+    fleet is the *normal* start state and the plan is the device assignment alone. It used to
+    be refused, on the argv-era reasoning that a shard with no cameras reads nothing forever.
+    """
+
+    def test_the_plan_is_the_devices_and_names_no_cameras(self) -> None:
+        plan = plan_shards({}, shards=3, gpus=[2, 3, 4])
+
+        assert len(plan) == 3
+        assert plan.cameras == ()
+        assert [s.gpus for s in plan.shards] == [(2,), (3,), (4,)]
+        assert all(s.offered_fps == 0.0 for s in plan.shards)
+
+    def test_shards_still_share_devices_when_there_are_more_of_them(self) -> None:
+        """The sharing is what the control plane sends on: it must be right with no cameras."""
+        plan = plan_shards({}, shards=4, gpus=[2, 3])
+
+        assert [plan.sharing_for(s) for s in plan.shards] == [(2,), (2,), (2,), (2,)]
+        assert sorted(plan.rank_for(s) for s in plan.shards) == [(0,), (0,), (1,), (1,)]
+
+
 class TestAnImpossiblePlanFailsAtPlanTime:
-    def test_an_empty_fleet(self) -> None:
-        with pytest.raises(ConfigurationError, match="empty fleet"):
-            plan_shards({}, shards=1, gpus=[2])
 
     @pytest.mark.parametrize("shards", [0, -1])
     def test_fewer_than_one_shard(self, shards: int) -> None:

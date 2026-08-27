@@ -34,7 +34,7 @@ from shipinfer.scheduling.work import WorkItem
 
 __all__ = ["ModelInstance"]
 
-_LOG = get_logger("server.instance")
+_LOG = get_logger("engine.instance")
 
 #: How long a worker waits for an execution slot before re-checking that it should still be
 #: running. The wait has to be bounded or a stopping server would sit inside the limiter

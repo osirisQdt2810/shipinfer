@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from pydantic import Field, model_validator
@@ -18,7 +19,28 @@ from shipinfer.core.settings.pipeline import PipelineSettings
 from shipinfer.core.settings.runner import RunnerSettings
 from shipinfer.core.settings.scheduler import SchedulerSettings
 
-__all__ = ["ServerSettings"]
+__all__ = ["RETIRED_ENV_SECTIONS", "ServerSettings"]
+
+#: Settings sections that were renamed, old name -> new name, without the ``SHIPINFER_``
+#: prefix. A row here turns an operator's stale export into a refusal that names the
+#: replacement.
+#:
+#: It is needed because ``extra="forbid"`` does **not** catch this, which is the opposite of
+#: what one would assume. pydantic-settings' environment source only emits keys for fields
+#: that exist, so ``SHIPINFER_TOPOLOGY__SHARDS`` is never handed to the model at all and
+#: nothing forbids it — the export is silently unread and the default stands. (Within a
+#: section that *does* exist the assumption holds: ``SHIPINFER_RUNNER__KIND`` is refused by
+#: ``RunnerSettings``'s own ``extra="forbid"``, because ``runner`` is a real field.)
+#:
+#: Silently unread is the expensive half. ``SHIPINFER_TOPOLOGY__SHARDS=4`` was how an operator
+#: pinned the process count for the previous release; ignored, it is a fleet running one
+#: process per GPU instead of four, with every process reporting healthy and nothing anywhere
+#: saying the knob stopped being read.
+RETIRED_ENV_SECTIONS: dict[str, str] = {
+    # "Topology" means the element chain now (arch.md section 1), so the section that
+    # configured process placement is `runner` (A2 PR-6).
+    "TOPOLOGY": "RUNNER",
+}
 
 
 class ServerSettings(BaseSettings):
@@ -60,6 +82,33 @@ class ServerSettings(BaseSettings):
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     http: HttpSettings = Field(default_factory=HttpSettings)
     runner: RunnerSettings = Field(default_factory=RunnerSettings)
+
+    @model_validator(mode="after")
+    def _refuse_retired_environment(self) -> ServerSettings:
+        """A stale ``SHIPINFER_<old section>__*`` export is refused, not ignored.
+
+        Read from the environment here rather than left to ``extra="forbid"`` because that
+        never sees it — see :data:`RETIRED_ENV_SECTIONS` for why. The alternative is the
+        failure this project keeps fixing: configuration that vanishes quietly and is noticed
+        weeks later from a dashboard.
+        """
+        stale = sorted(
+            name
+            for name in os.environ
+            for old in RETIRED_ENV_SECTIONS
+            if name == f"SHIPINFER_{old}" or name.startswith(f"SHIPINFER_{old}__")
+        )
+        if stale:
+            renamed = ", ".join(
+                f"SHIPINFER_{old}__* -> SHIPINFER_{new}__*"
+                for old, new in sorted(RETIRED_ENV_SECTIONS.items())
+            )
+            raise ValueError(
+                f"these environment variables name settings sections that no longer exist: "
+                f"{', '.join(stale)}. They are ignored rather than applied, so unset them or "
+                f"move them to the section that replaced them ({renamed})"
+            )
+        return self
 
     @model_validator(mode="after")
     def _startup_models_need_selection(self) -> ServerSettings:

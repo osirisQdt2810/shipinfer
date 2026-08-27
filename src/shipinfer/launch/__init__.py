@@ -16,8 +16,8 @@ the parent's half of that arrangement. It owns three things:
 The shard's *other* half — the servicer that answers these calls — is
 :mod:`shipinfer.runners.service`, and the direction is deliberate: a launcher that imported
 the thing it launches would pay for the executor in the parent process. The runner that
-drives this client across a whole fleet arrives in A2 PR-6, together with the deletion of the
-argv-rendering ``server/topology/`` classes.
+drives this client across a whole fleet is :class:`shipinfer.runners.fleet.FleetRunner`, and
+it lives above this package for the same reason.
 
 **grpcio and protobuf are an optional extra** (``pip install "shipinfer[grpc]"``) and nothing
 here imports either at module scope, so ``import shipinfer.launch`` works on a host that has
@@ -42,7 +42,7 @@ from shipinfer.launch.control import (
     ShardState,
     StopResult,
 )
-from shipinfer.launch.signals import forward_signals
+from shipinfer.launch.signals import Stoppable, forward_signals
 from shipinfer.launch.supervisor import DEFAULT_DRAIN_S, Fleet, ShardProcess
 
 __all__ = [
@@ -56,5 +56,6 @@ __all__ = [
     "ShardProcess",
     "ShardState",
     "StopResult",
+    "Stoppable",
     "forward_signals",
 ]
