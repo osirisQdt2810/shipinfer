@@ -14,7 +14,20 @@ leak ``test_start_unwind.py`` pins for the failed start, arriving by a different
 
 **The trace sink after the stop.** ``stop()`` closed the sink and left the field pointing at
 it, and ``stats()`` still reads that field. A metrics scrape does not stop when the server
-does, so the first scrape after a shutdown asked a closed sink for numbers.
+does, so the first scrape after a shutdown asked a closed sink for numbers. The reset that
+fixed it then threw the run's totals away, which is its own wrong answer: a dashboard's last
+sample read ``recorded: 0`` for a run that traced thousands of requests.
+
+Two more arrived with the review of that work, all the same shape — a caller that has
+already passed a check, waiting on the control lock:
+
+* **An unload racing the stop** got ``ModelNotFoundError`` ("no such model") for a model that
+  existed when it asked and was drained while it waited. ``load_model`` re-checks under the
+  lock; ``unload_model`` did not.
+* **A second ``stop()``** returned before any teardown had happened: the flags are cleared
+  *before* the lock is taken, so the second thread saw "already stopped" while the first was
+  still queued behind a slow load. A caller pairing ``stop()`` with an immediate ``start()``
+  then gets the first thread's teardown landing on its fresh server.
 
 Offline throughout — the mock backend, ``KIND_CPU`` instances and real worker threads,
 because the evidence for the first one is ``threading.enumerate()``.
@@ -101,6 +114,24 @@ def _live_workers(model: str) -> list[str]:
     return [t.name for t in threading.enumerate() if t.name.startswith(f"shipinfer-{model}_")]
 
 
+def _await_stop_flags(server: InferenceServer) -> None:
+    """Block until a ``stop()`` on another thread has cleared both lifecycle flags.
+
+    The point at which the interesting window opens: from here the server reads as stopped
+    to everyone, while its teardown is still queued behind whatever holds the control lock.
+    Both flags, and polled rather than assumed, because ``_started = False`` and
+    ``_starting = False`` are two statements — a test that only watched ``is_started`` would
+    sometimes race into the gap between them and exercise a different interleaving while
+    still passing.
+    """
+    deadline = time.monotonic() + _TIMEOUT
+    while time.monotonic() < deadline:
+        if not (server.is_started or server._starting):
+            return
+        time.sleep(0.001)
+    raise AssertionError("stop() never cleared the lifecycle flags")
+
+
 class _Outcome:
     """What ``load_model`` did on the other thread: a model, or the error it raised."""
 
@@ -113,6 +144,12 @@ class _Outcome:
             self.model = server.load_model(name)
         # BaseException, not Exception: the test asserts on the type either way, and a
         # thread that swallowed nothing would report the failure as a timeout instead.
+        except BaseException as exc:
+            self.error = exc
+
+    def run_unload(self, server: InferenceServer, name: str) -> None:
+        try:
+            server.unload_model(name)
         except BaseException as exc:
             self.error = exc
 
@@ -211,6 +248,144 @@ class TestALoadRacingAStop:
         assert not explicit.is_started
 
 
+class TestAnUnloadRacingAStop:
+    """The mirror of ``TestALoadRacingAStop``, and the one that was missing.
+
+    ``unload_model`` passes ``_require_control`` on a started server, then blocks on the
+    control lock while ``stop()`` drains the table under it. Without a re-check it reaches
+    ``self.model(name)`` and reports ``ModelNotFoundError`` — "no such model", listing the
+    now-empty model set — for a model that existed when the operator asked for it. That
+    sends them to check their spelling; what happened is that the server stopped.
+    """
+
+    def test_it_is_refused_as_a_state_error_not_as_a_missing_model(
+        self, explicit: InferenceServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        explicit.load_model("echo")
+        passed_the_check = threading.Event()
+        release = threading.Event()
+        original_require = InferenceServer._require_control
+
+        def gated_require(self: InferenceServer, action: str, name: str) -> None:
+            original_require(self, action, name)
+            # The window the fix exists for: started when checked, stopped by the time the
+            # control lock is taken. Gated on the action so the `load_model` above — which
+            # runs before the patch — and the fixture's own teardown are unaffected.
+            if action == "unload":
+                passed_the_check.set()
+                assert release.wait(_TIMEOUT), "the test never released the unload"
+
+        monkeypatch.setattr(InferenceServer, "_require_control", gated_require)
+
+        outcome = _Outcome()
+        unloader = threading.Thread(
+            target=outcome.run_unload, args=(explicit, "echo"), name="unloader"
+        )
+        unloader.start()
+        assert passed_the_check.wait(_TIMEOUT), "the unload never reached its started check"
+        explicit.stop()
+        release.set()
+        unloader.join(_TIMEOUT)
+
+        assert not unloader.is_alive()
+        assert isinstance(outcome.error, ServerStateError), f"got {outcome.error!r}"
+        assert "stopped while the request was waiting" in str(outcome.error)
+        # The stop still drained it, which is the other half of "this is not a missing model".
+        assert _live_workers("echo") == []
+        assert explicit.models() == []
+
+    def test_an_unload_on_a_live_server_is_untouched(self, explicit: InferenceServer) -> None:
+        """The re-check must not have made the ordinary unload conditional on anything."""
+        explicit.load_model("echo")
+
+        explicit.unload_model("echo")
+
+        assert explicit.models() == []
+        assert _live_workers("echo") == []
+        assert explicit.is_started
+
+
+class TestASecondStopWaitsForTheFirstOnesTeardown:
+    """``stop()`` clears both flags *before* it takes the control lock, so from that moment a
+    second ``stop()`` on another thread sees a stopped server — and used to return on that
+    alone, while nothing had been released yet. A caller pairing ``stop()`` with an immediate
+    ``start()`` would then have the first thread's teardown drain the *new* server's models
+    and close its trace sink.
+    """
+
+    def test_the_second_stop_does_not_return_before_the_teardown_ran(
+        self, explicit: InferenceServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        order: list[str] = []
+        inside_start = threading.Event()
+        release = threading.Event()
+        original_start = Model.start
+        original_teardown = InferenceServer._teardown
+
+        def blocking_start(self: Model) -> None:
+            """Holds the control lock, so both stops queue behind it."""
+            inside_start.set()
+            assert release.wait(_TIMEOUT), "the test never released the model's start"
+            original_start(self)
+
+        def recording_teardown(self: InferenceServer) -> None:
+            original_teardown(self)
+            order.append("teardown")
+
+        monkeypatch.setattr(Model, "start", blocking_start)
+        monkeypatch.setattr(InferenceServer, "_teardown", recording_teardown)
+
+        loader = threading.Thread(target=_Outcome().run, args=(explicit, "echo"))
+        loader.start()
+        assert inside_start.wait(_TIMEOUT), "the load never reached the model's start"
+
+        first = threading.Thread(target=explicit.stop, name="stop-a")
+        first.start()
+        # The window: the first stop has cleared the flags and is queued on the control lock.
+        _await_stop_flags(explicit)
+
+        def second_stop() -> None:
+            explicit.stop()
+            order.append("second-stop-returned")
+
+        second = threading.Thread(target=second_stop, name="stop-b")
+        second.start()
+        # Long enough for the second stop to reach the barrier and block on it.
+        time.sleep(0.1)
+        release.set()
+        for thread in (loader, first, second):
+            thread.join(_TIMEOUT)
+            assert not thread.is_alive(), f"{thread.name} never finished"
+
+        assert order == ["teardown", "second-stop-returned"], order
+
+    def test_a_stop_on_an_already_stopped_server_still_returns_at_once(
+        self, explicit: InferenceServer
+    ) -> None:
+        """The barrier must not have turned idempotence into a grace-period wait: `stop()`
+        is called twice by ordinary code (a `finally:` around a context manager), and both
+        `cli/shard.py` and the failure path of `start()` do it."""
+        explicit.stop()
+
+        began = time.monotonic()
+        explicit.stop()
+        elapsed = time.monotonic() - began
+
+        assert elapsed < 1.0, f"the second stop() waited {elapsed:.1f}s on a stopped server"
+
+    def test_a_stop_on_a_server_that_was_never_started_returns_at_once(
+        self, repository: Path
+    ) -> None:
+        """Nothing has been torn down, and nothing ever will be — the barrier starts set so
+        this is not a `shutdown_grace_s` wait for an event no one will fire."""
+        server = InferenceServer(_settings(repository))
+
+        began = time.monotonic()
+        server.stop()
+
+        assert time.monotonic() - began < 1.0
+
+
 class _RecordingSink(TraceSink):
     """A sink that remembers being used after it was closed, instead of tolerating it.
 
@@ -278,7 +453,9 @@ class TestStopLeavesAUsableTraceSink:
 
         assert sinks[0].is_closed
         assert sinks[0].uses_after_close == [], "stats() read a sink that stop() had closed"
-        assert stats["tracing"]["sink"] == "none"
+        assert isinstance(explicit.traces, NullTraceSink), "the field kept the closed sink"
+        # The name the run actually traced under, not the null sink that replaced it.
+        assert stats["tracing"]["sink"] == "recording"
 
     def test_the_field_is_the_null_sink_again_and_a_restart_builds_a_new_one(
         self, explicit: InferenceServer, sinks: list[_RecordingSink]
@@ -293,6 +470,48 @@ class TestStopLeavesAUsableTraceSink:
 
         assert explicit.traces is sinks[1]
         assert not explicit.traces.is_closed
+
+    def test_the_runs_totals_survive_the_reset(
+        self, explicit: InferenceServer, sinks: list[_RecordingSink]
+    ) -> None:
+        """The reset must not be a way to lose the numbers.
+
+        A dashboard scrapes on its own schedule, so the last sample it takes of a shard is
+        usually taken *after* the shutdown. Reading the fresh null sink there reports
+        ``recorded: 0``, which is not "we stopped measuring" — it is a claim that the run
+        traced nothing, and it is wrong.
+        """
+        explicit.load_model("echo")
+        explicit.infer_sync(
+            InferenceRequest(
+                model_name="echo",
+                inputs={"x": Tensor.from_numpy(np.zeros((1, 2), dtype=np.float32))},
+                context=RequestContext(camera_id="cam0", frame_id=7),
+            ),
+            timeout=_TIMEOUT,
+        )
+        live = explicit.stats()["tracing"]
+        assert live["recorded"] == 1
+
+        explicit.stop()
+
+        assert explicit.stats()["tracing"] == live
+        assert sinks[0].uses_after_close == [], "the totals were read from the closed sink"
+
+    def test_a_restart_reports_the_new_runs_sink_again(
+        self, explicit: InferenceServer, sinks: list[_RecordingSink]
+    ) -> None:
+        """Keeping the last totals must not freeze `stats()` on them: a server started again
+        is a new run, and its scrape has to follow the live sink."""
+        explicit.stop()
+        assert explicit.stats()["tracing"]["sink"] == "recording"
+
+        explicit.start()
+
+        assert explicit.stats()["tracing"] is not sinks[0].stats()
+        assert explicit.traces is sinks[1]
+        sinks[1].recorded = 3
+        assert explicit.stats()["tracing"]["recorded"] == 3
 
     def test_the_last_traces_still_land_and_the_sink_is_still_closed(
         self, explicit: InferenceServer, sinks: list[_RecordingSink]
