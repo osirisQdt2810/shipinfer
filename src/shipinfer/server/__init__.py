@@ -1,7 +1,7 @@
 """Compatibility shim: the model pool now lives in :mod:`shipinfer.engine` (arch.md §9).
 
-What is left under ``server/`` is the KServe surface (``api/``), the shard launcher and the
-topology-as-placement classes; those move in their own PRs and this package then disappears.
+What is left under ``server/`` is the shard launcher and the topology-as-placement classes;
+those move in their own PRs (A2 PR-4, PR-6) and this package then disappears.
 Until it does, every name this module used to export resolves to the *same object* it does
 in :mod:`shipinfer.engine` — ``tests/test_architecture.py`` asserts the identity, because a
 shim that re-exported a second copy of ``ResponseCache`` would make ``isinstance`` fail

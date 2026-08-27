@@ -96,6 +96,25 @@ class TestEnforcementAgrees:
         result = subprocess.run([sys.executable, str(hook)], capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
 
+    def test_every_package_on_disk_has_a_forbidden_externals_row(self) -> None:
+        """A layer with no row is a layer where nothing is forbidden.
+
+        `FORBIDDEN_EXTERNAL` is a dict, and an absent key means "anything goes" — which is how
+        four layers had no fastapi ban until A2 PR-2 added their rows. The hook's comment says
+        "every layer on disk has a row"; this makes that a check rather than a sentence, so
+        the next top-level package gets a failing test instead of silence.
+        """
+        import importlib.util
+
+        hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "check_layers.py"
+        spec = importlib.util.spec_from_file_location("check_layers", hook)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        packages = {p.name for p in SRC.iterdir() if (p / "__init__.py").is_file()}
+        missing = packages - set(module.FORBIDDEN_EXTERNAL)
+        assert not missing, f"layers with no FORBIDDEN_EXTERNAL row: {sorted(missing)}"
+
 
 class TestImportIsCheap:
     """import shipinfer must not drag in a backend, so the CLI stays usable on a bare host."""

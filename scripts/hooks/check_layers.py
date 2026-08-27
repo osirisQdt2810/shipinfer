@@ -96,12 +96,15 @@ ALLOWED_INTERNAL: dict[str, set[str]] = {
     "runtime": {"core"},
     "backends": {"core", "repository", "runtime"},
     "engine": {"core", "repository", "runtime", "backends", "scheduling"},
-    # `api` sits on the engine and reaches `repository` because that is what `/v2/models/
-    # {name}` answers with: an entry's versions, platform and tensor specs. It may not import
-    # `scheduling`, `runtime` or `backends` — an HTTP handler that decided what to batch or
-    # where to run would be the dispatch layer wearing a router (arch.md §6). It grows
-    # `launch` in phase B, when `/streams` needs to reach the shards.
-    "api": {"core", "repository", "engine"},
+    # `api` sits on the engine and on nothing else: `/v2/models/{name}` answers with an
+    # entry's versions, platform and tensor specs, but it reads them through the engine
+    # object (`server.repository`), not by importing `repository` — so the grant is exactly
+    # what the code does today. It may not import `scheduling`, `runtime` or `backends`: an
+    # HTTP handler that decided what to batch or where to run would be the dispatch layer
+    # wearing a router (arch.md §6). It grows `repository` if the metadata route ever
+    # annotates `RepositoryEntry` directly, and `launch` in phase B when `/streams` needs the
+    # shards — each as a diff with an argument, not a standing permission.
+    "api": {"core", "engine"},
     # What is left of `server` is the launcher and the topology-as-placement classes; they sit
     # *on* the engine and may not import `runtime` or `backends` directly any more
     # (transitively they still reach both through the engine — this check is about direct
