@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import Counter
 from collections.abc import Sequence
 
 from shipinfer.core.errors import QueueFullError, RequestCancelledError
@@ -69,6 +70,12 @@ class FairPriorityQueue(RequestQueue):
         self._rejected = 0
         self._evicted = 0
         self._expired = 0
+        #: The per-camera half of ADR-005. A `Counter` because every increment is
+        #: `+= 1` on a key that may not exist yet, and all three are written under
+        #: `self._cond` — the same lock that guards the lanes they describe.
+        self._rejected_by_camera: Counter[str] = Counter()
+        self._evicted_by_camera: Counter[str] = Counter()
+        self._expired_by_camera: Counter[str] = Counter()
 
     # -- introspection -----------------------------------------------------------------
 
@@ -81,14 +88,36 @@ class FairPriorityQueue(RequestQueue):
         return self._closed
 
     def stats(self) -> QueueStats:
-        return QueueStats(
-            depth=self._size,
-            capacity=self.capacity,
-            accepted=self._accepted,
-            rejected=self._rejected,
-            evicted=self._evicted,
-            expired=self._expired,
-        )
+        """A snapshot, taken under the lock and handed out as copies.
+
+        The lock is why ``depth_by_camera`` is computed here rather than maintained: a walk
+        of every lane's keys is O(cameras x priorities) — 200 dict entries at the design
+        point — and it happens once per stats call, not once per frame. Counting on
+        :meth:`put` and :meth:`get_batch` instead would put that bookkeeping on the path
+        that runs 15 000 times a second to save a walk an operator triggers every few
+        seconds.
+
+        Every map is a copy. :attr:`depth` is unavoidably one (it is built here), but the
+        three counters would otherwise be live objects the caller could mutate — and a
+        health document that gets trimmed in place would silently rewrite the queue's own
+        attribution.
+        """
+        with self._cond:
+            depth_by_camera: Counter[str] = Counter()
+            for lane in self._lanes:
+                depth_by_camera.update(lane.depths())
+            return QueueStats(
+                depth=self._size,
+                capacity=self.capacity,
+                accepted=self._accepted,
+                rejected=self._rejected,
+                evicted=self._evicted,
+                expired=self._expired,
+                depth_by_camera=dict(depth_by_camera),
+                rejected_by_camera=dict(self._rejected_by_camera),
+                evicted_by_camera=dict(self._evicted_by_camera),
+                expired_by_camera=dict(self._expired_by_camera),
+            )
 
     # -- producer ----------------------------------------------------------------------
 
@@ -98,7 +127,17 @@ class FairPriorityQueue(RequestQueue):
                 raise RequestCancelledError(f"queue {self.name!r} is closed")
 
             if self._size >= self.capacity and not self._make_room_locked():
+                # `_make_room_locked` has two false exits and they are different events.
+                # Under BLOCK a producer asleep in it is woken by `close()` as well as by
+                # the timeout, and the two were indistinguishable here: a shutdown charged
+                # `rejected_by_camera` and raised `QueueFullError("full (0/1)")`, so an
+                # orderly stop read as a camera flooding in the one view an operator uses
+                # to find floods. `QueueStats` promises close() charges nobody; this is
+                # where that promise is kept for the producer that was still asleep.
+                if self._closed:
+                    raise RequestCancelledError(f"queue {self.name!r} is closed")
                 self._rejected += 1
+                self._rejected_by_camera[item.fairness_key] += 1
                 raise QueueFullError(self.name, self._size, self.capacity)
 
             item.request.timings.queued_ns = item.enqueued_ns
@@ -128,6 +167,11 @@ class FairPriorityQueue(RequestQueue):
             if victim is not None:
                 self._size -= 1
                 self._evicted += 1
+                # The victim's camera is the greediest by construction — `evict_from_longest`
+                # picks the key hogging the lane — so this counter names the flood, not the
+                # camera whose frame merely happened to be oldest. That inversion is the
+                # whole of ADR-005, and until now it was invisible in the numbers.
+                self._evicted_by_camera[victim.fairness_key] += 1
                 victim.fail(QueueFullError(self.name, self._size + 1, self.capacity))
                 return True
         return False
@@ -199,6 +243,7 @@ class FairPriorityQueue(RequestQueue):
                     self._size -= 1
                     if self.drop_expired and item.request.is_expired(now):
                         self._expired += 1
+                        self._expired_by_camera[item.fairness_key] += 1
                         item.fail(
                             RequestCancelledError("request deadline passed before execution")
                         )

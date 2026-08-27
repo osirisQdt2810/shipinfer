@@ -75,6 +75,16 @@ class Lane:
             self.order.remove(key)
         return item
 
+    def depths(self) -> dict[str, int]:
+        """How many requests each key is holding in this lane.
+
+        O(keys), and only ever called from ``stats()`` — never per frame. The alternative,
+        a running per-key counter maintained by :meth:`push` and :meth:`pop`, would put
+        bookkeeping on the hot path to serve a snapshot an operator reads every few
+        seconds.
+        """
+        return {key: len(bucket) for key, bucket in self.by_key.items()}
+
     def drain(self) -> list[WorkItem]:
         items = [item for bucket in self.by_key.values() for item in bucket]
         self.by_key.clear()

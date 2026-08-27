@@ -36,11 +36,16 @@ namespace shipinfer {
             std::lock_guard<std::mutex> lock(mutex_);
             return closed_;
         }
+        // Per-camera attribution is kept even though this queue is fairness-blind: the
+        // breakdown is how an operator *sees* that it is. Under DropOldest it charges
+        // whichever camera happened to be at the head, which is the inherited behaviour the
+        // fair queue exists to replace — visible here as data rather than argued about.
         QueueStats stats() const {
             std::lock_guard<std::mutex> lock(mutex_);
             QueueStats copy = stats_;
             copy.depth = size_.load(std::memory_order_relaxed);
             copy.capacity = capacity_;
+            for (const T& item : items_) ++copy.depth_by_camera[item.camera()];
             return copy;
         }
 
@@ -50,13 +55,16 @@ namespace shipinfer {
         PutStatus put(T&& item) {
             std::unique_lock<std::mutex> lock(mutex_);
             if (closed_) return PutStatus::Closed;
-            const std::string camera = item.camera();
             if (items_.size() >= capacity_ && !make_room_locked(lock)) {
+                // A BLOCK producer woken by `close()` is closed, not refused — see
+                // `FairPriorityQueue::put` for what charging it instead reported.
+                if (closed_) return PutStatus::Closed;
                 ++stats_.rejected;
-                ++stats_.rejected_by_camera[camera];
+                // Read here, not at the top of `put`: this is the one branch that needs
+                // it, and the item is still ours to read from on it.
+                ++stats_.rejected_by_camera[item.camera()];
                 return PutStatus::Rejected;
             }
-            if (closed_) return PutStatus::Closed;
             items_.push_back(std::move(item));
             size_.store(items_.size(), std::memory_order_relaxed);
             ++stats_.accepted;
@@ -93,6 +101,8 @@ namespace shipinfer {
                 items_.pop_front();
                 if (drop_expired_ && item.expired(now)) {
                     ++stats_.expired;
+                    // Read before the move: `on_drop_` takes ownership below.
+                    ++stats_.expired_by_camera[item.camera()];
                     if (on_drop_) on_drop_(std::move(item), DropReason::Expired);
                     continue;
                 }
