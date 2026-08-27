@@ -15,7 +15,7 @@ and `_emit` had already popped its future. So the frame vanished from the sink w
 "every opened frame is reported exactly once" still read green.
 
 **The first fix traded the race for a contention problem**, and review caught that too.
-Building the *records* under the lock closed the race, but `_as_embedding` is a 2048-float
+Building the *records* under the lock closed the race, but `as_embedding` is a 2048-float
 `tolist()` per object, so at ~15 000 objects/s that is ~30M conversions a second serialised
 inside the one mutex every worker takes in `open`/`expect`/`deliver`/`seal` — and `sweep()`
 built the whole expired list in a single hold, so one wedged instance blocked every worker.
