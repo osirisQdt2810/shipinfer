@@ -60,10 +60,12 @@ from shipinfer.topology.elements.mock import MockDetect
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: ``topology/ship_person.yaml`` with every implementation replaced by its mock -- the same
-#: nine slots, the same ``when:`` conditions and the same ``after:`` wiring, including the
-#: two lines that spell out the rejoin (``embed_person: after: detect`` and
-#: ``track: after: [recognize, embed_person]``). It is a **branching** chain, not a straight
-#: line: two branches split at ``detect`` and rejoin at ``track``.
+#: nine slots, the same ``when:`` conditions -- including the ``class == ship`` repeated on
+#: every element of the ship branch, because a condition guards one element only -- and the
+#: same ``after:`` wiring, including the two lines that spell out the rejoin
+#: (``embed_person: after: detect`` and ``track: after: [recognize, embed_person]``). It is
+#: a **branching** chain, not a straight line: two branches split at ``detect`` and rejoin
+#: at ``track``.
 #:
 #: Written out rather than generated: a chain file is the thing under test, and a generated
 #: one would test the generator. The cost of writing it out is that it can drift from the
@@ -76,9 +78,9 @@ MOCK_CHAIN = textwrap.dedent("""
       decode:       {impl: mock}
       detect:       {impl: mock, model: ship_detector}
       segment:      {impl: mock, model: ship_segmenter, when: class == ship}
-      embed_ship:   {impl: mock, model: ship_embedder, after: segment}
+      embed_ship:   {impl: mock, model: ship_embedder, when: class == ship, after: segment}
       embed_person: {impl: mock, model: person_embedder, when: class == person, after: detect}
-      recognize:    {impl: mock, model: ship_recognizer, after: embed_ship}
+      recognize:    {impl: mock, model: ship_recognizer, when: class == ship, after: embed_ship}
       track:        {impl: mock, per: camera, after: [recognize, embed_person]}
       mtmc:         {impl: mock, scope: global}
       output:       {impl: mock}
@@ -92,6 +94,42 @@ def load(text: str) -> Topology:
 
 def item(camera: str = "cam-1", frame: int = 7) -> ChainItem:
     return ChainItem(RequestContext(camera_id=camera, frame_id=frame), Caps.parse("nv12@gpu"))
+
+
+def walk(chain: Topology, start: ChainItem) -> ChainItem:
+    """Drive one item through every element, honouring each ``when:``, and return the emitted one.
+
+    Stands in for the runner that does not exist yet, and implements the one semantics
+    :meth:`ElementNode.admits` fixes: **skip and continue**. An element that does not admit
+    the item is passed over and the *same* item goes on to its successors -- it is not
+    dropped, and the walk does not stop.
+
+    Walking the topological order as a single line is a simplification a real runner will
+    not make (it will fan out at ``detect`` and fan in at ``track``), but it is exactly right
+    for the question these tests ask: which elements see a given item. Each element on a
+    branch is visited once, in an order the loader has already proved is legal.
+
+    Raises:
+        AssertionError: the chain emitted nothing, which for these chains is a broken walk
+            rather than a property worth reporting per test.
+    """
+    for node in chain:
+        node.element.open(ElementContext())
+    try:
+        current = start
+        for node in chain:
+            if not node.admits(current):
+                continue
+            result = node.element.process(current)
+            if result is None:
+                break
+            current = result
+        emitted = chain.node("output").element.emitted
+        assert len(emitted) == 1, f"the sink emitted {len(emitted)} items, not one"
+        return emitted[0]
+    finally:
+        for node in chain:
+            node.element.close()
 
 
 class TestRegistries:
@@ -832,16 +870,25 @@ class TestTheProductionChainFile:
     PATH = REPO_ROOT / "topology" / "ship_person.yaml"
 
     @classmethod
-    def load_with_mocks(cls) -> Topology:
+    def load_with_mocks(cls, *, detect_class: str | None = None) -> Topology:
         """The file, with every ``impl:`` replaced by ``mock`` and nothing else touched.
 
         Parsed from the file rather than retyped, so this cannot drift from it: the
         substitution is the *only* difference between what a deployment loads and what the
         offline tier can load today.
+
+        Args:
+            detect_class: what the mock detector should claim to have found, passed through
+                ``params:``. It changes the *mock*, never the wiring -- ``MockDetect`` reads
+                ``params["class"]`` and stamps it into the metadata, which is how a branch
+                test chooses which branch of this chain ought to fire. Left out, the
+                detector's own default (``ship``) applies.
         """
         raw = yaml.safe_load(cls.PATH.read_text(encoding="utf-8"))
         for declared in raw["elements"].values():
             declared["impl"] = "mock"
+        if detect_class is not None:
+            raw["elements"]["detect"]["params"] = {"class": detect_class}
         return Topology.from_spec(ChainSpec.model_validate(raw))
 
     def test_it_matches_the_schema(self) -> None:
@@ -897,6 +944,50 @@ class TestTheProductionChainFile:
             "recognize",
         ]
         assert [node.name for node in chain.predecessors("embed_person")] == ["detect"]
+
+    def test_a_person_detection_touches_no_ship_only_element(self) -> None:
+        """The defect this chain shipped with: the ship branch ran on every person crop.
+
+        ``when:`` is skip-and-continue, and it guards *one* element, so a condition on
+        ``segment`` alone leaves ``embed_ship`` and ``recognize`` unguarded: a person was
+        skipped past the segmenter and then handed to the ship embedder and the ship
+        recogniser, which wrote ``meta["identities"]`` for a person. At the sizing in
+        CLAUDE.md that is ~15 000 crops/s paying two extra model invocations, and the wrong
+        answer is emitted downstream where nothing can tell it from a real one.
+
+        Removing either ``when: class == ship`` from ``topology/ship_person.yaml`` fails
+        this test.
+        """
+        chain = self.load_with_mocks(detect_class="person")
+
+        emitted = walk(chain, item("cam-3", 11))
+
+        for ship_only in ("segment", "embed_ship", "recognize"):
+            assert (
+                chain.node(ship_only).element.processes == 0
+            ), f"{ship_only} ran on a person detection"
+        assert chain.node("embed_person").element.processes == 1
+        assert "identities" not in emitted.meta, "a person tracklet cannot carry a ship id"
+        assert "masks" not in emitted.meta, "the ship segmenter left masks on a person"
+        assert emitted.meta["class"] == "person"
+        assert emitted.meta["vectors"], "the person embedding must still reach the sink"
+
+    def test_a_ship_detection_runs_the_ship_branch_and_not_the_person_one(self) -> None:
+        """The mirror: guarding the branch must not have turned it off.
+
+        Without this half, the test above would also pass on a chain whose ``when:`` clauses
+        are simply always false -- the ship models never running is the other way to have no
+        ship identities.
+        """
+        chain = self.load_with_mocks(detect_class="ship")
+
+        emitted = walk(chain, item("cam-3", 12))
+
+        for ship_only in ("segment", "embed_ship", "recognize"):
+            assert chain.node(ship_only).element.processes == 1, f"{ship_only} was skipped"
+        assert chain.node("embed_person").element.processes == 0, "the person embedder ran"
+        assert emitted.meta["identities"] == ["ship-1"]
+        assert emitted.meta["masks"], "the segmenter's masks must reach the sink"
 
     def test_the_inline_fixture_agrees_with_the_file(self) -> None:
         """``MOCK_CHAIN`` resolves to exactly the wiring the production file resolves to.

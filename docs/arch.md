@@ -33,21 +33,24 @@ which branch conditions. It is data (a YAML file), not code:
 ```yaml
 # topology/ship_person.yaml — the production chain
 elements:
-  decode:    {impl: gstreamer-gpu}                  # NV12 → VRAM, the default
-  detect:    {impl: pool, model: ship_detector}
-  segment:   {impl: pool, model: ship_segmenter, when: class == ship}
-  embed_ship:   {impl: pool, model: ship_embedder,   after: segment}
+  decode:       {impl: gstreamer-gpu}               # NV12 → VRAM, the default
+  detect:       {impl: pool, model: ship_detector}
+  segment:      {impl: pool, model: ship_segmenter,  when: class == ship}
+  embed_ship:   {impl: pool, model: ship_embedder,   when: class == ship,   after: segment}
   embed_person: {impl: pool, model: person_embedder, when: class == person, after: detect}
-  recognize: {impl: pool, model: ship_recognizer, after: embed_ship}
-  track:     {impl: shipvision, per: camera, after: [recognize, embed_person]}  # stateful — home shard
-  mtmc:      {impl: shipvision, scope: global}
-  output:    {impl: kafka}
+  recognize:    {impl: pool, model: ship_recognizer, when: class == ship,   after: embed_ship}
+  track:        {impl: shipvision, per: camera, after: [recognize, embed_person]}  # stateful — home shard
+  mtmc:         {impl: shipvision, scope: global}
+  output:       {impl: kafka}
 ```
 
-Two rules make this file unambiguous: an element's predecessor is the **previously declared
-slot** unless `after:` says otherwise, and every element must reach `output`. The two
-`after:` lines on `embed_person` and `track` are the fork and the rejoin — without them the
-person branch would end in `embed_person` and the loader refuses the chain
+Three rules make this file unambiguous: an element's predecessor is the **previously declared
+slot** unless `after:` says otherwise, every element must reach `output`, and a `when:`
+guards **only the element it is written on** — a rejected item is skipped past that element
+and handed to its successors, so every element of a class-specific branch must carry the
+condition itself, which is why `embed_ship` and `recognize` repeat `when: class == ship`.
+The two `after:` lines on `embed_person` and `track` are the fork and the rejoin — without
+them the person branch would end in `embed_person` and the loader refuses the chain
 (`ChainStructureError`). `topology/ship_person.yaml` in the repository is this file, and a
 test loads its exact wiring.
 

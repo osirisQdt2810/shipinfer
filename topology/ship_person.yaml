@@ -22,6 +22,15 @@
 # `tests/topology/test_chain.py` loads exactly this wiring with the `mock` implementations
 # substituted, so the file and the tests cannot drift apart again.
 #
+# HOW A CONDITION IS SCOPED. A `when:` guards exactly ONE element -- the one it is written
+# on. A rejected item is not dropped and the walk does not stop: it is handed unchanged to
+# that element's successors (`ElementNode.admits`, "skip and continue"). So a condition does
+# NOT extend down the branch, and every element on a class-specific branch must declare its
+# own `when:` -- which is why `embed_ship` and `recognize` repeat `class == ship` below.
+# Without it, a person detection would be skipped past `segment` and then run through the
+# ship embedder and the ship recogniser, which is ~15 000 crops/s of wasted GPU at the
+# sizing in CLAUDE.md and, worse, emits a ship identity for a person.
+#
 # WHAT DOES NOT LOAD YET. Every `impl:` below is a name that lands in a later phase of the
 # migration plan (arch.md §10), so this file is a schema fixture today, not a runnable
 # chain -- `Topology.from_spec` refuses it with UnknownElementImplError naming
@@ -33,12 +42,12 @@
 # The hardware-free `mock` implementations of every kind are registered today; they are what
 # the offline tier loads chains with.
 elements:
-  decode:    {impl: gstreamer-gpu}                  # NV12 -> VRAM, the default
-  detect:    {impl: pool, model: ship_detector}
-  segment:   {impl: pool, model: ship_segmenter, when: class == ship}
-  embed_ship:   {impl: pool, model: ship_embedder,   after: segment}
+  decode:       {impl: gstreamer-gpu}               # NV12 -> VRAM, the default
+  detect:       {impl: pool, model: ship_detector}
+  segment:      {impl: pool, model: ship_segmenter,  when: class == ship}
+  embed_ship:   {impl: pool, model: ship_embedder,   when: class == ship,   after: segment}
   embed_person: {impl: pool, model: person_embedder, when: class == person, after: detect}
-  recognize: {impl: pool, model: ship_recognizer, after: embed_ship}
-  track:     {impl: shipvision, per: camera, after: [recognize, embed_person]}
-  mtmc:      {impl: shipvision, scope: global}
-  output:    {impl: kafka}
+  recognize:    {impl: pool, model: ship_recognizer, when: class == ship,   after: embed_ship}
+  track:        {impl: shipvision, per: camera, after: [recognize, embed_person]}
+  mtmc:         {impl: shipvision, scope: global}
+  output:       {impl: kafka}
