@@ -264,6 +264,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      # To dispatch ci.yml on main after the merge (see below).
+      actions: write
     steps:
       - name: Merge when the automerge label is present
         env:
@@ -279,6 +281,12 @@ jobs:
           if printf '%s\n' "$labels" | grep -qx automerge; then
             gh pr merge "$PR" --repo "$REPO" --squash --match-head-commit "$HEAD_SHA"
             echo "PR #$PR merged at $HEAD_SHA."
+            # The squash push above is made with GITHUB_TOKEN and therefore creates no
+            # workflow run on main — the C++ offline tier, the gst lane and the kernels
+            # compile never ran for an auto-merged PR. workflow_dispatch is exempt from that
+            # rule, so ask for the main run explicitly; it runs against main's new head.
+            gh workflow run ci.yml --repo "$REPO" --ref main
+            echo "Dispatched ci.yml on main."
           else
             echo "No automerge label — review is APPROVE but merging is left to a human."
           fi
