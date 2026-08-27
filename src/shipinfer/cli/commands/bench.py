@@ -14,8 +14,8 @@ from shipinfer.cli.common import build_settings, console, print_table
 from shipinfer.core.errors import QueueFullError
 from shipinfer.core.request import InferenceRequest, RequestContext
 from shipinfer.core.types import Tensor
+from shipinfer.engine import InferenceServer
 from shipinfer.runtime.containment import require_container
-from shipinfer.server import InferenceServer
 
 __all__ = ["bench"]
 

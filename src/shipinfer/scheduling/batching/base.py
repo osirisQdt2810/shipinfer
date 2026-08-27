@@ -46,7 +46,7 @@ class Batcher(abc.ABC):
     """Packs requests into a batch and unpacks the response.
 
     Stateless and reusable across the instances of one model; one is built per
-    :class:`~shipinfer.server.model.Model` and shared by every instance of it.
+    :class:`~shipinfer.engine.model.Model` and shared by every instance of it.
     """
 
     name: ClassVar[str] = "abstract"

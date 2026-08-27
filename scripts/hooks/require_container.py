@@ -78,7 +78,7 @@ BLOCKED_SCRIPTS = (
     # The C++ plane's binaries that open a device. Run directly, the C++ benchmark binary used
     # to pass both enforcement points; it now consults the containment gate itself
     # (`runtime/containment.h`), and the hook knows its name so the common case stops here.
-    # The CUDA-free test binaries (`test_scheduling`, `test_server`, `test_containment`) are
+    # The CUDA-free test binaries (`test_scheduling`, `test_engine`, `test_containment`) are
     # deliberately absent: they link no accelerator library and are the C++ offline tier.
     "csrc/build/bench",
     "csrc/build/test_pipeline",

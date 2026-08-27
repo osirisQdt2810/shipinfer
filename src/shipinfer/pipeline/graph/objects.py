@@ -95,7 +95,7 @@ class ObjectBatch:
         """A batch with no rows — a frame with no objects of this class.
 
         Zero rows rather than a missing entry, for the reason
-        :meth:`shipinfer.server.ensemble.EnsembleModel._collect_outputs` gives: "no ships in
+        :meth:`shipinfer.engine.ensemble.EnsembleModel._collect_outputs` gives: "no ships in
         this frame" and "the ship branch raised" must not look the same to a consumer.
         """
         return cls(

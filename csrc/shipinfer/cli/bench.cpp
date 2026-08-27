@@ -20,6 +20,7 @@
 #include "shipinfer/backends/tensorrt/engine.h"
 #include "shipinfer/core/buffers.h"
 #include "shipinfer/core/platform.h"
+#include "shipinfer/engine/model.h"
 #include "shipinfer/ingest/manager.h"
 #include "shipinfer/ingest/sink.h"
 #include "shipinfer/ingest/sources/replay.h"
@@ -31,7 +32,6 @@
 #include "shipinfer/runtime/containment.h"
 #include "shipinfer/scheduling/policies/registry.h"
 #include "shipinfer/scheduling/queues/fair.h"
-#include "shipinfer/server/model.h"
 
 using namespace shipinfer;
 
@@ -235,7 +235,7 @@ int main(int argc, char** argv) {
         const Options options = parse(argc, argv);
 
         // -- the models: one Model per plan, one instance per (device x count), each behind the
-        // Engine contract — the Python plane's shape (server/model.py) replacing the pool
+        // Engine contract — the Python plane's shape (engine/model.py) replacing the pool
         // graph.
         std::cerr << "loading engines...\n";
         const auto load_start = std::chrono::steady_clock::now();

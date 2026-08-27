@@ -12,7 +12,7 @@ invisible eviction policy, which is the failure this whole project was rebuilt t
 
 Pure-layer tests only: the limiter and the config section it is built from. That the server
 actually holds the bound is a server property and lives in
-``tests/server/test_rate_limiting.py``.
+``tests/engine/test_rate_limiting.py``.
 """
 
 from __future__ import annotations

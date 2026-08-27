@@ -6,8 +6,8 @@ from typing import Any
 
 from shipinfer.core.errors import ConfigurationError
 from shipinfer.core.logging import get_logger
+from shipinfer.engine.pool import InferenceServer
 from shipinfer.server.api.routes import build_router
-from shipinfer.server.engine import InferenceServer
 
 __all__ = ["create_app", "serve_http"]
 

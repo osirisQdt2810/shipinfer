@@ -317,9 +317,9 @@ def run_shipinfer(
         )
 
     from shipinfer.core.logging import configure
+    from shipinfer.engine import InferenceServer
     from shipinfer.ingest import IngestManager
     from shipinfer.pipeline import PipelineRunner
-    from shipinfer.server import InferenceServer
 
     configure(os.environ.get("SHIPINFER_BENCH_LOG", "WARNING"), force=True)
 

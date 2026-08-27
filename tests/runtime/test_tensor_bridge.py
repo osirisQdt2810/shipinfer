@@ -3,7 +3,7 @@
 ``to_torch`` hands torch a ``_DeviceSpan`` and torch keeps *that object* alive for the view's
 life — nothing else. So the span must retain the ``core.Tensor`` (and through it the handle
 that owns the memory), or a caller dropping its tensor frees the buffer under a live view.
-The full chain needs CUDA (``tests/server/test_remote_wire.py``, gpu tier); the retention
+The full chain needs CUDA (``tests/engine/test_remote_wire.py``, gpu tier); the retention
 property itself does not.
 """
 

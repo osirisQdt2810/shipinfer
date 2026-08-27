@@ -1,6 +1,6 @@
 """The DAG: which stages exist, which of them will run on this frame, and in what order.
 
-What this adds over :class:`shipinfer.server.ensemble.EnsembleModel` — which already
+What this adds over :class:`shipinfer.engine.ensemble.EnsembleModel` — which already
 executes a validated DAG of models and is the right tool for exposing one as a single
 addressable model — is the three things an ensemble's fixed-size tensors cannot express:
 

@@ -26,7 +26,7 @@ fairness mechanism (ADR-005).
 **A worker runs one frame's graph to completion.** Stages are sequential because in this DAG
 each one consumes the previous one's output; the concurrency comes from having several
 workers and from each *model* batching across every frame in flight. That is the same
-reasoning :class:`shipinfer.server.ensemble.EnsembleModel` gives for its steps, and keeping
+reasoning :class:`shipinfer.engine.ensemble.EnsembleModel` gives for its steps, and keeping
 the two consistent means one mental model for the whole server.
 
 **Emission belongs to the collector, not to the worker.** The worker's last act is to *seal*
@@ -135,7 +135,7 @@ class PipelineRunner:
     """Owns the ingest queue, the workers, reassembly and the result sink.
 
     Args:
-        server: a **started** :class:`shipinfer.server.InferenceServer`. Injected rather than
+        server: a **started** :class:`shipinfer.engine.InferenceServer`. Injected rather than
             constructed here: two runners over one server is a legitimate thing to want, and
             the server's lifecycle is longer than the pipeline's.
         settings: the deployment settings. Defaults to the server's own, which is what a
