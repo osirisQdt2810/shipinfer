@@ -104,7 +104,11 @@ jobs:
           # csrc/ tree mirrors the Python packages (arch.md §9), so a package rename renames
           # its test binary too, and a hard-coded name would fail main the moment it lands.
           # The count guard keeps a build that produced nothing from passing silently.
-          binaries=(csrc/build/test_*)
+          # Executables only: the build leaves test_<name>.o beside each binary.
+          binaries=()
+          for candidate in csrc/build/test_*; do
+            [[ -x "$candidate" && "$candidate" != *.o ]] && binaries+=("$candidate")
+          done
           test "${#binaries[@]}" -ge 4 || { echo "expected at least 4 offline binaries, found ${#binaries[@]}"; exit 1; }
           for binary in "${binaries[@]}"; do
             echo "== $binary"
