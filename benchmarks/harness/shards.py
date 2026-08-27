@@ -4,7 +4,7 @@
 generator's ceiling: one interpreter reading fifty replay cameras delivers ~2% of 50 x 20 fps.
 The multi-process topologies (`fleet`, `service` — ledger T2/T3) are measured the way they are
 deployed: the parent plans the shards, starts one child per shard through
-:class:`shipinfer.server.launcher.Fleet` with the topology's own environment (so `service`
+:class:`shipinfer.launch.Fleet` with the topology's own environment (so `service`
 children join the tier), and each child runs today's `run_shipinfer` on **its** cameras and
 **its** GPU, writing its own occupancy log and a `summary.json`. The parent waits for every
 child to finish, re-analyses each shard's log, and sums.
@@ -137,7 +137,7 @@ def run_sharded(
             finish within start-up plus the run plus a margin.
     """
     from shipinfer.core.settings import ServerSettings
-    from shipinfer.server.launcher import Fleet
+    from shipinfer.launch import Fleet
 
     topology, plan = plan_for(config)
     out_dir.mkdir(parents=True, exist_ok=True)

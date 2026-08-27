@@ -43,7 +43,7 @@ class DeepStreamTopology(Topology):
     **One process per shard, one GPU per shard**, and deliberately not the reference's
     one-process-many-branches (`mtmc_deepstream.py`: two `nvstreammux` chains with per-element
     ``gpu-id`` in one pipeline). Three reasons, in order of how much they cost when ignored.
-    :class:`~shipinfer.server.launcher.Fleet` sets ``CUDA_VISIBLE_DEVICES`` *before the child's
+    :class:`~shipinfer.launch.Fleet` sets ``CUDA_VISIBLE_DEVICES`` *before the child's
     interpreter starts*, so the child sees exactly one device numbered 0 — per-element physical
     ``gpu-id`` values would then name devices it cannot see. A process that touches G devices
     holds G CUDA contexts, ~300 MiB each, for nothing. And one plugin segfault should cost K

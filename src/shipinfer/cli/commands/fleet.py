@@ -6,8 +6,8 @@ from pathlib import Path
 
 from shipinfer.cli.common import build_settings, console
 from shipinfer.core.errors import ConfigurationError, ShardExitedError
+from shipinfer.launch import Fleet, forward_signals
 from shipinfer.runtime.containment import require_container
-from shipinfer.server.launcher import Fleet, forward_signals
 from shipinfer.server.topology import build_topology
 
 __all__ = ["fleet"]

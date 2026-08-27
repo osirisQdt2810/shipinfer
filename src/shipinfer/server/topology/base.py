@@ -5,7 +5,7 @@ WHAT A TOPOLOGY DECIDES
 Three things, and only three. **The plan** — which cameras and which GPUs each process owns,
 a :class:`~shipinfer.scheduling.sharding.ShardPlan`, pure and printable before anything is
 spawned. **The command** — the argv one shard's process runs. **The environment** — what every
-child must have before it imports torch, on top of what :class:`~shipinfer.server.launcher.Fleet`
+child must have before it imports torch, on top of what :class:`~shipinfer.launch.Fleet`
 already sets per shard (``CUDA_VISIBLE_DEVICES`` and the shard's cameras).
 
 Everything else — supervision, draining, the process group, signal forwarding — is `Fleet`,
