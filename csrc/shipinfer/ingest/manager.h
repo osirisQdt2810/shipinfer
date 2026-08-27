@@ -40,7 +40,7 @@ namespace shipinfer {
         // the whole manager against a fake camera.
         IngestManager(std::vector<IngestConfig> cameras, FrameSink& sink,
                       SourceFactory factory = {});
-        ~IngestManager();
+        virtual ~IngestManager();
 
         IngestManager(const IngestManager&) = delete;
         IngestManager& operator=(const IngestManager&) = delete;
@@ -108,6 +108,18 @@ namespace shipinfer {
         // Throws CameraUnavailableError naming every camera that produced nothing in time.
         void wait_ready(std::chrono::milliseconds timeout = std::chrono::milliseconds(30000),
                         std::chrono::milliseconds poll = std::chrono::milliseconds(50)) const;
+
+      protected:
+        // The two halves of the ~100 ns window in `add_camera`, made places a test can
+        // stand — the same job the injectable wait does for the actor's own sleeps. A
+        // concurrent `stop()` in the first half strips the map and signals a thread that
+        // does not exist yet; the second half is where that thread must reach its (blocked)
+        // `do_open` before the re-check's own stop request lands, which is what forces the
+        // re-check to detach and pay the abandonment debt. That interleaving is otherwise
+        // unreachable on purpose-built hardware (#33 round 3 hammered 400 ASan rounds
+        // without landing in it once).
+        virtual void between_publish_and_start() {}
+        virtual void between_start_and_recheck() {}
 
       private:
         std::vector<CameraHealth> snapshot() const;

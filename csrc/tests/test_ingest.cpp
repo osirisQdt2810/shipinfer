@@ -1518,11 +1518,10 @@ namespace {
             script.on_read = [](int) { return 1; };
             CountingSink sink;
             IngestManager manager({}, sink, scripted(script));
-            std::atomic<bool> added{false};
+            std::shared_ptr<CameraActor> added;
             std::thread adder([&] {
                 try {
-                    manager.add_camera(a_camera("cam0"));
-                    added.store(true);
+                    added = manager.add_camera(a_camera("cam0"));
                 } catch (const ServerStateError&) {
                     // the documented refusal: the fleet forgot the camera mid-add
                 }
@@ -1530,13 +1529,18 @@ namespace {
             if (round % 2 == 0) std::this_thread::yield();
             manager.stop(2000ms);
             adder.join();
-            if (added.load() && !manager.contains("cam0")) ++orphans;
+            // The orphan this pins is a camera RUNNING behind a manager that forgot it.
+            // `added && !contains` alone is not that: on a slow machine the add completes
+            // first and the stop then legitimately empties the map with the camera cleanly
+            // stopped — 12 of 100 rounds on CI's two-core runner, which is how this
+            // assertion's first version failed on main (#34's first run).
+            if (added && !manager.contains("cam0") && added->is_running()) ++orphans;
             manager.stop(2000ms);
         }
         check(orphans == 0,
               "100 add-vs-stop races produced " + std::to_string(orphans) +
-                  " camera(s) running behind a manager that forgot them (want 0: a "
-                  "successful add is tracked, an untracked add throws)");
+                  " camera(s) RUNNING behind a manager that forgot them (want 0: a "
+                  "successful add is tracked or stopped, never running untracked)");
     }
 
     void test_the_managers_death_leaks_the_abandoned_rather_than_freeing_them() {
@@ -1577,6 +1581,86 @@ namespace {
         // Give the thread a beat to leave run() before the harness moves on.
         for (int i = 0; i < 600 && script.closes.load() == 0; ++i)
             std::this_thread::sleep_for(5ms);
+    }
+
+    void test_a_refused_add_pays_the_abandonment_debt() {
+        // #33 round 3: the deadly interleaving is a stop() landing between add_camera's map
+        // insert and its start() — the stop signal is aimed at a thread that does not exist
+        // yet, start() then clears it, and the re-check has to stop an actor whose do_open
+        // is already blocked. If that stop has to DETACH, the throw must not drop the last
+        // reference; the actor is parked with the others the destructor deliberately leaks.
+        // The window is ~100 ns wide and unreachable by hammering (400 ASan rounds in
+        // review landed zero hits), so the manager exposes it as a seam instead.
+        static FakeScript script;
+        static CountingSink sink;
+        static std::promise<void> gate;
+        static std::shared_future<void> opened = gate.get_future().share();
+        // The lifetime witness (#35 round 1): a weak_ptr taken while the camera is still
+        // tracked. Without it the plain -O2 build cannot tell the fix from its absence —
+        // the freed actor's memory is not reused before the gate opens, so the detached
+        // thread's use-after-free LOOKS like the correct behaviour unless ASan is watching.
+        // Expired after the refusal == the throw dropped the last reference; alive == the
+        // refusal parked it on abandoned_.
+        static std::weak_ptr<CameraActor> parked;
+        // The re-check's grace, timed from where it starts (#35 round 1: timing from before
+        // add_camera would include this test's own poll loop in the hook below).
+        static Clock::time_point recheck_began;
+        script.on_open = [](int) { opened.wait(); };
+        script.on_read = [](int) { return 1; };
+
+        class StopsInTheWindow : public IngestManager {
+          public:
+            using IngestManager::IngestManager;
+
+          protected:
+            void between_publish_and_start() override {
+                // Still tracked here — the stop below is what forgets it.
+                parked = actor("cam0");
+                // The concurrent stop(): strips the map, signals the not-yet-existing
+                // thread, parks nothing (the actor is not joinable yet), reports 0.
+                stop(0ms);
+            }
+            void between_start_and_recheck() override {
+                // The other half of the interleaving: the fresh thread must be INSIDE its
+                // blocked do_open before the re-check's stop request lands, or it exits
+                // cleanly at its first signal check and the safe sub-case is all that runs.
+                for (int i = 0; i < 600 && script.opens.load() == 0; ++i)
+                    std::this_thread::sleep_for(5ms);
+                recheck_began = Clock::now();
+            }
+        };
+
+        bool refused = false;
+        {
+            StopsInTheWindow manager({}, sink, scripted(script));
+            try {
+                manager.add_camera(a_camera("cam0"));
+            } catch (const ServerStateError&) {
+                refused = true;
+            }
+            check(refused, "the add is refused, not returned as a camera nobody tracks");
+            check(ms_since(recheck_began) < 2000.0,
+                  "and the refusal used the short re-check grace, not the full shutdown one");
+            check(manager.size() == 0, "the fleet holds nothing");
+            check(!parked.expired(),
+                  "the actor outlived the refusal: parked on abandoned_, not dropped by the "
+                  "throw");
+        }  // ~IngestManager — must leak the parked actor, not free it under its thread
+        check(!parked.expired(),
+              "and it outlived the manager too — the deliberate leak covers the parked");
+        gate.set_value();
+        bool resumed = false;
+        for (int i = 0; i < 600; ++i) {
+            if (script.closes.load() >= 1) {
+                resumed = true;
+                break;
+            }
+            std::this_thread::sleep_for(5ms);
+        }
+        check(resumed,
+              "the detached thread resumed AFTER the refusal and the manager's death, and "
+              "closed its source — the actor it stands on was parked and leaked, not freed "
+              "by the throw");
     }
 
     void test_stop_charges_one_deadline_to_the_fleet_not_one_per_camera() {
@@ -1669,6 +1753,7 @@ int main() {
     test_a_directly_built_actor_names_the_camera_in_its_refusal();
     test_a_camera_added_during_stop_never_keeps_running();
     test_the_managers_death_leaks_the_abandoned_rather_than_freeing_them();
+    test_a_refused_add_pays_the_abandonment_debt();
     test_stop_charges_one_deadline_to_the_fleet_not_one_per_camera();
 
     std::printf("%d checks, %d failure(s), %d skipped\n", checks, failures, skips);
