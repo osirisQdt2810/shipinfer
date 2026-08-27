@@ -1618,7 +1618,47 @@ class TestTheRoundSevenFollowUps:
         config_path.write_text(text.replace(single, pair, 1))
         reloaded = ModelRepository.load(repository.root)
         configs = generate(reloaded, tmp_path, bbox_parser="", custom_lib="")
-        assert configs is not None, "the DetectNet pair is the parserless layout"
+        pgie = configs.pgie.read_text()
+        assert "output-blob-names=output_cov;output_bbox" in pgie
+        assert "parse-bbox-func-name" not in pgie, "parserless is the point"
+        assert "cluster-mode=1" in pgie, (
+            "raw DetectNet grids must be clustered (DBSCAN) — unclustered, every object "
+            "publishes as hundreds of overlapping boxes (#43 round 1)"
+        )
+
+    def test_a_correctly_shaped_pair_with_foreign_names_is_refused(
+        self, repository: ModelRepository, tmp_path: Path
+    ) -> None:
+        """#43 round 1: nvinfer locates the pair by strstr on "cov"/"bbox", not by shape or
+        position — a conf/boxes pair with perfect DetectNet dims would generate parserless
+        and then die at start-up with "Could not find output coverage layer". The gate asks
+        the name question too."""
+        config_path = repository.root / "ship_detector" / "config.yaml"
+        text = config_path.read_text()
+        single = """  - name: output0
+    data_type: FP32
+    dims: [300, 6]
+"""
+        foreign = """  - name: conf
+    data_type: FP32
+    dims: [2, 40, 40]
+  - name: boxes
+    data_type: FP32
+    dims: [8, 40, 40]
+"""
+        assert single in text, "the fixture edit must take"
+        config_path.write_text(text.replace(single, foreign, 1))
+        reloaded = ModelRepository.load(repository.root)
+        with pytest.raises(ConfigurationError, match=r"cannot read"):
+            generate(reloaded, tmp_path, bbox_parser="", custom_lib="")
+
+    def test_the_end_to_end_path_keeps_cluster_mode_none(
+        self, repository: ModelRepository, tmp_path: Path
+    ) -> None:
+        """The other half of the cluster-mode rule: decoded boxes must NOT be re-clustered —
+        a second NMS would merge boxes the engine already decided to keep."""
+        configs = generate(repository, tmp_path)
+        assert "cluster-mode=4" in configs.pgie.read_text()
 
     def test_a_two_output_segmentation_head_is_still_refused_without_a_parser(
         self, repository: ModelRepository, tmp_path: Path

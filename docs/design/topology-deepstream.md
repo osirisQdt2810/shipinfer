@@ -113,7 +113,8 @@ worse — a graph that runs and publishes nothing:
 
 * a model whose `platform` is not `tensorrt`;
 * more than one input, an input that is not rank 3, an input that is not FP32;
-* **a single-output detector with no `bbox_parser`** — nvinfer's built-in parsers expect the
+* **a detector whose outputs are not the named DetectNet coverage/bbox pair, with no
+  `bbox_parser`** — nvinfer's built-in parsers expect the
   two-tensor coverage/bbox layout, and against a decoded `(300, 6)` tensor they find zero
   boxes on every frame. The message names the missing key *and* the output shape;
 * an `operate_on` label `pipeline.class_labels` does not define (the message lists the ones it

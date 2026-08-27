@@ -66,8 +66,11 @@ _MODEL_COLOR_FORMAT_RGB = 0
 
 #: ``cluster-mode=4`` is "no clustering". The shipped detector is end-to-end — yolo26 emits
 #: decoded boxes with NMS already applied — so a second round of clustering here would merge
-#: boxes the engine already decided to keep.
+#: boxes the engine already decided to keep. The DetectNet coverage/bbox path is the
+#: opposite (#43 round 1): the grid emits raw per-cell boxes, and publishing them unclustered
+#: is hundreds of overlapping boxes per object — that path gets DBSCAN.
 _CLUSTER_MODE_NONE = 4
+_CLUSTER_MODE_DBSCAN = 1
 
 #: What ``nvurisrcbin`` is asked to open. Two schemes on purpose: a fleet is RTSP cameras, and
 #: a file is how a fixture replays one. Adding a third (``http``) is one entry here plus a test.
@@ -202,15 +205,19 @@ def pgie_config(
     Two keys are opinions rather than translations. ``maintain-aspect-ratio=1`` with
     ``symmetric-padding=1`` is the letterbox this project's own preprocessing does
     (``ImageOps.letterbox``, centre-padded), so the detector sees the geometry it was built for
-    and nvinfer scales its boxes back to the muxed frame itself. ``cluster-mode=4`` is no
-    clustering, because the shipped detector already applied NMS in the engine.
+    and nvinfer scales its boxes back to the muxed frame itself. ``cluster-mode`` follows the
+    layout: 4 (none) for decoded end-to-end or custom-parsed outputs, DBSCAN for the raw
+    DetectNet coverage/bbox grid, whose per-cell boxes must be clustered or every object
+    publishes as hundreds of overlapping rectangles.
 
     Raises:
         ConfigurationError: the model is not a TensorRT model, does not have exactly one 3-D
-            FP32 input, or emits a single output tensor with no bounding-box parser configured
-            to read it. That last one is the refusal that matters: nvinfer's built-in parsers
-            cannot decode a ``(300, 6)`` end-to-end output, and without ``parse-bbox-func-name``
-            a shard starts, runs, and reports zero detections on every frame.
+            FP32 input, or emits outputs that are not the named DetectNet coverage/bbox pair
+            while no bounding-box parser is configured to read them. That last one is the
+            refusal that matters: nvinfer's built-in parsers cannot decode a ``(300, 6)``
+            end-to-end tensor, an EfficientNMS quartet or a segmentation head, and without
+            ``parse-bbox-func-name`` a shard starts, runs, and reports zero detections on
+            every frame.
     """
     tensor = _single_image_input(artifact)
     outputs = [io.name for io in artifact.config.outputs]
@@ -279,7 +286,9 @@ def pgie_config(
         f"output-blob-names={';'.join(outputs)}",
         "maintain-aspect-ratio=1",
         "symmetric-padding=1",
-        f"cluster-mode={_CLUSTER_MODE_NONE}",
+        # Decoded boxes must not be re-clustered; raw DetectNet grids must be (#43
+        # round 1) — one mode per layout, chosen by the same predicate as the parser gate.
+        f"cluster-mode={_CLUSTER_MODE_NONE if deepstream.bbox_parser or not _is_coverage_bbox_pair(artifact.config.outputs) else _CLUSTER_MODE_DBSCAN}",
     ]
     if bool(deepstream.bbox_parser) != bool(deepstream.custom_lib):
         # Belt and braces beside the settings validator (the unfiltered-secondary
@@ -511,6 +520,13 @@ def _is_coverage_bbox_pair(outputs: Sequence[IOConfig]) -> bool:
     refusal (a custom parser pair) is the same either way (#42 round 1).
     """
     if len(outputs) != 2:
+        return False
+    # By NAME as well as by shape (#43 round 1): nvinfer's DetectPostprocessor locates the
+    # pair with strstr(layerName, "cov") / strstr(layerName, "bbox"), not by position — a
+    # correctly-shaped pair named conf/boxes would generate parserless and then fail at
+    # start-up with "Could not find output coverage layer". Loud, but foreseeable here.
+    names = sorted(io.name for io in outputs)
+    if not any("cov" in n for n in names) or not any("bbox" in n for n in names):
         return False
     a, b = (list(io.dims) for io in outputs)
     if len(a) != 3 or len(b) != 3:
