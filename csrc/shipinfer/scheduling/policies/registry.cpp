@@ -61,27 +61,4 @@ namespace shipinfer {
         return POLICIES().build(name, options);
     }
 
-    int option_int(const PolicyOptions& options, const std::string& key, int fallback) {
-        auto it = options.find(key);
-        if (it == options.end()) return fallback;
-        try {
-            return std::stoi(it->second);
-        } catch (const std::exception&) {
-            throw ConfigError("placement policy option " + key + " must be an integer, got '" +
-                              it->second + "'");
-        }
-    }
-
-    void refuse_unknown_options(const std::string& policy, const PolicyOptions& options,
-                                const std::vector<std::string>& accepted) {
-        for (const auto& [key, _] : options) {
-            bool known = false;
-            for (const std::string& name : accepted) known = known || name == key;
-            if (!known) {
-                throw ConfigError(policy + ": unknown option '" + key +
-                                  "' — the constructor does not take it");
-            }
-        }
-    }
-
 }  // namespace shipinfer

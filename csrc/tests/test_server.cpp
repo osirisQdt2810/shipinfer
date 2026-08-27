@@ -306,6 +306,45 @@ namespace {
         model.stop();
     }
 
+    // -- the two clocks a frame carries
+    // ---------------------------------------------------
+
+    void test_a_deadline_built_from_the_steady_stamp_expires() {
+        // The arithmetic every stage will do once frames carry a budget: deadline = when the
+        // frame was captured + how long it is worth spending on it.
+        FrameTag tag;
+        tag.camera_id = "cam";
+        tag.captured_ns = monotonic_ns();
+        tag.captured_unix_ns = unix_ns();
+
+        InferenceRequest request;
+        request.tag = tag;
+        request.deadline_ns = tag.captured_ns + 50 * 1000 * 1000;  // 50 ms
+        check(!request.is_expired(monotonic_ns()),
+              "a 50 ms budget on a frame stamped now has not expired now");
+        check(request.is_expired(tag.captured_ns + 60 * 1000 * 1000),
+              "and has expired 60 ms later — the deadline is built from the STEADY stamp");
+    }
+
+    void test_the_same_deadline_from_the_wall_stamp_would_never_expire() {
+        // The latent bug this pins. A wall-clock stamp is ~1.7e18 ns and the monotonic clock a
+        // deadline is compared against is ~1e13, so `captured_unix_ns + budget` lands roughly
+        // 54 years out and NOTHING would ever expire — the queue would happily execute frames
+        // an hour late, and no counter would say so. Two fields, two names, one of them
+        // documented as never being deadline arithmetic.
+        FrameTag tag;
+        tag.captured_ns = monotonic_ns();
+        tag.captured_unix_ns = unix_ns();
+
+        InferenceRequest wrong;
+        wrong.tag = tag;
+        wrong.deadline_ns = tag.captured_unix_ns + 50 * 1000 * 1000;
+        check(!wrong.is_expired(monotonic_ns()) &&
+                  !wrong.is_expired(tag.captured_ns + 86400LL * 365 * 1000000000LL),
+              "a deadline built from captured_unix_ns is still unexpired a year later, which "
+              "is why the two clocks are two fields");
+    }
+
 }  // namespace
 
 int main() {
@@ -318,6 +357,8 @@ int main() {
     test_the_model_places_by_policy_and_answers();
     test_a_request_nothing_will_take_comes_back_as_a_failed_future();
     test_the_model_spills_when_the_policy_choice_is_full();
+    test_a_deadline_built_from_the_steady_stamp_expires();
+    test_the_same_deadline_from_the_wall_stamp_would_never_expire();
     std::printf("%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

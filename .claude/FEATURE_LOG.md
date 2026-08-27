@@ -5,6 +5,53 @@ edits, typo fixes and pure docs.
 
 ---
 
+## ingest: the C++ ingest core — contract, registry, actor, manager (27 Aug 2026)
+
+`csrc/shipinfer/ingest/` is now the Python plane's ingest seam, port for port, and it builds
+and tests with **g++ alone**: no CUDA, no OpenCV, no GStreamer. Nine units — `frame.h`
+(`HostFrame`/`Frame`/`FrameCounter`), `config.h` (a flat, camera-shaped `IngestConfig` P5's
+settings tree fills), `sink.h` (the `FrameSink` contract plus `CountingSink`),
+`timing/backoff.*`, `timing/pacing.*`, `base.*` (the `open`/`read`/`close` template method),
+`registry.*` (`SOURCES()` + `SourceRegistrar`), `camera/health.*`, `camera/actor.*`,
+`manager.*` — plus `core/stop_signal.h`, `core/redact.h` and `core/options.*` underneath them.
+
+Four things are the point rather than a side effect:
+
+- **The A1 violation is gone.** `CameraActor` was declared in `sources/replay.h`, which is the
+  one ingest unit that reaches `core/platform.h` and OpenCV, so the whole camera plane was
+  unbuildable without a driver. It has its own file now, and `ingest/registry.cpp` carries the
+  invariant as a comment: **no unit under `ingest/` other than `sources/replay.*` may include
+  `sources/replay.h`**, because `scripts/build_csrc.py` follows a header to the `.cpp` beside
+  it. `csrc/build/test_ingest` is the fourth CUDA-free binary and its `ldd` names neither
+  libcuda nor OpenCV. Visible consequence, stated rather than papered over: an offline binary's
+  source registry legitimately contains no *real* source, because replay's registrar is in a
+  unit the offline build does not compile. The test asserts on its own fake and skips (counted)
+  on replay.
+- **`FrameTag` has its second clock.** `captured_ns` is STEADY, `captured_unix_ns` is WALL, and
+  `monotonic_ns`/`unix_ns` now live once, in `core/types.h`. The old replay source stamped
+  `system_clock` into `captured_ns` while `is_expired` compares `monotonic_ns` — the moment P5
+  wires `deadline_ns = captured_ns + budget`, every deadline would land ~54 years out and
+  nothing would ever expire. `test_server.cpp` pins both halves of that; `test_pipeline.cpp`
+  pins the round trip through `FrameState::capture()`.
+- **The reconnect policy is asserted as a sequence, not as "it retried".** The actor's wait is
+  injectable, so the offline tier reads back 0.4–0.5 s then 0.8–1.0 s, DEGRADED at one and two
+  failures and UNHEALTHY at three (sticky across a retry), a fatal `SourceUnavailableError`
+  calling the factory exactly once and surviving `stop()` as UNHEALTHY, the 5-empty-read budget
+  with its 5 ms anti-spin sleep, and a `stop()` landing inside a 30 s backoff in under 200 ms.
+  `IngestManager::stop` is signal-then-join in two passes: eight cameras parked in
+  uninterruptible one-second reads shut down in ~1 s, not 8.
+- **`bench.cpp` runs on the registry.** `--source` (default `replay`), an `IngestManager` in
+  place of the hand-rolled camera vector, a `QueueSink` that translates refusal into
+  `QueueFullError`, and the serial per-camera stop loop replaced by one `manager.stop()`. The
+  per-camera drop report reads `manager.health()`. `ReplayLibrary` is now refcounted and shared
+  per folder, and every frame carries an `owner` handle, so a reconnect cannot free pages a
+  worker is still DMAing out of.
+
+Sized by `csrc/tests/test_ingest.cpp` (131 checks, 1 counted skip) plus 2 checks each in
+`test_server.cpp` and `test_pipeline.cpp`. GStreamer is PR2 and needs a toolchain gate. The
+fourth binary joins CI's loop in a separate one-line workflows PR, because a PR that edits
+`.github/workflows/**` cannot pass the review job.
+
 ## feat: topology D, `deepstream` — one NVIDIA graph per shard, the same events out (26 Aug 2026)
 
 **What it is.** The fourth topology — a first-class pipeline implementation, not a competitor benchmark (V108): `@TOPOLOGIES.register("deepstream")`,

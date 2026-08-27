@@ -1,25 +1,41 @@
 #include "shipinfer/ingest/sources/replay.h"
 
 #include <algorithm>
-#include <atomic>
 #include <filesystem>
 #include <iostream>
+#include <map>
+#include <mutex>
 #include <opencv2/opencv.hpp>
 
 #include "shipinfer/core/platform.h"
+#include "shipinfer/core/types.h"
+#include "shipinfer/ingest/registry.h"
 
 namespace shipinfer {
     namespace {
 
-        int64_t unix_ns() {
-            return std::chrono::duration_cast<std::chrono::nanoseconds>(
-                       std::chrono::system_clock::now().time_since_epoch())
-                .count();
+        // Used when the camera config says nothing. 25 rather than 20 so an accidental default
+        // is visible in a report instead of looking like the real fleet rate.
+        constexpr double kFallbackFps = 25.0;
+
+        // The decoded libraries currently in use, keyed by folder and limit. Weak, so the last
+        // source to let go is what frees ~62 MB of decoded frames and unregisters their pages;
+        // a strong cache here would hold every folder any camera ever replayed for the life of
+        // the process.
+        std::mutex& library_mutex() {
+            static std::mutex mutex;
+            return mutex;
+        }
+        std::map<std::string, std::weak_ptr<const ReplayLibrary>>& library_cache() {
+            static std::map<std::string, std::weak_ptr<const ReplayLibrary>> cache;
+            return cache;
         }
 
     }  // namespace
 
-    ReplaySource::ReplaySource(const std::string& folder, int limit) {
+    // -- the library ------------------------------------------------------------------------
+
+    ReplayLibrary::ReplayLibrary(const std::string& folder, int limit) {
         namespace fs = std::filesystem;
         if (!fs::is_directory(folder)) {
             throw SourceError("frame folder is not a directory: " + folder);
@@ -84,7 +100,7 @@ namespace shipinfer {
         }
     }
 
-    ReplaySource::~ReplaySource() {
+    ReplayLibrary::~ReplayLibrary() {
         // Only what registered is unregistered — per image, so one refusal does not leak the
         // rest.
         for (size_t i = 0; i < frames_.size(); ++i) {
@@ -92,14 +108,32 @@ namespace shipinfer {
         }
     }
 
-    bool ReplaySource::pinned() const {
+    std::shared_ptr<const ReplayLibrary> ReplayLibrary::acquire(const std::string& folder,
+                                                                int limit) {
+        const std::string key = folder + "\x1f" + std::to_string(limit);
+        std::lock_guard<std::mutex> lock(library_mutex());
+        auto& cache = library_cache();
+        auto found = cache.find(key);
+        if (found != cache.end()) {
+            if (std::shared_ptr<const ReplayLibrary> live = found->second.lock()) return live;
+            cache.erase(found);
+        }
+        // `new` rather than `make_shared` because the constructor is private and this is the
+        // only thing allowed to call it: a second decode of the same folder is the cost this
+        // whole class exists to avoid.
+        std::shared_ptr<const ReplayLibrary> library(new ReplayLibrary(folder, limit));
+        cache[key] = library;
+        return library;
+    }
+
+    bool ReplayLibrary::pinned() const {
         for (char r : registered_) {
             if (!r) return false;
         }
         return !frames_.empty();
     }
 
-    HostFrame ReplaySource::at(size_t index) const {
+    HostFrame ReplayLibrary::at(size_t index) const {
         const Image& image = frames_[index % frames_.size()];
         HostFrame frame;
         frame.pixels = image.pixels.data();
@@ -108,67 +142,87 @@ namespace shipinfer {
         return frame;
     }
 
-    CameraActor::CameraActor(std::string camera_id, std::shared_ptr<ReplaySource> library,
-                             double fps, Publish publish)
-        : id_(std::move(camera_id)),
-          library_(std::move(library)),
-          fps_(fps),
-          publish_(std::move(publish)) {}
+    // -- the source -------------------------------------------------------------------------
 
-    CameraActor::~CameraActor() {
-        stop();
-    }
-
-    void CameraActor::start() {
-        if (thread_.joinable()) return;
-        thread_ = std::thread([this] { run(); });
-    }
-
-    void CameraActor::stop() {
-        stopping_.store(true);
-        if (thread_.joinable()) thread_.join();
-    }
-
-    void CameraActor::run() {
-        using clock = std::chrono::steady_clock;
-        const auto period = std::chrono::duration<double>(1.0 / std::max(1e-6, fps_));
-        auto next = clock::now();
-        int64_t frame_id = 0;
-
-        while (!stopping_.load()) {
-            FrameTag tag;
-            tag.camera_id = id_;
-            tag.frame_id = frame_id++;
-            tag.captured_ns = unix_ns();
-
-            const HostFrame frame = library_->at(static_cast<size_t>(tag.frame_id));
-            read_.fetch_add(1);
-            // `publish_` allocates (a FrameState, a lane entry); a std::bad_alloc escaping this
-            // thread would call std::terminate and lose the run with no counters — the same
-            // failure the worker threads were guarded against. A frame that could not be
-            // published is a dropped frame, counted, and this camera keeps going.
+    void ReplaySource::do_open() {
+        int limit = 0;
+        auto option = config().options.find("limit");
+        if (option != config().options.end()) {
             try {
-                if (!publish_(tag, frame)) dropped_.fetch_add(1);
-            } catch (const std::exception& error) {
-                dropped_.fetch_add(1);
-                static std::atomic<int> shouted{0};
-                if (shouted.fetch_add(1) < 5) {
-                    std::cerr << "camera " << id_ << " could not publish frame " << tag.frame_id
-                              << ": " << error.what() << "\n";
-                }
-            }
-
-            next += std::chrono::duration_cast<clock::duration>(period);
-            const auto now = clock::now();
-            if (next > now) {
-                std::this_thread::sleep_for(next - now);
-            } else {
-                // Behind. Absorb rather than catch up — see the header. Resetting `next` to now
-                // is what makes the deficit show up in `read_` as a lower offered rate instead
-                // of becoming a burst the fleet's queue has to eat.
-                next = now;
+                limit = std::stoi(option->second);
+            } catch (const std::exception&) {
+                throw ConfigError("camera '" + camera_id() + "': replay option limit must be " +
+                                  "an integer, got '" + option->second + "'");
             }
         }
+        try {
+            library_ = ReplayLibrary::acquire(config().uri, limit);
+        } catch (const SourceError& error) {
+            // A path an operator can fix is **retryable**, so it is a SourceOpenError.
+            // SourceUnavailableError would mean a missing decode runtime, which the actor
+            // treats as fatal and stops retrying — the wrong answer for a typo'd folder that
+            // somebody is about to create.
+            throw SourceOpenError(camera_id(), config().uri, error.what());
+        }
+        const HostFrame probe = library_->at(0);
+        // The decoded size, not `config.width/height`: this source does not resize, so
+        // reporting a size it does not deliver would send the letterbox scaling twice.
+        set_format(probe.height, probe.width, config().fps > 0.0 ? config().fps : kFallbackFps);
+        index_ = 0;
+        exhausted_ = false;
+        pacer_ = DeadlinePacer(fps());
+        pacer_.reset();
     }
+
+    std::optional<HostFrame> ReplaySource::do_read() {
+        if (exhausted_) return std::nullopt;
+        const double budget = config().read_timeout_s();
+        const bool interrupted = pacer_.wait([this, budget](double due_s) {
+            // Capped at one read timeout, because the actor's contract is that a read answers
+            // within one — a source that blocked for a 40 s frame period would make a stop
+            // request take 40 s to land. The documented surprise: below `1 / read_timeout_s`
+            // fps a replay source reports empty reads and the actor eventually reconnects it.
+            // That is harmless (the library is cached, so the reopen is free) and visible in
+            // `empty_reads` rather than silent. The pacer does not advance on an interrupted
+            // wait, so the frame schedule survives it.
+            if (due_s > budget) {
+                (void)stop().wait_for(budget);
+                return true;
+            }
+            return stop().wait_for(due_s);
+        });
+        if (interrupted) return std::nullopt;
+
+        if (index_ >= library_->size()) {
+            if (!config().loop) {
+                exhausted_ = true;
+                return std::nullopt;
+            }
+            index_ = 0;
+        }
+        HostFrame image = library_->at(index_);
+        ++index_;
+        // The keepalive: a reconnect that replaces this source must not free the pages a worker
+        // is still DMAing out of, and this handle is what makes the library outlive the source.
+        image.owner = library_;
+        return image;
+    }
+
+    void ReplaySource::do_close() {
+        library_.reset();
+        index_ = 0;
+    }
+
+    namespace {
+
+        const SourceRegistrar kRegistrar(
+            "replay", {"file", "video"},
+            "a directory of decoded frames, paced at the camera's fps — no camera, no network",
+            [](const IngestConfig& config, FrameCounter& counter,
+               StopSignal& stop) -> std::unique_ptr<FrameSource> {
+                return std::make_unique<ReplaySource>(config, counter, stop);
+            });
+
+    }  // namespace
 
 }  // namespace shipinfer
