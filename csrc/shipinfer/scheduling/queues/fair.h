@@ -60,11 +60,17 @@ namespace shipinfer {
             std::lock_guard<std::mutex> lock(mutex_);
             return closed_;
         }
+        // A snapshot, taken under the lock and returned by value — the maps are copies, as
+        // the Python plane's are, so a caller that trims what it was given is not editing a
+        // live queue's attribution. `depth_by_camera` is computed here rather than
+        // maintained: O(cameras x priorities), once per stats call, instead of bookkeeping
+        // on the path that runs 15 000 times a second.
         QueueStats stats() const {
             std::lock_guard<std::mutex> lock(mutex_);
             QueueStats copy = stats_;
             copy.depth = size_.load(std::memory_order_relaxed);
             copy.capacity = capacity_;
+            for (const Lane<T>& lane : lanes_) lane.add_depths(copy.depth_by_camera);
             return copy;
         }
 
@@ -170,6 +176,9 @@ namespace shipinfer {
                 if (victim.has_value()) {
                     size_.fetch_sub(1, std::memory_order_relaxed);
                     ++stats_.evicted;
+                    // The victim's camera is the greediest by construction —
+                    // `evict_from_longest` picks the key hogging the lane — so this names
+                    // the flood, not the camera whose frame merely happened to be oldest.
                     ++stats_.evicted_by_camera[victim->camera()];
                     evicted = std::move(victim);
                     return true;
@@ -218,6 +227,8 @@ namespace shipinfer {
                     size_.fetch_sub(1, std::memory_order_relaxed);
                     if (drop_expired_ && item.expired(now)) {
                         ++stats_.expired;
+                        // Read before the move: `on_drop_` takes ownership below.
+                        ++stats_.expired_by_camera[item.camera()];
                         if (on_drop_) on_drop_(std::move(item), DropReason::Expired);
                         continue;
                     }

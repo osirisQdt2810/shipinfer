@@ -191,6 +191,103 @@ namespace {
         check(queue.stats().expired == 1, "and counted");
     }
 
+    // -- TestPerCameraAttribution ----------------------------------------------------------
+    // Who paid for each drop. The totals already say a queue refused, evicted or expired
+    // work; they cannot say whose, and that is the exact question the inherited bug hid.
+    // Namesakes of `TestPerCameraAttribution` in `tests/scheduling/test_queue_fairness.py`.
+
+    void test_eviction_is_charged_to_the_greedy_camera_alone() {
+        FairPriorityQueue<Item> queue("q", 4, Overflow::DropOldest);
+        for (int i = 0; i < 3; ++i) queue.put(Item{"loud", i});
+        queue.put(Item{"quiet", 10});
+        queue.put(Item{"loud", 99});
+        const QueueStats stats = queue.stats();
+        check(stats.evicted == 1 && stats.evicted_by_camera.size() == 1 &&
+                  stats.evicted_by_camera.at("loud") == 1,
+              "the flood pays for its own flood, and nobody else is named");
+        check(stats.depth_by_camera.at("quiet") == 1, "the quiet camera's frame is untouched");
+    }
+
+    void test_expiry_names_only_the_camera_that_was_late() {
+        FairPriorityQueue<Item> queue("q", 8);
+        queue.put(Item{"late", 1, 1, Priority::Normal, now_ns() - 1});
+        queue.put(Item{"ontime", 2});
+        (void)queue.get_batch(BatchWindow(8));
+        const QueueStats stats = queue.stats();
+        check(stats.expired == 1 && stats.expired_by_camera.size() == 1 &&
+                  stats.expired_by_camera.at("late") == 1,
+              "only the camera whose deadline passed is charged for the expiry");
+    }
+
+    void test_depth_by_camera_sums_to_depth_across_priority_bands() {
+        // A camera with work in two lanes is one camera; a breakdown that does not add up to
+        // `depth` is worse than none.
+        FairPriorityQueue<Item> queue("q", 32);
+        for (int i = 0; i < 3; ++i) queue.put(Item{"cam_a", i});
+        queue.put(Item{"cam_a", 9, 1, Priority::TrackingCritical});
+        for (int i = 0; i < 2; ++i) queue.put(Item{"cam_b", i, 1, Priority::Background});
+        const QueueStats stats = queue.stats();
+        check(stats.depth_by_camera.size() == 2 && stats.depth_by_camera.at("cam_a") == 4 &&
+                  stats.depth_by_camera.at("cam_b") == 2,
+              "one entry per camera, summed over every lane it has work in");
+        size_t total = 0;
+        for (const auto& entry : stats.depth_by_camera) total += entry.second;
+        check(total == stats.depth && stats.depth == 6, "the breakdown adds up to the depth");
+    }
+
+    void test_close_does_not_charge_anybody() {
+        // Shutdown loss is not a per-camera fault; the runner's `items_queue_closed` owns it.
+        FairPriorityQueue<Item> queue("q", 8);
+        for (int i = 0; i < 3; ++i) queue.put(Item{"cam_a", i});
+        (void)queue.close();
+        const QueueStats stats = queue.stats();
+        check(stats.evicted_by_camera.empty() && stats.expired_by_camera.empty() &&
+                  stats.rejected_by_camera.empty() && stats.depth_by_camera.empty(),
+              "an orderly stop must not read like a flood");
+    }
+
+    void test_fifo_attributes_the_same_four_outcomes() {
+        // The fairness-blind control reports the same maps — a comparison where only one side
+        // can name a victim is not a comparison. What differs is *who* gets named.
+        FifoQueue<Item> queue("q", 4, Overflow::DropOldest);
+        queue.put(Item{"quiet", 10});  // oldest, and blameless
+        for (int i = 0; i < 3; ++i) queue.put(Item{"loud", i});
+        queue.put(Item{"loud", 99});
+        const QueueStats evicting = queue.stats();
+        check(evicting.evicted_by_camera.size() == 1 &&
+                  evicting.evicted_by_camera.at("quiet") == 1,
+              "FIFO sacrifices the blameless head — the inherited bug, now visible");
+        check(evicting.depth_by_camera.size() == 1 && evicting.depth_by_camera.at("loud") == 4,
+              "and the whole queue is now the loud camera's");
+
+        FifoQueue<Item> refusing("q", 2, Overflow::Reject);
+        refusing.put(Item{"late", 1, 1, Priority::Normal, now_ns() - 1});
+        refusing.put(Item{"ontime", 2});
+        check(refusing.put(Item{"newcomer", 3}) == PutStatus::Rejected, "the third is refused");
+        (void)refusing.get_batch(BatchWindow(8));
+        const QueueStats stats = refusing.stats();
+        check(stats.rejected_by_camera.at("newcomer") == 1, "the refusal names the newcomer");
+        check(stats.expired_by_camera.size() == 1 && stats.expired_by_camera.at("late") == 1,
+              "and the expiry names the camera that was late");
+    }
+
+    void test_stats_hands_out_copies_not_the_live_maps() {
+        // `stats()` returns by value; mutating the snapshot must not reach the queue. The
+        // Python plane pins the same property on `as_dict()`, which is what /v2/statistics
+        // serialises.
+        FairPriorityQueue<Item> queue("q", 1, Overflow::Reject);
+        queue.put(Item{"cam_a", 1});
+        check(queue.put(Item{"cam_b", 2}) == PutStatus::Rejected, "the second is refused");
+        QueueStats snapshot = queue.stats();
+        snapshot.rejected_by_camera["cam_b"] = 999;
+        snapshot.rejected_by_camera["ghost"] = 1;
+        snapshot.depth_by_camera.clear();
+        const QueueStats fresh = queue.stats();
+        check(fresh.rejected_by_camera.size() == 1 && fresh.rejected_by_camera.at("cam_b") == 1,
+              "the queue's own counters are untouched by an edited snapshot");
+        check(fresh.depth_by_camera.at("cam_a") == 1, "and so is the depth breakdown");
+    }
+
     void test_close_fails_everything_still_queued() {
         std::vector<int> closed_ids;
         FairPriorityQueue<Item> queue("q", 8, Overflow::Reject, 50, true,
@@ -597,6 +694,13 @@ int main() {
 
     test_expired_requests_are_dropped_before_execution();
     test_close_fails_everything_still_queued();
+
+    test_eviction_is_charged_to_the_greedy_camera_alone();
+    test_expiry_names_only_the_camera_that_was_late();
+    test_depth_by_camera_sums_to_depth_across_priority_bands();
+    test_close_does_not_charge_anybody();
+    test_fifo_attributes_the_same_four_outcomes();
+    test_stats_hands_out_copies_not_the_live_maps();
 
     test_returns_immediately_when_batch_is_already_full();
     test_waits_for_the_window_then_sends_a_partial_batch();

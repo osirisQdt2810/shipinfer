@@ -36,11 +36,16 @@ namespace shipinfer {
             std::lock_guard<std::mutex> lock(mutex_);
             return closed_;
         }
+        // Per-camera attribution is kept even though this queue is fairness-blind: the
+        // breakdown is how an operator *sees* that it is. Under DropOldest it charges
+        // whichever camera happened to be at the head, which is the inherited behaviour the
+        // fair queue exists to replace — visible here as data rather than argued about.
         QueueStats stats() const {
             std::lock_guard<std::mutex> lock(mutex_);
             QueueStats copy = stats_;
             copy.depth = size_.load(std::memory_order_relaxed);
             copy.capacity = capacity_;
+            for (const T& item : items_) ++copy.depth_by_camera[item.camera()];
             return copy;
         }
 
@@ -93,6 +98,8 @@ namespace shipinfer {
                 items_.pop_front();
                 if (drop_expired_ && item.expired(now)) {
                     ++stats_.expired;
+                    // Read before the move: `on_drop_` takes ownership below.
+                    ++stats_.expired_by_camera[item.camera()];
                     if (on_drop_) on_drop_(std::move(item), DropReason::Expired);
                     continue;
                 }
