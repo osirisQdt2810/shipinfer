@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 from shipinfer.cli.common import build_settings, console
 from shipinfer.core.errors import ConfigurationError, ShardExitedError
+from shipinfer.core.settings import DeviceSettings, ServerSettings
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; `runners` is imported inside `run()`
     from shipinfer.runners.base import Runner
@@ -56,7 +57,9 @@ def run(
             one that says so — so a non-empty list is refused rather than ignored.
         shards: how many shard processes, for the runners that have any. ``None`` leaves
             ``runner.shards``, whose own default is one per visible GPU (ADR-006).
-        gpus: which devices, as ``0,1,2``. ``None`` asks the driver, once.
+        gpus: which devices, as ``0,1,2``. ``None`` leaves ``devices.visible_gpus``, and
+            only when *that* is empty too is the driver asked, once (:func:`_fill_in_gpus`).
+            A flag is not the only way an operator answers this question.
         drain_s: seconds a shard gets to finish before it is killed. ``None`` leaves
             ``runner.drain_s``. It is ``shipinfer fleet --drain`` under its settings-tree
             name: the same budget, on the command that replaced it, so an operator who had
@@ -80,10 +83,10 @@ def run(
         )
     # The gate lives here as well as in the shell hook: a deny-list over command text cannot
     # be made sound, and this command loads engines and drives GPUs (`serve` says the same).
-    # It comes BEFORE anything is resolved so that `_driver_gpus()` - the one call here that
-    # touches the driver - runs below it and not above: a refusal should not have queried the
-    # hardware it is refusing to use. `--dry-run` is exempt because it spawns nothing; it is
-    # the mode for reading a plan on a laptop.
+    # It comes BEFORE anything is resolved so that `_fill_in_gpus()` - the one thing here that
+    # can touch the driver - runs below it and not above: a refusal should not have queried
+    # the hardware it is refusing to use. `--dry-run` is exempt because it spawns nothing; it
+    # is the mode for reading a plan on a laptop.
     if not dry_run:
         require_container("`shipinfer run`")
     # Every flag lands in the *settings tree* rather than in per-runner keyword arguments, so
@@ -98,11 +101,13 @@ def run(
         runner_keys["drain_s"] = drain_s
     settings = build_settings(
         repository,
-        gpus=gpus or _driver_gpus(),
+        gpus=gpus,
         policy=policy,
         log_level=log_level,
         **({} if not runner_keys else {"runner": runner_keys}),
     )
+    # AFTER the settings, never as an argument to them - see `_fill_in_gpus`.
+    settings = _fill_in_gpus(settings)
     chain_yaml = _read(topology)
     chain = Topology.from_spec(ChainSpec.from_yaml(chain_yaml, name=Path(topology).stem))
     chosen = runner or settings.runner.runner
@@ -133,19 +138,39 @@ def _read(path: Path) -> str:
         raise ConfigurationError(f"cannot read topology {path}: {exc}") from exc
 
 
-def _driver_gpus() -> str | None:
-    """Every device the driver reports, as ``--gpus`` would spell it, or ``None``.
+def _fill_in_gpus(settings: ServerSettings) -> ServerSettings:
+    """Put every device the driver reports into ``devices.visible_gpus``, if nothing did.
 
-    Resolved **here** rather than inside a runner, and the reason survives the move:
-    ``runners`` imports no ``runtime`` (``check_layers.py``), because ``device_count()``
-    initialises CUDA in whichever process calls it and the launcher is the one process in the
-    deployment that should hold no context. The CLI is already above that line, and this is
-    the same call ``shipinfer fleet`` made — only when nothing was configured, since an
-    explicit ``--gpus`` or ``devices.visible_gpus`` is the operator's answer to this question.
+    **Resolved after the settings, and that ordering is the whole correctness of this
+    function.** ``build_settings`` hands a flag to ``ServerSettings(**data)`` as an init
+    keyword argument, which is pydantic-settings' *highest*-priority source: a driver answer
+    passed in there outranks ``SHIPINFER_DEVICES__VISIBLE_GPUS``, so an operator who
+    restricted this deployment to the two devices they own would silently get eight shards on
+    eight GPUs - each holding a CUDA context on a box everybody shares - with nothing saying
+    the setting had been read and dropped. So the flag goes in alone, the resolved tree is
+    what answers "did anybody say", and the driver is asked only when the answer is no. A
+    ``--dry-run`` on a configured host therefore touches no driver at all.
+
+    Resolved **here** rather than inside a runner, and that reason survives too: ``runners``
+    imports no ``runtime`` (``check_layers.py``), because ``device_count()`` initialises CUDA
+    in whichever process calls it and the launcher is the one process in the deployment that
+    should hold no context. The CLI is already above that line, and this is the same call
+    ``shipinfer fleet`` made.
+
+    The section is rebuilt through :class:`~shipinfer.core.settings.DeviceSettings` rather
+    than ``model_copy``d on the leaf so its field validators run - the same argument
+    :func:`shipinfer.cli.shard.apply_sharing` makes for ``shared_by``. A driver that reports
+    none leaves the tree alone, and the runner that needs devices refuses by name.
     """
+    if settings.devices.visible_gpus:
+        return settings
     from shipinfer.runtime.platform import device_count
 
-    return ",".join(str(index) for index in range(device_count())) or None
+    reported = list(range(device_count()))
+    if not reported:
+        return settings
+    devices = DeviceSettings(**{**settings.devices.model_dump(), "visible_gpus": reported})
+    return settings.model_copy(update={"devices": devices})
 
 
 def _wait(built: Runner) -> None:

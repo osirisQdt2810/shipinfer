@@ -105,3 +105,63 @@ class TestWhatItRefuses:
 
         with pytest.raises(ConfigurationError, match="which GPUs"):
             run(chain_file, runner="fleet", dry_run=True)
+
+
+class TestWhoAnswersWhichDevices:
+    """`--gpus` is not the only way an operator answers, and the driver is the last word.
+
+    `build_settings` puts a flag in as an *init keyword argument*, which is
+    pydantic-settings' highest-priority source. So a driver answer resolved before the
+    settings and passed in as if it were a flag outranks `SHIPINFER_DEVICES__VISIBLE_GPUS` -
+    which is how a two-GPU deployment silently became eight shards on eight devices, each
+    holding a CUDA context on a shared box.
+    """
+
+    def test_the_env_setting_is_the_operators_answer_and_the_driver_is_not_asked(
+        self, chain_file: Path, capsys, monkeypatch
+    ) -> None:
+        """The documented way to restrict a deployment (`launch/supervisor.py` calls it
+        that). The stub raises rather than returning 8: a plan that came out right while the
+        driver was still consulted would be right for today's box only."""
+
+        def refuse() -> int:
+            raise AssertionError("the driver was asked although the operator had answered")
+
+        monkeypatch.setenv("SHIPINFER_DEVICES__VISIBLE_GPUS", "[2,3]")
+        monkeypatch.setattr("shipinfer.runtime.platform.device_count", refuse)
+
+        assert run(chain_file, runner="fleet", dry_run=True) == 0
+
+        out = capsys.readouterr().out
+        assert "2 shard(s)" in out, "the plan was not the two devices the operator owns"
+        assert "gpu(s) [2]" in out and "gpu(s) [3]" in out
+
+    def test_the_flag_still_wins_over_the_env_setting(
+        self, chain_file: Path, capsys, monkeypatch
+    ) -> None:
+        """`build_settings`' own rule: flags win over `SHIPINFER_*`. A one-off `--gpus 5`
+        must not require unsetting anything."""
+        monkeypatch.setenv("SHIPINFER_DEVICES__VISIBLE_GPUS", "[2,3]")
+
+        run(chain_file, runner="fleet", gpus="5", dry_run=True)
+
+        out = capsys.readouterr().out
+        assert "1 shard(s)" in out and "gpu(s) [5]" in out
+
+    def test_with_nothing_configured_the_driver_fills_it_in_once(
+        self, chain_file: Path, capsys, monkeypatch
+    ) -> None:
+        """One shard per visible GPU (ADR-006) is still the default a bare `run` gets."""
+        calls: list[int] = []
+
+        def counted() -> int:
+            calls.append(1)
+            return 3
+
+        monkeypatch.delenv("SHIPINFER_DEVICES__VISIBLE_GPUS", raising=False)
+        monkeypatch.setattr("shipinfer.runtime.platform.device_count", counted)
+
+        run(chain_file, runner="fleet", dry_run=True)
+
+        assert "3 shard(s)" in capsys.readouterr().out
+        assert len(calls) == 1, "the driver was asked more than once"
