@@ -96,6 +96,25 @@ class TestEnforcementAgrees:
         result = subprocess.run([sys.executable, str(hook)], capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
 
+    def test_every_package_on_disk_has_a_forbidden_externals_row(self) -> None:
+        """A layer with no row is a layer where nothing is forbidden.
+
+        `FORBIDDEN_EXTERNAL` is a dict, and an absent key means "anything goes" — which is how
+        four layers had no fastapi ban until A2 PR-2 added their rows. The hook's comment says
+        "every layer on disk has a row"; this makes that a check rather than a sentence, so
+        the next top-level package gets a failing test instead of silence.
+        """
+        import importlib.util
+
+        hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "check_layers.py"
+        spec = importlib.util.spec_from_file_location("check_layers", hook)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        packages = {p.name for p in SRC.iterdir() if (p / "__init__.py").is_file()}
+        missing = packages - set(module.FORBIDDEN_EXTERNAL)
+        assert not missing, f"layers with no FORBIDDEN_EXTERNAL row: {sorted(missing)}"
+
 
 class TestImportIsCheap:
     """import shipinfer must not drag in a backend, so the CLI stays usable on a bare host."""
@@ -131,8 +150,53 @@ class TestImportIsCheap:
             "import sys, shipinfer.topology as t; "
             "assert t.ELEMENTS, 'nothing registered'; "
             "heavy = [m for m in ('torch', 'tensorrt', 'cv2', 'gi', 'shipinfer.engine', "
-            "'shipinfer.runtime', 'shipinfer.scheduling') if m in sys.modules]; "
+            "'shipinfer.api', 'shipinfer.runtime', 'shipinfer.scheduling') if m in sys.modules]; "
             "assert not heavy, heavy"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+class TestTheWebFrameworkEntersAtOneSeam:
+    """FastAPI is `api/`'s alone, and `api/` does not pay for it at import time either.
+
+    Two rules that look like one and fail differently. `check_layers.py` says the *string*
+    ``fastapi`` appears in no layer but `api` — a static rule, checked there. These are the
+    runtime halves, and they are the ones that catch the mistake nobody makes on purpose: an
+    import that arrives transitively.
+
+    Why it matters is arch.md §6. The engine is the model pool and the KServe endpoint is a
+    side-door *into* it; an in-process caller — a runner walking a chain, a benchmark, a
+    notebook — reaches the pool without ever wanting a web framework in the process. A
+    starlette import chain behind ``shipinfer.engine`` costs that caller ~100 ms and a
+    dependency it cannot uninstall, and no test that only imports ``shipinfer`` would see it.
+    """
+
+    def test_importing_the_engine_does_not_import_fastapi(self) -> None:
+        code = (
+            "import sys, shipinfer.engine; "
+            "assert 'fastapi' not in sys.modules; "
+            "assert 'starlette' not in sys.modules; "
+            "assert 'uvicorn' not in sys.modules"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_importing_the_api_does_not_import_fastapi_either(self) -> None:
+        """`api/` owns fastapi, and still imports it *inside* the functions that need it.
+
+        Deliberate, not accidental: FastAPI and uvicorn are the ``server`` extra, so the
+        package has to be importable — and ``shipinfer serve`` without ``--http`` has to
+        run — on a host that never installed them. Module-scope imports would turn that into
+        an ``ImportError`` at start-up instead of the typed refusal
+        ``tests/api/test_optional_dependency.py`` pins.
+        """
+        code = (
+            "import sys, shipinfer.api; "
+            "assert callable(shipinfer.api.create_app); "
+            "assert callable(shipinfer.api.serve_http); "
+            "eager = [m for m in ('fastapi', 'starlette', 'uvicorn') if m in sys.modules]; "
+            "assert not eager, eager"
         )
         result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
         assert result.returncode == 0, result.stdout + result.stderr

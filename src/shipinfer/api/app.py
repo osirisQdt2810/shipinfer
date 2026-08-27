@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from shipinfer.api.routes import build_router
 from shipinfer.core.errors import ConfigurationError
 from shipinfer.core.logging import get_logger
 from shipinfer.engine.pool import InferenceServer
-from shipinfer.server.api.routes import build_router
 
 __all__ = ["create_app", "serve_http"]
 
+# The logger name stays "server.api" on purpose: an operator's log filter is behaviour,
+# and this move promises none changed. It is retargeted when server/ is deleted (A2 PR-6).
 _LOG = get_logger("server.api")
 
 

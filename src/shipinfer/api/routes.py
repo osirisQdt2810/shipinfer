@@ -5,6 +5,16 @@ from __future__ import annotations
 from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any
 
+from shipinfer.api.schemas import (
+    InferenceRequestBody,
+    InferenceResponseBody,
+    ModelMetadata,
+    RequestTag,
+    ServerMetadata,
+    TensorMetadata,
+    tensor_from_wire,
+    tensor_to_wire,
+)
 from shipinfer.core.errors import (
     ConfigurationError,
     ModelControlError,
@@ -19,19 +29,11 @@ from shipinfer.core.logging import get_logger
 from shipinfer.core.request import InferenceRequest, RequestContext
 from shipinfer.engine.health import check_health
 from shipinfer.engine.pool import InferenceServer
-from shipinfer.server.api.schemas import (
-    InferenceRequestBody,
-    InferenceResponseBody,
-    ModelMetadata,
-    RequestTag,
-    ServerMetadata,
-    TensorMetadata,
-    tensor_from_wire,
-    tensor_to_wire,
-)
 
 __all__ = ["build_router"]
 
+# The logger name stays "server.api" on purpose: an operator's log filter is behaviour,
+# and this move promises none changed. It is retargeted when server/ is deleted (A2 PR-6).
 _LOG = get_logger("server.api")
 
 #: Ceiling on how long one HTTP request may hold a worker. Generous enough that a cold
