@@ -722,6 +722,148 @@ shipvision main moves.)*
 *(the stall-watchdog session)*
 
 
+### V127 · 27 Aug 2026, ~09:21 UTC — continue (after a process restart)
+
+> tiếp tục
+
+(Arrived immediately after the harness notification that the P4-PR2c coder agent had no
+completion record — the previous Claude Code process exited while it ran. Treated as the
+standing continue instruction; the agent's branch existed with no commits, so it was resumed
+from its saved transcript.)
+
+### V128 · 27 Aug 2026, ~10:4x UTC — hỏi tổng kết: nhiều PR nhưng chưa rõ đã làm gì
+
+> tôi thấy bạn mở rất nhiều PR, nhưng mà vẫn chưa rõ hiện tại bạn đã làm những cái gì rồi ấy
+
+(Kèm ngữ cảnh IDE: operator đang mở src/shipinfer/pipeline/graph/detect.py.)
+
+### V129 · 27 Aug 2026, ~11:0x UTC — TẠM DỪNG: chất vấn kiến trúc tổng thể
+
+> tôi cảm thấy bạn đang code không chuẩn lắm:
+> - tại sao lại từ deepstream topology -> gọi xuống deepstream command???
+> - hình dung ban đầu về hệ thống của tôi như sau (bạn check nhé):
+> 1. 2 hướng đầu vào là InferenceEngine offline và api-server, nhận đầu vào là camera link stream hoặc video
+> 2. input đi qua topology để xử lý (topology như ta đã bảo có thể là deepstream hoặc fleet)
+> 3. topology sẽ là chuỗi pipeline, ví dụ như decode -> detect/segment/ocr -> reid -> tracker -> mtmc tracker -> output. Ở đây bạn đang code module server/ thực sự tôi đang thấy cực kì rối rắm và ko có 1 architecture nào hoàn chỉnh cả
+> 4. Ví dụ như tại bước decode, output có thể là ảnh nv12 ngay trên gpu hoặc trên cpu raw như bgr,... ->forward qua các element tiếp theo.
+> Bạn có thể tạm dừng, nêu lại kiến trúc tổng thể hệ thống mà bạn đang muốn dessign -> những module nào đang phụ trách phần gì -> sau đó nếu cảm thấy ko đúng với ý của tôi thì bạn hỏi lại tôi có được không
+
+HÀNH ĐỘNG: dừng mọi lane mới; trình bày kiến trúc as-built; đối chiếu 4 điểm; hỏi lại các
+điểm lệch. Đã relay trạng thái tạm dừng cho shipinfer-f6 (twin đang mổ crop-stage).
+
+### V130 · 27 Aug 2026, ~11:2x UTC — hỏi khái niệm giữa thảo luận kiến trúc
+
+> TENSOR request là gì
+
+### V131 · 27 Aug 2026, ~11:4x UTC — làm rõ vision kiến trúc, yêu cầu mô tả chi tiết + cách implement
+
+> không giống tôi hình dung lắm về architecture này:
+> - đầu vào phải là camera url/video. Lí do vì sao? vì tôi muốn nó là 1 pipeline có thể decode->computer-vision->output (chuỗi như tôi bảo trên). Mà bên cạnh decode đơn giản (ví dụ dùng cv.read_video -> dùng gstreamer pipeline để đọc và xử lý ngay trên GPU). (Chuỗi pipeline computer vision tôi mong muốn, bạn hãy đọc trong references/bitbucket-subfaceid/docs <- đây chính là mục tiêu target của system này)
+> - note: với chế độ inference offline/api server, ta ban đầu có thể khởi tạo thẳng M camera/video và shard đều ra. Khi thêm 1 luồng camera nữa thì cứ theo cơ chế round-robin đơn giản.
+> - topology ở đây tôi hiểu là gì? chính là pipeline ở trên - nhưng mà ta abstract được để mỗi thành phần có thể code khác nhau - oop khác nhau (ví dụ: element decode -> có thể dùng gstreamer hay là cv. element detect có thể implement lại nvinfer của deepstream với customize model của ta, hoặc đơn giản là đi qua model của ta luôn....)
+> - về mặt thiết kế, tôi hình dung đơn giản giống như là mtmc_deepstream.py vậy, mỗi cụm camera có thể được decode tại 1 streammux => sharding tại nvinferserver (ở đây tôi hiểu là chỉ server để load-balancing thôi - distribute image raw, hoặc có thể là xử lý infer distribute cropped ảnh luôn...)
+> Bạn có thể hình dung ra hệ thống của tôi không? Bạn có thể mô tả lại 1 cách chi tiết hơn và trình bày cách implement architecture của system này như nào được không?
+
+HÀNH ĐỘNG: đọc references/bitbucket-subfaceid/docs (target chain) + mtmc_deepstream.py,
+rồi trình bày kiến trúc chi tiết + kế hoạch implement. TOPOLOGY THEO ĐỊNH NGHĨA CỦA
+OPERATOR = chuỗi element trừu tượng hóa (mỗi element nhiều implementation), KHÔNG phải
+bố trí process. Đây là câu trả lời cho Q1/Q2 của V129: camera-vào-cả-hai-mode (offline
+engine + api server, round-robin khi thêm stream); "nvinferserver" hiểu là server
+load-balancing phân phối ảnh raw/crop = vai trò của model pool/scheduler hiện có.
+
+### V132 · 27 Aug 2026, ~12:0x UTC — DUYỆT cả 3 câu kiến trúc; yêu cầu giải thích rõ hơn sơ đồ
+
+> cả 3 câu tôi đều oke.
+> Nhưng mà bạn vẽ "Hệ thống của tôi" tôi chưa hiểu lắm, bạn nói rõ hơn được không?
+
+QUYẾT ĐỊNH CHỐT (V132, ràng buộc từ giờ):
+1. Track/MTMC = element TRONG chuỗi, nhưng shard-được để tách process khi cần (giữ cả hai cửa).
+2. GIỮ endpoint tensor KServe làm mặt phụ của engine.
+3. TÊN CHỐT: `topology` = chuỗi element khai báo; `runner` = cách thực thi (inprocess/fleet/deepstream).
+
+### V133 · 27 Aug 2026, ~12:2x UTC — yêu cầu mô tả vật lý/runtime chi tiết
+
+> bạn mô tả kĩ hơn, shard ra là shard ra gì, mỗi tầng có bao nhiêu tiến trình, bao nhiêu GPU đang chạy, nó kĩ hơn về hệ thống 1 chút
+
+### V134 · 27 Aug 2026, ~12:4x UTC — zoom vào bên trong một shard
+
+> bạn nói kĩ hơn trong mỗi shard được không
+
+### V135 · 27 Aug 2026, ~12:5x UTC — chê khó hiểu, yêu cầu giải thích chậm + chi tiết pool
+
+> giải thích kĩ hơn về POOL CỤC BỘ, ngoài ra, bạn viết thực sự khó hiểu quá, tôi viaãn chưa hiểu từ sau đoạn: [trích đoạn HÀNG ĐỢI CÔNG BẰNG] phiền bạn nói rõ ra (kiểu detail hơn như là: scheduler kéo round-robin => 1 scheduler duy nhất thôi phải không?)
+
+GHI CHÚ CÁCH TRÌNH BÀY: operator muốn kiểu hỏi-đáp cụ thể (ai làm? bao nhiêu cái?),
+ít sơ đồ nén, nhiều lời kể theo chân một frame/worker cụ thể. Áp dụng cho các giải
+thích kiến trúc về sau.
+
+### V136 · 27 Aug 2026, ~13:0x UTC — yêu cầu flow chart 2 GPU/2 shard/2 cam + các usecase
+
+> nói lại từ đầu luồng hoạt động trong mỗi shard, pool cục bộ này có share nhau giữa các tiến trình (các shard), hay chỉ nội bộ trong 1 tiến trình thôi. Nói kĩ ra được không, nói bằng flow chart, không phải bằng lời, có thể lấy ví dụ đơn giản có 2 GPU/2 shard/xử lý 2 camera -> đưa ra cả những usecase như gpu này đang quá tải mà gpu ko quá tải thì làm sao? khi raw image decode đang ở trên GPU (nv12 GPU) rồi thì làm sao, có shared nhau image không hay là chỉ shared vùng cropped image?...
+
+### V137 · 27 Aug 2026, ~13:2x UTC — CHỈNH THIẾT KẾ: share VRAM-first (CUDA IPC), không đi qua RAM; tổng quát hóa pool; decode mặc định ra VRAM
+
+> 1. note: tôi không cấm: process này với tay vào VRAM của GPU khác, chỉ cần đảm bảo perf tốt và accuracy chuẩn là được.
+> 2. Không ổn rồi, hiện tại shared memory/pool bạn đang dùng cả với RAM=> không ổn, ban đầu tôi expect là: nó giống như là handleCudaIPC vậy, chỉ cần cầm handle thôi, hoặc đơn giản là cudaMempcy tới các pool lẫn nhau. Việc sử dụng RAM thay vì VRAM gây down performance cực kì mạnh. => Bạn hãy thiết kế lại nhé.
+> 3. Từ đó, liệu ta có thể tổng quát hóa được "pool" này không? bản chất là ta muốn shared data lẫn nhau:
+> - data ở đây có 2 loại: RAM hoặc VRAM => mode default là VRAM (và tôi muốn pipeline default sẽ là gstreamer decode ra VRAM image -> bạn tham khảo bên subfaceid service cách decode)
+> Bạn có hiểu ý tôi nói không?
+
+QUYẾT ĐỊNH RÀNG BUỘC MỚI (V137):
+1. KHÔNG cấm cross-process/cross-GPU VRAM access — tiêu chí duy nhất: perf + accuracy.
+   (Ghi đè cách đọc doc §1 cũ; "tránh P2P" trong new-system-architecture.md hết hiệu lực.)
+2. Mesh dữ liệu giữa shard: VRAM-first — CUDA IPC handle / cudaMemcpyPeer; RAM chỉ là
+   fallback mode. Payload KHÔNG đi qua RAM khi hai đầu đều GPU.
+3. "Pool" tổng quát hóa = typed buffer pool hai location (VRAM default | RAM), decode
+   mặc định = gstreamer ra NV12 TRÊN VRAM (tham khảo subfaceid decode).
+
+### V138 · 27 Aug 2026, ~13:5x UTC — duyệt thiết kế DataPool; hỏi tiền lệ thế giới; đề xuất pool nhiều tầng
+
+> thiết kế như vậy tôi nghĩ oke (bạn check xem các hệ thống lớn trên thế giới có design kiểu như vậy không?) ngoài ra, theo bạn thì như vậy ta nên trao đổi ảnh raw, hay là cropped ảnh raw? Liệu khi detect với cùng 1 số lượng ảnh thì có bị quá tải không? => hình như là có: 1 ảnh với nhiều người lúc detect sẽ lâu hơn nhiều 1 ảnh với ít người => như vậy tôi nghĩ ta có thể build theo nhiều tầng pool: pool shared ở image raw và pool shared ở các tầng dưới. Bạn nên biết trong các tác vụ ở trên thì:
+> - embedding
+> - detect
+> - segment
+> là 3 task có thể gây load imbalance nhất
+
+QUYẾT ĐỊNH V138: thiết kế DataPool/vé/probe-theo-cặp ĐƯỢC DUYỆT. Chỉ đạo mới: spill
+NHIỀU TẦNG — tầng frame-raw và tầng crop; 3 stage dễ lệch tải nhất: embedding, detect,
+segment.
+
+### V139 · 27 Aug 2026, ~14:0x UTC — giả định triển khai: NVLink full giữa mọi GPU trong node
+
+> trên thực tế lúc triển khai chắc chắc sẽ có nvlink link giữa tất cả các gpu trong cùng node nên không sao
+
+GHI NHẬN: production node = all-to-all NVLink (NVSwitch-class) → bảng định tuyến sẽ là
+"direct mọi cặp". Probe theo-cặp VẪN GIỮ trong thiết kế (chi phí ~ms một lần lúc bắt tay;
+bảo vệ dev-box hiện tại vốn CÓ cặp PXB độc, và mọi deployment không-NVSwitch).
+
+### V140 · 27 Aug 2026, ~14:1x UTC — CHỐT GIL (i); viết docs/arch.md; triển khai lại top-down; gRPC thay command
+
+> sửa theo (i).
+> Vậy ta đã hình dung sơ bộ tổng thể hệ thống, tôi cần bạn ghi rõ ràng, giải thích kĩ càng hệ thống của chúng ta trong docs/arch.md
+> Sau đó bắt đầu triển khai từ trên xuống dưới lại theo đúng hệ thống này. Cần phải OOP, refactor chuẩn để không gặp vấn đề khi ta mở rộng, và code packaging phải dễ nhìn, nhìn vào là ta biết ngay từ tầng api server -> sharding các thứ như thế nào... ngoài ra, bơiỉ vì ở tầng python, bạn có thể sử dụng grpc như ở bên vllm để connect giữa 2 tiến trình được không? sẽ hay hơn rất nhiều khi bạn sử dụng trò "command" như vậy (thực tế bạn hãy xóa luôn cách dùng gọi command giữa 2 tiến trình như này đi nhé)
+
+QUYẾT ĐỊNH V140 (ràng buộc):
+1. GIL fix = (i): shipvision nhả GIL quanh đoạn thuần-native + per-thread CUDA stream đi
+   cùng nhau. LUẬT V70 ĐƯỢC SỬA: từ "không đụng GIL" → "release quanh native, cấm acquire".
+2. Viết docs/arch.md giải thích kĩ toàn hệ thống (English theo luật docs; bản dịch tiếng
+   Việt nếu operator yêu cầu riêng).
+3. Triển khai lại TOP-DOWN theo kiến trúc mới: OOP chuẩn, packaging tự-giải-thích
+   (api → launch/sharding → topology → engine → datapool nhìn phát biết ngay).
+4. Control-plane giữa tiến trình = gRPC (như vLLM), XÓA HẲN cơ chế command()/argv giữa
+   parent-child. (Spawn process vẫn phải có, nhưng mọi điều khiển/health/add-camera đi
+   qua gRPC service, không nhét vào argv+env.)
+5. V129 pause được thay bằng: bắt đầu triển khai theo kiến trúc mới.
+
+### V141 · 27 Aug 2026, ~15:0x UTC — tiếp tục
+
+> tiếp tục
+
+(Ngữ cảnh: #52 round 1 BLOCKING với 3 finding thật — ADR-002/ADR-015 bị đảo mà không nêu tên
++ chưa trả lời chi phí context per-peer; V127–V140 chưa snapshot vào repo; bảng P2P chưa có
+artifact truy vết. Đang sửa: ADR-016, snapshot user.md+TASKS.md, K-neighborhood + ngân sách
+context, chờ artifacts probe từ shipinfer-f6.)
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken

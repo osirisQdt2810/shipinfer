@@ -122,6 +122,15 @@ The single most important structure in the system. Every image, crop, tensor and
 lives in a **DataPool buffer**, and buffers are shared between shards **without ever
 staging payloads through ordinary RAM**.
 
+**This reverses two recorded decisions, by name.** ADR-002 said "nothing in this codebase
+performs a cross-device memory access" and sent every cross-GPU payload through host
+memory; ADR-015 built the spill transport on pinned rings and rejected CUDA IPC on two
+grounds — a CUDA context per peer GPU per shard (`G²` contexts box-wide), and a handle
+lifecycle nobody had specified. **ADR-016** records the reversal, supersedes ADR-015 for the
+payload transport (its rings survive as the control channel), amends ADR-002's payload
+clauses (its threading core — one worker, one context of its own, one GPU — stands), and
+answers both objections; §3.4 below is the short form.
+
 ### 3.1 Slabs and tickets
 
 - Each shard pre-allocates a few **large VRAM slabs** on its GPU (e.g. 2 × 512 MB) plus
@@ -134,6 +143,10 @@ staging payloads through ordinary RAM**.
   VRAM→VRAM. This is precisely Triton's CUDA-shared-memory extension
   (`CudaSharedMemoryRegister` + region/offset/size per request) applied internally.
 
+- **A carve that is the I/O of a captured CUDA graph is pinned for the graph's life** and
+  never recycled while the graph exists (ADR-008 applies to slab carves exactly as to any
+  captured buffer); recycling happens only through the slab's generation (§3.4).
+
 The pre-existing shared-memory rings (#26) are **kept but demoted**: they are the control
 channel that carries tickets (and the payload path only in RAM fallback mode). They no
 longer carry image bytes between GPUs (V137: the RAM round-trip is rejected).
@@ -143,7 +156,8 @@ longer carry image bytes between GPUs (V137: the RAM round-trip is rejected).
 `cudaDeviceCanAccessPeer` answers *capable*, not *fast*. Measured on the dev box
 (appendix): NVLink pairs move a 12 MB frame in **261 µs**; a PXB pair (across a PCIe
 bridge) takes **98.6 ms** for the same copy — three orders of magnitude, reproduced on
-three pairs — while the same pair staged through pinned memory takes 996 µs. Therefore:
+three pairs, **0-3, 1-3 and 2-4**, none of which lies inside the dev trio 3-4-5 — while the
+same pair staged through pinned memory takes 996 µs. Therefore:
 
 - **At every pair handshake, the DataPool times the link itself** (one 12 MB + one 128 KB
   copy, a few ms, once) and records the route: `direct` (NVLink/PIX) or `staged`
@@ -163,8 +177,37 @@ three pairs — while the same pair staged through pinned memory takes 996 µs. 
 | move payload | 0 copies (direct read) or 1 `cudaMemcpyPeer` | 1 memcpy |
 | used for | frames, crops, tensors, vectors | no-NVDEC hosts, CI, tests |
 
-Implementation stands on torch (ADR-003): torch's CUDA caching allocator and
-`torch.multiprocessing`'s CUDA-IPC tensor sharing are the base, not hand-rolled handles.
+**Torch is normative for the implementation (ADR-003)**: slabs are torch allocations,
+handles travel through `torch.multiprocessing`'s CUDA-IPC tensor sharing, peer copies are
+torch copies. The `cudaIpc*` / `cudaMemcpyPeer` / `cudaDeviceCanAccessPeer` names in this
+document state *semantics*, not call sites; where a raw call is unavoidable in `csrc/`, it
+goes through `core/platform.h`'s `gpu*` aliases (ADR-014) so the ROCm build stays whole.
+
+### 3.4 What it costs, and who may hold a handle (ADR-016)
+
+Opening a peer's slab needs a CUDA context on that peer's device in *this* process. That
+is the cost ADR-015 refused to pay, and it is real; the answer is to **bound it, measure
+it, and budget it** rather than to avoid it:
+
+- **K-neighbourhood.** A shard opens the slabs of at most **K peers** (default K = 3),
+  chosen by the route table — NVLink partners first. Everyone else is reached over the
+  pinned-staged path (the ADR-015 transport, unchanged). Reach is fleet-wide; the VRAM
+  transport is tiered. A shard therefore holds **K + 1 contexts, not G**; box-wide the
+  context line is `G × (K + 1) × C_ctx` rather than `G² × C_ctx`.
+- **C_ctx is a measured input**, not folklore: REPLACE_CTX_MIB MiB per foreign context on
+  this box (A5000, CUDA 12.6, measured 2026-08-27 in-container, Appendix A). At K = 3 that
+  is ≈ 4 × REPLACE_CTX_MIB MiB per shard, against ADR-015's feared 16 × ~300 MiB on a
+  16-GPU node.
+- **The budget is enforced at start-up.** Each shard writes its VRAM budget into its
+  Health report — `slabs + (K+1) × C_ctx + engines ≤ device memory − reserve` — and
+  refuses to open a camera if the inequality fails; a runtime OOM is never how this is
+  discovered.
+- **Handle lifecycle.** Slabs are opened at mesh join and **closed only at drain**, after
+  the shard's engine has quiesced (no kernel in flight on a mapping being torn down).
+  Every ticket carries the slab's **generation**; a restarted shard issues a new one, and a
+  ticket against a stale generation fails typed (`StaleTicketError`, tagged) rather than
+  being dereferenced. Peer death arrives from the launcher over gRPC (§2) and invalidates
+  that peer's mappings; tickets in flight on them fail with `PeerLostError` as in ADR-015.
 
 ---
 
@@ -213,9 +256,16 @@ One shard process, GPU *g*, M cameras. Thread counts for a 4-camera shard in par
    rides to the end and survives every error path.
 
 ② FAIR LANES — one bounded lane per camera (cap ~8 frames)
-   A full lane drops THAT camera's newest frame, counted, at the door
-   (early, whole-frame drop beats a half-processed pipeline; the old
-   system's shared evict-oldest buffer is the failure this replaces).
+   Two drop doors, both per-camera, both counted, neither cross-camera:
+   • the SINK door (ingest/sink.py, csrc sink.h): a frame that finds no
+     room is refused with QueueFullError and the camera's own actor drops
+     THAT frame — the newest — and continues;
+   • the LANE door (scheduling/queues/fair.py DROP_OLDEST): when room must
+     be made, the victim is the OLDEST item of the LONGEST lane in the
+     lowest-priority band, i.e. the greediest camera pays, never a quiet one.
+   Early, whole-frame drop beats a half-processed pipeline; the old system's
+   shared evict-oldest buffer — which evicted regardless of camera — is the
+   failure both doors replace.
    There is NO scheduler thread: the fairness is a round-robin cursor
    inside the queue's take(), executed by whichever worker asks next.
 
@@ -317,6 +367,13 @@ src/shipinfer/
 its topology-as-placement classes dissolve into `launch/` + `runners/`, and the
 argv-command mechanism is deleted outright.
 
+**`csrc/` is the second plane and stays a mirror (ADR-014).** Nothing above changes the
+two-planes rule: every Python package that has a native counterpart keeps it at the same
+path under `csrc/shipinfer/` — today `ingest/` (actors, sink, sources), tomorrow
+`datapool/` (slab carve, route probe, peer copy) — and every native component keeps a
+Python implementation so the offline tier runs with no build. The renames apply to both
+trees in the same PR; a plane is never allowed to drift from the other's layout.
+
 ---
 
 ## 10. Migration plan (top-down, reusing what is proven)
@@ -347,9 +404,16 @@ no-GPU/no-gst guarantees throughout (element ABCs and the chain loader are pure)
 | PXB staged via pinned | 996 µs (12.6 GB/s) | 29 µs | staged |
 
 `cudaDeviceCanAccessPeer` returns true for *every* pair above, including the poison ones.
-Today's dev trio (GPUs 3,4,5) happens to contain no PXB pair, which is why no benchmark
-ever tripped it; a 16-GPU deployment would. Production nodes are expected all-NVLink
-(V139); the probe stays regardless.
+The PXB rows were reproduced on pairs **0-3, 1-3 and 2-4**; the dev trio (GPUs 3,4,5)
+contains no PXB pair *among its own members*, which is why no benchmark ever tripped it;
+a 16-GPU deployment would. Probe script, raw log and `nvidia-smi topo -m` output:
+REPLACE_PROBE_PATHS (run inside the container per CLAUDE.md).
+
+| Context cost (ADR-016 input) | measured |
+|---|---|
+| one foreign CUDA context (peer IPC handle opened from another process) | REPLACE_CTX_MIB MiB on the opener's device, REPLACE_CTX_OWNER_MIB MiB on the owner's |
+
+Production nodes are expected all-NVLink (V139); the probe stays regardless.
 
 Other load-bearing numbers: true serial chain cost **51.6 ms/frame** (C1b discriminator);
 full-DAG floor **48 img/s per GPU** with segmenter×2 (#47: 96 → 143.8 img/s across 3 GPUs
@@ -366,3 +430,4 @@ full-DAG floor **48 img/s per GPU** with segmenter×2 (#47: 96 → 143.8 img/s a
 | Two-tier spill (frame + crop); imbalance-prone stages: embedding, detect, segment | V138 |
 | Production nodes all-NVLink; probe kept | V139 |
 | GIL fix inside shipvision with per-thread streams (V70 revised); this document; top-down re-implementation; gRPC control plane, argv-command deleted | V140 |
+| ADR-016 (this PR): supersedes ADR-015's payload transport, amends ADR-002's payload clauses, K-neighbourhood context budget, handle lifecycle | `.claude/DECISIONS.md` |

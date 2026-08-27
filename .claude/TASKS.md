@@ -1,5 +1,28 @@
 # Open work
 
+
+> **QUEUE (one open shipinfer PR at a time — announce HERE before opening, ping the other
+> worker on merge).** Workers: shipinfer-23 (P4/P-lanes: PR2c now, then the section-O CI
+> job V109 sibling, then P5/P6) · shipinfer-f6 (C-lanes / model_repository / bench: C1a
+> profile pass, seg VRAM delta, T3b). V124a phase 2 (crop-convention fork) is OPERATOR-
+> GATED — neither worker takes it without their word. /tmp/p4 belongs to shipinfer-23's
+> lanes; /tmp/ci and /tmp/t4 to shipinfer-f6's.
+> **PAUSED per V129 (~11:0x): the operator has questioned the overall architecture
+> (server/ "tangled", topology-vs-command, their 4-point mental model) and asked for an
+> as-built restatement + clarifying questions BEFORE work continues. NO NEW PRs from
+> either worker until they answer. shipinfer-23 writes the restatement; shipinfer-f6's
+> crop-stage anatomy workflow (read-only) finishes and feeds it. In-flight #51
+> (workflows-only) rides to completion. — f6, on 23's relay, verified against user.md**
+> CURRENT: f6 CLAIMS the shipvision queue for the V140.1 GIL+streams PR (prerequisite
+> lane; shipinfer queue untouched — 23 claims it next for docs/arch.md). — f6, ~14:2x
+> CURRENT: PAUSE LIFTED by V140 (top-down re-implementation begins). CLAIMED by
+> shipinfer-23 for the docs/arch.md PR (~14:2x). f6 may claim the shipvision GIL+streams
+> PR in the SHIPVISION queue in parallel (its own repo, no conflict).
+> may push PR2c. NOTE: f6's PR2c coder subagent worked in /tmp/p4 until 09:5x (stopped on
+> partition agreement); commit 73a9ab7's content may interleave BOTH sessions' edits —
+> shipinfer-23 verifies content before pushing, as planned.
+
+
 Order settled by the operator (V49): **Plane 3 and Triton first; the ≥5× whole-system
 optimisation is the final goal.** C10 (tmux) was left to me — decided below.
 
@@ -642,7 +665,45 @@ hook down, for when the operator asked to see something before it is executed.
       output says what a quantile is. And `settings.tracking.enabled` crashed the harness at
       the end of a real GPU run because the unit tests never went through the call site; now
       `tracking_enabled()` is reached through a real `ServerSettings`.
-- [ ] **C1c · Today's fleet ceiling — attempted 26 Aug ~21:04, deferred to a quiet window.**
+- [x] **C1c · ANSWERED 27 Aug 09:25–09:30 UTC (attempt 2; GPUs all idle, load 18.6→27.6
+      mid-run and it did NOT matter this time — generators achieved 99.8–100.2%%).**
+      Sweep 12×2 × {1,2,4,6,8}, fleet on GPUs 3–5, container, merged main
+      (artifacts .artifacts/bench/run-c1c-ceiling-27aug; log scratchpad/c1c-attempt2.log):
+      * x1/x2/x4 SUSTAINED on every shard with tight CIs → **the fleet floor is 95.9 img/s
+        on 3 GPUs (32.0 per GPU, full DAG: detect + segment + both embedders)**.
+      * x6 (48/shard, 144 total): pipeline and detector lanes ran 47.9–48.1 SUSTAINED, but
+        **ship_segmenter — one instance per GPU — rejected 3/15/25 requests across the
+        shards → its queue capped → the harness fails closed (UNMEASURED, "a bound buffer's
+        slope stops meaning anything")**. That is a REAL, actionable binding stage, not box
+        noise: the ceiling lies in (96, 144] img/s on 3 GPUs and the first knob is
+        seg instances/GPU (the sweep ran det=2/seg=1 per GPU).
+      * Hygiene: GPUs 3–5 back to 15 MiB at 09:29.
+      **C1c-next RUN 09:34 (same window): CONFIRMED — with ship_segmenter count:2, rung x6
+      is SUSTAINED on all three shards: 48.0/48.1/47.7 = 143.8 img/s total (47.9/GPU),
+      every stage flat, config auto-reverted, hygiene 15 MiB.** The segmenter's single
+      instance WAS the fleet's binding stage; two instances lift the floor 95.9 → 143.8.
+      CONSEQUENCE: the design load is 62.5 img/s/GPU — the shipped count:1 (whose comment
+      argues "work is not arriving") would cap the design deployment. → **#47 = that config PR, open ~09:4x
+      with automerge** (count 1→2, the comment carries the numbers instead of the guess;
+      tier 1694; both bench artifacts quoted like-for-like).
+      **#47 MERGED 27 Aug 09:39:10 (round 1 APPROVE — 17 merges on the day).**
+      **TWO-WORKER COORDINATION 09:5x**: shipinfer-23 (the pre-restart fork, alive) made
+      contact — both forks share this lineage's memory of #45/#46. DISCOVERED LIVE
+      COLLISION: my resumed PR2c coder and their session were both writing /tmp/p4
+      (coder's last words: "the other session just edited that exact spot"); coder STOPPED
+      on partition agreement; commit 73a9ab7 flagged to them as possibly interleaved —
+      they verify content + both lane tails before pushing. Partition accepted (QUEUE
+      block now atop this file): 23 = P4/P-lanes + /tmp/p4; f6 (me) = C-lanes +
+      model_repository + bench + /tmp/ci + /tmp/t4; V124a phase 2 operator-gated for
+      both. Queue FREE, PR2c is theirs to push.
+      Three NBs: (1) TAKEN straight on main — the comment records "measured at one shard
+      per GPU" (expand() DIVIDES count among shards on a device; 2 shards/GPU → back to the
+      old ceiling SILENTLY, since count:2 removed count:1's loud ranked-1-gets-none
+      trip-wire). (2) ledger: a resident-VRAM delta for count 1→2 would make the trade
+      auditable (rides C1a's profile pass). (3) ledger: ship_embedder count:1 WAS exercised
+      flat at the 143.8 rung (23–26/s per shard SUSTAINED) — noted as fine at today's
+      loads, next candidate if a future rung binds on it.
+      (Attempt 1 history: 26 Aug ~21:04, guard tripped at x2 under tenant load 24.1 —
       Fleet sweep 12×2 × {1,2,4,6,8} on GPUs 3–5 (tree: main+#30+#31-candidate): x1 (24
       offered) SUSTAINED 100%%; at x2 one child's generator delivered 15.1/16 (94%%) and the
       harness stopped the climb by its own rule — box load was 24.1/48 (the other tenant's
@@ -650,18 +711,61 @@ hook down, for when the operator asked to see something before it is executed.
       code finding: the C-sweep sustained 36 fps/child at load ~18 this afternoon. The
       ceiling measurement re-runs in a quiet window (early UTC morning has been quiet);
       until then C1's "where are we" number stays the sustained-to-72-img/s floor from #27.
-- [~] **C1a · Profile before optimising** (V63). Two of the three pieces are in place and
-      neither has been *run*, because the GPUs are held by parallel agents:
-      - per-stage host timings — `benchmarks/stages.py` (C5), reads the histograms the
-        pipeline already fills;
-      - per-op costs — `benchmarks/kernels.py` (C5);
-      - the device timeline — `deploy/rootless/profile.sh`, Nsight Systems mounted from the
-        host the way TensorRT is. `perf_event_paranoid` is 4 here so CPU **sampling** needs
-        CAP_PERFMON and is off; CUDA and NVTX tracing need no perf events and are the useful
-        half — they answer "is the GPU idle, and between what", which is the question standing
-        behind the 390 img/s ceiling.
-      Remaining: run all three on a quiet box and write the answer down. Everything in C1
-      waits on that.
+- [x] **C1a · Profile before optimising (V63) — ALL THREE TIERS HAVE NOW RUN, and this is
+      the answer written down (27 Aug ~10:0x; log scratchpad/c1a-stages-vram.log).**
+      - **Algo tier (stages.py, NEW today)**: 12×5 = 60 img/s on GPUs 3–5, merged main
+        (seg=2), comfortable load (wall 16.67 ms/frame == the offered period; delivered
+        60.0/60). Service costs per frame: **crop 52.3 ms (37.2%%) > detect 45.8 ms
+        (32.6%%)** > ship_segmenter 22.0 ms (0.49 calls/frame) > person_embedder 11.0 >
+        ship_embedder 9.3. Serial-per-frame 140.5 ms vs wall 16.7 ms → **the pools are
+        buying 8.4×**; adding workers is NOT the lever, a cheaper stage is — and the two
+        stages worth attention are crop and detect, in that order.
+      - **Kernel tier (kernels.py)**: the 04:55 quiet-window table (posted to #31) — staged
+        beats pageable 1.4–1.7× on all three ops with a 0.06–4%% A/B/A control; crop_batch
+        ~3.3 ms per op invocation. The 52 ms/frame crop STAGE vs the ~3 ms crop OP is the
+        open question the timeline tier answers (host-side wait, not kernel work).
+      - **Timeline tier (Nsight, C44's run)**: GPUs ~14%% kernel-busy at the 12×5 load;
+        host threads inside cudaMemcpyAsync 22.9 s and ~13 k launches/s — the crop stage's
+        cost is WAIT (D2H + launch storms), which #30/#31 attacked (upsample 4083→322,
+        staging wins above) and whose residue is the crop-stage 52 ms.
+      - **Seg count 1↔2 resident-VRAM delta (#47 r1 NB2)**: mixed-sign across GPUs
+        (2339/2455/2397 vs 2433/2453/2269 MiB) → the second instance's cost is BELOW the
+        ~±150 MiB sampling noise at this load — auditable, and cheap as assumed. Also
+        observed: serial-per-frame 150.4 ms at seg=1 vs 140.5 at seg=2 (queue wait bleeding
+        into stage service even at comfortable load).
+      **The C1 "where are we" line: floor 143.8 img/s / 3 GPUs full-DAG (#47), pools buying
+      8.4×, and the next optimisation target is the crop stage's host-side wait, then
+      detect.**
+      **C1b · THE 8.4x IS A GIL CONVOY — root-caused by the crop-stage anatomy workflow
+      and CONFIRMED by the discriminator (27 Aug ~11:0x; logs c1a-stages-vram.log +
+      c1a-discriminator.log):** shipvision's pybind bindings hold the GIL for the ENTIRE
+      native call — H2D staging memcpy, kernel, gpuStreamSynchronize, pinned-to-pageable
+      memcpy (module.cpp: zero gil_scoped_release anywhere; binding :857-859; the blocking
+      sync at :776-782) — so the GIL is a saturated serial server. Arithmetic: L = 60/s x
+      140.5 ms = 8.43 in flight; W/L = 16.67 ms = EXACTLY the offered period; every
+      stage's wall = service x 8.43; crop is the clean witness (no queue, no future in
+      its window). DISCRIMINATOR (workers=1 at 6 img/s, config-only temp edit, reverted):
+      crop 52.1 -> 8.5 ms, serial-per-frame 140.5 -> 51.6 ms, wall = the 166.7 ms period
+      — the convoy prediction (~5-7 ms) hit, the expensive-service rival (~50 ms) dead.
+      Corollaries: (a) stream-0 co-tenancy is structurally impossible TODAY (the GIL
+      serializes native calls) and becomes a real hazard the moment the GIL is released —
+      fix both together (per-thread streams); (b) the shipped 96 workers buy queueing,
+      not throughput; the true serial DAG cost is 51.6 ms/frame.
+      COLLISION WITH V70: shipvision deliberately never touches the GIL (operator
+      decision; architecture-guarded) — GIL policy belongs to the server that embeds it.
+      The fix therefore needs the OPERATOR: (i) revisit V70 with this evidence
+      (gil_scoped_release around the pure-native section in shipvision's bindings, plus
+      per-thread streams), or (ii) a thin shipinfer-owned pybind shim calling shipvision's
+      C++ API directly, so the release lives in the embedding server and V70's letter
+      stands. ON HOLD per V129 — and it is architecture-discussion evidence: CLAUDE.md's
+      threading contract ("threads spend their time inside TensorRT or a CUDA memcpy,
+      both of which release the GIL") is currently FALSE for the ops path.
+      **RESOLVED BY V140.1 (operator chose (i))**: shipvision releases the GIL around the
+      pure-native section WITH per-instance non-blocking streams in the same change; V70
+      revised to "release around native, never acquire" (guard rewritten, not deleted).
+      Build in flight on /tmp/sv branch feat/gil-release-and-private-streams (f6's lane,
+      shipvision queue). Acceptance evidence = the stages rerun after the submodule bump:
+      the convoy dead means serial-per-frame ~51.6 ms at 96 workers with crop ~8 ms.
 
 ## Phase 7 · Topology — B, C and DeepStream behind one abstraction (V83–V85)
 
@@ -1174,8 +1278,301 @@ that exposes the four attributes a policy reads.
       of RingProtocolError (state 2), zero-header (state 3) was already right; regression
       per window (the /dev/shm touch trick fabricates state 1). Mesh tests unchanged — the
       flake is removed, not waited out. Tier 1679 on the branch. A body number was caught
-      invented pre-run (mesh-test count "36 passed" → real 17) and replaced. Awaiting
-      round 1.
+      invented pre-run (mesh-test count "36 passed" → real 17) and replaced.
+      **#37 MERGED 27 Aug 05:14:07 UTC (round 1 APPROVE)** — the flake is dead at the root.
+      NBs → lanes R1 (deadline message carries the last reason) and R2 (the FOURTH window:
+      magic lands first in create's one-slice header write — a peer can see magic set with
+      slots==0 and hit the TERMINAL created-with-0-slots error; fix = magic stored LAST as
+      the readiness signal). Reviewer disclosure noted: their probes used
+      SHIPINFER_ALLOW_HOST_RUN=1 for an offline-tier command the hook wrongly caught.
+      **#38 (docs snapshot V113–V126) MERGED 27 Aug 05:20:19 UTC (round 1 APPROVE)** — both
+      ledgers converged first (repo P4 block merged into working copy, short dupes removed,
+      escalation preserved; every deletion verified reworded-not-lost).
+      **#39 = fix(ingest) P4-NB3, open ~05:4x with automerge**: lifecycle_mutex_ serialises
+      start()'s thread_ assignment + stop()'s joinable/join/detach; self-stop guard reads an
+      atomic id copy (cannot take the lock a stopper holds while waiting for this very
+      thread); exactly one caller reports the detach. FLIP-PROVEN: lock removed → SIGABRT
+      3/3 in the plain build (the round-3 escalation was literal); with it 186 checks 5/5.
+      + kRecheckStopGrace named + the zero-budget docstring. Process note: the flip-proof
+      ran `git checkout` on a file whose fix was UNCOMMITTED and ate it (caught by grep
+      count + rebuild; re-applied) — commit BEFORE flip-proving, then flip via temp edit.
+      **Round 1** (~05:5x): BLOCKING, real and sharp — my invariant was wrong-headed: the
+      lock loser returned TRUE ("stopped cleanly") for a thread its rival detached, and
+      that bool is the LIFETIME signal (fleet count → bench's _Exit-vs-unwind), so the
+      hammer interleave would read count 0 and unwind the sink under the detached thread —
+      the loud terminate converted into silent UAF, worse for a 24/7 server. Fix (their
+      shape): thread_abandoned_ fate flag written at detach under the lifecycle lock, read
+      by EVERY stopper under it — both answer false; over-parking harmless; count lives on
+      the fleet loop. Their NBs all taken: contract comment rewritten (it stated the
+      OPPOSITE of the truth post-fix), child publishes its own thread id as run()'s first
+      line (parent's post-spawn store left a first-frames self-stop window), the bounded
+      one-grace overrun documented. TWO flip-proofs now: lock removed → SIGABRT 3/3;
+      pre-round-1 semantics → 189/1 failure (the two-stopper test is the discriminator;
+      the manager-level count test pins the interleave end-to-end). 189 checks 5/5. —
+      `59289e8`, reply #issuecomment-5434852159.
+      **Round 2** (~06:0x): BLOCKING on three doc defects, code approved on the merits —
+      (1) REAL: actor.cpp's stop comment still carried round-1's inverse ("only the
+      detacher reports") fifteen lines above the fate read; their failure scenario: a
+      maintainer chasing the deliberate double-park reads it as contract and reverts :149
+      — exactly what flip-proof 2 catches. Rewritten in their words. (2)+(3) were the
+      body-edit-after-push race AGAIN (#33 r2 shape): they read "disagree"/186 while the
+      live body already said both-false/189 — answered with the timeline, nothing to
+      change. NBs taken: kRecheckStopGrace documents the REVERSE overrun it does not bound
+      (re-check loser waits the fleet's 5 s first); fate-flag stickiness vs Python's live
+      re-read documented as deliberate for the parity harness; ASan-suppression note for
+      the leaked test actor acknowledged. — `e59f33d`, reply #issuecomment-5434914000. PROCESS NOTE
+      recurring: push fires the review at the OLD body — edit the body BEFORE pushing
+      (now a memory rule, applied from round 3 on).
+      **Round 3** (~06:1x): BLOCKING, one line, same class ESCALATED to load-bearing — the
+      TEST's own docstring still carried round-1's inverse, i.e. the stated purpose of the
+      ONLY guard argued for the guard's defeat; the reviewer MEASURED it (edit the check to
+      match the docstring + revert semantics → whole tier green while bench unwinds the
+      sink). Fixed with their text + the round-2 rename
+      (both_report_the_one_abandonment); grep-all finds no other copy of the inverse.
+      NB1 taken AS CODE: thread_id_ cleared at the JOIN only (pthread_t reuse → a stranger
+      must not take the self-stop branch; a DETACHED thread's id stays so its own
+      self-stop keeps hitting the guard). NB2: the two overrun paragraphs cross-reference.
+      — `c1feed2`, reply #issuecomment-5434981500.
+      **Round 4: APPROVE — #39 MERGED 27 Aug 06:03:03 UTC.** P4-NB3 CLOSED (flip-proofs:
+      lock removed → SIGABRT 3/3; pre-round-1 semantics → 189/1; final 189/0 ×5). Their
+      close: "the rare fix where the reasoning, the test and the reproduced flip-proofs
+      all agree." Two NBs → (a) NEW LANE P4-NB5: the self-stop branch skips the fate read
+      (unreachable in-tree — the sink path sets stop_ directly — but the header promises
+      "by ANY stopper"; fix = thread_abandoned_ as std::atomic<bool> so the lockless
+      self-stop path can read it); (b) mark P4-NB3 [x] in the REPO's TASKS.md — riding the
+      R1/R2 PR's docs commit. Queue: PR-A = R1+R2 ring hygiene + repo-ledger flips; PR-B =
+      ingest parity bundle (P4-NB2-py + P4-NB4 + P4-NB5).
+      **#40 = PR-A, open 27 Aug ~06:2x with automerge**: R2 — create() writes the header
+      body with magic=0 then stores the magic word alone (readiness signal genuinely lands
+      last; _write_header gains magic= param, stamp unchanged); regression pins the
+      contract from both sides (body-without-magic reads unborn; the word alone completes
+      the birth). R1 — the connect deadline names absent vs stuck-mid-birth from the last
+      RingClosedError.reason (+test). + repo-ledger flips (P4-NB3 [x] with flip numbers,
+      P4-NB5 opened) per #39 r4's ask. Tier 1681 (+2).
+      **#40 MERGED 27 Aug 06:17:43 UTC (round 1 APPROVE straight)** — R1+R2 CLOSED; the
+      repo ledger now carries P4-NB3 [x] and P4-NB5.
+      **#41 = PR-B (ingest parity bundle), open ~06:4x with automerge** (`10b74a7`+format):
+      P4-NB2-py (Python re-check, deadly order driven deterministically by a monkeypatched
+      start that runs the concurrent stop first; ServerStateError + empty fleet), P4-NB4
+      (remove_camera returns clean/abandoned; parked→False, clean→True), P4-NB5 (atomic
+      fate, lockless self-stop read; flip-proven 191/1 reverted → 191/0 restored ×5;
+      first test draft got -1 because the detached thread exits after ONE read — self-stop
+      moved into the gated first read). Python ingest 206 passed; tier 1685.
+      **#41 MERGED 27 Aug 06:34:27 UTC (round 1 APPROVE straight)** — P4-NB2-py, P4-NB4,
+      P4-NB5 ALL CLOSED. The P4 review-debt ledger is EMPTY.
+      **#42 = T4-NB trio, open ~06:5x with automerge** (`428cf5a`, rebased on #41, tier
+      1688): T4-NB1 parserless gate now len(outputs)!=2 (EfficientNMS quartet named in the
+      message + doctored-config test); T4-NB2 probe imports graph/state.py's now-public
+      as_embedding (astype(float) dropped — the redundant float64 materialisation; identity
+      asserted in a test, comment references to the old name grep-swept); T4-NB3 stop()
+      removes the pad probe BEFORE the sink closes (shared fake records both on one
+      timeline; the assertion is the ORDER).
+      **#42 MERGED 27 Aug 06:42:47 UTC (round 1 APPROVE)** — T4-NB1..3 CLOSED. Two NBs →
+      **T4-NB1b (open, NEXT)**: (a) the widened gate is arity-only and the repo itself
+      ships the counterexample — ship_segmenter's output0[300,38]+output1[32,160,160] as a
+      PRIMARY would still generate parserless; check the LAYOUT (a 4C-channel bbox layer
+      beside a C-channel coverage layer, both 3-D) not the count. (b) MY BODY OVERSTATED:
+      "the exactly-two case still passes parserless, pinned by the existing suite" was
+      false — the reviewer measured !=2 → <2 stays green (no positive-case test existed).
+      Both-side tests go in with the layout gate. Evidence lesson repeated: a coverage
+      claim about the EXISTING suite is also a claim to verify (grep the tests before
+      writing "pinned").
+      Box load 19 at 06:48 — C1c still deferred.
+      **#43 = T4-NB1b (layout gate), open ~07:0x with automerge**: _is_coverage_bbox_pair
+      (3-D C-channel coverage beside 3-D 4C-channel bbox, same spatial extent; heuristic
+      stated as such); accept side FINALLY pinned (DetectNet pair generates parserless);
+      the ship_segmenter-shaped counterexample refused with the segmentation head named;
+      flip-proven (arity-only → 1 failed/74). Tier 1690.
+      **#43 MERGED 27 Aug 06:53:56 (round 1 APPROVE)** — four NBs, all real, all taken in
+      **#44 (open ~07:1x with automerge, tier 1692)**: (1) nvinfer resolves the pair by
+      strstr NAME not shape → the gate asks the name question (foreign-names test +
+      flip 1 failed/76); (2) cluster-mode follows the layout — NONE for decoded/custom,
+      DBSCAN for the raw DetectNet grid the gate just blessed (both halves tested +
+      flip 1 failed/76); (3) the two-revisions-behind prose (Raises + design doc) synced;
+      (4) the accept test asserts blob-names/no-parser-key/DBSCAN instead of `is not
+      None`.
+      **Round 1** (~07:2x): BLOCKING, both real, the first one MINE TWICE OVER — the name
+      probe and the channel sort never met, so the tightened gate FALSE-ACCEPTED a
+      swapped-role pair (nvinfer would index 4*8 channels from the 2-channel tensor) and a
+      cov_bbox-satisfies-both-probes pair: silent garbage, worse than the loud refusal it
+      fixed. Their predicate verbatim (resolve by name, distinct, shapes on the resolved
+      pair) + their table as two tests; wholesale flip back → 2 failed. B2 re-sourced per
+      V86 and THE SOURCE CHANGED THE ANSWER: no DeepStream checkout here, so went to
+      NVIDIA's current sample for the same architecture (dstest1_pgie_config.txt,
+      TrafficCamNet DetectNet_v2) — it uses cluster-mode=2 NMS + nms-iou-threshold=0.5,
+      NOT DBSCAN; DBSCAN-with-knobs would have added two offline-unverifiable settings.
+      NMS mode + parameter emitted and asserted both ways. NBs: doc row, docstring, dead
+      ternary case — all in. Tier 1694. — `415fd7d`.
+      **Round 2: APPROVE — #44 MERGED 27 Aug 07:19:33 UTC.** The DetectNet chain
+      (#42→#43→#44) is CLOSED: the parserless gate is nvinfer's own name-resolution
+      contract, the clustering is the vendor's own sample, both flip-proven. 14 merges
+      today.
+      Round-2 NBs ledgered as **T4-NB1c (take-or-leave trio, implement on demand or when a
+      DetectNet model ships)**: (1) one local `clustered = not deepstream.bbox_parser` read
+      at both emit sites instead of two copies of the condition; (2) refuse when either
+      name-probe matches MORE than one layer (sum(...)==1 per probe — output_cov+cov_bbox
+      currently passes with loop-order-dependent host binding); (3) _NMS_IOU_THRESHOLD's
+      natural home is PipelineSettings if a DetectNet model ever ships.
+      **P4-PR2 PLAN (from the Explore map, 27 Aug ~07:3x; full report in the session
+      transcript):**
+      * Structural facts: build_csrc's needs_accelerator keys ONLY on core/platform.h — a
+        gst unit would be misclassified CUDA-free and break the offline tier; and NO lane
+        today compiles replay(OpenCV)+gst together (host: opencv4+nvcc, no gst-dev;
+        shipinfer-gst:jammy: gst-dev+build-essential, no libopencv-dev, TensorRT mounted
+        only at run time). bench.sh's "apt is impossible" note is outdated — gst-image.sh's
+        run+commit+--network=host IS the standing counterexample.
+      * **PR2a (offline-only, FIRST)**: pure free functions in a gst-free header
+        `ingest/sources/gstreamer_pipeline.h` — build_pipeline (exact gst-launch string,
+        the GL trap for auto/nvh26xdec, protocols= omitted for auto-transport, stride-free
+        pure strings) + select_decoder/select_converter over an injected
+        std::function<bool(const std::string&)> availability predicate; IngestConfig gains
+        `codec` ("h264"; validate {auto,h264,h265} matching pydantic ingest.py:54); the 18
+        portable Python tests (TestPipelineString 11 + TestElementSelection 7) become
+        offline checks in test_ingest. NO build-script change needed (header-only).
+      * **PR2b (the gst unit + build lane)**: sources/gstreamer.{h,cpp} implementing
+        FrameSource on real gst (open: parse_launch→appsink→PLAYING→get_state(open_timeout),
+        negotiate from caps; read: gst_app_sink_try_pull_sample(read_timeout), bus
+        pop_filtered EOS/ERROR→FrameDecodeError (NEVER is_exhausted — EOS on a camera is a
+        fault), stride ((w*3)+3)&~3 + copy-out-of-pool into shared_ptr<vector> as
+        HostFrame.owner; close: NULL tolerant of partial open; missing plugin =
+        SourceUnavailableError fatal vs unreachable camera = SourceOpenError retryable —
+        replay.cpp:158-166's exact distinction); registrar ("gstreamer",{"gst"},
+        supports_hwaccel true); KeywordOptions for decoder-override/max-buffers via
+        refuse_unknown_options (its documented next caller); build_csrc generalised with a
+        per-unit external-deps map (gst → pkg-config gstreamer-1.0 gstreamer-app-1.0,
+        mirroring opencv_flags); gst image extended with libopencv-dev via run+commit;
+        registry tests behind SOURCES().contains("gstreamer")+counted skip.
+      * **PR2c (evidence)**: live loopback via gst-rtsp-server (already in the image) —
+        end-to-end read inside the container.
+      **#45 = PR2a, open 27 Aug ~08:0x with automerge** (`7182396`, coder-built, verified +
+      rerun by main session): gstreamer_pipeline.h (header-only, closure = types+redact
+      only, needs_accelerator False), codec field + start-up Literal, 18 ported tests +2
+      codec checks (+26 → test_ingest 217, 3/3 stable), CROSS-PLANE 12-case diff
+      byte-identical against the real Python build_pipeline; one deliberate divergence
+      (unquoted list rendering) commented for the parity harness. Coder's judgment calls
+      all sound: 0-sentinel both-or-neither, GL trap on the RESOLVED element (stays right
+      if a GL software decoder appears), detail::gst namespace vs redact's detail (ODR).
+      FEATURE_LOG deliberately deferred to PR2b (half a feature is not an entry).
+      **Round 1: APPROVE — #45 MERGED 27 Aug 07:57:31 UTC (15 merges on the day).** Two
+      NBs, both bind PR2b and were RELAYED to the running coder mid-flight: (1) redaction
+      at the call sites, never in build_pipeline — SourceOpenError's ctor already redacts,
+      so pass the raw GError (no double-redaction); the no-logging comment must name
+      redact_in for when P5 adds logging. (2) select_decoder's empty-candidates "no vp9
+      decoder found (tried [])" is byte-faithful parity, deliberately kept — the source
+      relies on validate()'s codec Literal, no second check.
+      **#46 = PR2b, open 27 Aug ~08:3x with automerge** (`e21054e`, coder-built + main
+      session's warn-and-continue adjustment): GStreamerSource (gst_init_check under
+      call_once + GIO proxy scar; parse/appsink/PLAYING/timeout each a distinct retryable
+      SourceOpenError vs missing-plugin fatal; try_pull_sample-bounded reads; bus EOS/ERROR
+      → FrameDecodeError, never is_exhausted; stride undone + copy-out-of-pool as
+      HostFrame.owner); EXTERNAL lane map + --with-external (explicit-missing = hard fail,
+      implicit-missing = LOUD WARN + proceed — the host bench build stays alive, verified
+      warning-then-compiles); option_int gains its documented subject (policies pass
+      "placement policy", messages byte-identical; replay's hand-parse left — unverifiable
+      in any lane this box runs); gst-image.sh recipe matches the live image;
+      FEATURE_LOG entry for PR2a+b. Host 217/2-skips, container 233/1-skip (ldd: no gst on
+      host binary, gst+no-CUDA in container), .lanes stamp proven over 5 transitions,
+      Python tier untouched 1694. Coder deviations all sound (gst_init_check; typed
+      no-video-caps error where Python TypeErrors; hwaccel=false test camera for a
+      deterministic site). PR2c (rtsp-server loopback pixel) still owed.
+      **Round 1** (~08:5x): BLOCKING, both real — (B1) MY warn-and-continue edit inserted
+      the else-arm between the offline arm's two lines, capturing cuda_sources=[] —
+      --offline then ran nvcc (invisibly green on machines WITH nvcc: the host's 11.5 AND
+      the container, whose pytorch-runtime base ships nvcc 12.6 — resolving the reviewer's
+      "233 cannot be from this tree": it was, a real number from a masked bug; their
+      driverless runner was the one honest machine), and the full build dropped the
+      kernels → link failure. Fixed + STRUCTURAL guard (--offline with non-empty .cu list
+      = named build-script bug); full build run END TO END as the missing measurement
+      (7 binaries, ops.cu compiled+linked). (B2) max_buffers=0 is GstAppSink "unlimited" →
+      unbounded decoder queue; _positive_int mirrored, reviewer's message verbatim, +1
+      live container check (234). Notes: refuse_unknown_options param subject;
+      open_timeout_ms >= 1. — `c088633`.
+      **Round 2: APPROVE — #46 MERGED 27 Aug 09:02:22 UTC (16 merges on the day).** P4-PR2
+      a+b DONE. Five NBs → PR2c's scope grew:
+      - **PR2c-1**: bake the omitted-lane names into the binary so create_source's refusal
+        says "the gstreamer lane was not compiled into this binary" instead of "unknown
+        video source" (their better alternative to re-printing warnings), + re-print the
+        dropped-lane list after the last `built` line.
+      - **PR2c-2**: the loopback pixel test (gst-rtsp-server serving videotestsrc in-
+        process or in-container; a real decoded BGR frame asserted).
+      - **PR2c-3 (V109 sibling PR)**: a CI lane — ubuntu runner CAN apt gst dev packages,
+        so a job `--offline --with-external gstreamer` runs section O (17 checks now a
+        permanent CI skip otherwise) and, with gst-rtsp-server apt'd, the loopback too.
+      - **PR2c-4**: replay.cpp limit-parse TODO pointing at the container lane.
+      - NB3 count drift FIXED on main (`a0c61ce`) + merged body edited 233→234.
+      - NB5 (bus polled never drained): parity with Python, note only.
+      **#48 = PR2c, open 27 Aug ~10:2x with automerge** (`73a9ab7`, coder-built; STRANGER-READ
+      of the full 896-line diff done per f6's interleave warning — f6's resumed coder had
+      been building PR2c in the SAME /tmp/p4 for ~35 min in parallel; verdict:
+      single-author coherent, both lane tails re-run post-rebase): lane-aware refusals
+      ("exists but was not compiled into this binary", -DSHIPINFER_OMITTED_LANES +
+      omitted_lanes.h string-table + cross-language drift guard tests/test_build_csrc.py);
+      THE PIXEL — scripts/rtsp_serve.py forked as a real RTSP server (the C dev package is
+      absent from the image, probed not assumed; no new lane needed), section P asserts 3
+      frames, >8 distinct byte values, consecutive-differ, monotonic tags, clean close;
+      host 219/0/3, container 246/0/1 with the PIXEL line; three flip-proofs run
+      post-commit; replay option_int TODO; FEATURE_LOG. TWO-SESSION NOTE: shipinfer-f6 =
+      post-restart twin of THIS transcript (V127); partition agreed (23: P4/P-lanes +
+      /tmp/p4; f6: C-lanes/model-repo/bench + /tmp/ci + /tmp/t4); QUEUE block at ledger
+      top is the claim bus.
+      **Round 1: APPROVE — #48 MERGED 27 Aug 10:07:55 UTC (18 merges on the day incl.
+      f6's #47). P4-PR2 COMPLETE (a+b+c).** Five NBs: NB1 body URI drift (/test vs /cam0)
+      → merged body edited; NB2 overstated fixture-precedent comment → trim to the two
+      real callers; NB3 REAL — execvp after fork is not async-signal-safe (PATH search may
+      allocate) and the binary demonstrably forks with live detached threads (six
+      abandonments before section P in the reviewer's own run) → resolve in parent +
+      execv; NB4 the #ifndef fallback contradicts the unconditional lane-check in the skip
+      branch → guard with #ifdef; NB5 exercise kTable's opencv row end-to-end (one check).
+      NB2–5 = the quartet mini-PR:
+      **#49, open ~10:4x with automerge**: parent-resolved execv (resolve_on_path in
+      malloc-legal territory; absence known pre-fork; 127 shrinks to vanished-or-noexec);
+      the lane assertion #ifdef-guarded with the #else pinning the documented bare
+      refusal; the opencv row exercised end-to-end (+1 host check → 220/0/3 ×3);
+      container 246 + PIXEL through the new exec path.
+      **Round 1: BLOCKING, both mine and severe in kind** — the NB3 fix WAS NEVER ON DISK:
+      the fix script asserted after its final edit with no write (THE write-before-assert
+      trap, memory rule #1, struck despite the rule), so the title described unwritten
+      code and the body attributed real test output to it. Reviewer grep'd
+      resolve_on_path → nothing. Re-applied WITH write + immediate grep-verify (execv
+      present, no execvp call), both lanes re-run on the real tree (220/0/3 ×3;
+      container 246 + PIXEL), N1 (construction inside its guard) + N2 ((void)) taken,
+      body re-derived from the diff and OWNS the miss in its own words. — `f1e12fd`.
+      **Round 2: APPROVE — #49 MERGED 27 Aug 10:28:02 UTC (19 merges on the day).**
+      **#50 = the CI gst-lane job, open ~10:3x (V109 lane)**: apt the gst dev pair + the
+      loopback's runtime needs on the runner, build --offline --with-external gstreamer,
+      run test_ingest with grep PIXEL as the gate (a green count that looked at no pixel
+      is the failure mode the line exists to prevent); offline job untouched. Body's
+      trigger claim caught and fixed BEFORE merge this time (#34's lesson: ci.yml is
+      main-only — the first main run is the acceptance gate). Tests polling; self-merge
+      on green; the first main run post-merge is watched as the real proof.
+      **#50 MERGED ~10:32 (V109; 20 merges on the day). FIRST MAIN RUN: BOTH new-ish jobs
+      RED, gate worked as designed** — (a) gst lane: setup-python's hermetic interpreter
+      shadowed the system python3, rtsp_serve.py died ModuleNotFoundError 'gi', section P
+      skipped, grep PIXEL correctly red; (b) kernels job's FIRST honest compile attempt
+      ever (clone was fixed by #36) pointed at build.py --arch 86 — an entrypoint from
+      before shipvision's restructure, in no pinned revision. **#51 open ~10:5x (V109)**:
+      drop setup-python from the gst lane (system python sees gi); kernels runs
+      shipvision's own README line (pip pybind11 + cmake -DCMAKE_CUDA_ARCHITECTURES=86 +
+      build). Acceptance = the NEXT main run, watched.
+      **#51 MERGED ~10:4x (V109; 21 merges on the day). ACCEPTANCE RUN 33064301705: ALL
+      EIGHT JOBS GREEN** — the gst lane passes its PIXEL grep (a decoded pixel now runs in
+      CI on every main push), and the kernels job passes FOR THE FIRST TIME IN ITS
+      EXISTENCE (born failing at the clone in #28, clone fixed #36, entrypoint fixed #51).
+      Main is fully green across the complete job set. P4-PR2 + its CI story: CLOSED.
+      MEMORY-RULE ADDENDUM EARNED: grep-verify must happen in the SAME command as the
+      write, not a later one — my earlier 'grep-verify' ran against the file the SECOND
+      script wrote, masking that the FIRST script's edits were gone.
+      PROCESS: the anchor-insertion class struck again (an else inserted mid-arm) — when
+      inserting a branch arm, the anchor must extend THROUGH the arm's last line.
+      **PR2b toolchain gate OPENED 27 Aug ~08:0x**: shipinfer-gst:jammy extended with
+      libopencv-dev via the run+commit+--network=host shape (backup tag jammy-pre-opencv
+      kept; new id 749a05d, 12.6GB). Probe INSIDE the image: g++ 11.4 + python3 + pkg-config
+      gst-app-1.0 + opencv4 4.5.4 all present; `build_csrc.py --offline` builds and
+      test_ingest runs 217/0/1 — the one lane that can compile replay(OpenCV)+gst together
+      now exists. gst-image.sh's APT_PACKAGES gains libopencv-dev IN PR2b so a FORCE rebake
+      keeps it. Lesson repeated
+      till learned: when a review names a stale sentence, grep for the SENTENCE'S FAMILY
+      across code AND tests AND body in one pass, not just the file it was found in.
       NOTE the mirrored lanes now live in BOTH ledgers (repo + working copy) — keep them in
       sync at the docs snapshot.
       **Shipvision #12 MERGED 27 Aug 04:33:26 UTC (round 2 APPROVE + auto-merge)** —
@@ -1280,14 +1677,11 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
             `manager.size()` reports 0 and no later `stop()` can reach it. No UAF (the bound
             method keeps the actor alive) — the orphaned camera is the whole defect. Mirror
             the C++ re-check + `ServerStateError` + tests.
-      - [x] **P4-NB3 · DONE in #39** (merged 27 Aug 06:03:03; `lifecycle_mutex_` serialises
-            start's assignment + stop's joinable/join/detach; the fate flag
-            `thread_abandoned_` means every stopper reports a detach whichever performed
-            it; child-published atomic thread id, cleared at the join only; flip-proofs:
-            lock removed → SIGABRT 3/3, pre-round-1 only-the-detacher-reports semantics →
-            189 checks / 1 failure; four review rounds). Was: `CameraActor::stop` is not
-            safe against a concurrent stop, and the manager now enters it from two
-            threads (#35 round 2; ESCALATED round 3: the
+      - [x] **P4-NB3 · DONE in #39 (merged 27 Aug 06:03:03; lifecycle_mutex_ + the fate
+            flag + child-published atomic id + id cleared at join; flip-proofs: lock
+            removed → SIGABRT 3/3, pre-round-1 semantics → 189/1; four review rounds).
+            Was: `CameraActor::stop` is not safe against a concurrent stop, and the
+            manager now enters it from two threads** (#35 round 2; ESCALATED round 3: the
             race is a latent std::terminate inside the hammer test itself — a crashing CI
             job, not UB-on-paper — so this is the NEXT ingest fix, before PR2; fold in the
             stop-docstring "later actors may get zero" wording and the kRecheckStopGrace
@@ -1303,10 +1697,11 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
             bool** (#35 round 2 nit) — the C++ counterpart parks on it; Python has nothing to
             park but should at least surface the abandonment to its caller.
       - [ ] **P4-NB5 · The self-stop branch is the one stopper that does not report the
-            fate** (#39 round 4 NB; unreachable in-tree — the sink path sets `stop_`
-            directly and a self-stop's answer never reaches the fleet count — but the
+            fate** (#39 round 4 NB, unreachable in-tree — the sink path sets stop_
+            directly, and a self-stop's answer never reaches the fleet count — but the
             header promises "by ANY stopper"). Fix: `thread_abandoned_` as
-            `std::atomic<bool>` so the lockless self-stop path can read it.
+            `std::atomic<bool>` so the lockless self-stop path can read it; + a line
+            keeping the header honest either way.
 - [ ] **P5 · Resolved config in, same events out.** The binary takes the settings tree and the
       model repository (`config.yaml`) the Python plane reads, not CLI flags; emits the same
       event schema (`pipeline/schema.py`) so one sink serves both planes.
@@ -1452,6 +1847,62 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       BRANCH checkout, not a stale pointer). Standing rule indexed in user.md §3: working
       checkouts track shipvision main; the parent's gitlink is bumped promptly when
       shipvision main moves.
+
+## V129–V137 · THE ARCHITECTURE RESET (in progress, gates all new PRs)
+      **V137-HW · THE LINK-REGIME DOSSIER (f6, 27 Aug ~12:0x; probes at scratchpad/p2p/,
+      run in the pytorch container, GPUs idle, hygiene verified):** the box has three
+      link regimes and they differ by THREE ORDERS OF MAGNITUDE, so the DataPool design
+      cannot treat "P2P capable" as "P2P usable":
+      | path                        | 12 MB frame       | 128 KB crop  |
+      | NVLink direct (0-1,3-4,5-6,2-7 = NV4) | 261 us, 48 GB/s | 29-38 us |
+      | SYS cross-NUMA (auto-staged)          | 756 us, 16.7 GB/s | 31 us  |
+      | PXB direct P2P                        | 98,6xx us, 0.1 GB/s | 49,2xx us |
+      | PXB staged-via-pinned (the rescue)    | 996 us, 12.6 GB/s | 29 us  |
+      | same-GPU baseline                     | 48 us, 261 GB/s   | —      |
+      * PXB DIRECT IS POISON on every PXB pair tested (0-3, 1-3, 2-4) — ACS/root-complex
+        bounce; even a 128 KB ticket-sized copy takes 49 ms. `can_device_access_peer` says
+        True for ALL pairs, so a naive "capable => enable" DataPool would fall into a
+        3-orders trap the moment a fleet spans a PCIe bridge.
+      * DESIGN LAW: per-pair link probe AT MESH JOIN (one 12 MB + one 128 KB timed copy),
+        then pick direct-P2P (NVLink) vs staged-via-pinned (everything else). This answers
+        the open "P2P-direct vs memcpyPeer" question: it is per-pair, measured, not a
+        global choice.
+      * The working trio (3,4,5) contains NO PXB pair (3-4 NVLink, 3-5/4-5 SYS) — today's
+        benches never touched the poison regime; a 16-GPU deployment WOULD.
+      * Crop-ticket sharing is viable across every pair (~30 us) on the right path; frame
+        sharing is 261 us NVLink / ~1 ms elsewhere — both compatible with the 62.5 img/s
+        per-GPU design load.
+
+- [x] V129: operator paused everything; as-built restated; 4 questions asked.
+- [x] V132 DECISIONS: (1) track/mtmc = elements IN-CHAIN, shardable out later; (2) KEEP the
+      KServe tensor endpoint as the engine's side door; (3) NAMES: `topology` = the
+      declarative element chain, `runner` = how it executes (inprocess | fleet |
+      deepstream-compiler).
+- [x] V137 DECISIONS: (1) cross-GPU/cross-process VRAM access is ALLOWED (old doc §1
+      "avoid P2P" lifted; criteria = perf + accuracy); (2) sharing plane is VRAM-FIRST —
+      CUDA IPC slab handles exchanged once at mesh join, per-buffer TICKETS
+      (slab#, offset, size, format, tag) over the existing rings (rings demoted to control
+      channel; RAM payload = fallback mode only); (3) "pool" generalizes to DataPool
+      (VRAM-default | pinned-RAM fallback, one API); decode DEFAULT = gstreamer →
+      NV12/NVMM straight into the pool (subfaceid-style); BGR-CPU = fallback.
+- [ ] OPEN QUESTION 1 (asked): P2P-direct-read vs cudaMemcpyPeer-then-compute decided by
+      MEASUREMENT on this box (probe cudaDeviceCanAccessPeer at startup)?
+- [ ] OPEN QUESTION 2 (asked): the GIL fix — (i) revisit V70, release inside shipvision +
+      per-thread streams together; or (ii) shipinfer-owned pybind shim keeping V70's
+      letter. PREREQUISITE for VRAM-first parallelism (C1b: the convoy).
+- [x] docs/arch.md WRITTEN and opened as **#52** (~14:4x, automerge): the full binding
+      write-up — 3 concepts, gRPC control plane (argv-command declared deleted), DataPool
+      (slab IPC + tickets + per-pair probe with the poison table), two-tier spill, shard
+      anatomy, GIL law V70-amended, caps, package layout mirroring the doc, migration
+      phases 0+A-E, appendices (measured numbers + V-decision record). V138/V139/V140
+      folded in (GIL=(i) — f6 offered the shipvision phase-0 PR; NVLink-prod assumption;
+      gRPC per vLLM pattern).
+- [ ] THEN (after #52): Phase A skeleton (topology/ + runners/inprocess + engine//api
+      split + gRPC proto + launch; DELETE argv-command) → Phase A (khung + wrap stages)
+      → B (API camera + round-robin) → C (track/mtmc/recognize elements) → D=NOW-EARLY
+      (NV12/VRAM caps + DataPool + IPC handshake) → E (deepstream = chain compiler).
+      Torch's own CUDA-IPC machinery (torch.multiprocessing) is the implementation base
+      per ADR-003. Presentation style per V135: ai-làm-mấy-cái, flowcharts, ví dụ 2GPU/2cam.
 
 ## Z · Final gate
 

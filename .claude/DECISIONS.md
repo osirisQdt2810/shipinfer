@@ -62,6 +62,14 @@ must move between GPUs goes through host memory; ADR-004 is the policy that make
 rare. The `(camera_id, frame_id)` tag is what makes reordering safe, so it is carried on
 every request and never rewritten.
 
+**Amended by ADR-016 (2026-08-27).** The threading core of this decision — one worker
+thread, one CUDA context of its own, one GPU, placement decided on CPU-side metadata — is
+unchanged. The clauses *"nothing in this codebase performs a cross-device memory access"*
+and *"a payload which must move between GPUs goes through host memory"* are superseded:
+DataPool payloads move VRAM→VRAM over a per-pair timed route, and a shard holds a bounded
+number of peer mappings. The "works only on some topologies" caveat that motivated the old
+clause was right and is now measured rather than avoided (ADR-016 §context).
+
 ---
 
 ## ADR-003 — Torch is the runtime substrate; we do not reimplement it
@@ -438,7 +446,9 @@ binary you start, not a provider string.
 
 ## ADR-015 — Inference crosses processes through pinned host memory, never CUDA IPC
 
-**Status:** Accepted · 2026-08-26 · builds on ADR-002 (spills cross through the host), ADR-005
+**Status:** Superseded by ADR-016 (2026-08-27) for the *payload* transport — the rings it
+specifies survive as the control channel and as the RAM-fallback payload path; its two
+objections to CUDA IPC are answered there, not waved away. Originally: Accepted · 2026-08-26 · builds on ADR-002 (spills cross through the host), ADR-005
 (backpressure is typed and carried), ADR-006 (one process per shard) and the topology seam (#18).
 
 **Context.** The fleet gives every shard its own process, its own GPU and its own cameras, and
@@ -498,3 +508,89 @@ tags; the owner's exception crosses as text.
   `RingProtocolError` naming both, so two builds cannot talk past each other.
 - **Not decided here:** slot size per model, and whether the tier should ever carry frames. Both
   are asked of the operator in the topology PR.
+
+---
+
+## ADR-016 — DataPool: VRAM-first sharing over CUDA IPC slabs, bounded to a link-probed neighbourhood
+
+**Status:** Accepted · 2026-08-27 · operator decisions V137/V138/V139 · supersedes ADR-015 for
+the payload transport; amends ADR-002's payload clauses; builds on ADR-003 (torch owns the
+allocator and the IPC machinery), ADR-005 (backpressure typed and carried), ADR-014 (`gpu*`
+aliases are the only vendor names in `csrc/`).
+
+**Context.** ADR-002 sent every cross-GPU payload through host memory because peer access
+"works only on some topologies"; ADR-015 then built the spill transport on pinned rings and
+rejected CUDA IPC on two grounds: **(1)** opening a peer's memory needs a CUDA context on
+that device in the opening process — one per peer GPU per shard, "the per-process context
+cost the fleet exists to avoid" (quantified in the ledger as `G` contexts per process,
+`G² × ~300 MiB` box-wide); **(2)** the handle lifecycle — open once, never close under a
+live kernel — is a second protocol on top of the first. Both objections are correct as
+stated. What changed is the operator's requirement (V137): a payload that already sits in
+VRAM must not be staged through RAM to reach another GPU ("gây down performance cực kì
+mạnh"); cross-GPU access is permitted, the only criteria being perf and accuracy. And the
+topology caveat is no longer folklore — it was measured on this box (Appendix A of
+`docs/arch.md`): NVLink pairs move a 12 MB frame in 261 µs; a PXB pair moves it in
+**98.6 ms** over direct P2P (three orders of magnitude, three pairs reproduced) and in
+996 µs when staged; `cudaDeviceCanAccessPeer` says "yes" to all of them.
+
+**Decision.**
+
+1. **Payloads live in a DataPool** — per-shard pre-allocated VRAM slabs (plus one pinned
+   host slab as the fallback location) carved into buffers; a buffer is referenced by a
+   **ticket** `(slab, offset, size, format, tag)`. The ADR-015 rings are kept **as the
+   control channel** that carries tickets, and as the payload path only in RAM-fallback
+   mode. This is Triton's CUDA-shared-memory pattern (register a region once, reference
+   region/offset/size per request) applied inside one node.
+2. **Slab handles are exchanged once per pair at mesh join and opened once.** Never per
+   buffer, never per request.
+3. **The neighbourhood is bounded — this answers objection (1).** A shard opens the slabs of
+   at most **K peers** (default K = 3, configurable), chosen by measured link quality
+   (NVLink partners first). Every other peer is reached over the pinned-staged path (the
+   ADR-015 transport, unchanged). So a shard holds **K + 1 contexts**, not G, and the
+   box-wide context cost is `G × (K + 1) × C_ctx` instead of `G² × C_ctx`. The per-context
+   cost `C_ctx` is a **measured input** (REPLACE_CTX_MIB MiB per foreign context on this
+   box's A5000s under CUDA 12.6 — measured 2026-08-27, appendix), and the resulting
+   **per-shard VRAM budget is written down at start-up** in the shard's Health report:
+   `slabs + (K+1) × C_ctx + engines ≤ device memory − reserve`, refused before any camera
+   opens if it does not hold. At K = 3 and C_ctx ≈ 300 MiB the context line is ~1.2 GB per
+   shard on a 16-GPU node, against ADR-015's feared 4.8 GB.
+4. **Every pair is timed at handshake — this is the topology caveat, made a routine.** One
+   12 MB and one 128 KB copy per pair (a few ms, once) fill a route table:
+   `direct` (NVLink/PIX-class) or `staged`. "Capable" is never trusted as "fast"; NCCL's
+   `NCCL_P2P_LEVEL` distances (NVL/PIX/PXB/PHB/SYS) are the precedent. On the all-NVLink
+   production node (V139) every route resolves to `direct`; the probe stays because the
+   dev box demonstrably has poison pairs and because hardware assumptions change silently.
+5. **Handle lifecycle — this answers objection (2).** Slabs are opened at join and
+   **closed only at drain**, after the shard's engine has quiesced (no kernel may be in
+   flight on a mapping being torn down). Tickets carry the slab **generation**; a shard
+   that restarts issues a new generation, and a ticket against a stale generation is
+   refused typed (`StaleTicketError`, carrying its `(camera, frame)` tag) rather than
+   dereferenced. Peer death is signalled by the launcher over gRPC (V140) and invalidates
+   that peer's mappings; in-flight tickets on them fail with `PeerLostError` as in ADR-015.
+   A buffer that is the I/O of a captured CUDA graph is **pinned for the graph's life and
+   never recycled** (ADR-008 applies to slab carves exactly as to any captured buffer).
+6. **Two spill tiers, one pool** (V138): frame tickets when a shard's detect queue is deep
+   (camera/fps skew), crop tickets when embed/segment queues are deep (crowding);
+   independent thresholds; locality follows the data (a spilled frame's crops are cut and
+   embedded where it landed); results always return to the camera's home shard.
+7. **Torch is normative for the implementation** (ADR-003): slabs are torch allocations,
+   handles travel through `torch.multiprocessing`'s CUDA-IPC sharing, peer copies are torch
+   copies. The `cudaIpc*` / `cudaMemcpyPeer` names in this ADR and in `docs/arch.md` state
+   the *semantics*; where a raw call is unavoidable in `csrc/`, it goes through
+   `core/platform.h`'s `gpu*` aliases (ADR-014) or the ROCm build breaks.
+
+**Consequences.**
+
+- **Zero or one copy per shared payload** instead of ADR-015's two, and no payload byte
+  ever transits host memory between two GPUs that have a `direct` or `staged`-VRAM route.
+- **A context budget exists and is enforced**, which ADR-015 rightly said was missing; it
+  is a start-up refusal, not a runtime surprise.
+- **Reach is unchanged, transport is tiered**: neighbours over VRAM, everyone else over the
+  ADR-015 rings — the fleet never loses a spill target because of K.
+- **Two protocols after all** — ADR-015's objection stands as a cost, now paid explicitly:
+  the ticket/generation rules above are the lifecycle protocol, tested at the unit level
+  (stale ticket, dead peer, drain under load) before any camera uses them.
+- **The dev box needs the probe** (pairs 0-3, 1-3, 2-4 are PXB-poison); the production
+  node does not, and pays a few ms once for it anyway.
+- **Not decided here:** K's default beyond 3, and whether the deepstream runner's graphs
+  publish their NVMM buffers into the same slabs (phase E of the migration plan).
