@@ -120,7 +120,9 @@ def build_app() -> typer.Typer:
         ),
         repository: Path = repo_option,
         inputs: list[str] = typer.Option(
-            [], "--inputs", help="Files or URLs to shard at start (phase B; refused for now)."
+            [],
+            "--inputs",
+            help="Files or URLs to run as cameras, named cam-000 by position.",
         ),
         shards: int | None = typer.Option(
             None,

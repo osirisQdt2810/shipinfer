@@ -16,17 +16,19 @@ what to do over the control plane.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from shipinfer.cli.common import build_settings, console
 from shipinfer.core.errors import ConfigurationError, ShardExitedError
 from shipinfer.core.settings import DeviceSettings, ServerSettings
+from shipinfer.launch.control import CameraSpec
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; `runners` is imported inside `run()`
     from shipinfer.runners.base import Runner
 
-__all__ = ["run"]
+__all__ = ["cameras_from_inputs", "place_cameras", "run"]
 
 
 def run(
@@ -51,10 +53,10 @@ def run(
             line rather than on sixteen children at once.
         runner: which runner executes it. ``None`` takes ``runner.runner`` from the settings.
         repository: the model repository, for the runners that load one.
-        inputs: files or URLs to shard across the fleet at start (arch.md §2's offline mode).
-            **Accepted and stored, not yet wired**: turning one into a running camera is the
-            ingest half of phase B, and a flag that silently did nothing would be worse than
-            one that says so — so a non-empty list is refused rather than ignored.
+        inputs: files or URLs to run as cameras (arch.md §2's offline mode). Each becomes one
+            camera, named by its position, placed on the runner once it is up. A dry run
+            reports how many there are and places none, because placing one means starting a
+            decoder thread.
         shards: how many shard processes, for the runners that have any. ``None`` leaves
             ``runner.shards``, whose own default is one per visible GPU (ADR-006).
         gpus: which devices, as ``0,1,2``. ``None`` leaves ``devices.visible_gpus``, and
@@ -68,19 +70,15 @@ def run(
             worth reading before fifty cameras start reconnecting.
 
     Raises:
-        ConfigurationError: an unknown runner, an invalid chain, or ``--inputs`` (see above).
+        ConfigurationError: an unknown runner, an invalid chain, a runner that manages no
+            cameras given ``--inputs``, or an input the runner refuses.
     """
     from shipinfer.runners import build_runner
     from shipinfer.runtime.containment import require_container
     from shipinfer.topology import ChainSpec, Topology
 
     out = console()
-    if inputs:
-        raise ConfigurationError(
-            f"--inputs is not wired yet ({len(inputs)} given): the chain runs, but nothing "
-            "opens a file or an RTSP URL for it until the ingest half of phase B. Until then "
-            "a camera reaches a running fleet through the control plane"
-        )
+    cameras = cameras_from_inputs(inputs)
     # The gate lives here as well as in the shell hook: a deny-list over command text cannot
     # be made sound, and this command loads engines and drives GPUs (`serve` says the same).
     # It comes BEFORE anything is resolved so that `_fill_in_gpus()` - the one thing here that
@@ -114,6 +112,8 @@ def run(
     out.print(f"topology: {chain.name} ({len(list(chain))} element(s)) — runner {chosen}")
 
     built = build_runner(chosen, chain, settings, chain_yaml=chain_yaml)
+    if cameras:
+        out.print(f"cameras: {len(cameras)} from --inputs ({cameras[0].camera_id} ...)")
     if dry_run:
         # On the contract, not probed for: `Runner.describe_plan` has an in-process default
         # ("no plan: one process") and the fleet overrides it with the plan it would run.
@@ -122,6 +122,10 @@ def run(
 
     built.start()
     try:
+        # After `start`, because a camera is placed on a *running* runner: the chain has to be
+        # open and its workers up before a decoder thread starts publishing into them. A
+        # refusal here therefore travels through the `finally`, which stops what did come up.
+        place_cameras(built, cameras)
         _wait(built)
     except ShardExitedError as exc:
         out.print(f"[red]{exc}[/red]")
@@ -129,6 +133,57 @@ def run(
     finally:
         built.stop()
     return 0
+
+
+def cameras_from_inputs(inputs: Sequence[str] | None) -> list[CameraSpec]:
+    """``--inputs a.mp4 rtsp://b`` as the camera specs a runner takes.
+
+    Identity is **positional** — ``cam-000``, ``cam-001`` — and that is the only sensible
+    answer: a file path is not a camera id (two directories can hold the same ``clip.mp4``,
+    and a path is not a legal metric label), and the offline mode has nobody to ask. Stable
+    across restarts for a fixed argument list, which is what a downstream tracker keyed on
+    ``camera_id`` needs, and deliberately zero-padded so ``cam-010`` sorts after ``cam-009``
+    in every log and dashboard that sorts strings.
+
+    An empty or absent list gives an empty list, not an error: ``shipinfer run`` with no
+    inputs is the normal way to bring a chain up and add cameras over the control plane.
+    """
+    return [
+        CameraSpec(camera_id=f"cam-{index:03d}", url=url, fps=0.0)
+        for index, url in enumerate(inputs or ())
+    ]
+
+
+def place_cameras(runner: Runner, cameras: Sequence[CameraSpec]) -> None:
+    """Start every camera on the runner, or refuse naming the first one that would not.
+
+    Stops at the first failure rather than placing the rest, because the failures reachable
+    here are configuration ones — a duplicate id, a source the chain names that nobody
+    registered — and each of them means the same thing about every camera behind it. Carrying
+    on would report the last one's message for a mistake made in the first.
+
+    Raises:
+        ConfigurationError: the runner manages no cameras (the ``--runner`` chosen executes a
+            chain but owns no ingest plane), or a camera was refused. In the second case the
+            original message is kept and prefixed with which input it was, because
+            ``ingest/manager.py``'s message names the camera id and the operator typed a path.
+    """
+    if not cameras:
+        return
+    if not runner.manages_cameras:
+        raise ConfigurationError(
+            f"--inputs was given {len(cameras)} input(s) but runner {runner.name!r} manages "
+            "no cameras, so nothing would open them; choose a runner that does with "
+            "`--runner` (`shipinfer runners` lists them), or feed the chain through the "
+            "control plane"
+        )
+    for camera in cameras:
+        try:
+            runner.add_camera(camera)
+        except ConfigurationError as exc:
+            raise ConfigurationError(
+                f"--inputs {camera.url!r} (as {camera.camera_id}) was refused: {exc}"
+            ) from exc
 
 
 def _read(path: Path) -> str:
