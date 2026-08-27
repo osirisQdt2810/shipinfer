@@ -1,4 +1,4 @@
-// A servable model: its instances, its dispatcher, its window — `server/model.py`.
+// A servable model: its instances, its dispatcher, its window — `engine/model.py`.
 #pragma once
 
 #include <future>
@@ -6,9 +6,9 @@
 #include <string>
 #include <vector>
 
+#include "shipinfer/engine/instance.h"
 #include "shipinfer/scheduling/dispatcher.h"
 #include "shipinfer/scheduling/policies/base.h"
-#include "shipinfer/server/instance.h"
 
 namespace shipinfer {
 

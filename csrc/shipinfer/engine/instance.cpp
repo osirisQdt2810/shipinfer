@@ -1,4 +1,4 @@
-#include "shipinfer/server/instance.h"
+#include "shipinfer/engine/instance.h"
 
 #include <algorithm>
 #include <cstring>

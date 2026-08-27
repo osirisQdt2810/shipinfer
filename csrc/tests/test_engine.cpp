@@ -1,4 +1,4 @@
-// The instance thread and the model over its dispatcher, tested the way `tests/server/` tests
+// The instance thread and the model over its dispatcher, tested the way `tests/engine/` tests
 // the Python ones: with an engine that has no device. `IdentityEngine` keeps its bindings in
 // host memory and copies input rows to output rows, so a wrong span shows up as the wrong
 // caller's numbers — which is the one thing the scatter must never get wrong.
@@ -15,10 +15,10 @@
 
 #include "shipinfer/backends/engine_api.h"
 #include "shipinfer/core/types.h"
+#include "shipinfer/engine/model.h"
+#include "shipinfer/engine/request.h"
 #include "shipinfer/scheduling/policies/join_shortest_queue.h"
 #include "shipinfer/scheduling/policies/round_robin.h"
-#include "shipinfer/server/model.h"
-#include "shipinfer/server/request.h"
 
 namespace {
 

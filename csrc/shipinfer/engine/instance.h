@@ -1,5 +1,5 @@
 // One model instance: a backend copy pinned to one device, fed by its own bounded queue,
-// drained by its own thread — `server/instance.py`, seam for seam.
+// drained by its own thread — `engine/instance.py`, seam for seam.
 //
 // The thread binds itself to its device once at start-up and never touches another (ADR-002).
 // It takes a batch from the queue under the model's window, assembles it into the engine's
@@ -22,10 +22,10 @@
 #include <vector>
 
 #include "shipinfer/backends/engine_api.h"
+#include "shipinfer/engine/request.h"
 #include "shipinfer/scheduling/policies/base.h"
 #include "shipinfer/scheduling/queues/base.h"
 #include "shipinfer/scheduling/queues/fair.h"
-#include "shipinfer/server/request.h"
 
 namespace shipinfer {
 
