@@ -100,7 +100,7 @@ jobs:
       - name: Run them
         run: |
           set -e
-          for binary in csrc/build/test_scheduling csrc/build/test_server csrc/build/test_containment; do
+          for binary in csrc/build/test_scheduling csrc/build/test_server csrc/build/test_containment csrc/build/test_ingest; do
             echo "== $binary"
             "$binary"
           done
