@@ -55,10 +55,29 @@ FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
     "runtime": {"fastapi", "uvicorn", "confluent_kafka"},
     "backends": {"fastapi", "uvicorn", "confluent_kafka"},
     # The engine is the model pool (arch.md §6) and the KServe endpoint is a *side-door* into
-    # it, not part of it: the HTTP layer lives in `server/api/` and moves to `api/`. Naming
-    # fastapi here would put a web framework behind `shipinfer.engine`, which is the import an
-    # in-process caller — a runner walking a chain — must not pay for.
+    # it, not part of it: the HTTP layer lives in `api/`. Naming fastapi here would put a web
+    # framework behind `shipinfer.engine`, which is the import an in-process caller — a runner
+    # walking a chain — must not pay for.
     "engine": {"fastapi", "uvicorn", "confluent_kafka"},
+    # `api` is the KServe surface (arch.md §6): the engine's side-door for callers who bring
+    # their own tensors. It is the one layer whose row *omits* fastapi and uvicorn — every
+    # other row below and above it names them, so a web framework can enter this codebase at
+    # exactly one seam and `import shipinfer.<anything else>` never pays for one. It keeps
+    # `confluent_kafka` from the engine's row: publishing results is a `pipeline` sink's job,
+    # and an HTTP handler that reached for a broker would be doing dispatch.
+    "api": {"confluent_kafka"},
+    # `server` is what the split has not carried off yet — the shard launcher and the
+    # topology-as-placement classes (both leave in A2 PR-4/PR-6). It held the only fastapi
+    # import in the tree until `server/api/` became `api/`; this row is what stops it growing
+    # a second one on the way out.
+    "server": {"fastapi", "uvicorn", "confluent_kafka"},
+    # The three layers left without a ban, banned: an output sink pushes, a camera actor
+    # pulls, and the CLI calls `serve_http` rather than building an app itself. Rows rather
+    # than trust — "fastapi enters at `api/` and nowhere else" is worth being a statement this
+    # script can check, and with these every layer on disk has a row.
+    "pipeline": {"fastapi", "uvicorn"},
+    "ingest": {"fastapi", "uvicorn"},
+    "cli": {"fastapi", "uvicorn"},
 }
 
 #: Top-level modules that are not layers, and may therefore be imported by any layer
@@ -77,8 +96,14 @@ ALLOWED_INTERNAL: dict[str, set[str]] = {
     "runtime": {"core"},
     "backends": {"core", "repository", "runtime"},
     "engine": {"core", "repository", "runtime", "backends", "scheduling"},
-    # What is left of `server` is the KServe surface, the launcher and the topology classes;
-    # they sit *on* the engine and may not import `runtime` or `backends` directly any more
+    # `api` sits on the engine and reaches `repository` because that is what `/v2/models/
+    # {name}` answers with: an entry's versions, platform and tensor specs. It may not import
+    # `scheduling`, `runtime` or `backends` — an HTTP handler that decided what to batch or
+    # where to run would be the dispatch layer wearing a router (arch.md §6). It grows
+    # `launch` in phase B, when `/streams` needs to reach the shards.
+    "api": {"core", "repository", "engine"},
+    # What is left of `server` is the launcher and the topology-as-placement classes; they sit
+    # *on* the engine and may not import `runtime` or `backends` directly any more
     # (transitively they still reach both through the engine — this check is about direct
     # imports, which is what keeps the remaining callers greppable). `repository` stays because `server/topology/deepstream.py`
     # reads the model repository to plan its shards — a config question, answered without a
