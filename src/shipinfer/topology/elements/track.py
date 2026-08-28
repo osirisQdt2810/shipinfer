@@ -1,11 +1,16 @@
-"""The per-camera tracker table: one tracker per camera, and the ordering invariant.
+"""The ``track`` element: one stateful tracker per camera, and the plane change.
 
-Moved here from ``pipeline/graph/tracking.py`` in phase C4, unchanged in behaviour, because
-the chain's ``track`` element and the counting-simulation pipeline's ``TrackStage`` both need
-it and two copies of an invariant that has **no symptom when it breaks** is how one of them
-stops being correct. That module imports it back, so the older graph keeps working — the
-coexistence ``docs/arch.md`` section 9 describes, and the reason ``pipeline`` may import
-``topology`` one-way (``scripts/hooks/check_layers.py`` states the direction).
+This is arch.md §5⑥ on the chain — the step where a frame stops being pixels and becomes
+identities. Two things live here, and the split is deliberate:
+
+* :class:`TrackerShard` is the **per-camera table**: one tracker instance per camera, one
+  lock per camera, one high-water mark per camera. It was proven in
+  ``pipeline/graph/tracking.py`` and is *moved* here rather than rewritten, so the chain and
+  the counting-simulation pipeline share one implementation of an invariant that has no
+  symptom when it breaks (that module now imports it back — the coexistence arch.md §9
+  describes).
+* :class:`ShipvisionTrack` is the element: it turns a :class:`ChainItem` into the tracker's
+  vocabulary, calls the shard, and turns the answer back into metadata.
 
 **Why the sharding is a correctness constraint and not a scaling one.** Kalman state, track
 ids and ageing all belong to one camera's view. Two cameras on one tracker associate one
@@ -14,34 +19,63 @@ identity reported somewhere nothing happened. ``shipvision``'s ``BaseTracker.beg
 a camera change as a second line of defence, and that belt-and-braces is deliberate because
 the failure is invisible.
 
-**Why the ordering guard is here.** The fair lane preserves a camera's frame order (one FIFO
-deque per fairness key), but the *workers* do not: with more than one pipeline worker, two of
-a camera's frames are in flight at once and the later one can reach the tracker first. Feeding
-a tracker a frame it has already passed double-ages every track and double-counts the hit that
-promotes one, so it is refused — see :meth:`TrackerShard.update` for what the caller does with
-that refusal.
+**Why the ordering guard is here and not upstream.** The fair lane preserves a camera's frame
+order (one FIFO deque per fairness key), but the *workers* do not: with more than one pipeline
+worker, two of a camera's frames are walked concurrently and the later one can reach this
+element first. Feeding a tracker a frame it has already passed double-ages every track and
+double-counts the hit that promotes one, so the frame that lost the race is refused — and the
+refusal is **caught here**, counted, and the item emitted with ``track`` in
+``missing_stages``. An element that raised would cost the frame its whole event (the runner
+fails the item's future and stops the walk), and a frame with an honest gap is worth more than
+no frame at all (arch.md §5⑤).
+
+**Why the payload is dropped.** ``produces`` is ``meta@cpu`` and exactly one entry, so this
+element stamps its own cap on the item it derives — the one place in the chain where that is
+right, because this is the plane change the caps vocabulary exists to describe. Stamping
+``meta@cpu`` while carrying a device handle would relabel VRAM as host metadata, which is the
+laundering ``_substitute_donor`` refuses and the download arch.md §8 exists to make visible.
+So the payload goes with the label.
 
 **Where shipvision is named.** Nowhere at module scope. Every symbol comes from
 :mod:`shipinfer.topology.bridge` inside a function, so ``import shipinfer.topology`` stays
-free of the submodule and a chain that names it is still *validatable* on a host that never
-checked it out.
+free of the submodule and a chain naming ``impl: shipvision`` is still *validatable* on a host
+that never checked it out — it fails at ``open()``, with the command that fixes it.
 """
 
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Mapping
-from typing import Any
+from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 
-from shipinfer.core.errors import ConfigurationError, TrackingError
-from shipinfer.topology.bridge import load_mot
+from shipinfer.core.errors import ConfigurationError, TrackingError, ValidationError
+from shipinfer.topology.base import ChainItem, Element, ElementContext, ElementKind
+from shipinfer.topology.bridge import load_mot, load_types
+from shipinfer.topology.elements.detections import Detections
+from shipinfer.topology.registry import registry_for
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from shipinfer.core.metrics import Counter, Gauge
 
 __all__ = [
+    "DEFAULT_ALGORITHM",
     "DEFAULT_REGRESSION_RESET",
+    "MISSING_STAGES",
+    "ShipvisionTrack",
     "TrackerShard",
 ]
+
+#: The metadata key naming the stages a frame went through without. The chain's half of
+#: ``pipeline/schema.py``'s field of the same name, and the vocabulary an ``output`` element
+#: serialises: a partial frame says so, and never reads as a complete one with nothing in it.
+MISSING_STAGES = "missing_stages"
+
+#: The tracker a slot gets when it does not say. ByteTrack, mirroring
+#: ``pipeline.tracking.algorithm`` — a literal in a pure layer because ``topology`` may not
+#: read the settings tree, and a test ties the two so they cannot drift.
+DEFAULT_ALGORITHM = "bytetrack"
 
 #: How far a camera's ``frame_id`` may go *backwards* before this element stops calling it a
 #: reordering and starts calling it a restarted stream.
@@ -344,3 +378,424 @@ class TrackerShard:
 
     def __repr__(self) -> str:
         return f"<TrackerShard {self._algorithm} cameras={len(self._cameras)}>"
+
+
+class _TrackMetrics:
+    """The element's metric handles, resolved once at ``open``.
+
+    Same shape and the same reason as :class:`~shipinfer.runners.metrics.RunnerMetrics`: at a
+    thousand frames a second a metric looked up by string per frame is a hash and a dict probe
+    nobody needs to pay for. It exists as a class rather than five attributes so that
+    ``context.metrics is None`` has one answer — a null object whose calls are no-ops — instead
+    of an ``if`` on the per-frame path.
+
+    ``None`` means the runner offered no registry, and then nothing is counted rather than a
+    private registry being minted: a metric nobody scrapes reads as evidence and is worse than
+    an absent one (:class:`~shipinfer.topology.base.ElementContext`).
+    """
+
+    __slots__ = ("cameras", "element", "out_of_order", "regressions", "untracked")
+
+    def __init__(self, registry: Any, element: str) -> None:
+        self.element = element
+        counter = getattr(registry, "counter", None)
+        if counter is None:
+            self.out_of_order: Counter | None = None
+            self.untracked: Counter | None = None
+            self.regressions: Counter | None = None
+            self.cameras: Gauge | None = None
+            return
+        self.out_of_order = registry.counter(
+            "shipinfer_track_frames_out_of_order_total",
+            "Frames refused by a camera's tracker because they did not advance its stream, "
+            "per camera. The number that says whether the reordering the pipeline workers "
+            "introduce is material; the fix is upstream (fewer of one camera's frames in "
+            "flight), never a reorder buffer.",
+        )
+        self.untracked = registry.counter(
+            "shipinfer_track_frames_untracked_total",
+            "Frames the track element emitted with `track` in `missing_stages`, by reason. "
+            "`no_detections` is a frame the detector never answered for; `out_of_order` is a "
+            "frame that lost the ordering race. Both are emitted rather than failed: a frame "
+            "with an honest gap is worth more than no frame at all.",
+        )
+        self.regressions = registry.counter(
+            "shipinfer_track_implicit_resets_total",
+            "Cameras whose frame_id went backwards far enough to be a restarted stream that "
+            "nobody announced, per camera. Every track id under that camera changed at this "
+            "moment; a deployment seeing these should be sending remove_camera + add_camera.",
+        )
+        self.cameras = registry.gauge(
+            "shipinfer_track_cameras",
+            "Cameras holding a tracker on this element. Labelled by element because two "
+            "`track` slots in one chain keep two independent tables, and one gauge would "
+            "report whichever wrote last.",
+        )
+
+    def out_of_order_frame(self, camera_id: str) -> None:
+        if self.out_of_order is not None:
+            self.out_of_order.inc(camera=camera_id)
+        if self.untracked is not None:
+            self.untracked.inc(reason="out_of_order")
+
+    def untracked_frame(self, reason: str) -> None:
+        if self.untracked is not None:
+            self.untracked.inc(reason=reason)
+
+    def implicit_reset(self, camera_id: str) -> None:
+        if self.regressions is not None:
+            self.regressions.inc(camera=camera_id)
+
+    def camera_count(self, count: int) -> None:
+        if self.cameras is not None:
+            self.cameras.set(count, element=self.element)
+
+
+@registry_for(ElementKind.TRACK).register("shipvision")
+class ShipvisionTrack(Element):
+    """Per-camera multi-object tracking over ``shipvision.mot``.
+
+    Reads ``meta["detections"]`` — the decoded, source-pixel
+    :class:`~shipinfer.topology.elements.detections.Detections` a ``pool`` detector files —
+    and optionally ``meta["vectors"]``, and writes ``meta["tracks"]``.
+
+    **The caps.** ``accepts`` lists ``meta@cpu`` first because a tracker wants boxes and not
+    pixels: fed by another metadata element it never touches a frame at all. ``bgr@cpu`` and
+    ``nv12@gpu`` follow because today's chain is host memory end to end and phase D's is
+    device memory end to end, and in both cases this element is where the chain leaves the
+    frame behind. ``produces`` is one entry, so this element **does** stamp its own cap and
+    clear the payload — the one place in the chain where that is right, because it is the
+    plane change and not a relabelling.
+
+    **What it never does is fail a frame for a tracking refusal.** An out-of-order frame is
+    counted and emitted with ``track`` in ``missing_stages``; so is a frame the detector never
+    answered for. Anything the runner sees raised from here is a genuine fault — a malformed
+    payload, a broken configuration — and costs that one item.
+
+    ``params:`` takes:
+
+    * ``algorithm`` — a name in ``shipvision.mot.TRACKERS``. Default
+      :data:`DEFAULT_ALGORITHM`.
+    * ``options: {...}`` — constructor keyword arguments for that tracker (``max_age``,
+      ``min_hits``, ``track_threshold``, …). A key the tracker does not accept stops the
+      deploy at ``open()`` rather than on the first frame.
+    * ``classes: [ship, person]`` — the detection labels to track. Default: every label the
+      detector produced. Names and not ids, because
+      :class:`~shipinfer.topology.elements.detections.Detections` resolves the id table once
+      and a second copy of it here is a second thing to get wrong.
+    * ``regression_reset`` — see :data:`DEFAULT_REGRESSION_RESET`.
+
+    There is deliberately **no ``backend:``**. ``TRACKERS.build`` with no backend resolves the
+    fastest one this host can actually build with a numpy floor, which is what every caller
+    here wants; naming ``native`` would make a chain that loads on the build machine refuse on
+    a machine without the extension, for a tracker whose cost is tens of microseconds against a
+    frame budget of milliseconds.
+    """
+
+    kind: ClassVar[ElementKind] = ElementKind.TRACK
+    #: ``meta@cpu`` first: a tracker fed by another metadata element never sees a frame. The
+    #: other two are the same chain before and after phase D, and this element is the plane
+    #: change in both.
+    accepts: ClassVar[tuple[str, ...]] = ("meta@cpu", "bgr@cpu", "nv12@gpu")
+    produces: ClassVar[tuple[str, ...]] = ("meta@cpu",)
+    # `requires_model_name`, `needs_model` and `needs_image_ops` all keep the ABC's `False`,
+    # and each one is an answer rather than an omission: a MOT algorithm is not a repository
+    # model (so no `model:` in the chain and no `InferenceServer` behind the runner), and it
+    # reads boxes rather than pixels (so no letterbox and no `runtime.ops`).
+
+    def __init__(
+        self,
+        name: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        model: str | None = None,
+    ) -> None:
+        super().__init__(name, params, model=model)
+        self._algorithm = str(self.params.get("algorithm", DEFAULT_ALGORITHM))
+        options = self.params.get("options") or {}
+        if not isinstance(options, Mapping):
+            raise ConfigurationError(
+                f"track element {name!r}: `params: options:` must be a mapping of tracker "
+                f"keyword arguments, got {type(options).__name__}"
+            )
+        self._options: dict[str, Any] = dict(options)
+        self._classes = self._parse_classes(self.params.get("classes"))
+        self._regression_reset = self._parse_regression_reset(
+            self.params.get("regression_reset", DEFAULT_REGRESSION_RESET)
+        )
+        self._shard: TrackerShard | None = None
+        self._metrics = _TrackMetrics(None, name)
+        # What the gauge last reported, so the per-frame path is an int compare and the write
+        # happens only when a camera appears or leaves.
+        self._reported_cameras = -1
+        # Resolved once at open: the three shipvision types this element builds per frame.
+        # Bound as attributes rather than walked off the module every frame, because
+        # `types.Detection` is two dict lookups and this runs fifteen thousand times a second.
+        self._Detection: Any = None
+        self._Detections: Any = None
+        self._FrameTag: Any = None
+
+    def _parse_classes(self, declared: Any) -> tuple[str, ...] | None:
+        """``params: classes:`` as a tuple of labels, or ``None`` for "everything".
+
+        ``None`` and not ``()``: an empty list in a chain file means "track nothing", which is
+        a strange thing to ask for but an unambiguous one, and conflating it with an absent key
+        would make a typo silently track everything.
+        """
+        if declared is None:
+            return None
+        if isinstance(declared, str) or not isinstance(declared, Sequence):
+            raise ConfigurationError(
+                f"track element {self.name!r}: `params: classes:` must be a list of detection "
+                f"labels, got {type(declared).__name__}"
+            )
+        return tuple(str(entry) for entry in declared)
+
+    def _parse_regression_reset(self, declared: Any) -> int:
+        try:
+            value = int(declared)
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(
+                f"track element {self.name!r}: `params: regression_reset:` must be a number "
+                f"of frames, got {declared!r}"
+            ) from exc
+        if value < 0:
+            raise ConfigurationError(
+                f"track element {self.name!r}: `params: regression_reset:` must not be "
+                f"negative, got {value}; 0 refuses every regression"
+            )
+        return value
+
+    # -- lifecycle ---------------------------------------------------------------------
+
+    def _do_open(self, context: ElementContext) -> None:
+        """Build the per-camera table and resolve the vocabulary — both now, neither per frame.
+
+        Raises:
+            ConfigurationError: ``3rdparty/shipvision`` is not checked out or not installed
+                (the bridge's refusal, carrying the command that fixes it), the algorithm is
+                unknown, or ``options`` holds a key the tracker's constructor does not accept.
+                All three stop the deploy rather than surfacing identically on every frame from
+                inside a worker thread.
+        """
+        types = load_types()
+        self._Detection = types.Detection
+        self._Detections = types.Detections
+        self._FrameTag = types.FrameTag
+        self._shard = TrackerShard(self._algorithm, options=self._options, backend=None)
+        self._metrics = _TrackMetrics(context.metrics, self.name)
+        self._reported_cameras = -1
+        self._note_cameras()
+
+    def _do_close(self) -> None:
+        # The trackers go with the element: their state is a camera's identity history and
+        # keeping it across a close would mean a reopened chain continuing ids from before the
+        # gap it cannot see.
+        self._shard = None
+        self._Detection = None
+        self._Detections = None
+        self._FrameTag = None
+
+    def camera_added(self, camera_id: str) -> None:
+        """Restart this camera's tracker if it already had one.
+
+        A re-added camera is a camera whose ingest actor minted a fresh ``FrameCounter``, so
+        its next frame is ``frame_id = 0`` — below the high-water mark the previous run left
+        behind, and refused forever without this. ADR-018 names remove + add as the recovery
+        for a lost camera, so this state has to be one the chain can be in.
+
+        Never *builds* a tracker: this fires for every camera placed on the shard, and minting
+        a Kalman filter for forty-nine cameras that are not on this element — on the thread
+        holding the runner's lifecycle lock — is work for nothing.
+        """
+        if self._shard is not None:
+            self._shard.reset_if_present(camera_id)
+
+    def camera_removed(self, camera_id: str) -> None:
+        """Drop this camera's tracker, under the table lock and nothing else.
+
+        See :meth:`TrackerShard.drop` for why it does not wait for an in-flight frame: this
+        runs holding the runner's ``_lifecycle``, and every other lifecycle operation on the
+        shard — including the ``stop`` that would end a wait — queues behind it.
+        """
+        if self._shard is not None and self._shard.drop(camera_id):
+            self._note_cameras()
+
+    # -- one frame ---------------------------------------------------------------------
+
+    def _do_process(self, item: ChainItem) -> ChainItem:
+        """Track one frame, and hand on metadata rather than pixels.
+
+        Returns:
+            The successor item: same tag, ``caps`` = ``meta@cpu``, ``payload`` cleared, and
+            ``meta["tracks"]`` holding this frame's publishable tracks. ``meta["frame_hw"]``
+            rides along from the detector, because the boxes are in that extent's pixels and
+            the payload that could have said so is gone.
+
+            A frame the detector never answered for, and a frame that lost the ordering race,
+            come back with the same shape and ``track`` in ``meta["missing_stages"]`` — never
+            as ``None`` and never as an exception, because "no ships in this frame", "the
+            detector is dead" and "this frame arrived late" are three events and only one of
+            them is a fault (arch.md §5⑤).
+
+        Raises:
+            ValidationError: ``meta["detections"]`` is not a
+                :class:`~shipinfer.topology.elements.detections.Detections`, or
+                ``meta["vectors"]`` is present in a form that cannot be attributed to
+                detections. Both are a mis-wired chain rather than a late frame, and a
+                tracker that silently ran without the appearance vectors a deployment paid a
+                re-ID network for would be the empty-result-means-failure this codebase refuses.
+            ServerStateError: called before :meth:`Element.open`.
+        """
+        detections = item.meta.get("detections")
+        if detections is None:
+            # The detector did not answer. Distinct from "no objects": an empty `Detections`
+            # still advances the tracker below, because ageing is how a track dies.
+            self._metrics.untracked_frame("no_detections")
+            return self._untracked(item)
+        if not isinstance(detections, Detections):
+            raise ValidationError(
+                f"track element {self.name!r} was handed meta['detections'] of type "
+                f"{type(detections).__name__} and needs a decoded Detections in source-frame "
+                "pixels; a `pool` detector files one, and raw model outputs are not it"
+            )
+
+        assert self._shard is not None  # `process` refuses before `open`
+        camera_id = item.context.camera_id
+        vision = self._as_vision_detections(item, detections)
+        try:
+            tracks = self._shard.update(
+                vision,
+                regression_reset=self._regression_reset,
+                on_implicit_reset=self._metrics.implicit_reset,
+            )
+        except TrackingError:
+            # Counted and emitted, never raised on: the runner fails an item's future on any
+            # exception, and this frame's boxes, masks and vectors are all still good.
+            self._metrics.out_of_order_frame(camera_id)
+            return self._untracked(item)
+        self._note_cameras()
+        # `tracks` is handed on as shipvision's own `Track` objects, deliberately. They are
+        # exactly what the cross-camera tier consumes (`mtmc.CameraTracks(tag, tracks, h, w)`),
+        # so a pure record here would be a shape `mtmc` converts straight back — losing the
+        # embedding, the state and the tag on the way — and the pool already returns
+        # `dataclasses.replace` copies, so buffering one past the next frame is safe.
+        return item.derive(caps=self.output_caps[0], payload=None, tracks=tracks)
+
+    def _untracked(self, item: ChainItem) -> ChainItem:
+        """The successor for a frame this element could not track: same plane, no tracks."""
+        return item.derive(
+            caps=self.output_caps[0],
+            payload=None,
+            **{MISSING_STAGES: (*item.meta.get(MISSING_STAGES, ()), "track")},
+        )
+
+    def _as_vision_detections(self, item: ChainItem, detections: Detections) -> Any:
+        """This frame's detections in the tracking library's vocabulary, embeddings attached.
+
+        The conversion is per object and this is a hot path, but it is bounded by
+        ``max_detections`` and it is the price of a shared vocabulary: the alternative is a
+        second box format in the system, and ``shipvision.types`` names the exact bug that
+        causes — a converter that wrote width where height belonged tracks square objects
+        perfectly and falls apart on a ship.
+        """
+        vectors = self._embeddings(item, detections)
+        keep = self._selected(detections)
+        boxes = detections.boxes
+        scores = detections.scores
+        class_ids = detections.class_ids
+        height, width = item.meta.get("frame_hw", (0, 0))
+        return self._Detections(
+            tag=self._FrameTag(
+                camera_id=item.context.camera_id,
+                frame_id=item.context.frame_id,
+                timestamp=item.context.captured_unix_ns / 1e9,
+            ),
+            items=[
+                self._Detection(
+                    box=boxes[index],
+                    # Clamped rather than passed through: `Detection` refuses a score outside
+                    # [0, 1], and an fp16 engine that reports 1.0000001 would otherwise fail
+                    # tracking on every frame it appeared in. The value is the detector's
+                    # confidence, and one ulp of it is not information worth a dropped frame.
+                    score=min(1.0, max(0.0, float(scores[index]))),
+                    class_id=int(class_ids[index]),
+                    embedding=None if vectors is None else vectors[index],
+                )
+                for index in keep
+            ],
+            height=int(height),
+            width=int(width),
+        )
+
+    def _selected(self, detections: Detections) -> range | tuple[int, ...]:
+        """Which detection rows this element tracks — every one, or the declared classes.
+
+        A ``range`` in the common case, so the "track everything" path allocates nothing per
+        frame beyond what the tracker itself needs.
+        """
+        if self._classes is None:
+            return range(len(detections))
+        wanted = self._classes
+        return tuple(i for i, label in enumerate(detections.labels) if label in wanted)
+
+    def _embeddings(self, item: ChainItem, detections: Detections) -> Any:
+        """``meta["vectors"]`` as one appearance vector per detection row, or ``None``.
+
+        Two forms are accepted and both are unambiguous: a mapping of detection index to
+        vector, and a sequence or array with exactly one row per detection. Anything else —
+        a re-ID model's raw output tensors under their own names, most likely — is refused
+        rather than ignored, because appearance is what carries an identity through the frames
+        where geometry alone is ambiguous, and a tracker that quietly ran without it is a
+        measurable accuracy loss reported as a healthy chain.
+
+        Returns:
+            Something indexable by detection row, or ``None`` when the chain filed no vectors.
+        """
+        vectors = item.meta.get("vectors")
+        if vectors is None:
+            return None
+        count = len(detections)
+        if isinstance(vectors, Mapping):
+            try:
+                by_index = {int(key): value for key, value in vectors.items()}
+            except (TypeError, ValueError) as exc:
+                raise ValidationError(
+                    f"track element {self.name!r}: meta['vectors'] is a mapping whose keys are "
+                    f"not detection indices ({sorted(vectors)[:4]}...). An embedder's raw "
+                    "output tensors are not an attribution; scatter them back onto the rows "
+                    "they came from first"
+                ) from exc
+            return [by_index.get(index) for index in range(count)]
+        if isinstance(vectors, (np.ndarray, Sequence)):
+            if len(vectors) != count:
+                raise ValidationError(
+                    f"track element {self.name!r}: meta['vectors'] has {len(vectors)} rows for "
+                    f"{count} detections. One row per detection, in the detector's own order, "
+                    "or a mapping of detection index to vector"
+                )
+            return vectors
+        raise ValidationError(
+            f"track element {self.name!r}: meta['vectors'] is a {type(vectors).__name__} and "
+            "must be one row per detection or a mapping of detection index to vector"
+        )
+
+    # -- metrics -----------------------------------------------------------------------
+
+    def _note_cameras(self) -> None:
+        """Publish the tracker count, and only when it changed.
+
+        An int compare on the per-frame path and a gauge write when a camera appears or
+        leaves. Two workers can race the compare; a gauge that is one frame late is a gauge,
+        and taking a lock per frame to keep it exact would cost more than the number is worth.
+        """
+        if self._shard is None:
+            return
+        count = self._shard.camera_count
+        if count != self._reported_cameras:
+            self._reported_cameras = count
+            self._metrics.camera_count(count)
+
+    def __repr__(self) -> str:
+        cameras = 0 if self._shard is None else self._shard.camera_count
+        return f"<ShipvisionTrack {self.name} {self._algorithm} cameras={cameras}>"
