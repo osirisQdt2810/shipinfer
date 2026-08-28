@@ -22,9 +22,10 @@ from shipinfer.core.request import InferenceRequest, RequestContext
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Tensor
 from shipinfer.engine import InferenceServer
+from tests.support.models import materialise
 
 _MODEL = """
-platform: mock
+platform: pytorch
 max_batch_size: 4
 inputs: [{name: x, data_type: FP32, dims: [2]}]
 outputs: [{name: y, data_type: FP32, dims: [2]}]
@@ -51,6 +52,7 @@ def _write_model(root: Path, name: str, body: str = _MODEL, *, versioned: bool =
     directory = root / name
     (directory / "1").mkdir(parents=True) if versioned else directory.mkdir(parents=True)
     (directory / "config.yaml").write_text(body.lstrip())
+    materialise(root)
 
 
 @pytest.fixture()
@@ -58,6 +60,7 @@ def repository(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
     _write_model(root, "echo")
     _write_model(root, "other")
+    materialise(root)
     return root
 
 
@@ -164,7 +167,9 @@ class TestExplicitControl:
         assert "arrived_late" in explicit.models()
 
     def test_a_failed_load_leaves_the_server_untouched(self, explicit, repository) -> None:
-        _write_model(repository, "broken", _MODEL.replace("platform: mock", "platform: nope"))
+        _write_model(
+            repository, "broken", _MODEL.replace("platform: pytorch", "platform: nope")
+        )
         explicit.load_model("echo")
 
         with pytest.raises(ConfigurationError):

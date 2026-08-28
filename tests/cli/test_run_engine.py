@@ -51,6 +51,7 @@ from shipinfer.topology import ChainItem, ChainSpec, ElementKind, Topology
 from shipinfer.topology.base import ElementContext
 from shipinfer.topology.elements.mock import MockDetect
 from shipinfer.topology.registry import registry_for
+from tests.support.models import materialise
 
 #: The module object, not the ``run`` function ``shipinfer.cli.commands`` re-exports under the
 #: same name -- ``monkeypatch.setattr("shipinfer.cli.commands.run._wait", ...)`` resolves the
@@ -336,7 +337,7 @@ def detector_repository(tmp_path: Path) -> Path:
     ``echo`` declares ``x[4]`` because the engine tests submit ``(1, 4)`` tensors to it. Both
     are right for what they are; neither is a detector.
 
-    ``platform: mock`` on a ``KIND_CPU`` group, so :class:`~shipinfer.engine.InferenceServer`
+    ``platform: pytorch`` on a ``KIND_CPU`` group, so :class:`~shipinfer.engine.InferenceServer`
     starts it with no accelerator. The dims are the artefact's statement of its own geometry --
     ``PoolDetect`` resolves its letterbox target from them, which is what a real deployment
     does -- and ``8x8`` only to keep the fixture small.
@@ -345,7 +346,7 @@ def detector_repository(tmp_path: Path) -> Path:
     (root / "detector" / "1").mkdir(parents=True)
     (root / "detector" / "config.yaml").write_text(textwrap.dedent("""
         name: detector
-        platform: mock
+        platform: pytorch
         max_batch_size: 4
         inputs:
           - {name: images, data_type: FP32, dims: [3, 8, 8]}
@@ -354,6 +355,7 @@ def detector_repository(tmp_path: Path) -> Path:
         instance_groups:
           - {kind: KIND_CPU, count: 1}
         """).lstrip())
+    materialise(root)
     return root
 
 
@@ -986,7 +988,7 @@ class TestOverARealEngine:
     in it, and looks at the element while the chain is open -- which is the thing that used to
     raise ``ConfigurationError`` before the first frame.
 
-    Offline: :func:`detector_repository` declares one ``platform: mock`` model on a
+    Offline: :func:`detector_repository` declares one ``platform: pytorch`` model on a
     ``KIND_CPU`` instance group, so no accelerator is touched.
     """
 

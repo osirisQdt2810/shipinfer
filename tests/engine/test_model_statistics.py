@@ -24,9 +24,10 @@ from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Tensor
 from shipinfer.engine import InferenceServer
 from shipinfer.engine.statistics import DurationStat, ModelStatistics
+from tests.support.models import materialise
 
 _ECHO = """
-platform: mock
+platform: pytorch
 max_batch_size: 4
 inputs: [{name: x, data_type: FP32, dims: [2]}]
 outputs: [{name: y, data_type: FP32, dims: [2]}]
@@ -40,7 +41,7 @@ parameters: {latency_ms: 0.05}
 #: server in this file is healthy, so the four per-camera maps are legitimately empty there —
 #: this is the shape that makes a refusal certain rather than a race.
 _SLOW_ECHO = """
-platform: mock
+platform: pytorch
 max_batch_size: 1
 inputs: [{name: x, data_type: FP32, dims: [2]}]
 outputs: [{name: y, data_type: FP32, dims: [2]}]
@@ -55,6 +56,7 @@ def repository(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
     (root / "echo" / "1").mkdir(parents=True)
     (root / "echo" / "config.yaml").write_text(_ECHO.lstrip())
+    materialise(root)
     return root
 
 
@@ -89,6 +91,7 @@ def saturated_server(tmp_path: Path):
     root = tmp_path / "slow_repo"
     (root / "echo" / "1").mkdir(parents=True)
     (root / "echo" / "config.yaml").write_text(_SLOW_ECHO.lstrip())
+    materialise(root)
     settings = ServerSettings(
         model_repository=root,
         devices={"visible_gpus": []},

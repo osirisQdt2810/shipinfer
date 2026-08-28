@@ -230,14 +230,31 @@ def demo_repository_path() -> Path:
     return Path(__file__).resolve().parents[1] / "model_repository"
 
 
+@pytest.fixture(scope="session")
+def work_unit_ms() -> float:
+    """Milliseconds one unit of a fixture's real work costs on this machine.
+
+    Measured once. A fixture that has to be slow is slow because it computes: a torch op
+    releases the GIL and blocks its thread, which is what a worker waiting on an accelerator
+    does, where a sleep only models it.
+    """
+    from tests.support.models import unit_cost_ms
+
+    return unit_cost_ms()
+
+
 @pytest.fixture()
-def tmp_repository(tmp_path: Path) -> Iterator[Path]:
-    """A minimal two-model repository, writable by the test."""
+def tmp_repository(tmp_path: Path, work_unit_ms: float) -> Iterator[Path]:
+    """A minimal two-model repository of real TorchScript models, writable by the test."""
+    from tests.support.models import write_model
+
     root = tmp_path / "model_repository"
-    (root / "echo" / "1").mkdir(parents=True)
+    write_model(
+        root / "echo" / "1", in_features=4, out_features=4, latency_ms=0.5, unit_ms=work_unit_ms
+    )
     (root / "echo" / "config.yaml").write_text("""
 name: echo
-platform: mock
+platform: pytorch
 max_batch_size: 8
 inputs:
   - {name: x, data_type: FP32, dims: [4]}
@@ -249,13 +266,13 @@ dynamic_batching:
   enabled: true
   max_queue_delay_us: 2000
   preferred_batch_sizes: [2, 4, 8]
-parameters:
-  latency_ms: 0.5
 """.lstrip())
-    (root / "slow" / "1").mkdir(parents=True)
+    write_model(
+        root / "slow" / "1", in_features=2, out_features=2, latency_ms=5.0, unit_ms=work_unit_ms
+    )
     (root / "slow" / "config.yaml").write_text("""
 name: slow
-platform: mock
+platform: pytorch
 max_batch_size: 4
 inputs:
   - {name: x, data_type: FP32, dims: [2]}
@@ -265,8 +282,6 @@ instance_groups:
   - {kind: KIND_CPU, count: 1}
 dynamic_batching:
   enabled: false
-parameters:
-  latency_ms: 5.0
 """.lstrip())
     yield root
     shutil.rmtree(root, ignore_errors=True)

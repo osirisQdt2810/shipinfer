@@ -6,13 +6,11 @@ new module plus one registration; nothing else in the tree changes.
 """
 
 from shipinfer.backends.base import BackendContext, ModelBackend
-from shipinfer.backends.mock import MockBackend
 from shipinfer.backends.registry import BACKENDS, build_backend
 
 __all__ = [
     "BACKENDS",
     "BackendContext",
-    "MockBackend",
     "ModelBackend",
     "build_backend",
 ]

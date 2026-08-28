@@ -26,6 +26,7 @@ from shipinfer.core.errors import ConfigurationError
 from shipinfer.core.settings import ServerSettings
 from shipinfer.engine import InferenceServer
 from shipinfer.runtime.graphs import derive_graph_batch_sizes, resolve_graph_spec
+from tests.support.models import materialise
 
 
 def _write_model(
@@ -37,7 +38,7 @@ def _write_model(
     parameters: dict[str, Any] | None = None,
 ) -> Path:
     config: dict[str, Any] = {
-        "platform": "mock",
+        "platform": "pytorch",
         "max_batch_size": max_batch_size,
         "inputs": [{"name": "images", "data_type": "FP32", "dims": [4]}],
         "outputs": [{"name": "embedding", "data_type": "FP32", "dims": [3]}],
@@ -56,6 +57,7 @@ def _write_model(
     directory = root / name
     (directory / "1").mkdir(parents=True)
     (directory / "config.yaml").write_text(yaml.safe_dump(config))
+    materialise(root)
     return root
 
 

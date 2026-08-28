@@ -61,6 +61,7 @@ from shipinfer.topology import bridge as bridge_module
 from shipinfer.topology.elements.detections import Detections, Normalization
 from shipinfer.topology.elements.pool import PoolEmbed, PoolSegment
 from shipinfer.topology.elements.track import ShipvisionTrack
+from tests.support.models import materialise
 
 pytestmark = [pytest.mark.timeout(60)]
 
@@ -1277,7 +1278,7 @@ class TestOverARealEngine:
         (root / "embedder" / "1").mkdir(parents=True)
         (root / "embedder" / "config.yaml").write_text(
             "name: embedder\n"
-            "platform: mock\n"
+            "platform: pytorch\n"
             "dynamic_batching: {enabled: false}\n"
             "inputs:\n"
             "  - {name: images, data_type: FP32, dims: [3, 8, 8]}\n"
@@ -1286,6 +1287,7 @@ class TestOverARealEngine:
             "instance_groups:\n"
             "  - {kind: KIND_CPU, count: 1}\n"
         )
+        materialise(root)
         return root
 
     def test_an_omitted_max_batch_size_loses_no_crop(self, embedder_repository) -> None:

@@ -19,9 +19,10 @@ import pytest
 from shipinfer.core.errors import ServerStateError
 from shipinfer.core.settings import ServerSettings
 from shipinfer.engine import InferenceServer
+from tests.support.models import materialise
 
 _MODEL = """
-platform: mock
+platform: pytorch
 max_batch_size: 4
 inputs: [{{name: x, data_type: FP32, dims: [2]}}]
 outputs: [{{name: y, data_type: FP32, dims: [2]}}]
@@ -39,6 +40,7 @@ class TestTheServerRunsTheSamples:
         root = tmp_path / "repo"
         (root / "m" / "1").mkdir(parents=True)
         (root / "m" / "config.yaml").write_text(_MODEL.format(warmup=warmup).lstrip())
+        materialise(root)
         return InferenceServer(
             ServerSettings(
                 model_repository=root,
@@ -49,7 +51,7 @@ class TestTheServerRunsTheSamples:
 
     def _executions(self, server: InferenceServer) -> int:
         (instance,) = server.model("m").instances
-        return instance.stats()["backend"]["executions"]
+        return instance.stats()["backend"]["warmup_executions"]
 
     def test_without_samples_the_iteration_count_still_governs(self, tmp_path: Path) -> None:
         with self._server(tmp_path, "", iterations=2) as server:
@@ -120,6 +122,7 @@ class TestABrokenSampleFailsStartUpFastNotAfterTheTimeout:
                 )
             ).lstrip()
         )
+        materialise(root)
         server = InferenceServer(
             ServerSettings(
                 model_repository=root,

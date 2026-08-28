@@ -21,9 +21,10 @@ from shipinfer.core.request import InferenceRequest, RequestContext
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Tensor
 from shipinfer.engine import InferenceServer
+from tests.support.models import materialise
 
 
-def _repo(tmp_path: Path, *, cache: str | None = "lru", fail_every: int = 0) -> Path:
+def _repo(tmp_path: Path, *, cache: str | None = "lru", broken: bool = False) -> Path:
     """A one-model repository whose caching can be switched on and off."""
     root = tmp_path / "repo"
     (root / "m" / "1").mkdir(parents=True)
@@ -33,7 +34,7 @@ def _repo(tmp_path: Path, *, cache: str | None = "lru", fail_every: int = 0) -> 
     elif cache is not None:
         cache_block = f"  response_cache: {cache}\n"
     (root / "m" / "config.yaml").write_text(
-        "platform: mock\n"
+        "platform: pytorch\n"
         "max_batch_size: 4\n"
         "inputs: [{name: x, data_type: FP32, dims: [4]}]\n"
         "outputs: [{name: y, data_type: FP32, dims: [2]}]\n"
@@ -41,8 +42,9 @@ def _repo(tmp_path: Path, *, cache: str | None = "lru", fail_every: int = 0) -> 
         "dynamic_batching: {enabled: false}\n"
         "parameters:\n"
         "  latency_ms: 0.1\n"
-        f"  fail_every: {fail_every}\n" + cache_block
+        f"  disagrees_with_its_config: {broken}\n" + cache_block
     )
+    materialise(root)
     return root
 
 
@@ -68,7 +70,15 @@ def _request(value: float, camera: str = "cam0", frame: int = 0) -> InferenceReq
 
 
 def _executions(server: InferenceServer) -> int:
-    return sum(i.stats()["backend"]["executions"] for i in server.model("m").instances)
+    """How many batches the model actually attempted — the instance's own counters.
+
+    It used to read a counter only `MockBackend` reported. The instance has always tracked
+    this for every backend, and a cache test asking "did the model run again?" is asking
+    exactly what `batches` answers.
+    """
+    return sum(
+        i.stats()["batches"] + i.stats()["failed_batches"] for i in server.model("m").instances
+    )
 
 
 class TestCacheKeying:
@@ -129,7 +139,7 @@ class TestCacheAdmissionAndEviction:
 
     def test_a_failed_request_is_not_cached(self, tmp_path: Path) -> None:
         """A stored exception would be served forever — far worse than being slow."""
-        with _server(_repo(tmp_path, fail_every=1)) as server:
+        with _server(_repo(tmp_path, broken=True)) as server:
             for _ in range(2):
                 with pytest.raises(InferenceError):
                     server.infer_sync(_request(1.0), timeout=10)

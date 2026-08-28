@@ -20,11 +20,12 @@ from shipinfer.core.request import InferenceRequest, RequestContext
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Tensor
 from shipinfer.engine import InferenceServer
+from tests.support.models import materialise
 
 # Four instances, a bound of one, and a per-execution latency large enough that a burst
 # genuinely overlaps: without the limiter all four would be in compute at once.
 _MODEL = """
-platform: mock
+platform: pytorch
 max_batch_size: 2
 inputs: [{{name: x, data_type: FP32, dims: [2]}}]
 outputs: [{{name: y, data_type: FP32, dims: [2]}}]
@@ -39,6 +40,7 @@ def _server(tmp_path: Path, name: str, limits: str) -> InferenceServer:
     root = tmp_path / "repo"
     (root / name / "1").mkdir(parents=True)
     (root / name / "config.yaml").write_text(_MODEL.format(limits=limits).lstrip())
+    materialise(root)
     return InferenceServer(
         ServerSettings(
             model_repository=root,

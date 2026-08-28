@@ -55,6 +55,7 @@ from shipinfer.core.settings.runner import (
 )
 from shipinfer.launch import Fleet
 from shipinfer.scheduling.sharding import plan_shards
+from tests.support.models import materialise
 
 pytestmark = [
     pytest.mark.multigpu,
@@ -106,7 +107,7 @@ def _write_repository(root: Path) -> None:
     (root / "emb" / "1").mkdir(parents=True)
     (root / "emb" / "config.yaml").write_text("""
 name: emb
-platform: mock
+platform: pytorch
 max_batch_size: 1
 inputs:
   - {name: x, data_type: FP32, dims: [4]}
@@ -119,6 +120,7 @@ dynamic_batching:
 parameters:
   latency_ms: 40
 """.lstrip())
+    materialise(root)
 
 
 def _get(url: str, timeout: float = 5.0) -> tuple[int, dict]:
