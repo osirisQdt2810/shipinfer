@@ -581,6 +581,143 @@ class TestPlacingCameras:
             runner.add_camera(CameraSpec(camera_id="quay-1", url="rtsp://host"))
 
 
+class TestACameraGroupIsAnAtomicUnitOfPlacement:
+    """``docs/arch.md`` §4, enforced here because nothing else can enforce it.
+
+    An ``mtmc`` element associates one camera group against one identity space, and that
+    tracker lives in one shard process. Split the group across two shards and each half runs
+    its own tracker: one object is given two global ids, both of them plausible, and nothing
+    in the metrics disagrees. The element cannot see the split — it is told
+    :attr:`ElementContext.shard_id` and nothing about where any *camera* went, and it opens
+    before a single camera is placed. This class owns ``{camera_id: shard_id}``, so this is
+    where the invariant is decidable.
+    """
+
+    @pytest.fixture()
+    def grouped(self, clients):
+        """A two-shard fleet whose chain declares one group of four cameras."""
+        chain_yaml = textwrap.dedent("""
+            name: grouped
+            elements:
+              decode: {impl: mock}
+              detect: {impl: mock, model: ship_detector}
+              track:  {impl: mock}
+              mtmc:   {impl: mock, params: {group: quay, cameras: [q-0, q-1, q-2, q-3]}}
+              output: {impl: mock}
+            """)
+
+        def factory(shard, port):
+            clients[shard.index] = FakeClient(shard.index, port)
+            return clients[shard.index]
+
+        built = FleetRunner(
+            Topology.from_spec(ChainSpec.from_yaml(chain_yaml)),
+            ServerSettings(),
+            chain_yaml=chain_yaml,
+            shards=2,
+            gpus=[2, 3],
+            command=sleeps(),
+            client=factory,
+        )
+        yield built
+        built.stop(timeout_s=5.0)
+
+    def test_the_whole_group_follows_the_first_camera_of_it(self, grouped, clients) -> None:
+        """Least-loaded placement would have alternated them; the group pins them together."""
+        grouped.start()
+        for index in range(4):
+            grouped.add_camera(CameraSpec(camera_id=f"q-{index}", url="rtsp://host"))
+
+        assert clients[0].cameras == ["q-0", "q-1", "q-2", "q-3"]
+        assert clients[1].cameras == []
+
+    def test_a_camera_outside_the_group_is_still_placed_by_load(self, grouped, clients) -> None:
+        """The pin is the group's, not a global override: everything else balances as before."""
+        grouped.start()
+        grouped.add_camera(CameraSpec(camera_id="q-0", url="rtsp://host"))
+        grouped.add_camera(CameraSpec(camera_id="visitor", url="rtsp://host"))
+
+        assert clients[0].cameras == ["q-0"]
+        assert clients[1].cameras == ["visitor"]
+
+    def test_a_group_whose_shard_died_is_refused_naming_the_group_and_both_shards(
+        self, grouped, clients
+    ) -> None:
+        """Re-placing the survivors would be the tracker reset dressed as failover ADR-018
+        refuses, one tier up: every global id under the group would change silently."""
+        grouped.start()
+        grouped.add_camera(CameraSpec(camera_id="q-0", url="rtsp://host"))
+        assert clients[0].cameras == ["q-0"]
+        kill_shard(grouped, 0)
+
+        with pytest.raises(NoShardAvailableError) as caught:
+            grouped.add_camera(CameraSpec(camera_id="q-1", url="rtsp://host"))
+
+        message = str(caught.value)
+        assert "quay" in message
+        assert "shard 0" in message and "shard 1" in message
+        assert "atomic unit of placement" in message
+        assert clients[1].cameras == [], "half the group was placed on the survivor"
+
+    def test_the_refusal_is_a_capacity_answer_and_not_a_configuration_one(
+        self, grouped
+    ) -> None:
+        grouped.start()
+        grouped.add_camera(CameraSpec(camera_id="q-0", url="rtsp://host"))
+        kill_shard(grouped, 0)
+
+        with pytest.raises(NoShardAvailableError) as caught:
+            grouped.add_camera(CameraSpec(camera_id="q-1", url="rtsp://host"))
+
+        assert not isinstance(caught.value, ConfigurationError)
+
+    def test_removing_the_last_camera_frees_the_group_to_move(self, grouped, clients) -> None:
+        """The pin is on where the group *is*, not on where it once was."""
+        grouped.start()
+        grouped.add_camera(CameraSpec(camera_id="q-0", url="rtsp://host"))
+        grouped.add_camera(CameraSpec(camera_id="visitor", url="rtsp://host"))
+        assert grouped.remove_camera("q-0") is True
+
+        grouped.add_camera(CameraSpec(camera_id="q-1", url="rtsp://host"))
+
+        # Nothing of the group is placed any more, so q-1 is placed by load like any other
+        # camera -- onto shard 0, which the removal emptied.
+        assert clients[0].cameras == ["q-1"]
+        assert clients[1].cameras == ["visitor"]
+
+    def test_a_chain_with_no_roster_places_by_load_as_before(self, runner, clients) -> None:
+        """Declaring the roster is what buys the invariant; a chain that did not say gets the
+        honest answer, which is that the group is whatever ended up together."""
+        runner.start()
+        for index in range(4):
+            runner.add_camera(CameraSpec(camera_id=f"q-{index}", url="rtsp://host"))
+
+        assert clients[0].cameras == ["q-0", "q-2"]
+        assert clients[1].cameras == ["q-1", "q-3"]
+
+    def test_one_camera_in_two_groups_is_refused_when_the_fleet_is_built(self) -> None:
+        """A camera that would have to be on two shards at once, refused before a start."""
+        chain_yaml = textwrap.dedent("""
+            name: overlapping
+            elements:
+              decode: {impl: mock}
+              track:  {impl: mock}
+              mtmc:   {impl: mock, params: {group: quay, cameras: [q-0]}}
+              mtmc_2: {impl: mock, kind: mtmc, params: {group: gate, cameras: [q-0]}}
+              output: {impl: mock}
+            """)
+
+        with pytest.raises(ConfigurationError, match="claimed by camera groups"):
+            FleetRunner(
+                Topology.from_spec(ChainSpec.from_yaml(chain_yaml)),
+                ServerSettings(),
+                chain_yaml=chain_yaml,
+                shards=2,
+                gpus=[2, 3],
+                command=sleeps(),
+            )
+
+
 class TestTheLockIsNeverHeldAcrossAnRpc:
     """`health()` during a slow `AddCamera` is the call an operator makes while wondering why
     a camera is dark. Holding `_lock` across the RPC made it the one call that hangs."""

@@ -42,6 +42,7 @@ from types import ModuleType
 from shipinfer.core.errors import ConfigurationError
 
 __all__ = [
+    "load_errors",
     "load_mot",
     "load_mtmc",
     "load_reid",
@@ -125,6 +126,31 @@ def load_reid() -> ModuleType:
     except ImportError as exc:
         raise _unavailable("shipvision.reid", exc) from exc
     return reid
+
+
+@functools.cache
+def load_errors() -> ModuleType:
+    """``shipvision.errors`` — the library's own typed refusals.
+
+    Needed by an element that has to **catch** one rather than let it fail a frame. The
+    standing case is the cross-camera tier: ``GlobalIdAssigner`` raises ``TrackingError`` for a
+    track with no appearance vector, which is a per-frame data condition (an embedder that was
+    spilled, a crop that produced nothing) and not a fault the frame should die of. Catching it
+    by name needs the class, and the class needs the submodule, so it comes through the same
+    door as everything else.
+
+    ``shipvision.errors`` is a leaf module that imports nothing of the library, so this is the
+    cheapest of the loaders — but it is still function-scope, for the reason the module
+    docstring gives.
+
+    Raises:
+        ConfigurationError: as :func:`load_mot`.
+    """
+    try:
+        from shipvision import errors
+    except ImportError as exc:
+        raise _unavailable("shipvision.errors", exc) from exc
+    return errors
 
 
 @functools.cache
