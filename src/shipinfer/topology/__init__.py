@@ -31,8 +31,10 @@ from __future__ import annotations
 # scope" is the subprocess assertion in `tests/test_architecture.py`, which imports *this*
 # package. A module that assertion cannot reach is a module the laziness is not enforced on.
 # Free to import: `bridge` imports `functools`, `types` and `shipinfer.core.errors`, and its
-# four loaders each `from shipvision import ...` inside the function body.
-from shipinfer.topology import bridge
+# four loaders each `from shipvision import ...` inside the function body. `sinks` is here for
+# the same reason with `confluent_kafka` in bridge's role: the subprocess must REACH
+# `sinks/kafka.py` for its laziness to be enforced (this PR's review caught the gap).
+from shipinfer.topology import bridge, sinks
 from shipinfer.topology.barrier import InstantBarrier, WaiterBudget
 from shipinfer.topology.base import (
     CameraGroup,

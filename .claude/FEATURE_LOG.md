@@ -930,8 +930,6 @@ obvious.
 
 ---
 
----
-
 ## 2026-08-27 — a dead shard's cameras are reported lost, never re-placed (Phase B4)
 
 `Fleet.dead_indices()` names exited shards by plan index and `runners.fleet._lost_in()` maps them
