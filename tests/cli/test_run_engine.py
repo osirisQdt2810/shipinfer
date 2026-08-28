@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import importlib
 import textwrap
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
@@ -123,6 +124,26 @@ class RecordingEngine:
 
     def get(self, name: str) -> str:  # pragma: no cover - no element opens in these tests
         return name
+
+
+class FourGpuEngine(RecordingEngine):
+    """A ``RecordingEngine`` that reports four GPUs, so the ops spread has something to spread.
+
+    Two attributes deep on purpose: ``get_thread_local_image_ops`` reads ``visible_gpus`` and
+    ``has_accelerator`` off the engine's ``DeviceManager`` and nothing else, which is why the
+    command can ask a real engine for its device list without building a second one. Reporting
+    ``has_accelerator`` as ``False`` while naming four devices is not a contradiction here: it
+    is what keeps this test offline, because the truthy branch calls ``bind_current_thread``.
+    """
+
+    class _Devices:
+        visible_gpus: ClassVar[tuple[int, ...]] = (0, 1, 2, 3)
+        has_accelerator: ClassVar[bool] = False
+
+    def __init__(self, settings: ServerSettings | None = None) -> None:
+        super().__init__(settings)
+        self.devices = FourGpuEngine._Devices()
+        self.memory = None
 
 
 class RefusingEngine:
@@ -436,12 +457,8 @@ class TestThePoolIsUpBeforeTheChainOpensAndDownAfterItStops:
         Asserting the *context* rather than only the constructor keyword, because that is what
         `PoolDetect._do_open` reads; a runner that accepted the keyword and dropped it on the
         floor would pass the constructor assertion and refuse every real chain at `open()`.
-
-        The concrete class is asserted too: on this host `get_image_ops` degrades to numpy,
-        and a run that silently produced something else would mean the offline tier had
-        touched a device.
         """
-        from shipinfer.runtime.ops import NumpyImageOps
+        from shipinfer.runtime.ops import ThreadLocalImageOps
 
         monkeypatch.setattr("shipinfer.engine.InferenceServer", RecordingEngine)
 
@@ -449,8 +466,80 @@ class TestThePoolIsUpBeforeTheChainOpensAndDownAfterItStops:
 
         (built,) = RecordingRunner.instances
         assert built.ops is not None, "a chain with a `pool` detector was handed no image ops"
-        assert isinstance(built.ops, NumpyImageOps)
+        assert isinstance(built.ops, ThreadLocalImageOps)
         assert built.element_context().ops is built.ops
+
+
+class TestEveryWorkerThreadGetsItsOwnImageOps:
+    """The blocking half of the same wiring: *one instance per thread*, not per process.
+
+    `pipeline.workers` threads walk one chain over one shared `PoolDetect`
+    (`runners/inprocess.py`), and every implementation `get_image_ops` can return is per-thread
+    by contract -- `NativeImageOps` keeps a staging ring inside the extension, `TorchImageOps`
+    binds a device on the constructing thread and caches an event and a ping-pong staging pair
+    on the instance. Handing one object to four workers is CONVENTIONS 2.8's buffer overwritten
+    mid-DMA: plausible pixels, no error, and nothing an offline suite can see, because
+    `NumpyImageOps` is stateless. So the property is asserted of the *decorator* the command
+    hands over, which is checkable with no driver at all.
+
+    The second test is the other half of the same defect: a single-process run on an 8-GPU box
+    letterboxed every camera on `cuda:0`, which is this project's founding bug one layer up.
+    """
+
+    def test_four_threads_through_the_handed_in_ops_get_four_delegates(
+        self, pool_chain_file: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("shipinfer.engine.InferenceServer", RecordingEngine)
+
+        run(pool_chain_file, runner="recording-pool")
+
+        (built,) = RecordingRunner.instances
+        # The *objects*, not their ids: a delegate is dropped when its thread exits and
+        # CPython hands the next one the same address, which makes an id-only set flaky.
+        delegates: list[object] = []
+        lock = threading.Lock()
+
+        def touch() -> None:
+            delegate = built.ops._ops
+            with lock:
+                delegates.append(delegate)
+
+        threads = [threading.Thread(target=touch) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(5.0)
+
+        assert len(delegates) == 4
+        assert len({id(d) for d in delegates}) == 4, "four workers shared one ImageOps"
+
+    def test_the_workers_are_spread_over_the_engine_s_devices(
+        self, pool_chain_file: Path, monkeypatch
+    ) -> None:
+        """Eight threads over the four GPUs the engine reports, two each.
+
+        The device list is read off the engine's `DeviceManager` and not resolved by building
+        one here: `DeviceManager.__init__` validates every visible device, which costs a CUDA
+        primary context per GPU that this process never gives back. `FourGpuEngine` is that
+        manager's shape and nothing more -- `visible_gpus` plus `has_accelerator`, which is all
+        `get_thread_local_image_ops` reads.
+        """
+        monkeypatch.setattr("shipinfer.engine.InferenceServer", FourGpuEngine)
+
+        run(pool_chain_file, runner="recording-pool")
+
+        (built,) = RecordingRunner.instances
+
+        def touch() -> None:
+            built.ops.on_device  # noqa: B018 - first touch assigns the device
+
+        threads = [threading.Thread(target=touch) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(5.0)
+
+        assert built.ops.assignments() == {0: 2, 1: 2, 2: 2, 3: 2}
 
 
 class TestWhenNoPoolIsNeededNoneIsBuilt:

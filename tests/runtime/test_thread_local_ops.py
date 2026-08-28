@@ -1,8 +1,14 @@
 """Per-thread image ops: one instance per worker, one device per instance.
 
 These three properties are the fix for three GPU faults that all report as something else
-(see :mod:`shipinfer.pipeline.graph.ops`), and all three are assertable with a counting fake
-and no driver at all — which is the point of testing them here rather than in the GPU tier.
+(see :mod:`shipinfer.runtime.ops.thread_local`), and all three are assertable with a counting
+fake and no driver at all — which is the point of testing them here rather than in the GPU
+tier.
+
+Moved with the module out of ``tests/pipeline/``: the class is an ``ImageOps`` decorator that
+has never imported anything from ``pipeline``, and it now has three callers — the pipeline
+runner, ``shipinfer run`` and ``shipinfer-shard``. This file is the parity suite for all
+three, and the wiring of each is asserted where it lives.
 """
 
 from __future__ import annotations
@@ -12,9 +18,9 @@ import threading
 import numpy as np
 import pytest
 
-from shipinfer.pipeline.graph.ops import ThreadLocalImageOps, staging_owner
 from shipinfer.runtime.ops import NormalizeParams
 from shipinfer.runtime.ops.numpy_ops import NumpyImageOps
+from shipinfer.runtime.ops.thread_local import ThreadLocalImageOps, staging_owner
 
 pytestmark = pytest.mark.timeout(30)
 
@@ -199,3 +205,116 @@ class TestItIsStillAnImageOps:
         assert crops.shape == (1, 3, 4, 4)
         assert kept.tolist() == [0]
         assert "thread-local" in ops.describe()
+
+
+class TestTheOldImportPathStillResolvesToTheSameObjects:
+    """``pipeline`` imports this by its old name in two places, and both re-export it.
+
+    A copy rather than a re-export would give the tree two ``ThreadLocalImageOps`` classes,
+    and ``isinstance`` across the two paths would start answering ``False`` — the exact
+    failure the detections shim was written to avoid one slice earlier.
+    """
+
+    def test_the_shim_hands_back_the_same_class_and_function(self):
+        import shipinfer.pipeline.graph as graph
+        from shipinfer.pipeline.graph import ops as shim
+
+        assert shim.ThreadLocalImageOps is ThreadLocalImageOps
+        assert shim.staging_owner is staging_owner
+        assert graph.ThreadLocalImageOps is ThreadLocalImageOps
+
+
+class TestTheCompositionRootsGetItInOneCall:
+    """``get_thread_local_image_ops`` — the wiring ``run`` and ``shard`` would otherwise copy.
+
+    It exists because the copy is not obvious: the delegate has to be built *on* the thread
+    that will use it, bound to that thread's device first, and handed its own pinned pool.
+    Three composition roots need exactly that, and two of them had none of it.
+    """
+
+    def test_it_spreads_threads_over_the_devices_it_is_given(self):
+        from shipinfer.runtime.ops import get_thread_local_image_ops
+
+        ops = get_thread_local_image_ops(devices=(0, 1, 2, 3))
+
+        def work(shared) -> None:
+            shared.on_device  # noqa: B018 - first touch assigns the device
+
+        run_in_threads(ops, 8, work)
+
+        assert ops.assignments() == {0: 2, 1: 2, 2: 2, 3: 2}
+
+    def test_a_host_with_no_devices_resolves_numpy_on_index_zero(self):
+        """``devices=()`` is what a CPU-only host reports, and it must not divide by zero."""
+        from shipinfer.runtime.ops import get_thread_local_image_ops
+
+        ops = get_thread_local_image_ops(devices=())
+
+        assert ops.assignments() == {}
+        assert ops.describe() == "thread-local over devices [0]"
+
+    def test_no_device_manager_means_no_binding_and_no_staging(self, monkeypatch):
+        """The offline shape: nothing is bound, nothing is claimed, numpy comes back.
+
+        A caller with no manager must not reach a ``bind_current_thread`` or a
+        ``staging_for``, because on a driverless host there is nothing on the other end of
+        either — and a benchmark double that answers ``has_accelerator`` falsely would then
+        take a CUDA path in the offline tier.
+        """
+        from shipinfer.runtime import ops as ops_module
+
+        asked: list[tuple[int, object]] = []
+
+        def fake_get_image_ops(provider, *, device_index=0, staging=None):
+            asked.append((device_index, staging))
+            return NumpyImageOps()
+
+        monkeypatch.setattr(ops_module, "get_image_ops", fake_get_image_ops)
+        built = ops_module.get_thread_local_image_ops(devices=(3,), memory=object())
+        built.on_device  # noqa: B018 - first touch builds the delegate
+
+        assert asked == [(3, None)]
+
+    def test_an_accelerated_manager_binds_the_thread_and_claims_its_own_pool(self, monkeypatch):
+        """One instance per thread is only half the fix; the pinned pool has to split too.
+
+        Two workers sharing one ``PinnedStagingPool`` is one buffer between two DMAs, which
+        CONVENTIONS 2.8 says produces plausible output and no error at all. The owner key is
+        per *thread*, so two threads on one device must still claim two pools.
+        """
+        from shipinfer.runtime import ops as ops_module
+
+        bound: list[object] = []
+        owners: list[str] = []
+        lock = threading.Lock()
+
+        class FakeManager:
+            has_accelerator = True
+
+            def bind_current_thread(self, device) -> None:
+                with lock:
+                    bound.append(device)
+
+        class FakeMemory:
+            def staging_for(self, owner: str) -> str:
+                with lock:
+                    owners.append(owner)
+                return owner
+
+        monkeypatch.setattr(
+            ops_module,
+            "get_image_ops",
+            lambda provider, *, device_index=0, staging=None: NumpyImageOps(),
+        )
+        built = ops_module.get_thread_local_image_ops(
+            devices=(2,), device_manager=FakeManager(), memory=FakeMemory()
+        )
+
+        def work(shared) -> None:
+            shared.on_device  # noqa: B018 - first touch builds the delegate
+
+        run_in_threads(built, 2, work)
+
+        assert [device.index for device in bound] == [2, 2]
+        assert len(set(owners)) == 2, "two workers on one device shared one pinned pool"
+        assert all("cuda:2" in owner for owner in owners)

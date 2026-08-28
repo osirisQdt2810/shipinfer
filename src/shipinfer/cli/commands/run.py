@@ -260,13 +260,38 @@ def run(
         if not dry_run and image_ops_are_needed(chosen, chain):
             # The other dependency an element cannot resolve for itself, gated the same way and
             # for the same reason: `topology` may not import `runtime`, so the composition root
-            # is where an ops implementation is chosen and handed over. `get_image_ops` picks
-            # the fused kernels, then torch, then numpy -- so this line resolves to
-            # `NumpyImageOps` on a host with no accelerator, which is what keeps the offline
-            # tier running the real element rather than a stubbed one.
-            from shipinfer.runtime.ops import get_image_ops
+            # is where an ops implementation is chosen and handed over.
+            #
+            # `get_thread_local_image_ops`, not `get_image_ops`, and the difference is the
+            # whole point of the line. `pipeline.workers` threads walk this chain at once
+            # (`runners/inprocess.py`), one `PoolDetect` instance is shared by all of them, and
+            # every implementation `get_image_ops` can return is per-thread by contract: the
+            # native one keeps a staging ring inside the extension, the torch one binds a
+            # device on the constructing thread and caches an event on the instance. One
+            # instance across four workers is four threads in one ring -- plausible pixels, no
+            # error, and invisible to the offline tier because `NumpyImageOps` is stateless.
+            # It also put every camera's pre-processing on `cuda:0` regardless of how many GPUs
+            # this process can see, which is this project's founding bug one layer up.
+            #
+            # The devices come from the engine's `DeviceManager` when there is one, and are
+            # *not* resolved by building one here: `DeviceManager.__init__` takes a CUDA
+            # primary context per visible GPU (~200 MiB each) that nothing in this process
+            # gives back, which is the same reason the engine itself is constructed as late as
+            # it is. A chain that needs ops and no pool (the first `crop` element will be one)
+            # therefore falls back to what the operator pinned in `devices.visible_gpus`, and
+            # to `(0,)` when that is empty -- on a host with no accelerator the delegate
+            # degrades to `NumpyImageOps` and the index is never used, which is what keeps the
+            # offline tier running the real element rather than a stubbed one.
+            from shipinfer.runtime.ops import get_thread_local_image_ops
 
-            ops = get_image_ops(settings.execution.provider)
+            manager = getattr(engine, "devices", None)
+            ops = get_thread_local_image_ops(
+                settings.execution.provider,
+                devices=tuple(getattr(manager, "visible_gpus", ()) or ())
+                or tuple(settings.devices.visible_gpus),
+                device_manager=manager,
+                memory=getattr(engine, "memory", None),
+            )
 
         built = build_runner(
             chosen, chain, settings, chain_yaml=chain_yaml, models=engine, ops=ops
