@@ -6,6 +6,10 @@ which is why they live at this layer: ``topology`` may import them, ``pipeline``
 them. ``kafka.py`` imports its client inside ``__init__`` — the laziness is enforced by
 ``tests/test_architecture.py`` (reachability, ``sys.modules``, and the module-scope AST scan),
 so a chain naming ``output: {impl: kafka}`` validates on a host that never had librdkafka.
+``null`` is the default (a deployment that has not chosen a destination produces nothing,
+loudly); ``jsonlines`` makes the DAG testable with no broker. Two registries name the family
+during coexistence: :data:`RESULT_SINKS` for ``pipeline/``, the ``OUTPUT`` element registry
+for a chain — one new transport file serves both.
 """
 
 from __future__ import annotations

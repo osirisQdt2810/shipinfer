@@ -37,6 +37,7 @@ __all__ = [
     "Normalization",
     "decode_detections",
     "parse_classes",
+    "per_row",
 ]
 
 #: Label for a class id the deployment did not configure. Kept rather than dropped: a
@@ -299,6 +300,83 @@ def parse_classes(declared: Any, what: str) -> tuple[str, ...] | None:
             f"{type(declared).__name__}"
         )
     return tuple(str(entry) for entry in declared)
+
+
+def per_row(value: Any, count: int, *, what: str, key: str) -> list[Any] | None:
+    """A per-object metadata value as one entry per detection row, or ``None`` if absent.
+
+    The one rule for reading anything a chain files *per object*, in the two shapes an element
+    may legitimately file it in:
+
+    * a **mapping** of detection index to value, which is what a crop element produces when it
+      covered only some rows (``embed_ship`` on a frame of ships and people), and
+    * a **sequence or array** with exactly one entry per detection, in the detector's own
+      order, which is what a whole-frame stage produces.
+
+    Anything else — a model's raw ``{output_name: Tensor}`` dict, most likely — is refused
+    rather than ignored. That is the whole reason this is a shared function and not a habit:
+    the two readers of these keys are :class:`~shipinfer.topology.elements.track.ShipvisionTrack`
+    (which loses appearance if a scatter-back silently misses) and the ``output`` element
+    (which loses a whole field of the published event), and both failures look exactly like a
+    healthy chain. One rule, one refusal, one place for it to be right.
+
+    The mapping form is checked for **coverage** as well as for key type. Partial coverage is
+    legitimate and stays legal, but a mapping whose keys name *no* row at all is an off-by-N
+    scatter-back, and without this it lands as ``None`` on every row with nothing said — the
+    same silence the sequence form's length check already refuses, arriving through the other
+    door. The **empty** mapping is exempt, and the distinction is the point: keys ``{100, 101}``
+    on a three-row frame is arithmetic that went wrong, while no keys at all is a stage that
+    correctly had nothing to contribute. Zero keys index nothing because there was nothing to
+    index, which is not the same as keys that index nothing.
+
+    Args:
+        value: what ``item.meta.get(key)`` returned.
+        count: how many detection rows this frame has.
+        what: the element, for the message — ``"track element 'track'"``.
+        key: the metadata key being read, so a refusal names the wiring rather than the rule.
+
+    Returns:
+        Something indexable by detection row, or ``None`` when the key was absent. The mapping
+        form comes back as a list with ``None`` in the rows nobody covered; the sequence form
+        comes back unchanged, so a numpy array stays a numpy array and is not copied per frame.
+
+    Raises:
+        ValidationError: the value cannot be attributed to detection rows — wrong container,
+            wrong length, keys that are not indices, or keys that index nothing in this frame.
+    """
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        try:
+            by_index = {int(index): entry for index, entry in value.items()}
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(
+                f"{what}: meta[{key!r}] is a mapping whose keys are not detection indices "
+                f"({sorted(value)[:4]}...). A model's raw output tensors are not an "
+                "attribution; scatter them back onto the rows they came from first"
+            ) from exc
+        if by_index and count and not any(0 <= index < count for index in by_index):
+            raise ValidationError(
+                f"{what}: meta[{key!r}] is a mapping whose keys {sorted(by_index)[:4]} name "
+                f"no detection in this frame, which has {count} (indices 0..{count - 1}). "
+                "Covering *some* rows is fine — only the person rows are embedded when only a "
+                "person re-ID model ran — but covering none of them is an off-by-N "
+                "scatter-back, and attaching nothing at all is a measurable loss reported as "
+                "a healthy chain"
+            )
+        return [by_index.get(index) for index in range(count)]
+    if isinstance(value, (np.ndarray, Sequence)):
+        if len(value) != count:
+            raise ValidationError(
+                f"{what}: meta[{key!r}] has {len(value)} rows for {count} detections. One "
+                "entry per detection, in the detector's own order, or a mapping of detection "
+                "index to value"
+            )
+        return value  # type: ignore[return-value]
+    raise ValidationError(
+        f"{what}: meta[{key!r}] is a {type(value).__name__} and must be one entry per "
+        "detection or a mapping of detection index to value"
+    )
 
 
 def decode_detections(

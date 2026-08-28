@@ -33,6 +33,7 @@ from shipinfer.topology.elements.detections import (
     Detections,
     decode_detections,
     parse_classes,
+    per_row,
 )
 
 LABELS = {0: "person", 8: "ship"}
@@ -432,3 +433,55 @@ class TestGatheringTheBoxesOfASelection:
 
         assert indices == ()
         assert boxes.shape == (0, 4)
+
+
+class TestPerRow:
+    """The one rule for reading a per-object metadata key, in both legal shapes.
+
+    Exercised through both readers elsewhere — ``track`` for ``meta["vectors"]`` and
+    ``output`` for those plus ``meta["identities"]`` — and pinned here on its own because it
+    is the rule, not either element's use of it. Two copies of this would be two places for
+    "a mapping that covers no row is an off-by-N" to drift, and the drift has no symptom:
+    both readers fail by quietly attaching nothing.
+    """
+
+    def test_an_absent_key_is_none_not_an_empty_row_set(self) -> None:
+        """ "Nothing was filed" and "nothing was found" are different, so they answer differently."""
+        assert per_row(None, 3, what="e", key="vectors") is None
+
+    def test_a_mapping_becomes_one_entry_per_row_with_gaps(self) -> None:
+        rows = per_row({1: "b"}, 3, what="e", key="vectors")
+
+        assert rows == [None, "b", None]
+
+    def test_a_sequence_of_the_right_length_is_handed_through_uncopied(self) -> None:
+        """A numpy array stays the same array: this runs per frame, per key."""
+        array = np.zeros((3, 2), dtype=np.float32)
+
+        assert per_row(array, 3, what="e", key="vectors") is array
+
+    def test_a_sequence_of_the_wrong_length_is_refused(self) -> None:
+        with pytest.raises(ValidationError, match="2 rows for 3 detections"):
+            per_row([1, 2], 3, what="e", key="vectors")
+
+    def test_a_mapping_covering_no_row_is_an_off_by_n(self) -> None:
+        with pytest.raises(ValidationError, match="name no detection"):
+            per_row({7: "x"}, 3, what="e", key="vectors")
+
+    def test_a_mapping_covering_some_rows_stays_legal(self) -> None:
+        """Only the person rows are embedded when only a person re-ID model ran."""
+        assert per_row({0: "a"}, 2, what="e", key="vectors") == ["a", None]
+
+    def test_an_empty_mapping_is_a_stage_with_nothing_to_say(self) -> None:
+        """Zero keys index nothing because there was nothing to index — not the same thing."""
+        assert per_row({}, 2, what="e", key="vectors") == [None, None]
+
+    def test_keys_that_are_not_indices_are_refused(self) -> None:
+        """A model's raw ``{output_name: Tensor}`` is not an attribution."""
+        with pytest.raises(ValidationError, match="not detection indices"):
+            per_row({"embedding": [1.0]}, 2, what="e", key="vectors")
+
+    def test_the_refusal_names_the_key_that_carries_it(self) -> None:
+        """The message has to point at the wiring, not at the rule."""
+        with pytest.raises(ValidationError, match="identities"):
+            per_row(object(), 2, what="output element 'output'", key="identities")
