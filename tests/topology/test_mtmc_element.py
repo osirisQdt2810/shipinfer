@@ -17,13 +17,14 @@ instance, so the id a test sees depends on nothing useful. What is asserted is t
 shared or not shared, present or ``None``.
 
 The synchronisation itself is not tested here — that is
-``tests/topology/test_mtmc_barrier.py``, over the pure class, with no submodule in sight.
+``tests/topology/test_barrier.py``, over the pure class, with no submodule in sight.
 What this file adds is everything that needs a tracker: the association, the scatter, and the
 element's own refusals.
 """
 
 from __future__ import annotations
 
+import logging
 import sys
 import textwrap
 import threading
@@ -256,7 +257,7 @@ def item(
 def opened(
     params: dict[str, Any] | None = None,
     *,
-    workers: int = 4,
+    workers: int | None = 4,
     registry: MetricsRegistry | None = None,
     name: str = "mtmc",
     budget: WaiterBudget | None = None,
@@ -894,6 +895,117 @@ class TestTheCameraLifecycle:
             assert value(metrics, "shipinfer_mtmc_cameras", element="mtmc") == 2
             built.camera_removed("cam-a")
             assert value(metrics, "shipinfer_mtmc_cameras", element="mtmc") == 1
+        finally:
+            built.close()
+
+
+@needs_shipvision
+class TestAGroupItsWorkersCannotCoverIsSaidOutLoud:
+    """The never-starve guard is honest, bounded and counted — and at the shipped default of
+    four workers it answers half of an eight-camera group without anybody being told.
+
+    Coverage is ``min(1, workers / group_size)``: an instant closes on the *last* camera's
+    frame and every earlier frame of it is parked in a worker until then, so four workers
+    answer four frames of every instant and emit the other four with a gap. That is the same
+    class of silent shortfall as the bucket key this element used to have, moved from the
+    window to the worker count, and a counter nobody is scraping yet is not a warning.
+    """
+
+    def _warnings(self, caplog) -> list[str]:
+        return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+
+    def test_a_declared_roster_the_workers_cannot_cover_is_warned_about_at_open(
+        self, caplog
+    ) -> None:
+        roster = [f"cam-{index}" for index in range(8)]
+        with caplog.at_level(logging.WARNING, logger="shipinfer.topology.mtmc"):
+            built = opened({"group": "quay", "cameras": roster}, workers=4)
+        built.close()
+
+        warned = self._warnings(caplog)
+        assert len(warned) == 1, warned
+        assert "8 cameras" in warned[0], "it names the group"
+        assert "4 frame(s) of each instant can be answered" in warned[0], "and the coverage"
+        assert "pipeline.workers" in warned[0] and "at least 8" in warned[0], "and the fix"
+
+    def test_a_declared_roster_says_it_again_when_the_cameras_actually_arrive(
+        self, caplog
+    ) -> None:
+        """Two lines in a process lifetime, and deliberately two: the first says the declared
+        configuration cannot work, the second says it has started happening and with how many
+        cameras. The ramp from an empty shard always passes through a covered count, so a
+        latch set at ``open()`` would be cleared by the ramp anyway."""
+        roster = [f"cam-{index}" for index in range(8)]
+        with caplog.at_level(logging.WARNING, logger="shipinfer.topology.mtmc"):
+            built = opened({"group": "quay", "cameras": roster}, workers=4)
+            try:
+                for camera in roster:
+                    built.camera_added(camera)
+            finally:
+                built.close()
+
+        warned = self._warnings(caplog)
+        assert len(warned) == 2, warned
+        assert "8 cameras (its declared roster)" in warned[0]
+        assert "5 cameras (live on this shard)" in warned[1], "the crossing, once"
+
+    def test_a_group_the_workers_do_cover_says_nothing(self, caplog) -> None:
+        roster = [f"cam-{index}" for index in range(8)]
+        with caplog.at_level(logging.WARNING, logger="shipinfer.topology.mtmc"):
+            built = opened({"group": "quay", "cameras": roster}, workers=8)
+        built.close()
+
+        assert self._warnings(caplog) == [], "eight workers answer an eight-camera instant"
+
+    def test_a_live_set_that_grows_past_the_budget_warns_once_at_each_crossing(
+        self, caplog
+    ) -> None:
+        """Cameras are added by API at run time, so a chain that declared nothing — or
+        declared four and was given six — crosses the line hours after ``open()``. Once per
+        crossing and not once per announcement: this runs on the lifecycle thread."""
+        built = opened(workers=4)  # no roster: nothing to warn about at open
+        try:
+            with caplog.at_level(logging.WARNING, logger="shipinfer.topology.mtmc"):
+                for index in range(4):
+                    built.camera_added(f"cam-{index}")
+                assert self._warnings(caplog) == [], "four workers cover four cameras"
+
+                built.camera_added("cam-4")
+                built.camera_added("cam-5")
+                after_crossing = self._warnings(caplog)
+
+                built.camera_removed("cam-4")
+                built.camera_removed("cam-5")
+                built.camera_added("cam-6")
+                built.camera_added("cam-7")
+                after_recrossing = self._warnings(caplog)
+        finally:
+            built.close()
+
+        assert len(after_crossing) == 1, after_crossing
+        assert "5 cameras" in after_crossing[0], "the crossing, not every camera after it"
+        assert len(after_recrossing) == 2, "back under the budget and over it again is news"
+
+    def test_no_worker_count_but_a_budget_says_the_barrier_still_waits(self, caplog) -> None:
+        """The element used to log "it will emit every frame immediately" whichever way the
+        barrier was built, and a supplied budget wins over an absent worker count."""
+        with caplog.at_level(logging.WARNING, logger="shipinfer.topology.mtmc"):
+            built = opened(workers=None, budget=WaiterBudget(2))
+        try:
+            assert built.barrier.budget.permits == 2
+            warned = self._warnings(caplog)
+            assert len(warned) == 1, warned
+            assert "will wait" in warned[0] and "2 permit(s)" in warned[0]
+        finally:
+            built.close()
+
+    def test_no_worker_count_and_no_budget_does_say_it_never_waits(self, caplog) -> None:
+        with caplog.at_level(logging.WARNING, logger="shipinfer.topology.mtmc"):
+            built = opened(workers=None)
+        try:
+            warned = self._warnings(caplog)
+            assert len(warned) == 1, warned
+            assert "emit every frame immediately" in warned[0]
         finally:
             built.close()
 

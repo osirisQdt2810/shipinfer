@@ -144,8 +144,15 @@ working as designed rather than a synchronisation failure: three workers cannot 
 cameras' frames while the eighth arrives, so five frames of every instant are emitted
 immediately with an honest gap (`would_starve: 300`, and 60/60 instants still closed
 `complete`). It is the number that sizes `pipeline.workers` against a group: **a shard needs
-more workers than its largest camera group**. Its median is *lower* than the others precisely
-because a starved frame does not wait.
+at least as many workers as its camera group has cameras** — an instant closes on the *last*
+camera's frame and every earlier frame of it is parked until then, so coverage is
+`min(1, workers / group_size)` and 8 workers cover 8 cameras exactly. With **two** `mtmc`
+slots the requirement is the **sum** of the groups' sizes and not the larger of them, because
+the waiter budget is process-wide and its permits are first-come: measured, two 8-camera
+groups reach 100% each at 16 workers and 73% / 52% at 9, where whichever group's frames
+arrive first takes the permits. The element now warns at `open()` and at the crossing rather
+than leaving this to `shipinfer_mtmc_would_starve_total`. Its median is *lower* than the
+others precisely because a starved frame does not wait.
 
 The previous entry recorded a p95 of ~51 ms at eight cameras and attributed it to "the window
 firing … a camera's frames drift across bucket boundaries". **That diagnosis was wrong**, and

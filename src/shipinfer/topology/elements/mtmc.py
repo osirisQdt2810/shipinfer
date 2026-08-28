@@ -374,6 +374,9 @@ class ShipvisionMtmc(Element):
         self._warned_unassignable = False
         self._metrics = _MtmcMetrics(None, name)
         self._reported_cameras = -1
+        #: Latched so the under-sized-group warning is one line per *crossing* rather than
+        #: one per camera announcement.
+        self._starved_group = False
         # Resolved once at open, so the per-frame path walks no module dictionaries.
         self._CameraTracks: Any = None
         self._FrameTrackCluster: Any = None
@@ -460,15 +463,29 @@ class ShipvisionMtmc(Element):
             on_event=self._metrics.instant,
         )
         self._reported_cameras = -1
+        self._starved_group = False
         self._note_cameras()
-        if context.workers is None:
+        if context.workers is None and self._barrier.budget.permits:
+            # A supplied budget wins over the worker count, so this barrier *does* wait --
+            # saying it would not would send an operator looking for the wrong symptom.
             _LOG.warning(
-                "mtmc element %r was given no worker count; it will emit every frame "
-                "immediately rather than wait for the rest of group %r. The runner sets "
-                "ElementContext.workers",
+                "mtmc element %r was given no worker count but was given a waiter budget: "
+                "group %r will wait for the rest of its instant on the budget's %d "
+                "permit(s), not on a worker count. The runner sets ElementContext.workers",
+                self.name,
+                self._group,
+                self._barrier.budget.permits,
+            )
+        elif context.workers is None:
+            _LOG.warning(
+                "mtmc element %r was given no worker count and no waiter budget; it will "
+                "emit every frame immediately rather than wait for the rest of group %r. "
+                "The runner sets ElementContext.workers",
                 self.name,
                 self._group,
             )
+        if self._roster:
+            self._warn_if_workers_cannot_cover(len(self._roster), "its declared roster")
 
     def _ground_plane(self, mtmc: Any) -> Any:
         """The group's homographies, or ``None`` for an appearance-only deployment.
@@ -529,6 +546,7 @@ class ShipvisionMtmc(Element):
         self._tracker = None
         self._TrackingError = _NeverRaised
         self._warned_unassignable = False
+        self._starved_group = False
         self._CameraTracks = None
         self._FrameTrackCluster = None
         self._FrameTag = None
@@ -757,13 +775,69 @@ class ShipvisionMtmc(Element):
     # -- metrics -----------------------------------------------------------------------
 
     def _note_cameras(self) -> None:
-        """Publish the live-camera count, and only when it changed."""
+        """Publish the live-camera count, and only when it changed.
+
+        Also where a group that has outgrown the waiter budget is said out loud: the check
+        is on the *live* set because cameras are added by API at run time, so a chain that
+        declared a roster of four and was given eight cameras crosses the line hours after
+        ``open()``. Latched on the crossing rather than counted per announcement, and
+        cleared when the group comes back under the budget so a shard that loses and
+        regains cameras says so each time. A chain that declared an over-large roster
+        gets a line here *as well as* the one at ``open()``, and deliberately: the first
+        says the configuration cannot work and the second says it has started happening.
+        """
         if self._barrier is None:
             return
         count = len(self._barrier.live)
         if count != self._reported_cameras:
             self._reported_cameras = count
             self._metrics.camera_count(count)
+            if count <= self._barrier.budget.permits + 1:
+                self._starved_group = False
+            elif not self._starved_group:
+                self._starved_group = True
+                self._warn_if_workers_cannot_cover(count, "live on this shard")
+
+    def _warn_if_workers_cannot_cover(self, cameras: int, source: str) -> None:
+        """Warn when the pipeline has too few workers to answer a whole instant.
+
+        An instant closes when the **last** live camera of the group reports, and every
+        frame that arrived before it is parked in the barrier until then -- so a group of
+        ``n`` cameras needs ``n - 1`` waiter permits, which is ``pipeline.workers >= n``.
+        Below that the never-starve guard is working rather than failing: the frames that
+        could not park are emitted immediately, carrying their boxes, vectors and per-camera
+        track ids and lacking only the global id. But at the shipped default of four workers
+        an eight-camera group loses half of every instant's answers, and until now that was
+        visible only to somebody already scraping ``shipinfer_mtmc_would_starve_total``.
+        One line at the crossing costs nothing and names the setting that fixes it.
+
+        Args:
+            cameras: how many cameras an instant of this group waits for.
+            source: where that number came from, so the line says whether it is the
+                declared roster or what is actually running.
+        """
+        if self._barrier is None:
+            return
+        permits = self._barrier.budget.permits
+        answerable = permits + 1
+        if cameras <= answerable:
+            return
+        _LOG.warning(
+            "mtmc element %r: group %r has %d cameras (%s) but only %d frame(s) of each "
+            "instant can be answered -- %d worker(s) may park in a barrier at once and the "
+            "one that closes the instant is the next. The other %d frame(s) per instant are "
+            "emitted with a gap (shipinfer_mtmc_would_starve_total). Raise "
+            "`pipeline.workers` to at least %d; the permits are process-wide, so a chain "
+            "with a second mtmc slot needs the sum of its groups' sizes",
+            self.name,
+            self._group,
+            cameras,
+            source,
+            answerable,
+            permits,
+            cameras - answerable,
+            cameras,
+        )
 
     def __repr__(self) -> str:
         cameras = 0 if self._barrier is None else len(self._barrier.live)
