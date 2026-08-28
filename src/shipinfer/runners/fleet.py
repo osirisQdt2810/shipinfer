@@ -65,7 +65,7 @@ from shipinfer.launch.control import CameraSpec
 from shipinfer.runners.base import Runner
 from shipinfer.runners.registry import RUNNERS
 from shipinfer.scheduling.sharding import Shard, ShardPlan, plan_shards
-from shipinfer.topology import ChainItem, ModelResolver, Topology
+from shipinfer.topology import ChainItem, ImageOpsLike, ModelResolver, Topology
 
 __all__ = ["FleetRunner"]
 
@@ -147,6 +147,7 @@ class FleetRunner(Runner):
         shard_id: int = 0,
         device: Device | None = None,
         models: ModelResolver | None = None,
+        ops: ImageOpsLike | None = None,
         chain_yaml: str = "",
         shards: int | None = None,
         gpus: Sequence[int] | None = None,
@@ -162,6 +163,7 @@ class FleetRunner(Runner):
             shard_id=shard_id,
             device=device,
             models=models,
+            ops=ops,
             chain_yaml=chain_yaml,
         )
         if not chain_yaml.strip():

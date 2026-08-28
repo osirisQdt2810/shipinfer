@@ -1,4 +1,4 @@
-"""``shipinfer run`` builds the model pool its chain needs, and only then.
+"""``shipinfer run`` builds the dependencies its chain needs, and only those.
 
 The defect this file pins: ``run`` built a runner with no ``models=``, so
 :class:`~shipinfer.topology.base.ElementContext` carried ``models=None`` and the first
@@ -11,22 +11,37 @@ pool has to be up before the chain opens against it, and it has to outlive the w
 are still submitting to it. So the double records rather than mocks, and the tests compare a
 whole sequence instead of counting calls.
 
+Two dependencies are gated the same way and asserted the same way: the model pool
+(``models=``) and, since C3, image pre-processing (``ops=``). A ``pool`` detector letterboxes
+its frame and cannot resolve an implementation itself — ``topology`` may not import
+``runtime`` — so this command resolves one, and only for a chain that declares
+:attr:`~shipinfer.topology.base.Element.needs_image_ops`. A chain of mocks must build neither.
+
 Everything is offline. The engine is a recording double in every test but the last, which
-starts a real ``InferenceServer`` over the mock backend and a two-model repository — the one
-that proves a ``pool`` element actually opens, rather than that a keyword was forwarded.
+starts a real ``InferenceServer`` over the mock backend and a detector-shaped repository — the
+one that proves a ``pool`` element actually opens, rather than that a keyword was forwarded. The
+ops it is handed there resolve to ``NumpyImageOps``, because ``get_image_ops`` degrades to it
+on a host with no accelerator; that is the whole reason this tier can run the real element.
 """
 
 from __future__ import annotations
 
 import importlib
+import inspect
 import textwrap
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
 
-from shipinfer.cli.commands.run import model_pool_is_needed, run
+from shipinfer.cli.commands.run import (
+    dependency_is_needed,
+    image_ops_are_needed,
+    model_pool_is_needed,
+    run,
+)
 from shipinfer.core.errors import ConfigurationError, ServerStateError
 from shipinfer.core.request import ResponseFuture
 from shipinfer.core.settings import ServerSettings
@@ -43,12 +58,22 @@ from shipinfer.topology.registry import registry_for
 run_module = importlib.import_module("shipinfer.cli.commands.run")
 
 #: A chain with a `pool` element: the shape of every real topology, and the one that used to
-#: fail at `open()`. `echo` is the model the offline repository fixture declares.
+#: fail at `open()`. `detector` is the model :func:`detector_repository` declares, and it is a
+#: *detector-shaped* one: one input `images[3x8x8]:FP32` and one output `output0[300x6]:FP32`.
+#:
+#: That shape is load-bearing, not decoration. A `pool` detector submits a letterboxed
+#: `(1, 3, H, W)` frame, so it refuses at `open()` both an input the artefact does not declare
+#: and one no letterbox fits -- and the shared `tmp_repository` fixture's `echo` declares
+#: `x[4]`, which is the second of those. Naming it here (with a `decode.dst_size` to get past
+#: the extent resolution) made this file's real-engine test assert that a chain which cannot
+#: run had opened successfully. `input:` is named anyway, because `ingest.input_name` is where
+#: an element that does not say gets it and the default is not this model's; `decode.dst_size`
+#: is not, because the model declares its extent and that is the path a real deployment takes.
 POOL_CHAIN = textwrap.dedent("""
     name: pool_chain
     elements:
       decode: {impl: mock}
-      detect: {impl: pool, model: echo}
+      detect: {impl: pool, model: detector, params: {input: images}}
       output: {impl: mock}
     """)
 
@@ -70,6 +95,12 @@ ELSEWHERE_CHAIN = POOL_CHAIN.replace("{impl: pool", "{impl: run-engine-elsewhere
 HERE_CHAIN = POOL_CHAIN.replace("{impl: pool", "{impl: run-engine-here").replace(
     "name: pool_chain", "name: here_chain"
 )
+
+#: A chain that needs image ops and *no* model pool (:class:`DetectWithOpsAndNoPool`) -- the
+#: shape of the first `crop` element, and the only combination the shipped set cannot make.
+OPS_ONLY_CHAIN = POOL_CHAIN.replace(
+    "{impl: pool, model: detector, params: {input: images}}", "{impl: run-engine-ops-only}"
+).replace("name: pool_chain", "name: ops_only_chain")
 
 #: What happened, in order, across the engine double and the runner double. One list rather
 #: than a counter per object because the failure this file exists to prevent is an *ordering*
@@ -110,6 +141,26 @@ class RecordingEngine:
 
     def get(self, name: str) -> str:  # pragma: no cover - no element opens in these tests
         return name
+
+
+class FourGpuEngine(RecordingEngine):
+    """A ``RecordingEngine`` that reports four GPUs, so the ops spread has something to spread.
+
+    Two attributes deep on purpose: ``get_thread_local_image_ops`` reads ``visible_gpus`` and
+    ``has_accelerator`` off the engine's ``DeviceManager`` and nothing else, which is why the
+    command can ask a real engine for its device list without building a second one. Reporting
+    ``has_accelerator`` as ``False`` while naming four devices is not a contradiction here: it
+    is what keeps this test offline, because the truthy branch calls ``bind_current_thread``.
+    """
+
+    class _Devices:
+        visible_gpus: ClassVar[tuple[int, ...]] = (0, 1, 2, 3)
+        has_accelerator: ClassVar[bool] = False
+
+    def __init__(self, settings: ServerSettings | None = None) -> None:
+        super().__init__(settings)
+        self.devices = FourGpuEngine._Devices()
+        self.memory = None
 
 
 class RefusingEngine:
@@ -168,6 +219,21 @@ class DetectHere(DetectElsewhere):
         """
         if context.models is None:
             raise ConfigurationError(f"{self.name!r} was opened with no model pool")
+
+
+@registry_for(ElementKind.DETECT).register("run-engine-ops-only")
+class DetectWithOpsAndNoPool(MockDetect):
+    """An element that pre-processes and runs no model in this process.
+
+    The one combination no shipped element makes today, and the one the comment in
+    ``run.py`` promises is handled: ``needs_image_ops`` without ``needs_model``. Phase C's
+    ``crop`` element is it -- it letterboxes or crops for something downstream and asks this
+    process's pool for nothing -- so the wiring it will land on is pinned here before it
+    exists rather than after it is found to be wrong.
+    """
+
+    needs_image_ops: ClassVar[bool] = True
+    needs_model: ClassVar[bool] = False
 
 
 @RUNNERS.register("recording-pool")
@@ -261,8 +327,44 @@ def pool_chain_file(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
+def detector_repository(tmp_path: Path) -> Path:
+    """A one-model repository whose model can actually receive a letterboxed frame.
+
+    Local to this file rather than a third model in the shared ``tmp_repository`` fixture: that
+    one is a *two-model* repository by contract (``tests/engine/test_server.py`` asserts
+    ``server.models() == ["echo", "slow"]`` and a three-instance health report), and its
+    ``echo`` declares ``x[4]`` because the engine tests submit ``(1, 4)`` tensors to it. Both
+    are right for what they are; neither is a detector.
+
+    ``platform: mock`` on a ``KIND_CPU`` group, so :class:`~shipinfer.engine.InferenceServer`
+    starts it with no accelerator. The dims are the artefact's statement of its own geometry --
+    ``PoolDetect`` resolves its letterbox target from them, which is what a real deployment
+    does -- and ``8x8`` only to keep the fixture small.
+    """
+    root = tmp_path / "detector_repository"
+    (root / "detector" / "1").mkdir(parents=True)
+    (root / "detector" / "config.yaml").write_text(textwrap.dedent("""
+        name: detector
+        platform: mock
+        max_batch_size: 4
+        inputs:
+          - {name: images, data_type: FP32, dims: [3, 8, 8]}
+        outputs:
+          - {name: output0, data_type: FP32, dims: [300, 6]}
+        instance_groups:
+          - {kind: KIND_CPU, count: 1}
+        """).lstrip())
+    return root
+
+
+@pytest.fixture()
 def mock_chain_file(tmp_path: Path) -> Path:
     return write_chain(tmp_path, MOCK_CHAIN)
+
+
+@pytest.fixture()
+def ops_only_chain_file(tmp_path: Path) -> Path:
+    return write_chain(tmp_path, OPS_ONLY_CHAIN)
 
 
 def topology_of(text: str) -> Topology:
@@ -310,7 +412,9 @@ class TestAChainThatNamesAModelItRunsElsewhere:
 
         element = chain.node("detect").element
         assert element.requires_model_name is True
-        assert element.model == "echo", "the name an operator writes is carried, not dropped"
+        assert (
+            element.model == "detector"
+        ), "the name an operator writes is carried, not dropped"
 
     def test_it_needs_no_pool_although_it_names_a_model(self) -> None:
         assert model_pool_is_needed("inprocess", topology_of(ELSEWHERE_CHAIN)) is False
@@ -332,6 +436,81 @@ class TestAChainThatNamesAModelItRunsElsewhere:
         assert EVENTS == ["runner.start", "wait", "runner.stop"]
         (built,) = RecordingRunner.instances
         assert built.models is None, "a chain whose model runs elsewhere was handed a pool"
+
+
+class TestWhoNeedsImageOps:
+    """The same shape one dependency over, and the same two declarations.
+
+    ``get_image_ops`` is not free: under a non-``AUTO`` provider it constructs a torch
+    implementation bound to a device. So a chain of mocks must resolve none, and a fleet
+    launcher must resolve none — its shards each resolve one bound to their own GPU, and one
+    resolved here would be bound to a device this process does not own.
+    """
+
+    def test_a_chain_with_a_pool_detector_on_a_runner_that_opens_it_here(self) -> None:
+        assert image_ops_are_needed("inprocess", topology_of(POOL_CHAIN)) is True
+
+    def test_a_chain_of_mocks_needs_none_although_its_kinds_are_the_same(self) -> None:
+        assert image_ops_are_needed("inprocess", topology_of(MOCK_CHAIN)) is False
+
+    def test_a_pool_chain_with_no_detector_in_it_needs_none(self) -> None:
+        """The half that would be lost by reusing ``needs_model``: an embedder submits a
+        tensor somebody else shaped, so it needs the pool and no pre-processing at all."""
+        embed_only = POOL_CHAIN.replace(
+            "detect: {impl: pool, model: detector, params: {input: images}}",
+            "embed: {impl: pool, model: detector}",
+        ).replace("name: pool_chain", "name: embed_chain")
+
+        assert model_pool_is_needed("inprocess", topology_of(embed_only)) is True
+        assert image_ops_are_needed("inprocess", topology_of(embed_only)) is False
+
+    def test_the_fleet_needs_none_because_each_shard_resolves_its_own(self) -> None:
+        assert image_ops_are_needed("fleet", topology_of(POOL_CHAIN)) is False
+
+    def test_an_unknown_runner_is_refused_by_the_registry_that_would_build_it(self) -> None:
+        with pytest.raises(ConfigurationError, match="unknown runner"):
+            image_ops_are_needed("nope", topology_of(POOL_CHAIN))
+
+
+class TestTheTwoPredicatesAreOneFunctionOverATable:
+    """``models=`` and ``ops=`` are the same two questions about different attributes.
+
+    They were two copies of four lines with one attribute name changed, and phase D adds a
+    third dependency (a DataPool) — at which point the copies would be the design. The named
+    predicates stay, because they are what the call site reads like; what they share is a
+    table, so a new dependency is a row rather than a function.
+    """
+
+    def test_both_names_are_the_same_function_over_their_own_row(self) -> None:
+        chain = topology_of(POOL_CHAIN)
+
+        assert model_pool_is_needed("inprocess", chain) == dependency_is_needed(
+            "models", "inprocess", chain
+        )
+        assert image_ops_are_needed("inprocess", chain) == dependency_is_needed(
+            "ops", "inprocess", chain
+        )
+
+    def test_the_table_names_the_keyword_and_the_element_attribute(self) -> None:
+        """The two ends the row ties together: the ``build_runner`` keyword an operator never
+        sees, and the declaration an element makes. Both are read by name elsewhere, so a
+        typo in either is silent -- ``getattr`` on a missing attribute would be an
+        ``AttributeError`` per element and a missing keyword would simply never be built."""
+        from shipinfer.runners.base import Runner
+        from shipinfer.topology.base import Element
+
+        for keyword, attribute in run_module._HANDED_IN.items():
+            assert hasattr(Element, attribute), f"no element declares {attribute!r}"
+            assert keyword in inspect.signature(Runner.__init__).parameters
+
+    def test_a_runner_that_runs_the_chain_elsewhere_needs_no_row_at_all(self) -> None:
+        """The first of the two questions short-circuits the second, for every row."""
+        chain = topology_of(POOL_CHAIN)
+
+        assert [dependency_is_needed(key, "fleet", chain) for key in run_module._HANDED_IN] == [
+            False,
+            False,
+        ]
 
 
 class TestThePoolIsUpBeforeTheChainOpensAndDownAfterItStops:
@@ -381,6 +560,143 @@ class TestThePoolIsUpBeforeTheChainOpensAndDownAfterItStops:
         (built,) = RecordingRunner.instances
         assert built.element_context().models is RecordingEngine.instances[0]
 
+    def test_the_runner_is_handed_image_ops_and_puts_them_on_the_context(
+        self, pool_chain_file: Path, monkeypatch
+    ) -> None:
+        """`ops=` is the C3 half of the same fix, and it goes all the way to the element.
+
+        Asserting the *context* rather than only the constructor keyword, because that is what
+        `PoolDetect._do_open` reads; a runner that accepted the keyword and dropped it on the
+        floor would pass the constructor assertion and refuse every real chain at `open()`.
+        """
+        from shipinfer.runtime.ops import ThreadLocalImageOps
+
+        monkeypatch.setattr("shipinfer.engine.InferenceServer", RecordingEngine)
+
+        run(pool_chain_file, runner="recording-pool")
+
+        (built,) = RecordingRunner.instances
+        assert built.ops is not None, "a chain with a `pool` detector was handed no image ops"
+        assert isinstance(built.ops, ThreadLocalImageOps)
+        assert built.element_context().ops is built.ops
+
+
+class TestEveryWorkerThreadGetsItsOwnImageOps:
+    """The blocking half of the same wiring: *one instance per thread*, not per process.
+
+    `pipeline.workers` threads walk one chain over one shared `PoolDetect`
+    (`runners/inprocess.py`), and every implementation `get_image_ops` can return is per-thread
+    by contract -- `NativeImageOps` keeps a staging ring inside the extension, `TorchImageOps`
+    binds a device on the constructing thread and caches an event and a ping-pong staging pair
+    on the instance. Handing one object to four workers is CONVENTIONS 2.8's buffer overwritten
+    mid-DMA: plausible pixels, no error, and nothing an offline suite can see, because
+    `NumpyImageOps` is stateless. So the property is asserted of the *decorator* the command
+    hands over, which is checkable with no driver at all.
+
+    The second test is the other half of the same defect: a single-process run on an 8-GPU box
+    letterboxed every camera on `cuda:0`, which is this project's founding bug one layer up.
+    """
+
+    def test_four_threads_through_the_handed_in_ops_get_four_delegates(
+        self, pool_chain_file: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("shipinfer.engine.InferenceServer", RecordingEngine)
+
+        run(pool_chain_file, runner="recording-pool")
+
+        (built,) = RecordingRunner.instances
+        # The *objects*, not their ids: a delegate is dropped when its thread exits and
+        # CPython hands the next one the same address, which makes an id-only set flaky.
+        delegates: list[object] = []
+        lock = threading.Lock()
+
+        def touch() -> None:
+            delegate = built.ops._ops
+            with lock:
+                delegates.append(delegate)
+
+        threads = [threading.Thread(target=touch) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(5.0)
+
+        assert len(delegates) == 4
+        assert len({id(d) for d in delegates}) == 4, "four workers shared one ImageOps"
+
+    def test_the_workers_are_spread_over_the_engine_s_devices(
+        self, pool_chain_file: Path, monkeypatch
+    ) -> None:
+        """Eight threads over the four GPUs the engine reports, two each.
+
+        The device list is read off the engine's `DeviceManager` and not resolved by building
+        one here: `DeviceManager.__init__` validates every visible device, which costs a CUDA
+        primary context per GPU that this process never gives back. `FourGpuEngine` is that
+        manager's shape and nothing more -- `visible_gpus` plus `has_accelerator`, which is all
+        `get_thread_local_image_ops` reads.
+        """
+        monkeypatch.setattr("shipinfer.engine.InferenceServer", FourGpuEngine)
+
+        run(pool_chain_file, runner="recording-pool")
+
+        (built,) = RecordingRunner.instances
+
+        def touch() -> None:
+            built.ops.on_device  # noqa: B018 - first touch assigns the device
+
+        threads = [threading.Thread(target=touch) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(5.0)
+
+        assert built.ops.assignments() == {0: 2, 1: 2, 2: 2, 3: 2}
+
+
+class TestAChainThatNeedsOpsAndNoPool:
+    """The two dependencies coming apart in the direction nothing ships yet.
+
+    `dependency_is_needed` asks its two questions separately precisely so this chain is
+    possible, and it is the shape of phase C's `crop` element. What it gets today is recorded
+    here rather than assumed, because the recording is the honest half: with no engine there
+    is no `DeviceManager`, so `get_thread_local_image_ops` binds no thread (ADR-002) and
+    claims no pinned pool, and the device list comes from what the operator pinned.
+
+    That is safe -- `TorchImageOps` and `NativeImageOps` are each constructed *with* their
+    device index and act on it rather than on the ambient current device -- and it is not the
+    full arrangement. Building a `DeviceManager` here to close the gap is the trade `run.py`
+    refuses on purpose (a CUDA primary context per visible GPU, ~200 MiB each, that nothing in
+    this process gives back), so the gap is documented at both ends and pinned here.
+    """
+
+    def test_it_resolves_ops_and_builds_no_engine_at_all(
+        self, ops_only_chain_file: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("shipinfer.engine.InferenceServer", RefusingEngine)
+        handed = object()
+        recorded: dict[str, Any] = {}
+
+        def fake_ops(provider, **kwargs: Any) -> object:
+            recorded.update(kwargs, provider=provider)
+            return handed
+
+        monkeypatch.setattr("shipinfer.runtime.ops.get_thread_local_image_ops", fake_ops)
+
+        # `--gpus 0,1` so the fallback has something to fall back to, and so `_fill_in_gpus`
+        # asks no driver: the whole point is that this path resolves a device list without an
+        # engine to read one off.
+        assert run(ops_only_chain_file, runner="recording-pool", gpus="0,1") == 0
+
+        (built,) = RecordingRunner.instances
+        assert built.models is None, "a chain that runs no model here was handed a pool"
+        assert built.ops is handed
+        assert recorded["devices"] == (0, 1), "the operator's `devices.visible_gpus`"
+        assert recorded["device_manager"] is None, (
+            "there is no engine, so there is no DeviceManager -- no thread is bound and no "
+            "staging pool is claimed. Documented at both ends; change this and change those"
+        )
+        assert recorded["memory"] is None
+
 
 class TestWhenNoPoolIsNeededNoneIsBuilt:
     """Three runs that must touch no repository, no device and no engine.
@@ -400,6 +716,8 @@ class TestWhenNoPoolIsNeededNoneIsBuilt:
         assert EVENTS == ["runner.start", "wait", "runner.stop"]
         (built,) = RecordingRunner.instances
         assert built.models is None, "a mock chain was handed a model pool"
+        assert built.ops is None, "a mock chain was handed image ops"
+        assert built.element_context().ops is None
 
     def test_a_dry_run_builds_no_engine_even_for_a_pool_chain(
         self, pool_chain_file: Path, monkeypatch
@@ -660,12 +978,12 @@ class TestOverARealEngine:
     in it, and looks at the element while the chain is open -- which is the thing that used to
     raise ``ConfigurationError`` before the first frame.
 
-    Offline: the repository fixture declares two ``platform: mock`` models on ``KIND_CPU``
-    instance groups, so no accelerator is touched.
+    Offline: :func:`detector_repository` declares one ``platform: mock`` model on a
+    ``KIND_CPU`` instance group, so no accelerator is touched.
     """
 
     def test_the_pool_element_resolves_its_model_while_the_chain_is_open(
-        self, pool_chain_file: Path, tmp_repository: Path, monkeypatch
+        self, pool_chain_file: Path, detector_repository: Path, monkeypatch
     ) -> None:
         opened: dict[str, Any] = {}
 
@@ -676,9 +994,18 @@ class TestOverARealEngine:
             opened["is_open"] = element.is_open
             opened["model"] = element.model
             opened["resolved"] = element._handle is not None
+            opened["dst_size"] = element._dst_size
 
         monkeypatch.setattr(run_module, "_wait", probe)
 
-        assert run(pool_chain_file, runner="inprocess", repository=tmp_repository) == 0
+        assert run(pool_chain_file, runner="inprocess", repository=detector_repository) == 0
 
-        assert opened == {"is_open": True, "model": "echo", "resolved": True}
+        # `dst_size` is in here because it is the half a forwarded keyword cannot fake: it
+        # came from the artefact's own `dims: [3, 8, 8]`, read off a repository this command
+        # loaded, which is the resolution every real deployment relies on.
+        assert opened == {
+            "is_open": True,
+            "model": "detector",
+            "resolved": True,
+            "dst_size": (8, 8),
+        }

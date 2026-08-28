@@ -289,13 +289,17 @@ class ElementContext:
             standing case — can close its instant only by timeout once every worker is parked
             inside it. ``None`` means the runner did not say, and an element that needs the
             number must then refuse to wait at all rather than guess one.
-        ops: batched image preprocessing, bound to this shard's device. **``None`` in every
-            runner in this tree today**: the field is declared here so that the elements C3
-            lands are written against it from the first line, and C3 is what wires it, in the
-            same shape ``models=`` already has -- the CLI or the shard process resolves one
-            implementation from ``runtime.ops`` (the layer that may import torch) and hands
-            it to the runner, which puts it here. Until then an element that needs it finds
-            ``None`` and must raise, rather than falling back to a per-image loop in Python.
+        ops: batched image preprocessing, bound to this shard's device, in the same shape
+            ``models=`` already has -- ``shipinfer run`` (``cli/commands/run.py``) or the
+            shard process (``cli/shard.py``) resolves one implementation from ``runtime.ops``,
+            the layer that may import torch, and hands it to the runner, which puts it here.
+            What arrives is a ``ThreadLocalImageOps``, because a chain is walked by
+            ``pipeline.workers`` threads over one shared element and an ``ImageOps`` belongs
+            to one thread. ``None`` means the runner resolved none, which is the normal answer
+            for a chain no element of which declares
+            :attr:`~shipinfer.topology.base.Element.needs_image_ops`; an element that needs it
+            and finds ``None`` must raise, rather than falling back to a per-image loop in
+            Python.
 
     The last five are **resolved settings, not settings**. ``topology`` is a pure package and
     must not import :mod:`shipinfer.core.settings`, :mod:`shipinfer.runners` or
@@ -396,6 +400,26 @@ class Element(abc.ABC):
     #:   answer is exactly the one a frame nobody can act on must not be given another GPU
     #:   for, and a local one is not.
     needs_model: ClassVar[bool] = False
+
+    #: Whether :meth:`open` reads :attr:`ElementContext.ops` -- the third of these
+    #: declarations and the newest, asked by the same caller as :attr:`needs_model` and for
+    #: the same reason: the process that builds a runner has to know, *before* it builds one,
+    #: whether to resolve an image-ops implementation out of ``shipinfer.runtime.ops``. That
+    #: resolution is not free and it is not portable -- ``get_image_ops`` may construct a
+    #: torch context bound to this shard's device -- so a chain of mocks must not pay for it,
+    #: which is exactly the mistake ``node.kind in MODEL_KINDS`` was for the model pool.
+    #:
+    #: Separate from :attr:`needs_model` rather than folded into it, because the two come
+    #: apart in both directions: ``PoolSegment`` submits a crop somebody else prepared
+    #: (``needs_model``, no ops), and a future ``crop`` element would preprocess without
+    #: running a repository model at all (ops, no ``needs_model``). Today only
+    #: :class:`~shipinfer.topology.elements.pool.PoolDetect` answers ``True`` -- it is the one
+    #: element that letterboxes a whole frame and then has to undo exactly that transform to
+    #: put the boxes back in source pixels.
+    #:
+    #: A class that answers ``True`` must raise from :meth:`_do_open` when the context carries
+    #: no ops, so that the declaration and the requirement cannot drift.
+    needs_image_ops: ClassVar[bool] = False
 
     def __init__(
         self,

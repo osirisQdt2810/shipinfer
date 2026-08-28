@@ -107,6 +107,7 @@ from shipinfer.topology import (
     ElementContext,
     ElementKind,
     ElementNode,
+    ImageOpsLike,
     ModelResolver,
     Topology,
 )
@@ -198,6 +199,8 @@ class InprocessRunner(Runner):
         shard_id: passed to every element (arch.md §2).
         device: the GPU this runner owns, or ``None``.
         models: the model pool for ``pool`` elements.
+        ops: image pre-processing for the elements that transform a frame before submitting
+            it. Handed in for the reason ``models`` is — see :class:`~shipinfer.runners.base.Runner`.
         queue: override the admission queue. A test injects a tiny one to provoke overflow;
             production takes the configured
             :class:`~shipinfer.scheduling.queues.fair.FairPriorityQueue`. An injected queue
@@ -243,6 +246,7 @@ class InprocessRunner(Runner):
         shard_id: int = 0,
         device: Device | None = None,
         models: ModelResolver | None = None,
+        ops: ImageOpsLike | None = None,
         chain_yaml: str = "",
         queue: RequestQueue | None = None,
         workers: int | None = None,
@@ -255,6 +259,7 @@ class InprocessRunner(Runner):
             shard_id=shard_id,
             device=device,
             models=models,
+            ops=ops,
             chain_yaml=chain_yaml,
         )
         pipeline = self._settings.pipeline
@@ -402,7 +407,8 @@ class InprocessRunner(Runner):
         Both are left ``None`` by :meth:`Runner.element_context` rather than defaulted there,
         because a runner that does not execute a chain in this process has neither to promise
         — the fleet runner's elements live in its children, each of which builds its own.
-        ``ops`` stays ``None`` here: nothing resolves an image-ops implementation yet.
+        ``ops`` is not one of them: it arrives at construction like ``models``, so the base
+        class already put it on the context.
         """
         return replace(
             super().element_context(),

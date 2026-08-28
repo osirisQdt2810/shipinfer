@@ -43,8 +43,8 @@ def build_runner(
         name: a registered runner name or alias (``inprocess``, ``single``, ...).
         topology: the validated chain to run.
         settings: the deployment settings; the runner's default applies when omitted.
-        options: implementation-specific keywords — ``shard_id``, ``device``, ``models``, and
-            whatever the implementation adds (``workers``, ``queue``).
+        options: implementation-specific keywords — ``shard_id``, ``device``, ``models``,
+            ``ops``, and whatever the implementation adds (``workers``, ``queue``).
 
     Raises:
         ConfigurationError: no runner is registered under that name; the message lists the

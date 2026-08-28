@@ -42,10 +42,11 @@ class TestTheNewFieldsDefaultToNotTold:
         elements before a runner, an engine or a device exists — which is what the offline
         tier does on every one of these tests. The three added in phase C keep that property.
 
-        ``ops`` is ``None`` in every runner in this tree: C3 is what resolves an
-        implementation and hands it over, in the shape ``models=`` already has. Until then
-        this is the only behaviour it has, and pinning it is what makes "an element must
-        raise rather than guess" a rule with something behind it.
+        ``ops`` is resolved and handed over by the process that builds the runner
+        (``cli/commands/run.py``, ``cli/shard.py``), in the shape ``models=`` already has —
+        and only for a chain that declares it needs one, so ``None`` stays the normal answer
+        for a chain of mocks. Pinning the default is what makes "an element must raise rather
+        than guess" a rule with something behind it.
         """
         assert getattr(ElementContext(), field) is None
 
