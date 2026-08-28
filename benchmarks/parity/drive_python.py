@@ -7,28 +7,21 @@ bookkeeping are the production ones, which is the only reason the trace says any
 Everything is observed from the **actor's own thread**, at the source and sink calls, so
 what the trace records is that thread's program order rather than a poll racing it. The
 actor's state and failure count are read out of its real ``health`` snapshot at each of
-those points; the un-jittered backoff peek is the one number computed rather than measured,
-because the jitter draws from a different generator in each plane (see ``README.md``).
+those points, and the retry delay out of a production
+:class:`~shipinfer.ingest.timing.backoff.ExponentialBackoff` stepped in lockstep with that
+count -- un-jittered, because the jitter draws from a different generator in each plane.
 """
 
 from __future__ import annotations
 
-import argparse
-import sys
 import time
 from pathlib import Path
 
 import numpy as np
 
-from benchmarks.parity.scenario import (
-    INT_SETTINGS,
-    CameraScript,
-    Scenario,
-    load_scenario,
-)
+from benchmarks.parity.scenario import INT_SETTINGS, CameraScript, Scenario
 from benchmarks.parity.trace import Trace, TraceWriter
 from shipinfer.core.errors import (
-    ConfigurationError,
     FrameDecodeError,
     QueueFullError,
     RequestCancelledError,
@@ -42,8 +35,9 @@ from shipinfer.ingest.camera.actor import CameraActor
 from shipinfer.ingest.frame.frame import Frame
 from shipinfer.ingest.frame.tag import FrameCounter
 from shipinfer.ingest.manager import IngestManager
+from shipinfer.ingest.timing.backoff import ExponentialBackoff
 
-__all__ = ["GOLDEN", "HERE", "SCENARIOS", "run_scenario"]
+__all__ = ["GOLDEN", "HERE", "SCENARIOS", "peek_us", "run_scenario"]
 
 HERE = Path(__file__).resolve().parent
 SCENARIOS = HERE / "scenarios"
@@ -52,6 +46,18 @@ GOLDEN = HERE / "golden"
 #: Every scripted frame is this size. Small because no pixel is ever looked at: the parity
 #: property is which frames were produced and what happened to them, not what was in them.
 _HEIGHT, _WIDTH = 4, 6
+
+
+def peek_us(backoff: ExponentialBackoff) -> int:
+    """One backoff's next un-jittered delay, in whole microseconds.
+
+    Whole microseconds because the trace carries no floats: a rounding that differs in the
+    last bit between two languages is a gate that flaps. The C++ half rounds identically
+    (``csrc/tests/scripted_source.h``), and that unit conversion is the only backoff
+    arithmetic this harness still spells twice.
+    """
+    return int(backoff.peek() * 1_000_000 + 0.5)
+
 
 #: How long the whole fleet may take to finish its script. Every camera terminates on its
 #: own (an exhausted read, a fatal open, a closed sink), so overrunning this means the run
@@ -67,15 +73,29 @@ class CameraRecorder:
     ADR-002 buys.
     """
 
-    def __init__(self, script: CameraScript, scenario: Scenario, writer: TraceWriter) -> None:
+    def __init__(
+        self, script: CameraScript, settings: IngestSettings, writer: TraceWriter
+    ) -> None:
         self.script = script
         self.exhausted = False
         self.actor: CameraActor | None = None
-        self._scenario = scenario
         self._writer = writer
         self._counts = {"open": 0, "read": 0, "close": 0, "sink": 0}
         self._state = "idle"
         self._failures = 0
+        # The actor's backoff is private and its history is not: `peek()` answers for the
+        # attempt it is *at*, and by the time a failure is observable the actor has moved on.
+        # So the recorder keeps its own instance of the PRODUCTION class, built the way
+        # `CameraActor.__init__` builds the actor's (`camera/actor.py`), and steps it in
+        # lockstep with the observed failure count -- a mirror, not a second formula. A
+        # scenario recomputing `initial * factor ** attempt` here made the column unfailable:
+        # both planes agreed because neither was reading its own backoff.
+        self._backoff = ExponentialBackoff(
+            settings.reconnect_initial_ms / 1000.0,
+            settings.reconnect_max_ms / 1000.0,
+            factor=settings.reconnect_factor,
+            jitter=settings.reconnect_jitter,
+        )
 
     def emit(
         self, kind: str, numbers: tuple[int, ...] = (), text: tuple[str, ...] = ()
@@ -102,9 +122,18 @@ class CameraRecorder:
             self.emit("state", (), (self._state, health.state.value))
             self._state = health.state.value
         while health.consecutive_failures > self._failures:
-            self.emit("retry", (self._failures, self._scenario.peek_us(self._failures)))
+            self.emit("retry", (self._failures, peek_us(self._backoff)))
+            self._backoff.next_delay()
             self._failures += 1
-        self._failures = min(self._failures, health.consecutive_failures)
+        if health.consecutive_failures < self._failures:
+            self._realign(health.consecutive_failures)
+
+    def _realign(self, attempts: int) -> None:
+        """Follow the actor's backoff back down -- it resets the moment a frame arrives."""
+        self._backoff.reset()
+        for _ in range(attempts):
+            self._backoff.next_delay()
+        self._failures = attempts
 
 
 class ScriptedSource(FrameSource):
@@ -217,8 +246,9 @@ def run_scenario(scenario: Scenario, *, plane: str = "python") -> Trace:
     """
     writer = TraceWriter()
     writer.header(scenario.name, plane)
+    settings = _settings(scenario)
     recorders = {
-        script.camera_id: CameraRecorder(script, scenario, writer)
+        script.camera_id: CameraRecorder(script, settings, writer)
         for script in scenario.cameras
         if script.enabled
     }
@@ -234,7 +264,7 @@ def run_scenario(scenario: Scenario, *, plane: str = "python") -> Trace:
             recorder.actor = manager.actor(config.camera_id)
         return ScriptedSource(config, counter, settings=None, recorder=recorder)
 
-    manager = IngestManager(sink, settings=_settings(scenario), source_factory=factory)
+    manager = IngestManager(sink, settings=settings, source_factory=factory)
     actors: dict[str, CameraActor] = {}
     try:
         manager.start()
@@ -287,61 +317,3 @@ def _await_finish(actors: dict[str, CameraActor]) -> None:
         f"parity run did not finish within {_RUN_BUDGET_S:g}s; still running: "
         f"{sorted(name for name, actor in actors.items() if actor.is_running)}"
     )
-
-
-def main(argv: list[str] | None = None) -> int:
-    """``python -m benchmarks.parity.drive_python --scenario reconnect --emit-golden``."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scenario", required=True, help="a name under scenarios/, or a path")
-    parser.add_argument("--out", type=Path, help="write the trace here instead of stdout")
-    parser.add_argument(
-        "--emit-golden",
-        action="store_true",
-        help="write golden/<scenario>.jsonl -- the committed file BOTH planes are then held "
-        "to. Regenerating one to make a plane pass is what this harness exists to prevent",
-    )
-    parser.add_argument("--force", action="store_true", help="overwrite an existing golden")
-    args = parser.parse_args(argv)
-
-    named = Path(args.scenario)
-    path = named if named.suffix == ".scn" else SCENARIOS / f"{args.scenario}.scn"
-    scenario = load_scenario(path)
-    trace = run_scenario(scenario)
-    lines = [record.to_line() for record in trace.records]
-    if len(lines) < scenario.records_min:
-        raise ConfigurationError(
-            f"{path}: promised at least {scenario.records_min} record(s), produced "
-            f"{len(lines)}. A vacuous trace is a golden that proves nothing"
-        )
-    if args.emit_golden:
-        destination = GOLDEN / f"{scenario.name}.jsonl"
-        if destination.exists() and not args.force:
-            raise ConfigurationError(
-                f"{destination} already exists. A golden is captured once and committed; "
-                f"pass --force only when the change to the plane IS the decision"
-            )
-        _write(trace, destination)
-        print(f"wrote {destination} ({len(lines)} record(s))")
-    elif args.out:
-        _write(trace, args.out)
-        print(f"wrote {args.out} ({len(lines)} record(s))")
-    else:
-        print("\n".join(_render(trace)))
-    return 0
-
-
-def _render(trace: Trace) -> list[str]:
-    writer = TraceWriter()
-    writer.header(trace.scenario, trace.plane)
-    for record in trace.records:
-        writer.record(record.kind, record.camera, record.numbers, record.text)
-    return writer.lines()
-
-
-def _write(trace: Trace, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(_render(trace)) + "\n", encoding="ascii")
-
-
-if __name__ == "__main__":
-    sys.exit(main())

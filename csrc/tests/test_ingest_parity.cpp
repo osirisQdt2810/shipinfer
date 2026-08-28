@@ -43,6 +43,9 @@ namespace {
     int failures = 0;
     int checks = 0;
 
+    //: How long the whole fleet may take to finish its script -- `_RUN_BUDGET_S` there.
+    constexpr auto kRunBudget = 20s;
+
     void check(bool condition, const std::string& what) {
         ++checks;
         if (!condition) {
@@ -97,42 +100,78 @@ namespace {
 
     // -- the register's other half ----------------------------------------------------------
 
+    // Python's `str.isidentifier()`, which is what the other plane's entry is written
+    // against: a leading digit is NOT an identifier there, so accepting one here would let
+    // this plane excuse a difference the Python differ would report.
     bool is_identifier(const std::string& value) {
-        if (value.empty()) return false;
+        if (value.empty() || std::isdigit(static_cast<unsigned char>(value[0]))) return false;
         for (char c : value) {
             if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') return false;
         }
         return true;
     }
 
-    // The known-divergence id that accounts for this one field, or "" if none does. Every id
-    // here has an entry in `benchmarks/parity/known.py` with citations on both sides and an
-    // open ledger line; adding one here without one there fails `TestKnownDivergences`.
+    // `last_error_type_prefix`: the Python actor stores f"{type(error).__name__}: {error}"
+    // (`ingest/camera/actor.py::_record_failure`); this plane stores redact_in(what())
+    // (`ingest/camera/actor.cpp::record_failure`), which carries no type in front of it.
+    bool only_the_exception_type_prefix(const ParityRecord& python, const ParityRecord& mine) {
+        if (python.text.size() < 2 || mine.text.size() < 2) return false;
+        const size_t at = python.text[1].find(": ");
+        return at != std::string::npos && python.text[1].substr(at + 2) == mine.text[1] &&
+               is_identifier(python.text[1].substr(0, at));
+    }
+
+    // `fatal_consecutive_failures`: the Python health reads `backoff.attempts`, and the fatal
+    // SourceUnavailableError path never calls next_delay(), so it stays 0; this plane
+    // increments `consecutive_failures_` inside record_failure, so it reads 1.
+    //
+    // Keyed on the error's own words and not on the counts alone, because 0-against-1 is a
+    // shape a future unrelated divergence could also have. "is unavailable" is the message
+    // BOTH planes build a SourceUnavailableError from, so this key survives the fix for
+    // `last_error_type_prefix` — keying on the type name would tie the two entries together.
+    bool fatal_open_charges_one_failure(const ParityRecord& python, const ParityRecord& mine) {
+        if (python.numbers.size() < 7 || mine.numbers.size() < 7 || python.text.size() < 2) {
+            return false;
+        }
+        return python.numbers[6] == 0 && mine.numbers[6] == 1 &&
+               python.text[0] == "unhealthy" &&
+               python.text[1].find("is unavailable") != std::string::npos;
+    }
+
+    // The register's other half, as a table rather than a chain of `if`s: `main` walks it to
+    // fail when a registered divergence fired in NO scenario, and
+    // `test_parity_ingest.py::TestKnownDivergences` regexes the ids out of this file and out
+    // of `known_divergence` below, so a difference this plane excuses without an entry in
+    // `benchmarks/parity/known.py` — or an entry there this plane does not honour — is red on
+    // both sides. Every id here has citations on both sides and an open ledger line.
+    struct KnownEntry {
+        std::string id;
+        std::string field;
+        bool (*matches)(const ParityRecord& python, const ParityRecord& mine);
+    };
+
+    const std::vector<KnownEntry>& known_register() {
+        static const std::vector<KnownEntry> entries = {
+            {"last_error_type_prefix", "last_error", &only_the_exception_type_prefix},
+            {"fatal_consecutive_failures", "consecutive_failures",
+             &fatal_open_charges_one_failure},
+        };
+        return entries;
+    }
+
+    // The known-divergence id that accounts for this one field, or "" if none does.
     std::string known_divergence(const ParityRecord& python, const ParityRecord& mine,
                                  const std::string& field) {
         if (python.kind != "health") return "";
-        // `last_error_type_prefix`: the Python actor stores f"{type(error).__name__}: {error}"
-        // (`ingest/camera/actor.py::_record_failure`); this plane stores redact_in(what())
-        // (`ingest/camera/actor.cpp::record_failure`), which carries no type in front of it.
-        if (field == "last_error" && python.text.size() > 1 && mine.text.size() > 1) {
-            const size_t at = python.text[1].find(": ");
-            if (at != std::string::npos && python.text[1].substr(at + 2) == mine.text[1] &&
-                is_identifier(python.text[1].substr(0, at))) {
-                return "last_error_type_prefix";
-            }
-        }
-        // `fatal_consecutive_failures`: the Python health reads `backoff.attempts`, and the
-        // fatal SourceUnavailableError path never calls next_delay(), so it stays 0; this
-        // plane increments `consecutive_failures_` inside record_failure, so it reads 1.
-        if (field == "consecutive_failures" && python.numbers.size() > 6 &&
-            mine.numbers.size() > 6 && !python.text.empty()) {
-            if (python.numbers[6] == 0 && mine.numbers[6] == 1 &&
-                python.text[0] == "unhealthy") {
-                return "fatal_consecutive_failures";
-            }
+        for (const KnownEntry& entry : known_register()) {
+            if (entry.field == field && entry.matches(python, mine)) return entry.id;
         }
         return "";
     }
+
+    // Which registered ids actually fired, across every scenario in this run. A register whose
+    // entries stop firing is a register rotting into a suppression list, so `main` checks it.
+    std::set<std::string> fired;
 
     std::vector<std::string> differing_fields(const ParityRecord& left,
                                               const ParityRecord& right) {
@@ -168,8 +207,11 @@ namespace {
         for (const CameraScript& script : scenario.cameras) {
             cameras.push_back(camera_config(scenario, script));
             if (script.enabled) {
+                // The camera just resolved, so the recorder's mirrored backoff is built from
+                // exactly the numbers the actor's own will be. Read in the constructor and
+                // not held, so the vector reallocating later is harmless.
                 recorders[script.camera_id] =
-                    std::make_unique<CameraRecorder>(script, scenario, writer);
+                    std::make_unique<CameraRecorder>(script, cameras.back(), writer);
             }
         }
         // The sink and the recorders outlive the manager, which references both and stops
@@ -190,11 +232,26 @@ namespace {
             std::map<std::string, std::shared_ptr<CameraActor>> actors;
             for (const auto& entry : recorders)
                 actors[entry.first] = manager.actor(entry.first);
-            const auto deadline = std::chrono::steady_clock::now() + 20s;
-            while (std::chrono::steady_clock::now() < deadline) {
-                bool running = false;
-                for (const auto& entry : actors) running |= entry.second->is_running();
-                if (!running) break;
+            // Every script ends on its own (an exhausted read, a fatal open, a closed
+            // sink), so overrunning this means the run is STUCK. Mirrors the Python
+            // driver's `ServerStateError`: a budget that expires silently would emit a
+            // truncated trace and then compare it as if it were whole, which is a gate
+            // reporting "17 record(s) against 31" for a hang.
+            const auto deadline = std::chrono::steady_clock::now() + kRunBudget;
+            for (;;) {
+                std::vector<std::string> running;
+                for (const auto& entry : actors) {
+                    if (entry.second->is_running()) running.push_back(entry.first);
+                }
+                if (running.empty()) break;
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    std::string names;
+                    for (const std::string& name : running) {
+                        names += (names.empty() ? "" : ", ") + name;
+                    }
+                    throw ServerStateError(
+                        "parity run did not finish within 20s; still running: " + names);
+                }
                 std::this_thread::sleep_for(2ms);
             }
             for (const auto& entry : actors) healths[entry.first] = entry.second->health();
@@ -340,6 +397,11 @@ namespace {
               name + ": the golden names this scenario");
         check(golden.at(0).find("\"schema\":1") != std::string::npos,
               name + ": the golden is this schema");
+        // The register is asymmetric — `known_divergence` is given the Python record first —
+        // so a golden emitted by some other plane would have the two sides the wrong way
+        // round and quietly excuse the mirror image of each entry.
+        check(golden.at(0).find("\"plane\":\"python\"") != std::string::npos,
+              name + ": the golden was emitted by the python plane: " + golden.at(0));
         const auto theirs = by_camera(golden);
         const auto ours = by_camera(mine);
         std::set<std::string> cameras;
@@ -366,6 +428,7 @@ namespace {
                         unexplained += (unexplained.empty() ? "" : ", ") + field;
                     } else {
                         accepted.insert(camera + "." + field + " = " + entry);
+                        fired.insert(entry);
                     }
                 }
                 if (unexplained.empty()) continue;
@@ -389,6 +452,34 @@ namespace {
         }
     }
 
+    // -- section D: the register is still a register -----------------------------------------
+
+    // A registered divergence that fires in NO scenario is the register rotting into a
+    // permanent suppression: either the divergence was fixed — in which case the entry goes,
+    // on BOTH sides, which is the whole point of banning `xfail` — or the case that reproduced
+    // it was lost. Neither is visible from the diff alone, because a fix at this plane's CALL
+    // SITE leaves the entry's own citation untouched and simply stops printing `KNOWN:`.
+    void test_the_register_is_still_a_register() {
+        for (const KnownEntry& entry : known_register()) {
+            check(fired.count(entry.id) == 1,
+                  "known divergence " + entry.id +
+                      " fired in no scenario: either it is fixed (delete it here AND in "
+                      "benchmarks/parity/known.py, with its ledger line) or the case that "
+                      "reproduced it is gone");
+        }
+        // The other direction: an id excused by an `if` written past the table. The Python
+        // half fails on that too (the two id sets must be equal), and this makes the binary
+        // itself say so rather than printing a KNOWN line nobody reads.
+        for (const std::string& id : fired) {
+            bool registered = false;
+            for (const KnownEntry& entry : known_register()) registered |= entry.id == id;
+            check(registered, "'" + id +
+                                  "' was excused past known_register(): every id "
+                                  "known_divergence returns is an entry in the table, and "
+                                  "every entry in the table has one in known.py");
+        }
+    }
+
 }  // namespace
 
 int main() {
@@ -404,6 +495,9 @@ int main() {
         test_this_plane_matches_the_golden("reconnect");
         test_this_plane_matches_the_golden("backpressure");
         test_this_plane_matches_the_golden("fatal_vs_retryable");
+
+        // Last, deliberately: it reads what the three comparisons above accumulated.
+        test_the_register_is_still_a_register();
     } catch (const std::exception& error) {
         // A missing golden or an unreadable scenario is a HARD failure, never a skip: a gate
         // that fails open is worse than no gate, because it reads as evidence.

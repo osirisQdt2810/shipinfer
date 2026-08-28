@@ -31,10 +31,20 @@
 #include "shipinfer/ingest/manager.h"
 #include "shipinfer/ingest/registry.h"
 #include "shipinfer/ingest/sink.h"
+#include "shipinfer/ingest/timing/backoff.h"
 #include "tests/parity_scenario.h"
 #include "tests/parity_trace.h"
 
 namespace shipinfer::parity {
+
+    // One backoff's next un-jittered delay, in whole microseconds. Whole microseconds because
+    // the trace carries no floats: a rounding that differs in the last bit between two
+    // languages is a gate that flaps. `benchmarks/parity/drive_python.py::peek_us` rounds
+    // identically, and that unit conversion is the only backoff arithmetic this harness still
+    // spells twice.
+    inline int64_t peek_us(const ExponentialBackoff& backoff) {
+        return static_cast<int64_t>(backoff.peek() * 1e6 + 0.5);
+    }
 
     // One camera's trace, and the counters that turn its script into call outcomes.
     //
@@ -43,8 +53,23 @@ namespace shipinfer::parity {
     // actor's whole life is what ADR-002 buys.
     class CameraRecorder {
       public:
-        CameraRecorder(CameraScript script, const Scenario& scenario, ParityTraceWriter& writer)
-            : script_(std::move(script)), scenario_(scenario), writer_(writer) {}
+        // `config` is the camera the manager is about to be given, so the mirrored backoff
+        // below is built from exactly the numbers the actor's own is built from.
+        CameraRecorder(CameraScript script, const IngestConfig& config,
+                       ParityTraceWriter& writer)
+            : script_(std::move(script)),
+              writer_(writer),
+              // The actor's `backoff_` is private, and its history is not recoverable
+              // anyway: `peek()` answers for the attempt it is *at*, and by the time a
+              // failure is observable the actor has moved on. So the recorder keeps its own
+              // instance of the PRODUCTION class, built the way `CameraActor`'s constructor
+              // builds the actor's, and steps it in lockstep with the observed failure count
+              // -- a mirror, not a second formula. The scenario recomputing
+              // `initial * factor ^ attempt` here made the column unfailable: both planes
+              // agreed because neither was reading its own backoff. Seeded fixed because
+              // only `peek()` is ever read and entropy would be noise on a test.
+              backoff_(config.reconnect_initial_ms / 1000.0, config.reconnect_max_ms / 1000.0,
+                       config.reconnect_factor, config.reconnect_jitter, 1) {}
 
         const CameraScript& script() const { return script_; }
         bool exhausted() const { return exhausted_.load(); }
@@ -70,16 +95,24 @@ namespace shipinfer::parity {
                 state_ = state;
             }
             while (health.consecutive_failures > failures_) {
-                emit("retry", {static_cast<int64_t>(failures_), scenario_.peek_us(failures_)});
+                emit("retry", {static_cast<int64_t>(failures_), peek_us(backoff_)});
+                backoff_.next_delay();
                 ++failures_;
             }
-            failures_ = std::min(failures_, health.consecutive_failures);
+            // Follow the actor's backoff back down -- it resets the moment a frame arrives.
+            if (health.consecutive_failures < failures_) {
+                backoff_.reset();
+                for (uint64_t i = 0; i < health.consecutive_failures; ++i) {
+                    backoff_.next_delay();
+                }
+                failures_ = health.consecutive_failures;
+            }
         }
 
       private:
         CameraScript script_;
-        const Scenario& scenario_;
         ParityTraceWriter& writer_;
+        ExponentialBackoff backoff_;
         std::shared_ptr<CameraActor> actor_;
         std::atomic<bool> exhausted_{false};
         std::map<std::string, size_t> counts_;

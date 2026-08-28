@@ -26,6 +26,30 @@ trace field. No golden was regenerated and nothing was `xfail`ed; that is the wh
 binary is `test_ingest_parity` so CI's existing `for candidate in csrc/build/test_*` loop
 runs it: **zero workflow changes**. Offline in both planes, and no GPU tier by design.
 
+**What internal review broke, and what it cost (round 2).** Three claims the harness made
+about itself were falsified by running it, and every fix is a test that fails without it:
+
+- The C++ half of the divergence register could be widened with one line and no entry in
+  `known.py` — the mirror test only checked Python → C++. The register is a table now, both
+  halves' id sets must be **equal**, and the binary also fails on an id excused past its own
+  table.
+- `retry.peek_us` could not fail: both planes recomputed `initial · factorⁿ` from the
+  scenario's config, so doubling production `ExponentialBackoff.peek()` left the gate green
+  while the README called the column coverage. Each recorder now mirrors a **production**
+  backoff, stepped in lockstep with the observed failure count; the mutation is red on both
+  planes.
+- The three entries cited ledger items `P6-D1/D2/D3` that did not exist — the test asserted
+  the *shape of a string*. It reads `.claude/TASKS.md` now, and the three items are open.
+
+Plus: a registered divergence that fires in no scenario fails the C++ gate (a fix at the
+call site otherwise just stops printing `KNOWN:`); the goldens assert their scenario's
+promise rather than a record-count floor; and the emitter's entry point moved to
+`scripts/emit_parity_golden.py`, because `require_container.py` denies `-m benchmarks.*`
+wholesale and a README documenting a denied command teaches the reader to reach for
+`SHIPINFER_ALLOW_HOST_RUN`.
+
+---
+
 ## 2026-08-28 — `recognize` as a gallery query: `GalleryRecognize` + the gallery on disk (Phase C7)
 
 ---

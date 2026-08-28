@@ -1805,9 +1805,28 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
 - [ ] **P5 · Resolved config in, same events out.** The binary takes the settings tree and the
       model repository (`config.yaml`) the Python plane reads, not CLI flags; emits the same
       event schema (`pipeline/schema.py`) so one sink serves both planes.
-- [ ] **P6 · The parity harness.** `benchmarks/parity/`: drive both planes with one recorded
+- [~] **P6 · The parity harness.** `benchmarks/parity/`: drive both planes with one recorded
       trace and diff events, per-camera eviction counts and batch boundaries. This is the gate
-      the sync rule refers to; CI runs its offline half.
+      the sync rule refers to; CI runs its offline half. PR-A (ingest parity) built:
+      `benchmarks/parity/` + `csrc/tests/test_ingest_parity` + 3 committed goldens. PR-B
+      (scheduling-seam parity) and PR-C (csrc runners re-baseline) still open.
+- [ ] P6-D1 `CameraHealth.last_error`: pick one spelling across the planes. Python stores
+      f"{type(error).__name__}: {error}" (`src/shipinfer/ingest/camera/actor.py`
+      `_record_failure`); C++ stores `redact_in(reason)`, i.e. `what()` with no type in front
+      (`csrc/shipinfer/ingest/camera/actor.cpp` `record_failure`). The field is served by the
+      health API on both planes. Registered as `last_error_type_prefix` in
+      `benchmarks/parity/known.py`; deleting the entry is part of the fix.
+- [ ] P6-D2 `CameraHealth.consecutive_failures` after a FATAL open: 0 (py) vs 1 (cpp).
+      Python's health reads `backoff.attempts`, and the `SourceUnavailableError` path never
+      calls `next_delay()`; C++ increments `consecutive_failures_` inside `record_failure`.
+      Decide whether a failure that is never retried counts as one. Registered as
+      `fatal_consecutive_failures`.
+- [ ] P6-D3 `CameraActor.stop()` fate stickiness: C++ latches `thread_abandoned_` and answers
+      false for ever (`csrc/shipinfer/ingest/camera/actor.h:139-145`, decided in #39 round 4);
+      Python re-reads `thread.is_alive()`, so a second `stop()` after the abandoned thread
+      exits answers True. Decide whether Python latches too, or the C++ header stays the
+      single statement of it. Registered as `stop_fate_stickiness` (documentary: it shows in
+      no trace field, so a test reproduces it directly).
 
 - [x] **C22 progress (V80/V81).** shipvision: #2 split into #1, #3, #4, #5, #6, #7, #8, #9 — all
       merged, #2 closed; the native sessions in the restructured `csrc/` layout remain (from the

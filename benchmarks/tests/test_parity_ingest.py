@@ -11,6 +11,7 @@ scheduling, bookkeeping and error taxonomy, none of which needs a device.
 from __future__ import annotations
 
 import ast
+import importlib.util
 import re
 import threading
 import time
@@ -19,17 +20,21 @@ from pathlib import Path
 import pytest
 
 from benchmarks.parity import KNOWN, Record, compare, load_scenario
-from benchmarks.parity.drive_python import GOLDEN, SCENARIOS, run_scenario
+from benchmarks.parity.drive_python import GOLDEN, SCENARIOS, peek_us, run_scenario
 from benchmarks.parity.trace import FIELDS, read_trace
 from shipinfer.core.errors import ConfigurationError, SourceOpenError
 from shipinfer.core.settings.ingest import CameraConfig, IngestSettings
 from shipinfer.ingest.base import FrameSource
 from shipinfer.ingest.camera.actor import CameraActor
 from shipinfer.ingest.sink import CountingSink
+from shipinfer.ingest.timing.backoff import ExponentialBackoff
 
 ROOT = Path(__file__).resolve().parents[2]
 CPP_TEST = ROOT / "csrc" / "tests" / "test_ingest_parity.cpp"
 CPP_TRACE = ROOT / "csrc" / "tests" / "parity_trace.h"
+README = ROOT / "benchmarks" / "parity" / "README.md"
+LEDGER = ROOT / ".claude" / "TASKS.md"
+HOOK = ROOT / "scripts" / "hooks" / "require_container.py"
 THIS_FILE = Path(__file__)
 
 NAMES = ("reconnect", "backpressure", "fatal_vs_retryable")
@@ -198,6 +203,13 @@ class TestDifferFindsRealDrift:
         assert [a.known_id for a in report.accepted] == ["last_error_type_prefix"]
 
 
+def _health(name: str, camera: str) -> dict[str, int | str]:
+    """One camera's health record out of a committed golden, by name."""
+    trace = read_trace(GOLDEN / f"{name}.jsonl")
+    record = next(r for r in trace.records if r.kind == "health" and r.camera == camera)
+    return record.fields()
+
+
 class TestGoldenIsNotVacuous:
     """A golden that compared nothing would pass for ever. Each one promises a floor."""
 
@@ -206,6 +218,32 @@ class TestGoldenIsNotVacuous:
         scenario = load_scenario(SCENARIOS / f"{name}.scn")
         golden = read_trace(GOLDEN / f"{name}.jsonl")
         assert len(golden.records) >= scenario.records_min
+
+    @pytest.mark.parametrize("name", NAMES)
+    def test_the_golden_says_which_plane_emitted_it(self, name: str) -> None:
+        """The register is asymmetric -- ``compare`` reads ``left.plane == "python"`` to
+        decide which record is whose -- so a golden from another plane would have both sides
+        of every entry the wrong way round and excuse each one's mirror image."""
+        assert read_trace(GOLDEN / f"{name}.jsonl").plane == "python"
+
+    def test_the_backpressure_golden_charges_the_drops_to_the_loud_camera(self) -> None:
+        """ADR-005, asserted rather than snapshotted.
+
+        A floor and a set of record kinds make the golden a photograph: whatever was captured
+        is what passes, including a capture-time bug. `backpressure.scn` says in its own
+        comment that "cam_loud is refused twice and then accepted; cam_quiet is never refused,
+        and its counters have to prove it" -- so these are the numbers that promise.
+        """
+        assert _health("backpressure", "cam_loud")["frames_dropped"] == 3
+        assert _health("backpressure", "cam_quiet")["frames_dropped"] == 0
+
+    def test_the_fatal_golden_never_connected_the_camera_it_gave_up_on(self) -> None:
+        """A fatal open is charged as a connect FAILURE and never as a connect: the whole
+        point of the taxonomy is that this camera is not retried, so a `connects` of 1 would
+        mean the actor had opened the source it declared unusable."""
+        health = _health("fatal_vs_retryable", "cam_fatal")
+        assert health["connects"] == 0
+        assert health["connect_failures"] == 1
 
     def test_the_suite_covers_a_drop_a_retry_and_both_halves_of_the_taxonomy(self) -> None:
         records: list[Record] = []
@@ -216,6 +254,53 @@ class TestGoldenIsNotVacuous:
         assert {"drop", "retry", "health", "state", "frame"} <= kinds
         assert {"SourceOpenError", "SourceUnavailableError"} <= outcomes
         assert any(r.kind == "source_read" and r.text[0] == "FrameDecodeError" for r in records)
+
+
+class TestTheBackoffColumnIsReadFromThePlane:
+    """`retry.peek_us` is the production backoff's own number, so it can actually differ."""
+
+    def test_a_change_to_the_production_peek_breaks_the_golden(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The experiment that used to pass.
+
+        `ExponentialBackoff.peek` was changed to `initial * factor ** (attempts + 1)` --
+        doubling every reconnect delay in the fleet -- and this gate stayed green, because
+        both planes recomputed `initial * factor ** attempt` from the scenario's own config
+        and neither read its own backoff. The column could not fail while the README called
+        it coverage. It is now stepped in lockstep with the actor's failure count, off a
+        production `ExponentialBackoff` built from the same settings the actor's is.
+        """
+        original = ExponentialBackoff.peek
+        monkeypatch.setattr(
+            ExponentialBackoff, "peek", lambda self: original(self) * self.factor
+        )
+        report = compare(
+            run_scenario(load_scenario(SCENARIOS / "reconnect.scn")),
+            read_trace(GOLDEN / "reconnect.jsonl"),
+        )
+        assert not report.ok, "the retry delays doubled and the gate did not notice"
+        assert "peek_us" in report.differences[0].why, report.render()
+
+    def test_the_recorded_delay_is_the_one_the_actor_would_have_slept(self) -> None:
+        """Not a formula that happens to agree with it: the value comes off the class the
+        actor retries on, so the two cannot drift apart without this saying so."""
+        scenario = load_scenario(SCENARIOS / "reconnect.scn")
+        backoff = ExponentialBackoff(
+            scenario.int_setting("reconnect_initial_ms") / 1000.0,
+            scenario.int_setting("reconnect_max_ms") / 1000.0,
+            factor=scenario.float_setting("reconnect_factor"),
+            jitter=scenario.float_setting("reconnect_jitter"),
+        )
+        expected = []
+        for _ in range(3):
+            expected.append(peek_us(backoff))
+            backoff.next_delay()
+        retries = [
+            r for r in read_trace(GOLDEN / "reconnect.jsonl").records if r.kind == "retry"
+        ]
+        assert [r.numbers[0] for r in retries] == [0, 1, 2]
+        assert [r.numbers[1] for r in retries] == expected
 
 
 class TestKnownDivergences:
@@ -233,25 +318,59 @@ class TestKnownDivergences:
     def test_every_entry_has_an_open_ledger_line_and_a_reproducing_case(
         self, entry_id: str
     ) -> None:
+        """The ledger line is looked UP, not pattern-matched.
+
+        Asserting only that the string starts with ``"[ ] "`` checked the shape of a
+        sentence: all three entries cited ``P6-D1/D2/D3`` while ``.claude/TASKS.md`` had no
+        ``P6-D`` line at all, so nobody owned any of the three fixes and the test was green.
+        The register's only defence against becoming a suppression list is that each entry
+        is somebody's open work.
+        """
         entry = KNOWN[entry_id]
         assert entry.ledger.startswith("[ ] "), (
             f"{entry_id}: a known divergence carries an OPEN ledger line naming the fix; a "
             f"closed one means the entry should have been deleted with the fix"
+        )
+        ledger_id = entry.ledger.split()[2]
+        open_item = re.compile(rf"^\s*-?\s*\[ \]\s+`?{re.escape(ledger_id)}\b", re.M)
+        assert open_item.search(LEDGER.read_text()), (
+            f"{entry_id}: cites ledger item {ledger_id!r}, which is not an open line in "
+            f"{LEDGER.relative_to(ROOT)}. An entry nobody owns the fix for is a suppression"
         )
         assert entry.case in THIS_FILE.read_text(), (
             f"{entry_id}: names case {entry.case!r}, which is in no test here -- an entry "
             f"nothing reproduces is a suppression, not a decision"
         )
 
-    @pytest.mark.parametrize("entry_id", sorted(KNOWN))
-    def test_an_entry_the_differ_uses_is_mirrored_in_the_cpp_gate(self, entry_id: str) -> None:
-        """The C++ half diffs against the same golden, so it needs the same exceptions."""
-        entry = KNOWN[entry_id]
-        if entry.explains is None:
-            return
-        assert entry_id in CPP_TEST.read_text(), (
-            f"{entry_id}: not in {CPP_TEST.name}. That binary compares against the same "
-            f"golden, so an entry only this plane honours turns the C++ gate red"
+    def test_the_two_halves_of_the_register_name_the_same_ids(self) -> None:
+        """Both directions, because only one was guarded and the other was the hole.
+
+        The C++ gate diffs against the same golden, so it carries the same exceptions -- and
+        a reviewer widened its half with one line (``if (field == "frames_dropped") return
+        "drops_are_counted_differently";``) and no entry here, re-applied a real C++ bug, and
+        got ``38 checks, 0 failure(s)`` plus a green Python suite. Checking only that each
+        Python entry appears in the ``.cpp`` cannot see that: the set has to be equal.
+        """
+        source = CPP_TEST.read_text()
+        table = re.search(
+            r"static const std::vector<KnownEntry> entries = \{(.*?)\n        \};",
+            source,
+            re.DOTALL,
+        )
+        assert table, f"no known_register() table in {CPP_TEST.name}"
+        body = re.search(
+            r"\n    std::string known_divergence\(.*?\n    \}\n", source, re.DOTALL
+        )
+        assert body, f"no known_divergence() in {CPP_TEST.name}"
+        # The table is the register; the returns are read too, so an id smuggled straight
+        # into the function -- past the table -- is not invisible to this test.
+        there = set(re.findall(r'\{"(\w+)",', table.group(1)))
+        there |= {found for found in re.findall(r'return\s+"([^"]*)"', body.group(0)) if found}
+        here = {name for name, entry in KNOWN.items() if entry.explains is not None}
+        assert there == here, (
+            f"the divergence register has drifted: {sorted(there - here)} are excused by "
+            f"{CPP_TEST.name} with no entry in known.py, and {sorted(here - there)} are "
+            f"entries known.py's differ uses that the C++ gate does not honour"
         )
 
 
@@ -350,6 +469,64 @@ class TestTheFieldTablesAgree:
             "have drifted; the two planes would then name the same field differently in a "
             "failing gate, or disagree about how many a record has"
         )
+
+
+class TestTheReaderRefusesAMalformedTrace:
+    """A golden read leniently is a gate that compared something other than it says."""
+
+    def test_a_truncated_record_is_refused_naming_its_line(self, tmp_path: Path) -> None:
+        """Arity was checked on write and not on read, so a golden with a short `n[]` got as
+        far as `fields()` -- which zips names against values -- and died there as a bare
+        `KeyError: 'frames_dropped'`, in whichever assertion happened to touch that field."""
+        lines = list((GOLDEN / "backpressure.jsonl").read_text().splitlines())
+        victim = next(i for i, line in enumerate(lines) if '"kind":"health"' in line)
+        lines[victim] = lines[victim].replace('"n":[5,2,3,0,1,0,0]', '"n":[5,2,3]')
+        path = _write(tmp_path, "backpressure", lines)
+        with pytest.raises(ConfigurationError, match=rf"{path.name}:{victim + 1}: record"):
+            read_trace(path)
+
+
+class TestTheDocumentedCommandsRun:
+    """Every command the README gives is one this project's own hook allows on a host.
+
+    Not pedantry: the emitter was documented as `python -m benchmarks.parity.drive_python`,
+    which `require_container.py` denies wholesale by module root -- though it imports numpy
+    and `shipinfer.ingest`, touches no device and produces no measurement. A README that
+    documents a denied command teaches the reader to reach for `SHIPINFER_ALLOW_HOST_RUN`,
+    and that is how the container rule was lost the first time.
+    """
+
+    @staticmethod
+    def _hook():
+        spec = importlib.util.spec_from_file_location("require_container", HOOK)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        return module
+
+    @staticmethod
+    def _commands() -> list[str]:
+        """Every runnable command in the README: fenced lines and inline `code` spans."""
+        text = README.read_text()
+        fenced = re.compile(r"```\w*\n(.*?)```", re.S)
+        candidates = [
+            line.strip() for block in fenced.findall(text) for line in block.splitlines()
+        ]
+        # The fences are removed before the inline spans are read: a stray pairing across a
+        # ``` makes every later span in the file line up one backtick out.
+        candidates += [span.strip() for span in re.findall(r"`([^`]+)`", fenced.sub("", text))]
+        starts = ("python ", "pytest ", "./csrc/")
+        return [c for c in candidates if c.startswith(starts)]
+
+    def test_the_readme_documents_at_least_the_emitter_and_the_two_gates(self) -> None:
+        commands = self._commands()
+        assert any("emit_parity_golden" in c for c in commands), commands
+        assert len(commands) >= 3, commands
+
+    def test_the_container_hook_allows_every_one_of_them(self) -> None:
+        verdict = self._hook().verdict
+        refused = {c: verdict(c, str(ROOT)) for c in self._commands()}
+        assert not any(refused.values()), {c: why for c, why in refused.items() if why}
 
 
 class _BlockingSource(FrameSource):

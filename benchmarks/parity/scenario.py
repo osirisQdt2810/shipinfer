@@ -1,7 +1,7 @@
 """The scenario format: what each camera's decode path is told to do, call by call.
 
-Line-oriented and not JSON, so the C++ half parses it in forty lines with no vendored
-library. One directive per line, whitespace-separated, ``#`` to end of line is a comment::
+Line-oriented and not JSON, so the C++ half parses it with no vendored library. One
+directive per line, whitespace-separated, ``#`` to end of line is a comment::
 
     scenario reconnect            # exactly once, first
     records_min 24                # the vacuity floor this scenario promises
@@ -11,8 +11,7 @@ library. One directive per line, whitespace-separated, ``#`` to end of line is a
     read frame|empty|exhaust|FrameDecodeError [detail]
     sink accept|full|closed
 
-Each list is consumed in order and its last entry repeats for ever, so a short script drives
-an unbounded loop -- and every enabled camera must end somewhere, or the run never would.
+Each list's last entry repeats for ever, so every enabled camera must end somewhere.
 """
 
 from __future__ import annotations
@@ -46,8 +45,10 @@ INT_SETTINGS = frozenset(
 )
 FLOAT_SETTINGS = frozenset({"reconnect_factor", "reconnect_jitter"})
 
-#: Stated by every scenario rather than inherited: the backoff is compared through the peek
-#: sequence these four build, and `empty_read_sleep_ms` paces a run the trace does not record.
+#: Stated by every scenario rather than inherited: these four are what each plane's actor
+#: builds its `ExponentialBackoff` from -- and the `retry` record reports that backoff's own
+#: peek, so a scenario that left them to the default would compare two different backoffs.
+#: `empty_read_sleep_ms` paces a run the trace does not record.
 REQUIRED_SETTINGS = (
     "empty_read_sleep_ms",
     "reconnect_initial_ms",
@@ -95,19 +96,6 @@ class Scenario:
 
     def float_setting(self, key: str) -> float:
         return float(self.settings[key])
-
-    def peek_us(self, attempt: int) -> int:
-        """The un-jittered delay attempt ``attempt`` would draw, in whole microseconds.
-
-        The one piece of backoff arithmetic both planes repeat: jitter draws from a
-        ``mt19937_64`` on one side and ``random.Random`` on the other, so the delays
-        themselves are never comparable, while this sequence is identical from
-        initial/factor/cap alone.
-        """
-        initial = self.int_setting("reconnect_initial_ms") / 1000.0
-        cap = self.int_setting("reconnect_max_ms") / 1000.0
-        factor = self.float_setting("reconnect_factor")
-        return int(min(cap, initial * factor**attempt) * 1_000_000 + 0.5)
 
     def camera(self, camera_id: str) -> CameraScript:
         for script in self.cameras:

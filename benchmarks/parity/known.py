@@ -55,11 +55,22 @@ def _only_the_exception_type_prefix(python_record: Record, cpp_record: Record) -
 def _fatal_open_charges_one_consecutive_failure(
     python_record: Record, cpp_record: Record
 ) -> bool:
-    """A fatal open leaves the count at 0 on one plane and 1 on the other, never elsewhere."""
+    """A fatal open leaves the count at 0 on one plane and 1 on the other, never elsewhere.
+
+    Keyed on the error's own words as well as on the counts. 0-against-1 on an unhealthy
+    camera is a *shape*, and a future divergence of the same shape on some other failure
+    would be a new decision rather than this one -- an entry that absorbed it would be
+    suppressing a difference nobody had looked at.
+
+    The key is ``"is unavailable"``, the message both planes build a
+    ``SourceUnavailableError`` from, and not the type name: keying on the type name would
+    tie this entry to ``last_error_type_prefix`` staying unfixed.
+    """
     return (
         int(python_record.fields()["consecutive_failures"]) == 0
         and int(cpp_record.fields()["consecutive_failures"]) == 1
         and python_record.fields()["state"] == "unhealthy"
+        and "is unavailable" in str(python_record.fields()["last_error"])
     )
 
 

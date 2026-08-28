@@ -10,7 +10,6 @@
 #pragma once
 
 #include <algorithm>
-#include <cmath>
 #include <fstream>
 #include <map>
 #include <set>
@@ -56,19 +55,6 @@ namespace shipinfer::parity {
         int int_setting(const std::string& key) const { return std::stoi(settings.at(key)); }
         double double_setting(const std::string& key) const {
             return std::stod(settings.at(key));
-        }
-
-        // The un-jittered delay attempt `attempt` would draw, in whole microseconds. The one
-        // piece of backoff arithmetic both planes repeat: jitter draws from `mt19937_64` here
-        // and from `random.Random` there, so the delays themselves are never comparable while
-        // this sequence is identical from initial/factor/cap alone.
-        int64_t peek_us(uint64_t attempt) const {
-            const double initial = int_setting("reconnect_initial_ms") / 1000.0;
-            const double cap = int_setting("reconnect_max_ms") / 1000.0;
-            const double factor = double_setting("reconnect_factor");
-            const double peek =
-                std::min(cap, initial * std::pow(factor, static_cast<double>(attempt)));
-            return static_cast<int64_t>(peek * 1e6 + 0.5);
         }
     };
 

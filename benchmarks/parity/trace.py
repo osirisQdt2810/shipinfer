@@ -247,8 +247,9 @@ def parse_lines(lines: Sequence[str], *, where: str = "<lines>") -> Trace:
     """The reader, over lines rather than a path -- what a fresh in-process run comes back as.
 
     Raises:
-        ConfigurationError: an empty trace, a header of another schema, or an unknown record
-            kind, named with ``where:line`` so a bad golden says which line is bad.
+        ConfigurationError: an empty trace, a header of another schema, an unknown record
+            kind, or a record of the wrong arity -- named with ``where:line`` so a bad golden
+            says which line is bad.
     """
     kept = [line for line in lines if line.strip()]
     if not kept:
@@ -267,12 +268,24 @@ def parse_lines(lines: Sequence[str], *, where: str = "<lines>") -> Trace:
                 f"{where}:{number}: unknown parity record kind {parsed.get('kind')!r}; "
                 f"known: {sorted(KINDS)}"
             )
+        numbers, text = list(parsed.get("n", ())), list(parsed.get("t", ()))
+        expected_numbers, expected_text = FIELDS[parsed["kind"]]
+        # Checked on READ and not only on write, because a truncated `n[]` otherwise reaches
+        # `fields()` -- which zips names against values -- and dies later as a bare KeyError
+        # against a field name, in whichever test happened to look. The C++ reader's
+        # `differing_fields` already treats a short record as differing on the missing field.
+        if (len(numbers), len(text)) != (len(expected_numbers), len(expected_text)):
+            raise ConfigurationError(
+                f"{where}:{number}: record {parsed['kind']!r} carries "
+                f"{list(expected_numbers)} and {list(expected_text)}; got {len(numbers)} "
+                f"number(s) and {len(text)} word(s)"
+            )
         records.append(
             Record(
                 kind=parsed["kind"],
                 camera=parsed["camera"],
-                numbers=tuple(int(n) for n in parsed["n"]),
-                text=tuple(str(t) for t in parsed["t"]),
+                numbers=tuple(int(n) for n in numbers),
+                text=tuple(str(t) for t in text),
             )
         )
     return Trace(
