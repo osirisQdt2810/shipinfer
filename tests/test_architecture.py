@@ -293,14 +293,19 @@ class TestImportIsCheap:
         that promise honest when the day comes to relax the static rule: importing the
         package, and therefore every registered element class, still costs nothing.
 
-        ``shipvision`` is in the list and is the name that makes this test load-bearing
-        *today*. The static rule cannot ban it — ``check_layers.py`` walks the AST and counts
-        a function-scope import the same as a module-scope one, so a ``FORBIDDEN_EXTERNAL``
+        ``shipvision`` and ``confluent_kafka`` are in the list and are the names that make
+        this test load-bearing *today*. The static rule cannot ban either —
+        ``check_layers.py`` walks the AST and counts a function-scope import the same as a
+        module-scope one, so a ``FORBIDDEN_EXTERNAL``
         row would ban the lazy loaders in ``topology/bridge.py`` as well and leave no legal
         spelling. A subprocess assertion is therefore the only enforcement of the laziness:
         the day a loader is called at module scope, or an element module writes ``from
         shipvision import mot`` at the top, the offline tier starts needing a checked-out
-        submodule and this is what says so.
+        submodule and this is what says so. ``confluent_kafka`` arrived with the ``output``
+        element: arch.md §9 moved the result sinks under ``topology/sinks/``, the Kafka one
+        imports its client inside ``KafkaResultSink.__init__``, and that laziness is what lets
+        a chain naming ``output: {impl: kafka}`` be *validated* on a host with no librdkafka.
+        Move the import to module scope and this goes red — which is the only place it can.
 
         It reaches ``bridge.py`` because ``topology/__init__.py`` imports it, which is why
         that import is there — a module this cannot reach is a module the laziness is not
@@ -310,13 +315,46 @@ class TestImportIsCheap:
         code = (
             "import sys, shipinfer.topology as t; "
             "assert t.ELEMENTS, 'nothing registered'; "
+            "assert 'shipinfer.topology.sinks' in sys.modules, 'sinks unreached: unenforced'; "
             "heavy = [m for m in ('torch', 'tensorrt', 'cv2', 'gi', 'shipvision', "
-            "'shipinfer.engine', 'shipinfer.api', 'shipinfer.runtime', "
+            "'confluent_kafka', 'shipinfer.engine', 'shipinfer.api', 'shipinfer.runtime', "
             "'shipinfer.scheduling') if m in sys.modules]; "
             "assert not heavy, heavy"
         )
         result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
         assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_no_module_scope_kafka_import_even_guarded(self) -> None:
+        """The subprocess probe above cannot see a *guarded* module-scope import on a host
+        with no librdkafka — the failed import leaves nothing in ``sys.modules``, and CI is
+        such a host. So the one package the exemption was created for gets a targeted AST
+        check: no import anywhere under ``topology/`` that executes at module import time (module
+        or class scope, bare or inside ``try:``) may name ``confluent_kafka``. Function bodies stay legal —
+        that laziness is the point."""
+        offenders: list[str] = []
+
+        def visit(node: ast.AST, path_name: str) -> None:
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue  # runs later, not at import — the legal home
+                if isinstance(child, ast.Import):
+                    offenders.extend(
+                        f"{path_name}:{child.lineno}: import {alias.name}"
+                        for alias in child.names
+                        if alias.name.split(".")[0] == "confluent_kafka"
+                    )
+                elif (
+                    isinstance(child, ast.ImportFrom)
+                    and (child.module or "").split(".")[0] == "confluent_kafka"
+                ):
+                    offenders.append(f"{path_name}:{child.lineno}: from {child.module}")
+                visit(child, path_name)
+
+        files = sorted((SRC / "topology").rglob("*.py"))
+        assert files, "topology package not found — this check is scanning nothing"
+        for path in files:
+            visit(ast.parse(path.read_text()), str(path.relative_to(SRC)))
+        assert not offenders, offenders
 
 
 class TestTheWebFrameworkEntersAtOneSeam:

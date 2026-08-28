@@ -1,21 +1,26 @@
-"""Where perception events go — one implementation per file, selected by name.
+"""Re-export of the result sinks, which now live under ``topology``.
 
-``null`` is the default: a pipeline should start without a broker, and a deployment that has
-not decided where results go is better off producing none loudly than failing to boot.
-``jsonlines`` is what makes the whole DAG testable end to end with no Kafka and no camera.
-``kafka`` is the production path, and the one that keeps the contract the tracking tier
-already consumes.
+The family moved to :mod:`shipinfer.topology.sinks` ahead of the ``output`` element that
+will use them: arch.md §9 says ``sinks/{kafka,jsonlines,null}`` become ``output`` element
+implementations, and ``topology`` may import ``core`` and nothing else, so an element could
+not have reached them here. This package stays because ``pipeline/`` remains the working application until the
+chain has replaced it (arch.md §9 again) and its runner, its DeepStream path and their tests
+all name the sinks through this path.
 
-Registration is eager because none of these modules imports a heavy dependency at import
-time — ``confluent_kafka`` is imported inside the Kafka sink's constructor, so
-``shipinfer registries`` lists every sink on a host that has none of them installed.
+Nothing is redefined and nothing is re-registered: ``RESULT_SINKS`` below *is* the registry
+under ``topology``, so a sink resolved by name from either import path is the same class.
+New code should import :mod:`shipinfer.topology.sinks` directly.
 """
 
-from shipinfer.pipeline.sinks.base import ResultSink
-from shipinfer.pipeline.sinks.jsonlines import JsonLinesResultSink
-from shipinfer.pipeline.sinks.kafka import KafkaResultSink
-from shipinfer.pipeline.sinks.null import NullResultSink
-from shipinfer.pipeline.sinks.registry import RESULT_SINKS
+from __future__ import annotations
+
+from shipinfer.topology.sinks import (
+    RESULT_SINKS,
+    JsonLinesResultSink,
+    KafkaResultSink,
+    NullResultSink,
+    ResultSink,
+)
 
 __all__ = [
     "RESULT_SINKS",

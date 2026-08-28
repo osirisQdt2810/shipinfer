@@ -27,6 +27,12 @@ from typing import Any
 import numpy as np
 
 from shipinfer.core.errors import ValidationError
+
+# Re-exported, not redefined: the row-to-floats conversion now lives beside the event it
+# feeds (`core/events/convert.py`) because the chain's `output` element needs the same one.
+# Imported here under its own name so existing callers of
+# `pipeline.graph.state.as_embedding` keep resolving to that single helper.
+from shipinfer.core.events import as_embedding
 from shipinfer.core.request import InferenceRequest, Priority, RequestContext
 from shipinfer.pipeline.graph.detections import Detections
 from shipinfer.pipeline.graph.objects import ObjectBatch
@@ -56,23 +62,6 @@ DETECTIONS = "detections"
 #: keeps one type and a stage that reads it after release fails on shape, loudly, instead of
 #: on ``NoneType``.
 _RELEASED = np.zeros((0, 0, 3), dtype=np.uint8)
-
-
-def as_embedding(row: np.ndarray) -> tuple[float, ...]:
-    """A model row as a tuple of floats — a **copy**, so the source batch can be freed.
-
-    `tolist()`, not `float(v) for v in ...`. The generator was a per-element Python loop on
-    the emission path: `person_embedder` emits 2048 floats and the documented load is
-    ~15 000 objects/s, so ~30 M `float()` calls a second, paid even with the `null` sink.
-    `tolist()` does the identical conversion — it yields Python floats, not `np.float32` —
-    in one C call. ADR-003 and the ponytail principle: numpy already does this well.
-    And no `.astype(float)` first: `tolist()` on the float32 view already yields Python
-    floats and already copies — the astype was a second, redundant full float64
-    materialisation, ~240 MB/s of pure allocation at the design load (#32 round 7). Public
-    because the DeepStream probe reads the same tensors from NvDs metadata and must convert
-    them the same way (the two-planes rule): ONE helper, not two copies that drift.
-    """
-    return tuple(np.asarray(row).reshape(-1).tolist())
 
 
 def _as_int(row: np.ndarray) -> int:

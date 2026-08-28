@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections import deque
 from typing import Any, ClassVar
 
-from shipinfer.pipeline.schema import PerceptionEvent
-from shipinfer.pipeline.sinks.base import ResultSink
-from shipinfer.pipeline.sinks.registry import RESULT_SINKS
+from shipinfer.core.events.schema import PerceptionEvent
+from shipinfer.topology.sinks.base import ResultSink
+from shipinfer.topology.sinks.registry import RESULT_SINKS
 
 __all__ = ["NullResultSink"]
 

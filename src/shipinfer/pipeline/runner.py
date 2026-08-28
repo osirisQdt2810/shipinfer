@@ -67,10 +67,10 @@ from shipinfer.pipeline.metrics import PipelineMetrics
 from shipinfer.pipeline.reassembly import EVICTED, FrameCollector, FrameResult
 from shipinfer.pipeline.schema import PerceptionEvent
 from shipinfer.pipeline.sink import QueueFrameSink
-from shipinfer.pipeline.sinks import RESULT_SINKS, ResultSink
 from shipinfer.runtime.ops import ImageOps, get_thread_local_image_ops
 from shipinfer.scheduling.queues import QUEUES, BatchWindow, RequestQueue
 from shipinfer.scheduling.work import WorkItem
+from shipinfer.topology.sinks import RESULT_SINKS, ResultSink
 
 __all__ = ["FrameProducer", "PipelineRunner"]
 

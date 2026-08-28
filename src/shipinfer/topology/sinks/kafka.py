@@ -20,7 +20,7 @@ by ``poll()``. Without ``on_delivery`` that verdict is *never read*, so a topic 
 exist, an ACL denial or a broker that acknowledges nothing is completely invisible: every
 ``emit()`` returns ``True``, ``frames_emitted`` climbs at full rate and
 ``pipeline_sink_failures_total`` stays at zero through total publish loss — the exact failure
-:mod:`shipinfer.pipeline.sinks.base` says the ``bool`` return exists to prevent. So the
+:mod:`shipinfer.topology.sinks.base` says the ``bool`` return exists to prevent. So the
 callback is registered and every failure it reports is charged back to an ``emit()``.
 
 The attribution is a few frames late and the count is exact, which is the honest trade for
@@ -47,14 +47,14 @@ from shipinfer.core.errors import (
     BackendUnavailableError,
     ConfigurationError,
 )
+from shipinfer.core.events.schema import PerceptionEvent
 from shipinfer.core.logging import get_logger, log_context
-from shipinfer.pipeline.schema import PerceptionEvent
-from shipinfer.pipeline.sinks.base import ResultSink
-from shipinfer.pipeline.sinks.registry import RESULT_SINKS
+from shipinfer.topology.sinks.base import ResultSink
+from shipinfer.topology.sinks.registry import RESULT_SINKS
 
 __all__ = ["KafkaResultSink"]
 
-_LOG = get_logger("pipeline.sinks.kafka")
+_LOG = get_logger("topology.sinks.kafka")
 
 #: One delivery failure in this many is logged at ERROR; the rest go to DEBUG. A rejected
 #: topic fails *every* message, so at 1000 frames a second an unthrottled log line would

@@ -33,6 +33,7 @@ pytest                                  # the same selection, but WITH your GPUs
 pytest tests/scheduling -q              # one area
 pytest -q -m gpu                        # real devices
 pytest -q -m multigpu                   # the balancing evidence (needs >= 2 GPUs)
+python -m pytest -p tests.plugins.mask_shipvision # the CI-shaped run: `3rdparty/shipvision` hidden
 
 ruff check src tests scripts
 black --check src tests scripts
@@ -40,6 +41,13 @@ isort --check src tests scripts
 mypy src/shipinfer                      # strict; not a commit gate yet
 pre-commit run --all-files
 ```
+
+**Run the masked selection too, whenever you touched `topology/` or `pipeline/`.** CI does
+not check the submodule out, so a green run on this box says nothing about the run that gates
+the PR: `-p tests.plugins.mask_shipvision` makes `shipvision` unimportable exactly as a
+checkout without it is (`ModuleNotFoundError`, so `pytest.importorskip` skips rather than
+fails), and prints a header line saying so — paste that line with the numbers, because a
+masked run and an unmasked one differ by ~130 skips and by nothing else visible.
 
 **Run `scripts/run_tests.sh`, not bare `pytest`, before pushing.** It exports
 `CUDA_VISIBLE_DEVICES=""`, so the offline tier runs the way CI runs it: with no accelerator

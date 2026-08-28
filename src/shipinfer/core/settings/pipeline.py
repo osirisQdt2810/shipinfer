@@ -218,7 +218,7 @@ class PipelineSettings(BaseModel):
 
     # -- output ------------------------------------------------------------------------
 
-    #: A name registered in :data:`shipinfer.pipeline.sinks.RESULT_SINKS`.
+    #: A name registered in :data:`shipinfer.topology.sinks.RESULT_SINKS`.
     result_sink: str = "null"
     #: Constructor keyword arguments for that sink (a path, a broker list, a topic).
     #: Validated by the sink's own ``__init__``, so a typo fails at start-up.

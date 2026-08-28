@@ -13,7 +13,7 @@ from dataclasses import replace
 
 import pytest
 
-from shipinfer.pipeline.schema import (
+from shipinfer.core.events import (
     MESSAGE_TYPE,
     SCHEMA_VERSION,
     ObjectRecord,
@@ -196,6 +196,44 @@ class TestTrackletsAreAnExtension:
         assert payload["body_track_id_vec"] == [None]
         assert payload["body_track_state_vec"] == [None]
         assert json.loads(self.tracked().to_json())["ship_track_id_vec"] == [None]
+
+
+class TestTheSchemaIsPortable:
+    """`schema.py` is the module a consumer copies out wholesale — stdlib only, enforced."""
+
+    def test_every_module_scope_import_is_stdlib(self) -> None:
+        import ast
+        import sys
+        from pathlib import Path
+
+        path = Path(__file__).resolve().parents[2] / "src/shipinfer/core/events/schema.py"
+        tree = ast.parse(path.read_text())
+        roots: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                roots.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                roots.add((node.module or "").split(".")[0])
+        foreign = sorted(r for r in roots if r and r not in sys.stdlib_module_names)
+        assert not foreign, f"schema.py stopped being copy-out-able: {foreign}"
+
+
+class TestTheOldImportPathStillResolves:
+    """``pipeline/`` keeps working off the moved type, rather than owning a second copy.
+
+    arch.md §9: ``pipeline/`` remains the working application until the chain replaces it, and
+    ~30 modules name the event through :mod:`shipinfer.pipeline.schema`. The shim is only
+    worth having if it is the *same* class — two definitions with one name is the failure the
+    move exists to prevent.
+    """
+
+    def test_the_shim_re_exports_the_same_class(self):
+        from shipinfer.pipeline import schema as shim
+
+        assert shim.PerceptionEvent is PerceptionEvent
+        assert shim.ObjectRecord is ObjectRecord
+        assert shim.SCHEMA_VERSION == SCHEMA_VERSION
+        assert shim.MESSAGE_TYPE == MESSAGE_TYPE
 
 
 class TestCompletenessIsExplicit:
