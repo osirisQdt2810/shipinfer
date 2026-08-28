@@ -157,6 +157,18 @@ BLOCKED_MODULE_ROOTS = frozenset({"benchmarks"})
 #: deliberately short: pytest and pip EXECUTE what they are given and must never join it.
 READ_ONLY_TOOL_MODULES = frozenset({"black", "isort", "ruff"})
 
+#: Sub-packages carved back out of the roots above. `benchmarks.parity` is the cross-plane
+#: ingest parity harness: it imports numpy and `shipinfer.ingest`, drives a scripted source,
+#: touches no device and produces no measurement — so the container rule has nothing to say
+#: about it, and refusing the whole package was a false positive. Its emitter has since been
+#: moved to `scripts/emit_parity_golden.py` precisely because this hook denied it, so nothing
+#: under the package is an entry point today; the carve-out is the principled half of that
+#: fix, and it is what keeps the next one from being moved out of the package too.
+#:
+#: A prefix and not a root, so `benchmarks.run_bench` beside it is still refused, and matched
+#: with a trailing dot so a future `benchmarks.parity_bench` does not inherit it.
+ALLOWED_MODULE_PREFIXES = ("benchmarks.parity",)
+
 
 #: Runners whose *offline* use is allowed on a host, per ADR-001. Their device tiers are not.
 _TEST_RUNNERS = frozenset({"pytest", "py.test"})
@@ -608,7 +620,11 @@ def verdict(command: str, cwd: str | None = None) -> str | None:
                     continue
                 if module in BLOCKED_MODULES and _selects_device_tier(args):
                     return f"`python -m {module} {_device_marker(args)}` runs the device tier."
-                if root in BLOCKED_MODULE_ROOTS:
+                carved_out = any(
+                    module == prefix or module.startswith(prefix + ".")
+                    for prefix in ALLOWED_MODULE_PREFIXES
+                )
+                if root in BLOCKED_MODULE_ROOTS and not carved_out:
                     return f"`python -m {module}` runs a benchmark on the host."
             if any(script in joined for script in BLOCKED_SCRIPTS):
                 return "this invokes a test or benchmark runner."
