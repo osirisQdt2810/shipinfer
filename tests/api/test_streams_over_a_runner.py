@@ -250,6 +250,87 @@ class TestAPostedUrlIsRead:
         assert "quay-1" in response.json()["detail"]
 
 
+class TestTheListingConfirmsTheBand:
+    """The round trip #75 asked for: post a lane, read back the lane that took effect.
+
+    Over the real runner rather than a fake controller, because everything interesting here is
+    plumbing between two files -- the band has to survive `POST` -> `CameraSpec` ->
+    `InprocessRunner._priority_for` -> the health report -> `GET /streams`, and a double for
+    the middle of that would assert the test's own opinion of it.
+    """
+
+    def test_a_posted_band_is_what_the_listing_reports(self, deployment) -> None:
+        """`tracking_critical` for the camera that asked, `normal` for the one that did not.
+
+        The second half is what makes the first mean anything: a listing that reported the
+        posted band would pass on `quay-hot` alone, and a runner that ignored the band
+        entirely would too, since `normal` is what every camera used to get (#71).
+        """
+        streamed = deployment(frames=200, pause_s=0.002)
+        with streamed.client as client:
+            client.post(
+                "/streams",
+                json={
+                    "camera_id": "quay-hot",
+                    "url": "injected://hot",
+                    "priority": "tracking_critical",
+                },
+            )
+            client.post("/streams", json={"camera_id": "quay-cold", "url": "injected://cold"})
+
+            assert until(lambda: len(client.get("/streams").json()["streams"]) == 2)
+            bands = _bands(client)
+
+        assert bands == {"quay-hot": "tracking_critical", "quay-cold": "normal"}
+
+    def test_the_band_is_reported_before_the_camera_has_delivered_a_frame(
+        self, deployment
+    ) -> None:
+        """It is resolved at placement, so it does not wait on a decoder that may never open.
+
+        A camera pointed at a dead switch is exactly when an operator asks which lane it is
+        in, and a band that only appeared once frames arrived would be absent for every
+        camera worth asking about.
+        """
+        streamed = deployment(frames=0)
+        with streamed.client as client:
+            body = client.post(
+                "/streams",
+                json={
+                    "camera_id": "quay-dark",
+                    "url": "injected://dark",
+                    "priority": "background",
+                },
+            )
+
+            assert body.status_code == 201, body.text
+            assert _bands(client) == {"quay-dark": "background"}
+
+    def test_a_re_added_camera_reports_the_band_it_was_re_added_with(self, deployment) -> None:
+        """The listing follows the runner's resolution rather than remembering the first post.
+
+        `DELETE` then `POST` with no band is a camera handed back to the deployment's own
+        choice (`runners/inprocess.py::_admit_at`), and a listing that answered from anything
+        it had cached would still be reporting the dead placement's lane.
+        """
+        streamed = deployment(frames=200, pause_s=0.002)
+        with streamed.client as client:
+            client.post(
+                "/streams",
+                json={
+                    "camera_id": "quay-1",
+                    "url": "injected://q",
+                    "priority": "tracking_critical",
+                },
+            )
+            assert until(lambda: _bands(client) == {"quay-1": "tracking_critical"})
+
+            client.delete("/streams/quay-1")
+            client.post("/streams", json={"camera_id": "quay-1", "url": "injected://q"})
+
+            assert _bands(client) == {"quay-1": "normal"}
+
+
 class TestDeletingAStream:
     def test_a_deleted_camera_stops_being_read_and_leaves_the_listing(self, deployment) -> None:
         """The mirror image, and the reason the listing is not a cache.
@@ -328,6 +409,14 @@ class TestDrainingAndHealth:
 
         assert response.status_code == 200
         assert response.json()["state"] == "stopped"
+
+
+def _bands(client: TestClient) -> dict[str, str | None]:
+    """Every listed camera's reported lane, keyed by id."""
+    return {
+        str(stream["camera_id"]): stream["priority"]
+        for stream in client.get("/streams").json()["streams"]
+    }
 
 
 def _state(client: TestClient, camera_id: str) -> str:
