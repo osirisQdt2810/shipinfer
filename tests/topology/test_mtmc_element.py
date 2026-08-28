@@ -45,7 +45,14 @@ from shipinfer.launch.control import CameraSpec
 from shipinfer.runners.inprocess import InprocessRunner
 from shipinfer.topology import ChainSpec, Topology
 from shipinfer.topology import bridge as bridge_module
-from shipinfer.topology.base import ChainItem, Element, ElementContext, ElementKind
+from shipinfer.topology.barrier import WaiterBudget
+from shipinfer.topology.base import (
+    CameraGroup,
+    ChainItem,
+    Element,
+    ElementContext,
+    ElementKind,
+)
 from shipinfer.topology.caps import Caps
 from shipinfer.topology.elements.detections import Detections
 from shipinfer.topology.elements.mock import MockOutput
@@ -79,6 +86,11 @@ HEIGHT, WIDTH = 400, 400
 
 #: Wide enough that no instant here closes on the window unless a test means it to.
 WIDE_MS = 30_000.0
+
+#: A plausible unix capture clock for the items these tests build, in nanoseconds. Every
+#: ``instant=`` in this file is an offset from it, because a *zero* ``captured_unix_ns`` is a
+#: refusal (``TestAFrameWithoutGlobalIdsSaysSo``) and not a usable default.
+EPOCH_NS = 1_700_000_000_000_000_000
 
 CHAIN = """
 name: associated
@@ -219,13 +231,21 @@ def item(
     frame_hw: Any = (HEIGHT, WIDTH),
     **meta: Any,
 ) -> ChainItem:
-    """One chain item on the metadata plane, as ``track`` hands it on."""
+    """One chain item on the metadata plane, as ``track`` hands it on.
+
+    ``instant`` is an offset in seconds from :data:`EPOCH_NS`, not an absolute capture time.
+    It has to be offset from *something* real: ``captured_unix_ns`` defaults to ``0`` and the
+    element refuses that, because a source that never stamps the clock would put every frame
+    of every camera into one instant.
+    """
     payload = {"tracks": tracks} if tracks is not None else {}
     if frame_hw is not None:
         payload["frame_hw"] = frame_hw
     return ChainItem(
         context=RequestContext(
-            camera_id=camera, frame_id=frame, captured_unix_ns=int(instant * 1e9)
+            camera_id=camera,
+            frame_id=frame,
+            captured_unix_ns=EPOCH_NS + int(instant * 1e9),
         ),
         caps=Caps.parse("meta@cpu"),
         payload=None,
@@ -238,6 +258,8 @@ def opened(
     *,
     workers: int = 4,
     registry: MetricsRegistry | None = None,
+    name: str = "mtmc",
+    budget: WaiterBudget | None = None,
 ) -> ShipvisionMtmc:
     """A ``ShipvisionMtmc`` over a real tracker, wide window, eager gate."""
     declared: dict[str, Any] = {
@@ -245,8 +267,8 @@ def opened(
         "options": EAGER,
         **(params or {}),
     }
-    element = create_element(ElementKind.MTMC, "shipvision", "mtmc", declared)
-    element.open(ElementContext(workers=workers, metrics=registry))
+    element = create_element(ElementKind.MTMC, "shipvision", name, declared)
+    element.open(ElementContext(workers=workers, metrics=registry, waiter_budget=budget))
     return element  # type: ignore[return-value]
 
 
@@ -374,12 +396,52 @@ class TestParamsAreRefusedAtConstruction:
         with pytest.raises(ConfigurationError, match=r"calibration.*must be a mapping"):
             create_element(ElementKind.MTMC, "shipvision", "mtmc", {"calibration": []})
 
-    def test_parse_group_is_the_one_parser_the_fleet_shares(self) -> None:
+    def test_parse_group_is_the_one_parser_and_camera_group_is_what_it_publishes(
+        self,
+    ) -> None:
         assert parse_group({"group": "quay", "cameras": ["a", "b"]}, where="x") == (
             "quay",
             ("a", "b"),
         )
         assert parse_group({}, where="x") == ("", ())
+
+
+class TestTheGroupIsDeclaredToTheRunnerAndNotParsedTwice:
+    """``Element.camera_group()`` is what a runner asks, and it needs no submodule and no
+    ``open()`` — the runner asks when it is built, long before a camera or a tracker exists.
+
+    The hook is what keeps the launcher free of an ``ElementKind.MTMC`` test, an import of
+    this module, and a second parse of ``params: cameras:`` (ADR-017 §2). A second
+    cross-camera element would be a method override rather than an ``elif`` in ``runners/``.
+    """
+
+    def test_a_declared_roster_is_published_as_a_camera_group(self) -> None:
+        built = create_element(
+            ElementKind.MTMC, "shipvision", "mtmc", {"group": "quay", "cameras": ["q-0", "q-1"]}
+        )
+
+        assert built.camera_group() == CameraGroup("quay", ("q-0", "q-1"))
+
+    def test_the_group_name_falls_back_to_the_slot_name(self) -> None:
+        built = create_element(ElementKind.MTMC, "shipvision", "berth", {"cameras": ["q-0"]})
+
+        assert built.camera_group() == CameraGroup("berth", ("q-0",))
+
+    def test_no_roster_is_no_group_and_not_an_empty_one(self) -> None:
+        """ "The chain did not say" and "the chain grouped nothing" are different facts: only
+        the first one lets the runner keep balancing by load."""
+        assert create_element(ElementKind.MTMC, "shipvision", "mtmc", {}).camera_group() is None
+        assert (
+            create_element(
+                ElementKind.MTMC, "shipvision", "mtmc", {"group": "quay"}
+            ).camera_group()
+            is None
+        )
+
+    def test_an_ordinary_element_declares_no_group(self) -> None:
+        """The ABC's default, which is what makes the runner's walk kind-free."""
+        assert create_element(ElementKind.TRACK, "mock", "track", {}).camera_group() is None
+        assert FramedDetect("detect").camera_group() is None
 
 
 class TestWithoutTheSubmodule:
@@ -675,6 +737,92 @@ class TestAFrameWithoutGlobalIdsSaysSo:
             element.process(
                 item("cam-a", 0, tracks=[track(1, "cam-a", 0, TALL, SAME_A)], frame_hw=(0, 0))
             )
+
+    def test_a_zero_capture_clock_is_a_loud_refusal_like_a_zero_frame_size(
+        self, element
+    ) -> None:
+        """``RequestContext.captured_unix_ns`` defaults to ``0``, so a source that never
+        stamps it is indistinguishable from one that stamps the epoch — and either way every
+        frame of every camera lands in one instant, which closes once and leaves the rest of
+        the deployment ``late`` for the life of the process. Same class of mis-wiring as a
+        zero ``frame_hw``, so it gets the same treatment rather than a per-frame gap that
+        reads like clock skew."""
+        unstamped = ChainItem(
+            context=RequestContext(camera_id="cam-a", frame_id=0),
+            caps=Caps.parse("meta@cpu"),
+            payload=None,
+            meta={"tracks": [track(1, "cam-a", 0, TALL, SAME_A)], "frame_hw": (HEIGHT, WIDTH)},
+        )
+
+        with pytest.raises(ValidationError, match="captured_unix_ns"):
+            element.process(unstamped)
+
+        assert element.barrier.open_instants == 0, "a refused frame still opened an instant"
+
+
+# -- the never-starve guard across elements ------------------------------------------------------
+
+
+@needs_shipvision
+class TestTwoMtmcSlotsCannotParkEveryWorkerBetweenThem:
+    """The guard is a **process** budget, not a per-element one.
+
+    Two ``mtmc`` slots in one chain is a supported configuration: the loader takes an explicit
+    ``kind:`` and this element's own camera gauge is labelled by element precisely because two
+    independent groups can exist. Counting waiters per element let slot A admit ``workers - 1``
+    and slot B, which had seen none, admit the last worker — every pipeline worker parked,
+    neither barrier able to close on evidence, and the shard turned into a fixed window of
+    latency with a stalled queue behind it. Bounded rather than a hang, which is what made it
+    a stall dressed as a wait rather than a crash.
+    """
+
+    def test_the_last_worker_is_never_parked_by_the_second_slot(self) -> None:
+        workers = 3
+        budget = WaiterBudget(workers - 1)
+        quay = opened(name="quay", workers=workers, budget=budget)
+        gate = opened(name="gate", workers=workers, budget=budget)
+        try:
+            for element in (quay, gate):
+                for camera in ("cam-a", "cam-b", "cam-c"):
+                    element.camera_added(camera)
+            parked = [
+                Submitter(quay, item("cam-a", 0, tracks=[track(1, "cam-a", 0, TALL, SAME_A)])),
+                Submitter(gate, item("cam-a", 0, tracks=[track(1, "cam-a", 0, TALL, SAME_A)])),
+            ]
+            for worker in parked:
+                worker.start()
+            assert until(lambda: budget.held == workers - 1)
+
+            # The last worker of the process arrives at whichever slot; it must not park.
+            started = time.monotonic()
+            emitted = gate.process(
+                item("cam-b", 0, tracks=[track(2, "cam-b", 0, TALL, SAME_A)])
+            )
+            elapsed = time.monotonic() - started
+
+            assert elapsed < 1.0, "the second slot parked the last pipeline worker"
+            assert emitted.meta["missing_stages"] == ("mtmc",)
+            assert quay.barrier.waiters + gate.barrier.waiters == workers - 1
+        finally:
+            quay.close()
+            gate.close()
+            for worker in parked:
+                worker.join(5.0)
+
+    def test_the_runner_hands_every_element_the_same_budget(self) -> None:
+        """One object per runner: two `element_context()` calls that built two budgets would
+        put the bug back with the fix still in the file."""
+        chain = Topology.from_spec(ChainSpec.from_yaml(textwrap.dedent(CHAIN)))
+        built = InprocessRunner(
+            chain,
+            settings=ServerSettings(pipeline={"workers": 5, "queue_capacity": 8}),
+        )
+
+        first, second = built.element_context(), built.element_context()
+
+        assert first.waiter_budget is second.waiter_budget
+        assert first.waiter_budget is not None
+        assert first.waiter_budget.permits == 4, "workers - 1, so one always drains its lane"
 
 
 # -- the camera lifecycle ---------------------------------------------------------------------------

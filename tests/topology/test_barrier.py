@@ -1,15 +1,20 @@
 """The instant barrier: synchronisation, without a tracker anywhere near it.
 
-:class:`~shipinfer.topology.elements.mtmc.InstantBarrier` is pure — it buckets opaque
-payloads by capture instant and decides who waits, who closes and who is told to give up.
-Every property this file asserts is a property of *that*, so nothing here imports
-``shipvision``, constructs a track or needs a submodule: the association is a callback and
-the payloads are strings.
+:class:`~shipinfer.topology.barrier.InstantBarrier` is pure — it buckets opaque payloads by
+capture instant and decides who waits, who closes and who is told to give up. Every property
+this file asserts is a property of *that*, so nothing here imports ``shipvision``, constructs
+a track or needs a submodule: the association is a callback and the payloads are strings.
 
 That is the point rather than a convenience. The failures being guarded against are a frame
 waiting for a camera that was removed an hour ago, an association that only ever closes on a
-timeout because every worker is parked inside it, and a result scattered to the wrong frame —
-none of which is about cross-camera geometry, and all of which are about this class.
+timeout because every worker is parked inside it, a camera colliding with itself once every
+few frames, and a result scattered to the wrong frame — none of which is about cross-camera
+geometry, and all of which are about this class.
+
+``TestAGenlockedGridGetsEveryFrameAnswered`` is the one that would have caught the bucket key
+this class used to have, and it is written the way the deployment runs: one thread per camera,
+a :class:`threading.Barrier` so every camera submits its k-th frame together at 20 fps, and
+the assertion that **every** frame comes back with an answer.
 
 **Windows here are milliseconds, not the 60 ms default.** A test that closes on the window
 has to spend the window, so the ones that do use 30-60 ms and the ones that do not use a
@@ -26,10 +31,12 @@ from typing import Any
 
 import pytest
 
-from shipinfer.core.errors import ConfigurationError
-from shipinfer.topology.elements.mtmc import (
+from shipinfer.core.errors import ConfigurationError, ServerStateError
+from shipinfer.topology.barrier import (
+    CLOSED_ADVANCED,
     CLOSED_COMPLETE,
     CLOSED_WINDOW,
+    DEFAULT_SYNC_WINDOW_MS,
     DROPPED_EVICTED,
     DROPPED_EXPIRED,
     DROPPED_FAILED,
@@ -39,6 +46,7 @@ from shipinfer.topology.elements.mtmc import (
     MISSED_WOULD_STARVE,
     InstantBarrier,
     InstantEntry,
+    WaiterBudget,
 )
 
 pytestmark = [pytest.mark.timeout(30)]
@@ -129,47 +137,129 @@ class TestBarrierConstruction:
             InstantBarrier(sync_window_s=1.0, workers=4, max_instants=0)
 
 
-# -- the bucket key --------------------------------------------------------------------------
+# -- the anchored instant --------------------------------------------------------------------
 
 
-class TestTheInstantKeyComesFromCaptureTime:
-    """Which instant a frame belongs to is decided by when it was *taken*.
+class TestTheInstantIsAnchoredAndComesFromCaptureTime:
+    """Which instant a frame belongs to is decided by when it was *taken*, relative to the
+    frame that opened the instant — never by an absolute grid.
 
     Arrival order is the pipeline's business — fair lanes, N workers, spill — and has nothing
     to do with whether two frames show the same moment. A barrier keyed on arrival would put
     two cameras 40 ms apart in the queue into different instants while merging two frames of
     one camera that arrived together.
+
+    An **absolute** ``floor(capture / window)`` grid has no correct setting, which is why
+    these tests are about spans and not keys. A window wider than the frame period makes a
+    camera collide with itself every ``window / period`` frames; a window narrower than it
+    stops free-running cameras from ever landing together. The anchor removes the first
+    constraint entirely: the frame that opens the instant sets the span, and a camera already
+    in it can only ever *close* it.
     """
 
-    def test_two_captures_inside_one_window_share_a_key(self) -> None:
-        # The windows are absolute -- `floor(t / window)` -- so the two captures have to fall
-        # inside the same one, not merely be less than a window apart.
-        held = barrier(sync_window_s=0.06)
-        assert held.instant_key(100.02) == held.instant_key(100.05)
-
-    def test_two_captures_either_side_of_a_boundary_do_not(self) -> None:
-        held = barrier(sync_window_s=0.06)
-        assert held.instant_key(100.02) != held.instant_key(100.09)
-
-    def test_the_key_floors_rather_than_truncating(self) -> None:
-        """``int()`` rounds toward zero, which would merge the two windows around zero."""
-        held = barrier(sync_window_s=1.0)
-        assert held.instant_key(-0.5) != held.instant_key(0.5)
-
-    def test_two_cameras_of_one_instant_land_in_one_bucket(self) -> None:
+    @pytest.mark.parametrize("base", [100.0, 100.059, 100.999999])
+    def test_two_captures_inside_one_window_are_one_instant_wherever_they_sit(
+        self, base: float
+    ) -> None:
+        """No boundary to fall either side of: only the spread matters. Each ``base`` is a
+        capture that an absolute ``floor(t / 0.06)`` grid would have split from ``base+30ms``
+        or merged with something else — here every one of them is one instant."""
         held = barrier(sync_window_s=0.06, workers=4)
         held.camera_added("cam-a")
         held.camera_added("cam-b")
-        first = Submitter(held, "cam-a", 100.02)
+        first = Submitter(held, "cam-a", base)
         first.start()
         assert until(lambda: held.waiters == 1)
-        second = held.submit("cam-b", 100.05, "p", associate=flat)
+        second = held.submit("cam-b", base + 0.03, "p", associate=flat)
         first.join(5.0)
 
         assert second.reason == CLOSED_COMPLETE
         assert second.results == {"cameras": ("cam-a", "cam-b")}
         assert first.outcome.results == second.results
         assert first.outcome.instant == second.instant
+
+    def test_two_captures_more_than_a_window_apart_are_two_instants(self) -> None:
+        held = barrier(sync_window_s=0.05, workers=4)
+        held.camera_added("cam-a")
+        held.camera_added("cam-b")
+
+        first = held.submit("cam-a", 100.0, "p", associate=flat)
+        second = held.submit("cam-b", 100.09, "p", associate=flat)
+
+        assert first.reason == CLOSED_WINDOW and second.reason == CLOSED_WINDOW
+        assert first.instant != second.instant
+        assert first.results == {"cameras": ("cam-a",)}
+        assert second.results == {"cameras": ("cam-b",)}
+
+    def test_captures_either_side_of_zero_are_one_instant_when_they_are_close(self) -> None:
+        """The old key floored a ratio; an anchored span has no origin to be wrong about."""
+        held = barrier(sync_window_s=1.0, workers=4)
+        held.camera_added("cam-a")
+        held.camera_added("cam-b")
+        first = Submitter(held, "cam-a", -0.4)
+        first.start()
+        assert until(lambda: held.waiters == 1)
+
+        second = held.submit("cam-b", 0.4, "p", associate=flat)
+        first.join(5.0)
+
+        assert second.reason == CLOSED_COMPLETE
+        assert second.results == {"cameras": ("cam-a", "cam-b")}
+
+    def test_a_camera_never_collides_with_itself_at_any_window(self) -> None:
+        """The failure the anchor exists to delete: on an absolute grid a 20 fps camera hit
+        its own bucket once every ``window / period`` frames, and every such frame was denied
+        an answer. Here the second frame *closes* the instant its predecessor was in."""
+        held = barrier(sync_window_s=DEFAULT_SYNC_WINDOW_MS / 1e3, workers=4)
+        held.camera_added("cam-a")
+
+        outcomes = [
+            held.submit("cam-a", 100.0 + k * 0.05, "p", associate=flat) for k in range(40)
+        ]
+
+        assert [o.reason for o in outcomes] == [CLOSED_COMPLETE] * 40
+        assert MISSED_LATE not in held.frame_stats()
+        assert MISSED_DUPLICATE not in held.frame_stats()
+
+    def test_a_second_frame_from_a_camera_in_the_bucket_closes_it(self) -> None:
+        """It is the only evidence available that the instant is over: that camera has moved
+        on, so nothing more will arrive from it for the instant it was in."""
+        # `workers=2` so the frame that does the sealing is itself refused a wait: this test
+        # is about the waiter it released, and a second parked thread would only be a second
+        # thing to join.
+        held = barrier(sync_window_s=30.0, workers=2)
+        held.camera_added("cam-a")
+        held.camera_added("cam-b")
+        waiting = Submitter(held, "cam-a", 10.0)
+        waiting.start()
+        assert until(lambda: held.waiters == 1)
+
+        started = time.monotonic()
+        nxt = held.submit("cam-a", 10.5, "p", associate=flat)
+        waiting.join(5.0)
+
+        assert time.monotonic() - started < 5.0, "the sealed instant waited out its window"
+        assert waiting.outcome.reason == CLOSED_ADVANCED
+        assert waiting.outcome.results == {"cameras": ("cam-a",)}
+        assert nxt.instant != waiting.outcome.instant, "the next frame opened the next instant"
+        assert held.instant_stats()[CLOSED_ADVANCED] == 1
+
+    def test_a_repeat_of_a_capture_already_in_the_bucket_is_a_duplicate(self) -> None:
+        """A *later* capture is the next instant; the same one is a mis-wired source."""
+        held = barrier(sync_window_s=30.0, workers=4)
+        held.camera_added("cam-a")
+        held.camera_added("cam-b")
+        waiting = Submitter(held, "cam-a", 10.0)
+        waiting.start()
+        assert until(lambda: held.waiters == 1)
+
+        again = held.submit("cam-a", 10.0, "p", associate=flat)
+
+        assert again.reason == MISSED_DUPLICATE
+        assert held.instant_stats().get(CLOSED_ADVANCED, 0) == 0
+        held.submit("cam-b", 10.0, "p", associate=flat)
+        waiting.join(5.0)
+        assert waiting.outcome.results == {"cameras": ("cam-a", "cam-b")}
 
 
 # -- closing ---------------------------------------------------------------------------------
@@ -236,7 +326,7 @@ class TestABucketClosesOnTheWindow:
         # this, and refusing to associate the rest of the group would be the worse answer.
         assert outcome.results == {"cameras": ("cam-a",)}
         assert 0.04 <= elapsed < 5.0
-        assert held.stats()[CLOSED_WINDOW] == 1
+        assert held.instant_stats()[CLOSED_WINDOW] == 1
 
     def test_every_wait_is_bounded_by_the_window(self) -> None:
         """No caller is ever parked longer than one window, whatever else happens."""
@@ -270,7 +360,7 @@ class TestALateFrameIsCountedAndNeverRetroFitted:
 
         assert late.reason == MISSED_LATE
         assert late.results is None
-        assert held.stats()[MISSED_LATE] == 1
+        assert held.frame_stats()[MISSED_LATE] == 1
 
     def test_a_late_frame_does_not_re_open_its_instant(self) -> None:
         """The refusal is the point: a second association would issue contradictory ids."""
@@ -289,23 +379,6 @@ class TestALateFrameIsCountedAndNeverRetroFitted:
         assert closes == [("cam-a",)]
         assert held.open_instants == 0
 
-    def test_two_frames_of_one_camera_in_one_instant_do_not_merge(self) -> None:
-        """``FrameTrackCluster`` refuses a duplicate camera; the barrier never builds one."""
-        held = barrier(workers=4)
-        held.camera_added("cam-a")
-        held.camera_added("cam-b")
-        waiting = Submitter(held, "cam-a", 10.0)
-        waiting.start()
-        assert until(lambda: held.waiters == 1)
-
-        again = held.submit("cam-a", 10.0, "p", associate=flat)
-
-        assert again.reason == MISSED_DUPLICATE
-        assert again.results is None
-        held.submit("cam-b", 10.0, "p", associate=flat)
-        waiting.join(5.0)
-        assert waiting.outcome.results == {"cameras": ("cam-a", "cam-b")}
-
 
 # -- bounded ---------------------------------------------------------------------------------
 
@@ -321,9 +394,12 @@ class TestTheBucketsAreBounded:
             held.submit("cam-a", float(instant) * WIDE_S, "p", associate=flat)
 
         assert held.open_instants == 3
-        assert held.stats()[DROPPED_EVICTED] == 3
+        assert held.instant_stats()[DROPPED_EVICTED] == 3
 
-    def test_eviction_takes_the_oldest_by_capture_time_not_by_arrival(self) -> None:
+    def test_eviction_takes_the_instant_that_has_been_open_longest(self) -> None:
+        """By open order, which is deadline order — every deadline is one window after its
+        bucket opened. Evicting by *capture* time instead would let one camera with a stale
+        clock push out the instant the rest of the group is actively filling."""
         held = barrier(workers=1, max_instants=2)
         held.camera_added("cam-a")
         held.camera_added("cam-b")
@@ -332,12 +408,9 @@ class TestTheBucketsAreBounded:
 
         held.submit("cam-a", 200.0 * WIDE_S, "p", associate=flat)
 
-        # 100 was the oldest instant even though it arrived second.
-        assert held.instant_key(100.0 * WIDE_S) not in held._buckets
-        assert sorted(held._buckets) == [
-            held.instant_key(200.0 * WIDE_S),
-            held.instant_key(300.0 * WIDE_S),
-        ]
+        # 300 arrived first, so it is the one that has been open longest.
+        assert [span[1] for span in held.open_spans] == [100.0 * WIDE_S, 200.0 * WIDE_S]
+        assert held.instant_stats()[DROPPED_EVICTED] == 1
 
     def test_an_evicted_instant_releases_the_frames_waiting_on_it(self) -> None:
         # `workers=2` so the frame that does the evicting is itself refused a wait: this test
@@ -395,7 +468,7 @@ class TestBarrierNeverStarves:
         assert held.waiters == workers - 1
         assert extra.reason == MISSED_WOULD_STARVE
         assert extra.results is None
-        assert held.stats()[MISSED_WOULD_STARVE] == 1
+        assert held.frame_stats()[MISSED_WOULD_STARVE] == 1
         held.close_all()
         for worker in parked:
             worker.join(5.0)
@@ -510,7 +583,7 @@ class TestTheLiveCameraSetDrivesCompleteness:
         held.drop_camera("cam-b")
 
         assert held.open_instants == 1
-        assert held.stats().get(CLOSED_COMPLETE, 0) == 0
+        assert held.instant_stats().get(CLOSED_COMPLETE, 0) == 0
 
     def test_a_barrier_nobody_announced_learns_its_group_from_traffic(self) -> None:
         """A runner that does not drive the hooks costs one instant, not per-camera MTMC."""
@@ -548,7 +621,7 @@ class TestAnAbandonedInstantIsRetired:
 
         held.submit("cam-a", 20.0, "p", associate=flat)
 
-        assert held.stats()[DROPPED_EXPIRED] == 1
+        assert held.instant_stats()[DROPPED_EXPIRED] == 1
         assert held.open_instants == 1
 
 
@@ -557,8 +630,9 @@ class TestCloseAllResolvesEveryWaiter:
         held = barrier(sync_window_s=30.0, workers=4)
         for camera in ("cam-a", "cam-b", "cam-c"):
             held.camera_added(camera)
-        # Two *different* instants: `floor(t / 30)` puts 10 and 100 in separate buckets, and
-        # the point of this test is that a shutdown resolves every open one.
+        # Two *different* instants: 10 and 100 are 90 s apart against a 30 s window, so
+        # neither can join the other's span, and the point of this test is that a shutdown
+        # resolves every open one.
         parked = [Submitter(held, "cam-a", 10.0), Submitter(held, "cam-b", 100.0)]
         for worker in parked:
             worker.start()
@@ -611,7 +685,7 @@ class TestAFailedAssociationDoesNotStrandAWaiter:
         assert not waiting.is_alive()
         assert waiting.outcome.reason == DROPPED_FAILED
         assert waiting.outcome.results is None
-        assert held.stats()[DROPPED_FAILED] == 1
+        assert held.instant_stats()[DROPPED_FAILED] == 1
 
 
 # -- the observer -------------------------------------------------------------------------------
@@ -644,7 +718,7 @@ class TestTheInstantObserver:
         held.submit("cam-a", 10.0, "p", associate=flat)
 
         assert events == []
-        assert held.stats()[MISSED_WOULD_STARVE] == 1
+        assert held.frame_stats()[MISSED_WOULD_STARVE] == 1
 
 
 # -- under threads --------------------------------------------------------------------------------
@@ -682,3 +756,172 @@ class TestUnderThreads:
                 # An associated frame is always inside the instant it was told about.
                 assert camera in outcome.results["cameras"]
         assert held.waiters == 0
+
+
+# -- the property the whole class exists for -----------------------------------------------
+
+
+def run_grid(
+    cameras: int,
+    *,
+    frames: int = 24,
+    window_ms: float = DEFAULT_SYNC_WINDOW_MS,
+    fps: float = 20.0,
+    stagger: bool = False,
+) -> dict[str, int]:
+    """One thread per camera, all submitting their k-th frame together. Tally by reason.
+
+    The shape of the deployment, in miniature: ``cameras`` pipeline workers each carrying one
+    camera's frame, a :class:`threading.Barrier` standing in for the genlock so that the k-th
+    frame of every camera is offered at the same moment, and capture timestamps a real frame
+    period apart. ``stagger`` spreads the group's captures evenly across one frame period,
+    which is what free-running cameras look like.
+    """
+    period = 1.0 / fps
+    held = InstantBarrier(sync_window_s=window_ms / 1e3, workers=cameras + 1)
+    for index in range(cameras):
+        held.camera_added(f"cam-{index}")
+    offsets = [index * period / cameras if stagger else 0.0 for index in range(cameras)]
+    gate = threading.Barrier(cameras)
+    tally: dict[str, int] = {}
+    lock = threading.Lock()
+
+    def drive(index: int) -> None:
+        for frame in range(frames):
+            gate.wait()
+            outcome = held.submit(
+                f"cam-{index}",
+                1_000_000.0 + frame * period + offsets[index],
+                "p",
+                associate=flat,
+            )
+            with lock:
+                tally[outcome.reason] = tally.get(outcome.reason, 0) + 1
+
+    threads = [threading.Thread(target=drive, args=(i,), daemon=True) for i in range(cameras)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(20.0)
+    assert not any(thread.is_alive() for thread in threads), tally
+    assert sum(tally.values()) == cameras * frames
+    return tally
+
+
+class TestAGenlockedGridGetsEveryFrameAnswered:
+    """Every frame of a healthy group comes back with an answer. No exceptions.
+
+    This is the test the absolute ``floor(capture / window)`` grid could not pass, and it is
+    written as the deployment runs rather than as a unit: real threads, one per camera, every
+    camera offering its k-th frame at the same moment, capture times a real 20 fps period
+    apart. On the grid, a 60 ms window against a 50 ms period made each camera land in a
+    bucket it had already reported once every six frames, so **83.3%** of frames came back
+    ``late`` — with the cameras perfectly synchronised and nothing else wrong. The anchored
+    instant makes a camera's second frame *close* the instant its first was in, so the
+    collision cannot happen at any window.
+
+    Both the default window and the sizing (`CLAUDE.md`: 50 cameras, 20 fps, groups of a
+    berth or a quay) are pinned here, because "the default is fine" was the claim that was
+    wrong.
+    """
+
+    @pytest.mark.parametrize("cameras", [2, 8])
+    def test_every_frame_gets_an_answer_at_the_default_window(self, cameras: int) -> None:
+        tally = run_grid(cameras)
+
+        answered = tally.get(CLOSED_COMPLETE, 0) + tally.get(CLOSED_WINDOW, 0)
+        assert answered == sum(tally.values()), tally
+        assert tally.get(MISSED_LATE, 0) == 0, "a camera collided with itself"
+        assert tally.get(MISSED_DUPLICATE, 0) == 0
+
+    @pytest.mark.parametrize("cameras", [2, 8])
+    def test_free_running_cameras_staggered_across_a_period_still_land_together(
+        self, cameras: int
+    ) -> None:
+        """The other half of the constraint an absolute grid could not satisfy: a window
+        *narrow* enough to stop self-collision is too narrow to hold a group whose captures
+        are spread across a frame period. The anchor holds them because the first arrival
+        opens the window rather than the clock."""
+        tally = run_grid(cameras, stagger=True)
+
+        assert tally.get(CLOSED_COMPLETE, 0) == sum(tally.values()), tally
+
+    def test_a_window_narrower_than_the_frame_period_is_also_fine(self) -> None:
+        """The default is not load-bearing for the self-collision property — nothing is."""
+        tally = run_grid(8, window_ms=25.0)
+
+        answered = tally.get(CLOSED_COMPLETE, 0) + tally.get(CLOSED_WINDOW, 0)
+        assert answered == sum(tally.values()), tally
+
+
+# -- the waiter budget -------------------------------------------------------------------
+
+
+class TestTheWaiterBudgetIsPerProcessAndNotPerBarrier:
+    """Two ``mtmc`` slots in one chain must not be able to park every worker between them.
+
+    Two independent camera groups is a supported configuration — the chain loader takes an
+    explicit ``kind:``, and the element's own metric is labelled by element precisely because
+    two of them can exist. With a per-barrier count barrier A admits ``workers - 1`` waiters
+    and barrier B, which has seen none, admits the last worker. Every pipeline worker is then
+    parked, neither barrier can close on evidence, and the shard has converted itself into a
+    fixed window of latency with a stalled queue behind it — bounded rather than a hang, and
+    therefore exactly the stall dressed as a wait the guard exists to prevent.
+    """
+
+    def test_a_budget_refuses_a_negative_size(self) -> None:
+        with pytest.raises(ConfigurationError, match="cannot have -1 permits"):
+            WaiterBudget(-1)
+
+    def test_a_budget_of_zero_never_lets_anyone_wait(self) -> None:
+        budget = WaiterBudget(0)
+        assert budget.acquire() is False
+        assert budget.held == 0
+
+    def test_releasing_more_than_was_acquired_is_refused(self) -> None:
+        """A silent decrement past zero would hand out permits that do not exist."""
+        budget = WaiterBudget(1)
+        assert budget.acquire() is True
+        budget.release()
+        with pytest.raises(ServerStateError, match="released more times"):
+            budget.release()
+
+    def test_a_barrier_given_no_budget_sizes_a_private_one_from_workers(self) -> None:
+        assert barrier(workers=4).budget.permits == 3
+        assert barrier(workers=1).budget.permits == 0
+        assert barrier(workers=None).budget.permits == 0
+
+    @pytest.mark.parametrize("workers", [2, 4, 8])
+    def test_two_barriers_sharing_a_budget_never_park_every_worker(self, workers: int) -> None:
+        budget = WaiterBudget(workers - 1)
+        first = barrier(workers=workers, budget=budget)
+        second = barrier(workers=workers, budget=budget)
+        for held in (first, second):
+            for index in range(workers + 3):
+                held.camera_added(f"cam-{index}")
+
+        # Fill the budget from the *first* barrier, then offer the last worker to the second.
+        parked = [Submitter(first, f"cam-{index}", 10.0) for index in range(workers - 1)]
+        for worker in parked:
+            worker.start()
+        assert until(lambda: budget.held == workers - 1)
+
+        last = second.submit("cam-0", 10.0, "p", associate=flat)
+
+        assert last.reason == MISSED_WOULD_STARVE, "both barriers together parked every worker"
+        assert first.waiters + second.waiters == workers - 1
+        first.close_all()
+        second.close_all()
+        for worker in parked:
+            worker.join(5.0)
+        assert budget.held == 0, "a released waiter kept its permit"
+
+    def test_the_permit_comes_back_when_the_waiter_leaves(self) -> None:
+        budget = WaiterBudget(1)
+        held = barrier(sync_window_s=0.03, workers=4, budget=budget)
+        held.camera_added("cam-a")
+        held.camera_added("cam-b")
+
+        assert held.submit("cam-a", 10.0, "p", associate=flat).reason == CLOSED_WINDOW
+        assert budget.held == 0
+        assert held.submit("cam-a", 20.0, "p", associate=flat).reason == CLOSED_WINDOW

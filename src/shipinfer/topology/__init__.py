@@ -33,7 +33,9 @@ from __future__ import annotations
 # Free to import: `bridge` imports `functools`, `types` and `shipinfer.core.errors`, and its
 # four loaders each `from shipvision import ...` inside the function body.
 from shipinfer.topology import bridge
+from shipinfer.topology.barrier import InstantBarrier, WaiterBudget
 from shipinfer.topology.base import (
+    CameraGroup,
     ChainItem,
     Element,
     ElementContext,
@@ -70,6 +72,7 @@ __all__ = [
     "ANY",
     "ELEMENTS",
     "LOCATIONS",
+    "CameraGroup",
     "Caps",
     "ChainItem",
     "ChainSpec",
@@ -82,9 +85,11 @@ __all__ = [
     "ElementRegistry",
     "ElementSpec",
     "ImageOpsLike",
+    "InstantBarrier",
     "LetterboxLike",
     "ModelResolver",
     "Topology",
+    "WaiterBudget",
     "create_element",
     "describe_elements",
     "load_topology",

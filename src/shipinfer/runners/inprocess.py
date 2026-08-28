@@ -110,6 +110,7 @@ from shipinfer.topology import (
     ImageOpsLike,
     ModelResolver,
     Topology,
+    WaiterBudget,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; `ingest` is imported inside `_ingest`
@@ -269,6 +270,12 @@ class InprocessRunner(Runner):
                 "accepts items and walks none of them"
             )
         self._wanted_workers = pipeline.workers if workers is None else workers
+        #: The permits every waiting element in this process shares, sized once here. One
+        #: object for the runner and not one per element: two elements that each waited
+        #: `workers - 1` of their own would park every worker between them, and then no
+        #: element could close on evidence -- the stall the guard exists to prevent. Handed
+        #: out on `element_context()`.
+        self._waiter_budget = WaiterBudget(max(0, self._wanted_workers - 1))
         # `is not None`, never `queue or ...`: a `RequestQueue` defines `__len__`, so an empty
         # injected queue is *falsy* and the truthy form silently throws the caller's object
         # away. It cost an afternoon in `pipeline/runner.py`; the comment there says so.
@@ -404,16 +411,24 @@ class InprocessRunner(Runner):
         free, and a barrier told "four" on a runner started with one would park the only
         thread there is and close its instant by timeout for the rest of the deployment.
 
-        Both are left ``None`` by :meth:`Runner.element_context` rather than defaulted there,
-        because a runner that does not execute a chain in this process has neither to promise
-        — the fleet runner's elements live in its children, each of which builds its own.
-        ``ops`` is not one of them: it arrives at construction like ``models``, so the base
-        class already put it on the context.
+        ``waiter_budget`` is the *shared* permit pool those waits draw from, and it is one
+        object for the whole runner rather than one per element. ``workers`` alone is not
+        enough: each element counts only its own waiters, so a chain with two waiting elements
+        would have each of them admit ``workers - 1`` and park every worker between them —
+        bounded by the window rather than a hang, and therefore exactly the stall dressed as a
+        wait the guard exists to prevent.
+
+        All three are left ``None`` by :meth:`Runner.element_context` rather than defaulted
+        there, because a runner that does not execute a chain in this process has none of them
+        to promise — the fleet runner's elements live in its children, each of which builds
+        its own. ``ops`` is not one of them: it arrives at construction like ``models``, so the
+        base class already put it on the context.
         """
         return replace(
             super().element_context(),
             metrics=self._metrics.registry,
             workers=self._wanted_workers,
+            waiter_budget=self._waiter_budget,
         )
 
     @property
