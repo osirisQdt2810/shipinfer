@@ -7,6 +7,94 @@ edits, typo fixes and pure docs.
 
 ## 2026-08-28 — `recognize` as a gallery query: `GalleryRecognize` + the gallery on disk (Phase C7)
 
+---
+
+## 2026-08-28 — The `output` element, event schema v4, and the runnable demo chain (Phase C8b)
+
+**What.** The far end of the chain. A frame that reaches the last element is now one published
+`PerceptionEvent`, and `topology/ship_person_cpu.yaml` is the first chain file in this
+repository that loads with nothing substituted. The layering half — `core/events/` and
+`topology/sinks/` — landed first and on its own; this entry is what sits on top of it.
+
+| Piece | Delivered |
+|---|---|
+| **schema v4** | `ObjectRecord.global_id`, published as `body_global_id_vec` / `ship_global_id_vec`. Additive: `as_det2mot` untouched, and the test checks a **literal v3 key set** rather than comparing two v4 events to itself |
+| `topology/elements/output.py` | `SinkOutput` + `JsonLinesOutput` (`jsonlines`/`jsonl`/`file`) + `NullOutput` (`none`/`null`/`count`); `accepts ("meta@cpu", "bgr@cpu")`, `produces ()` |
+| `topology/elements/output_kafka.py` | `KafkaOutput`, registered with `register_lazy`, so a chain that names `jsonlines` never imports a broker client |
+| `track_rows` (`elements/track.py`) | one detection row per published track, from `shipvision.mot.association.associate` over IoU — `pipeline/graph/tracking.py::_attribute`'s algorithm in the chain's vocabulary. `params: attribution_iou`, default 0.3 |
+| `detections.per_row` | the one rule for reading a per-object `meta` key in its two legal shapes; `track._embeddings` and `output` both call it |
+| loader refusals (`chain.py::_check_row_selection`) | `when: class == …` on a `selects_rows` element is refused naming `params: classes:`; a `classes:` label the chain's detector never emits is refused naming both slots |
+| `Element` declarations | `selects_rows`, `declared_classes()`, `detection_labels()` — the loader asks the element, never a list of `impl` names |
+| `topology/ship_person_cpu.yaml` | the runnable demo: `replay` decode, four `pool` slots, `shipvision` track + mtmc, `jsonlines` output. No `when:`, no `recognize` slot yet |
+| **`docs/arch.md` §1 + ADR-017** | the design of record is amended, not just the code — see below |
+| tests | `test_output_element.py` (47), `test_chain_to_events.py` (6, end-to-end over the runner), +13 attribution in `test_track_element.py`, +9 `per_row` in `test_detections.py`, +15 in `test_chain.py`, +7 v4 in `tests/core/test_event_schema.py` |
+
+**Decisions.**
+
+- **The event's rows are the detections, and the track→row mapping is the `track` element's
+  job.** A track's box is the filtered estimate, so recovering which detection fed it needs
+  the frame's detections, the tracker's answer and the association solver at once — and only
+  `track` holds all three. An `output` element that redid it would be a second, quieter
+  tracker, and would need `shipvision` in a layer that has no other use for it.
+  `meta["tracks"]` arriving without `meta["track_rows"]` is **refused**, because the
+  alternative is every `track_id` silently `null` on a chain that is tracking.
+
+- **A sink that refuses is counted, never raised.** The runner fails an item's future on any
+  exception, so raising would turn a broker outage into a walk that stops over frames that
+  were good. `ResultSink.emit`'s `bool` and `drain_delivery_failures()` both land on
+  `shipinfer_output_events_dropped_total`, the latter charged to the camera in the tag it came
+  with rather than to whichever frame was mid-emit.
+
+- **The element converts nothing itself.** `embedding` goes through
+  `core.events.as_embedding` and `bbox` through one `tolist()`, because the per-element
+  `float()` generator is a ~30 M-call-a-second Python loop at the documented load, paid even
+  with the `null` sink — measured 6.3x slower here at 2048-d. The element keeps only the rule
+  that is genuinely its own: a vector nobody filed is `()` and never `None`. A test pins the
+  *identity* of the conversion this element and `pipeline/graph/state.py` resolve, because two
+  functions that agree today is exactly how this loop came back the second time.
+
+- **`when:` guards frames, `classes:` selects rows — and this amends the design of record.**
+  `docs/arch.md` §1's canonical chain snippet had been teaching the spelling the loader now
+  refuses, and line 51 explained why to repeat it. The snippet is rewritten to
+  `params: {classes: [ship]}` on the three crop slots, §1 gains a paragraph stating the split,
+  and **ADR-017 carries an amendment** (2026-08-28, phase C8) recording it with C8a's finding
+  and this loader refusal as the evidence. `segment` keeps its `when:` — it submits the whole
+  frame and selects no rows — and `when:`'s semantics are otherwise untouched: only the `class`
+  field, and only on a row-selecting slot. `topology/ship_person.yaml` still carries the old
+  guards, because rewriting them means rewriting the test class that pins skip-and-continue and
+  the file stops at `gstreamer-gpu` long before the loader reaches them; its header says so and
+  points at the runnable sibling, and phase D will hit the refusal on its first run.
+
+- **The `null` output is registered as `none` with `null` as an alias**, the opposite of the
+  sink's own registration: YAML reads a bare `impl: null` as the null *literal*, so leading
+  with that name puts a schema error with no diagnosis in front of the one implementation a
+  chain reaches for when it has nowhere to publish yet. A test drives both halves — `impl: none`
+  loads, `impl: null` is a `ChainSpecError` naming `elements.output.impl`.
+
+**What the evidence does and does not show.** The end-to-end classes in
+`test_chain_to_events.py` write real files through a real runner, and the cross-camera merge is
+shown with a **double** that assigns one fleet id per object: two cameras, two different
+`track_id`s, one `global_id`, asserted on the published bytes. That is deliberate and it is the
+honest split — whether the *real* assigner merges a given pair depends on whether their instant
+closed and on the clustering threshold, so a `ship_global_id_vec: [0]` out of a live two-camera
+run is a **group-of-one assignment, not a cross-camera join**. The deterministic version of the
+real merge is pinned one layer down, at the chain item, in
+`test_mtmc_element.py::test_near_identical_embeddings_share_one_global_id`. The real-tier class
+here asserts what is true of every run instead: an array a row short, or a global id on an
+object with no tracklet, both fail.
+
+**Not done, deliberately.** No `recognize:` slot in the demo chain (C7 is another lane; adding
+it is one line plus one `after:`). No `mask_area_px` in the event, because `PoolSegment` still
+forwards the whole frame and files no areas — a field read from a key nobody writes is worse
+than an absent one. `img_fps` is 0: the element is never told a camera's rate, and inventing
+one from `params:` would be a number an operator could set wrong with no symptom. No
+`shipinfer run` invocation against the demo file: the walk is covered through `InprocessRunner`,
+and the CLI composition root is phase D's.
+
+---
+
+## 2026-08-28 — the event value and its transports move to the layers both generations can reach (Phase C8, the layering half)
+
 **What.** The first phase-C element. `recognize: {impl: shipvision}` is a bounded
 nearest-neighbour search over a `shipvision.reid` gallery — no model, no repository artefact,
 no pool — plus shipinfer's half of that gallery: the on-disk format it is loaded from.
