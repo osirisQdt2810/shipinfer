@@ -9,9 +9,10 @@ thing:
 * a chain whose ``after:`` has a typo (a branch that never runs);
 * a segmenter spelled ``sement`` (a missing stage nobody notices).
 
-The whole file runs offline, with no GPU and no driver, because every element in it is a
-mock and :class:`~shipinfer.topology.base.Element` constructors are required to be
-hardware-free.
+The whole file runs offline, with no GPU and no driver, on the implementations a deployment
+actually names: :class:`~shipinfer.topology.base.Element` constructors are required to be
+hardware-free, so a chain of ``replay``/``pool``/``shipvision``/``none`` *loads* anywhere and
+only ``open()`` needs a repository behind it.
 
 The tests are named ``tests/topology/test_chain.py`` rather than ``test_topology.py``
 because ``tests/server/test_topology.py`` already exists and pytest's default import mode
@@ -24,7 +25,9 @@ import sys
 import textwrap
 import types
 from pathlib import Path
+from typing import Any, ClassVar
 
+import numpy as np
 import pytest
 import yaml
 
@@ -42,6 +45,9 @@ from shipinfer.core.errors import (
     UnknownElementKindError,
 )
 from shipinfer.core.request import RequestContext
+from shipinfer.core.settings import ServerSettings
+from shipinfer.core.types import Tensor
+from shipinfer.engine import InferenceServer
 from shipinfer.topology import (
     Caps,
     ChainItem,
@@ -56,38 +62,72 @@ from shipinfer.topology import (
     load_topology,
     registry_for,
 )
-from shipinfer.topology.elements.mock import MockDetect, MockOutput
-from shipinfer.topology.elements.output import SinkOutput
+from shipinfer.topology.elements.output import JsonLinesOutput, NullOutput, SinkOutput
 from shipinfer.topology.elements.pool import PoolRecognize, PoolSegment
+from tests.support.models import materialise
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-#: ``topology/ship_person.yaml`` with every implementation replaced by its mock -- the same
-#: nine slots, the same ``when:`` conditions -- including the ``class == ship`` repeated on
-#: every element of the ship branch, because a condition guards one element only -- and the
-#: same ``after:`` wiring, including the two lines that spell out the rejoin
-#: (``embed_person: after: detect`` and ``track: after: [recognize, embed_person]``). It is
-#: a **branching** chain, not a straight line: two branches split at ``detect`` and rejoin
-#: at ``track``.
+#: ``topology/ship_person.yaml``'s nine slots and its ``after:`` wiring -- including the two
+#: lines that spell out the rejoin (``embed_person: after: detect`` and
+#: ``track: after: [recognize, embed_person]``) -- on the implementations a host with no
+#: accelerator can name today. It is a **branching** chain, not a straight line: two branches
+#: split at ``detect`` and rejoin at ``track``.
+#:
+#: The rows each *embedder* covers are ``params: classes:`` and not ``when:``, because that is
+#: the only spelling the loader accepts on a row-selecting element (C8b). ``segment`` and
+#: ``recognize`` select no rows, so their guards stay the frame conditions the file writes.
 #:
 #: Written out rather than generated: a chain file is the thing under test, and a generated
 #: one would test the generator. The cost of writing it out is that it can drift from the
-#: real file, so ``TestTheProductionChainFile`` loads that file's own wiring with the impls
-#: substituted and asserts it is valid -- the fixture being wrong is then a test failure
-#: rather than a fixture that quietly proves something the deployment does not do.
-MOCK_CHAIN = textwrap.dedent("""
-    name: mock_ship_person
+#: real file, so ``TestTheProductionChainFile`` loads that file's own wiring and asserts it
+#: resolves to the same thing -- the fixture being wrong is then a test failure rather than a
+#: fixture that quietly proves something the deployment does not do.
+CHAIN = textwrap.dedent("""
+    name: ship_person_offline
     elements:
-      decode:       {impl: mock}
-      detect:       {impl: mock, model: ship_detector}
-      segment:      {impl: mock, model: ship_segmenter, when: class == ship}
-      embed_ship:   {impl: mock, model: ship_embedder, when: class == ship, after: segment}
-      embed_person: {impl: mock, model: person_embedder, when: class == person, after: detect}
-      recognize:    {impl: mock, model: ship_recognizer, when: class == ship, after: embed_ship}
-      track:        {impl: mock, per: camera, after: [recognize, embed_person]}
-      mtmc:         {impl: mock, scope: global}
-      output:       {impl: mock}
+      decode:       {impl: replay}
+      detect:       {impl: pool, model: ship_detector}
+      segment:      {impl: pool, model: ship_segmenter}
+      embed_ship:   {impl: pool, model: ship_embedder, params: {classes: [ship]}, after: segment}
+      embed_person: {impl: pool, model: person_embedder, params: {classes: [person]}, after: detect}
+      recognize:    {impl: shipvision, params: {classes: [ship]}, after: embed_ship}
+      track:        {impl: shipvision, per: camera, after: [recognize, embed_person]}
+      mtmc:         {impl: shipvision, scope: global}
+      output:       {impl: none}
     """)
+
+
+@registry_for(ElementKind.DECODE).register("chain-test-gpu")
+class DeviceDecode(Element):
+    """A decoder that leaves the frame in VRAM. Phase D's ``gstreamer-gpu``, in advance.
+
+    Every shipped decode implementation delivers ``bgr@cpu`` (``elements/decode.py``), so
+    there is nothing in the registry that can put a device cap on the head of a chain — and
+    half the caps rules this file pins are about a chain that must not come back to host
+    memory. Declared here rather than shipped: an operator cannot write this in a chain file,
+    which is exactly the difference between a fixture and an implementation.
+    """
+
+    kind: ClassVar[ElementKind] = ElementKind.DECODE
+    produces: ClassVar[tuple[str, ...]] = ("nv12@gpu",)
+
+    def _do_open(self, context: ElementContext) -> None:
+        return None
+
+    def _do_process(self, item: ChainItem) -> ChainItem | None:
+        return item.derive(caps=self.output_caps[0])
+
+
+@registry_for(ElementKind.DECODE).register("chain-test-any")
+class UnresolvableDecode(DeviceDecode):
+    """A root that will not say what it produces. The chain the loader cannot resolve.
+
+    A wildcard ``produces`` is filled in from what arrives at the element, and nothing arrives
+    at a root — so this leaves every cap downstream unknown.
+    """
+
+    produces: ClassVar[tuple[str, ...]] = ("*@*",)
 
 
 def load(text: str) -> Topology:
@@ -96,7 +136,7 @@ def load(text: str) -> Topology:
 
 
 def item(camera: str = "cam-1", frame: int = 7) -> ChainItem:
-    return ChainItem(RequestContext(camera_id=camera, frame_id=frame), Caps.parse("nv12@gpu"))
+    return ChainItem(RequestContext(camera_id=camera, frame_id=frame), Caps.parse("bgr@cpu"))
 
 
 def walk(chain: Topology, start: ChainItem) -> ChainItem:
@@ -136,16 +176,26 @@ def walk(chain: Topology, start: ChainItem) -> ChainItem:
 
 
 class TestRegistries:
-    """One registry per kind, and a hardware-free implementation of every kind."""
+    """One registry per kind, and at least one implementation of every kind."""
 
     @pytest.mark.parametrize("kind", list(ElementKind))
-    def test_every_kind_has_a_registry_and_a_mock(self, kind: ElementKind) -> None:
-        """A kind with no offline implementation is a kind the offline tier cannot test."""
+    def test_every_kind_has_a_registry_with_something_in_it(self, kind: ElementKind) -> None:
+        """A kind nobody implements is a slot a chain file can name and never run.
+
+        Deliberately does NOT resolve the entries. ``Registry.get()`` imports the target of a
+        lazy registration, and lazy registration exists precisely for implementations whose
+        module is expensive or absent -- ``kafka`` needs ``confluent_kafka``, and the next one
+        may need TensorRT or GStreamer. Walking every dotted path here would make a bare
+        ``pytest`` import them, which is how an offline suite quietly starts needing a driver
+        (ADR-001). The kind is enforced where it is actually decided:
+        :meth:`test_registering_a_class_under_the_wrong_kind_is_refused` for eager
+        registration and
+        :meth:`test_a_lazy_registration_of_the_wrong_kind_is_refused_at_creation` for lazy.
+        """
         registry = registry_for(kind)
 
         assert registry.element_kind is kind
-        assert "mock" in registry
-        assert registry.get("mock").kind is kind
+        assert list(registry.names()), "an empty registry cannot answer any chain"
 
     def test_registering_a_class_under_the_wrong_kind_is_refused(self) -> None:
         """The check that stops ``@DETECTORS.register`` from running a segmenter."""
@@ -164,20 +214,24 @@ class TestRegistries:
     def test_one_impl_name_may_live_in_several_kinds(self) -> None:
         """The evidence for per-kind registries.
 
-        ``pool`` is the default for all four model kinds and ``shipvision`` is both a
-        tracker and an MTMC implementation (arch.md §1). A flat registry refuses a duplicate
-        name, so it would force the kind into the name by convention.
+        ``pool`` is the default for all four model kinds and ``shipvision`` is a recogniser, a
+        tracker *and* an MTMC implementation (arch.md §1) — three different classes under one
+        name. A flat registry refuses a duplicate name, so it would force the kind into the
+        name by convention.
         """
-        classes = {registry_for(kind).get("mock") for kind in ElementKind}
+        pooled = {ElementKind.DETECT, ElementKind.SEGMENT, ElementKind.EMBED}
+        shipvision = {ElementKind.RECOGNIZE, ElementKind.TRACK, ElementKind.MTMC}
 
-        assert len(classes) == len(list(ElementKind))
+        assert {registry_for(kind).get("pool").kind for kind in pooled} == pooled
+        assert len({registry_for(kind).get("shipvision") for kind in shipvision}) == 3
+        assert {registry_for(kind).get("shipvision").kind for kind in shipvision} == shipvision
 
     def test_an_unknown_impl_names_the_ones_that_exist(self) -> None:
         with pytest.raises(UnknownElementImplError) as caught:
-            create_element(ElementKind.DETECT, "moc", "detect")
+            create_element(ElementKind.DETECT, "pol", "detect")
 
-        assert "moc" in str(caught.value)
-        assert "mock" in str(caught.value), "the message must list the available impls"
+        assert "pol" in str(caught.value)
+        assert "pool" in str(caught.value), "the message must list the available impls"
         assert caught.value.available == tuple(registry_for(ElementKind.DETECT).names())
 
     def test_an_unknown_kind_is_refused_by_name(self) -> None:
@@ -191,9 +245,17 @@ class TestRegistries:
         assert all(name and text for name, text in described["detect"]), "no description"
 
     def test_the_registered_name_lands_on_the_class(self) -> None:
-        """``impl`` is set by the decorator, so the chain file and a log line agree."""
-        assert registry_for(ElementKind.DETECT).get("mock").impl == "mock"
-        assert registry_for(ElementKind.DETECT).get("mock-cpu").impl == "mock-cpu"
+        """``impl`` is set by the decorator, so the chain file and a log line agree.
+
+        The canonical name and not the alias a chain happened to spell: ``jsonl`` and ``file``
+        both resolve to ``jsonlines``, and a log line that echoed the alias would make two
+        deployments of one element look like two elements.
+        """
+        registry = registry_for(ElementKind.OUTPUT)
+
+        assert registry.get("jsonlines").impl == "jsonlines"
+        assert registry.get("none").impl == "none"
+        assert registry.get("jsonl").impl == "jsonlines"
 
     def test_a_lazy_registration_of_the_wrong_kind_is_refused_at_creation(self) -> None:
         """The hole a lazy entry opens, and where it is closed.
@@ -207,30 +269,35 @@ class TestRegistries:
         place every element is built.
         """
         registry = registry_for(ElementKind.OUTPUT)
+        # Registries are process-global, so a name added here is nameable by every test that
+        # runs afterwards. Removed in `finally` rather than left: leaked state that only
+        # works because pytest happens to run a class in declaration order is a test that
+        # passes for a reason nobody chose.
         registry.register_lazy(
-            "mock-lazy-tracker",
-            "shipinfer.topology.elements.mock:MockTrack",
+            "lazy-tracker",
+            "shipinfer.topology.elements.track:ShipvisionTrack",
             description="a tracker smuggled into the output registry",
         )
+        try:
+            assert "lazy-tracker" in registry, "the registration itself cannot check"
 
-        assert "mock-lazy-tracker" in registry, "the registration itself cannot check"
+            with pytest.raises(ConfigurationError, match="cannot be registered as a output"):
+                create_element(ElementKind.OUTPUT, "lazy-tracker", "output")
+        finally:
+            registry._entries.pop("lazy-tracker", None)
 
-        with pytest.raises(ConfigurationError, match="cannot be registered as a output"):
-            create_element(ElementKind.OUTPUT, "mock-lazy-tracker", "output")
+    def test_the_shipped_lazy_registration_resolves_and_gets_its_name(self) -> None:
+        """The other half, on the one implementation that really is registered lazily.
 
-    def test_a_lazy_registration_of_the_right_kind_works_and_gets_its_name(self) -> None:
-        """The other half: lazy is a legitimate style, and ``impl`` still lands."""
-        registry = registry_for(ElementKind.OUTPUT)
-        registry.register_lazy(
-            "mock-lazy-output",
-            "shipinfer.topology.elements.mock:MockLazyOutput",
-            description="a sink registered lazily",
-        )
-
-        element = create_element(ElementKind.OUTPUT, "mock-lazy-output", "output")
+        ``kafka`` is a dotted path in ``elements/output.py`` because its sink imports
+        ``confluent_kafka``, so nothing about it may be imported by ``shipinfer.topology``.
+        Building it is what walks that path — and ``impl`` is set by ``create_element``,
+        because no decorator ever ran on the class.
+        """
+        element = create_element(ElementKind.OUTPUT, "kafka", "output")
 
         assert element.kind is ElementKind.OUTPUT
-        assert element.impl == "mock-lazy-output", "no decorator ran, so the factory sets it"
+        assert element.impl == "kafka", "no decorator ran, so the factory sets it"
 
     def test_one_class_under_two_lazy_names_is_refused_at_creation(
         self, monkeypatch: pytest.MonkeyPatch
@@ -257,16 +324,16 @@ class TestRegistries:
         module.Sink = DoubleRegistered  # type: ignore[attr-defined]
         monkeypatch.setitem(sys.modules, module.__name__, module)
         registry = registry_for(ElementKind.OUTPUT)
-        for name in ("mock-lazy-twice-a", "mock-lazy-twice-b"):
+        for name in ("lazy-twice-a", "lazy-twice-b"):
             registry.register_lazy(
                 name, f"{module.__name__}:Sink", description="one class, two names"
             )
 
-        first = create_element(ElementKind.OUTPUT, "mock-lazy-twice-a", "output")
+        first = create_element(ElementKind.OUTPUT, "lazy-twice-a", "output")
 
         with pytest.raises(ConfigurationError, match="two implementation names"):
-            create_element(ElementKind.OUTPUT, "mock-lazy-twice-b", "output")
-        assert first.impl == "mock-lazy-twice-a", "the built element keeps its own name"
+            create_element(ElementKind.OUTPUT, "lazy-twice-b", "output")
+        assert first.impl == "lazy-twice-a", "the built element keeps its own name"
 
     def test_a_subclass_may_carry_its_own_lazy_name(
         self, monkeypatch: pytest.MonkeyPatch
@@ -280,27 +347,27 @@ class TestRegistries:
         """
         module = types.ModuleType("shipinfer_test_subclass_lazy_name")
 
-        class Derived(MockOutput):
+        class Derived(JsonLinesOutput):
             """A sink that is a subclass of an eagerly registered one."""
 
         module.Sink = Derived  # type: ignore[attr-defined]
         monkeypatch.setitem(sys.modules, module.__name__, module)
         registry = registry_for(ElementKind.OUTPUT)
         registry.register_lazy(
-            "mock-lazy-derived", f"{module.__name__}:Sink", description="a subclass"
+            "lazy-derived", f"{module.__name__}:Sink", description="a subclass"
         )
 
-        element = create_element(ElementKind.OUTPUT, "mock-lazy-derived", "output")
+        element = create_element(ElementKind.OUTPUT, "lazy-derived", "output")
 
-        assert element.impl == "mock-lazy-derived"
-        assert MockOutput.impl == "mock", "the base's own name must not be rewritten"
+        assert element.impl == "lazy-derived"
+        assert JsonLinesOutput.impl == "jsonlines", "the base's own name must not be rewritten"
 
 
 class TestLoadingAValidChain:
-    def test_the_mock_chain_loads_and_is_ordered(self) -> None:
-        chain = load(MOCK_CHAIN)
+    def test_the_chain_loads_and_is_ordered(self) -> None:
+        chain = load(CHAIN)
 
-        assert chain.name == "mock_ship_person"
+        assert chain.name == "ship_person_offline"
         assert len(chain) == 9
         order = [node.name for node in chain]
         for edge in chain.edges:
@@ -308,24 +375,27 @@ class TestLoadingAValidChain:
                 edge.consumer
             ), f"out of order: {edge}"
 
-    def test_the_frame_stays_on_the_device_until_the_tracker(self) -> None:
-        """The cap of every edge, which is the load-time evidence for the VRAM-first path.
+    def test_the_frame_is_carried_until_the_tracker_and_dropped_there(self) -> None:
+        """The cap of every edge, which is the load-time evidence for the plane change.
 
-        Everything up to ``track`` carries ``nv12@gpu``; from ``track`` on it is
-        ``meta@cpu``, because a MOT algorithm needs boxes and not pixels. A chain that
-        dropped to host memory earlier would show up right here.
+        Everything up to ``track`` carries the frame; from ``track`` on it is ``meta@cpu``,
+        because a MOT algorithm needs boxes and not pixels. A chain that dropped the pixels
+        earlier — or carried them past the tracker to a sink that serialises — shows up right
+        here. ``bgr@cpu`` because ``replay`` is a host-memory source; the same nine slots
+        behind phase D's ``gstreamer-gpu`` read ``nv12@gpu`` for the first five edges, which
+        is the wildcard on the ``pool`` elements being resolved rather than declared.
         """
-        chain = load(MOCK_CHAIN)
+        chain = load(CHAIN)
         caps = {(edge.producer, edge.consumer): str(edge.caps) for edge in chain.edges}
 
-        assert caps[("decode", "detect")] == "nv12@gpu"
-        assert caps[("detect", "segment")] == "nv12@gpu"
-        assert caps[("recognize", "track")] == "nv12@gpu"
+        assert caps[("decode", "detect")] == "bgr@cpu"
+        assert caps[("detect", "segment")] == "bgr@cpu"
+        assert caps[("recognize", "track")] == "bgr@cpu"
         assert caps[("track", "mtmc")] == "meta@cpu"
         assert caps[("mtmc", "output")] == "meta@cpu"
 
     def test_roots_and_sinks_are_the_decoder_and_the_output(self) -> None:
-        chain = load(MOCK_CHAIN)
+        chain = load(CHAIN)
 
         assert [node.name for node in chain.roots] == ["decode"]
         assert [node.name for node in chain.sinks] == ["output"]
@@ -334,10 +404,10 @@ class TestLoadingAValidChain:
         """The rule that lets a nine-step chain need no wiring at all."""
         chain = load("""
             elements:
-              decode: {impl: mock}
-              detect: {impl: mock, model: d}
-              track:  {impl: mock}
-              output: {impl: mock}
+              decode: {impl: replay}
+              detect: {impl: pool, model: d}
+              track:  {impl: shipvision}
+              output: {impl: none}
             """)
 
         assert [node.name for node in chain.predecessors("detect")] == ["decode"]
@@ -350,7 +420,7 @@ class TestLoadingAValidChain:
         ``embed_person`` must follow ``detect``, not the ``segment`` declared before it, and
         both branches rejoin at ``track``.
         """
-        chain = load(MOCK_CHAIN)
+        chain = load(CHAIN)
 
         assert [node.name for node in chain.predecessors("embed_person")] == ["detect"]
         assert [node.name for node in chain.predecessors("embed_ship")] == ["segment"]
@@ -365,7 +435,7 @@ class TestLoadingAValidChain:
 
     def test_a_kind_is_inferred_from_the_slot_name(self) -> None:
         """``embed_ship`` is an embedder, which is what lets a chain hold two of them."""
-        chain = load(MOCK_CHAIN)
+        chain = load(CHAIN)
 
         assert chain.node("embed_ship").kind is ElementKind.EMBED
         assert chain.node("embed_person").kind is ElementKind.EMBED
@@ -374,19 +444,24 @@ class TestLoadingAValidChain:
     def test_an_explicit_kind_overrides_the_slot_name(self) -> None:
         chain = load("""
             elements:
-              camera: {impl: mock, kind: decode}
-              emit:   {impl: mock, kind: output}
+              camera: {impl: replay, kind: decode}
+              emit:   {impl: none, kind: output}
             """)
 
         assert chain.node("camera").kind is ElementKind.DECODE
 
     def test_describe_prints_the_resolved_wiring(self) -> None:
         """The default-predecessor rule means the file does not state most of the edges."""
-        described = load(MOCK_CHAIN).describe()
+        described = load(CHAIN).describe()
 
-        assert "decode -> detect [nv12@gpu]" in described
-        assert "when=class == ship" in described
+        assert "decode -> detect [bgr@cpu]" in described
         assert "model=ship_detector" in described
+
+    def test_describe_prints_a_frame_guard_where_one_is_written(self) -> None:
+        """The production chain carries none, so this asks a chain that does."""
+        described = load(TestConditions.GUARDED).describe()
+
+        assert "when=class == ship" in described
 
     def test_the_element_is_told_which_model_it_runs(self) -> None:
         """``model:`` reaches the element, not only the node's spec beside it.
@@ -397,7 +472,7 @@ class TestLoadingAValidChain:
         and not a missing value -- the loader has already refused a model kind that names
         none.
         """
-        chain = load(MOCK_CHAIN)
+        chain = load(CHAIN)
 
         assert chain.node("detect").element.model == "ship_detector"
         assert chain.node("embed_ship").element.model == "ship_embedder"
@@ -405,32 +480,38 @@ class TestLoadingAValidChain:
         assert chain.node("decode").element.model is None
         assert chain.node("track").element.model is None
         assert chain.node("output").element.model is None
+        # `recognize` is `impl: shipvision`: a gallery element loads its own gallery and
+        # names no repository model, which is the same "a kind's property, not a missing
+        # value" the four above demonstrate.
+        assert chain.node("recognize").element.model is None
 
     def test_the_runner_can_still_read_what_the_file_said(self) -> None:
         """``per``/``scope``/``params`` are the runner's business, so the spec is kept."""
-        chain = load(MOCK_CHAIN)
+        chain = load(CHAIN)
 
         assert chain.node("track").spec.per == "camera"
         assert chain.node("mtmc").spec.scope == "global"
 
-    def test_a_wildcard_passthrough_between_two_gpu_elements_loads(self) -> None:
+    def test_a_wildcard_element_between_two_device_elements_loads(self) -> None:
         """Propagation resolves, it does not forbid. The other half of the §8 rule.
 
         The same ``*@*`` element that is refused in front of a host-only sink is fine between
         two device elements, and both of its edges come out ``nv12@gpu`` — not ``*@*``, which
-        would be a validated chain nobody could read the caps of.
+        would be a validated chain nobody could read the caps of. ``pool`` is the shipped
+        wildcard: it hands on whatever plane it was given.
         """
         chain = load("""
             elements:
-              decode: {impl: mock}
-              track:  {impl: mock-passthrough}
-              detect: {impl: mock, model: d, after: track}
-              output: {impl: mock}
+              decode:  {impl: chain-test-gpu}
+              segment: {impl: pool, model: s}
+              detect:  {impl: pool, model: d, after: segment}
+              track:   {impl: shipvision}
+              output:  {impl: none}
             """)
         caps = {(edge.producer, edge.consumer): str(edge.caps) for edge in chain.edges}
 
-        assert caps[("decode", "track")] == "nv12@gpu"
-        assert caps[("track", "detect")] == "nv12@gpu"
+        assert caps[("decode", "segment")] == "nv12@gpu"
+        assert caps[("segment", "detect")] == "nv12@gpu"
 
     def test_a_cap_transparent_conditional_element_loads(self) -> None:
         """The bypass rule refuses a plane change, not every ``when:``.
@@ -441,11 +522,12 @@ class TestLoadingAValidChain:
         """
         chain = load("""
             elements:
-              decode:     {impl: mock}
-              detect:     {impl: mock, model: d}
-              segment:    {impl: mock, model: s, when: class == ship}
-              embed_ship: {impl: mock, model: e}
-              output:     {impl: mock}
+              decode:     {impl: chain-test-gpu}
+              detect:     {impl: pool, model: d}
+              segment:    {impl: pool, model: s, when: class == ship}
+              embed_ship: {impl: pool, model: e, params: {classes: [ship]}}
+              track:      {impl: shipvision}
+              output:     {impl: none}
             """)
 
         assert str(chain.node("segment").condition) == "class == ship"
@@ -453,14 +535,19 @@ class TestLoadingAValidChain:
 
     def test_loading_twice_gives_two_independent_chains(self) -> None:
         """Elements are stateful (a tracker holds per-camera state), so nothing is cached."""
-        first, second = load(MOCK_CHAIN), load(MOCK_CHAIN)
+        first, second = load(CHAIN), load(CHAIN)
 
         assert first.node("track").element is not second.node("track").element
 
 
 class TestRefusals:
-    def test_a_cpu_detector_behind_a_gpu_decoder_is_refused(self) -> None:
+    def test_a_serialising_sink_behind_a_device_decoder_is_refused(self) -> None:
         """arch.md §8's rule: a chain that would silently download refuses to load.
+
+        A sink serialises, so it reads host memory and says so — ``accepts: meta@cpu,
+        bgr@cpu`` on every ``output`` implementation. Behind a decoder that leaves the frame
+        in VRAM there is nothing to bridge the two, and the alternative to refusing is a
+        device-to-host copy per frame that nothing in the chain file mentions.
 
         The message must name both sides and both cap lists — this is the error most likely
         to be read by someone who did not write the chain.
@@ -468,40 +555,39 @@ class TestRefusals:
         with pytest.raises(CapsMismatchError) as caught:
             load("""
                 elements:
-                  decode: {impl: mock}
-                  detect: {impl: mock-cpu, model: d}
-                  output: {impl: mock}
+                  decode: {impl: chain-test-gpu}
+                  output: {impl: none}
                 """)
 
         message = str(caught.value)
-        assert "'decode'" in message and "'detect'" in message
+        assert "'decode'" in message and "'output'" in message
         assert "nv12@gpu" in message and "bgr@cpu" in message
         assert "convert" in message, "the message should name the fix, not just the problem"
         assert caught.value.produced == ("nv12@gpu",)
-        assert caught.value.accepted == ("bgr@cpu",)
+        assert caught.value.accepted == ("meta@cpu", "bgr@cpu")
 
-    def test_a_wildcard_passthrough_cannot_launder_a_gpu_frame_to_a_cpu_sink(self) -> None:
+    def test_a_wildcard_element_cannot_launder_a_device_frame_to_a_host_sink(self) -> None:
         """The evasion a per-edge caps check leaves open, and the reason caps propagate.
 
-        ``mock-passthrough`` declares ``accepts: *@*`` and ``produces: *@*``, which is the
-        honest way for a real tee or filter to say "I do not touch the pixels". Negotiated
-        one edge at a time, both of its edges pass: ``nv12@gpu`` matches ``*@*``, and ``*@*``
-        matches ``bgr@cpu``. The chain would load, and the device-to-host download arch.md §8
-        exists to refuse would happen every frame in the middle of it.
+        A ``pool`` element declares ``produces: *@*``, which is the honest way to say "I read
+        the frame and hand it on untouched". Negotiated one edge at a time, both of its edges
+        pass: ``nv12@gpu`` matches ``*@*``, and ``*@*`` matches ``bgr@cpu``. The chain would
+        load, and the device-to-host download arch.md §8 exists to refuse would happen every
+        frame in the middle of it.
 
         It is refused because the loader resolves the wildcard from what arrives at the
         element *before* negotiating its output, so by the time the sink is considered the
-        passthrough is an ``nv12@gpu`` producer and nothing bridges the two memories.
+        segmenter is an ``nv12@gpu`` producer and nothing bridges the two memories.
         """
         with pytest.raises(CapsMismatchError) as caught:
             load("""
                 elements:
-                  decode: {impl: mock}
-                  track:  {impl: mock-passthrough}
-                  output: {impl: mock-cpu}
+                  decode:  {impl: chain-test-gpu}
+                  segment: {impl: pool, model: s}
+                  output:  {impl: none}
                 """)
 
-        assert caught.value.producer == "track"
+        assert caught.value.producer == "segment"
         assert caught.value.produced == ("nv12@gpu",), "the resolved cap, not the '*@*'"
         assert caught.value.consumer == "output"
 
@@ -514,8 +600,8 @@ class TestRefusals:
         with pytest.raises(ChainStructureError, match="must say what it produces"):
             load("""
                 elements:
-                  decode: {impl: mock-any}
-                  output: {impl: mock}
+                  decode: {impl: chain-test-any}
+                  output: {impl: none}
                 """)
 
     def test_a_conditional_root_is_refused(self) -> None:
@@ -530,26 +616,27 @@ class TestRefusals:
         with pytest.raises(ChainStructureError, match="carries `when: class == ship`"):
             load("""
                 elements:
-                  decode: {impl: mock, when: class == ship}
-                  detect: {impl: mock, model: d}
-                  output: {impl: mock}
+                  decode: {impl: replay, when: class == ship}
+                  detect: {impl: pool, model: d}
+                  output: {impl: none}
                 """)
 
     def test_a_wildcard_producer_fed_two_different_caps_is_refused(self) -> None:
-        """A fan-in into a passthrough: the loader would have to pick one cap and guess.
+        """A fan-in into a ``*@*`` element: the loader would have to pick one cap and guess.
 
         Fan-in edges carrying different caps is legal in general (each edge is negotiated on
         its own pair). It stops being legal when the element says "I hand on what I was
-        given", because then there is no single answer to put on its outbound edge.
+        given", because then there is no single answer to put on its outbound edge — and here the
+        two roots hand it the same frame in two different memories.
         """
         with pytest.raises(ChainStructureError, match="wildcard format"):
             load("""
                 elements:
-                  decode:     {impl: mock}
-                  detect:     {impl: mock, model: d}
-                  track:      {impl: mock, after: detect}
-                  track_join: {impl: mock-passthrough, after: [detect, track]}
-                  output:     {impl: mock}
+                  decode_gpu: {impl: chain-test-gpu}
+                  decode_cpu: {impl: replay, after: []}
+                  segment:    {impl: pool, model: s, after: [decode_gpu, decode_cpu]}
+                  track:      {impl: shipvision}
+                  output:     {impl: none}
                 """)
 
     def test_a_conditional_element_that_changes_the_plane_is_refused(self) -> None:
@@ -557,17 +644,21 @@ class TestRefusals:
 
         A condition means skip-and-continue, so an item the tracker does not admit travels
         from ``decode`` straight to ``mtmc``. The declared edges are both fine —
-        ``decode -> track`` is ``nv12@gpu``, ``track -> mtmc`` is ``meta@cpu`` — and the
-        chain still cannot run, because for every person frame ``mtmc`` is handed a device
-        frame it cannot read. Checking only the declared edges would ship this.
+        ``decode -> track`` is ``bgr@cpu``, ``track -> mtmc`` is ``meta@cpu`` — and the chain
+        still cannot run, because on every frame the guard rejects, ``mtmc`` is handed pixels
+        it cannot read. Checking only the declared edges would ship this.
+
+        The guard is a frame-level fact and not ``class ==``: a tracker selects rows, so the
+        loader refuses that spelling first (:class:`TestRowSelectionIsNotAFrameCondition`) and
+        this test would never reach the bypass rule it is about.
         """
         with pytest.raises(CapsMismatchError) as caught:
             load("""
                 elements:
-                  decode: {impl: mock}
-                  track:  {impl: mock, when: class == ship}
-                  mtmc:   {impl: mock}
-                  output: {impl: mock}
+                  decode: {impl: replay}
+                  track:  {impl: shipvision, when: has_ship == true}
+                  mtmc:   {impl: shipvision}
+                  output: {impl: none}
                 """)
 
         assert caught.value.skipped == "track"
@@ -579,9 +670,9 @@ class TestRefusals:
         with pytest.raises(UnknownElementError) as caught:
             load("""
                 elements:
-                  decode: {impl: mock}
-                  detect: {impl: mock, model: d, after: decoed}
-                  output: {impl: mock}
+                  decode: {impl: replay}
+                  detect: {impl: pool, model: d, after: decoed}
+                  output: {impl: none}
                 """)
 
         assert caught.value.referrer == "detect"
@@ -598,11 +689,11 @@ class TestRefusals:
         with pytest.raises(ChainCycleError) as caught:
             load("""
                 elements:
-                  decode: {impl: mock}
-                  detect: {impl: mock, model: d, after: track}
-                  track:  {impl: mock, after: detect}
-                  mtmc:   {impl: mock}
-                  output: {impl: mock}
+                  decode: {impl: replay}
+                  detect: {impl: pool, model: d, after: track}
+                  track:  {impl: shipvision, after: detect}
+                  mtmc:   {impl: shipvision}
+                  output: {impl: none}
                 """)
 
         assert caught.value.cycle == ("detect", "track")
@@ -612,9 +703,9 @@ class TestRefusals:
         with pytest.raises(ChainCycleError):
             load("""
                 elements:
-                  decode: {impl: mock}
-                  detect: {impl: mock, model: d, after: detect}
-                  output: {impl: mock}
+                  decode: {impl: replay}
+                  detect: {impl: pool, model: d, after: detect}
+                  output: {impl: none}
                 """)
 
     @pytest.mark.parametrize(
@@ -623,7 +714,7 @@ class TestRefusals:
             (
                 """
                 elements:
-                  decode: {impl: mock}
+                  decode: {impl: replay}
                 """,
                 "the chain has no output element",
                 "a decoder alone emits nothing",
@@ -631,8 +722,8 @@ class TestRefusals:
             (
                 """
                 elements:
-                  decode: {impl: mock}
-                  detect: {impl: mock, model: d}
+                  decode: {impl: replay}
+                  detect: {impl: pool, model: d}
                 """,
                 "the chain has no output element",
                 "every model runs and nothing is emitted",
@@ -640,9 +731,9 @@ class TestRefusals:
             (
                 """
                 elements:
-                  decode: {impl: mock}
-                  detect: {impl: mock, model: d}
-                  track:  {impl: mock}
+                  decode: {impl: replay}
+                  detect: {impl: pool, model: d}
+                  track:  {impl: shipvision}
                 """,
                 "the chain has no output element",
                 "the chain ends at a tracker, whose results go nowhere",
@@ -650,8 +741,8 @@ class TestRefusals:
             (
                 """
                 elements:
-                  detect: {impl: mock, model: d, after: []}
-                  output: {impl: mock}
+                  detect: {impl: pool, model: d, after: []}
+                  output: {impl: none}
                 """,
                 "must be a decode element",
                 "a chain must start at a decoder",
@@ -659,7 +750,7 @@ class TestRefusals:
             (
                 """
                 elements:
-                  output: {impl: mock, after: []}
+                  output: {impl: none, after: []}
                 """,
                 "must be a decode element",
                 "an output sink with no decoder in front of it is not a chain",
@@ -667,9 +758,9 @@ class TestRefusals:
             (
                 """
                 elements:
-                  decode: {impl: mock}
-                  output: {impl: mock}
-                  mtmc:   {impl: mock, after: output}
+                  decode: {impl: replay}
+                  output: {impl: none}
+                  mtmc:   {impl: shipvision, after: output}
                 """,
                 "must be a sink",
                 "an output element that hands something on is not the end",
@@ -700,27 +791,27 @@ class TestRefusals:
         with pytest.raises(ChainStructureError, match="reach no output"):
             load("""
                 elements:
-                  decode:  {impl: mock}
-                  detect:  {impl: mock, model: d}
-                  output:  {impl: mock}
-                  segment: {impl: mock, model: s, after: detect}
+                  decode:  {impl: replay}
+                  detect:  {impl: pool, model: d}
+                  output:  {impl: none}
+                  segment: {impl: pool, model: s, after: detect}
                 """)
 
     def test_an_element_that_resolves_a_repository_model_without_one_is_refused(self) -> None:
         """The requirement is the *implementation's*, so the chain must name a ``pool``.
 
-        It used to be the kind's -- any ``detect:`` needed a ``model:`` -- and ``impl: mock``
-        was refused here too. It is not any more, and deliberately: a mock detector invents a
-        box and resolves nothing, so a chain of them needs neither a model name nor a model
-        pool behind it. ``tests/topology/test_model_requirement.py`` is where both halves of
-        the new rule live; this is the refusal itself, in the file that owns the loader's.
+        It used to be the kind's -- any ``recognize:`` needed a ``model:`` -- and
+        ``impl: shipvision`` was refused here too. It is not any more, and deliberately: a
+        gallery recogniser loads its own index and resolves nothing against the repository.
+        ``tests/topology/test_model_requirement.py`` is where both halves of the new rule
+        live; this is the refusal itself, in the file that owns the loader\'s.
         """
         with pytest.raises(ChainStructureError, match="model"):
             load("""
                 elements:
-                  decode: {impl: mock}
+                  decode: {impl: replay}
                   detect: {impl: pool}
-                  output: {impl: mock}
+                  output: {impl: none}
                 """)
 
     def test_an_unknown_key_is_refused(self) -> None:
@@ -728,8 +819,8 @@ class TestRefusals:
         with pytest.raises(ChainSpecError) as caught:
             load("""
                 elements:
-                  decode: {impl: mock, mdoel: ship_detector}
-                  output: {impl: mock}
+                  decode: {impl: replay, mdoel: ship_detector}
+                  output: {impl: none}
                 """)
 
         assert "mdoel" in str(caught.value)
@@ -738,9 +829,9 @@ class TestRefusals:
         with pytest.raises(UnknownElementKindError) as caught:
             load("""
                 elements:
-                  decode: {impl: mock}
-                  sement: {impl: mock, model: s}
-                  output: {impl: mock}
+                  decode: {impl: replay}
+                  sement: {impl: pool, model: s}
+                  output: {impl: none}
                 """)
 
         assert caught.value.slot == "sement"
@@ -759,8 +850,8 @@ class TestRefusals:
         with pytest.raises(UnknownElementKindError) as caught:
             load("""
                 elements:
-                  camera: {impl: mock, kind: decdoe}
-                  output: {impl: mock}
+                  camera: {impl: replay, kind: decdoe}
+                  output: {impl: none}
                 """)
 
         assert caught.value.slot == "decdoe"
@@ -769,7 +860,7 @@ class TestRefusals:
     def test_a_non_string_top_level_key_is_refused_as_a_spec_error(self) -> None:
         """The schema is the only thing allowed to reject a document, however odd it is."""
         with pytest.raises(ChainSpecError):
-            ChainSpec.from_yaml("1: elements\nelements: {decode: {impl: mock}}")
+            ChainSpec.from_yaml("1: elements\nelements: {decode: {impl: replay}}")
 
     def test_a_chain_with_no_elements_is_refused(self) -> None:
         with pytest.raises(ChainSpecError):
@@ -781,7 +872,7 @@ class TestRefusals:
 
     def test_invalid_yaml_names_the_source(self) -> None:
         with pytest.raises(ChainSpecError, match=r"chain\.yaml"):
-            ChainSpec.from_yaml("elements: {decode: {impl: mock}\n", source="chain.yaml")
+            ChainSpec.from_yaml("elements: {decode: {impl: replay}\n", source="chain.yaml")
 
     def test_a_missing_file_is_refused_with_its_path(self, tmp_path: Path) -> None:
         with pytest.raises(ChainSpecError, match=r"nope\.yaml"):
@@ -798,7 +889,7 @@ class TestThePackageSurface:
         correct, and would let a caller's bug be caught by the same ``except TopologyError``
         that handles bad configuration.
         """
-        chain = load(MOCK_CHAIN)
+        chain = load(CHAIN)
 
         with pytest.raises(KeyError) as caught:
             chain.node("detetc")
@@ -810,12 +901,12 @@ class TestThePackageSurface:
     def test_the_package_exports_classes_and_not_modules(self) -> None:
         """``__all__`` is the public vocabulary, and a module is not part of it.
 
-        ``elements.mock`` is imported by ``__init__`` for its registration side effect, which
-        is necessary and is not the same as being an export: an implementation is reached
-        through its registry, by the name a chain file uses. Exporting the module invites
-        ``from shipinfer.topology import mock`` and a second way to get at an element that
-        skips the seam — ``backends`` and ``ingest`` export the classes they mean and nothing
-        else.
+        ``elements.pool`` and its siblings are imported by ``__init__`` for their
+        registration side effect, which is necessary and is not the same as being an export:
+        an implementation is reached through its registry, by the name a chain file uses.
+        Exporting the module invites ``from shipinfer.topology import pool`` and a second way
+        to get at an element that skips the seam — ``backends`` and ``ingest`` export the
+        classes they mean and nothing else.
         """
         import shipinfer.topology as package
 
@@ -824,12 +915,23 @@ class TestThePackageSurface:
         assert not [
             name for name, value in exported.items() if isinstance(value, types.ModuleType)
         ]
-        assert "mock" in registry_for(ElementKind.DETECT), "the side effect still happened"
+        assert "pool" in registry_for(ElementKind.DETECT), "the side effect still happened"
 
 
 class TestConditions:
+    #: A frame guard on a field the *test* files. `segment` selects no rows, so the loader
+    #: permits `class` there; the production chain carries no guard at all, because nothing
+    #: in a real chain writes a frame-level `meta["class"]` (`docs/arch.md` §1).
+    GUARDED = (
+        "name: guarded\nelements:\n"
+        "  decode:  {impl: replay}\n"
+        "  detect:  {impl: pool, model: d}\n"
+        "  segment: {impl: pool, model: s, when: class == ship}\n"
+        "  output:  {impl: none}\n"
+    )
+
     def test_a_when_expression_is_parsed(self) -> None:
-        chain = load(MOCK_CHAIN)
+        chain = load(self.GUARDED)
         condition = chain.node("segment").condition
 
         assert condition == Condition("class", "==", "ship")
@@ -842,7 +944,7 @@ class TestConditions:
             Condition.parse(text)
 
     def test_a_condition_gates_an_element_on_metadata(self) -> None:
-        chain = load(MOCK_CHAIN)
+        chain = load(self.GUARDED)
         segment = chain.node("segment")
 
         assert segment.admits(item().derive(**{"class": "ship"}))
@@ -854,12 +956,41 @@ class TestConditions:
         assert not Condition.parse("class != ship").matches({})
 
     def test_an_element_with_no_condition_sees_everything(self) -> None:
-        assert load(MOCK_CHAIN).node("detect").admits(item())
+        assert load(CHAIN).node("detect").admits(item())
+
+
+class CountedSink(NullOutput):
+    """The real ``none`` sink, with its two lifecycle hooks counted.
+
+    :class:`Element` exposes no counters and should not: nothing in production reads them.
+    Idempotence is therefore asserted through a subclass that counts, over the real
+    ``_do_open`` that builds a real sink and the real ``_do_close`` that closes it — so a
+    hook that stopped being called fails here rather than being hidden by a stub.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        params: object = None,
+        *,
+        model: str | None = None,
+    ) -> None:
+        super().__init__(name, params, model=model)  # type: ignore[arg-type]
+        self.opens = 0
+        self.closes = 0
+
+    def _do_open(self, context: ElementContext) -> None:
+        super()._do_open(context)
+        self.opens += 1
+
+    def _do_close(self) -> None:
+        super()._do_close()
+        self.closes += 1
 
 
 class TestElementLifecycle:
     def test_open_and_close_are_idempotent(self) -> None:
-        element = create_element(ElementKind.DETECT, "mock", "detect")
+        element = CountedSink("output")
 
         element.open()
         element.open()
@@ -870,7 +1001,7 @@ class TestElementLifecycle:
         assert not element.is_open and element.closes == 1
 
     def test_closing_an_element_that_never_opened_does_nothing(self) -> None:
-        element = create_element(ElementKind.DETECT, "mock", "detect")
+        element = CountedSink("output")
 
         element.close()
 
@@ -878,27 +1009,27 @@ class TestElementLifecycle:
 
     def test_processing_before_open_is_a_typed_refusal(self) -> None:
         """Not an implicit open: that is how a CUDA context lands on the wrong thread."""
-        element = create_element(ElementKind.DETECT, "mock", "detect")
+        element = create_element(ElementKind.OUTPUT, "none", "output")
 
         with pytest.raises(ServerStateError, match="before open"):
             element.process(item())
 
     def test_a_failed_open_closes_what_it_managed_to_acquire(self) -> None:
-        class Broken(MockDetect):
+        class Broken(CountedSink):
             def _do_open(self, context: ElementContext) -> None:
                 super()._do_open(context)
-                raise RuntimeError("no camera")
+                raise RuntimeError("no broker")
 
-        element = Broken("detect")
+        element = Broken("output")
 
-        with pytest.raises(RuntimeError, match="no camera"):
+        with pytest.raises(RuntimeError, match="no broker"):
             element.open()
 
         assert not element.is_open
         assert element.closes == 1, "a half-open element must be unwound"
 
     def test_the_context_arrives_at_open_and_is_dropped_at_close(self) -> None:
-        element = create_element(ElementKind.DETECT, "mock", "detect")
+        element = create_element(ElementKind.OUTPUT, "none", "output")
         context = ElementContext(shard_id=3)
 
         element.open(context)
@@ -910,67 +1041,132 @@ class TestElementLifecycle:
     def test_params_reach_the_element(self) -> None:
         chain = load("""
             elements:
-              decode: {impl: mock}
-              detect: {impl: mock, model: d, params: {class: person}}
-              output: {impl: mock}
+              decode: {impl: replay}
+              output: {impl: none, params: {keep_last: 4}}
             """)
 
-        assert chain.node("detect").element.params == {"class": "person"}
+        assert chain.node("output").element.params == {"keep_last": 4}
+
+
+#: One model, declared once, built to its own config by ``tests/support/models.py``. Small
+#: on purpose: the walk is what is under test, not the arithmetic inside the module.
+_SEGMENTER = """
+platform: pytorch
+max_batch_size: 4
+inputs: [{name: images, data_type: FP32, dims: [4]}]
+outputs: [{name: masks, data_type: FP32, dims: [4]}]
+instance_groups: [{kind: KIND_CPU, count: 1}]
+dynamic_batching: {enabled: false}
+"""
+
+#: ``decode -> segment -> output`` on the three implementations that need nothing but a model
+#: repository: a file source, a pool element, and a sink that counts. Every edge is
+#: ``bgr@cpu``, which is what a host-memory chain looks like end to end.
+WALKABLE = """
+name: walkable
+elements:
+  decode:  {impl: replay}
+  segment: {impl: pool, model: ship_segmenter, params: {input: images}}
+  output:  {impl: none, params: {keep_last: 4}}
+"""
 
 
 class TestWalkingAChain:
-    def test_the_tag_survives_every_element(self) -> None:
+    """The three elements driven for real, over a real model pool.
+
+    The pool is an :class:`~shipinfer.engine.pool.InferenceServer` on the CPU with one
+    TorchScript module in it, rather than a stand-in for one: a walk whose middle element
+    never submitted anything would prove that the loader wired three objects together and
+    nothing about the contract between them.
+    """
+
+    @pytest.fixture()
+    def server(self, tmp_path: Path):
+        root = tmp_path / "repo"
+        (root / "ship_segmenter" / "1").mkdir(parents=True)
+        (root / "ship_segmenter" / "config.yaml").write_text(_SEGMENTER.lstrip())
+        materialise(root)
+        settings = ServerSettings(
+            model_repository=root,
+            devices={"visible_gpus": []},
+            execution={"warmup_iterations": 0},
+        )
+        with InferenceServer(settings) as running:
+            yield running
+
+    @staticmethod
+    def frame(camera: str = "cam-42", frame_id: int = 1234, **meta: Any) -> ChainItem:
+        """One host-resident frame, in the shape a decoder's frame sink hands over."""
+        return ChainItem(
+            RequestContext(camera_id=camera, frame_id=frame_id),
+            Caps.parse("bgr@cpu"),
+            payload=Tensor.from_numpy(np.zeros((1, 4), dtype=np.float32)),
+            meta=dict(meta),
+        )
+
+    def test_the_tag_survives_every_element(self, server) -> None:
         """ADR-002, checked end to end: the ``(camera_id, frame_id)`` tag is never rewritten.
 
-        Walking the chain by hand rather than through a runner — there is no runner yet, and
-        the property belongs to the elements either way.
+        Walked by hand rather than through a runner, because the property belongs to the
+        elements: a runner that reassembled on arrival order would still pass its own tests
+        with an element that rebuilt the tag here.
         """
-        chain = load(MOCK_CHAIN)
+        chain = load(WALKABLE)
         for node in chain:
-            node.element.open(ElementContext())
+            node.element.open(ElementContext(models=server))
+        try:
+            current = self.frame()
+            start_key = current.key
+            seen: list[str] = []
+            for node in chain:
+                result = node.element.process(current)
+                seen.append(node.name)
+                if result is None:
+                    break
+                current = result
+                assert current.key == start_key, f"{node.name} rewrote the tag"
 
-        current = item("cam-42", 1234)
-        start_key = current.key
-        seen: list[str] = []
-        for node in chain:
-            if not node.admits(current):
-                continue
-            result = node.element.process(current)
-            seen.append(node.name)
-            if result is None:
-                break
-            current = result
-            assert current.key == start_key, f"{node.name} rewrote the tag"
+            published = chain.node("output").element._sink
+            assert seen == ["decode", "segment", "output"]
+            assert published.emitted == 1
+            event = published.events()[0]
+            assert (event.camera_id, event.frame_id) == start_key
+        finally:
+            for node in chain:
+                node.element.close()
 
-        sink = chain.node("output").element
-        assert seen[-1] == "output"
-        assert len(sink.emitted) == 1
-        assert sink.emitted[0].key == start_key
-        assert str(sink.emitted[0].caps) == "meta@cpu"
-        for node in chain:
-            node.element.close()
+    def test_metadata_accumulates_along_the_chain(self, server) -> None:
+        """An element *adds* to the metadata; it does not replace it.
 
-    def test_metadata_accumulates_along_the_chain(self) -> None:
-        chain = load(MOCK_CHAIN)
-        detect, segment = chain.node("detect").element, chain.node("segment").element
-        detect.open()
-        segment.open()
+        The frame arrives carrying what the decoder's sink stamped on it, and the segmenter's
+        own key has to land beside that rather than instead of it — the difference between a
+        chain whose stages compose and one where the last writer is the only writer.
+        """
+        chain = load(WALKABLE)
+        decode, segment = chain.node("decode").element, chain.node("segment").element
+        decode.open(ElementContext())
+        segment.open(ElementContext(models=server))
+        try:
+            after_decode = decode.process(self.frame(frame_hw=(4, 6), fps=20.0))
+            assert after_decode is not None
+            after_segment = segment.process(after_decode)
 
-        after_detect = detect.process(item())
-        assert after_detect is not None
-        after_segment = segment.process(after_detect)
-
-        assert after_segment is not None
-        assert after_segment.meta["boxes"], "the detector's boxes must survive"
-        assert after_segment.meta["masks"], "and the segmenter must have added its own"
+            assert after_segment is not None
+            assert after_segment.meta["frame_hw"] == (4, 6), "the decoder's frame size survives"
+            assert after_segment.meta["masks"], "and the segmenter must have added its own"
+        finally:
+            decode.close()
+            segment.close()
 
     def test_the_sink_consumes_the_item_rather_than_failing(self) -> None:
         """``None`` from a sink means "consumed", which is why failures raise instead."""
-        sink = create_element(ElementKind.OUTPUT, "mock", "output")
+        sink = create_element(ElementKind.OUTPUT, "none", "output", {"keep_last": 2})
         sink.open()
-
-        assert sink.process(item()) is None
-        assert len(sink.emitted) == 1
+        try:
+            assert sink.process(self.frame()) is None
+            assert sink._sink.emitted == 1
+        finally:
+            sink.close()
 
 
 class TestTheDonorAtAFanIn:
@@ -983,33 +1179,33 @@ class TestTheDonorAtAFanIn:
     it stays in the runner (``tests/runners/test_walk.py``).
     """
 
-    #: Two branches into one tracker, carrying **different** caps: ``detect`` hands a frame
-    #: (``nv12@gpu``) and ``tap`` hands metadata (``meta@cpu``). ``after: [tap, detect]``
-    #: puts the metadata predecessor *first* in declaration order on purpose — the rule is
-    #: about the negotiated cap, and with the two aligned the test would not know which one
-    #: it proved.
+    #: Two branches into one tracker, carrying **different** caps: ``detect`` hands the frame
+    #: (``bgr@cpu``) and ``tap`` hands metadata (``meta@cpu``). ``after: [detect, tap]`` puts
+    #: the *frame* predecessor first in declaration order on purpose — a tracker lists
+    #: ``meta@cpu`` first in its ``accepts``, so the rule under test and the declaration order
+    #: disagree, and with the two aligned the test would not know which one it proved.
     FAN_IN = """
         name: fan_in
         elements:
-          decode: {impl: mock}
-          detect: {impl: mock, model: ship_detector}
-          tap:    {impl: mock, kind: track, after: detect}
-          join:   {impl: mock, kind: track, after: [tap, detect]}
-          output: {impl: mock}
+          decode: {impl: replay}
+          detect: {impl: pool, model: ship_detector}
+          tap:    {impl: shipvision, kind: track, after: detect}
+          join:   {impl: shipvision, kind: track, after: [detect, tap]}
+          output: {impl: none}
         """
 
     def test_the_donor_is_the_predecessor_whose_edge_carries_the_preferred_cap(self) -> None:
         """A payload is a frame handle or a tensor; half of one and half of another is not one.
 
-        ``join`` is a tracker: it accepts ``nv12@gpu`` before ``meta@cpu``, so of its two
-        predecessors the one whose edge carries the frame donates — even though the metadata
-        branch is declared first.
+        ``join`` is a tracker: it accepts ``meta@cpu`` before the two frame planes, so of its
+        two predecessors the metadata branch donates — even though the frame branch is
+        declared first.
         """
         chain = load(self.FAN_IN)
 
         node = chain.node("join")
-        assert node.inputs == ("tap", "detect"), "the fixture's declaration order"
-        assert node.donor == "detect", "the preferred cap wins over declaration order"
+        assert node.inputs == ("detect", "tap"), "the fixture's declaration order"
+        assert node.donor == "tap", "the preferred cap wins over declaration order"
 
     def test_a_root_has_no_donor(self) -> None:
         chain = load(self.FAN_IN)
@@ -1022,12 +1218,12 @@ class TestTheDonorAtAFanIn:
         chain = load("""
             name: agreeing_fan_in
             elements:
-              decode: {impl: mock}
-              detect: {impl: mock, model: d}
-              left:   {impl: mock, kind: segment, model: s, after: detect}
-              right:  {impl: mock, kind: embed, model: e, after: detect}
-              join:   {impl: mock, kind: recognize, model: r, after: [right, left]}
-              output: {impl: mock}
+              decode: {impl: replay}
+              detect: {impl: pool, model: d}
+              left:   {impl: pool, kind: segment, model: s, after: detect}
+              right:  {impl: pool, kind: embed, model: e, after: detect}
+              join:   {impl: pool, kind: segment, model: r, after: [right, left]}
+              output: {impl: none}
             """)
 
         assert chain.node("join").donor == "right"
@@ -1039,25 +1235,17 @@ class TestTheProductionChainFile:
     PATH = REPO_ROOT / "topology" / "ship_person.yaml"
 
     @classmethod
-    def load_with_mocks(cls, *, detect_class: str | None = None) -> Topology:
-        """The file, with every ``impl:`` replaced by ``mock`` and nothing else touched.
+    def substituted(cls) -> Topology:
+        """The file with its one not-yet-landed spelling replaced, and nothing else touched.
 
-        Parsed from the file rather than retyped, so this cannot drift from it: the
-        substitution is the *only* difference between what a deployment loads and what the
-        offline tier can load today.
-
-        Args:
-            detect_class: what the mock detector should claim to have found, passed through
-                ``params:``. It changes the *mock*, never the wiring -- ``MockDetect`` reads
-                ``params["class"]`` and stamps it into the metadata, which is how a branch
-                test chooses which branch of this chain ought to fire. Left out, the
-                detector's own default (``ship``) applies.
+        Parsed from the file rather than retyped, so this cannot drift from it. One
+        substitution, and it names a phase rather than a convenience: ``decode: gstreamer-gpu``
+        is phase D's zero-copy source and is not registered, so the loader cannot get past the
+        first slot. Every other ``impl:``, every ``after:``, every ``params:`` is the file's,
+        which is what makes the assertions below statements about the shipped chain.
         """
         raw = yaml.safe_load(cls.PATH.read_text(encoding="utf-8"))
-        for declared in raw["elements"].values():
-            declared["impl"] = "mock"
-        if detect_class is not None:
-            raw["elements"]["detect"]["params"] = {"class": detect_class}
+        raw["elements"]["decode"]["impl"] = "replay"
         return Topology.from_spec(ChainSpec.model_validate(raw))
 
     def test_it_matches_the_schema(self) -> None:
@@ -1075,10 +1263,11 @@ class TestTheProductionChainFile:
             "mtmc",
             "output",
         ]
-        assert spec.elements["segment"].when == "class == ship"
+        assert spec.elements["segment"].when is None, "a guard nothing files is not written"
+        assert spec.elements["embed_ship"].params["classes"] == ["ship"]
         assert spec.elements["embed_ship"].predecessors == ("segment",)
 
-    def test_its_implementations_land_in_a_later_phase(self) -> None:
+    def test_its_decoder_lands_in_a_later_phase(self) -> None:
         """It does not load yet, and the refusal says exactly which name is missing.
 
         When phase D registers ``gstreamer-gpu`` this test fails and should be replaced by
@@ -1090,21 +1279,41 @@ class TestTheProductionChainFile:
         assert caught.value.impl == "gstreamer-gpu"
         assert caught.value.kind == "decode"
 
+    def test_every_row_selecting_slot_names_its_classes(self) -> None:
+        """The conversion this file was waiting for, now done and pinned.
+
+        It used to carry ``when: class == X`` on its three crop slots and ``impl: pool`` on
+        ``recognize`` — the first refused since C8b because ``when:`` guards a frame while
+        those elements select rows, the second because a ``pool`` recogniser files the model's
+        raw response under a key ``output`` reads per row. Both were invisible only because
+        the file stops at ``gstreamer-gpu`` first. This replaces the test that reported the
+        gap: what it asserted is now what the file does.
+        """
+        chain = self.substituted()
+
+        assert chain.node("embed_ship").element.declared_classes() == ("ship",)
+        assert chain.node("embed_person").element.declared_classes() == ("person",)
+        assert chain.node("recognize").element.declared_classes() == ("ship",)
+        assert (
+            chain.node("recognize").element.impl == "shipvision"
+        ), "identity is a gallery query"
+        assert all(node.condition is None for node in chain.nodes), "no guard nothing files"
+
     def test_its_own_wiring_is_a_valid_chain(self) -> None:
-        """The file's *wiring* loads today, with only the ``impl:`` names substituted.
+        """The file's *wiring* loads today, with only the phase-D decoder substituted.
 
         The test the file's header claims. Until phase D lands, the check above can only
         reach ``UnknownElementImplError`` — the loader stops at the first unregistered
         implementation and never gets to the structure or the caps — so the production chain
-        could be wired wrong for four phases and every test would stay green. It was: with
-        the mocks swapped in, this file used to fail with
-        ``ChainStructureError: ['embed_person'] reach no output``, because ``track`` fell
-        back to the declaration-order predecessor and picked up only ``recognize``.
+        could be wired wrong for four phases and every test would stay green. It was: this
+        file used to fail with ``ChainStructureError: ['embed_person'] reach no output``,
+        because ``track`` fell back to the declaration-order predecessor and picked up only
+        ``recognize``.
 
-        Substituting ``impl:`` and nothing else is the point. Anything more and this becomes
-        a second fixture rather than a check on the first.
+        Substituting that one name and nothing else is the point. Anything more and this
+        becomes a second fixture rather than a check on the first.
         """
-        chain = self.load_with_mocks()
+        chain = self.substituted()
 
         assert len(chain) == 9
         assert [node.name for node in chain.sinks] == ["output"]
@@ -1114,63 +1323,53 @@ class TestTheProductionChainFile:
         ]
         assert [node.name for node in chain.predecessors("embed_person")] == ["detect"]
 
-    def test_a_person_detection_touches_no_ship_only_element(self) -> None:
+    def test_the_two_branches_cover_disjoint_rows(self) -> None:
         """The defect this chain shipped with: the ship branch ran on every person crop.
 
-        ``when:`` is skip-and-continue, and it guards *one* element, so a condition on
-        ``segment`` alone leaves ``embed_ship`` and ``recognize`` unguarded: a person was
-        skipped past the segmenter and then handed to the ship embedder and the ship
-        recogniser, which wrote ``meta["identities"]`` for a person. At the sizing in
-        CLAUDE.md that is ~15 000 crops/s paying two extra model invocations, and the wrong
+        ``when:`` is skip-and-continue, and it guards *one* element for a whole *frame*, so
+        the guards on this file could never separate a frame's ships from its people at all:
+        a frame holds both, nothing writes a frame-level ``meta['class']``, and the ship
+        embedder and recogniser therefore either ran on every crop or on none. At the sizing
+        in CLAUDE.md that is ~15 000 crops/s paying two extra model invocations, and the wrong
         answer is emitted downstream where nothing can tell it from a real one.
 
-        Removing either ``when: class == ship`` from ``topology/ship_person.yaml`` fails
-        this test.
+        Read through the row filter the loader demands: each branch names the labels it pays
+        for, and the two sets do not meet. Deleting a ``classes:`` from either branch in the
+        file fails this test.
         """
-        chain = self.load_with_mocks(detect_class="person")
+        chain = self.substituted()
 
-        emitted = walk(chain, item("cam-3", 11))
+        ships = set(chain.node("embed_ship").element.declared_classes())
+        people = set(chain.node("embed_person").element.declared_classes())
 
-        for ship_only in ("segment", "embed_ship", "recognize"):
-            assert (
-                chain.node(ship_only).element.processes == 0
-            ), f"{ship_only} ran on a person detection"
-        assert chain.node("embed_person").element.processes == 1
-        assert "identities" not in emitted.meta, "a person tracklet cannot carry a ship id"
-        assert "masks" not in emitted.meta, "the ship segmenter left masks on a person"
-        assert emitted.meta["class"] == "person"
-        assert emitted.meta["vectors"], "the person embedding must still reach the sink"
+        assert ships == {"ship"} and people == {"person"}
+        assert not ships & people, "a crop paid for twice is a crop attributed twice"
 
-    def test_a_ship_detection_runs_the_ship_branch_and_not_the_person_one(self) -> None:
-        """The mirror: guarding the branch must not have turned it off.
+    def test_the_whole_frame_stage_declares_no_rows(self) -> None:
+        """The mirror of the conversion: it must not have given every slot a ``classes:``.
 
-        Without this half, the test above would also pass on a chain whose ``when:`` clauses
-        are simply always false -- the ship models never running is the other way to have no
-        ship identities.
+        ``segment`` submits the whole frame and selects nothing, so a row filter on it would
+        be as wrong as a frame guard on an embedder — and without this half, the test above
+        would pass on a file that had simply had ``classes:`` sprayed across it.
         """
-        chain = self.load_with_mocks(detect_class="ship")
+        chain = self.substituted()
 
-        emitted = walk(chain, item("cam-3", 12))
-
-        for ship_only in ("segment", "embed_ship", "recognize"):
-            assert chain.node(ship_only).element.processes == 1, f"{ship_only} was skipped"
-        assert chain.node("embed_person").element.processes == 0, "the person embedder ran"
-        assert emitted.meta["identities"] == {0: ("ship-1", 1.0)}
-        assert emitted.meta["masks"], "the segmenter's masks must reach the sink"
+        assert chain.node("segment").element.declared_classes() is None
+        assert chain.node("segment").condition is None
 
     def test_the_inline_fixture_agrees_with_the_file(self) -> None:
-        """``MOCK_CHAIN`` resolves to exactly the wiring the production file resolves to.
+        """``CHAIN`` resolves to exactly the wiring the production file resolves to.
 
-        The fixture's docstring says it is the production chain with mocks; this is what
+        The fixture's docstring says it is the production chain's nine slots; this is what
         makes that sentence true. The drift worth catching is the fixture being *more*
         correct than the file it claims to copy — which is what happened, and is why
-        ``MOCK_CHAIN`` carried two ``after:`` clauses the file did not.
+        ``CHAIN`` carried two ``after:`` clauses the file did not.
 
         Compared after validation rather than as text, because the default-predecessor rule
         means most of the wiring is not written in either place.
         """
-        fixture = load(MOCK_CHAIN)
-        production = self.load_with_mocks()
+        fixture = load(CHAIN)
+        production = self.substituted()
 
         assert [node.name for node in fixture] == [node.name for node in production]
         assert [str(edge) for edge in fixture.edges] == [str(edge) for edge in production.edges]
@@ -1270,14 +1469,18 @@ class TestRowSelectionIsNotAFrameCondition:
     def test_an_element_that_selects_no_rows_may_still_be_guarded_by_class(self) -> None:
         """The refusal is a declaration on the implementation, not a ban on a word.
 
-        A ``mock`` element does not read ``classes:``, so ``when: class == ship`` on one is
-        still the ordinary branch condition the mock chain tests are built on — which is also
-        why ``topology/ship_person.yaml`` keeps loading with its implementations substituted.
+        A ``segment`` slot is a whole-frame stage — it reads no ``classes:`` — so the loader
+        permits ``when: class == ship`` on one. Permitted is not recommended: nothing in a
+        real chain writes a frame-level ``meta["class"]``, which is why
+        ``topology/ship_person.yaml`` carries no guard at all
+        (:meth:`TestTheProductionChainFile.test_the_whole_frame_stage_declares_no_rows`).
+        What is under test here is the shape of the *rule* — a declaration on the
+        implementation rather than a ban on a word.
         """
         chain = self.chain(
-            "detect: {impl: mock}",
-            "segment: {impl: mock, when: class == ship}",
-            "output: {impl: mock}",
+            "detect: {impl: pool, model: d}",
+            "segment: {impl: pool, model: s, when: class == ship}",
+            "output: {impl: none}",
         )
 
         assert str(chain.node("segment").condition) == "class == ship"
@@ -1409,7 +1612,7 @@ class TestTheRunnableChainFile:
     PATH = REPO_ROOT / "topology" / "ship_person_cpu.yaml"
 
     def test_it_loads_with_no_substitutions(self) -> None:
-        """The whole difference from ``ship_person.yaml``, which needs its impls mocked out.
+        """The whole difference from ``ship_person.yaml``, whose decoder is phase D's.
 
         Loading is not running — the ``pool`` slots still need a repository and the shipvision
         slots still need the submodule — but every ``impl:`` in it resolves, which is what

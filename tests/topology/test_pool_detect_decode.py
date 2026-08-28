@@ -197,8 +197,8 @@ class TestItRefusesWithoutTheOpsItWasPromised:
         assert PoolDetect.needs_image_ops is True
 
     def test_only_the_elements_that_read_pixels_do(self) -> None:
-        """The gating is only worth having if it is selective: a chain of mocks, or of
-        forwarding `pool` elements, must resolve no ops at all.
+        """The gating is only worth having if it is selective: a chain of forwarding `pool`
+        elements, or of elements that never touch the frame, must resolve no ops at all.
 
         ``PoolEmbed`` answers ``True`` since C8 — it cuts one crop per detection out of the
         source frame (``tests/topology/test_pool_embed_crops.py``). ``PoolSegment`` does not
@@ -206,11 +206,12 @@ class TestItRefusesWithoutTheOpsItWasPromised:
         that a per-row scatter-back cannot express, so it keeps the forwarding default rather
         than gaining half a feature.
         """
-        from shipinfer.topology.elements.mock import MockDetect
         from shipinfer.topology.elements.pool import PoolEmbed, PoolRecognize, PoolSegment
+        from shipinfer.topology.elements.track import ShipvisionTrack
 
         assert [
-            cls.needs_image_ops for cls in (PoolSegment, PoolEmbed, PoolRecognize, MockDetect)
+            cls.needs_image_ops
+            for cls in (PoolSegment, PoolEmbed, PoolRecognize, ShipvisionTrack)
         ] == [False, True, False, False]
 
     def test_a_context_with_no_ops_is_a_typed_refusal_at_open(self) -> None:
@@ -476,8 +477,9 @@ class TestWhatLandsOnTheItem:
 
         Nothing in ``src/`` read it — it was ``response.outputs`` filed under a name — and
         keeping it would pin the whole output tensor alive for the rest of the walk so a
-        future consumer could redo arithmetic this element has already done correctly. The
-        mocks still file their own ``boxes`` list; that key is theirs, not this element's.
+        future consumer could redo arithmetic this element has already done correctly. An
+        upstream stage in a chain may still carry its own ``boxes`` list; that key is not
+        this element's to file or to clear.
         """
         detector = FakeDetector({"boxes": rows((10, 30, 50, 45, 0.9, 8))})
         element = opened(detector, decode={"boxes_output": "boxes"})
