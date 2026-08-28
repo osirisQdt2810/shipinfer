@@ -328,8 +328,6 @@ Round 3 (CI): the crop chunk bound is the engine's, not Triton's — `_max_batch
 assembler at one row; the fake now enforces the same rule, and a real-engine test pins it).
 `boxes_at` never aliases the live array; `_scatter` keeps a plain peer's mapping plain. A
 crop element's whole-frame response carries chunk 0's `executed_on` — ledger item.
----
-
 
 ---
 

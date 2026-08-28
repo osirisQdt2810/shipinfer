@@ -328,8 +328,8 @@ class TestImportIsCheap:
         """The subprocess probe above cannot see a *guarded* module-scope import on a host
         with no librdkafka — the failed import leaves nothing in ``sys.modules``, and CI is
         such a host. So the one package the exemption was created for gets a targeted AST
-        check: no import that executes at module import time (module or class scope, bare
-        or inside ``try:``) may name ``confluent_kafka``. Function bodies stay legal —
+        check: no import anywhere under ``topology/`` that executes at module import time (module
+        or class scope, bare or inside ``try:``) may name ``confluent_kafka``. Function bodies stay legal —
         that laziness is the point."""
         offenders: list[str] = []
 
@@ -343,13 +343,15 @@ class TestImportIsCheap:
                         for alias in child.names
                         if alias.name.split(".")[0] == "confluent_kafka"
                     )
-                elif isinstance(child, ast.ImportFrom):
-                    if (child.module or "").split(".")[0] == "confluent_kafka":
-                        offenders.append(f"{path_name}:{child.lineno}: from {child.module}")
+                elif (
+                    isinstance(child, ast.ImportFrom)
+                    and (child.module or "").split(".")[0] == "confluent_kafka"
+                ):
+                    offenders.append(f"{path_name}:{child.lineno}: from {child.module}")
                 visit(child, path_name)
 
-        files = sorted((SRC / "topology" / "sinks").glob("*.py"))
-        assert files, "sinks package not found — this check is scanning nothing"
+        files = sorted((SRC / "topology").rglob("*.py"))
+        assert files, "topology package not found — this check is scanning nothing"
         for path in files:
             visit(ast.parse(path.read_text()), path.name)
         assert not offenders, offenders

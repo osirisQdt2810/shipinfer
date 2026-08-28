@@ -1,49 +1,13 @@
-"""The event this system publishes — the old Kafka contract, extended for ships.
+"""The perception event: one frame's finished answer, as the wire and the file see it.
 
-Lives in ``core`` because both generations of the pipeline build one: ``pipeline/graph/``
-assembles it from a frame's stage outputs, and the ``output`` element under
-``topology/elements/`` will assemble it from a chain item's metadata. ``topology`` may import
-``core`` and nothing else, so a value shared by the two has exactly one legal home
-(``shipinfer.pipeline.schema`` re-exports it for the coexistence arch.md §9 describes).
-
-The downstream services already exist: ``motservice`` consumes per-frame detections and
-``mtmcservice`` consumes tracklets (``references/bitbucket-subfaceid``). Replacing their
-input format would mean rewriting both, so the rule from
-``docs/new-system-architecture.md`` is *giữ contract cũ, mở rộng schema cho ship* — keep the
-old contract, extend the schema for ships.
-
-**What v1 was.** ``DetectionMOTFrameData`` (``KafkaData/DetectionMOTFrameData.h``) serialises
-one message type, ``Det2MOT``, as parallel arrays::
-
-    sub_id, det_id_vec, camera_id, image_id, det_body_score_vec,
-    body_bbox_vec, body_feature_vec, img_width, img_height, img_fps
-
-**What v2 adds**, and how it stays compatible:
-
-* every v1 key keeps its name, its type and its meaning, and still carries **people only**,
-  so a running ``motservice`` needs no change and no rebuild;
-* ships get their own parallel arrays in the same idiom (``ship_bbox_vec``,
-  ``ship_feature_vec``, ``ship_id_vec``, ...), because that is how the existing consumer
-  code is written and a new consumer should not have to learn a second style;
-* ``schema_version`` is explicit, so a consumer can branch on the number instead of
-  guessing from the presence of a key;
-* completeness is explicit (``partial``, ``missing_stages``). A frame that lost its
-  embedder is *not* the same event as a frame with no people in it, and v1 could not tell
-  those apart.
-
-**What v3 adds** is the tracklet. ``motservice`` was named for the step that was missing:
-this pipeline detected and embedded and then handed the result to a separate service to
-associate. With Plane 3 running in-process the identity is already known when the event is
-built, so it travels with the object — ``body_track_id_vec`` beside ``body_bbox_vec``,
-``ship_track_id_vec`` beside ``ship_bbox_vec``, in the same parallel-array idiom as
-everything else. Purely additive: ``as_det2mot`` is untouched, so a deployed ``motservice``
-that ignores the new keys and does its own association keeps working, and one that reads them
-can stop.
-
-People are **not** duplicated into a generic object array. Two representations of a 512-d
-embedding would double the largest field in the message — at 15 people per frame and 1000
-frames a second that is the difference between 150 MB/s and 300 MB/s of JSON — and it would
-leave two places for a consumer to disagree with itself.
+Schema v4: per-object parallel arrays (``*_bbox_vec``, ``*_track_id_vec``,
+``*_global_id_vec``, ``*_feature_vec``) split by class, plus frame identity
+(``camera_id``, ``image_id``, ``sub_id``), geometry (``img_width/height/fps``) and
+``missing_stages`` — a partial frame says so instead of reading as an empty complete one.
+Stdlib only, by construction and by test (``TestTheSchemaIsPortable``): this module is what
+a consumer on another machine may copy out wholesale, so it must drag nothing with it.
+``PerceptionEvent.build`` is the one constructor; ``pipeline/schema.py`` re-exports for the
+old spelling.
 """
 
 from __future__ import annotations
@@ -105,14 +69,10 @@ class ObjectRecord:
     #: float mask is 1 MB and this bus carries metadata, not pixels — the architecture doc
     #: is explicit that frames stay in shared memory and Kafka gets the small results.
     mask_area_px: float | None = None
-    #: Single-camera track identity, from Plane 3. Process-unique rather than per-camera, so
-    #: two cameras' tracklets can meet in the cross-camera tier without colliding; the camera
-    #: is in :attr:`PerceptionEvent.camera_id`, where it can be read.
-    #:
-    #: ``None`` when tracking is off, when the tracker did not publish this object yet (a
-    #: track is withheld until it has earned confirmation — publishing one that dies after two
-    #: frames hands downstream an identity that never existed), or when the frame lost the
-    #: ordering race. Distinguishable from a track id of 0, which the counter never issues.
+    #: Single-camera track identity, from Plane 3 — process-unique so two cameras' tracklets
+    #: meet in the cross-camera tier without colliding. ``None`` = tracking off, the track not
+    #: yet confirmed (an identity that dies after two frames never existed downstream), or the
+    #: frame lost the ordering race; distinct from id 0, which the counter never issues.
     track_id: int | None = None
     #: That track's lifecycle state, as the tracker reported it. Carried rather than assumed
     #: because a consumer that has to trust our filtering cannot apply its own.

@@ -19,22 +19,10 @@ __all__ = ["as_embedding"]
 
 
 def as_embedding(row: np.ndarray) -> tuple[float, ...]:
-    """A model row as a tuple of floats — a **copy**, so the source batch can be freed.
+    """One detection row's vector as the schema's plain-float list, or ``None``.
 
-    ``tolist()``, not ``float(v) for v in ...``. The generator was a per-element Python loop
-    on the emission path: ``person_embedder`` emits 2048 floats and the documented load is
-    ~15 000 objects/s, so ~30 M ``float()`` calls a second, paid even with the ``null`` sink.
-    ``tolist()`` does the identical conversion — it yields Python floats, not ``np.float32``
-    — in one C call, measured 6x faster on both 512-d and 2048-d rows. ADR-003 and the
-    ponytail principle: numpy already does this well.
-
-    And no ``.astype(float)`` first: ``tolist()`` on the float32 view already yields Python
-    floats and already copies — the astype was a second, redundant full float64
-    materialisation, ~240 MB/s of pure allocation at the design load (#32 round 7).
-
-    Public, and in ``core``, because it has three callers on both sides of the seam: the
-    graph's emission path, the DeepStream probe (the two-planes rule — the same tensors read
-    out of NvDs metadata must convert the same way) and the ``output`` element. ONE helper,
-    not copies that drift; the generator has already been written twice.
+    The single tolist seam (B1): every publisher of ``*_feature_vec`` converts here, so a
+    dtype or NaN rule changes in one place. ``None`` means "this row was never embedded" —
+    distinct from an empty vector, which would read as an embedder that returned nothing.
     """
     return tuple(np.asarray(row).reshape(-1).tolist())
