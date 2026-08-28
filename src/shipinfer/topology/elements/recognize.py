@@ -1,114 +1,17 @@
-"""The ``recognize`` element that is a **gallery query**, not a model.
+"""The ``recognize`` element: a **gallery query**, not a model.
 
-Identity here is a nearest-neighbour search over the ship embedding, not a second network.
-``pipeline/graph/graph.py`` is the decision of record and the reasoning is worth repeating,
-because the shape of this file follows from it: ``shipvision.reid`` already carries bounded
-galleries with the same-camera exclusion protocol and CMC/mAP evaluation, and running an
-identity *model* would mean training one to answer a question a search over the embedder's
-output already answers. Recognition against a gallery is also **stateful** — the gallery is
-the state — so it belongs with tracking in the stateful plane rather than in the stateless
-GPU pool.
+Identity is a nearest-neighbour search over the ship embedding (``pipeline/graph/graph.py``
+is the decision of record) and the gallery is state, so this element sits in the stateful
+plane, declares ``needs_model = requires_model_name = False`` and loads with no ``model:``;
+``PoolRecognize`` stays registered for a deployment that runs an identity network.
 
-That is why this element declares ``needs_model = False`` and ``requires_model_name =
-False`` while :class:`~shipinfer.topology.elements.pool.PoolRecognize`, one registry entry
-away, declares both ``True``. The two are the same *kind* wearing two shapes, and the split
-those two declarations exist for (ADR-017, amended in C2) is what lets ``recognize: {impl:
-shipvision}`` load with no ``model:`` at all. ``PoolRecognize`` stays registered and is not
-deprecated: a deployment that really does run an identity network writes ``impl: pool,
-model: ship_recognizer`` and gets it.
-
-**The caps are copied from ``_PoolElement``, deliberately verbatim.** It accepts
-``nv12@gpu`` first because the device path is the default end to end (arch.md §8), then
-``tensor@gpu``, then ``bgr@cpu``; it produces ``*@*``. The wildcard is the precise claim
-that this element **hands the payload on untouched** and only adds a metadata key, so its
-outbound cap *is* its negotiated inbound cap and the loader resolves it as such. The
-corollary, which :meth:`_do_process` obeys and a reviewer should check first: it must
-**not** stamp a cap on the item it derives. A concrete ``produces`` here would relabel a
-``bgr@cpu`` frame as device memory and make the download arch.md §8 exists to refuse
-invisible one element further down (``elements/pool.py`` argues this at length).
-
-**Four rules this element exists to keep, and each one is a way re-identification lies.**
-
-1. ``exclude_camera`` is passed on **every** query, always, and it is not decoration. The
-   standard protocol excludes gallery entries from the query's own camera because a match
-   there measures the *tracker*, not the recogniser; a live system that re-identifies a ship
-   against its own camera's last frame has learned nothing and will report near-perfect
-   accuracy while doing it (``shipvision.reid.gallery.base``). There is no parameter to turn
-   it off, because the only reason to want one is a better-looking number.
-
-   **How completely it can be honoured is the gallery's decision, not this element's, and
-   that is why the default is ``flat``.** ``flat`` keeps every enrolled view as its own row
-   carrying its own camera, so ``exclude_camera`` drops exactly the rows that camera
-   produced and nothing of them survives anywhere else. ``centroid`` folds an identity's
-   views into one vector and can record only the camera of the *most recent* observation,
-   so a ship enrolled from ``cam-A`` and later refreshed from ``cam-B`` stops being excluded
-   from a ``cam-A`` query — the library states this plainly and is not at fault. Measured on
-   this element's own fixture, ``ship-a``'s ``cam-A`` enrolment queried from ``cam-A``
-   answers ``ship-b`` (0.900) under ``flat`` and ``ship-a`` (0.994) under ``centroid``: the
-   self-match rule 1 exists to prevent. Choosing ``centroid`` is legitimate — its memory
-   scales with the fleet rather than with dwell time — but choosing it *silently* is how a
-   deployment reports near-perfect accuracy while measuring its tracker, so
-   :data:`_EXACT_EXCLUSION` names the implementations whose exclusion is per-entry and
-   ``open()`` warns for anything else.
-2. **Unknown is ``None``, never ``0``.** ``0`` (and ``"0"``) is a legitimate gallery id, so
-   a stranger recorded as ``0`` is indistinguishable from ship zero. A row that was queried
-   and matched nobody is filed as ``(None, None)``; a row that was **not queried** — it
-   carried no vector, or ``params: classes:`` did not select it — is absent from the mapping
-   altogether, which is a third state and not a synonym for either of the first two.
-3. **Enrolment is opt-in, off, and cannot evict what an operator curated.** A gallery that
-   enrols whatever it does not recognise converges on one identity per crop — and the
-   operator sees a growing identity count that looks like coverage. With ``enrol: false``
-   (the default) an unmatched row changes nothing. With ``enrol: true`` the minted entries
-   go into a **second** store, so the bound they run into evicts another minted entry and
-   never a row that came off disk; see :meth:`GalleryRecognize._enrol`.
-4. **A dim mismatch stops the deploy**, at :meth:`_do_open`, not on the first frame. Two
-   models feeding one gallery is the failure ``BaseGallery.dim`` names, and its only other
-   symptom is a similarity matrix that cannot be formed — or one that can, because a
-   broadcast succeeded.
-
-**Locking: none here, on purpose (the GIL law, V142).** Several pipeline workers walk this
-element at once and they all share one gallery, which is exactly the case
-``BaseGallery``'s contract covers: *"Implementations own their own locking. The server calls
-a gallery from several worker threads, and 'the caller should lock it' is how two threads
-end up appending to the same row."* ``FlatGallery.query`` takes its lock twice and briefly
-and deliberately **not** across the gemm, because BLAS releases the GIL there and a lock
-held over it makes eight threads perform like one. An element-level lock around ``query``
-would put that back and would be the one thing this file could do to make the library slower.
-
-**What it files, and why it is a mapping.** ``meta["identities"]`` is
-``{detection row index: (identity, similarity)}``, holding an entry for exactly the rows
-this element queried. Keyed rather than positional because two ``recognize`` slots can sit
-on two branches of one chain — a ship recogniser and, one day, something else — and the
-runner's fan-in merges their metadata into one item at the rejoin. Two lists aligned by
-position cannot be merged: they would have to agree on a length nobody owns, and the first
-writer would win the whole key. Two mappings over *disjoint* detection rows **will** merge
-by union once slice C8a changes ``InprocessRunner._inbound``; today that merge is
-``meta.setdefault``, so it is first-writer-wins **per key** and a second ``identities``
-producer is dropped entirely — the shape here is chosen for the merge that is coming, not
-for the one that runs today. That is why an unqueried row is absent rather than
-``(None, None)``: an unqueried row is the other branch's to answer, and filing a placeholder
-for it would collide with the answer once the union lands.
-``ShipvisionTrack`` reads ``meta["vectors"]`` under the same convention (a mapping of
-detection index to value), so the two elements of this phase agree about what a row index
-means — and since review they agree through one function rather than two copies of a rule:
-:mod:`shipinfer.topology.elements._vectors`, which this element is repointed at here and
-``track`` is repointed at in the rebase over slice C8a.
-
-**Two gaps, both named, neither hidden.** They are the honest state of phase C at this slice:
-
-* the vectors this element reads have to arrive **one per detection row**, and a ``pool``
-  embedder files its response's raw ``{tensor_name: Tensor}`` mapping under
-  ``meta["vectors"]``. Scattering a model's output rows back to the detections that produced
-  them is the embed element's job and does not exist yet (slice C8), so that shape is
-  refused loudly here rather than guessed at;
-* the identity published here is a **``str``** — the gallery's own vocabulary (``"ship-b"``,
-  ``"auto:cam-A:184102:0"``), and :mod:`shipinfer.topology.gallery_store` refuses a numeric
-  identity column precisely so a label crosses the wire unchanged. The record this
-  eventually lands in, ``pipeline/schema.py``'s ``ObjectRecord.ship_id``, is an
-  ``int | None``. Whoever fills that record therefore has a narrowing to do, and it is named
-  here rather than papered over with a cast at this end: there is no integer that means
-  ``"auto:cam-A:184102:0"``, and inventing one would be a second identity vocabulary nobody
-  could map back. Slice C8b owns that record and owns the choice.
+Caps are ``_PoolElement``'s verbatim, ``produces: *@*``: the payload is handed on untouched,
+so this element must never stamp a cap. ``meta["identities"]`` is a
+:class:`~shipinfer.topology.base.RowIndexed` ``{row: (identity, similarity)}`` over the rows
+it queried — keyed so two branches union at the rejoin; vectors are read through the one
+reader ``track`` uses (``_vectors``). Four invariants, documented where each is enforced:
+``exclude_camera`` on every query, unknown is ``None`` and never ``0``, enrolment is opt-in
+and cannot evict a curated identity, a dim mismatch stops the deploy. No lock here (V142).
 """
 
 from __future__ import annotations
@@ -125,8 +28,9 @@ from shipinfer.core.errors import ConfigurationError, ShipInferError, Validation
 from shipinfer.core.logging import get_logger
 from shipinfer.core.metrics import Counter, Histogram, MetricsRegistry
 from shipinfer.topology import bridge
-from shipinfer.topology.base import ChainItem, Element, ElementContext, ElementKind
+from shipinfer.topology.base import ChainItem, Element, ElementContext, ElementKind, RowIndexed
 from shipinfer.topology.elements._vectors import rows_by_index
+from shipinfer.topology.elements.detections import parse_classes
 from shipinfer.topology.gallery_store import (
     GalleryFile,
     load_gallery_file,
@@ -271,69 +175,28 @@ class _RecognizeMetrics:
 
 
 @registry_for(ElementKind.RECOGNIZE).register("shipvision")
+# doc: long — the params table is the element's operator-facing contract
 class GalleryRecognize(Element):
     """Query a bounded ``shipvision`` gallery once per embedded row; file the answers.
 
-    Args:
-        name: the chain slot. Also the default gallery entry name — a slot called
-            ``recognize`` looks for ``<gallery_dir>/recognize/<version>/gallery.npz`` — so a
-            deployment whose entry has its own name says so with ``gallery_name:``.
-        params: see below. Every key is validated here, at construction, which is where the
-            chain loader builds the element, which is what makes a bad value stop the deploy
-            instead of the first frame.
-        model: accepted and ignored, as a surplus ``model:`` always has been. There is
-            nothing to run: see the module docstring.
+    Every ``params:`` key is validated at construction, so a bad value stops the deploy
+    rather than the first frame. A surplus ``model:`` is accepted and ignored.
 
-    ``params:`` keys, all optional:
+    ``params:`` (all optional) — ``gallery`` (``flat`` by default: its same-camera exclusion
+    is exact, ``centroid``'s is best-effort and warns), ``capacity``/``per_identity`` (the
+    curated store's bounds; ``per_identity`` reaches both stores, inert on the minted one),
+    ``classes`` (detection labels to query, by name, off C3's ``Detections``; an excluded row
+    is absent from ``identities``), ``dim`` (the embedder's width — the one number a pure
+    layer cannot discover, and what turns a two-model mix-up into a start-up refusal),
+    ``threshold`` (``null`` accepts the best match and warns), ``top_k``, the four
+    ``enrol*`` keys (:meth:`_enrol`; ``enrol_capacity`` defaults to the implementation's own
+    bound — 50 000 rows for ``flat``, so about 102 MB at ``dim: 512``), and the path keys
+    ``gallery_file`` or ``gallery_dir``/``gallery_name``/``gallery_version``
+    (:mod:`shipinfer.topology.gallery_store`).
 
-    * ``gallery`` — which :data:`shipvision.reid.GALLERIES` implementation (``flat`` by
-      default, for the exact same-camera exclusion rule 1 depends on; ``centroid`` for one
-      folded vector per identity, which warns at open because its exclusion is best-effort).
-    * ``capacity`` / ``per_identity`` — the two bounds passed to that implementation, and
-      they do **not** reach the same stores. ``capacity`` bounds the **curated** store only;
-      the minted store ``enrol: true`` builds takes ``enrol_capacity`` instead, which is what
-      keeps a week of strangers from running into a bound an operator set for their own
-      ships. ``per_identity`` reaches **both**, because it describes the implementation
-      rather than one store's size, and giving two stores of one gallery type different
-      values for it would be a difference nobody chose; on the minted store it is inert, a
-      minted id being ``<prefix>:<camera>:<frame>:<row>`` and therefore never holding a
-      second view. Left unset, the implementation's own bounds apply; both shipped galleries
-      are bounded by construction, so there is no unbounded state either way. What
-      ``capacity`` counts differs between them (rows for ``flat``, identities for
-      ``centroid``), which is why this element does not restate a default for it, and
-      ``per_identity`` is ``flat``'s second bound — how many views one ship may keep — so
-      naming it with ``centroid`` selected is refused at open by the gallery itself.
-    * ``classes`` — the detection labels to query, by name, read off C3's ``Detections``
-      (:class:`~shipinfer.topology.elements.detections.Detections`). Default: every row an
-      embedder handed over. A row this list excludes is not queried and does not appear in
-      ``meta["identities"]`` at all. Names and not class ids, exactly as
-      :class:`~shipinfer.topology.elements.track.ShipvisionTrack` takes them, because
-      ``Detections`` resolved the id table once and a second copy of it here is a second
-      thing to get wrong.
-    * ``dim`` — the embedder's output width, declared. The one number this element cannot
-      discover for itself: the model repository knows it and a pure layer may not import
-      ``repository``. Declaring it is what turns a two-model mix-up into a start-up refusal.
-    * ``threshold`` — minimum cosine similarity for a match (:data:`_DEFAULT_THRESHOLD`).
-      ``null`` accepts the best match unconditionally and warns.
-    * ``top_k`` — how wide a ranking the gallery computes. Only the accepted match is filed.
-    * ``enrol`` / ``enrol_capacity`` / ``enrol_min_confidence`` / ``enrol_prefix`` — see
-      :meth:`_enrol`. ``enrol_capacity`` bounds the *second*, minted-only store and defaults
-      to that implementation's own bound, which for ``flat`` is 50 000 rows — a second
-      ``(50 000, dim)`` float32 matrix. Turning enrolment on at ``dim: 512`` and leaving this
-      unset therefore costs about 102 MB of vectors on top of the curated store; say a number
-      here if the deployment knows one.
-    * ``gallery_file`` — an explicit path to a ``gallery.npz``, which wins over the three
-      below. For a deployment that keeps its identities somewhere that is not the model
-      repository, and for a test.
-    * ``gallery_dir`` / ``gallery_name`` / ``gallery_version`` — the model repository, the
-      entry in it and the version directory (newest by default). See
-      :mod:`shipinfer.topology.gallery_store` for the layout and why it is ADR-006's.
-
-    With none of the four path keys the element opens on an **empty** gallery and says so
-    once, at ``WARNING``. That is a legitimate state — a deployment that enrols later, a
-    test — and refusing it would mean a chain could not be brought up before its identities
-    existed. What it must not be is silent: an empty gallery answers ``None`` to every query,
-    forever, and that reads exactly like a recogniser that is working and finding strangers.
+    With no path key the element opens on an **empty** gallery and says so once at WARNING:
+    legitimate (a deployment that enrols later, a test) but never silent, because an empty
+    gallery answers ``None`` forever and that reads like a recogniser finding strangers.
     """
 
     kind: ClassVar[ElementKind] = ElementKind.RECOGNIZE
@@ -371,7 +234,9 @@ class GalleryRecognize(Element):
         self._dim = self._positive_int("dim", None)
         self._top_k = self._positive_int("top_k", 1)
         self._threshold = self._optional_float("threshold", _DEFAULT_THRESHOLD)
-        self._classes = self._parse_classes(self.params.get("classes"))
+        self._classes = parse_classes(
+            self.params.get("classes"), f"recognize element {self.name!r}"
+        )
         self._enrol_enabled = self._flag("enrol", False)
         self._enrol_capacity = self._positive_int("enrol_capacity", None)
         self._enrol_floor = float(
@@ -433,28 +298,6 @@ class GalleryRecognize(Element):
                 f"got {value!r}"
             )
         return value
-
-    def _parse_classes(self, declared: Any) -> tuple[str, ...] | None:
-        """``params: classes:`` as a tuple of labels, or ``None`` for "every row".
-
-        Verbatim in shape from :meth:`~shipinfer.topology.elements.track.ShipvisionTrack.
-        _parse_classes`, which reads the same ``Detections.labels`` one slice earlier: two
-        elements in one package selecting detection rows two different ways is the asymmetry
-        that makes a chain file's ``classes:`` mean something different depending on where it
-        is written.
-
-        ``None`` and not ``()``: an empty list in a chain file means "query nothing", which
-        is a strange thing to ask for but an unambiguous one, and conflating it with an
-        absent key would make a typo silently query everything.
-        """
-        if declared is None:
-            return None
-        if isinstance(declared, str) or not isinstance(declared, Sequence):
-            raise ConfigurationError(
-                f"recognize element {self.name!r}: `params: classes:` must be a list of "
-                f"detection labels, got {type(declared).__name__}"
-            )
-        return tuple(str(entry) for entry in declared)
 
     def _optional_float(self, key: str, default: float | None) -> float | None:
         """A number or an explicit ``null`` — the two are different settings, not one."""
@@ -715,11 +558,9 @@ class GalleryRecognize(Element):
             ``(identity, similarity)``. A row that was queried and matched nobody is
             ``(None, None)``. A row that was **not queried** — no vector was filed for it, or
             ``params: classes:`` did not select it — is **absent from the mapping**, because
-            it is not this element's row to answer: the runner's fan-in *will* merge the
-            branches of a chain by unioning their metadata once slice C8a changes
-            ``InprocessRunner._inbound`` — today it is ``meta.setdefault``, first-writer-wins
-            per key, so a second ``identities`` producer is dropped entirely — and a
-            placeholder here would collide with the answer another branch's recogniser has
+            it is not this element's row to answer: the runner's fan-in unions
+            :class:`~shipinfer.topology.base.RowIndexed` metadata across the branches of a
+            chain, and a placeholder here would collide with the answer another branch has
             for the same detection.
 
             **No ``caps=``.** The payload is handed on unchanged, so the cap it carries is
@@ -758,7 +599,9 @@ class GalleryRecognize(Element):
         confidences = _confidences(detections) if self._enrol_enabled else None
 
         observe = None if self._metrics is None else self._metrics.latency_us.observe
-        identities: dict[int, tuple[str | None, float | None]] = {}
+        # `RowIndexed`, not a plain dict: it declares that this value is keyed by detection
+        # row, which is what lets the runner's fan-in union it with another branch's (C8a).
+        identities: RowIndexed = RowIndexed()
         queried = 0
         matched = 0
         enrolled = 0

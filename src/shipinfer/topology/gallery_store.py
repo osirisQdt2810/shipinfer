@@ -1,46 +1,20 @@
 """Reading an enrolled gallery off disk — shipinfer's half of a shipvision gallery.
 
-``shipvision.reid`` owns the gallery: the bounded matrix, the gemm, the same-camera
-exclusion protocol. What it deliberately does **not** own is persistence — it has no
-``save`` and no ``load``, because *where a deployment keeps its enrolled identities* is a
-deployment question and the library refuses to answer it. That half is this module, and it
-lives here rather than in ``3rdparty/`` for the same reason ADR-006 gives for the model
-repository: the on-disk layout is shipinfer's concept.
+``shipvision.reid`` owns the matrix, the gemm and the exclusion protocol, and deliberately
+not persistence: where a deployment keeps its identities is a deployment question (ADR-006,
+the same reason the model repository's layout is ours).
 
-**The layout is the model repository's, unchanged (ADR-006).** A gallery is an entry beside
-the models it is fed by::
+A gallery is an entry beside the models, ``<repository>/<name>/<version>/gallery.npz``, so
+the directory an operator already rsyncs carries the identities and the highest-numbered
+version wins. No ``config.yaml``: a gallery is not a model, and the repository skips a
+directory without one. ``.npz`` because the payload is an ``(N, d)`` float32 matrix that
+YAML would render as 20 MB of text and not round-trip; read with ``allow_pickle=False``,
+always — a ``.npz`` is a zip and a pickled object array in one is arbitrary code.
 
-    model_repository/
-      ship_embedder/       config.yaml  1/model.plan
-      ship_gallery/                     1/gallery.npz     <- one of these
-
-so the same directory an operator already rsyncs carries the identities, the same
-"highest numbered version directory wins" rule applies, and rolling a gallery back is
-``2/`` → ``1/`` rather than a file swap. There is no ``config.yaml``: a gallery is not a
-model, nothing loads it into an instance group, and
-:class:`~shipinfer.repository.ModelRepository` skips a directory that has none with a log
-line rather than refusing the repository.
-
-**Why ``.npz`` and not YAML or JSON.** The payload is an ``(N, d)`` float32 matrix — a
-thousand ships at 512 floats is 2 MB of numbers, which is a 20 MB text file that parses in
-seconds and does not round-trip exactly. ``numpy`` is already a dependency of every pure
-layer, ``np.savez`` is one call, and the archive keeps the array's dtype and shape instead
-of making the loader guess them. It is read with ``allow_pickle=False``, always: a ``.npz``
-is a zip, a pickled object array inside one is arbitrary code, and a model repository is a
-directory an operator syncs from somewhere else.
-
-**Everything is validated here, once, at load.** The refusals below all name the file and
-the row, because the alternative is a gallery that accepts a malformed vector and answers
-plausibly: a non-finite value propagates through the similarity matrix into *every* score
-(``shipvision.reid.distance.normalize`` says so), and a zero row sits at cosine 0 from
-everything, which is a plausible answer to every query. Both would surface as "recognition
-got worse", weeks later, with no error anywhere.
-
-The module imports numpy and nothing else from outside ``core`` — ``topology`` is a pure
-layer (ADR-017), it may not import :mod:`shipinfer.repository`, and it must not import
-shipvision at module scope. So this reads *files* and returns *arrays*; turning those into
-``Embedding`` objects and into a gallery is
-:mod:`shipinfer.topology.elements.recognize`'s job, inside ``_do_open``.
+Everything is validated at load, naming the file and the row: a non-finite value propagates
+into *every* score and a zero row sits at cosine 0 from everything, so both would surface as
+"recognition got worse" weeks later rather than as an error. This reads files and returns
+arrays; ``elements/recognize.py`` turns them into a gallery inside ``_do_open``.
 """
 
 from __future__ import annotations

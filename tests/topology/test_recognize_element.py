@@ -1762,8 +1762,8 @@ class TestInAChain:
                 elements:
                   decode:     {impl: mock}
                   detect:     {impl: mock}
-                  embed_ship: {impl: mock, when: class == ship}
-                  recognize:  {impl: shipvision, when: class == ship, after: embed_ship}
+                  embed_ship: {impl: mock, params: {classes: [ship]}}
+                  recognize:  {impl: shipvision, params: {classes: [ship]}, after: embed_ship}
                   output:     {impl: mock}
                 """))
 
@@ -1794,29 +1794,21 @@ class TestInAChain:
         ``produces: *@*`` is resolved from the inbound cap, so what the bypass carries and
         what the element would have handed on are the same cap.
 
-        Pinned because it is why ``when: class == ship`` on a gallery query costs the loader
-        nothing — and because a concrete ``produces`` here would quietly stop that being true,
-        which is a thing a reviewer of a future change should be told by a red test rather
-        than by reading this file.
+        Pinned because a concrete ``produces`` here would quietly stop that being true, which
+        a reviewer should be told by a red test rather than by reading this file.
         """
         caps = {(edge.producer, edge.consumer): str(edge.caps) for edge in self.chain().edges}
 
         assert caps[("embed_ship", "recognize")] == caps[("recognize", "output")]
 
-    def test_the_guard_gates_the_element_and_not_the_rows_inside_it(self) -> None:
-        """``when: class == ship`` is evaluated once per *item*, on ``meta["class"]``.
+    def test_row_selection_is_params_classes_and_not_a_guard(self) -> None:
+        """Which rows are queried is ``params: {classes: [...]}``, over C3's labels.
 
-        Worth pinning because the natural reading of "recognize only ships" is per-row, and
-        it is not: a frame the condition rejects skips this element entirely, and a frame it
-        admits is queried for every vector it carries. Per-row selection is a *separate*
-        setting — ``params: {classes: [ship]}``, over C3's ``Detections.labels``, pinned in
-        :class:`TestTheClassFilter` — and the two are not interchangeable: ``when:`` decides
-        whether this element runs at all, ``classes:`` decides which rows it asks about.
+        ``when:`` guards the *element*, once per item, on ``meta["class"]`` — which nothing
+        in the chain sets, so a slot that tried to select rows with it would select none.
+        The two are not interchangeable and only one of them is per row.
         """
         node = self.chain().node("recognize")
 
-        assert node.admits(item(np.zeros((1, DIM), np.float32), **{"class": "ship"})) is True
-        assert node.admits(item(np.zeros((1, DIM), np.float32), **{"class": "person"})) is False
-        assert (
-            node.admits(item(np.zeros((1, DIM), np.float32))) is False
-        ), "a missing class satisfies neither operator"
+        assert node.element.params["classes"] == ["ship"]
+        assert node.admits(item(np.zeros((1, DIM), np.float32))) is True

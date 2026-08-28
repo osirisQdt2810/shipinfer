@@ -39,7 +39,7 @@ from typing import Any, ClassVar
 
 import numpy as np
 
-from shipinfer.topology.base import ChainItem, Element, ElementContext, ElementKind
+from shipinfer.topology.base import ChainItem, Element, ElementContext, ElementKind, RowIndexed
 from shipinfer.topology.elements.detections import DecodeParams, Detections
 from shipinfer.topology.registry import registry_for
 
@@ -254,7 +254,8 @@ class MockRecognize(_Mock):
     produces: ClassVar[tuple[str, ...]] = ("nv12@gpu",)
 
     def _meta(self, item: ChainItem) -> dict[str, Any]:
-        return {"identities": {0: ("ship-1", 1.0)}}
+        # `RowIndexed` for the reason `GalleryRecognize` files one: the fan-in unions it.
+        return {"identities": RowIndexed({0: ("ship-1", 1.0)})}
 
 
 @registry_for(ElementKind.TRACK).register("mock")

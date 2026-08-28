@@ -1,57 +1,18 @@
-"""One reader for ``meta["vectors"]``, so one convention means one thing.
+"""One reader for ``meta["vectors"]``, so the key means one thing everywhere.
 
-``meta["vectors"]`` is the key an ``embed`` element files and that every element downstream
-of one has to attribute back to detection rows. Two elements read it today —
-:class:`~shipinfer.topology.elements.recognize.GalleryRecognize` queries a gallery per row,
-:class:`~shipinfer.topology.elements.track.ShipvisionTrack` attaches an appearance to a
-track — and C8's scatter-back will be the third. Written twice it was already read twice
-differently: one accepted ``{"3": v}`` and ``{3.0: v}`` and the other refused them, one
-refused a mapping only when *no* key named a row and the other when *any* key did not. Two
-readers of one key that disagree at the edges mean a chain file's ``vectors`` means
-something different depending on which element is standing there, and the symptom is a frame
-that one element accepts and the next refuses.
+``recognize`` queries a gallery per row and ``track`` attaches an appearance to a track;
+written twice, the two disagreed at the edges (one coerced ``{"3": v}``, the other refused
+it), which makes a chain file's ``vectors`` mean something different depending on which
+element is standing there. The rule lives here; callers own only what they do with the rows.
 
-So the rule lives here, once, and the callers own only what they do with the rows.
-:meth:`~shipinfer.topology.elements.track.ShipvisionTrack._embeddings` is repointed at this
-module in the rebase over the C8a slice, which is already rewriting it; until that lands
-this module has one caller and the second is named rather than assumed.
-
-**The rule, written down.** ``vectors`` is one of exactly two shapes:
-
-* a **mapping** ``{row index: vector}`` — the shape a *branch* embedder produces, because
-  ``embed_ship`` embeds the ship rows of a frame that also holds people and only the
-  original index says which row a vector came from;
-* a **per-row** ``(N, d)`` array or sequence, whose row *i* is detection *i* — the shape an
-  embedder that embedded the whole frame produces.
-
-and the edges resolve like this:
-
-* **Keys are integral row indices**: ``int`` or ``numpy`` integer. ``bool`` and ``np.bool_``
-  are refused by name — ``True`` is an ``int`` in Python and a flag is not a row. Floats and
-  strings are refused too: ``3.0`` is an index that went through a divide, ``"3"`` is one
-  that went through JSON, and the raw ``{tensor_name: Tensor}`` a ``pool`` embedder files
-  straight from its response arrives through exactly that door. Coercing them would make
-  this reader the place a scatter-back's type error is silently repaired.
-* **A negative key is refused always**, including when the detection count is unknown. There
-  is no index space in which ``-1`` names a detection row, and the one thing a consumer is
-  likely to do with it — index a list — attaches the vector to the *last* row instead.
-* **When the count is known, every key must name a row.** Any key outside
-  ``range(count)`` refuses the frame. The looser rule (refuse only when *no* key is in
-  range) accepts ``{0: v, 99: v}`` on a two-row frame: row 0 is attributed, row 99 is
-  dropped without a word, and a scatter-back that is off by all-but-one row reads exactly
-  like a partial embedder. The legitimate partial case is untouched, because a partial
-  embedder's keys are all real rows.
-* **An empty mapping is legal.** It is "this embedder selected no rows in this frame", which
-  is what an ordinary frame of people looks like to a ship embedder. A *missing* ``vectors``
-  key is a different thing — the element is in the wrong place — and belongs to the caller,
-  which is the only one that knows whether it may be absent.
-* **The count is a cross-check, not a requirement.** A chain may legitimately embed with no
-  decoding detector ahead of it (a fixed-crop source, a test), so ``detections`` may be
-  ``None`` and then only the negative-key rule applies. The caller is the one that knows
-  whether its own settings turn the detections into a requirement.
-
-Pure by construction: numpy and :mod:`shipinfer.core.errors`, nothing else. It registers
-nothing, so it is not imported by the package ``__init__`` — the callers import it directly.
+``vectors`` is either a mapping ``{row index: vector}`` — what a *branch* embedder produces,
+since only the original index says which row a vector came from — or a per-row ``(N, d)``
+array whose row *i* is detection *i*. Keys must be integral (``int``/numpy); ``bool``, floats
+and strings are refused, which is also how the raw ``{tensor_name: Tensor}`` a ``pool``
+embedder files gets caught. A negative key is refused always. When the count is known every
+key must name a row — the looser rule silently drops the out-of-range half of a mis-scattered
+frame. An empty mapping is legal ("no rows selected here"); a *missing* key is the caller's
+business. Pure: numpy and ``core.errors``, nothing else.
 """
 
 from __future__ import annotations
