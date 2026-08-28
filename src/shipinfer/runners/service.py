@@ -734,8 +734,16 @@ class ShardServer:
             self.server.stop(grace_s).wait(grace_s + 1.0)
 
     def wait_for_termination(self, timeout: float | None = None) -> bool:
-        """Block until the server stops. What a shard process's ``main`` sits on."""
-        return bool(self.server.wait_for_termination(timeout))
+        """Whether the server has stopped. What a shard process's ``main`` polls.
+
+        ``True`` means terminated, ``False`` means ``timeout`` elapsed with it still serving.
+        grpc's own method answers the *opposite* question — it returns True when the wait
+        times out — so the inversion belongs here, once, rather than at the call site. Read
+        the wrong way round, a healthy server looks stopped and the shard exits one tick
+        after it started: the fleet came up, installed its chain, and every shard was gone
+        before the first camera was placed.
+        """
+        return not self.server.wait_for_termination(timeout)
 
 
 def serve_shard(
