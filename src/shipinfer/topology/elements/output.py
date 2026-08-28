@@ -253,6 +253,7 @@ class SinkOutput(Element):
             height=int(height),
             captured_ns=item.context.captured_ns,
             captured_unix_ns=item.context.captured_unix_ns,
+            fps=float(item.meta.get("fps", 0.0)),
             missing_stages=tuple(item.meta.get(MISSING_STAGES, ())),
         )
 

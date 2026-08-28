@@ -54,6 +54,10 @@ elements:
     model: ship_detector
     params:
       decode:
+        # 0.25 < the tracker's track_threshold (shipvision ByteTrack: 0.5) ON PURPOSE:
+        # detections in [0.25, 0.5) are published in events (track_id: null) and used by
+        # ByteTrack only to CONTINUE tracks, never to start one. V148's first real run
+        # surfaced exactly this: a 0.47 person in every event, tracked by nothing — correct.
         class_labels: {0: person, 8: ship}
         score_threshold: 0.25
         max_detections: 300

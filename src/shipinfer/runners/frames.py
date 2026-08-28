@@ -90,11 +90,19 @@ class ChainFrameSink:
             runner is the one holding it (``inprocess.py::_head``).
     """
 
-    __slots__ = ("_caps", "_submit")
+    __slots__ = ("_caps", "_fps_of", "_submit")
 
-    def __init__(self, submit: Callable[[ChainItem], ResponseFuture], caps: Caps) -> None:
+    def __init__(
+        self,
+        submit: Callable[[ChainItem], ResponseFuture],
+        caps: Caps,
+        fps_of: Callable[[str], float] | None = None,
+    ) -> None:
         self._submit = submit
         self._caps = caps
+        #: The camera's negotiated rate, per frame — the one per-camera fact an event needs
+        #: that no element can discover (V148's first real run shipped img_fps=0 everywhere).
+        self._fps_of = fps_of
 
     @property
     def caps(self) -> Caps:
@@ -127,11 +135,13 @@ class ChainFrameSink:
             RequestCancelledError: the runner has stopped and will accept nothing more. The
                 actor finishes cleanly instead of logging one line per frame.
         """
+        fps = self._fps_of(frame.camera_id) if self._fps_of is not None else 0.0
         self._submit(
             ChainItem(
                 context=frame.context,
                 caps=self._caps,
                 payload=Tensor.from_numpy(frame.as_batch()),
+                meta={"fps": fps} if fps else {},
             )
         )
 

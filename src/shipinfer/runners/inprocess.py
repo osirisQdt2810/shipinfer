@@ -339,6 +339,8 @@ class InprocessRunner(Runner):
         #: live producer into the new cycle's queue.
         self._ingest_manager: IngestManager | None = None
         self._source_factory = source_factory
+        #: negotiated-rate cache for `_camera_fps`; dropped on re-add (the rate may change).
+        self._fps_cache: dict[str, float] = {}
         #: ``camera_id -> priority`` for the cameras **this process's own configuration**
         #: names, plus the default learned once for a camera it does not
         #: (:meth:`_learn_priority`). Filled from ``ingest.cameras`` when the ingest manager
@@ -472,6 +474,22 @@ class InprocessRunner(Runner):
     # concurrent stop rather than racing it, and ``IngestManager.add_camera`` returns as soon
     # as the actor thread is started, without waiting on the RTSP open.
 
+    def _camera_fps(self, camera_id: str) -> float:
+        """The camera's negotiated rate, cached once non-zero (constant per connect)."""
+        cached = self._fps_cache.get(camera_id, 0.0)
+        if cached:
+            return cached
+        manager = self._ingest_manager
+        if manager is None:
+            return 0.0
+        try:
+            fps = manager.actor(camera_id).source_fps
+        except ConfigurationError:
+            return 0.0
+        if fps:
+            self._fps_cache[camera_id] = fps
+        return fps
+
     def add_camera(self, camera: CameraSpec) -> None:
         """Start one camera on this runner.
 
@@ -528,6 +546,7 @@ class InprocessRunner(Runner):
             previous = self._placed_band(camera.camera_id)
             self._admit_at(camera)
             try:
+                self._fps_cache.pop(camera.camera_id, None)
                 manager.add_camera(self._camera_config(camera))
             except BaseException:
                 self._restore_band(camera.camera_id, previous)
@@ -909,7 +928,7 @@ class InprocessRunner(Runner):
         # reads as a bug, backs off from and logs a traceback for. The queue is still open at
         # that moment; once it is closed the actor gets the `RequestCancelledError` the
         # contract does name, which is what tells it to finish.
-        sink = ChainFrameSink(self._do_submit, self._head().caps)
+        sink = ChainFrameSink(self._do_submit, self._head().caps, fps_of=self._camera_fps)
         ingest = self._settings.ingest
         manager = IngestManager(
             sink,

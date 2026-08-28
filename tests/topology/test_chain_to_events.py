@@ -344,6 +344,22 @@ class TestAChainOfDoublesWritesEvents:
         assert (event["img_width"], event["img_height"]) == (WIDTH, HEIGHT)
         assert event["partial"] is False
 
+    def test_the_event_carries_the_cameras_negotiated_rate(
+        self, runner, tmp_path: Path
+    ) -> None:
+        """V148's first real run shipped ``img_fps: 0`` in every event: no element can
+        discover the rate, so nothing filed it. The frame sink now stamps ``meta["fps"]``
+        from the actor's connected source and ``output`` passes it to the builder. The
+        scripted source negotiates 20 fps (``conftest``), so 0 here means the plumbing
+        broke somewhere between the actor and the event."""
+        path = tmp_path / "events.jsonl"
+        chain = chain_for(path, track="events-track", mtmc="events-mtmc")
+        started = runner(chain, settings=settings(), source_factory=scripted(frames=2))
+        started.add_camera(CameraSpec("cam-a", "injected://a", 0.0))
+
+        assert until(lambda: len(events_in(path)) == 2), events_in(path)
+        assert {event["img_fps"] for event in events_in(path)} == {20}
+
     def test_two_cameras_never_share_a_line(self, runner, tmp_path: Path) -> None:
         """The tag is the whole basis of reassembly, and a sink is where it is finally read."""
         path = tmp_path / "events.jsonl"
