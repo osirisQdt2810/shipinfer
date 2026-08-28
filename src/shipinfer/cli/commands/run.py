@@ -27,11 +27,13 @@ from shipinfer.launch.control import CameraSpec, mint_camera_id
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; `runners` is imported inside `run()`
     from shipinfer.runners.base import Runner
+    from shipinfer.topology import Topology
 
 __all__ = [
     "cameras_from_inputs",
     "cameras_from_settings",
     "cameras_to_place",
+    "model_pool_is_needed",
     "place_cameras",
     "refuse_flags_that_would_be_ignored",
     "refuse_if_it_manages_no_cameras",
@@ -118,6 +120,10 @@ def run(
             (:meth:`shipinfer.api.BackgroundHttpServer.start`). The last is raised after the
             runner is up and therefore travels through the ``finally`` that stops it, which
             is what an operator who typed ``--http`` is asking for: no ingress, no deployment.
+        ServerStateError: the model pool this chain needs would not start. Raised by
+            :meth:`~shipinfer.engine.InferenceServer.start`, unwrapped, because it already
+            names the model that would not load; the engine has released what it took and the
+            runner was never started, so this leaves nothing behind to stop.
     """
     from shipinfer.runners import build_runner
     from shipinfer.runtime.containment import require_container
@@ -159,7 +165,24 @@ def run(
     chosen = runner or settings.runner.runner
     out.print(f"topology: {chain.name} ({len(list(chain))} element(s)) — runner {chosen}")
 
-    built = build_runner(chosen, chain, settings, chain_yaml=chain_yaml)
+    # The model pool this run owns, or `None` when nothing here would ask for one: a chain of
+    # mocks, a `--dry-run` that spawns nothing, or a `fleet` whose shards each build their own
+    # (`cli/shard.py`). Without it a real chain could not run in this process at all -- a
+    # `pool` element is opened with `ElementContext.models` and refuses when it is `None`, so
+    # `--runner inprocess` over any topology with a model in it failed at `start()`.
+    #
+    # Constructed HERE because `models=` is a constructor argument, and *started* below rather
+    # than now: construction resolves the device list and the allocators, while everything
+    # that scans the repository, deserialises an engine or starts a thread happens in
+    # `start()`. That keeps the expensive half behind the cheap refusals below, which is where
+    # `built.start()` already sits and why they were put there.
+    engine = None
+    if not dry_run and model_pool_is_needed(chosen, chain):
+        from shipinfer.engine import InferenceServer
+
+        engine = InferenceServer(settings)
+
+    built = build_runner(chosen, chain, settings, chain_yaml=chain_yaml, models=engine)
     # The configured fleet and `--inputs`, in that order, as ONE list to place. Nobody starts
     # a camera but this: `InprocessRunner` used to start `ingest.cameras` inside its own
     # `_do_start`, which is right for one process and catastrophic for a shard, because a
@@ -203,6 +226,14 @@ def run(
         out.print(built.describe_plan())
         return 0
 
+    # The pool comes up BEFORE the chain does: `built.start()` is what calls `open()` on every
+    # element, and that is where a `pool` element resolves its model
+    # (`topology/elements/pool.py`) -- against a pool that has to be loaded by then. A failure
+    # here raises the engine's own typed refusal, having already released whatever it managed
+    # to take (`InferenceServer.start`), and leaves the runner unstarted: nothing was started
+    # that a `finally` would have to stop, which is why this line sits outside the `try`.
+    if engine is not None:
+        engine.start()
     built.start()
     try:
         # After `start`, because a camera is placed on a *running* runner: the chain has to be
@@ -220,8 +251,51 @@ def run(
         out.print(f"[red]{exc}[/red]")
         return 1
     finally:
-        built.stop()
+        # Ingress, then runner, then engine -- the reverse of the order they came up in.
+        # `_wait` has already stopped the web server in its own `finally`, so nothing places a
+        # camera on a runner that is going down; the workers stop next; and only then does the
+        # pool they were submitting to go away, because a worker still walking a frame would
+        # otherwise lose the models mid-request. Nested rather than two statements so that a
+        # runner whose stop raises still gives the GPU back: a crash must not be what frees
+        # the device (CLAUDE.md's hygiene rule), and `InferenceServer.stop` never raises.
+        try:
+            built.stop()
+        finally:
+            if engine is not None:
+                engine.stop()
     return 0
+
+
+def model_pool_is_needed(runner: str, chain: Topology) -> bool:
+    """Whether this run has to build a model pool and hand it to the runner as ``models=``.
+
+    Two questions, and neither is answered by a name:
+
+    * **does this runner open the chain here?** ``Runner.needs_model_pool``, read off the
+      registered class before anything is built, because ``models=`` is a constructor
+      argument. ``fleet`` answers ``False`` — its shards each build their own engine
+      (``cli/shard.py``), and a launcher that built one too would hold a CUDA context on every
+      device it can see while running no inference.
+    * **does anything in the chain resolve a model against it?** ``Element.needs_model``,
+      declared by the implementation. Asking ``node.kind in MODEL_KINDS`` instead is the
+      version of this that looks right and is not: every ``detect`` element is a model kind
+      and must name a ``model:``, so a chain of mocks would load the whole repository to run
+      elements that invent a box.
+
+    Both are declarations rather than a check against ``"inprocess"`` or ``"pool"``, so a new
+    runner or a new element answers for itself instead of being added to a condition here
+    (CONVENTIONS 2.3).
+
+    Raises:
+        ConfigurationError: no runner is registered under that name; the message lists the
+            ones that are. The same refusal :func:`~shipinfer.runners.build_runner` makes, one
+            line earlier, because this asks the same registry.
+    """
+    from shipinfer.runners import RUNNERS
+
+    if not RUNNERS.get(runner).needs_model_pool:
+        return False
+    return any(node.element.needs_model for node in chain)
 
 
 def cameras_from_inputs(inputs: Sequence[str] | None, *, loop: bool = True) -> list[CameraSpec]:
