@@ -44,8 +44,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from shipinfer import envs
 from shipinfer.core.logging import get_logger
-from shipinfer.envs import PROFILE_DIR, PROFILE_PHASES, PROFILE_STEPS
 from shipinfer.runtime.platform import torch_module
 
 __all__ = [
@@ -90,7 +90,7 @@ from shipinfer.core.tracing import TRACE_EVENTS  # noqa: E402 - see the note abo
 
 def profiling_enabled() -> bool:
     """Whether any opt-in level is active. Cheap enough to call per batch."""
-    return bool(PROFILE_DIR.get()) or PROFILE_PHASES.get()
+    return bool(envs.SHIPINFER_PROFILE_DIR) or envs.SHIPINFER_PROFILE_PHASES
 
 
 @contextlib.contextmanager
@@ -182,7 +182,7 @@ class PhaseTimer:
     def __init__(self, *, enabled: bool | None = None) -> None:
         self._torch = torch_module()
         self.enabled = (
-            (PROFILE_PHASES.get() if enabled is None else enabled)
+            (envs.SHIPINFER_PROFILE_PHASES if enabled is None else enabled)
             and self._torch is not None
             and self._torch.cuda.is_available()
         )
@@ -255,7 +255,7 @@ def torch_profiler(label: str) -> Iterator[Any | None]:
     Yields the profiler so a caller can `step()` it, or `None` when profiling is off, which
     keeps the call site a single `with` either way.
     """
-    directory = PROFILE_DIR.get()
+    directory = envs.SHIPINFER_PROFILE_DIR
     torch = torch_module()
     if not directory or torch is None:
         yield None
@@ -269,7 +269,7 @@ def torch_profiler(label: str) -> Iterator[Any | None]:
     if torch.cuda.is_available():
         activities.append(torch.profiler.ProfilerActivity.CUDA)
 
-    steps = PROFILE_STEPS.get()
+    steps = envs.SHIPINFER_PROFILE_STEPS
     _LOG.info("torch profiler active: %s steps -> %s", steps, target)
     schedule = torch.profiler.schedule(wait=1, warmup=1, active=steps, repeat=1)
     with torch.profiler.profile(
