@@ -11,7 +11,14 @@ a decision that fails silently if it is wrong:
   main-thread server would make Ctrl-C stop the web server and leave fifty decoder threads
   reading;
 * the supervise loop returning sets ``should_exit`` and joins, rather than leaving a daemon
-  thread to be shot at interpreter exit with a request half-answered.
+  thread to be shot at interpreter exit with a request half-answered;
+* **the bind is confirmed before the deployment is allowed to look healthy.** A daemon thread
+  that dies takes its exception with it, and uvicorn answers a taken port by calling
+  ``sys.exit`` inside ``startup()``, which ``threading.excepthook`` discards without a word.
+  So ``--http`` on a taken port used to spawn every shard, place every camera, log *"serving
+  /streams"*, serve nothing at all and exit ``0``. :class:`TestABindThatFails` is that case
+  against a **real** socket and a real uvicorn, because the whole failure lives in what the
+  library does off the main thread.
 
 The shape of the file follows from the first bullet: ``_wait`` must run on the **main**
 thread, because ``signal.signal`` refuses anywhere else — so the assertions that need the
@@ -27,6 +34,7 @@ the routes against a real runner.
 from __future__ import annotations
 
 import signal
+import socket
 import sys
 import threading
 import types
@@ -90,12 +98,24 @@ class SupervisingRunner(Runner):
 
 
 class FakeUvicornServer:
-    """Records what it was configured with, and blocks in ``run`` until ``should_exit``."""
+    """Records what it was configured with, and blocks in ``run`` until ``should_exit``.
+
+    ``started`` is uvicorn's own flag and is faithfully part of the fake, because
+    ``BackgroundHttpServer.start`` now waits for it before it claims to be serving. Set
+    *after* the socket would be open, which is where the real ``Server.startup`` sets it.
+
+    ``fail_to_bind`` is the other half of the real thing: uvicorn catches the ``OSError`` from
+    a taken port inside ``startup()`` and calls ``sys.exit``, so the thread ends with
+    ``started`` still False and the ``SystemExit`` is swallowed by ``threading.excepthook``.
+    """
 
     instances: ClassVar[list[FakeUvicornServer]] = []
+    #: Set by a test before the server is built; every instance reads it at ``run``.
+    fail_to_bind: ClassVar[bool] = False
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
+        self.started = False
         self.should_exit = False
         self.serving = threading.Event()
         self.finished = threading.Event()
@@ -104,6 +124,10 @@ class FakeUvicornServer:
 
     def run(self) -> None:
         self.ran_on = threading.current_thread().name
+        if FakeUvicornServer.fail_to_bind:
+            self.finished.set()
+            raise SystemExit(3)
+        self.started = True
         self.serving.set()
         while not self.should_exit:
             self.finished.wait(0.005)
@@ -123,6 +147,7 @@ def uvicorn(monkeypatch: pytest.MonkeyPatch) -> Any:
     module.Config = lambda app, **options: {"app": app, **options}  # type: ignore[attr-defined]
     module.Server = FakeUvicornServer  # type: ignore[attr-defined]
     FakeUvicornServer.instances.clear()
+    FakeUvicornServer.fail_to_bind = False
     monkeypatch.setitem(sys.modules, "uvicorn", module)
     return module
 
@@ -239,6 +264,169 @@ class TestTheSignalHandlersStayTheRunners:
         _wait(runner, http=True)
 
         assert handlers["sigterm"] is handlers["sigint"]
+
+
+class TestABindThatFailsIsRefusedRatherThanLoggedAsSuccess:
+    """Against a real socket and the installed uvicorn, because that is where the bug lived.
+
+    A fake server cannot pin this: what made the old code wrong was a *library* behaviour off
+    the main thread -- ``Server.startup`` catching the ``OSError`` and calling ``sys.exit``,
+    and ``threading.excepthook`` silently dropping the resulting ``SystemExit``. Asserting it
+    over a stand-in that raises on demand would prove only that the stand-in raises.
+
+    No GPU, no container, no marker: a loopback socket is all this needs, which is why it
+    belongs in the offline tier despite touching the network stack.
+    """
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+    def test_a_port_that_is_already_taken_is_a_typed_refusal_and_not_a_dead_thread(
+        self,
+    ) -> None:
+        """The ignored warning is the bug: pytest sees the ``SystemExit`` a deployment does
+        not, because ``threading.excepthook`` drops it and pytest's hook does not."""
+        pytest.importorskip("fastapi")
+        pytest.importorskip("uvicorn")
+        from shipinfer.api import BackgroundHttpServer, create_app
+
+        runner = SupervisingRunner(Topology.from_spec(ChainSpec.from_yaml(CHAIN)))
+        occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen(1)
+            port = occupied.getsockname()[1]
+            server = BackgroundHttpServer(
+                create_app(cameras=runner), host="127.0.0.1", port=port, bind_timeout_s=5.0
+            )
+
+            with pytest.raises(ConfigurationError, match=rf"127\.0\.0\.1:{port}"):
+                server.start()
+
+            assert server._thread is None, "a failed start left a thread behind"
+            assert not [
+                thread for thread in threading.enumerate() if thread.name == "shipinfer-http"
+            ], "the HTTP thread outlived the refusal"
+            # The `finally` in `_wait` and in `run()` reaches this either way; it must not
+            # raise or touch a server that never served.
+            server.stop()
+        finally:
+            occupied.close()
+
+    def test_a_bind_that_works_reports_started_and_stops_cleanly(self) -> None:
+        """The other side of the same gate, so the confirmation cannot be vacuously true.
+
+        Port ``0`` rather than a port picked and released, which would be a race: the OS
+        chooses a free one and uvicorn binds it, and what is under test is that ``start()``
+        returns only once ``started`` is set -- no sleep, no polling in the assertion.
+        """
+        pytest.importorskip("fastapi")
+        pytest.importorskip("uvicorn")
+        from shipinfer.api import BackgroundHttpServer, create_app
+
+        runner = SupervisingRunner(Topology.from_spec(ChainSpec.from_yaml(CHAIN)))
+        server = BackgroundHttpServer(
+            create_app(cameras=runner), host="127.0.0.1", port=0, bind_timeout_s=10.0
+        )
+        try:
+            assert server.start() is server
+            assert server._server.started is True, "start() returned before the bind"
+            thread = server._thread
+            assert thread is not None and thread.is_alive()
+        finally:
+            server.stop(timeout_s=10.0)
+
+        assert thread is not None and not thread.is_alive(), "stop() did not join the thread"
+        assert server._thread is None, "a stopped server still holds a thread"
+
+
+class TestTheCommandDoesNotSuperviseWithNoIngress:
+    """The wiring, over the fake: a refused bind must stop the run rather than continue it."""
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+    def test_a_failed_bind_travels_out_of_wait_before_anything_supervises(
+        self, runner, uvicorn
+    ) -> None:
+        """Raised *before* ``supervise()``, which is what makes it reach ``run()``'s finally.
+
+        The alternative -- logging it and supervising anyway -- is the bug: the deployment
+        runs, the camera door is shut, and nothing in the process has a reason to say so.
+        """
+        FakeUvicornServer.fail_to_bind = True
+
+        with pytest.raises(ConfigurationError, match=r"127\.0\.0\.1:8123"):
+            _wait(runner, http=True, host="127.0.0.1", port=8123)
+
+        assert not runner.supervising.is_set(), "it supervised with no ingress up"
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+    def test_the_command_exits_non_zero_and_stops_the_runner(
+        self, chain_file: Path, uvicorn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end through ``run()``: the refusal escapes rather than being logged.
+
+        ``run()`` returns ``0`` on a clean shutdown, so "the refusal escapes" *is* the
+        non-zero exit: ``cli/__init__.py`` wraps the return value in ``typer.Exit`` and never
+        constructs one when the call raises, and click's standalone mode does not swallow a
+        ``ShipInferError``. What must not happen is the old behaviour -- a normal return, exit
+        ``0``, and a deployment with no ingress.
+
+        ``supervise`` is stubbed out for a reason worth stating: without it, a regression in
+        the bind check does not *fail* this test, it **hangs** it -- a real ``InprocessRunner``
+        supervises until it is signalled, which is exactly what ``run()`` is supposed to be
+        prevented from reaching here. A test whose failure mode is a hang is a test that gets
+        deleted; this one fails in a second and names what it was waiting for.
+        """
+        from shipinfer.runners.inprocess import InprocessRunner
+
+        supervised = threading.Event()
+        FakeUvicornServer.fail_to_bind = True
+        monkeypatch.setattr(
+            "shipinfer.runtime.containment.require_container", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            InprocessRunner, "supervise", lambda self, **kwargs: supervised.set()
+        )
+
+        with pytest.raises(ConfigurationError, match=r"did not come up"):
+            run(chain_file, runner="inprocess", http=True, port=8123)
+
+        assert FakeUvicornServer.instances, "no server was ever built"
+        assert not supervised.is_set(), "it supervised a deployment with no ingress"
+
+
+class TestFlagsThatWouldBeIgnored:
+    """``--host``/``--port`` say where the web server goes; without ``--http`` there is none.
+
+    Accepted silently, they are a deployment that looks configured and is not -- the same
+    shape as the bind failure above, one flag out and one layer earlier, and the refusal costs
+    a line. ``None`` is the sentinel precisely so ``--host 127.0.0.1`` typed out in full is
+    still refused: the operator asked for something this run will not do.
+    """
+
+    def test_a_port_without_http_is_refused_naming_the_flag_that_is_missing(
+        self, chain_file: Path
+    ) -> None:
+        with pytest.raises(ConfigurationError, match=r"--port.*`--http`"):
+            run(chain_file, runner="inprocess", port=9000, dry_run=True)
+
+    def test_a_host_without_http_is_refused_too(self, chain_file: Path) -> None:
+        with pytest.raises(ConfigurationError, match=r"--host"):
+            run(chain_file, runner="inprocess", host="0.0.0.0", dry_run=True)
+
+    def test_both_are_named_in_one_message(self, chain_file: Path) -> None:
+        with pytest.raises(ConfigurationError, match=r"--host and --port"):
+            run(chain_file, runner="inprocess", host="0.0.0.0", port=9000, dry_run=True)
+
+    def test_saying_nothing_is_not_saying_the_default(self, chain_file: Path) -> None:
+        """The reason both options are declared ``None`` rather than with their real values."""
+        assert run(chain_file, runner="inprocess", dry_run=True) == 0
+
+    def test_with_http_they_are_exactly_what_they_configure(self, runner, uvicorn) -> None:
+        config: dict[str, Any] = {}
+        runner.probe = lambda: config.update(serving().config)
+
+        _wait(runner, http=True, host="0.0.0.0", port=9000)
+
+        assert (config["host"], config["port"]) == ("0.0.0.0", 9000)
 
 
 class TestTheUvicornBehaviourAllOfThisRestsOn:

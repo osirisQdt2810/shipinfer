@@ -153,15 +153,21 @@ def build_app() -> typer.Typer:
             "--http",
             help="Serve /streams, /cameras and /health beside the running chain.",
         ),
-        host: str = typer.Option(
-            "127.0.0.1",
+        # `None` and not the real defaults, so `commands.run` can tell "the operator asked
+        # for 127.0.0.1" from "the operator said nothing" -- which is what lets it refuse
+        # either flag given without the `--http` that is the only thing they configure.
+        host: str | None = typer.Option(
+            None,
             "--host",
             help=(
-                "Address --http binds. Loopback by default: /streams starts and stops "
-                "decoding and has no authentication, so put a proxy in front to expose it."
+                "Address --http binds [default: 127.0.0.1]. Loopback by default: /streams "
+                "starts and stops decoding and has no authentication, so put a proxy in "
+                "front to expose it. Needs --http."
             ),
         ),
-        port: int = typer.Option(8000, "--port", help="Port --http binds."),
+        port: int | None = typer.Option(
+            None, "--port", help="Port --http binds [default: 8000]. Needs --http."
+        ),
         dry_run: bool = typer.Option(
             False, "--dry-run", help="Print what would run, and spawn nothing."
         ),

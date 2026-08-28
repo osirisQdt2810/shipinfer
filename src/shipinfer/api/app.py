@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any
 
 from shipinfer.api.routes import build_router
@@ -152,8 +153,18 @@ class BackgroundHttpServer:
         host: str = "127.0.0.1",
         port: int = 8000,
         log_level: str = "info",
+        bind_timeout_s: float = 5.0,
     ) -> None:
         """Build the server. Binds nothing until :meth:`start`.
+
+        Args:
+            bind_timeout_s: how long :meth:`start` waits for uvicorn to report it is
+                serving before it calls the start a failure. Generous rather than tight:
+                what is being waited for is a ``listen()`` on a socket this process already
+                chose, so a second is already long -- but this thread starts while a fleet is
+                spawning shards, and a deadline short enough to lose that race would refuse a
+                deployment that was about to work. Nothing waits on it in the normal case,
+                because the loop below returns the moment ``started`` flips.
 
         Raises:
             ConfigurationError: uvicorn is not installed. Typed and naming the extra, for the
@@ -167,6 +178,7 @@ class BackgroundHttpServer:
 
         self._host = host
         self._port = port
+        self._bind_timeout_s = bind_timeout_s
         self._server = uvicorn.Server(
             uvicorn.Config(
                 app,
@@ -181,20 +193,76 @@ class BackgroundHttpServer:
         self._thread: threading.Thread | None = None
 
     def start(self) -> BackgroundHttpServer:
-        """Serve on a daemon thread. Idempotent.
+        """Serve on a daemon thread, and do not return until it is serving. Idempotent.
 
         Daemon on purpose: the runner's shutdown is what the process waits for, and an HTTP
         thread that could keep a stopped deployment alive would turn a failed
         :meth:`stop` into a hang instead of a warning.
+
+        **The bind is confirmed, and that is the whole reason this method can fail.** A
+        daemon thread that dies takes its exception with it: ``uvicorn.Server.startup``
+        catches the ``OSError`` from a port already in use, logs it and calls
+        ``sys.exit(3)``, and off the main thread ``threading.excepthook`` discards
+        ``SystemExit`` without a word. So ``shipinfer run --http --port 8000`` against a
+        taken port used to spawn every shard, place every camera, log *"serving /streams on
+        ..."*, run the deployment with no ingress at all, and exit ``0`` -- there was nothing
+        for a supervisor or a readiness probe to notice. Confirming ``started`` turns that
+        into a refusal the operator reads before ``supervise()`` is ever entered, and the
+        INFO line moved below the wait so it can no longer assert something untrue.
+
+        Failure leaves nothing running: the thread reference is dropped, so :meth:`stop`
+        stays a safe no-op, and ``should_exit`` is set first for the case the deadline lost a
+        race rather than the bind failing -- a server that binds one tick after it was
+        declared failed must not go on holding the port. It is not joined, because a startup
+        wedged behind a lifespan hook would then hang the refusal it is meant to deliver, and
+        the thread is a daemon.
+
+        Raises:
+            ConfigurationError: uvicorn did not report itself serving within
+                ``bind_timeout_s`` -- in practice the address is in use, or the host does not
+                own it. Named with the ``host:port`` because that is the one thing the
+                operator can change, and typed like every other refusal in this module so it
+                travels out of ``cli/commands/run.py::_wait`` through the ``finally`` that
+                stops the runner.
         """
         if self._thread is not None:
             return self
-        _LOG.info("serving /streams on http://%s:%d (docs at /docs)", self._host, self._port)
         self._thread = threading.Thread(
             target=self._server.run, name="shipinfer-http", daemon=True
         )
         self._thread.start()
+        if not self._serving_within(self._bind_timeout_s):
+            self._server.should_exit = True
+            self._thread = None
+            raise ConfigurationError(
+                f"the HTTP server did not come up on {self._host}:{self._port} within "
+                f"{self._bind_timeout_s:.1f}s (the address is most likely already in use; "
+                "uvicorn logged the reason) -- choose another --port, or stop what holds it"
+            )
+        _LOG.info("serving /streams on http://%s:%d (docs at /docs)", self._host, self._port)
         return self
+
+    def _serving_within(self, timeout_s: float) -> bool:
+        """Whether uvicorn reported itself serving before the deadline.
+
+        ``Server.started`` is uvicorn's own flag, set at the end of ``startup()`` once every
+        listener is up; polling it is what there is, because ``Server`` offers no event and
+        the loop it would be set on belongs to the thread being waited for. Polled at 5 ms so
+        the normal case costs one tick rather than the deadline.
+
+        The thread is watched as well as the clock, and that is what makes the common failure
+        fast: a bind that fails ends the thread within milliseconds, so this returns then
+        rather than after ``bind_timeout_s`` of a port that was never going to open.
+        """
+        deadline = time.monotonic() + timeout_s
+        thread = self._thread
+        while not self._server.started:
+            if thread is None or not thread.is_alive() or time.monotonic() >= deadline:
+                # Re-read rather than return False: the flag may have flipped in the window
+                # between the loop test and the thread ending.
+                return bool(self._server.started)
+            time.sleep(0.005)
+        return True
 
     def stop(self, timeout_s: float = 10.0) -> None:
         """Ask uvicorn to finish and wait for the thread. Idempotent, and never raises.
@@ -202,6 +270,10 @@ class BackgroundHttpServer:
         A server that will not stop is logged rather than raised: this runs in the ``finally``
         that also stops the runner, and an exception here would mask why the deployment was
         going down in the first place.
+
+        Safe after a :meth:`start` that refused, and safe before one: a failed start drops
+        the thread reference, so this returns on the first line rather than setting
+        ``should_exit`` on a server that never served.
         """
         if self._thread is None:
             return

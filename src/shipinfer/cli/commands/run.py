@@ -33,9 +33,18 @@ __all__ = [
     "cameras_from_settings",
     "cameras_to_place",
     "place_cameras",
+    "refuse_flags_that_would_be_ignored",
     "refuse_if_it_manages_no_cameras",
     "run",
 ]
+
+#: What ``--http`` binds when the operator names neither. Loopback, because ``/streams``
+#: starts and stops decoding on a shared GPU box and phase B puts no authentication in front
+#: of it. Named constants rather than defaults in :func:`run`'s signature so ``None`` can mean
+#: "the operator did not say", which is what :func:`refuse_flags_that_would_be_ignored` needs
+#: to tell an ignored flag from an unmentioned one.
+_DEFAULT_HOST = "127.0.0.1"
+_DEFAULT_PORT = 8000
 
 
 def run(
@@ -50,8 +59,8 @@ def run(
     policy: str | None = None,
     drain_s: float | None = None,
     http: bool = False,
-    host: str = "127.0.0.1",
-    port: int = 8000,
+    host: str | None = None,
+    port: int | None = None,
     log_level: str = "INFO",
     dry_run: bool = False,
 ) -> int:
@@ -84,13 +93,16 @@ def run(
         http: serve ``/streams`` (arch.md §2's camera door) beside the running chain, on a
             thread. Off by default: a chain driven by ``--inputs`` needs no ingress, and a
             port that nobody asked for is a port somebody has to firewall.
-        host: what the HTTP server binds. **Loopback by default**, unlike ``shipinfer serve``:
-            these routes start and stop video decoding on a shared GPU box and phase B has no
+        host: what the HTTP server binds; ``None`` means the operator did not say and takes
+            ``127.0.0.1``. **Loopback by default**, unlike ``shipinfer serve``: these routes
+            start and stop video decoding on a shared GPU box and phase B has no
             authentication on them, so reaching them from another machine is a decision an
             operator makes explicitly — by putting an authenticating proxy in front, or, at
-            their own risk, by passing ``--host 0.0.0.0``.
-        port: what it binds. ``0`` is not special-cased; ask the OS for one only if you have
-            a way to find out which it chose.
+            their own risk, by passing ``--host 0.0.0.0``. Given *without* ``--http`` it is
+            refused rather than ignored (:func:`refuse_flags_that_would_be_ignored`).
+        port: what it binds, or ``None`` for 8000. ``0`` is not special-cased; ask the OS for
+            one only if you have a way to find out which it chose. Refused without ``--http``
+            for ``host``'s reason.
         drain_s: seconds a shard gets to finish before it is killed. ``None`` leaves
             ``runner.drain_s``. It is ``shipinfer fleet --drain`` under its settings-tree
             name: the same budget, on the command that replaced it, so an operator who had
@@ -100,8 +112,12 @@ def run(
 
     Raises:
         ConfigurationError: an unknown runner, an invalid chain, a runner that manages no
-            cameras given ``--inputs``, an input the runner refuses, or ``--http`` on a host
-            where the ``server`` extra was never installed.
+            cameras given ``--inputs``, an input the runner refuses, ``--host``/``--port``
+            without the ``--http`` that gives them meaning, ``--http`` on a host where the
+            ``server`` extra was never installed, or an HTTP port that could not be bound
+            (:meth:`shipinfer.api.BackgroundHttpServer.start`). The last is raised after the
+            runner is up and therefore travels through the ``finally`` that stops it, which
+            is what an operator who typed ``--http`` is asking for: no ingress, no deployment.
     """
     from shipinfer.runners import build_runner
     from shipinfer.runtime.containment import require_container
@@ -117,6 +133,9 @@ def run(
     # is the mode for reading a plan on a laptop.
     if not dry_run:
         require_container("`shipinfer run`")
+    # Before the settings are built and long before anything is spawned: this is a fact about
+    # the command line alone, and it is the cheapest refusal in the function.
+    refuse_flags_that_would_be_ignored(http=http, host=host, port=port)
     # Every flag lands in the *settings tree* rather than in per-runner keyword arguments, so
     # this command names no runner: `--shards` is `runner.shards`, `--drain-s` is
     # `runner.drain_s` and `--gpus` is `devices.visible_gpus`, and a runner that cares reads
@@ -185,7 +204,13 @@ def run(
         # open and its workers up before a decoder thread starts publishing into them. A
         # refusal here therefore travels through the `finally`, which stops what did come up.
         place_cameras(built, cameras)
-        _wait(built, http=http, host=host, port=port, log_level=log_level)
+        _wait(
+            built,
+            http=http,
+            host=_DEFAULT_HOST if host is None else host,
+            port=_DEFAULT_PORT if port is None else port,
+            log_level=log_level,
+        )
     except ShardExitedError as exc:
         out.print(f"[red]{exc}[/red]")
         return 1
@@ -262,6 +287,42 @@ def cameras_to_place(
     refused naming the id, rather than the configured camera being refused by the input.
     """
     return [*cameras_from_settings(settings), *cameras_from_inputs(inputs, loop=loop)]
+
+
+def refuse_flags_that_would_be_ignored(
+    *, http: bool, host: str | None, port: int | None
+) -> None:
+    """Refuse ``--host``/``--port`` without the ``--http`` that gives them meaning.
+
+    Both flags configure exactly one thing — where :func:`_wait` puts the web server — and
+    without ``--http`` there is no web server to configure. Accepting them silently is a
+    small instance of the failure this command keeps meeting: an operator who typed
+    ``shipinfer run --port 9000`` and forgot ``--http`` gets a healthy deployment, no
+    ingress, and exit ``0``, with the flag they typed nowhere in the logs to contradict them.
+    A refusal naming the missing flag costs one line and is read before anything is spawned.
+
+    ``None`` rather than typer's own defaults is what makes this honest: with the default as
+    the sentinel, ``--host 127.0.0.1`` typed out in full is indistinguishable from not typing
+    it at all, and refusing a value the operator did not give is as rude as ignoring one they
+    did. So ``cli/__init__.py`` declares both options with ``None`` and this sees only what
+    was actually said.
+
+    Raises:
+        ConfigurationError: either flag was given and ``--http`` was not. Typed like every
+            other refusal in this module rather than a ``typer.BadParameter``, because this
+            module names no typer — it is called by the CLI and by tests, and a library
+            caller deserves the same message.
+    """
+    if http:
+        return
+    given = [name for name, value in (("--host", host), ("--port", port)) if value is not None]
+    if not given:
+        return
+    raise ConfigurationError(
+        f"{' and '.join(given)} {'configure' if len(given) > 1 else 'configures'} the HTTP "
+        "server and this run starts none; add `--http` to serve /streams on it, or drop "
+        f"{'them' if len(given) > 1 else 'it'}"
+    )
 
 
 def refuse_if_it_manages_no_cameras(runner: Runner, cameras: Sequence[CameraSpec]) -> None:
@@ -404,11 +465,17 @@ def _wait(
 
     Raises:
         ShardExitedError: a shard exited; the fleet is already stopped.
-        ConfigurationError: ``--http`` was asked for and FastAPI or uvicorn is not installed.
-            Typed and naming the extra, raised before the supervise loop starts. This is the
-            last line of defence and not where an operator meets it: :func:`run` probes both
-            imports before it starts anything, so a real ``shipinfer run --http`` refuses with
-            no shard spawned. It stays here for a caller that reached ``_wait`` directly.
+        ConfigurationError: ``--http`` was asked for and FastAPI or uvicorn is not installed,
+            or the server could not bind ``host:port``. The first is typed and names the
+            extra; it is the last line of defence and not where an operator meets it, because
+            :func:`run` probes both imports before it starts anything, so a real ``shipinfer
+            run --http`` refuses with no shard spawned. It stays here for a caller that
+            reached ``_wait`` directly. The second cannot be probed early -- a port is free
+            until it is not -- so it is raised by ``start()`` below, *before* ``supervise()``
+            is entered and therefore before the deployment settles into looking healthy. Both
+            leave nothing to stop: ``start()`` raising means no server was assigned, so the
+            ``finally`` that would stop one is never reached, and :func:`run`'s own
+            ``finally`` stops the runner.
     """
     from shipinfer.launch import forward_signals
 
