@@ -30,6 +30,7 @@ import pytest
 
 import shipinfer.topology.elements  # noqa: F401  -- imported for its registrations
 from shipinfer.core.errors import ConfigurationError
+from shipinfer.topology import bridge
 from shipinfer.topology.base import Element, ElementContext, ElementKind
 from shipinfer.topology.registry import ELEMENTS, create_element
 
@@ -60,6 +61,27 @@ EVERY_IMPLEMENTATION = [
     for impl in sorted(registry.names())
     if _ships_with_the_package(kind, impl)
 ]
+
+
+def _runtime_is_absent(impl: str) -> bool:
+    """Whether this implementation's runtime is missing on this host.
+
+    The invariant below is about the **model pool** and nothing else, and it is checked by
+    really opening the element. An implementation whose runtime is a separate install can
+    therefore refuse for a reason that has nothing to do with a pool: ``impl: shipvision`` is
+    the standing case, since CI deliberately does not check ``3rdparty/shipvision`` out
+    (``.claude/CLAUDE.md``), and a gallery or a tracker on such a host fails at ``open()``
+    naming the submodule — correctly, and with nothing to say about ``needs_model``.
+
+    So those are skipped rather than swallowed, and skipped through
+    :func:`~shipinfer.topology.bridge.shipvision_available`, which is the function that
+    exists for callers that need to *decide* rather than to fail (its own docstring names a
+    test that skips as one of them). Keyed on the registered implementation name because that
+    is what the family is called in a chain file (arch.md §1: ``track``, ``mtmc`` and
+    ``recognize`` all have a ``shipvision`` implementation), so the next one is covered
+    without an edit here.
+    """
+    return impl == "shipvision" and not bridge.shipvision_available()
 
 
 def _open_with_no_pool(kind: ElementKind, impl: str) -> Element:
@@ -98,6 +120,8 @@ def test_needs_model_predicts_whether_open_demands_a_pool(kind: ElementKind, imp
     the opposite of that -- and would go red on the one checkout the offline tier exists to
     protect. So the refusal is allowed and then *read*: it must not be the pool's.
     """
+    if _runtime_is_absent(impl):
+        pytest.skip(f"{impl} is not installed on this host; see _runtime_is_absent")
     declared = ELEMENTS[kind].get(impl).needs_model
     element = None
     try:
