@@ -64,7 +64,11 @@ def _blocks(numbers: list[int]) -> list[tuple[int, int]]:
 
 
 def check(path: Path) -> list[str]:
-    source = path.read_text(encoding="utf-8")
+    try:
+        source = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        print(f"{path}: not utf-8, so not checked: {exc}", file=sys.stderr)
+        return []
     try:
         tree = ast.parse(source)
     except SyntaxError as exc:
@@ -99,7 +103,11 @@ def check(path: Path) -> list[str]:
     for start, run in _blocks(_comment_lines(source)):
         # The marker is itself a comment, so it joins the run it exempts: a block that opts
         # out says so on its own first line, and neither the marker nor the block is counted.
-        if lines[start - 1].strip().startswith(EXEMPT):
+        marker = lines[start - 1].strip()
+        if marker.startswith(EXEMPT):
+            if marker[len(EXEMPT) :].strip():
+                continue
+            bad.append(f"{rel}:{start}: `{EXEMPT}` needs a reason")
             continue
         if run > COMMENT_MAX and not _exempted(lines, start):
             bad.append(f"{rel}:{start}: comment block is {run} lines (max {COMMENT_MAX})")
@@ -110,6 +118,11 @@ def main(argv: list[str]) -> int:
     given = [Path(a) for a in argv] or [ROOT / root for root in DEFAULT_ROOTS]
     if missing := [p for p in given if not p.exists()]:
         print(f"no such path: {', '.join(str(p) for p in missing)}", file=sys.stderr)
+        return 2
+    if wrong := [p for p in given if p.is_file() and p.suffix != ".py"]:
+        # Silent under a pre-commit `files:` filter is fine; silent when a human names a file
+        # is how you conclude a file is clean because the tool never looked at it.
+        print(f"not python: {', '.join(str(p) for p in wrong)}", file=sys.stderr)
         return 2
     paths = [f for p in given for f in (sorted(p.rglob("*.py")) if p.is_dir() else [p])]
     bad = [line for path in paths if path.suffix == ".py" for line in check(path)]

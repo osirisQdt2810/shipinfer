@@ -90,7 +90,15 @@ class TestAMarkerOnADecoratedSymbol:
     def test_a_marker_with_no_reason_does_not_exempt_anything(self, tmp_path: Path):
         """An exemption that need not be argued is one nobody argues."""
         path = _write(tmp_path, "# doc: long\n" + _long_docstring(12))
-        assert _hook().check(path) == [f"{path}:2: docstring of f is 12 lines (max 10)"]
+        assert _hook().check(path) == [
+            f"{path}:2: docstring of f is 12 lines (max 10)",
+            f"{path}:1: `# doc: long` needs a reason",
+        ]
+
+    def test_a_reasonless_marker_does_not_exempt_a_comment_block_either(self, tmp_path: Path):
+        """The block path short-circuited on the marker before the reason was ever checked."""
+        path = _write(tmp_path, "# doc: long\n# one\n# two\n# three\n# four\nx = 1\n")
+        assert _hook().check(path) == [f"{path}:1: `# doc: long` needs a reason"]
 
 
 class TestAFileItCannotParse:
@@ -109,6 +117,21 @@ class TestWhatIsNotAComment:
     def test_trailing_comments_do_not_form_a_block(self, tmp_path: Path):
         body = "".join(f"x{n} = {n}  # why\n" for n in range(6))
         assert _hook().check(_write(tmp_path, body)) == []
+
+
+class TestAFileItCannotRead:
+    def test_a_non_python_argument_is_an_error_not_a_silent_pass(self, tmp_path: Path, capsys):
+        """Naming a file and being told nothing reads as \"clean\", which it is not."""
+        note = tmp_path / "notes.md"
+        note.write_text("# doc: long\n", encoding="utf-8")
+        assert _hook().main([str(note)]) == 2
+        assert "not python" in capsys.readouterr().err
+
+    def test_a_file_that_is_not_utf8_is_named_rather_than_raising(self, tmp_path: Path, capsys):
+        path = tmp_path / "latin.py"
+        path.write_bytes(b'x = "\xff\xfe caf\xe9"\n')
+        assert _hook().check(path) == []
+        assert "not utf-8" in capsys.readouterr().err
 
 
 class TestTheCommandLine:
