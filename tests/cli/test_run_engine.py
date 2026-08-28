@@ -54,15 +54,18 @@ run_module = importlib.import_module("shipinfer.cli.commands.run")
 #: A chain with a `pool` element: the shape of every real topology, and the one that used to
 #: fail at `open()`. `echo` is the model the offline repository fixture declares.
 #:
-#: `decode.dst_size` is named because `echo` is not a detector -- it declares `x[4]`, and a
-#: `pool` detector resolves its letterbox target from the model's declared input and refuses
-#: rather than guessing 640x640. Saying it on the slot is the documented override, and it is
-#: what a deployment whose engine declares a dynamic input does too.
+#: Both `params:` are named because `echo` is not a detector -- it declares one input `x[4]`
+#: and nothing else. `input: x` because a `pool` detector refuses at `open()` an input the
+#: artefact does not declare (a typo'd name would otherwise fail per frame inside the
+#: backend), and `decode.dst_size` because it resolves its letterbox target from the model's
+#: declared input and refuses rather than guessing 640x640. `x[4]` is not a static `(3, H, W)`,
+#: so there is nothing for the override to contradict -- which is the documented case for
+#: saying it on the slot, and what a deployment whose engine declares a dynamic input does too.
 POOL_CHAIN = textwrap.dedent("""
     name: pool_chain
     elements:
       decode: {impl: mock}
-      detect: {impl: pool, model: echo, params: {decode: {dst_size: [8, 8]}}}
+      detect: {impl: pool, model: echo, params: {input: x, decode: {dst_size: [8, 8]}}}
       output: {impl: mock}
     """)
 
@@ -387,7 +390,7 @@ class TestWhoNeedsImageOps:
         """The half that would be lost by reusing ``needs_model``: an embedder submits a
         tensor somebody else shaped, so it needs the pool and no pre-processing at all."""
         embed_only = POOL_CHAIN.replace(
-            "detect: {impl: pool, model: echo, params: {decode: {dst_size: [8, 8]}}}",
+            "detect: {impl: pool, model: echo, params: {input: x, decode: {dst_size: [8, 8]}}}",
             "embed: {impl: pool, model: echo}",
         ).replace("name: pool_chain", "name: embed_chain")
 

@@ -45,6 +45,7 @@ from shipinfer.core.request import (
 )
 from shipinfer.core.settings import PipelineSettings
 from shipinfer.core.types import DataType, Tensor, TensorSpec
+from shipinfer.core.types.spec import DYNAMIC
 from shipinfer.runtime.ops import NormalizeParams, NumpyImageOps
 from shipinfer.topology import Caps, ChainItem, ElementContext
 from shipinfer.topology.elements.detections import DecodeParams, Detections, Normalization
@@ -475,11 +476,15 @@ class TestWhereTheGeometryComesFrom:
             element.process(item()).meta["detections"].boxes, [[40.0, 20.0, 200.0, 80.0]]
         )
 
-    def test_the_slot_overrides_the_artefact(self) -> None:
-        """A deployment whose engine declares a dynamic input has to say, and so does one that
-        knows better than a stale ``config.yaml``."""
+    def test_the_slot_overrides_a_dynamic_input(self) -> None:
+        """A deployment whose engine declares a dynamic input has to say, and this is where.
+
+        ``-1`` is what a dynamic-shape engine declares, and it is the *only* thing the
+        override may disagree with: a static declaration is a statement about the artefact,
+        and the slot contradicting it is checked below rather than obeyed.
+        """
         detector = self._declaring(
-            (TensorSpec("images", DataType.FP32, (3, 640, 640)),),
+            (TensorSpec("images", DataType.FP32, (3, DYNAMIC, DYNAMIC)),),
             (TensorSpec("output0", DataType.FP32, (300, 6)),),
         )
         element = PoolDetect(
@@ -489,6 +494,67 @@ class TestWhereTheGeometryComesFrom:
             ElementContext(models=FakePool(ship_detector=detector), ops=NumpyImageOps())
         )
 
+        assert element._dst_size == DST
+
+    def test_a_slot_that_contradicts_a_static_input_stops_the_deploy(self) -> None:
+        """The cross-check the code lost when it moved out of ``pipeline/graph/stage.py``.
+
+        A static engine refuses the wrong extent loudly at the first submission, so this
+        refusal looks redundant — until the same chain runs against a **dynamic** engine one
+        deployment over, which accepts a 100x100 frame for a detector trained at 640 and
+        answers with boxes that are wrong on every camera. That is verbatim the failure
+        ``_resolve_dst_size``'s docstring gives as its reason for existing, and this is the
+        half that catches it while an operator is still watching.
+        """
+        detector = self._declaring(
+            (TensorSpec("images", DataType.FP32, (3, 640, 640)),),
+            (TensorSpec("output0", DataType.FP32, (300, 6)),),
+        )
+        element = PoolDetect(
+            "detect", {"decode": {"dst_size": [100, 100]}}, model="ship_detector"
+        )
+
+        with pytest.raises(ConfigurationError) as caught:
+            element.open(
+                ElementContext(models=FakePool(ship_detector=detector), ops=NumpyImageOps())
+            )
+
+        message = str(caught.value)
+        assert "100" in message and "640" in message, "the message must name both ends"
+        assert "ship_detector" in message
+        assert not element.is_open
+
+    def test_an_input_the_model_does_not_declare_stops_the_deploy(self) -> None:
+        """``params: {input: pixels}`` on a single-input model used to open and then fail
+        per frame, because ``_resolve_dst_size`` falls back to "the single declared spec"
+        when the name misses -- so the typo resolved a perfectly good extent and hid itself
+        until the first frame of the deploy (CONVENTIONS 2.6)."""
+        detector = self._declaring(
+            (TensorSpec("images", DataType.FP32, (3, 100, 100)),),
+            (TensorSpec("output0", DataType.FP32, (300, 6)),),
+        )
+        element = PoolDetect("detect", {"input": "pixels"}, model="ship_detector")
+
+        with pytest.raises(ConfigurationError) as caught:
+            element.open(
+                ElementContext(models=FakePool(ship_detector=detector), ops=NumpyImageOps())
+            )
+
+        message = str(caught.value)
+        assert "pixels" in message, "the message must name the input that was asked for"
+        assert "images" in message, "and the ones the model does declare"
+        assert not element.is_open
+
+    def test_a_model_that_declares_no_inputs_is_not_second_guessed(self) -> None:
+        """A handle with no artefact -- a test's fake, a backend that declares nothing -- has
+        nothing to disagree with, and the slot's ``params:`` are then the only truth there is.
+        Refusing here would make every element in this file unopenable."""
+        element = opened(
+            FakeDetector({"boxes": rows((0, 0, 1, 1, 0.9, 8))}),
+            decode={"boxes_output": "boxes"},
+        )
+
+        assert element.is_open
         assert element._dst_size == DST
 
     def test_a_model_that_declares_nothing_usable_stops_the_deploy(self) -> None:

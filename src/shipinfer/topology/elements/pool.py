@@ -451,9 +451,11 @@ class PoolDetect(_PoolElement):
         """Resolve the pool, the ops and the geometry — all three now, none per frame.
 
         Raises:
-            ConfigurationError: no model pool (the base class's refusal), no image ops, or a
+            ConfigurationError: no model pool (the base class's refusal), no image ops, a
                 model whose declared input does not say how big its input is and a slot that
-                does not either. Every one of them names what to pass.
+                does not either, or a resolved letterbox the artefact contradicts
+                (:meth:`_refuse_a_letterbox_the_model_disagrees_with`). Every one of them
+                names what to pass.
             ModelNotFoundError: the pool has no such model.
         """
         super()._do_open(context)
@@ -471,6 +473,7 @@ class PoolDetect(_PoolElement):
             )
         self._ops = context.ops
         self._dst_size = self._resolve_dst_size()
+        self._refuse_a_letterbox_the_model_disagrees_with()
         # Count first: it is identified by *name*, and knowing which output it is removes it
         # from the candidates for the rows. Resolved the other way round, a perfectly ordinary
         # detector that declares `output0` plus `num_detections` looks like two candidate row
@@ -516,9 +519,10 @@ class PoolDetect(_PoolElement):
         spec = specs.get(self._input) or (
             next(iter(specs.values())) if len(specs) == 1 else None
         )
+        extent = _static_extent(spec)
+        if extent is not None:
+            return extent
         shape = tuple(getattr(spec, "shape", ()) or ())
-        if len(shape) == 3 and shape[0] == 3 and shape[1] > 0 and shape[2] > 0:
-            return int(shape[1]), int(shape[2])
         raise ConfigurationError(
             f"detect element {self.name!r} cannot tell how big model {self.model!r} wants its "
             f"input: its declared inputs are {sorted(specs) or 'none'} and the one named "
@@ -526,6 +530,55 @@ class PoolDetect(_PoolElement):
             "model a `config.yaml` that declares it, or say so on the slot: "
             "`params: {decode: {dst_size: [640, 640]}}`"
         )
+
+    def _refuse_a_letterbox_the_model_disagrees_with(self) -> None:
+        """Cross-check the resolved input name and extent against what the artefact declares.
+
+        Two refusals the proven path made at start-up and this element had lost when the code
+        moved out of ``pipeline/graph/stage.py`` (``validate``, which named both ends).
+
+        **An ``input`` the model does not declare.** :meth:`_resolve_dst_size` falls back to
+        "the single declared spec" when ``specs.get(self._input)`` misses, so a typo'd
+        ``params: {input: pixels}`` on a single-input model resolved a perfectly good extent,
+        opened successfully, and then failed inside the backend on every frame of the deploy.
+        CONVENTIONS 2.6 is validate at start-up, not at first use.
+
+        **A ``decode.dst_size`` a static input contradicts.** The override exists for an
+        engine whose input is dynamic, and a dynamic spec declares nothing to disagree with —
+        which is exactly why the disagreement is only checkable against a static ``(3, H, W)``.
+        Left unchecked it is the failure :meth:`_resolve_dst_size`'s own docstring gives as its
+        reason for existing, one deployment further on: a static engine refuses the wrong
+        extent loudly, a dynamic one accepts it and makes every box on every camera wrong.
+
+        A handle that declares no inputs at all — a test's fake, a backend that declares
+        nothing — is not second-guessed: there is nothing to disagree with, and the slot's
+        ``params:`` are then the only statement of the truth.
+
+        Raises:
+            ConfigurationError: either disagreement, naming both ends.
+        """
+        specs = self._declared("input_specs")
+        if not specs:
+            return
+        spec = specs.get(self._input)
+        if spec is None:
+            raise ConfigurationError(
+                f"detect element {self.name!r} submits its frame as input {self._input!r} and "
+                f"model {self.model!r} declares no such input (it declares {sorted(specs)}). "
+                "Name the model's own input on the slot: `params: {input: <name>}` — or fix "
+                "`ingest.input_name`, which is where an element that does not say gets it"
+            )
+        declared = _static_extent(spec)
+        if declared is not None and declared != self._dst_size:
+            raise ConfigurationError(
+                f"detect element {self.name!r} would letterbox to "
+                f"{list(self._dst_size)} and model {self.model!r} declares input "
+                f"{self._input!r} as (3, {declared[0]}, {declared[1]}). "
+                "`decode.dst_size` is the override for an engine whose input is *dynamic*; "
+                "against a declared static extent it is a mistake, and one that a "
+                "dynamic-shape engine would accept silently and answer with boxes that are "
+                "wrong on every camera. Drop the override, or fix the model's `config.yaml`"
+            )
 
     def _resolve_boxes_output(self) -> str:
         """Which response output holds the rows.
@@ -725,6 +778,22 @@ class PoolDetect(_PoolElement):
             **{self.meta_key: detections},
             frame_hw=geometry.frame_hw,
         )
+
+
+def _static_extent(spec: Any) -> tuple[int, int] | None:
+    """The ``(height, width)`` a spec pins for a ``(3, H, W)`` input, or ``None`` for none.
+
+    ``None`` covers "no such spec", "not an image-shaped input" and "a dynamic dimension"
+    alike, and collapsing the three is the point: all of them mean *the artefact does not say*,
+    which is the condition under which the slot's ``decode.dst_size`` is the only statement of
+    the truth. One function so the resolution (:meth:`PoolDetect._resolve_dst_size`) and the
+    cross-check (:meth:`PoolDetect._refuse_a_letterbox_the_model_disagrees_with`) cannot come
+    to different answers about what "the model declares its extent" means.
+    """
+    shape = tuple(getattr(spec, "shape", ()) or ())
+    if len(shape) == 3 and shape[0] == 3 and shape[1] > 0 and shape[2] > 0:
+        return int(shape[1]), int(shape[2])
+    return None
 
 
 def _extent(value: Any, what: str) -> tuple[int, int]:
