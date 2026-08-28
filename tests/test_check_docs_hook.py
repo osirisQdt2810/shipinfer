@@ -53,12 +53,16 @@ class TestItReportsWhatIsOverTheCap:
 
 class TestTheEscapeHatch:
     def test_a_marker_above_a_symbol_exempts_its_docstring(self, tmp_path: Path):
-        path = _write(tmp_path, "# doc: long the wire format is normative\n" + _long_docstring(12))
+        path = _write(
+            tmp_path, "# doc: long the wire format is normative\n" + _long_docstring(12)
+        )
         assert _hook().check(path) == []
 
     def test_a_marker_heading_a_comment_block_exempts_the_block(self, tmp_path: Path):
         """The marker is itself a comment, so it joins the run it exempts."""
-        body = "# doc: long the wire format is normative\n# one\n# two\n# three\n# four\nx = 1\n"
+        body = (
+            "# doc: long the wire format is normative\n# one\n# two\n# three\n# four\nx = 1\n"
+        )
         assert _hook().check(_write(tmp_path, body)) == []
 
     def test_a_marker_heading_a_block_does_not_exempt_the_symbol_below_it(self, tmp_path: Path):
@@ -66,6 +70,35 @@ class TestTheEscapeHatch:
         body = "# doc: long the wire format is normative\n# one\n# two\n" + _long_docstring(12)
         reported = _hook().check(_write(tmp_path, body))
         assert reported == [f"{tmp_path / 'sample.py'}:4: docstring of f is 12 lines (max 10)"]
+
+
+class TestAMarkerOnADecoratedSymbol:
+    """Both honest placements work, because a false positive is how a hook gets deleted."""
+
+    @pytest.mark.parametrize(
+        "prefix",
+        [
+            "# doc: long the params table is the contract\n@register('x')\n",
+            "@register('x')\n# doc: long the params table is the contract\n",
+            "# doc: long the params table is the contract\n@register(\n    'x',\n)\n",
+        ],
+        ids=["above-the-decorator", "between-decorator-and-def", "multi-line-decorator"],
+    )
+    def test_the_marker_is_found_wherever_it_honestly_sits(self, tmp_path: Path, prefix: str):
+        assert _hook().check(_write(tmp_path, prefix + _long_docstring(12))) == []
+
+    def test_a_marker_with_no_reason_does_not_exempt_anything(self, tmp_path: Path):
+        """An exemption that need not be argued is one nobody argues."""
+        path = _write(tmp_path, "# doc: long\n" + _long_docstring(12))
+        assert _hook().check(path) == [f"{path}:2: docstring of f is 12 lines (max 10)"]
+
+
+class TestAFileItCannotParse:
+    def test_it_says_so_rather_than_reporting_the_file_clean(self, tmp_path: Path, capsys):
+        """Silence here would be an invisible pass once the gate is armed."""
+        path = _write(tmp_path, "def f(:\n")
+        assert _hook().check(path) == []
+        assert "not parsed, so not checked" in capsys.readouterr().err
 
 
 class TestWhatIsNotAComment:

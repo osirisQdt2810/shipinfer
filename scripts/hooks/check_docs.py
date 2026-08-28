@@ -22,19 +22,17 @@ DEFAULT_ROOTS = ("src/shipinfer", "scripts", "tests", "benchmarks")
 
 
 def _exempted(lines: list[str], lineno: int) -> bool:
-    """True when the marker sits directly above ``lineno`` (1-based).
+    """True when the first non-blank line above ``lineno`` (1-based) is a marker with a reason.
 
-    Directly, not anywhere above: a marker separated from the symbol by other comments heads
-    the *block* those comments form, and reading it as the symbol's would silently exempt a
-    docstring nobody marked — the quiet half of the bug this rule exists to prevent.
+    The *first* line, not any line above: a marker further up heads the comment block between
+    them, and reading it as this symbol's would silently exempt a docstring nobody marked. The
+    reason is required — an exemption that need not be argued is one nobody argues.
     """
-    for i in range(lineno - 2, max(lineno - 12, -1), -1):
+    for i in range(lineno - 2, -1, -1):
         text = lines[i].strip()
-        if text.startswith(EXEMPT):
-            return True
-        if text and not text.startswith("@"):
-            # Any other comment in between means the marker heads that block, not this symbol.
-            return False
+        if not text:
+            continue
+        return text.startswith(EXEMPT) and bool(text[len(EXEMPT) :].strip())
     return False
 
 
@@ -69,7 +67,8 @@ def check(path: Path) -> list[str]:
     source = path.read_text(encoding="utf-8")
     try:
         tree = ast.parse(source)
-    except SyntaxError:
+    except SyntaxError as exc:
+        print(f"{path}: not parsed, so not checked: {exc}", file=sys.stderr)
         return []
     lines = source.splitlines()
     rel = path.relative_to(ROOT) if path.is_relative_to(ROOT) else path
@@ -84,11 +83,19 @@ def check(path: Path) -> list[str]:
             continue
         count = text.count("\n") + 1
         cap = MODULE_MAX if isinstance(node, ast.Module) else SYMBOL_MAX
-        # The module's own line is its docstring's, so a `# doc: long` comment above it works.
-        line = node.body[0].lineno if isinstance(node, ast.Module) else node.lineno
-        if count > cap and not _exempted(lines, line):
+        # The module's own line is its docstring's. A decorated symbol has two places a
+        # marker can honestly sit -- above the decorators, or between them and the `def` --
+        # and both are accepted, because a false positive is how a hook gets deleted.
+        if isinstance(node, ast.Module):
+            anchors = [node.body[0].lineno]
+        else:
+            anchors = [
+                node.lineno,
+                min((d.lineno for d in node.decorator_list), default=node.lineno),
+            ]
+        if count > cap and not any(_exempted(lines, anchor) for anchor in anchors):
             name = "<module>" if isinstance(node, ast.Module) else node.name
-            bad.append(f"{rel}:{line}: docstring of {name} is {count} lines (max {cap})")
+            bad.append(f"{rel}:{anchors[0]}: docstring of {name} is {count} lines (max {cap})")
     for start, run in _blocks(_comment_lines(source)):
         # The marker is itself a comment, so it joins the run it exempts: a block that opts
         # out says so on its own first line, and neither the marker nor the block is counted.
