@@ -392,7 +392,7 @@ class Model:
     def start(
         self, timeout_s: float = 120.0, abort_reason: Callable[[], str | None] | None = None
     ) -> None:
-        """Start every instance and wait for at least one to become ready.
+        """Start every instance; refuse the model when every instance has failed.
 
         Args:
             timeout_s: How long to wait for all instances to settle.
@@ -418,9 +418,12 @@ class Model:
 
         Raises:
             ServerStateError: when an instance fails to become ready under
-                ``strict_startup``, and when ``abort_reason`` gives one. The instances
-                this call already started are stopped before either error leaves — the
-                caller may have no other handle on them.
+                ``strict_startup``; when — non-strict, since strict's per-instance check
+                fires first — *every* instance has failed; and when ``abort_reason``
+                gives one. (A worker death after readiness also sets ``start_error`` but
+                cannot reach the gate: an unpublished model is dispatched nothing.) The
+                instances this call already started are stopped before any of these
+                leave — the caller may have no other handle on them.
         """
         started: list[ModelInstance] = []
         try:
@@ -444,6 +447,15 @@ class Model:
                         else f"instance {instance.name} did not become ready within "
                         f"{timeout_s:.0f}s"
                     )
+            if all(instance.start_error is not None for instance in self._instances):
+                # Settled *and* failed, every one: the model can never serve, and keeping
+                # it published advertises capacity that does not exist — a start-up failure
+                # belongs at start-up. A deadline miss leaves ``start_error`` unset (still
+                # loading), and that instance keeps the old tolerant behaviour.
+                cause = self._instances[0].start_error
+                raise ServerStateError(
+                    f"model {self.name!r}: every instance failed to start: {cause}"
+                ) from cause
         except BaseException:
             self._unwind(started)
             raise
