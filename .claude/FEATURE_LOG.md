@@ -13,10 +13,10 @@ no pool — plus shipinfer's half of that gallery: the on-disk format it is load
 
 | Piece | Delivered |
 |---|---|
-| `topology/elements/recognize.py` | `GalleryRecognize`, `@registry_for(ElementKind.RECOGNIZE).register("shipvision")`. Caps copied verbatim from `_PoolElement` (`nv12@gpu, tensor@gpu, bgr@cpu` in, `*@*` out) and it stamps **no** cap on the item it derives. `requires_model_name = needs_model = False` — the divergence C2's split was built for. `_do_open` loads shipvision through `topology/bridge.py`, builds the gallery through `GALLERIES.build`, fills it from disk and refuses a width mismatch; `_do_process` queries once per embedded row and files `meta["identities"]` |
+| `topology/elements/recognize.py` | `GalleryRecognize`, `@registry_for(ElementKind.RECOGNIZE).register("shipvision")`. Caps copied verbatim from `_PoolElement` (`nv12@gpu, tensor@gpu, bgr@cpu` in, `*@*` out) and it stamps **no** cap on the item it derives. `requires_model_name = needs_model = False` — the divergence C2's split was built for. `_do_open` loads shipvision through `topology/bridge.py`, builds the gallery through `GALLERIES.build`, fills it from disk and refuses a width mismatch; `_do_process` queries once per selected row and files `meta["identities"]` |
 | `topology/gallery_store.py` | `<repository>/<entry>/<version>/gallery.npz` — `vectors (N,d) float`, `identities (N,) text`, optional `camera_ids (N,) text` — with `resolve_gallery_path` (newest version wins, Triton's rule) and `load_gallery_file` (shape, dtype, finite and non-zero validated, `allow_pickle=False`). numpy only; no shipvision, no `repository` import |
-| `tests/topology/test_recognize_element.py` | 54 offline tests, green **with and without** the submodule |
-| `tests/topology/test_element_model_declarations.py` | the generic "every registered element" walk skips an implementation whose *runtime* is absent, through `bridge.shipvision_available()`. Without it, that file went red on any host with no submodule the moment a `shipvision` element registered — and C4/C6 would each have hit the same wall |
+| `topology/elements/mock.py` | `MockRecognize` files the same mapping shape the real element does, so a chain of mocks exercises the *type* the fan-in merges rather than a stand-in for it |
+| `tests/topology/test_recognize_element.py` | 75 offline tests, green **with and without** the submodule |
 
 **Why.** `pipeline/graph/graph.py` is the decision of record: there is no `ship_recognizer`
 model and there never was one worth training. Identity is a search over the ship embedding,
@@ -27,37 +27,68 @@ an identity network.
 
 **Decisions.**
 
-- **`exclude_camera` on every published query, with no parameter to turn it off.** A match
-  against the query's own camera measures the tracker and inflates every score; the only
-  reason to want the switch is a better-looking number. The test proves it by the *answer*:
-  the probe's own camera holds an exact match and the correct reply is the other camera's
-  entry at 0.9.
+- **`meta["identities"]` is a mapping keyed by the detection row**,
+  `{index: (identity | None, similarity | None)}`, holding an entry for exactly the rows this
+  element queried. Three states, and the third is load-bearing: matched, queried-and-unknown,
+  and **absent** — a row nobody embedded, or one `classes:` did not select, is not this
+  element's to answer. The runner's fan-in merges branches by unioning their metadata, so two
+  recognisers on two branches must claim disjoint rows; two positional lists cannot be merged
+  at all, and a `(None, None)` placeholder would collide with the other branch's real answer.
+  `ShipvisionTrack` reads `meta["vectors"]` under the same convention.
+- **`exclude_camera` on every published query, with no parameter to turn it off — and the
+  default gallery is `flat`, because that is the only shipped implementation that can honour
+  it per entry.** A match against the query's own camera measures the tracker and inflates
+  every score. `centroid` folds an identity's views into one vector and records only the
+  camera of the *most recent* observation, so the same fixture queried through it answers
+  `ship-a` at 0.994 — the self-match — with the `exclude_camera=` argument still in place.
+  `centroid` remains selectable (its memory scales with the fleet rather than with dwell
+  time) and `open()` WARNs when the configured implementation is not in `_EXACT_EXCLUSION`.
 - **One deliberate exception, and it is a different question.** With `enrol: true` the
   membership check before an add asks "is this appearance in the gallery **at all**", and that
   one must *not* exclude — a camera can never match what it itself enrolled, so with the
   exclusion it re-enrols the same ship on every frame and the gallery grows per frame. The
   published answer for such a row is still `None`: the identity exists and this camera may not
   claim it.
-- **Unknown is `None`, never `0`,** because `0` is a legitimate gallery id
-  (`pipeline/schema.py`). A freshly minted enrolment files `(identity, None)`: the identity is
-  real, the similarity behind it does not exist.
+- **Unknown is `None`, never `0`,** because `0` is a legitimate gallery id. A freshly minted
+  enrolment files `(identity, None)`: the identity is real, the similarity behind it does not
+  exist.
+- **Enrolment writes into a *second* store, so it cannot cost the operator a curated
+  identity.** Both shipped galleries evict the least recently *observed* entry and this
+  element never re-adds on a match, so a file-loaded identity's clock is frozen at load and it
+  is the first thing a full gallery drops: measured at capacity 8 with four curated identities
+  and forty stranger frames from one camera — two seconds at 20 fps — the single-store version
+  left `curated survivors: []`. That is ADR-005's own failure reproduced inside the gallery.
+  The curated store now has no writer after `_fill`; minted entries go into a store built at
+  `open` and queried beside it, merged by score. The alternative — refusing to enrol at
+  capacity — would need `gallery.capacity`, which is **not** part of `BaseGallery`; two stores
+  need only `add`, `query` and `__len__`, which are. The cost is stated honestly in `_enrol`:
+  enrolment makes every row two queries and an unmatched row four, not "one extra".
 - **Enrolment is opt-in, off, and gated on a *detection* confidence** read from C3's
-  `Detections.scores`. Until C3 lands nothing carries one, so nothing is enrolled — and the
-  element says so once, at WARNING, because a switched-on enrolment that silently never fires
-  is the flattering failure this project exists to remove. Minted ids are
-  `<prefix>:<camera>:<frame>:<row>` (`auto:cam-03:184102:2`): fleet-unique without
-  coordination, greppable, and naming their own provenance.
+  `Detections.scores`. A chain that embeds with no decoding detector ahead of it carries no
+  per-row quality, so nothing is enrolled — and the element says so once, at WARNING, because
+  a switched-on enrolment that silently never fires is the flattering failure this project
+  exists to remove. Minted ids are `<prefix>:<camera>:<frame>:<row>` (`auto:cam-03:184102:2`):
+  fleet-unique without coordination, greppable, and naming their own provenance.
+- **`params: {classes: [ship]}` selects rows by C3's `Detections.labels`**, mirroring
+  `ShipvisionTrack`'s key of the same name over the same field. `when:` gates the element per
+  *item* and never the rows inside it, so an admitted frame still carries every detection the
+  detector found; a ship gallery asked about a person answers *something*. A row the filter
+  excludes is not queried, not counted, and not in the mapping. `classes:` with no
+  `meta["detections"]` to read is a refusal, not a silent pass-through.
 - **The gallery format is shipinfer's (ADR-006), and it is an entry in the model repository.**
   shipvision has no `save`/`load` by design. `.npz` because the payload is an `(N, d)` float32
   matrix; `allow_pickle=False` because a repository is a directory an operator syncs from
-  somewhere else. A separate module rather than a private function in the element: the file is
-  a contract with whatever enrols identities offline, and it deserves its own refusals and its
-  own tests.
+  somewhere else — and that is now a test rather than a claim: an object array whose
+  `__reduce__` names `os.system` is refused **and does not run**. Flip the flag and the
+  archive is still refused, by the shape check, *after* the payload has executed.
 - **The dim check's two sources, named.** Declared `params: {dim:}` (the embedder's width,
   which a pure layer cannot discover — `repository` is not importable from `topology`) versus
-  the loaded file. Both present and disagreeing stops the deploy; only one present and it
-  stands; neither — an empty gallery, no declaration — and the width is not knowable at open,
-  which the warning says.
+  the loaded file, including an **empty** one: `np.savez` keeps the shape and the loader
+  refuses a zero-width array, so a `(0, 512)` archive states its width as loudly as a full
+  one. Both present and disagreeing stops the deploy; only one and it stands; neither and the
+  width is not knowable at open, which the warning says. A mismatch that arrives on a frame
+  instead (no `dim:` declared) is re-raised as our `ValidationError` rather than escaping as
+  `shipvision.errors.DimensionMismatchError`.
 - **An empty gallery opens with one WARNING** rather than a refusal: a deployment that has not
   enrolled anyone yet is an ordinary state, and refusing it would mean a chain cannot be
   brought up before its identities exist. What it must not be is quiet — an empty gallery
@@ -66,20 +97,24 @@ an identity network.
   implementations own their locking, and `FlatGallery.query` deliberately does not hold its
   lock across the gemm because BLAS releases the GIL there. An element-level lock would put
   the convoy back.
-- **Unknown `params:` keys are refused at load.** A silently dropped `treshold:` means the
-  element ran with a default nobody chose and the run looked successful.
+- **Every `params:` value is validated at load,** including the switches: `enrol: "off"` is
+  truthy and would have turned enrolment *on*, so a non-boolean is refused by name.
 
 **Known gaps, both named in the code.** A `pool` embedder files its response's raw
 `{tensor_name: Tensor}` under `meta["vectors"]`; scattering those rows back to the detections
 that produced them is C8's, so that shape is **refused loudly** here rather than guessed at.
-And the row count comes from the vectors, cross-checked against `meta["detections"]` only when
-that key is present — C3's, one `len()` away.
+And the identity published here is a `str` — the gallery's own vocabulary — while
+`pipeline/schema.py`'s `ObjectRecord.ship_id` is an `int | None`; there is no integer that
+means `auto:cam-A:184102:0`, so the narrowing belongs to whoever fills that record (C8b) and
+is named rather than papered over with a cast at this end.
 
-**Evidence.** `pytest -q`: 2583 passed, 1 skipped (present) / 2511 passed, 73 skipped (with
-`shipvision` masked by a meta-path finder). Revert checks: dropping `exclude_camera` turns 5
-tests red (`assert 'ship-a' == 'ship-b'`); filing `0` for an unknown turns 5 red
-(`assert 0 is None`); removing the loader's finite/zero-norm checks turns the malformed-archive
-cases red.
+**Evidence.** `pytest -q`: 2734 passed, 1 skipped, 60 deselected (present) / 2606 passed, 129
+skipped, 60 deselected (with `shipvision` masked by a meta-path finder). Revert checks:
+filing the identities as a positional list turns **11** red; putting `_DEFAULT_GALLERY` back
+to `centroid` turns **6** red, including the cross-camera answer (`assert 'ship-a' ==
+'ship-b'`) with `exclude_camera=` untouched; pointing enrolment's `add` back at the curated
+store turns **4** red (`curated survivors` becomes `auto:*`); `allow_pickle=True` turns **2**
+red on `assert not True` — the marker file the archive's pickle created.
 
 ---
 
