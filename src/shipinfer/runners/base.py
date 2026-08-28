@@ -195,6 +195,15 @@ class Runner(abc.ABC):
         ``ingest.input_name`` becomes ``input_name``; an element still prefers its own
         ``params:`` over both, because a tensor name belongs to the model and not to the
         deployment.
+
+        ``metrics``, ``workers`` and ``ops`` are deliberately left unset here and filled in by
+        the subclass that has them. They are not settings but *facts about this process*: a
+        metrics registry an exporter is already scraping, the number of threads that will
+        really walk the chain, an image-ops implementation bound to this shard's device. A
+        base-class default would have to invent all three, and each invention is worse than
+        the ``None`` an element can refuse on — a private registry nobody scrapes reads as
+        evidence, and a worker count that is not the real one is what makes a barrier park the
+        only thread there is.
         """
         return ElementContext(
             shard_id=self._shard_id,

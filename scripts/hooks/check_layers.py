@@ -21,12 +21,21 @@ SRC = ROOT / "src" / ROOT_PACKAGE
 
 #: Third-party modules a layer may never import.
 FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
+    # `shipvision` is named in exactly three rows -- here, `scheduling` and `repository` --
+    # and its absence from every other row is as deliberate as its presence in these. The
+    # submodule is optional and CI does not check it out, so an import of it anywhere below
+    # `topology` would make the offline tier need a build to run: `core` is what the whole
+    # suite imports, and a scheduler that reached for a tracking algorithm would be deciding
+    # what to compute as well as where. Above those three it is *expected* -- the elements
+    # that run MOT, MTMC and re-identification are its callers -- which is why `topology`
+    # does not name it. See `topology/bridge.py`.
     "core": {
         "torch",
         "tensorrt",
         "onnxruntime",
         "cuda",
         "cv2",
+        "shipvision",
         "fastapi",
         "uvicorn",
         "confluent_kafka",
@@ -39,6 +48,7 @@ FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
         "onnxruntime",
         "cuda",
         "cv2",
+        "shipvision",
         "fastapi",
         "uvicorn",
         "grpc",
@@ -53,6 +63,16 @@ FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
     # cannot (a module whose import needs `pyds`), it registers lazily; and if that ever
     # stops being enough, the relaxation is a separate `topology.elements` layer with its
     # own row here, never a hole in this one.
+    #
+    # `shipvision` is deliberately ABSENT from this row, and that absence is a decision
+    # rather than an oversight. The track, mtmc and recognize elements run its algorithms;
+    # they reach it through `topology/bridge.py`, which imports it inside a function. This
+    # checker walks the AST and counts a function-scope import exactly like a module-scope
+    # one, so naming it here would ban the lazy import the design requires and leave no
+    # legal spelling at all. What enforces the laziness instead is
+    # `tests/test_architecture.py::TestImportIsCheap`, which imports `shipinfer.topology` in
+    # a subprocess and fails if `shipvision` came with it -- the same split this file already
+    # describes for `runners -> ingest` below.
     "topology": {
         "torch",
         "tensorrt",
@@ -70,6 +90,7 @@ FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
         "tensorrt",
         "onnxruntime",
         "cuda",
+        "shipvision",
         "fastapi",
         "uvicorn",
         "grpc",
@@ -222,7 +243,23 @@ ALLOWED_INTERNAL: dict[str, set[str]] = {
         "scheduling",
         "topology",
     },
-    "pipeline": {"core", "repository", "runtime", "backends", "scheduling", "engine"},
+    # `pipeline` gained `topology` in phase C, one-way and for one reason: the stateful
+    # elements move into `topology/elements/` and the counting-simulation pipeline keeps
+    # working off the moved code during the coexistence arch.md section 9 describes --
+    # `pipeline/graph/tracking.py` imports the tracker shard rather than owning a second
+    # copy of it. The direction is the load-bearing half, as everywhere else: `topology` may
+    # NOT import `pipeline`, because an element that reached into the pipeline would be a
+    # pure layer importing an accelerator layer, and `tests/test_architecture.py` asserts the
+    # reverse edge stays absent.
+    "pipeline": {
+        "core",
+        "repository",
+        "runtime",
+        "backends",
+        "scheduling",
+        "engine",
+        "topology",
+    },
     # `ingest` does NOT depend on `scheduling`: it publishes into the `FrameSink` protocol
     # it owns, and `pipeline` supplies the queue-backed implementation. Mapping a frame onto
     # a request is dispatch policy, and it belongs next to the code that undoes the mapping.

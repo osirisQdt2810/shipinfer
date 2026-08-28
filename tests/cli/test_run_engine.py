@@ -32,7 +32,10 @@ from shipinfer.core.request import ResponseFuture
 from shipinfer.core.settings import ServerSettings
 from shipinfer.runners import RUNNERS
 from shipinfer.runners.base import Runner
-from shipinfer.topology import ChainItem, ChainSpec, Topology
+from shipinfer.topology import ChainItem, ChainSpec, ElementKind, Topology
+from shipinfer.topology.base import ElementContext
+from shipinfer.topology.elements.mock import MockDetect
+from shipinfer.topology.registry import registry_for
 
 #: The module object, not the ``run`` function ``shipinfer.cli.commands`` re-exports under the
 #: same name -- ``monkeypatch.setattr("shipinfer.cli.commands.run._wait", ...)`` resolves the
@@ -53,6 +56,19 @@ POOL_CHAIN = textwrap.dedent("""
 #: Asking `node.kind in MODEL_KINDS` instead of the element would load a repository for this.
 MOCK_CHAIN = POOL_CHAIN.replace("{impl: pool", "{impl: mock").replace(
     "name: pool_chain", "name: mock_chain"
+)
+
+#: The same chain again with an `nvinfer`-shaped detector (:class:`DetectElsewhere` below):
+#: it *names* `model: echo` and runs it outside this process. The chain the split exists for
+#: -- asking `requires_model_name` here would build an `InferenceServer` for it.
+ELSEWHERE_CHAIN = POOL_CHAIN.replace("{impl: pool", "{impl: run-engine-elsewhere").replace(
+    "name: pool_chain", "name: elsewhere_chain"
+)
+
+#: Its sibling (:class:`DetectHere`), identical but for one attribute: it resolves that same
+#: name against this process's pool, so this chain does need one.
+HERE_CHAIN = POOL_CHAIN.replace("{impl: pool", "{impl: run-engine-here").replace(
+    "name: pool_chain", "name: here_chain"
 )
 
 #: What happened, in order, across the engine double and the runner double. One list rather
@@ -107,6 +123,51 @@ class RefusingEngine:
 
     def __init__(self, settings: ServerSettings | None = None) -> None:
         raise AssertionError("an engine was built for a run that needs none")
+
+
+@registry_for(ElementKind.DETECT).register("run-engine-elsewhere")
+class DetectElsewhere(MockDetect):
+    """A detect that names a ``model:`` and resolves it somewhere that is not this process.
+
+    The shape of the ``nvinfer`` element the deepstream runner will register: the graph
+    compiler hands the artefact's name to GStreamer, so an operator must write it in the chain
+    file (``requires_model_name``) and nothing here ever asks a model pool for it
+    (``needs_model``). Those are the two questions, and this is the only element shape at which
+    they disagree -- every implementation the package ships answers both the same way, so
+    without a double the reader in :func:`~shipinfer.cli.commands.run.model_pool_is_needed`
+    can be pointed at either attribute and the suite stays green.
+
+    Registered here rather than in ``topology/elements/``, and under a name prefixed with this
+    file's, for the reason ``tests/topology/test_model_requirement.py`` gives: the registries
+    are process-wide, so a double that lives beside the test that uses it cannot make some
+    other file's result depend on collection order.
+    """
+
+    requires_model_name: ClassVar[bool] = True
+    needs_model: ClassVar[bool] = False
+
+
+@registry_for(ElementKind.DETECT).register("run-engine-here")
+class DetectHere(DetectElsewhere):
+    """The same element with the second answer flipped: it *does* run its model here.
+
+    One attribute apart from :class:`DetectElsewhere`, which is what makes the pair a
+    measurement rather than an assertion: a predicate hard-wired to ``False`` would pass its
+    test and fail this one.
+    """
+
+    requires_model_name: ClassVar[bool] = True
+    needs_model: ClassVar[bool] = True
+
+    def _do_open(self, context: ElementContext) -> None:
+        """Refuse a context with no pool, which is what declaring ``needs_model`` promises.
+
+        Not reached by these tests -- the recording runner never opens its chain -- but a
+        double that claimed to need a pool and then ran happily without one would be a double
+        of nothing.
+        """
+        if context.models is None:
+            raise ConfigurationError(f"{self.name!r} was opened with no model pool")
 
 
 @RUNNERS.register("recording-pool")
@@ -228,6 +289,49 @@ class TestWhoNeedsAPool:
     def test_an_unknown_runner_is_refused_by_the_registry_that_would_build_it(self) -> None:
         with pytest.raises(ConfigurationError, match="unknown runner"):
             model_pool_is_needed("nope", topology_of(POOL_CHAIN))
+
+
+class TestAChainThatNamesAModelItRunsElsewhere:
+    """The half of the split ``model_pool_is_needed`` is the only reader of.
+
+    Every element the package ships answers ``requires_model_name`` and ``needs_model``
+    identically, so the two attributes are indistinguishable from inside the shipped set: the
+    predicate below reads ``needs_model``, and swapping it to ``requires_model_name`` left the
+    whole of ``tests/cli``, ``tests/topology`` and ``tests/runners`` green. :class:`DetectElsewhere`
+    is the chain that tells them apart, and it is not hypothetical -- it is the deepstream
+    chain phase C is being built towards, on which the wrong attribute means a launcher that
+    loads the model repository onto every visible device to serve a chain that never submits
+    to it.
+    """
+
+    def test_it_loads_because_it_names_the_model_the_chain_file_must_carry(self) -> None:
+        """First the loader's half, so the second assertion is about a chain that exists."""
+        chain = topology_of(ELSEWHERE_CHAIN)
+
+        element = chain.node("detect").element
+        assert element.requires_model_name is True
+        assert element.model == "echo", "the name an operator writes is carried, not dropped"
+
+    def test_it_needs_no_pool_although_it_names_a_model(self) -> None:
+        assert model_pool_is_needed("inprocess", topology_of(ELSEWHERE_CHAIN)) is False
+
+    def test_the_sibling_that_resolves_that_name_here_does_need_one(self) -> None:
+        """One attribute apart from the case above, and the answer flips."""
+        assert model_pool_is_needed("inprocess", topology_of(HERE_CHAIN)) is True
+
+    def test_no_engine_is_built_for_it(self, tmp_path: Path, monkeypatch) -> None:
+        """The predicate's consequence, through ``run`` rather than through the helper.
+
+        ``RefusingEngine`` fails on the constructor, so a regression is reported at the line
+        that made the mistake instead of after a repository has been read.
+        """
+        monkeypatch.setattr("shipinfer.engine.InferenceServer", RefusingEngine)
+
+        assert run(write_chain(tmp_path, ELSEWHERE_CHAIN), runner="recording-pool") == 0
+
+        assert EVENTS == ["runner.start", "wait", "runner.stop"]
+        (built,) = RecordingRunner.instances
+        assert built.models is None, "a chain whose model runs elsewhere was handed a pool"
 
 
 class TestThePoolIsUpBeforeTheChainOpensAndDownAfterItStops:

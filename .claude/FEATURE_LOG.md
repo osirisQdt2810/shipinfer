@@ -5,6 +5,92 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-28 — the seam phase C's elements sit on: the shipvision bridge, `needs_model`, `ElementContext`, camera hooks (Phase C2)
+
+**What.** Four seam changes, no new element. ADR-017's `Element` ABC grows two camera hooks
+and two model declarations; `ElementContext` grows three fields. ADR-017 §4 is amended in
+`DECISIONS.md`, because the rule it states is the one this slice replaced.
+
+| Piece | Delivered |
+|---|---|
+| `topology/bridge.py` | the ONE site that names `shipvision`: `load_mot/load_mtmc/load_reid/load_types`, each importing its subpackage **inside** the function under `functools.lru_cache`, plus `shipvision_available()`. A missing submodule is a `ConfigurationError` carrying `git submodule update --init 3rdparty/shipvision && pip install -e 3rdparty/shipvision` — `pipeline/graph/tracking.py`'s wording, so an operator meets one sentence and not four. `topology/__init__.py` imports it, so the package-level import-cheapness subprocess covers it |
+| `topology/chain.py` + `runners/inprocess.py` | both readers of "does this element run a repository model" now ask the **element**, not the kind — and they ask two *different* declarations, `Element.requires_model_name` and `Element.needs_model`. `MODEL_KINDS` is deleted |
+| `topology/base.py` | `ElementContext.metrics` / `.workers` / `.ops`, and `ImageOpsLike` / `LetterboxLike` — a structural stand-in for `runtime.ops.base.ImageOps`, which a pure layer may not import. `InprocessRunner.element_context()` fills the first two; `ops` waits for C3 |
+| `topology/base.py` + `runners/inprocess.py` | `Element.camera_added` / `camera_removed`, base no-ops, called best-effort by `add_camera` / `remove_camera` / `drain` inside `_lifecycle` |
+| `scripts/hooks/check_layers.py` + `tests/test_architecture.py` | `shipvision` banned in `core`, `scheduling`, `repository` (both tables, asserted equal); `pipeline` may now import `topology`, one-way |
+
+**Why.** C4/C6/C7 move `TrackerShard` in and add three stateful elements. Every one of them
+needs the submodule, a per-camera lifecycle and the runner's resolved settings, and none of
+those can be added from inside an element module. Doing them first keeps each later slice to
+one element.
+
+**Decisions.**
+
+- **The requirement is the implementation's, not the kind's — and it is two declarations,
+  not one.** `Element.requires_model_name` is the *chain file's* question ("must this slot
+  name a `model:`?"), read by the loader. `Element.needs_model` is *this process's* ("will
+  `open()` resolve that name against `ElementContext.models`?"), read by the walk's expiry
+  gate and by whatever decides to build an `InferenceServer`. They agree for every
+  implementation phase C ships, which is why one attribute looked free, and they come apart at
+  the first that runs its model elsewhere: an `nvinfer` detect names a `model:` artefact and
+  executes it inside GStreamer — `requires_model_name = True`, `needs_model = False`. Folded
+  together, that element must either refuse a correct chain or make a deepstream chain that
+  forgot its `model:` load clean and fail at graph-compile time. Consequence, and it is a real
+  behaviour change: `detect: {impl: mock}` with no `model:` now **loads**, because a mock
+  resolves nothing. The kind-level rule was insisting on a name nobody reads. **ADR-017 §4 is
+  amended in place** to say so — leaving the ADR stating the superseded rule is the same drift
+  that got `MODEL_KINDS` deleted, one layer up.
+- **The refusal names the element and its impl, not the kind.** `element 'detect' (impl 'pool')
+  must name a \`model: <repository model name>\``. The old sentence ("`detect` is a detect
+  element and needs …") told an operator that every detect element needs a model, which is
+  precisely the rule that was removed.
+- **A surplus `model:` stays accepted.** `ElementSpec.model` has always been "meaningless for
+  the rest" and `describe()` prints it. Refusing it is a separate decision with its own blast
+  radius; this slice is about the requirement, not the surplus.
+- **`shipvision` is NOT in `FORBIDDEN_EXTERNAL["topology"]`.** The hook walks the AST and
+  counts a function-scope import the same as a module-scope one, so that row would ban the
+  lazy loaders and leave no legal spelling. The laziness is enforced by the subprocess
+  assertions in `tests/test_architecture.py` and `tests/topology/test_bridge.py` instead —
+  the same split the file already documents for `runners -> ingest`.
+- **`ops` is a `Protocol`, not `Any`.** `topology` may not import `runtime`. `ImageOpsLike`
+  names one member — `letterbox_batch`, which is all `pipeline/graph/detect.py` calls — and
+  `tests/topology/test_element_context.py` compares its signature against the real `ImageOps`,
+  because a stand-in that has quietly stopped matching is worse than none: it type-checks and
+  fails on the first call.
+- **Hook order.** `camera_added` **after** the ingest actor is placed, so a refused placement
+  announces nothing — an element cannot tell a refused camera from a placed one that has yet
+  to send a frame, and a duplicate `AddCamera` that reset a live camera's tracker would drop
+  every track under it. `camera_removed` **after** the actor is stopped, so nothing can
+  rebuild the state the hook just dropped. Both are best-effort: one element raising is logged
+  with its name and the loop continues, the shape `_do_stop` uses — a tracker that cannot drop
+  a shard must not also keep the camera from being removed, because ADR-018 has no second
+  recovery to offer.
+- **The hooks are NOT serialised against the walk, and the ABC says so.** They run on the
+  caller's thread under the runner's `_lifecycle` lock, which orders the lifecycle operations
+  against each other and nothing else; `submit` and the walk deliberately take no lock, so up
+  to `ElementContext.workers` threads can be inside the same element's `process()` — for the
+  same camera — while `camera_removed` runs. So an implementation guards its per-camera table
+  with its own lock (`pipeline/graph/tracking.py`'s `_admit` is the shape), treats a removal
+  racing an in-flight frame as ordinary, and returns promptly, because every lifecycle
+  operation on the shard queues behind it. `tests/runners/test_camera_lifecycle.py`'s
+  `TestTheHooksRunConcurrentlyWithTheWalk` forces the overlap on an `Event` and records it
+  from inside the hook, so the contract is pinned rather than merely written down: the
+  docstring used to promise "items already admitted are walked after this returns", which
+  would have sent the first `TrackerShard.camera_removed` at an intermittent `KeyError`.
+- **The announcement resolves the method on the instance.** `hook(node.element, id)` with
+  `hook = Element.camera_added` runs the ABC's own no-op past every override: a loop that
+  reaches every element and tells none of them anything, with nothing in a log to see. Caught
+  by the recording test; the loop uses `getattr(node.element, hook.__name__)`.
+
+**Not done here.** No element. `ElementContext.ops` is `None` in every runner in the tree and
+has no producer yet: C3 wires it, in the shape `models=` already has (the CLI or the shard
+resolves one implementation from `runtime.ops` and hands it to the runner). The field and its
+protocol are declared now so the elements C3 lands are written against them from the first
+line, and the docstring says which slice fills it. Shutdown does not announce a removal per
+camera — `close()` releases everything.
+
+---
+
 ## 2026-08-28 — the engine's lifecycle is a claim: `start()` owns a run, a teardown owns a generation
 
 **What.** `InferenceServer.start()` now performs its entry and its exit as atomic

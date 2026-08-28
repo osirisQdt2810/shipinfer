@@ -649,6 +649,20 @@ a chain is validated, and where the "no silent download to CPU" promise (§8) is
    are skip-and-continue. Each failure is one typed error under `TopologyError`, and the
    message names the fix.
 
+**Amended 2026-08-28 (phase C2).** §4's *a model required for model kinds* is superseded: the
+requirement is the **element's**, not the kind's. `Element.requires_model_name` — a `ClassVar`
+the loader reads off the built element — says whether a slot must name a `model:`, and the
+separate `Element.needs_model` says whether `open()` resolves that name against
+`ElementContext.models`. `MODEL_KINDS` was deleted in the same slice, because a `Final`
+frozenset restating a superseded rule is exactly the drift this file exists to prevent. What
+changes: a mock detect needs no `model:` (it invents a box and reads nothing), and
+`recognize: {impl: shipvision}` is a gallery query with nothing to name — both were refused at
+load before. What the split buys: an `nvinfer` element names a `model:` artefact and runs it
+inside GStreamer, so it declares `requires_model_name = True` with `needs_model = False`, and
+one attribute would have forced it to choose between refusing a correct chain and making
+`shipinfer run` build an `InferenceServer` nothing submits to. A surplus `model:` on an element
+that needs none stays accepted and ignored, as it always was.
+
 **Consequences.**
 
 - A runner (phase A2) receives a `Topology` it can trust: ordered nodes, edges carrying a
