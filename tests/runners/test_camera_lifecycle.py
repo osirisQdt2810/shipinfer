@@ -735,6 +735,78 @@ class TestThePriorityBandComesFromTheCameraConfig:
         assert queue.band_of("cam-hot") == {Priority.TRACKING_CRITICAL}
         assert queue.band_of("cam-cold") == {Priority.NORMAL}
 
+    @pytest.mark.parametrize("door", ["config", "spec"])
+    def test_the_health_report_names_the_band_each_camera_landed_in(self, door: str) -> None:
+        """The band an operator can actually check, from whichever door named it.
+
+        The third claim about one camera, beside the record and the queue: what the runner
+        *reports*. It is the only one an operator can reach at runtime -- ``GET /streams``
+        echoes this field (``api/streams.py``) -- and until it existed a band was written on
+        a placement and then unobservable, which on a fleet shard, whose configured table is
+        stripped, meant the ADR-005 customisation could be silently doing nothing.
+
+        Resolved through ``_priority_for`` and not read off either table directly, which is
+        what makes both doors answer here: ``door="config"`` is the single-process
+        deployment, ``door="spec"`` the shard whose only source is the placement.
+        """
+        chain = load()
+        configured = (
+            [
+                {
+                    "camera_id": "cam-hot",
+                    "uri": "injected://hot",
+                    "priority": Priority.TRACKING_CRITICAL,
+                }
+            ]
+            if door == "config"
+            else []
+        )
+        runner = InprocessRunner(
+            chain,
+            settings=settings(ingest={"cameras": configured}),
+            source_factory=scripted(frames=2),
+        )
+        runner.start()
+        try:
+            runner.add_camera(
+                CameraSpec(
+                    "cam-hot",
+                    "injected://hot",
+                    priority=None if door == "config" else Priority.TRACKING_CRITICAL,
+                )
+            )
+            runner.add_camera(CameraSpec("cam-cold", "injected://cold"))
+            cameras = runner.health()["cameras"]
+        finally:
+            runner.stop(timeout_s=5.0)
+
+        assert cameras["cam-hot"]["priority"] == "tracking_critical"
+        assert cameras["cam-cold"]["priority"] == "normal", "the default is still reported"
+        assert cameras["cam-hot"]["state"], "the ingest entry is carried, not replaced"
+
+    def test_the_reported_band_is_a_name_and_never_a_number(self) -> None:
+        """``0`` is ``TRACKING_CRITICAL`` and is also what "unset" looks like on a wire.
+
+        The report crosses a ``google.protobuf.Struct`` to a launcher and then JSON to a
+        client (``launch/proto/shard.proto``), and a band written as an ``IntEnum`` would
+        arrive as a number that a reader has to know this enum to interpret -- with the
+        highest lane spelled falsy. Names are what both doors of this deployment are written
+        in (``Priority.parse``), so they are what the report is written in too.
+        """
+        chain = load()
+        runner = InprocessRunner(chain, settings=settings(), source_factory=scripted(frames=1))
+        runner.start()
+        try:
+            runner.add_camera(
+                CameraSpec("cam-hot", "injected://hot", priority=Priority.TRACKING_CRITICAL)
+            )
+            reported = runner.health()["cameras"]["cam-hot"]["priority"]
+        finally:
+            runner.stop(timeout_s=5.0)
+
+        assert reported == "tracking_critical"
+        assert isinstance(reported, str)
+
     def test_a_spec_with_no_band_leaves_the_configured_table_in_charge(self) -> None:
         """``None`` on the spec is "the shard decides", not "put it in normal".
 

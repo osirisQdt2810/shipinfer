@@ -341,6 +341,20 @@ class StreamInfo(BaseModel):
     #: this one is terminal until a caller removes the camera and adds it back. The view lags
     #: a death by up to the launcher's supervision poll.
     lost: bool = False
+    #: Which scheduler lane this camera's frames are admitted into, as the lower-cased band
+    #: name :attr:`StreamRequest.priority` is posted in -- so the request that placed a
+    #: camera and the listing that confirms it are written in one vocabulary, and an
+    #: operator can check over HTTP that ``priority: tracking_critical`` actually took
+    #: effect. That check is the point: a fleet shard's ingest config is stripped (#71), so
+    #: the band on the placement is the only thing that decides the lane and nothing else
+    #: reports what it resolved to.
+    #:
+    #: ``None`` is "the controller did not say", and it is deliberately not ``normal``.
+    #: A default here would answer *middle lane* for a camera on an unreachable shard or
+    #: behind a runner whose health carries no band, which is the confidently-wrong shape
+    #: `url` and `loop` are optional to avoid -- and the misconfiguration it would hide is
+    #: exactly the one being looked for (ADR-005).
+    priority: BandName | None = None
 
     # `loop` is deliberately absent, for the reason `url` is optional-shaped: no runner's
     # health report carries it, so a field here would answer `true` for every camera --

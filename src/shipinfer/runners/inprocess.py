@@ -1759,9 +1759,30 @@ class InprocessRunner(Runner):
         one is a runner lying about what it is.
 
         Keyed by camera id and carrying
-        :meth:`~shipinfer.ingest.CameraHealth.as_dict` verbatim, because the interesting
-        answer is never the count -- it is which camera is CONNECTING, which is EXHAUSTED at
-        the end of its file, and which is dropping frames the pool refused.
+        :meth:`~shipinfer.ingest.CameraHealth.as_dict`, because the interesting answer is
+        never the count -- it is which camera is CONNECTING, which is EXHAUSTED at the end of
+        its file, and which is dropping frames the pool refused.
+
+        Plus one field the ingest plane does not have: ``priority``, the band this runner
+        admits that camera's items into. It is stamped here rather than added to
+        :class:`~shipinfer.ingest.CameraHealth` because a frame is data and a band is policy
+        -- ``shipinfer.ingest`` neither reads nor resolves one (:meth:`_camera_config`) --
+        and it is reported at all because otherwise nothing does. A band reaches a camera
+        from a launcher's :class:`~shipinfer.launch.control.CameraSpec` or from
+        ``ingest.cameras``, and on a fleet shard the second of those is stripped (#71), so
+        ``priority: tracking_critical`` on a placement was a claim an operator had no way to
+        check. ``GET /streams`` echoes this field (``api/streams.py``), and it crosses to a
+        launcher untouched because ``HealthReply.cameras`` is a ``google.protobuf.Struct``
+        that ``runners/service.py`` fills with this dict.
+
+        The value comes from :meth:`_priority_for` and never from a table read directly,
+        which is the same rule :meth:`_camera_config` follows and for the same reason: the
+        report and the lane are one resolution or they are two claims that can disagree. It
+        is a read on the submit path's tables, so it is O(1) and allocates nothing beyond the
+        report itself; it can in principle memoise a band through
+        :meth:`_learn_priority`, but not in practice -- every camera in this map was either
+        placed through :meth:`_camera_config`, which resolves it first, or named in
+        ``ingest.cameras``, which is where :attr:`_configured` came from.
         """
         manager = self._ingest_manager
         return {
@@ -1774,7 +1795,10 @@ class InprocessRunner(Runner):
                 {}
                 if manager is None
                 else {
-                    camera_id: health.as_dict()
+                    camera_id: {
+                        **health.as_dict(),
+                        "priority": self._priority_for(camera_id).name.lower(),
+                    }
                     for camera_id, health in manager.health().items()
                 }
             ),

@@ -264,17 +264,26 @@ def build_streams_router(cameras: CameraController) -> Any:
 
         The band arrives as a *name* (:data:`~shipinfer.api.schemas.BandName`) and is turned
         into a :class:`~shipinfer.core.request.Priority` here, at the one place the wire
-        vocabulary meets the launcher's. The lookup cannot fail: the schema already refused
-        every string that is not a member name -- in any case, having lower-cased it first
+        vocabulary meets the launcher's -- by :meth:`~shipinfer.core.request.Priority.parse`,
+        which is the same call the schema's validator and
+        :class:`~shipinfer.core.settings.ingest.CameraConfig` make. One rule for what a band
+        is, owned in ``core``, rather than a third spelling of ``Priority[name.upper()]``
+        living here: a band added, renamed or aliased there reaches this door with no edit,
+        and cannot reach it *differently*.
+
+        The call cannot fail: the schema already refused every string that is not a member
+        name -- in any case, having lower-cased it first
         (:meth:`~shipinfer.api.schemas.StreamRequest._band_name_is_case_insensitive`) -- which
-        is what makes this a 422 rather than a 500.
+        is what makes an unknown band a 422 rather than a 500. That the validator has already
+        narrowed the input is also why ``parse`` taking the numbers too is not a widening
+        here: ``{"priority": 0}`` and ``{"priority": "0"}`` never reach this function.
         """
         return CameraSpec(
             camera_id=camera_id,
             url=body.url,
             fps=body.fps,
             loop=body.loop,
-            priority=None if body.priority is None else Priority[body.priority.upper()],
+            priority=None if body.priority is None else Priority.parse(body.priority),
         )
 
     async def _named(body: StreamRequest) -> CameraSpec:
@@ -492,6 +501,12 @@ def _placed_from(health: Mapping[str, Any], camera: CameraSpec) -> StreamInfo:
     supplied it and no runner's health carries one (:class:`StreamInfo`). A camera missing
     from the report is still a 201: the add returned success, and reporting a failure would
     earn a retry and a duplicate.
+
+    ``priority`` is deliberately *not* filled in from ``camera`` the way ``url`` is. The band
+    on the spec is what was asked for; the field reports what the controller resolved, and on
+    a camera the report does not mention nothing has resolved anything yet -- so a 201 whose
+    body echoed the request would confirm a placement in a lane no runner has agreed to. It
+    reads ``null`` there, and the ``GET`` that follows says what actually happened.
     """
     for info in _streams(health):
         if info.camera_id == camera.camera_id:
@@ -540,6 +555,12 @@ def _streams(health: Mapping[str, Any]) -> list[StreamInfo]:
       and a runner that had to stamp each entry would be keeping a derived flag in step with
       a poll.
 
+    ``state`` and ``priority`` are read from the per-camera entry first and from the shard's
+    own entry second, because that is where each of them exists on each runner: in process
+    both are inline, on a fleet the launcher's map carries neither and the shard's report
+    carries both. The two are the same join and are taken together (:func:`_on_shard`), so a
+    listing cannot say a camera is streaming on one shard and banded on another.
+
     Read defensively — ``.get`` and an ``isinstance`` per level — because a health report is a
     ``dict`` by design (``launch/control.py`` explains why it is not a wire message) and a
     listing that raises on an unreachable shard's entry is a listing that fails exactly when
@@ -555,31 +576,67 @@ def _streams(health: Mapping[str, Any]) -> list[StreamInfo]:
     for camera_id, entry in sorted(entries.items()):
         detail = entry if isinstance(entry, Mapping) else {}
         shard = detail.get("shard", default_shard)
-        state = detail.get("state") or _state_on_shard(health, shard, str(camera_id))
+        on_shard = _on_shard(health, shard, str(camera_id))
         streams.append(
             StreamInfo(
                 camera_id=str(camera_id),
                 url=str(detail.get("url") or ""),
                 shard=shard if isinstance(shard, int) else None,
                 pending=bool(detail.get("pending", False)),
-                state=str(state or ""),
+                state=str(detail.get("state") or on_shard.get("state") or ""),
                 lost=str(camera_id) in lost_ids,
+                # `or` is safe on these two and on nothing else in this file: a band name is
+                # a non-empty string or `None`, so there is no falsy band to demote the way
+                # `Priority.TRACKING_CRITICAL or ...` would (ADR-005).
+                priority=_band_of(detail) or _band_of(on_shard),
             )
         )
     return streams
 
 
-def _state_on_shard(health: Mapping[str, Any], shard: object, camera_id: str) -> str:
-    """The ingest state a shard reported for one of its cameras, or ``""``.
+def _on_shard(health: Mapping[str, Any], shard: object, camera_id: str) -> Mapping[str, Any]:
+    """What a shard's own report says about one of its cameras, or an empty mapping.
 
-    A launcher's camera map says *where* a camera is and the shard's own report says *how it
-    is doing*; joining them here is what makes ``GET /streams`` answer the question an
-    operator actually has ("which camera is dark") on a fleet as well as in process.
+    A launcher's camera map says *where* a camera is and the shard's report says *how it is
+    doing* and *which lane it landed in*; joining them here is what makes ``GET /streams``
+    answer the questions an operator actually has ("which camera is dark", "did my
+    ``tracking_critical`` take effect") on a fleet as well as in process.
+
+    Returns the entry rather than one field of it because both callers want the same entry:
+    two lookups down the same four levels could disagree with each other about which shard
+    they read, and there is nothing to be gained by allowing that.
     """
     shards = health.get("shards")
     if not isinstance(shards, Mapping):
-        return ""
+        return {}
     entry = shards.get(str(shard))
     reported = entry.get("cameras") if isinstance(entry, Mapping) else None
     camera = reported.get(camera_id) if isinstance(reported, Mapping) else None
-    return str(camera.get("state", "")) if isinstance(camera, Mapping) else ""
+    return camera if isinstance(camera, Mapping) else {}
+
+
+def _band_of(detail: Mapping[str, Any]) -> str | None:
+    """The scheduler band a per-camera health entry names, lower-cased, or ``None``.
+
+    ``None`` for an entry that names no band, and for one whose band this deployment does not
+    have. The second is not defensiveness for its own sake: a launcher's report is assembled
+    from shard replies that crossed a ``google.protobuf.Struct``
+    (``launch/proto/shard.proto``) and were written by a process this one did not build, so a
+    shard from an older release is a real source of a name that is not in
+    :class:`~shipinfer.core.request.Priority`. Answering ``None`` degrades one field of one
+    camera; raising would fail the whole listing, and a listing fails when it is being read
+    to find out what is wrong.
+
+    :meth:`~shipinfer.core.request.Priority.parse` rather than a membership test against
+    :data:`~shipinfer.api.schemas.BAND_NAMES`, for the reason :func:`build_streams_router`'s
+    ``_spec`` gives: one rule decides what a band is. It accepts the numbers as well, which
+    is right *here* and wrong at the request door — this is a report being read, so a runner
+    that wrote ``0`` meant the band and not "unset", and there is no client to mislead.
+    """
+    band = detail.get("priority")
+    if band is None:
+        return None
+    try:
+        return Priority.parse(band).name.lower()
+    except ValueError:
+        return None
