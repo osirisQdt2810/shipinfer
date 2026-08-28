@@ -1378,13 +1378,19 @@ class TestTheHooksRunConcurrentlyWithTheWalk:
 
         runner.remove_camera("cam-a", timeout_s=5.0)
 
-        assert element.removed_mid_process == [
-            "cam-a"
-        ], "the hook did not overlap the walk, so this test is no longer arranging the race"
-        assert not element.left.is_set(), "the removal waited for the element to finish"
-        assert runner.cameras == ()
+        try:
+            assert element.removed_mid_process == [
+                "cam-a"
+            ], "the hook did not overlap the walk, so this test is no longer arranging the race"
+            assert not element.left.is_set(), "the removal waited for the element to finish"
+            assert runner.cameras == ()
+        finally:
+            # In the `finally` so that a red build is fast as well as red: an assertion that
+            # escaped from here would leave the worker parked for its full 10 s and the
+            # fixture's `stop` waiting another 5 on top of it. The release stays *after* the
+            # assertions because one of them is about the worker still being parked.
+            element.release.set()
 
-        element.release.set()
         assert until(element.left.is_set), "the parked worker never finished its frame"
 
     def test_the_frame_the_worker_was_holding_still_reaches_the_sink(self, runner_over) -> None:
