@@ -261,6 +261,40 @@ class TestTheInstantIsAnchoredAndComesFromCaptureTime:
         waiting.join(5.0)
         assert waiting.outcome.results == {"cameras": ("cam-a", "cam-b")}
 
+    def test_another_camera_running_ahead_does_not_make_the_next_frame_a_duplicate(
+        self,
+    ) -> None:
+        """The bucket's ``last`` is the maximum over the whole *group*, so testing a repeat
+        against it refused a camera's genuinely next frame whenever a second camera had
+        already pushed the span past it: cam-a at 100.000, cam-b at 100.055, and then cam-a's
+        own next frame at 100.050 — 50 ms later, which is what 20 fps looks like. It was
+        counted ``duplicate``, got no answer, and left the instant to sit out its whole window
+        for a camera that had moved on. The test is per camera, against what that camera
+        itself put in, which is also what :data:`MISSED_DUPLICATE`'s docstring has always
+        said."""
+        held = barrier(sync_window_s=DEFAULT_SYNC_WINDOW_MS / 1e3, workers=8)
+        for camera in ("cam-a", "cam-b", "cam-c"):
+            held.camera_added(camera)
+        opener = Submitter(held, "cam-a", 100.000)
+        opener.start()
+        assert until(lambda: held.waiters == 1)
+        ahead = Submitter(held, "cam-b", 100.055)
+        ahead.start()
+        assert until(lambda: held.waiters == 2)
+        assert held.open_spans == ((1, 100.000, 100.055),), "one instant, spanning both"
+
+        nxt = held.submit("cam-a", 100.050, "p", associate=flat)
+
+        opener.join(5.0)
+        ahead.join(5.0)
+        assert held.frame_stats().get(MISSED_DUPLICATE, 0) == 0, "cam-a's next frame refused"
+        assert held.instant_stats()[CLOSED_ADVANCED] == 1, "the instant was sealed, not held"
+        assert opener.outcome.reason == CLOSED_ADVANCED
+        assert opener.outcome.results == {"cameras": ("cam-a", "cam-b")}
+        assert ahead.outcome.results == opener.outcome.results
+        assert nxt.instant != opener.outcome.instant, "the next frame is the next instant"
+        assert nxt.results == {"cameras": ("cam-a",)}, "and it is in that instant alone"
+
 
 # -- closing ---------------------------------------------------------------------------------
 
@@ -624,6 +658,26 @@ class TestAnAbandonedInstantIsRetired:
         assert held.instant_stats()[DROPPED_EXPIRED] == 1
         assert held.open_instants == 1
 
+    def test_a_sealed_bucket_nobody_waited_on_keeps_the_reason_it_was_sealed_with(
+        self,
+    ) -> None:
+        """``advanced`` is the share an operator reads before touching ``sync_window_ms``,
+        and counting a sealed-but-unwaited bucket ``expired`` made it structurally zero in
+        the one regime where it matters: a shard with too few workers, where nobody ever
+        parks and so nobody is ever there to close the instant a camera sealed."""
+        held = barrier(sync_window_s=0.03, workers=1)  # no permits: nobody ever waits
+        held.camera_added("cam-a")
+        held.camera_added("cam-b")
+        assert held.submit("cam-a", 100.00, "p", associate=flat).reason == MISSED_WOULD_STARVE
+        # cam-a's next frame is inside the window and later than its own, so it seals instant
+        # 1 -- `advanced` -- and opens instant 2 with itself in it.
+        assert held.submit("cam-a", 100.02, "p", associate=flat).reason == MISSED_WOULD_STARVE
+        time.sleep(0.06)
+
+        held.submit("cam-b", 100.20, "p", associate=flat)
+
+        assert held.instant_stats() == {CLOSED_ADVANCED: 1, DROPPED_EXPIRED: 1}
+
 
 class TestCloseAllResolvesEveryWaiter:
     def test_a_shutdown_releases_the_parked_workers_at_once(self) -> None:
@@ -885,6 +939,31 @@ class TestTheWaiterBudgetIsPerProcessAndNotPerBarrier:
         budget.release()
         with pytest.raises(ServerStateError, match="released more times"):
             budget.release()
+
+    def test_a_budget_hands_out_its_permits_and_no_more_and_counts_them(self) -> None:
+        """The bound is :class:`threading.BoundedSemaphore`'s; ``held`` is not, which is why
+        there is a wrapper at all — the health report and every test of the never-starve
+        invariant read it, and ``Semaphore`` has no public way to say it."""
+        budget = WaiterBudget(2)
+
+        assert [budget.acquire() for _ in range(3)] == [True, True, False]
+
+        assert budget.held == 2
+        budget.release()
+        assert budget.held == 1
+
+    def test_a_supplied_budget_wins_over_an_unknown_worker_count(self) -> None:
+        """``workers`` only ever sizes a *private* budget, so "the runner did not say" does
+        not veto a budget that was said: a barrier built this way waits on the budget's
+        permits, and a docstring claiming it never waits would send an operator looking for
+        the wrong symptom."""
+        budget = WaiterBudget(3)
+
+        held = InstantBarrier(sync_window_s=1.0, workers=None, budget=budget)
+
+        assert held.budget is budget
+        assert held.budget.permits == 3
+        assert held.workers == 1, "and `workers` reports the fallback, governing nothing"
 
     def test_a_barrier_given_no_budget_sizes_a_private_one_from_workers(self) -> None:
         assert barrier(workers=4).budget.permits == 3

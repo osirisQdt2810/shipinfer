@@ -105,7 +105,10 @@ CLOSED_ADVANCED = "advanced"
 #: far ahead of the others.
 DROPPED_EVICTED = "evicted"
 #: The bucket passed its deadline with nobody waiting on it -- every frame in it had already
-#: been emitted by the never-starve guard, so there was no answer for anyone to receive.
+#: been emitted by the never-starve guard, so there was no answer for anyone to receive. A
+#: bucket that was *sealed* before it expired keeps its sealing reason instead: what happened
+#: to it is that a camera moved on (:data:`CLOSED_ADVANCED`), and counting it here would read
+#: that share as zero in exactly the starved shard where it is the number to look at.
 DROPPED_EXPIRED = "expired"
 #: :meth:`InstantBarrier.close_all` resolved the bucket because the element is closing. Also
 #: the *frame*-level reason a submit after that gets, which is why the two families are
@@ -125,7 +128,10 @@ MISSED_LATE = "late"
 #: leak. A *later* capture from a camera already in the bucket is not this -- it is the next
 #: instant, and it closes the open one (:data:`CLOSED_ADVANCED`).
 MISSED_DUPLICATE = "duplicate"
-#: Waiting would have parked the last pipeline worker. See the module docstring.
+#: Waiting would have parked the last pipeline worker. See the module docstring. The
+#: frame's payload is already in its bucket when the guard fires, so its tracks still take
+#: part in the group's association -- only the *answer* is not delivered to this frame.
+#: Dropping the entry instead would degrade the instant for every camera that did wait.
 MISSED_WOULD_STARVE = "would_starve"
 
 #: How wide an instant is, in milliseconds -- the maximum capture spread of one instant, and
@@ -134,7 +140,11 @@ MISSED_WOULD_STARVE = "would_starve"
 #: no longer constrained from below by the frame period: it has to be at least the group's
 #: arrival spread, and 60 ms is a comfortable margin over the ~1 ms genlock skew of a wired
 #: group while staying near one frame period at 20 fps, which is the worst-case latency this
-#: bounds.
+#: bounds. What no window can rescue is a group whose cameras run at **different frame
+#: rates**: the slow camera stretches each instant's span until it reaches the fast cameras'
+#: next capture, which then reads late against the instant that has just closed. Measured,
+#: one 15 fps camera in a group of eight at 20 fps: 80% coverage. A group is one frame rate,
+#: and mixed rates belong in separate groups.
 DEFAULT_SYNC_WINDOW_MS = 60.0
 #: How many instants may be open at once before the oldest is evicted. Eight is half a second
 #: at the default window: enough to absorb one camera running a few frames behind, far too
@@ -155,10 +165,26 @@ class WaiterBudget:
     prevent. One budget for the process, constructed by the runner with ``workers - 1``
     permits, makes the invariant hold however many barriers there are.
 
+    One budget for two groups also makes their coverage **interfere**, because the permits are
+    handed out first-come and neither barrier knows about the other: a shard running two
+    barriers needs the *sum* of its groups' sizes in workers rather than the larger of them.
+    Measured, two 8-camera groups: 100% coverage each at 16 workers, and 73% / 52% at 9, where
+    whichever group's frames arrive first takes the permits and the other waits with a gap.
+
     ``acquire`` never blocks: a barrier calls it while holding its own condition lock, and a
     budget that could block there would be a lock-ordering hazard between two barriers. It
-    takes only this object's lock and calls nothing back, so a barrier's lock and this one
-    are always taken in that order and never the reverse.
+    takes only this object's lock and the semaphore's, and calls nothing back, so a barrier's
+    lock and these are always taken in that order and never the reverse.
+
+    **What is not the stdlib's.** The permit counting is
+    :class:`threading.BoundedSemaphore` and nothing else: ``acquire(blocking=False)`` is "take
+    one if there is one" and ``release()`` past the bound is the over-release this guard must
+    refuse rather than absorb. Two things a semaphore does not give: how many permits are
+    *out* — ``Semaphore._value`` is private and there is no public reader, and that number is
+    what the health report and every test of the never-starve invariant read — and a typed
+    failure, since a bare ``ValueError`` names neither the subsystem nor what it costs. So a
+    counter is kept beside it, under a lock held only across the semaphore's own non-blocking
+    calls, and the refusal is re-raised as :class:`ServerStateError`.
 
     Args:
         permits: how many waiters may be outstanding. ``0`` is legitimate and means "never
@@ -169,7 +195,7 @@ class WaiterBudget:
         ConfigurationError: a negative number of permits.
     """
 
-    __slots__ = ("_held", "_lock", "_permits")
+    __slots__ = ("_held", "_lock", "_permits", "_semaphore")
 
     def __init__(self, permits: int) -> None:
         if permits < 0:
@@ -177,8 +203,9 @@ class WaiterBudget:
                 f"a waiter budget cannot have {permits} permits; 0 means 'never wait', which "
                 f"is what a single-worker runner gets"
             )
-        self._lock = threading.Lock()
         self._permits = int(permits)
+        self._semaphore = threading.BoundedSemaphore(self._permits)
+        self._lock = threading.Lock()
         self._held = 0
 
     @property
@@ -200,7 +227,7 @@ class WaiterBudget:
             caller must emit its frame with a gap instead of parking.
         """
         with self._lock:
-            if self._held >= self._permits:
+            if not self._semaphore.acquire(blocking=False):
                 return False
             self._held += 1
             return True
@@ -212,14 +239,16 @@ class WaiterBudget:
             ServerStateError: more releases than acquires. Acquire and release are paired by
                 one ``try``/``finally`` in :meth:`InstantBarrier.submit`, so this cannot
                 happen from a correct caller and a silent decrement past zero would hand out
-                permits that do not exist.
+                permits that do not exist. The refusal is the semaphore's, re-raised typed.
         """
         with self._lock:
-            if self._held == 0:
+            try:
+                self._semaphore.release()
+            except ValueError as exc:
                 raise ServerStateError(
                     "a waiter budget was released more times than it was acquired; the "
                     "permit count is now meaningless and the never-starve guard with it"
-                )
+                ) from exc
             self._held -= 1
 
     def __repr__(self) -> str:
@@ -283,7 +312,12 @@ class _Bucket:
     first: float
     last: float
     entries: list[InstantEntry] = field(default_factory=list)
-    reported: set[str] = field(default_factory=set)
+    #: Camera -> the capture *that camera* put into this instant. A mapping and not a set
+    #: because the duplicate test is per camera: ``last`` is the maximum over the whole
+    #: group, so testing a repeat against it refuses a camera's genuinely next frame
+    #: whenever another camera has already pushed the span past it (a@100.000, b@100.055,
+    #: then a@100.050 -- 50 ms after a's own frame, and a duplicate of nothing).
+    reported: dict[str, float] = field(default_factory=dict)
     waiters: int = 0
     #: Set by the thread that resolved this bucket. A waiter wakes, sees it, and returns.
     done: bool = False
@@ -338,12 +372,16 @@ class InstantBarrier:
         workers: how many threads may be inside :meth:`submit` at once —
             :attr:`~shipinfer.topology.base.ElementContext.workers`. Used only to size a
             private :class:`WaiterBudget` when ``budget`` is not supplied. ``None`` means the
-            runner did not say, and the barrier then never waits at all: guessing would park
-            the only thread there is on a single-worker runner.
+            runner did not say, and sizes that private budget to zero permits — a barrier
+            given neither a worker count nor a budget never waits at all, because guessing
+            would park the only thread there is on a single-worker runner.
         budget: the process-wide waiter budget, from
             :attr:`~shipinfer.topology.base.ElementContext.waiter_budget`. ``None`` builds a
             private one with ``workers - 1`` permits, which is right for a barrier that is the
-            only one in its process and is what the offline tier uses.
+            only one in its process and is what the offline tier uses. **A supplied budget
+            wins over ``workers``**, which is only ever a way to size the private one: a
+            barrier built with ``workers=None`` and a non-empty budget does wait, on the
+            budget's permits, and :attr:`workers` then reads 1 while governing nothing.
         max_instants: how many buckets may be open before the oldest is evicted.
         on_event: called once per *instant-level* event, under the lock, with one of
             :data:`CLOSED_COMPLETE`, :data:`CLOSED_WINDOW`, :data:`CLOSED_ADVANCED`,
@@ -398,7 +436,7 @@ class InstantBarrier:
         if workers is not None and workers < 1:
             raise ConfigurationError(
                 f"workers must be at least 1, got {workers}; pass None for 'the runner did "
-                f"not say', which makes this barrier never wait"
+                f"not say', which sizes a private budget of zero permits"
             )
         self._window_s = float(sync_window_s)
         # `None` collapses to 1, and 1 gives a private budget of zero permits -- i.e. never
@@ -442,7 +480,11 @@ class InstantBarrier:
 
     @property
     def workers(self) -> int:
-        """How many threads may be inside :meth:`submit`; ``workers - 1`` may wait."""
+        """What the runner said its worker count is, or 1 when it said nothing.
+
+        It sizes a *private* budget and governs nothing else. How many callers may actually
+        wait is ``budget.permits``, which is the shared budget's whenever one was supplied.
+        """
         return self._workers
 
     @property
@@ -548,7 +590,7 @@ class InstantBarrier:
             live = self._live_set
             woken = False
             for bucket in self._buckets.values():
-                if bucket.waiters and not bucket.ready and live <= bucket.reported:
+                if bucket.waiters and not bucket.ready and live <= bucket.reported.keys():
                     bucket.ready = True
                     bucket.ready_reason = CLOSED_COMPLETE
                     woken = True
@@ -599,7 +641,7 @@ class InstantBarrier:
                     return self._missed(MISSED_LATE, late)
                 bucket = self._open(capture_s, now)
             elif camera_id in bucket.reported:
-                if capture_s <= bucket.last:
+                if capture_s <= bucket.reported[camera_id]:
                     return self._missed(MISSED_DUPLICATE, bucket.instant)
                 # This camera has moved on, so that instant has every frame it will ever get
                 # from it. Seal it -- a waiter, which holds a callback, closes it -- and put
@@ -607,12 +649,12 @@ class InstantBarrier:
                 self._seal(bucket, CLOSED_ADVANCED)
                 bucket = self._open(capture_s, now)
 
-            bucket.reported.add(camera_id)
+            bucket.reported[camera_id] = capture_s
             bucket.entries.append(InstantEntry(camera_id, payload))
             bucket.first = min(bucket.first, capture_s)
             bucket.last = max(bucket.last, capture_s)
 
-            if self._live_set <= bucket.reported:
+            if self._live_set <= bucket.reported.keys():
                 return self._close(bucket, CLOSED_COMPLETE, associate)
             # The never-starve guard, counted process-wide: two barriers each admitting
             # `workers - 1` waiters would park every worker between them.
@@ -790,8 +832,20 @@ class InstantBarrier:
         there is no association anybody would receive — running one would cost a tracker call
         and a global-id assignment for an answer with no reader, and *not* running one would
         leave the bucket to be evicted later and read as clock skew. It is discarded and
-        counted.
+        counted — under the reason it was **sealed** with when it was sealed, because "a
+        camera moved on" is what happened to that instant and :data:`CLOSED_ADVANCED` is the
+        share an operator reads before touching ``sync_window_ms``.
+
+        Runs on every :meth:`submit`, and almost always finds nothing. The map is
+        insertion-ordered by instant id and every deadline is one window after its bucket
+        opened, so the bucket at the front has the earliest deadline of all of them: if *it*
+        has not expired, none has, and the common case costs one comparison rather than a list
+        nobody reads.
         """
+        if not self._buckets:
+            return
+        if next(iter(self._buckets.values())).deadline > now:
+            return
         stale = [
             bucket
             for bucket in self._buckets.values()
@@ -801,9 +855,9 @@ class InstantBarrier:
             self._buckets.pop(bucket.instant, None)
             self._remember(bucket)
             bucket.results = None
-            bucket.reason = DROPPED_EXPIRED
+            bucket.reason = bucket.ready_reason if bucket.ready else DROPPED_EXPIRED
             bucket.done = True
-            self._event(DROPPED_EXPIRED)
+            self._event(bucket.reason)
         if stale:
             self._cond.notify_all()
 
