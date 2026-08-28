@@ -19,7 +19,8 @@ and by the shard.
 | `topology/elements/pool.py` | `_do_process` splits into `_prepare` / `_finish`; `PoolDetect` replaces both. `letterbox_batch` in, `decode_detections` against the reported scale/pad out. `meta["boxes"]` is **removed** — nothing in `src/` read it |
 | `topology/base.py` | `Element.needs_image_ops`, the third of these declarations. `True` on `PoolDetect` only |
 | `runners/base.py`, `inprocess.py`, `fleet.py` | `Runner(ops=...)`, `Runner.ops`, and `element_context()` puts it on the context — the same shape `models=` already had |
-| `cli/commands/run.py`, `cli/shard.py` | `image_ops_are_needed(runner, chain)` and the shard's `_image_ops`: `get_image_ops` resolved only when the chain declares it. A mock chain and a `fleet` launcher resolve none |
+| `cli/commands/run.py`, `cli/shard.py` | `dependency_is_needed(keyword, runner, chain)` over a `{keyword: element attribute}` table, with `model_pool_is_needed` / `image_ops_are_needed` as its two named rows: a dependency is resolved only when the chain declares it. A mock chain and a `fleet` launcher resolve none. What is handed over is a `ThreadLocalImageOps` — see the first decision below |
+| `runtime/ops/thread_local.py` | `ThreadLocalImageOps` + `staging_owner` moved out of `pipeline/graph/ops.py` (re-export shim left behind), plus `get_thread_local_image_ops` — the one call that binds a delegate per worker thread, spreads threads over the visible GPUs and claims a pinned pool each |
 | `topology/elements/mock.py` | `MockDetect` files a real `Detections` beside its old `boxes` list, so C4's tracker can be tested offline against the shape a `pool` detector actually produces |
 
 **Why.** `track` cannot consume `meta["boxes"]`, because that key was `response.outputs` filed
@@ -30,6 +31,27 @@ to move into the pure layer first.
 
 **Decisions.**
 
+- **The runner is handed one `ImageOps` per worker thread, not one per process.** `get_image_ops`
+  answers for *one* thread and every implementation it can return says so: `NativeImageOps`
+  keeps a staging ring inside the extension, `TorchImageOps` binds a device on the constructing
+  thread and caches an event and a ping-pong staging pair on the instance. `pipeline.workers`
+  threads walk one chain over one shared `PoolDetect`, so a single instance is CONVENTIONS 2.8's
+  pinned buffer overwritten mid-DMA — plausible pixels, no error, and invisible to the offline
+  tier because `NumpyImageOps` is stateless. The first cut of this slice did exactly that, and
+  passed no `device_index` either, so a single-process run on an 8-GPU box pre-processed every
+  camera on `cuda:0` — this project's founding bug one layer up. Fixed by *reuse*:
+  `ThreadLocalImageOps` already solved it for `PipelineRunner`, so it moved to the layer that
+  owns the seam and gained `get_thread_local_image_ops` for the composition roots. Devices come
+  off the engine's `DeviceManager`, never from building one here — that costs a CUDA primary
+  context per GPU this process never gives back.
+- **`PoolDetect` cross-checks the artefact at `open()`, not at the first frame.** `decode.dst_size`
+  is the override for a *dynamic*-shape engine; against a declared static `(3, H, W)` it is
+  refused, naming both ends, because a static engine catches it loudly and a dynamic one accepts
+  it and answers with boxes that are wrong on every camera. An `input` the model does not declare
+  is refused too — `_resolve_dst_size` falls back to "the single declared spec" when the name
+  misses, so a typo'd `params: {input: pixels}` resolved a perfectly good extent and hid itself
+  until the first frame of the deploy. Both checks were in the code this element replaced
+  (`pipeline/graph/stage.py::validate`) and were lost in the move; CONVENTIONS 2.6.
 - **No `ElementContext.ops` is a refusal at `open()`, not a numpy fallback.** `topology` may
   not import `runtime`, so a fallback would mean a second, unfused letterbox living in the
   pure layer — a reimplementation of the thing the ops seam exists to own (CONVENTIONS 2.1),
@@ -61,18 +83,24 @@ to move into the pure layer first.
   ordinary detector rather than an ambiguous one.
 - **The ops gating reuses `Runner.needs_model_pool` for the runner half.** What that attribute
   declares is "this runner calls `open()` on these elements in this process", which is the
-  condition for both dependencies; the name is the pool's only because the pool needed it
-  first. The *element* half is a separate declaration, because the two come apart — a chain of
-  `pool` embedders needs a pool and no ops, and the first element that crops without running a
-  repository model will need ops and no pool.
+  condition for every dependency an element is handed; the name is the pool's only because the
+  pool needed it first, and its docstring now says so. The *element* half is a separate
+  declaration, because the two come apart — a chain of `pool` embedders needs a pool and no ops,
+  and the first element that crops without running a repository model will need ops and no pool.
+  The two predicates are one function over a `{keyword: attribute}` table rather than two copies
+  of four lines, because phase D adds a third dependency (the DataPool).
 - **`tests/runners/test_pool_element.py` now asserts the shared behaviour through
   `PoolSegment`.** Testing it through the one subclass that overrides both hooks would be
   testing the override.
 
-**Evidence.** Offline tier only, no GPU touched: `2446 passed, 1 skipped, 60 deselected` in
-169 s; `check_layers.py` 0; `pre-commit run --all-files` 0 Failed. Revert-checks: deleting the
-un-letterbox arithmetic in `decode_detections` turns 4 decode tests red and nothing else;
-returning `True` unconditionally from `image_ops_are_needed` turns 3 gating tests red.
+**Evidence.** Offline tier only, no GPU touched: `2528 passed, 1 skipped, 60 deselected` in
+160 s; `check_layers.py` 0; `pre-commit run --all-files` 0 Failed. Revert-checks: deleting
+the un-letterbox arithmetic in `decode_detections` turns 6 decode tests red and nothing
+else; returning `True` unconditionally from the `ops` row of `dependency_is_needed` turns 3
+gating tests red; handing a bare `get_image_ops(...)` back to the two runners turns 5 wiring
+tests red across `run` and `shard`; deleting the `_do_open` artefact cross-check turns exactly
+the two new start-up refusals red; dropping `extents`, the uint8 check and the mock's class-id
+lookup turns 5 more red.
 
 ---
 

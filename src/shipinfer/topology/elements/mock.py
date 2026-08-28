@@ -40,7 +40,7 @@ from typing import Any, ClassVar
 import numpy as np
 
 from shipinfer.topology.base import ChainItem, Element, ElementContext, ElementKind
-from shipinfer.topology.elements.detections import Detections
+from shipinfer.topology.elements.detections import DecodeParams, Detections
 from shipinfer.topology.registry import registry_for
 
 __all__ = [
@@ -127,6 +127,21 @@ class MockDecode(_Mock):
         )
 
 
+#: The default class table, inverted. Built from :class:`DecodeParams` rather than written
+#: out, because the two disagreeing is exactly the bug this replaces: ``invented_detections``
+#: filed ``class_ids=[0]`` under the label ``"ship"`` while the table maps 0 to ``person`` and
+#: 8 to ``ship``. A mock whose id contradicts its own label is worse than an obviously fake
+#: one — it is the first thing a tracker test copies, and a class-conditional chain step
+#: (``when: class == ship``) reads the id.
+_CLASS_IDS: dict[str, int] = {
+    label: class_id for class_id, label in DecodeParams().class_labels.items()
+}
+
+#: What a label the default table has no id for is filed as. Deliberately not ``0``: ``0`` is
+#: ``person``, so reusing it would put an invented class under a real one's number.
+_UNKNOWN_CLASS_ID = -1
+
+
 def invented_detections(label: str) -> Detections:
     """One 10x10 box of ``label``, in the shape a real detector produces.
 
@@ -139,11 +154,16 @@ def invented_detections(label: str) -> Detections:
 
     The numbers are still invented and still say so — one box at the origin, score 0.9. A mock
     that produced plausible detections would eventually be trusted for something.
+
+    The **class id agrees with the label**, which is the one thing here that is not free to be
+    arbitrary: a real decode derives one from the other through
+    :attr:`DecodeParams.class_labels`, so a mock filing them independently produces a
+    ``Detections`` no decoder could ever emit.
     """
     return Detections(
         boxes=np.array([[0.0, 0.0, 10.0, 10.0]], dtype=np.float32),
         scores=np.array([0.9], dtype=np.float32),
-        class_ids=np.array([0], dtype=np.int32),
+        class_ids=np.array([_CLASS_IDS.get(label, _UNKNOWN_CLASS_ID)], dtype=np.int32),
         labels=(label,),
     )
 

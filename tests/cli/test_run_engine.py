@@ -27,6 +27,7 @@ on a host with no accelerator; that is the whole reason this tier can run the re
 from __future__ import annotations
 
 import importlib
+import inspect
 import textwrap
 import threading
 from collections.abc import Callable
@@ -35,7 +36,12 @@ from typing import Any, ClassVar
 
 import pytest
 
-from shipinfer.cli.commands.run import image_ops_are_needed, model_pool_is_needed, run
+from shipinfer.cli.commands.run import (
+    dependency_is_needed,
+    image_ops_are_needed,
+    model_pool_is_needed,
+    run,
+)
 from shipinfer.core.errors import ConfigurationError, ServerStateError
 from shipinfer.core.request import ResponseFuture
 from shipinfer.core.settings import ServerSettings
@@ -403,6 +409,47 @@ class TestWhoNeedsImageOps:
     def test_an_unknown_runner_is_refused_by_the_registry_that_would_build_it(self) -> None:
         with pytest.raises(ConfigurationError, match="unknown runner"):
             image_ops_are_needed("nope", topology_of(POOL_CHAIN))
+
+
+class TestTheTwoPredicatesAreOneFunctionOverATable:
+    """``models=`` and ``ops=`` are the same two questions about different attributes.
+
+    They were two copies of four lines with one attribute name changed, and phase D adds a
+    third dependency (a DataPool) — at which point the copies would be the design. The named
+    predicates stay, because they are what the call site reads like; what they share is a
+    table, so a new dependency is a row rather than a function.
+    """
+
+    def test_both_names_are_the_same_function_over_their_own_row(self) -> None:
+        chain = topology_of(POOL_CHAIN)
+
+        assert model_pool_is_needed("inprocess", chain) == dependency_is_needed(
+            "models", "inprocess", chain
+        )
+        assert image_ops_are_needed("inprocess", chain) == dependency_is_needed(
+            "ops", "inprocess", chain
+        )
+
+    def test_the_table_names_the_keyword_and_the_element_attribute(self) -> None:
+        """The two ends the row ties together: the ``build_runner`` keyword an operator never
+        sees, and the declaration an element makes. Both are read by name elsewhere, so a
+        typo in either is silent -- ``getattr`` on a missing attribute would be an
+        ``AttributeError`` per element and a missing keyword would simply never be built."""
+        from shipinfer.runners.base import Runner
+        from shipinfer.topology.base import Element
+
+        for keyword, attribute in run_module._HANDED_IN.items():
+            assert hasattr(Element, attribute), f"no element declares {attribute!r}"
+            assert keyword in inspect.signature(Runner.__init__).parameters
+
+    def test_a_runner_that_runs_the_chain_elsewhere_needs_no_row_at_all(self) -> None:
+        """The first of the two questions short-circuits the second, for every row."""
+        chain = topology_of(POOL_CHAIN)
+
+        assert [dependency_is_needed(key, "fleet", chain) for key in run_module._HANDED_IN] == [
+            False,
+            False,
+        ]
 
 
 class TestThePoolIsUpBeforeTheChainOpensAndDownAfterItStops:

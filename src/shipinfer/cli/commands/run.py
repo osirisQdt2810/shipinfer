@@ -16,7 +16,7 @@ what to do over the control plane.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -363,25 +363,43 @@ def run(
     return 0
 
 
-def model_pool_is_needed(runner: str, chain: Topology) -> bool:
-    """Whether this run has to build a model pool and hand it to the runner as ``models=``.
+#: The dependencies a chain is *handed* rather than imports: the ``build_runner`` keyword,
+#: and the :class:`~shipinfer.topology.base.Element` attribute by which an implementation
+#: declares it needs one. A table rather than a function each, because the two were the same
+#: four lines with one attribute name changed and phase D adds a third (a DataPool) — at which
+#: point the copies would be the design rather than an accident.
+#:
+#: Both halves are **declarations**, never a check against ``"inprocess"`` or ``"pool"``, so a
+#: new runner or a new element answers for itself instead of being added to a condition here
+#: (CONVENTIONS 2.3).
+_HANDED_IN: Mapping[str, str] = {
+    "models": "needs_model",
+    "ops": "needs_image_ops",
+}
+
+
+def dependency_is_needed(keyword: str, runner: str, chain: Topology) -> bool:
+    """Whether this run has to build ``keyword=`` and hand it to the runner.
 
     Two questions, and neither is answered by a name:
 
     * **does this runner open the chain here?** ``Runner.needs_model_pool``, read off the
-      registered class before anything is built, because ``models=`` is a constructor
-      argument. ``fleet`` answers ``False`` — its shards each build their own engine
-      (``cli/shard.py``), and a launcher that built one too would hold a CUDA context on every
-      device it can see while running no inference.
-    * **does anything in the chain resolve a model against it?** ``Element.needs_model``,
-      declared by the implementation. Asking ``node.kind in MODEL_KINDS`` instead is the
-      version of this that looks right and is not: every ``detect`` element is a model kind
-      and must name a ``model:``, so a chain of mocks would load the whole repository to run
-      elements that invent a box.
+      registered class before anything is built, because these are constructor arguments. The
+      attribute is named for the pool because that was the first dependency to need it; what
+      it declares is "this runner calls ``open()`` on these elements in this process", which
+      is the condition for every dependency an element is handed. ``fleet`` answers ``False``
+      — its shards each build their own (``cli/shard.py``), and a launcher that built one too
+      would hold a CUDA context on every device it can see while running no inference.
+    * **does anything in the chain ask for it?** The element attribute from
+      :data:`_HANDED_IN`, declared by the implementation. Asking ``node.kind in MODEL_KINDS``
+      instead is the version of this that looks right and is not: every ``detect`` element is
+      a model kind and must name a ``model:``, so a chain of mocks would load the whole
+      repository to run elements that invent a box.
 
-    Both are declarations rather than a check against ``"inprocess"`` or ``"pool"``, so a new
-    runner or a new element answers for itself instead of being added to a condition here
-    (CONVENTIONS 2.3).
+    The two dependencies are asked separately and not folded into one answer, because they
+    come apart in both directions: a chain of ``pool`` embedders needs a pool and no ops
+    (somebody upstream shaped the tensor), and the first element that crops without running a
+    repository model will need ops and no pool.
 
     Raises:
         ConfigurationError: no runner is registered under that name; the message lists the
@@ -392,35 +410,27 @@ def model_pool_is_needed(runner: str, chain: Topology) -> bool:
 
     if not RUNNERS.get(runner).needs_model_pool:
         return False
-    return any(node.element.needs_model for node in chain)
+    attribute = _HANDED_IN[keyword]
+    return any(getattr(node.element, attribute) for node in chain)
+
+
+def model_pool_is_needed(runner: str, chain: Topology) -> bool:
+    """Whether this run has to build a model pool and hand it in as ``models=``.
+
+    A name for :func:`dependency_is_needed`'s ``models`` row, kept because it is what the call
+    site reads like and what the tests ask for.
+    """
+    return dependency_is_needed("models", runner, chain)
 
 
 def image_ops_are_needed(runner: str, chain: Topology) -> bool:
-    """Whether this run has to resolve image ops and hand them to the runner as ``ops=``.
+    """Whether this run has to resolve image ops and hand them in as ``ops=``.
 
-    The same two questions :func:`model_pool_is_needed` asks, about the other dependency an
-    element is handed rather than imports:
-
-    * **does this runner open the chain here?** ``Runner.needs_model_pool``. The attribute is
-      named for the pool because that was the first dependency to need it, but what it
-      declares is "this runner calls ``open()`` on these elements in this process" — which is
-      exactly the condition for ``ops`` too. A ``fleet`` answers ``False``: its shards each
-      resolve their own, bound to their own GPU (``cli/shard.py``), and one resolved here
-      would be bound to a device this process does not own.
-    * **does anything in the chain need it?** ``Element.needs_image_ops``, declared by the
-      implementation. Only ``PoolDetect`` answers ``True`` today. Asking the *kind* instead
-      would resolve ops for a chain of mocks, and ``get_image_ops`` is not free — under a
-      non-``AUTO`` provider it constructs a torch implementation bound to a device.
-
-    Deliberately a second function rather than one that answers both, because the two
-    dependencies come apart: a chain of ``pool`` embedders needs a pool and no ops, and the
-    first element that crops without running a repository model will need ops and no pool.
+    A name for :func:`dependency_is_needed`'s ``ops`` row. Only ``PoolDetect`` answers
+    ``True`` today, and the gate is worth having because ``get_image_ops`` is not free: under
+    a non-``AUTO`` provider it constructs a torch implementation bound to a device.
     """
-    from shipinfer.runners import RUNNERS
-
-    if not RUNNERS.get(runner).needs_model_pool:
-        return False
-    return any(node.element.needs_image_ops for node in chain)
+    return dependency_is_needed("ops", runner, chain)
 
 
 def cameras_from_inputs(inputs: Sequence[str] | None, *, loop: bool = True) -> list[CameraSpec]:

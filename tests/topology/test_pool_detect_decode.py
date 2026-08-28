@@ -300,6 +300,60 @@ class TestTheLetterboxIsRecordedNotRecomputed:
         assert results["square"].meta["frame_hw"] == (100, 100)
 
 
+class TestTheGeometryCarriesEverythingTheOpsReported:
+    """``_prepare`` returns what the seam *said*, and re-derives none of it.
+
+    ``extents`` is the member with no reader yet and it is carried anyway, because the seam is
+    being defined here and the first consumer -- the element that crops out of the letterboxed
+    frame -- would otherwise compute ``out_h`` from ``scale`` and disagree by a pixel:
+    ``pad = (T - r) / 2`` is the same for ``r`` and ``r + 1`` whenever ``T - r`` is even, which
+    is exactly why ``LetterboxResult`` reports it separately.
+    """
+
+    def test_prepare_carries_scale_pad_extents_and_the_source_size(self) -> None:
+        element = opened(FakeDetector(), decode={"boxes_output": "boxes"})
+        source = frame()
+
+        _, geometry = element._prepare(item(source))
+
+        reported = NumpyImageOps().letterbox_batch(
+            [source.numpy()[0]], DST, NormalizeParams(), pad_value=114
+        )
+        assert geometry.frame_hw == FRAME_HW
+        assert geometry.scale == SCALE
+        assert geometry.pad == PAD
+        assert geometry.extents == tuple(int(v) for v in reported.extents[0])
+        # 200x400 at scale 0.25 is 50x100 written inside a 100x100 canvas -- and 50 is not
+        # recoverable from `scale` and `pad` alone, which is the whole argument for the field.
+        assert geometry.extents == (50, 100)
+
+
+class TestTheFrameHasToBeTheFrameItPromises:
+    def test_a_float_frame_is_refused_rather_than_truncated_to_black(self) -> None:
+        """The dtype was documented and not checked. Every ``ImageOps`` implementation writes
+        source pixels into a uint8 canvas, so a frame already scaled to 0-1 is *truncated*
+        into it: an all-black letterbox, a detector that answers with nothing on every camera,
+        and an empty scene as the only symptom."""
+        element = opened(FakeDetector(), decode={"boxes_output": "boxes"})
+        floats = Tensor.from_numpy(np.zeros((1, *FRAME_HW, 3), dtype=np.float32))
+
+        with pytest.raises(ValidationError) as caught:
+            element.process(item(floats))
+
+        message = str(caught.value)
+        assert "uint8" in message, "the message must name the dtype it needs"
+        assert "detect" in message
+
+    def test_the_uint8_frame_it_does_want_is_accepted(self) -> None:
+        """The other half, so the check above is a check and not a refusal of everything."""
+        element = opened(
+            FakeDetector({"boxes": rows((10, 30, 50, 45, 0.9, 8))}),
+            decode={"boxes_output": "boxes"},
+        )
+
+        assert element.process(item()).meta["detections"] is not None
+
+
 class TestTheRowsBecomeSourcePixels:
     def test_two_rows_decode_to_the_boxes_written_on_this_test(self) -> None:
         """The whole point of the file, with the arithmetic done by hand.

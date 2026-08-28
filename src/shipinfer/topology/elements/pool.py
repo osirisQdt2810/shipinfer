@@ -360,6 +360,14 @@ class _Letterbox:
     scale: float
     #: ``(pad_x, pad_y)`` in destination pixels.
     pad: tuple[float, float]
+    #: ``(out_h, out_w)`` — the extent actually written inside the letterbox, before padding.
+    #: Carried rather than left to the first consumer to re-derive, for the reason
+    #: :class:`~shipinfer.topology.base.LetterboxLike` returns it at all: ``pad = (T - r) / 2``
+    #: is the same for ``r`` and ``r + 1`` whenever ``T - r`` is even, so a consumer computing
+    #: ``out_h`` from ``scale`` can disagree by a pixel while scale and pad both still match.
+    #: The decode does not need it — it works in source pixels — and the first element that
+    #: crops does, which is why it is here rather than plumbed in later.
+    extents: tuple[int, int]
 
 
 @registry_for(ElementKind.DETECT).register("pool")
@@ -687,8 +695,8 @@ class PoolDetect(_PoolElement):
 
         Raises:
             ValidationError: the payload is not a host-resident ``(1, H, W, 3)`` or
-                ``(H, W, 3)`` frame. A device-resident handle is refused by name rather than
-                downloaded: an implicit device-to-host copy per frame is exactly the cost
+                ``(H, W, 3)`` **uint8** frame. A device-resident handle is refused by name
+                rather than downloaded: an implicit device-to-host copy per frame is exactly the cost
                 arch.md section 8 makes the caps refuse at load time, and it becomes a real
                 submission with the DataPool (phase D).
         """
@@ -700,11 +708,18 @@ class PoolDetect(_PoolElement):
             frame_hw=(int(image.shape[0]), int(image.shape[1])),
             scale=float(letterboxed.scales[0]),
             pad=(float(letterboxed.pads[0][0]), float(letterboxed.pads[0][1])),
+            extents=(int(letterboxed.extents[0][0]), int(letterboxed.extents[0][1])),
         )
         return Tensor.from_numpy(letterboxed.tensor), geometry
 
     def _frame_of(self, item: ChainItem) -> np.ndarray:
-        """One ``(H, W, 3)`` uint8 frame out of the item's payload."""
+        """One ``(H, W, 3)`` uint8 frame out of the item's payload.
+
+        The dtype is checked and not merely documented: every ``ImageOps`` implementation
+        writes source pixels into a uint8 canvas, so a float32 payload is *truncated* into it
+        rather than refused — a frame in the 0-1 scale becomes an all-black letterbox and the
+        detector answers with nothing on every camera, which reads as an empty scene.
+        """
         payload = item.payload
         if not isinstance(payload, Tensor):
             raise ValidationError(
@@ -729,6 +744,14 @@ class PoolDetect(_PoolElement):
                 f"payload is {payload.describe()}. One chain item is one frame, so a batch "
                 "dimension above 1 is a producer that assembled a batch this element does not "
                 "scatter"
+            )
+        if array.dtype != np.uint8:
+            raise ValidationError(
+                f"detect element {self.name!r} needs one (H, W, 3) uint8 frame to letterbox "
+                f"and the payload is {payload.describe()}. Source pixels are letterboxed into "
+                "a uint8 canvas and normalised from the 0-255 scale, so an already-scaled "
+                "float frame is truncated to black rather than refused — and a detector that "
+                "sees black answers with nothing on every camera"
             )
         return array
 

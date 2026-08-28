@@ -121,15 +121,18 @@ class Runner(abc.ABC):
     #: (``runners/service.py``).
     manages_cameras: ClassVar[bool] = False
 
-    #: Whether this runner opens the chain's elements in *this* process, and therefore wants
-    #: the caller to build a model pool and hand it in as ``models=``. ``False`` here, and the
-    #: default is the safe one: a runner that executes the chain somewhere else must not make
-    #: the process that built it load engines. ``fleet`` is exactly that case and leaves it
-    #: ``False`` -- each shard builds its own engine (``cli/shard.py``), and a launcher that
-    #: built one too would hold a CUDA context on every device it can see while doing no
+    #: **Whether this runner opens the chain's elements in *this* process** -- that is what the
+    #: attribute declares, and the name is the pool's only because the pool was the first
+    #: dependency to need the answer. Every dependency an element is *handed* rather than
+    #: imports is gated on it: ``models=`` first, ``ops=`` since C3, a DataPool in phase D
+    #: (``cli/commands/run.py::dependency_is_needed``). ``False`` here, and the default is the
+    #: safe one: a runner that executes the chain somewhere else must not make the process that
+    #: built it load engines. ``fleet`` is exactly that case and leaves it ``False`` -- each
+    #: shard builds its own engine and its own ops (``cli/shard.py``), and a launcher that
+    #: built either would hold a CUDA context on every device it can see while doing no
     #: inference at all, which is the one thing ``check_layers.py`` keeps ``launch`` clean of.
-    #: Read off the *class*, before a runner is built, because ``models=`` is a constructor
-    #: argument (``cli/commands/run.py``).
+    #: Read off the *class*, before a runner is built, because these are constructor
+    #: arguments.
     needs_model_pool: ClassVar[bool] = False
 
     def __init__(
