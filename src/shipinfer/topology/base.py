@@ -227,12 +227,14 @@ class ImageOpsLike(Protocol):
     runner is handed an ops implementation, resolves it once and puts it on
     :attr:`ElementContext.ops`; the element calls it and never learns where it came from.
 
-    Deliberately **narrower** than ``ImageOps``. Only ``letterbox_batch`` is here, because it
-    is the only member the elements call today (``pipeline/graph/detect.py`` is the proven
-    path this follows: one letterbox per frame, its ``scales``/``pads``/``extents`` stored and
-    handed to the decode). ``crop_batch``, ``nms`` and ``letterbox_to_device`` are real and
-    are absent on purpose — a protocol member nobody calls is a coupling nobody needs, and the
-    first element that crops adds it with a test.
+    Deliberately **narrower** than ``ImageOps``. Two members are here, because two are what
+    the elements call: ``letterbox_batch`` for the detector (``pipeline/graph/detect.py`` is
+    the proven path it follows: one letterbox per frame, its ``scales``/``pads``/``extents``
+    stored and handed to the decode) and ``crop_batch`` for the embedder
+    (``pipeline/graph/crop.py``: one call for all N boxes of a frame, never a Python loop
+    around a kernel launch). ``nms`` and ``letterbox_to_device`` are real and are absent on
+    purpose — a protocol member nobody calls is a coupling nobody needs, and the element that
+    needs one adds it with a test, which is exactly how ``crop_batch`` arrived.
 
     ``params`` and ``dst_size`` are the caller's business: an element is *told* what the model
     wants, through its own ``params:`` or the runner's context. Typing ``params`` as ``Any``
@@ -255,6 +257,40 @@ class ImageOpsLike(Protocol):
             params: normalisation and channel order — a
                 :class:`shipinfer.runtime.ops.base.NormalizeParams`.
             pad_value: fill for the letterbox bars.
+        """
+        ...
+
+    def crop_batch(
+        self,
+        image: Any,
+        boxes: Any,
+        dst_size: tuple[int, int],
+        params: Any,
+    ) -> Any:
+        """Cut N boxes out of one frame and resize them into one ``(N, C, h, w)`` tensor.
+
+        The mirror of :meth:`letterbox_batch` for the fan-out: one frame in, one row per
+        detection out. **One call for all N boxes** — the signature is batched precisely so
+        that a per-crop Python loop around a kernel launch is hard to write (CONVENTIONS 2.5),
+        and at 10-20 people a frame across a thousand frames a second that loop is the
+        difference between a shard that keeps up and one that does not.
+
+        The rows come back in the order the boxes went in, which is the whole basis of the
+        scatter-back: the element that called this holds the detection index of every box and
+        pairs it with the row at the same position. Losing that order is how an embedding ends
+        up attached to the wrong object — a corruption with no exception and no symptom short
+        of a tracker that swaps identities.
+
+        Args:
+            image: the ``(H, W, 3)`` uint8 source frame, in **source** pixels — not the
+                letterboxed one the detector submitted. Cropping from the full-resolution
+                frame is both cheaper and sharper than cropping the letterbox and resizing
+                again (``pipeline/graph/crop.py``).
+            boxes: ``(N, 4)`` float32 ``[x1, y1, x2, y2]`` in ``image`` pixel coordinates —
+                the layout :class:`~shipinfer.topology.elements.detections.Detections` stores.
+            dst_size: ``(height, width)`` of one crop, matching the consuming model's declared
+                input.
+            params: normalisation and channel order, as for :meth:`letterbox_batch`.
         """
         ...
 

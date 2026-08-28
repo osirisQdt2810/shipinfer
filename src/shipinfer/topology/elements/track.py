@@ -815,6 +815,15 @@ class ShipvisionTrack(Element):
         nothing said. That is the same silence the sequence form's length check already
         refuses, arriving through the other door.
 
+        The **empty** mapping is exempt from that check, and the distinction is the point: a
+        mapping with keys ``{100, 101, 102}`` on a three-row frame is arithmetic that went
+        wrong, while a mapping with no keys is an embedder that correctly had nothing to
+        embed. The latter is the ordinary frame once a crop element is in the chain —
+        ``embed_person`` sees a frame of three ships and covers none of them
+        (:class:`~shipinfer.topology.elements.pool._PoolCropElement`) — and refusing it would
+        fail a frame for being unremarkable. Zero keys index nothing because there was nothing
+        to index, which is not the same as keys that index nothing.
+
         Returns:
             Something indexable by detection row, or ``None`` when the chain filed no vectors.
 
@@ -837,7 +846,7 @@ class ShipvisionTrack(Element):
                     "output tensors are not an attribution; scatter them back onto the rows "
                     "they came from first"
                 ) from exc
-            if count and not any(0 <= key < count for key in by_index):
+            if by_index and count and not any(0 <= key < count for key in by_index):
                 raise ValidationError(
                     f"track element {self.name!r}: meta['vectors'] is a mapping whose keys "
                     f"{sorted(by_index)[:4]} name no detection in this frame, which has "

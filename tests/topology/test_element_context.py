@@ -123,11 +123,12 @@ class TestTheImageOpsProtocolStillMatchesTheRealOne:
     def test_the_protocol_stays_narrower_than_the_class_it_stands_for(self) -> None:
         """A protocol member nobody calls is a coupling nobody needs.
 
-        ``crop_batch``, ``nms`` and ``letterbox_to_device`` are real and are deliberately
-        absent: the first element that crops adds the member with the test that needs it. This
-        pins the decision so that "add it while you are here" is a choice somebody makes on
-        purpose.
+        ``nms`` and ``letterbox_to_device`` are real and are deliberately absent. ``crop_batch``
+        was too until C8, and it arrived the way this test says one should: the first element
+        that crops (:class:`~shipinfer.topology.elements.pool.PoolEmbed`) added the member with
+        the test that needs it (``tests/topology/test_pool_embed_crops.py``). This pins the
+        decision so that "add it while you are here" stays a choice somebody makes on purpose.
         """
         stand_in = {name for name in vars(ImageOpsLike) if not name.startswith("_")}
 
-        assert stand_in == {"letterbox_batch"}
+        assert stand_in == {"letterbox_batch", "crop_batch"}
