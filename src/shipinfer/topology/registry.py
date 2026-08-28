@@ -161,8 +161,8 @@ def create_element(
         name: the chain slot this instance fills.
         params: the slot's ``params:`` block, passed through untouched.
         model: the slot's ``model:``, likewise. **Not** validated here, and the order matters:
-            the loader reads :attr:`~shipinfer.topology.base.Element.needs_model` off the
-            element this returns, so a missing model is refused one step *after* this call
+            the loader reads :attr:`~shipinfer.topology.base.Element.requires_model_name` off
+            the element this returns, so a missing model is refused one step *after* this call
             rather than before it. That is what lets the requirement be the implementation's
             rather than the kind's; the cost is that a ``None`` here means "not yet checked".
 

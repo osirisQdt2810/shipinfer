@@ -169,6 +169,11 @@ class _Pooled:
     re-check in the walk, which used to ask ``node.kind in MODEL_KINDS``. That question and
     this one differ for every mock in the file, which is why the gate needs an element that
     says yes and there is none to hand.
+
+    :attr:`~shipinfer.topology.base.Element.requires_model_name` is deliberately left
+    ``False``: that is the *loader's* declaration, and setting it would make every chain in
+    this file carry a ``model:`` for an element that resolves nothing. The split is what lets
+    a double be one without being the other.
     """
 
     needs_model: ClassVar[bool] = True

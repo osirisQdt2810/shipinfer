@@ -97,8 +97,8 @@ class _PoolElement(Element):
             whatever the runner resolved from the settings — see the module docstring for the
             precedence.
         model: the repository model to run. Required — the loader refuses an element whose
-            :attr:`~shipinfer.topology.base.Element.needs_model` is set and names none, so a
-            missing one here is a programming error and says so.
+            :attr:`~shipinfer.topology.base.Element.requires_model_name` is set and names
+            none, so a missing one here is a programming error and says so.
     """
 
     accepts: ClassVar[tuple[str, ...]] = ("nv12@gpu", "tensor@gpu", "bgr@cpu")
@@ -107,6 +107,11 @@ class _PoolElement(Element):
     #: cap here would relabel.
     produces: ClassVar[tuple[str, ...]] = ("*@*",)
 
+    #: Both declarations, and this is the implementation for which they coincide: the chain
+    #: file has to name the model (the loader's question) *and* `_do_open` resolves that name
+    #: against `ElementContext.models` (the pool's). An `nvinfer` element will answer the
+    #: first `True` and the second `False`, which is why they are two attributes.
+    requires_model_name: ClassVar[bool] = True
     #: The one thing in this file the process that builds the runner reads *before* the
     #: chain is opened: a chain carrying one of these is a chain whose runner has to be handed
     #: a model pool, and `shipinfer run` builds an `InferenceServer` because of it.

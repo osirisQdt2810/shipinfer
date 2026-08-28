@@ -166,8 +166,8 @@ class ElementSpec(_Strict):
     #: :meth:`~shipinfer.topology.base.ElementKind.parse`, which raises that one.
     kind: Optional[str] = None
     #: Repository model name. Required by the implementations that declare
-    #: :attr:`~shipinfer.topology.base.Element.needs_model` -- every ``pool`` element --
-    #: and meaningless, but accepted, for the rest.
+    #: :attr:`~shipinfer.topology.base.Element.requires_model_name` -- every ``pool`` element
+    #: -- and meaningless, but accepted, for the rest.
     model: Optional[str] = None
     #: Branch condition, e.g. ``class == ship``.
     when: Optional[str] = None
@@ -442,26 +442,35 @@ class Topology:
         # * `recognize` is a model kind and `impl: shipvision` is a *gallery query* over an
         #   embedding, with no repository model to name. The kind rule refused that chain at
         #   load -- "recognize needs `model:`" -- and left no spelling that got past it.
-        # * `impl: mock` is not a model element at all. It invents a box, resolves nothing
-        #   and needs no `InferenceServer` behind it, which is what `Element.needs_model`
-        #   already had to mean for `shipinfer run` to leave a mock-only chain engine-free.
-        #   Requiring a `model:` of it was the kind rule insisting on a name nobody reads.
+        # * `impl: mock` is not a model element at all. It invents a box and reads nothing, so
+        #   requiring a `model:` of it was the kind rule insisting on a name nobody reads.
         #
-        # Reading `Element.needs_model` costs the elements being *built* first, which is why
-        # this moved below the comprehension and is the only other visible consequence: a slot
-        # that is both misspelled and modelless now reports the unknown implementation, which
-        # is the better error anyway, because until the impl resolves nobody knows whether a
-        # model was needed.
+        # `Element.requires_model_name` and NOT `Element.needs_model`, which is a different
+        # question with a different reader: this one is "must the chain file carry a name?"
+        # and that one is "will `open()` reach into this process's model pool?". They agree
+        # for every implementation phase C ships and come apart at `nvinfer`, which names a
+        # `model:` artefact and runs it inside GStreamer -- asking `needs_model` here would
+        # let a deepstream chain that forgot its `model:` load clean and fail at graph-compile
+        # time instead of stopping the deploy.
         #
-        # A `model:` on an element that does not resolve one stays *accepted* and ignored,
+        # Reading the declaration off the element costs the elements being *built* first,
+        # which is why this moved below the comprehension and is the only other visible
+        # consequence: a slot that is both misspelled and modelless now reports the unknown
+        # implementation, which is the better error anyway, because until the impl resolves
+        # nobody knows whether a model was needed.
+        #
+        # A `model:` on an element that does not need one stays *accepted* and ignored,
         # exactly as before: `ElementSpec.model` has always been documented "meaningless for
         # the rest", `describe()` prints it, and every mock model element in the test suite
         # carries one it never resolves. Refusing it is a separate decision with its own blast
         # radius, and this slice is about the requirement, not the surplus.
         for slot, element in elements.items():
-            if element.needs_model and not spec.elements[slot].model:
+            if element.requires_model_name and not spec.elements[slot].model:
+                # The element and its implementation, not the kind: the kind decides nothing
+                # here any more, and "detect elements need a model" is exactly the rule this
+                # message would be restating after it was removed.
                 raise ChainStructureError(
-                    f"element {slot!r} is a {kinds[slot].value} element and needs "
+                    f"element {slot!r} (impl {element.impl!r}) must name a "
                     "`model: <repository model name>`"
                 )
 
