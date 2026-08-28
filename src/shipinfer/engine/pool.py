@@ -664,7 +664,7 @@ class InferenceServer:
         name: str,
         *,
         generation: int,
-        abort: Callable[[], bool],
+        abort: Callable[[], str | None],
         traces: TraceSink,
     ) -> Model | EnsembleModel | None:
         """Load one model at start-up, honouring ``strict_startup`` — and the abort, which
