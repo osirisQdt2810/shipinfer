@@ -102,21 +102,14 @@ class ResponseCache(abc.ABC):
 
 
 def freeze_outputs(outputs: Mapping[str, Tensor]) -> dict[str, Tensor]:
-    """Detach outputs from the batch they were scattered out of, then seal them.
+    """Copy outputs out of their batch and seal the copies non-writeable.
 
-    Two failure modes, one fix. A scattered output is a *view* into the whole batch's
-    array (:meth:`~shipinfer.core.types.Tensor.slice_batch`), so storing it as-is would
-    pin an entire batch in memory behind one small entry and make the cache's byte
-    accounting a fiction. And a hit hands the same object to every later caller, so one
-    caller writing into it silently corrupts every subsequent hit.
-
-    So the bytes are copied once on the way in and the copy is marked non-writeable: a
-    caller that mutates a cached response gets a ``ValueError`` from numpy at the line
-    with the bug, instead of a wrong answer somewhere else an hour later.
+    A scattered output is a view into the whole batch (would pin it in memory and skew
+    byte accounting), and a hit is shared by every later caller (one writer would corrupt
+    all of them). Copy once, then numpy raises ``ValueError`` at any mutation.
 
     Args:
-        outputs: host-resident tensors. Filtering device-resident ones out is the caller's
-            job — reading one here would mean a D2H copy inside the cache.
+        outputs: host-resident tensors; the caller filters device-resident ones out.
 
     Raises:
         RuntimeError: if a tensor is device-resident, from ``Tensor.numpy()``.

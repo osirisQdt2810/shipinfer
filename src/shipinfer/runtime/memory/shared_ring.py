@@ -1,81 +1,23 @@
-"""A pinned shared-memory ring between two processes on one box — the `service` topology's wire.
+"""A pinned shared-memory ring between two processes on one box — the `service` wire.
 
-WHY THIS EXISTS
----------------
-Topology C (`service`, ledger T3) lets a shard hand a crop batch to an instance on another
-GPU in another process. ADR-002 forbids CUDA IPC across GPUs — opening handles on every other
-device would cost G contexts per process, G² x ~300 MiB on the box — so a payload crosses
-through **host memory**: the producer copies device → pinned slot, the consumer copies pinned
-slot → its device (~125 µs each for a 1.5 MB batch on PCIe 4). The slot has to be visible to
-both processes and pinned in both, which is what this module provides:
-:mod:`multiprocessing.shared_memory` for the visibility, ``cudaHostRegister`` once per process
-for the pinning.
+A payload crosses through host memory, not CUDA IPC (ADR-002: G contexts per process is too
+much): device → pinned slot → the peer's device. `multiprocessing.shared_memory` gives the
+visibility, one `cudaHostRegister` per process the pinning.
 
-THE PROTOCOL — one writer, one reader
---------------------------------------
-Taken from vLLM's ``ShmRingBuffer`` (``vllm/distributed/device_communicators/shm_broadcast.py``):
-a fixed number of fixed-size slots, each with a byte of state, no locks. vLLM has one writer
-and many readers; we have the opposite need — many peers submitting to one owner — and the
-design decision is to keep vLLM's discipline anyway: **one ring per (submitter, owner, model)
-pair, so every ring has exactly one writer**. That makes a slot claim a plain store rather
-than a compare-and-swap Python cannot do on shared memory, and it costs pairwise rings, which
-is why ``slots`` defaults small.
+The protocol is vLLM's `ShmRingBuffer`: fixed slots, one state byte each, no locks — but
+**one ring per (submitter, owner, model)**, so every ring has exactly one writer and a claim
+is a plain store. State: FREE → CLAIMED (writer fills) → WRITTEN (reader may take) → TAKEN →
+FREE. The byte is stored *after* the work it announces, so WRITTEN implies a complete payload
+on x86-TSO; a weakly ordered port needs a fence here. Waiting spins, yields, then sleeps to a
+deadline. The header page carries queue depth, EWMA latency, a heartbeat and `closed`, read
+without a lock; layout and version are checked at `open`.
 
-A slot's state byte::
-
-    FREE    -> claimed by the writer   (writer fills the payload)
-    CLAIMED -> written                 (writer publishes: the reader may take it)
-    WRITTEN -> taken by the reader     (reader is copying out)
-    TAKEN   -> free                    (reader releases)
-
-Each transition is a single-byte store after the work it announces, so a reader that sees
-``WRITTEN`` sees a complete payload (x86 does not reorder stores; the CPython bytecode
-boundary is a compiler barrier). Waiting is a short spin, then ``time.sleep(0)``, then short
-sleeps up to a deadline — vLLM's spin → ``sched_yield`` → timeout, without the C extension.
-
-THE HEADER
-----------
-The first page carries what a :class:`~shipinfer.scheduling.policies.base.Placeable` proxy
-needs to read without a lock: the owner's queue depth and EWMA latency (stamped by the owner
-on every enqueue/dequeue), a heartbeat, and a ``closed`` flag. Version and layout are checked
-at ``open`` so two processes cannot disagree about slot sizes and call the result a model bug.
-
-OFFLINE
--------
-Everything here except :meth:`SharedRing.pinned_tensor` works with no driver and no torch:
-the layout is arithmetic, the protocol is bytes in a ``memoryview``, and the tests run the
-reader as a thread in the same process. Pinning is a per-process registration of the same
-pages, done lazily and only when asked.
-
-A writer that dies between `claim` and `publish` strands that slot at CLAIMED for the ring's
-life — there is no lease and no owner-side recovery, deliberately: the ring is per peer, and a
-dead peer takes the whole ring down through the heartbeat (`PeerLostError`), slots included.
-
-The rings are pairwise, so an owner multiplexes: there is deliberately no select/poll primitive
-here. The intended consumer shape (the proxy layer implements it) is one thread sweeping its
-rings round-robin with ``take(timeout_s=0)`` and a backoff when a whole sweep is idle — at the
-box's ceiling (16 GPUs x 3 shared models is ~48 rings) a sweep is 48 one-byte state scans, and
-``is_closed`` is a single byte read, so an idle sweep allocates nothing.
-
-Memory ordering: the state-byte-after-payload discipline assumes stores are not reordered
-(x86-TSO), the same assumption vLLM's ring carries. On a weakly ordered ISA (aarch64) a
-reader could observe WRITTEN before the payload stores land; accepted for now — this box and
-the deployment are x86 — and recorded here so a port knows where to add the fence. The same
-caveat covers the header stamp: a 24-byte memcpy is per-field atomic in practice on x86 for
-naturally aligned fields, not by architectural guarantee. And pinned-view liveness is the
-*Python object's*: a tensor from `pinned_tensor` must outlive every async copy it feeds — the
-ring cannot see the stream, only the handle. A *pinned* handle dropped without ``close()``
-leaks its registration for the process's life — a finalizer cannot unpin safely — so pinned
-rings are closed, not dropped.
-
-Pinned-view liveness is tracked, not guessed: `pinned_tensor` counts what it hands out and a
-finalizer on each tensor brings the count down, so `close()` unpins immediately when nothing
-is held and otherwise the last finalizer unpins and closes. Plain `payload()` memoryviews are
-not weakref-able; a mapping still viewed by one at close is parked in `_PENDING_CLOSE` (pages
-already unpinned — payload views are used synchronously, so that is safe) and reaped on any
-later close; if the *last* ring in a process closes under such a view, its mapping stays until
-exit. A slot is always `slot_bytes` long and `abandon` leaves stale bytes behind: a consumer
-frames its own payload (a length prefix, a versioned head), never trusts the slot's tail.
+Everything but :meth:`SharedRing.pinned_tensor` runs with no driver. A writer that dies
+between `claim` and `publish` strands that slot for the ring's life — the heartbeat takes the
+whole ring down instead (`PeerLostError`). Rings are pairwise with no poll primitive: a
+consumer sweeps its rings with ``take(timeout_s=0)``. A pinned handle must be `close()`d, not
+dropped, and a tensor from `pinned_tensor` must outlive every copy it feeds. `abandon` leaves
+stale bytes, so a consumer frames its own payload and never trusts the slot's tail.
 """
 
 from __future__ import annotations
