@@ -20,6 +20,15 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "shipinfer"
 PURE_LAYERS = ("core", "scheduling", "repository", "topology")
 FORBIDDEN_IN_PURE = {"torch", "tensorrt", "onnxruntime", "cuda", "cv2", "fastapi", "uvicorn"}
 
+#: The layers that may not name ``shipvision`` **at all**, not even inside a function. It is
+#: an optional submodule that CI does not check out, so an import below ``topology`` would
+#: make the offline tier need a build. ``topology`` is absent on purpose and is the only pure
+#: layer that is: its track/mtmc/recognize elements run those algorithms, through the
+#: function-scope loaders in ``topology/bridge.py``. A static rule cannot tell a function-scope
+#: import from a module-scope one, so what costs ``topology`` its laziness is
+#: ``TestImportIsCheap`` below, in a subprocess.
+SHIPVISION_FREE_LAYERS = ("core", "scheduling", "repository")
+
 
 def _modules_imported_by(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -43,6 +52,22 @@ class TestPureLayersAreAcceleratorFree:
                 if module.split(".")[0] in FORBIDDEN_IN_PURE:
                     offenders.append(f"{path.relative_to(SRC)} imports {module}")
         assert not offenders, "pure layers must stay accelerator-free:\n" + "\n".join(offenders)
+
+    @pytest.mark.parametrize("layer", SHIPVISION_FREE_LAYERS)
+    def test_the_lowest_layers_never_name_the_kernels_submodule(self, layer: str) -> None:
+        """``shipvision`` is optional, and below ``topology`` it must not even be spelled.
+
+        The AST is walked, so this catches a function-scope import too — which is the whole
+        difference from ``topology``, where a function-scope import is the design. A tracker
+        reached from ``scheduling`` would put an optional C++ build between the offline suite
+        and its first assertion.
+        """
+        offenders: list[str] = []
+        for path in (SRC / layer).rglob("*.py"):
+            for module in _modules_imported_by(path):
+                if module.split(".")[0] == "shipvision":
+                    offenders.append(f"{path.relative_to(SRC)} imports {module}")
+        assert not offenders, "the submodule is optional:\n" + "\n".join(offenders)
 
 
 class TestImportsGoOneWay:
@@ -154,6 +179,41 @@ class TestEnforcementAgrees:
         stale = (keys | granted) - packages - set(module.NON_LAYER_MODULES)
         assert not stale, f"rows naming packages that are not on disk: {sorted(stale)}"
 
+    def test_the_hook_bans_the_kernels_submodule_in_exactly_the_same_layers(self) -> None:
+        """The two tables are enforced twice on purpose, so neither may drift alone.
+
+        ``SHIPVISION_FREE_LAYERS`` above is this suite's copy of the rule and
+        ``FORBIDDEN_EXTERNAL`` is the hook's; asserting them *equal* is what stops someone
+        deleting a row in one place and leaving the other looking like it still checks
+        something. Equality and not containment, because the interesting mistake is in the
+        other direction: a ``shipvision`` ban added to ``topology``'s row would silently
+        forbid ``topology/bridge.py``, which is the module the whole design hangs on.
+        """
+        module = _checker()
+
+        banned = {
+            layer
+            for layer, forbidden in module.FORBIDDEN_EXTERNAL.items()
+            if "shipvision" in forbidden
+        }
+        assert banned == set(SHIPVISION_FREE_LAYERS)
+
+    def test_the_pipeline_may_read_the_topology_and_never_the_reverse(self) -> None:
+        """Phase C's one new internal edge, and the direction that keeps it safe.
+
+        The stateful elements move into ``topology/elements/``; ``pipeline/graph/`` keeps
+        working off the moved code rather than a second copy of it during the coexistence
+        arch.md §9 describes. The reverse edge is the one that must never appear: ``topology``
+        is a pure layer and ``pipeline`` sits on ``runtime`` and ``engine``, so an element
+        importing the pipeline would drag torch behind ``import shipinfer.topology`` — the
+        exact failure ``TestImportIsCheap`` exists to catch, arriving through a route the
+        static rule can still refuse outright.
+        """
+        module = _checker()
+
+        assert "topology" in module.ALLOWED_INTERNAL["pipeline"]
+        assert "pipeline" not in module.ALLOWED_INTERNAL["topology"]
+
     def test_nothing_below_the_command_line_may_import_it(self) -> None:
         """`cli` is the composition root, and the direction is what makes that harmless.
 
@@ -232,12 +292,22 @@ class TestImportIsCheap:
         GStreamer, TensorRT and the engine — inside ``_do_open``. This test is what keeps
         that promise honest when the day comes to relax the static rule: importing the
         package, and therefore every registered element class, still costs nothing.
+
+        ``shipvision`` is in the list and is the name that makes this test load-bearing
+        *today*. The static rule cannot ban it — ``check_layers.py`` walks the AST and counts
+        a function-scope import the same as a module-scope one, so a ``FORBIDDEN_EXTERNAL``
+        row would ban the lazy loaders in ``topology/bridge.py`` as well and leave no legal
+        spelling. This subprocess is therefore the *only* enforcement of the laziness: the
+        day a loader is called at module scope, or an element module writes ``from shipvision
+        import mot`` at the top, the offline tier starts needing a checked-out submodule and
+        this is what says so.
         """
         code = (
             "import sys, shipinfer.topology as t; "
             "assert t.ELEMENTS, 'nothing registered'; "
-            "heavy = [m for m in ('torch', 'tensorrt', 'cv2', 'gi', 'shipinfer.engine', "
-            "'shipinfer.api', 'shipinfer.runtime', 'shipinfer.scheduling') if m in sys.modules]; "
+            "heavy = [m for m in ('torch', 'tensorrt', 'cv2', 'gi', 'shipvision', "
+            "'shipinfer.engine', 'shipinfer.api', 'shipinfer.runtime', "
+            "'shipinfer.scheduling') if m in sys.modules]; "
             "assert not heavy, heavy"
         )
         result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
