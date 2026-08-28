@@ -938,15 +938,21 @@ class TestBackpressureAndFailure:
         The deadline is measured from *capture*, as the ingest sink measures it: the gap
         between capture and dequeue is exactly the queue latency a frame deadline exists to
         catch.
+
+        The budget is far larger than any scheduler latency, deliberately: both items are
+        judged against the same one, so at 1 ms the *fresh* item's verdict measured how
+        loaded the box was (8-10 red in 30 runs) rather than the property. At a minute the
+        capture clocks alone decide it, with slack outlasting the ten-second waits below.
         """
         chain = load()
         runner = running(
             chain,
-            ServerSettings(pipeline={"workers": 1}, ingest={"frame_deadline_ms": 1}),
+            ServerSettings(pipeline={"workers": 1}, ingest={"frame_deadline_ms": 60_000}),
         )
 
-        stale = runner.submit(item("cam-1", 1, captured_ns=time.monotonic_ns() - 1_000_000_000))
-        fresh = runner.submit(item("cam-2", 1, captured_ns=time.monotonic_ns()))
+        now = time.monotonic_ns()
+        stale = runner.submit(item("cam-1", 1, captured_ns=now - 120_000_000_000))
+        fresh = runner.submit(item("cam-2", 1, captured_ns=now))
 
         with pytest.raises(RequestCancelledError):
             stale.result(timeout=10.0)
