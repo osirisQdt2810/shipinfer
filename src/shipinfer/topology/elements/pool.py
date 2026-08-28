@@ -1492,7 +1492,7 @@ class _PoolCropElement(_PoolElement):
         both embedders ran. That is the exact failure the mapping form was chosen to make
         expressible, thrown away one line before the finish.
 
-        **Two of them meet in one of two ways, and this method is one half of the answer.**
+        **Two of them meet in one of two ways, and this method is one half of one rule.**
         In *series* -- both on one branch, the second declared ``after:`` the first -- the
         second one finds the first one's mapping in ``item.meta`` and merges into it here. In
         *parallel* -- ``topology/ship_person.yaml``'s shape, both declared ``after: detect``
@@ -1502,6 +1502,17 @@ class _PoolCropElement(_PoolElement):
         mapping-valued keys for exactly this reason). The shipped chain is the parallel one,
         so on it the ``existing`` below is always ``None``; the series composition is legal,
         the loader accepts it, and it must not lose half the frame either.
+
+        **Both halves answer an overlap the same way: they refuse it.** Disjoint rows union;
+        a row two elements both cover is an :class:`~shipinfer.core.errors.InferenceError`
+        here just as it is at the fan-in, because "two elements covering one detection means
+        the chain file asked both of them for it" is a property of the chain file and not of
+        the wiring, and is therefore exactly as true in series as in parallel. Letting
+        ``{**existing, **covered}`` decide it would make a ``classes:`` overlap that a deploy
+        catches loudly on ``ship_person.yaml`` into a silently wrong appearance vector on the
+        same two slots written ``after:`` one another. There is no identity exemption in this
+        half, unlike at the fan-in: without a fork there is no pre-computed mapping riding two
+        paths, so an entry that is already here was computed by a *different* element.
 
         Nothing to add is not nothing to say: with no peer under the key, the empty mapping
         is still filed, because "this element ran and covered no rows" and "this element never
@@ -1516,6 +1527,11 @@ class _PoolCropElement(_PoolElement):
                 An element that files raw model outputs there is a scatter-back that never
                 happened, and merging into it is not possible; overwriting it would hide the
                 producer that needs fixing.
+            InferenceError: an earlier slot on this branch already filed one of these rows.
+                Names the key, the row and *this* slot; the earlier one is "an earlier slot"
+                and not a name, because ``item.meta`` records what was filed and never who
+                filed it. The fix is in the chain file either way -- two slots sharing this
+                key with overlapping ``classes:`` -- and there are two of them to look at.
         """
         existing = item.meta.get(self.meta_key)
         if existing is None:
@@ -1535,6 +1551,16 @@ class _PoolCropElement(_PoolElement):
             # unchanged item is already a legal thing to flow down the chain (that is what a
             # false `ElementNode.admits` hands on). The quiet camera is the common case.
             return item
+        for row in covered:
+            if row in existing:
+                raise InferenceError(
+                    f"{self.kind.value} element {self.name!r} scatters detection row {row!r} "
+                    f"into meta[{self.meta_key!r}] and an earlier slot on this branch already "
+                    "filed that row. Elements sharing this key merge their coverage rather "
+                    "than one replacing the other, and two of them covering one detection "
+                    "means the chain file asked both of them for it -- check their "
+                    "`params: classes:` do not overlap"
+                )
         return item.derive(**{self.meta_key: {**existing, **covered}})
 
 

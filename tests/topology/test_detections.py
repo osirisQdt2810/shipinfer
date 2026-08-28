@@ -361,6 +361,31 @@ class TestGatheringTheBoxesOfASelection:
         assert np.array_equal(gathered, detections.boxes[[3, 2, 1, 0]])
         assert not np.array_equal(gathered, detections.boxes), "the fixture is not symmetric"
 
+    def test_an_index_past_the_end_is_a_typed_refusal(self) -> None:
+        """A selection built against a different frame, refused in this module's vocabulary.
+
+        ``range(1, 5)`` is as long as a four-row frame and is not a selection *of* it. The
+        value-not-length pass-through already declines to answer it with the boxes unpermuted;
+        what is left is numpy's bare ``IndexError`` out of a public method on a value type,
+        which CONVENTIONS Part 1 does not allow and which tells an operator nothing about
+        which frame or which row.
+        """
+        detections = mixed()
+
+        with pytest.raises(ValidationError) as raised:
+            detections.boxes_at(range(1, 5))
+
+        assert "4" in str(raised.value), "the frame's row count"
+        assert "[4]" in str(raised.value), "and the index it has no row for"
+
+    def test_a_valid_selection_is_never_charged_for_the_guard(self) -> None:
+        """The bounds are read off the failure, not checked before the gather, so the ordinary
+        frame does one pass and not two. Pinned as a property rather than a timing: every
+        in-range selection still answers, including the negative index numpy accepts."""
+        detections = mixed()
+
+        assert np.array_equal(detections.boxes_at((-1,)), detections.boxes[[3]])
+
     def test_selecting_nothing_is_an_empty_box_array_not_an_error(self) -> None:
         assert mixed().boxes_at(()).shape == (0, 4)
 

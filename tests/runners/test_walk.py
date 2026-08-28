@@ -284,6 +284,31 @@ class TestTwoBranchesFilingTheSameMapping:
         assert merged.meta["counts"] == before_the_fork
         assert merged.meta["vectors"] == {0: "ship-0", 1: "person-1"}
 
+    def test_a_mapping_written_before_the_fork_is_not_copied(
+        self, rejoin: InprocessRunner
+    ) -> None:
+        """The identity skip is a *fast path*, and this is what pins it.
+
+        It is not what makes the diamond work — deleting it leaves the answer identical,
+        because a mapping merged into itself meets every entry with the same object and no
+        refusal is reachable. What it saves is the O(rows) copy, on a key that is already the
+        answer, at every fan-in of every frame. Without this assertion the branch has no test
+        and one refactor turns a skipped copy into a made one, invisibly.
+        """
+        node = rejoin.topology.node("track")
+        before_the_fork = {0: "row-0", 1: "row-1"}
+
+        merged = rejoin._inbound(
+            node,
+            {
+                "embed_ship": item(counts=before_the_fork, vectors={0: "ship-0"}),
+                "embed_person": item(counts=before_the_fork, vectors={1: "person-1"}),
+            },
+        )
+
+        assert merged is not None
+        assert merged.meta["counts"] is before_the_fork, "handed through, not rebuilt"
+
     def test_two_branches_claiming_one_row_is_a_typed_refusal(
         self, rejoin: InprocessRunner
     ) -> None:

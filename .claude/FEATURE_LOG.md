@@ -72,16 +72,27 @@ that every row knows which detection it came from.
   the ordinary case — is not mistaken for a disagreement. Equality is deliberately not
   attempted beyond identity: the values are numpy arrays and `a == b` on two of them is an
   array whose truth value raises.
-- **No load-time check behind it, and that is a decision.** CONVENTIONS 2.6 would prefer the
-  loader to refuse "two elements on rejoining branches write the same key with incompatible
-  shapes" at `from_spec`. To do that it would have to know which metadata keys each element
-  writes and the shape of each value. Only the `pool` family declares anything of the sort
-  (`_PoolElement.meta_key`); `track`, `mtmc` and `decode` write theirs as literal keyword
-  arguments to `derive` inside `process`, and `mock` — the implementation every offline chain
-  loads — computes its keys from `params:` at runtime. A `ClassVar` that three families out of
-  five leave empty would make the check pass for every pair it cannot see, which reads as
-  coverage and is not. So the question is answered where the values are, and the only outcome
-  that is silent is the one that is correct.
+- **No *general* load-time check behind it, and that is a decision.** CONVENTIONS 2.6 would
+  prefer the loader to refuse "two elements on rejoining branches write the same key with
+  incompatible shapes" at `from_spec`. To do that it would have to know two things about every
+  element: which metadata *keys* it writes, and what *shape* each value has. The keys are
+  declarable — every writer names them literally, so it costs a `ClassVar` on five classes, the
+  way `pool` already does it (`_PoolElement.meta_key`). The **shapes are not**: nothing says
+  "`vectors` is a `{row: array}` mapping and `class` is a string", and it is the shape, not the
+  key, that decides whether two writers union or collide. Keys alone cannot tell the legal case
+  from the illegal one — two elements under one key is the *shipped* merge when both write
+  mappings over disjoint rows — so such a check would either refuse the chain the rule exists to
+  serve or pass every pair it cannot see, which reads as coverage and is not. The check that
+  *is* sound is narrower and belongs elsewhere: two `pool` crop elements on rejoining branches
+  with the same `meta_key` and `classes:` that overlap or are absent is a static fact, and it
+  lands beside the `classes:`-against-`class_labels` cross-check that reads the same two fields.
+- **The series composition refuses an overlap the same way the fan-in does.** `_scatter` merged
+  with `{**existing, **covered}` — silent last-writer-wins per row — so the same `classes:`
+  overlap was a typed refusal when the two slots rejoined at `track` and a wrong appearance
+  vector when they were declared `after:` one another. "Two elements covering one detection
+  means the chain file asked both of them for it" is a property of the chain file, not of the
+  wiring, so both compositions now raise `InferenceError` naming the key, the row and the two
+  slots. Disjoint rows still union and an empty coverage still hands the item on unchanged.
 - **An empty mapping is coverage of no rows, not an off-by-N.** `track._embeddings` refused a
   mapping "whose keys name no row at all". With a crop element in the chain that is the ordinary
   frame — `embed_person` sees three ships and covers none — so the empty mapping is now exempt.

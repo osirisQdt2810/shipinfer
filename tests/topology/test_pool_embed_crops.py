@@ -455,6 +455,27 @@ class TestTheVectorsLandOnTheRowsTheyCameFrom:
         assert [which_crop(vectors[row]) for row in (0, 2)] == [0, 1], "the ship pair"
         assert [which_crop(vectors[row]) for row in (1, 3)] == [0, 1], "the person pair"
 
+    def test_two_embedders_in_series_covering_one_row_is_a_typed_refusal(self) -> None:
+        """The series half of the fan-in's rule, and it answers the same way.
+
+        Two slots declared ``after:`` one another with overlapping ``classes:`` both cover the
+        ship rows. At the rejoin that is an ``InferenceError`` naming both slots; here it used
+        to be ``{**existing, **covered}`` — last-writer-wins, per row, no exception and no
+        counter, so the frame reaches ``track`` with an appearance vector chosen by declaration
+        order. The chain-file mistake is identical in both compositions, so the answer is too.
+        """
+        first = opened(FakeEmbedder(), params={"classes": ["ship"]})
+        second = opened(FakeEmbedder(), params={"classes": ["ship", "person"]})
+
+        with pytest.raises(InferenceError) as raised:
+            second.process(first.process(item(mixed())))
+
+        message = str(raised.value)
+        assert "vectors" in message, "the key"
+        assert "'embed'" in message, "this slot"
+        assert "an earlier slot" in message, "and the one already holding the row"
+        assert "classes" in message, "where the fix is"
+
     def test_a_non_mapping_already_under_the_key_is_refused(self) -> None:
         """Merging into a raw output dict is not possible and overwriting it would hide the
         producer that needs fixing."""

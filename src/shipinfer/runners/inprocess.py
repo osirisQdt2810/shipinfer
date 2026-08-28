@@ -1594,17 +1594,28 @@ class InprocessRunner(Runner):
         * **a skipped predecessor contributes its own inbound item**, because that is what
           skip-and-continue means — the walk stored it under that predecessor's name.
 
-        There is deliberately **no load-time check** behind this rule, and that is a decision
-        rather than an omission (CONVENTIONS 2.6 would prefer one). To refuse "two elements on
-        rejoining branches write the same key with incompatible shapes" at ``from_spec``, the
-        loader would have to know which metadata keys each element writes and what shape each
-        value has. Only the ``pool`` family declares anything of the sort
-        (``_PoolElement.meta_key``); ``track``, ``mtmc`` and ``decode`` write theirs as literal
-        keyword arguments to ``derive`` inside ``process``, and ``mock`` -- the implementation
-        every offline chain loads -- computes its keys from ``params:`` at runtime. A ClassVar
-        that three families out of five leave empty would make the check pass for every pair it
+        There is deliberately **no general load-time check** behind this rule, and that is a
+        decision rather than an omission (CONVENTIONS 2.6 would prefer one). To refuse "two
+        elements on rejoining branches write the same key with incompatible shapes" at
+        ``from_spec``, the loader would have to know two things about every element: which
+        metadata *keys* it writes, and what *shape* each value has. The keys are declarable --
+        every writer in this tree names them literally, so it costs a ClassVar on five classes,
+        the way the ``pool`` family already does it (``_PoolElement.meta_key``). The **shapes
+        are not**: nothing anywhere says "``vectors`` is a ``{detection row: array}`` mapping
+        and ``class`` is a string", and it is the shape and not the key that decides whether
+        two writers union or collide. Keys alone cannot tell the legal case from the illegal
+        one -- two elements under one key is the *shipped* merge when both write mappings over
+        disjoint rows, and a lost half-frame when one of them writes something else -- so such
+        a check would either refuse the chain this rule exists to serve or pass every pair it
         cannot see, which reads as coverage and is not. So the shape question is answered here,
-        where the values are, and the only outcome that is silent is the one that is correct.
+        where the values are.
+
+        The check that *is* sound is a narrower one, and it is deliberately not here either:
+        two ``pool`` crop elements on rejoining branches with the same ``meta_key`` and
+        ``params: classes:`` that overlap or are absent is a *static* fact, because ``meta_key``
+        is a ClassVar and ``classes:`` is a param. It belongs beside the
+        ``classes:``-against-``class_labels`` cross-check, which reads the same two fields, and
+        lands with it rather than as a second reader of them here.
 
         Raises:
             InferenceError: the nominated donor produced nothing and no other contributor
@@ -1641,11 +1652,26 @@ class InprocessRunner(Runner):
         Split out of :meth:`_inbound` because it is the half with a rule in it. See that
         method's docstring for the rule; this is how it is spelled.
 
-        The identity test before the merge is what makes a *diamond* work. A key written
-        before the fork rides down both branches as the same object, because
-        :meth:`~shipinfer.topology.base.ChainItem.derive` copies the dict and not the values,
-        so both contributors arrive holding it and every entry collides with itself. Those are
-        not two branches disagreeing and must not be refused as if they were.
+        The identity test before the merge is a **fast path, not a correctness guard**, and
+        saying so is the point of this paragraph. A key written before the fork rides down both
+        branches as the same object, because :meth:`~shipinfer.topology.base.ChainItem.derive`
+        copies the dict and not the values, so a diamond arrives with both contributors holding
+        one mapping. Merging that mapping into itself would answer correctly anyway -- every
+        entry would meet itself, and ``union[entry] is not row`` is false against the same
+        object, so no refusal is reachable -- and the branch buys nothing but the O(rows) copy
+        it skips. It is worth keeping at 1000 frames a second and it is pinned by a test that
+        asserts the merged value *is* the pre-fork object, so a refactor that drops it fails
+        rather than quietly copying every pre-fork mapping key at every fan-in.
+
+        ``meta["missing_stages"]`` is the tree's *other* partial-coverage value and it does not
+        get the union: it is a ``tuple[str, ...]`` appended to by ``track`` and ``mtmc``, so two
+        branches each naming a different gap resolve first-writer-wins and one name is dropped.
+        That is not live -- on ``topology/ship_person.yaml`` both writers sit *after* the
+        rejoin -- and unioning tuples in general would be wrong, because ``meta["frame_hw"]`` is
+        a tuple too and two branches disagreeing about a frame's size must not resolve to a
+        four-tuple. Special-casing the name here would put a pipeline key in the pure runner.
+        The next chain that loses a stage per branch should reach for the mapping form, which is
+        the shape ``vectors`` moved to for exactly this reason.
 
         Equality is deliberately *not* attempted beyond identity. The values under a
         mapping-valued key are numpy arrays -- an embedding per detection row -- and
@@ -1672,7 +1698,9 @@ class InprocessRunner(Runner):
                     continue
                 held = merged[key]
                 if held is value:
-                    # The same object down both branches: written before the fork.
+                    # Fast path, not a guard: the same object down both branches (written
+                    # before the fork) merges into itself entry-for-entry and cannot be
+                    # refused, so skipping the merge only skips the copy.
                     continue
                 if not (isinstance(held, Mapping) and isinstance(value, Mapping)):
                     continue  # Not a union to take: the first writer wins.

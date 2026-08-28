@@ -146,12 +146,34 @@ class Detections:
             indices: what :meth:`indices_of`, :meth:`indices_of_any` and
                 ``range(len(detections))`` return. Any order is answered correctly; the rows
                 come back in the order asked for.
+
+        Raises:
+            ValidationError: an index this frame has no row for. Caught from the gather rather
+                than checked before it, so the ordinary frame pays nothing for the guard, and
+                retyped rather than left as numpy's bare ``IndexError`` because this is a
+                public method on a value type (CONVENTIONS Part 1). A selection that runs past
+                the end was built against a *different* frame, and the rows it does hit are
+                then the wrong objects' -- the one failure this module exists to prevent.
         """
         if isinstance(indices, range) and indices == range(len(self)):
             return self.boxes
         if not indices:
             return np.zeros((0, 4), dtype=np.float32)
-        return np.ascontiguousarray(self.boxes[list(indices)])
+        gathered = list(indices)
+        try:
+            return np.ascontiguousarray(self.boxes[gathered])
+        except IndexError as exc:
+            outside = [
+                i
+                for i in gathered
+                if not isinstance(i, (int, np.integer)) or not -len(self) <= i < len(self)
+            ]
+            raise ValidationError(
+                f"detection indices {outside} name no row of a {len(self)}-row frame. "
+                "`boxes_at` takes what `indices_of`, `indices_of_any` or "
+                "`range(len(detections))` return, all of which are indices *of this frame*; "
+                "one that is not means the selection outlived the detections it was built from"
+            ) from exc
 
     def boxes_of(self, class_name: str) -> tuple[np.ndarray, tuple[int, ...]]:
         """``(boxes, indices)`` for one class: what the crop step needs, in one call.
