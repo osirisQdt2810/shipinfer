@@ -233,14 +233,26 @@ class MockEmbed(_Mock):
 
 @registry_for(ElementKind.RECOGNIZE).register("mock")
 class MockRecognize(_Mock):
-    """A recogniser: turns vectors into identities."""
+    """A recogniser: turns vectors into identities.
+
+    Files the shape the real one files —
+    :class:`~shipinfer.topology.elements.recognize.GalleryRecognize` publishes
+    ``{detection row index: (identity, similarity)}`` — for the same reason
+    :func:`invented_detections` builds a real ``Detections``: a mock that filed a list would
+    let everything downstream of a chain of mocks pass its tests against a shape no
+    deployment ever produces, and this key in particular is one the runner's fan-in merges
+    across branches, which is a merge a list cannot take part in.
+
+    The single row is row 0, which is the one detection :func:`invented_detections` invents,
+    and the similarity is a flat 1.0 — invented, and obviously so.
+    """
 
     kind: ClassVar[ElementKind] = ElementKind.RECOGNIZE
     accepts: ClassVar[tuple[str, ...]] = ("nv12@gpu",)
     produces: ClassVar[tuple[str, ...]] = ("nv12@gpu",)
 
     def _meta(self, item: ChainItem) -> dict[str, Any]:
-        return {"identities": ["ship-1"]}
+        return {"identities": {0: ("ship-1", 1.0)}}
 
 
 @registry_for(ElementKind.TRACK).register("mock")
