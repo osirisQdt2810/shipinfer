@@ -372,7 +372,7 @@ class TestASecondStopWaitsForTheFirstOnesTeardown:
         inside_start = threading.Event()
         release = threading.Event()
         original_start = Model.start
-        original_teardown = InferenceServer._teardown
+        original_release = InferenceServer._release
 
         def blocking_start(self: Model, **kwargs: Any) -> None:
             """Holds the control lock, so both stops queue behind it."""
@@ -380,12 +380,15 @@ class TestASecondStopWaitsForTheFirstOnesTeardown:
             assert release.wait(_TIMEOUT), "the test never released the model's start"
             original_start(self, **kwargs)
 
-        def recording_teardown(self: InferenceServer) -> None:
-            original_teardown(self)
+        def recording_release(self: InferenceServer) -> None:
+            # Patched at `_release`, not `_teardown`: `_teardown`'s own `finally` sets the
+            # barrier before it returns, so an append AFTER `_teardown` would race the waiter
+            # it releases. Inside `_release` the record lands before the barrier by construction.
+            original_release(self)
             order.append("teardown")
 
         monkeypatch.setattr(Model, "start", blocking_start)
-        monkeypatch.setattr(InferenceServer, "_teardown", recording_teardown)
+        monkeypatch.setattr(InferenceServer, "_release", recording_release)
 
         barrier = _watch_barrier(explicit)
         loader = threading.Thread(target=_Outcome().run, args=(explicit, "echo"))
@@ -501,6 +504,22 @@ class TestALongStartAbortsWhenTheServerIsStopping:
             assert model.is_ready
 
 
+def _await_recorded(sink: _RecordingSink, count: int) -> None:
+    """Block until the worker thread has recorded ``count`` traces.
+
+    ``ModelInstance._complete`` resolves the future *before* it records the trace -- on
+    purpose, so tracing can never delay the caller's answer -- so ``infer_sync`` returning does
+    not mean the trace exists yet. A test that reads the sink's totals straight after the call
+    is racing the worker's next few bytecodes; this is the forcing wait, not a sleep.
+    """
+    deadline = time.monotonic() + _TIMEOUT
+    while time.monotonic() < deadline:
+        if sink.recorded >= count:
+            return
+        time.sleep(0.001)
+    raise AssertionError(f"only {sink.recorded} of {count} traces were recorded")
+
+
 class _RecordingSink(TraceSink):
     """A sink that remembers being used after it was closed, instead of tolerating it.
 
@@ -605,6 +624,7 @@ class TestStopLeavesAUsableTraceSink:
             ),
             timeout=_TIMEOUT,
         )
+        _await_recorded(sinks[0], 1)
         live = explicit.stats()["tracing"]
         assert live["recorded"] == 1
 
@@ -691,6 +711,7 @@ class TestTwoStopsThatBothWinTheStartedCheck:
                     ),
                     timeout=_TIMEOUT,
                 )
+            _await_recorded(sinks[0], 3)
             live = server.stats()["tracing"]
             assert live["recorded"] == 3
 
