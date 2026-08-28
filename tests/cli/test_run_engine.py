@@ -123,6 +123,11 @@ class RecordingRunner(Runner):
     needs_model_pool: ClassVar[bool] = True
 
     instances: ClassVar[list[RecordingRunner]] = []
+    #: What ``_do_start``/``_do_stop`` raise, or ``None``. Class attributes for
+    #: :class:`RecordingEngine`'s reason -- ``run()`` builds the instance, so a test can only
+    #: arm the failure before it exists.
+    fail_to_start: ClassVar[BaseException | None] = None
+    fail_to_stop: ClassVar[BaseException | None] = None
 
     def __init__(
         self, topology: Topology, settings: ServerSettings | None = None, **kwargs: Any
@@ -132,9 +137,13 @@ class RecordingRunner(Runner):
 
     def _do_start(self) -> None:
         EVENTS.append("runner.start")
+        if RecordingRunner.fail_to_start is not None:
+            raise RecordingRunner.fail_to_start
 
     def _do_stop(self, timeout_s: float) -> None:
         EVENTS.append("runner.stop")
+        if RecordingRunner.fail_to_stop is not None:
+            raise RecordingRunner.fail_to_stop
 
     def _do_submit(self, item: ChainItem) -> ResponseFuture:  # pragma: no cover - unused
         raise NotImplementedError
@@ -152,10 +161,14 @@ def _fresh(monkeypatch: pytest.MonkeyPatch):
     RecordingEngine.instances.clear()
     RecordingEngine.fail_to_start = None
     RecordingRunner.instances.clear()
+    RecordingRunner.fail_to_start = None
+    RecordingRunner.fail_to_stop = None
     monkeypatch.setattr("shipinfer.runtime.containment.require_container", lambda *a, **k: None)
     monkeypatch.setattr(run_module, "_wait", lambda built, **kwargs: EVENTS.append("wait"))
     yield
     RecordingEngine.fail_to_start = None
+    RecordingRunner.fail_to_start = None
+    RecordingRunner.fail_to_stop = None
 
 
 def write_chain(tmp_path: Path, text: str) -> Path:
@@ -327,22 +340,128 @@ class TestWhenThePoolWillNotStart:
         with pytest.raises(type(failure), match=str(failure)[:20]):
             run(pool_chain_file, runner="recording-pool")
 
-        assert EVENTS == ["engine.start"], "something came up around a pool that had not"
+        assert EVENTS == ["engine.start", "engine.stop"], (
+            "either something came up around a pool that had not, or the failed start was "
+            "left holding whatever it had taken"
+        )
         assert not RecordingRunner.instances[0].is_running
 
-    def test_it_stops_nothing_it_did_not_start(
+    def test_the_pool_is_given_back_and_the_runner_is_not_stopped(
         self, pool_chain_file: Path, monkeypatch
     ) -> None:
-        """`InferenceServer.start` releases what it took before it raises, so a `stop()` from
-        here would be a second teardown of an object that has already had one -- and the
-        runner never started, so there is nothing of its to stop either."""
+        """What matters is that the GPU goes back, once, and that nothing else is touched.
+
+        This used to assert ``"engine.stop" not in EVENTS`` -- "it stops nothing it did not
+        start" -- and that is the wrong property to pin. ``InferenceServer.stop`` is
+        documented safe on a server whose ``start`` raised half-way (``engine/pool.py``), and
+        a failed start is exactly the case where something *may* still be held: a strict start
+        that fails on model 3 of 5 leaves two loaded. Forbidding the stop forbade the only
+        thing that could give those back, so the assertion is now the honest one -- the engine
+        is stopped exactly once, and the runner, which never started, is not stopped at all.
+        """
         RecordingEngine.fail_to_start = ServerStateError("no")
         monkeypatch.setattr("shipinfer.engine.InferenceServer", RecordingEngine)
 
         with pytest.raises(ServerStateError):
             run(pool_chain_file, runner="recording-pool")
 
-        assert "engine.stop" not in EVENTS and "runner.stop" not in EVENTS
+        assert EVENTS == ["engine.start", "engine.stop"], "the engine was stopped twice, or not"
+        assert not RecordingRunner.instances[0].is_running
+
+
+class TestTheGpuGoesBackWhateverFails:
+    """One guard over the whole bring-up, because every line of it can leak an engine.
+
+    The window this class exists for is not a race: it spans the whole of ``built.start()``,
+    which for a real chain opens decoders, sockets and a thread pool while an
+    :class:`~shipinfer.engine.InferenceServer` is already up. An exception there used to leave
+    that engine at ``_started = True`` with its worker threads alive and *nothing holding a
+    reference to it* -- the unreachable-object-holding-CUDA-contexts failure that
+    ``InferenceServer.start`` and ``cli/shard.py`` each spend a paragraph refusing in their own
+    scope, on a box CLAUDE.md's hygiene rule says is shared.
+    """
+
+    def test_a_runner_that_will_not_start_gives_the_pool_back(
+        self, pool_chain_file: Path, monkeypatch
+    ) -> None:
+        """The blocking case, in the order it happens.
+
+        ``runner.stop`` between the two is ``Runner.start``'s own unwind, which closes the
+        elements it had opened before re-raising; the engine's stop comes *after* it, which is
+        the same reverse order the successful path uses -- a half-open chain may still be
+        holding a model handle when it closes.
+        """
+        RecordingRunner.fail_to_start = RuntimeError("element 'detect' failed to open")
+        monkeypatch.setattr("shipinfer.engine.InferenceServer", RecordingEngine)
+
+        with pytest.raises(RuntimeError, match="failed to open"):
+            run(pool_chain_file, runner="recording-pool")
+
+        assert EVENTS == ["engine.start", "runner.start", "runner.stop", "engine.stop"]
+        (engine,) = RecordingEngine.instances
+        assert engine.stopped, "an engine was left running with nothing holding it"
+
+    def test_a_keyboard_interrupt_while_the_chain_opens_gives_the_pool_back(
+        self, pool_chain_file: Path, monkeypatch
+    ) -> None:
+        """``BaseException``, not ``Exception``, and this is why.
+
+        A Ctrl-C during a chain that is opening decoders is the likeliest way this path is
+        taken by hand, and :func:`~shipinfer.launch.signals.forward_signals` is not installed
+        until ``_wait`` -- two lines further on. It must reach the operator, so the guard
+        re-raises rather than converting it to an exit code.
+        """
+        RecordingRunner.fail_to_start = KeyboardInterrupt()
+        monkeypatch.setattr("shipinfer.engine.InferenceServer", RecordingEngine)
+
+        with pytest.raises(KeyboardInterrupt):
+            run(pool_chain_file, runner="recording-pool")
+
+        assert EVENTS[-1] == "engine.stop"
+        assert RecordingEngine.instances[0].stopped
+
+    def test_a_runner_whose_stop_raises_still_gives_the_pool_back(
+        self, pool_chain_file: Path, monkeypatch
+    ) -> None:
+        """The nested-stop guard on the shutdown path, which no test covered.
+
+        ``built.stop()`` and ``engine.stop()`` are nested (``try``/``finally``) rather than
+        written as two statements precisely so that a runner whose stop raises still frees the
+        device: a crash must not be what frees it. Un-nesting them turns this test red and
+        nothing else.
+        """
+        RecordingRunner.fail_to_stop = RuntimeError("a decoder thread would not join")
+        monkeypatch.setattr("shipinfer.engine.InferenceServer", RecordingEngine)
+
+        with pytest.raises(RuntimeError, match="would not join"):
+            run(pool_chain_file, runner="recording-pool")
+
+        assert EVENTS == ["engine.start", "runner.start", "wait", "runner.stop", "engine.stop"]
+        assert RecordingEngine.instances[0].stopped
+
+    def test_a_refusal_the_command_can_make_without_a_gpu_builds_no_engine(
+        self, pool_chain_file: Path, monkeypatch
+    ) -> None:
+        """The cheap half: construction is not free, so it happens after the cheap refusals.
+
+        ``InferenceServer.__init__`` validates every visible device, which takes one CUDA
+        primary context per GPU (~200 MiB each on this box), and **nothing gives those back
+        inside the process** -- ``stop()`` on a server that was never started returns without
+        reaching ``_release``. So a refusal that needs no accelerator to make must be made
+        before the constructor runs, and the guard above cannot substitute for that ordering.
+
+        ``--http`` on a host with no ``server`` extra is the one an operator actually hits.
+        """
+        monkeypatch.setattr("shipinfer.engine.InferenceServer", RefusingEngine)
+        monkeypatch.setattr(
+            "shipinfer.api.require_server_extra",
+            lambda: (_ for _ in ()).throw(ConfigurationError("install shipinfer[server]")),
+        )
+
+        with pytest.raises(ConfigurationError, match=r"shipinfer\[server\]"):
+            run(pool_chain_file, runner="recording-pool", http=True)
+
+        assert EVENTS == [], "something was built for a run that was refused"
 
 
 class TestOverARealEngine:

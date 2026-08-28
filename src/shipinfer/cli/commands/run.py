@@ -113,17 +113,35 @@ def run(
             worth reading before fifty cameras start reconnecting.
 
     Raises:
-        ConfigurationError: an unknown runner, an invalid chain, a runner that manages no
-            cameras given ``--inputs``, an input the runner refuses, ``--host``/``--port``
-            without the ``--http`` that gives them meaning, ``--http`` on a host where the
-            ``server`` extra was never installed, or an HTTP port that could not be bound
-            (:meth:`shipinfer.api.BackgroundHttpServer.start`). The last is raised after the
-            runner is up and therefore travels through the ``finally`` that stops it, which
-            is what an operator who typed ``--http`` is asking for: no ingress, no deployment.
-        ServerStateError: the model pool this chain needs would not start. Raised by
+        ConfigurationError: an unknown runner, an invalid chain, an unreadable
+            ``ingest.camera_db``, a runner that manages no cameras given ``--inputs``, an
+            input the runner refuses, ``--host``/``--port`` without the ``--http`` that gives
+            them meaning, ``--http`` on a host where the ``server`` extra was never installed,
+            an HTTP port that could not be bound
+            (:meth:`shipinfer.api.BackgroundHttpServer.start`), or a chain element that will
+            not open -- a ``pool`` element with no ``model:``, for instance. The HTTP bind is
+            raised after the runner is up and therefore travels through the ``finally`` that
+            stops it, which is what an operator who typed ``--http`` is asking for: no
+            ingress, no deployment.
+        ServerStateError: the model pool this chain needs would not start, or a model it needs
+            has no live instance. Raised by
             :meth:`~shipinfer.engine.InferenceServer.start`, unwrapped, because it already
-            names the model that would not load; the engine has released what it took and the
-            runner was never started, so this leaves nothing behind to stop.
+            names the model that would not load.
+        BackendUnavailableError: a model in the repository needs a runtime this host has not
+            got (no TensorRT, no onnxruntime). Also from the engine's start.
+        ModelNotFoundError: a ``pool`` element names a model the pool did not load. Raised
+            from ``built.start()``, one line further on than the engine's own start, which is
+            why every one of these travels through the guard below rather than past it.
+
+        **Every one of them leaves the GPU as it found it.** The bring-up -- the engine's
+        construction, the runner's construction, both ``start()`` calls -- sits under one
+        ``except BaseException`` that stops the engine if one was built, and the cheap
+        refusals are made above it so that no context is taken to answer them. The list is
+        not closed, either: the engine's start surfaces whatever a backend raises, including
+        the bare ``ValueError`` :class:`~shipinfer.backends.base.ModelBackend` raises for a
+        ``requires_gpu`` backend placed on a CPU device -- an untyped refusal that should be
+        a :class:`~shipinfer.core.errors.ConfigurationError` at its source, and is documented
+        here rather than changed because ``backends/`` cannot be touched without the GPU tier.
     """
     from shipinfer.runners import build_runner
     from shipinfer.runtime.containment import require_container
@@ -165,24 +183,6 @@ def run(
     chosen = runner or settings.runner.runner
     out.print(f"topology: {chain.name} ({len(list(chain))} element(s)) — runner {chosen}")
 
-    # The model pool this run owns, or `None` when nothing here would ask for one: a chain of
-    # mocks, a `--dry-run` that spawns nothing, or a `fleet` whose shards each build their own
-    # (`cli/shard.py`). Without it a real chain could not run in this process at all -- a
-    # `pool` element is opened with `ElementContext.models` and refuses when it is `None`, so
-    # `--runner inprocess` over any topology with a model in it failed at `start()`.
-    #
-    # Constructed HERE because `models=` is a constructor argument, and *started* below rather
-    # than now: construction resolves the device list and the allocators, while everything
-    # that scans the repository, deserialises an engine or starts a thread happens in
-    # `start()`. That keeps the expensive half behind the cheap refusals below, which is where
-    # `built.start()` already sits and why they were put there.
-    engine = None
-    if not dry_run and model_pool_is_needed(chosen, chain):
-        from shipinfer.engine import InferenceServer
-
-        engine = InferenceServer(settings)
-
-    built = build_runner(chosen, chain, settings, chain_yaml=chain_yaml, models=engine)
     # The configured fleet and `--inputs`, in that order, as ONE list to place. Nobody starts
     # a camera but this: `InprocessRunner` used to start `ingest.cameras` inside its own
     # `_do_start`, which is right for one process and catastrophic for a shard, because a
@@ -190,14 +190,12 @@ def run(
     # fleet -- so all fifty cameras ran on all eight of them. Placing them here instead means
     # the fleet runner spreads them over its shards through `add_camera` and the in-process
     # runner starts them locally, from one line, with no runner knowing which deployment it is.
+    #
+    # Resolved BEFORE the engine is constructed, because it reads `ingest.camera_db` off the
+    # disk and raises `ConfigurationError` on an unreadable file or a duplicate id -- see the
+    # engine comment below for why the order of the refusals is load-bearing rather than
+    # stylistic.
     cameras = cameras_to_place(settings, inputs, loop=loop)
-    # The capability refusal is made HERE, before the dry-run branch, because it is a fact
-    # about the runner the operator picked and not about this particular execution: reached
-    # only after `start()`, `--dry-run --inputs deepstream` printed a plan and exited 0 for a
-    # combination that can never work, and the operator learned it on the real run. The
-    # *placement* still happens after `start()` -- a camera is placed on a running runner --
-    # so the two halves of the check sit either side of it deliberately.
-    refuse_if_it_manages_no_cameras(built, cameras)
     if http:
         # The same argument one flag further out, and the same place to make it: whether this
         # host can serve HTTP at all is a fact about the host, not about this execution. Asked
@@ -220,21 +218,69 @@ def run(
         out.print(f"cameras: {configured} configured ({cameras[0].camera_id} ...)")
     if from_inputs:
         out.print(f"cameras: {len(from_inputs)} from --inputs ({from_inputs[0].camera_id} ...)")
-    if dry_run:
-        # On the contract, not probed for: `Runner.describe_plan` has an in-process default
-        # ("no plan: one process") and the fleet overrides it with the plan it would run.
-        out.print(built.describe_plan())
-        return 0
 
-    # The pool comes up BEFORE the chain does: `built.start()` is what calls `open()` on every
-    # element, and that is where a `pool` element resolves its model
-    # (`topology/elements/pool.py`) -- against a pool that has to be loaded by then. A failure
-    # here raises the engine's own typed refusal, having already released whatever it managed
-    # to take (`InferenceServer.start`), and leaves the runner unstarted: nothing was started
-    # that a `finally` would have to stop, which is why this line sits outside the `try`.
-    if engine is not None:
-        engine.start()
-    built.start()
+    # The model pool this run owns, or `None` when nothing here would ask for one: a chain of
+    # mocks, a `--dry-run` that spawns nothing, or a `fleet` whose shards each build their own
+    # (`cli/shard.py`). Without it a real chain could not run in this process at all -- a
+    # `pool` element is opened with `ElementContext.models` and refuses when it is `None`, so
+    # `--runner inprocess` over any topology with a model in it failed at `start()`.
+    #
+    # Constructed HERE, as late as the `models=` constructor argument allows, and the lateness
+    # is the fix rather than a preference. `InferenceServer.__init__` builds a `DeviceManager`,
+    # which validates every visible device -- one `torch.cuda.mem_get_info` per GPU, i.e. one
+    # CUDA primary context per GPU, ~200 MiB each on this box. Nothing gives those back inside
+    # the process: `stop()` on a server that was never started takes the `already_stopped`
+    # branch and returns without reaching `_release`, and there is no other teardown to call.
+    # So every refusal that can be made without them has to be made above this line, and the
+    # two that used to sit below it -- an unreadable `ingest.camera_db` and a `--http` on a
+    # host with no `server` extra -- now do. What is left below is `build_runner` and
+    # `refuse_if_it_manages_no_cameras`, which need the runner this keyword is for.
+    engine = None
+    try:
+        if not dry_run and model_pool_is_needed(chosen, chain):
+            from shipinfer.engine import InferenceServer
+
+            engine = InferenceServer(settings)
+
+        built = build_runner(chosen, chain, settings, chain_yaml=chain_yaml, models=engine)
+        # The capability refusal is made HERE, before the dry-run branch, because it is a fact
+        # about the runner the operator picked and not about this particular execution: reached
+        # only after `start()`, `--dry-run --inputs deepstream` printed a plan and exited 0 for
+        # a combination that can never work, and the operator learned it on the real run. The
+        # *placement* still happens after `start()` -- a camera is placed on a running runner --
+        # so the two halves of the check sit either side of it deliberately.
+        refuse_if_it_manages_no_cameras(built, cameras)
+        if dry_run:
+            # On the contract, not probed for: `Runner.describe_plan` has an in-process default
+            # ("no plan: one process") and the fleet overrides it with the plan it would run.
+            out.print(built.describe_plan())
+            return 0
+
+        # The pool comes up BEFORE the chain does: `built.start()` is what calls `open()` on
+        # every element, and that is where a `pool` element resolves its model
+        # (`topology/elements/pool.py`) -- against a pool that has to be loaded by then.
+        if engine is not None:
+            engine.start()
+        built.start()
+    except BaseException:
+        # One guard over the whole bring-up, because every line of it can fail with a started
+        # engine and no other reference to it. The case that made this necessary is
+        # `built.start()`: `Runner.start` unwinds its own elements and re-raises, so a chain
+        # whose `pool` element names a model the repository does not have left an engine at
+        # `_started = True`, with its instance worker threads alive and its CUDA contexts held,
+        # reachable from nothing -- the leak `InferenceServer.start` (`engine/pool.py`) and
+        # `_ShardProcess.build` (`cli/shard.py`) each refuse in their own scope. `engine.start()`
+        # failing is covered by the same line and costs nothing: `stop()` is documented safe on
+        # a server whose `start` raised half-way, and on one that never started it is the
+        # `already_stopped` no-op.
+        #
+        # `BaseException`, not `Exception`, for `InferenceServer.start`'s reason: a
+        # `KeyboardInterrupt` during a chain that is opening decoders and sockets is the
+        # likeliest way this path is taken by hand, and `forward_signals` is not installed
+        # until `_wait`, which is two lines further on.
+        if engine is not None:
+            engine.stop()
+        raise
     try:
         # After `start`, because a camera is placed on a *running* runner: the chain has to be
         # open and its workers up before a decoder thread starts publishing into them. A
