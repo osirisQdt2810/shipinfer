@@ -21,7 +21,10 @@ what makes *this* codebase work; Part 3 is how to approach a task here.
   ADR (`.claude/DECISIONS.md`) or the PR body — once, with a pointer. `# doc: long <reason>`
   above the symbol exempts it. Check: `python3 scripts/hooks/check_docs.py [paths]`.
   Markdown too: a `FEATURE_LOG.md` entry **≤ 15 lines**, an ADR **≤ 30**, a PR body section
-  **≤ 20**. Cut history, apologetics and anything a test already proves.
+  **≤ 20** — forward-only, and unchecked by any tool: `check_docs.py` reads Python ASTs, so
+  these four are prose rules. Accepted ADRs stay as written (ADR-001 is ~40 lines); a trim
+  wave shortens new prose, never an accepted decision's reasoning. Cut history, apologetics
+  and anything a test already proves.
 - **Errors are typed.** Raise from `shipinfer.core.errors`. Never return `None`, `[]` or
   `{}` to mean "something went wrong"; a dropped frame, a full queue and a dead GPU are
   three different events and an empty list distinguishes none of them.
@@ -137,8 +140,11 @@ This is an inference server; the hot path is measured in microseconds.
 
 ### 2.7 Observability
 
-- **One logger for the process** (V145): `get_logger()` returns the `shipinfer` logger;
-  the module is a field, not a separate logger. Structured `extra=log_context(...)`.
+- **One logger for the process** (V145): every module logs through the one `shipinfer`
+  logger and names itself in a field, rather than owning a logger. Today's signature is
+  `get_logger(area)` and `area` is required; the sweep that makes it optional is a queued
+  branch (`refactor/one-logger`), so write `get_logger("ingest.replay")` until it lands.
+  Structured `extra=log_context(...)`.
   Library code configures nothing at import time.
 - Production uses the **async** log sink: a synchronous handler does a blocking write while
   holding the handler lock, on the thread that is feeding a GPU.
