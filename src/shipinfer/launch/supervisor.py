@@ -265,6 +265,22 @@ class Fleet:
         """Shards that have exited, in plan order. Does not block."""
         return tuple(r for r in self._running if not r.alive)
 
+    def dead_indices(self) -> frozenset[int]:
+        """Which shards have exited, by plan index. Does not block.
+
+        The same question :meth:`dead` answers, in the vocabulary a caller above this module
+        already speaks. A launcher needs the *index* — that is what its client map, its
+        placement map and its health report are keyed by — and giving it
+        :class:`ShardProcess` to unpack would put ``subprocess.Popen`` in the hands of a
+        layer whose whole job is the conversation with a shard rather than the process
+        behind it (``runners/fleet.py``).
+
+        **The answer is a snapshot and it ages.** A shard may exit a microsecond after this
+        returns, so a caller that reports on it is reporting what was true when it asked;
+        the fleet runner polls this per health probe and says so in its own docstring.
+        """
+        return frozenset(r.shard.index for r in self._running if not r.alive)
+
     def supervise(
         self, *, poll_s: float = 1.0, until: Callable[[], bool] | None = None
     ) -> None:

@@ -258,6 +258,12 @@ class StreamInfo(BaseModel):
     #: The ingest state as the shard reports it (``connecting``, ``streaming``,
     #: ``exhausted``, ...), or ``""`` when nothing has said yet.
     state: str = ""
+    #: The shard holding this camera has **exited**, so nothing is reading it and nothing
+    #: will re-place it (ADR-018). Distinct from a missing entry, which would say the camera
+    #: was never placed, and from an unreachable shard, which is alive and may answer again:
+    #: this one is terminal until a caller removes the camera and adds it back. The view lags
+    #: a death by up to the launcher's supervision poll.
+    lost: bool = False
 
     # `loop` is deliberately absent, for the reason `url` is optional-shaped: no runner's
     # health report carries it, so a field here would answer `true` for every camera --

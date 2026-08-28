@@ -67,7 +67,11 @@ vision = ["torchvision>=0.17"]                     # tuned NMS / roi ops
 onnx = ["onnxruntime-gpu>=1.17"]                   # portable fallback backend
 
 # --- edges of the system ----------------------------------------------------------
-server = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]   # KServe v2 HTTP facade
+server = [                                                # KServe v2 HTTP facade + /streams
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "anyio>=4.1",  # `to_thread.run_sync(abandon_on_cancel=)`; starlette's floor admits anyio 3.x
+]
 video = ["opencv-python-headless>=4.9", "av>=12.0"]      # RTSP/file ingest + decode
 kafka = ["confluent-kafka>=2.3"]                         # result publishing (Plane 3 feed)
 cli = ["typer>=0.12", "rich>=13.7"]                      # `shipinfer ...`
