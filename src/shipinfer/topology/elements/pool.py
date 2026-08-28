@@ -71,7 +71,7 @@ runner, which is what a chain-validation test does.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -92,6 +92,7 @@ from shipinfer.topology.elements.detections import (
     Detections,
     Normalization,
     decode_detections,
+    parse_classes,
 )
 from shipinfer.topology.registry import registry_for
 
@@ -128,9 +129,11 @@ _DEFAULT_PAD_VALUE = 114
 _DEFAULT_BOXES_OUTPUT = "boxes"
 _DEFAULT_COUNT_OUTPUT = "num_detections"
 
-#: The answer a crop element gives before it is opened and knows its crop extent. Replaced
-#: per instance at ``open``; it exists so that :meth:`_PoolCropElement._prepare` has a tensor
-#: to return in every state rather than an ``Optional`` every caller has to unwrap.
+#: The crop batch of a *never opened* crop element, and nothing else: :meth:`_do_open`
+#: replaces it per instance with one of the extent that instance resolved, and
+#: :meth:`~shipinfer.topology.base.Element.process` refuses before ``open``, so no frame ever
+#: sees this one. It exists only so the attribute has a value and a type from ``__init__``
+#: rather than an ``Optional`` :meth:`_PoolCropElement._prepare` would have to unwrap.
 _EMPTY_CROPS = Tensor.from_numpy(np.empty((0, 3, 1, 1), dtype=np.float32))
 
 
@@ -1071,9 +1074,12 @@ class _PoolCropElement(_PoolElement):
     a frame crowded past ``max_batch_size`` -- and the ``{row: vector}`` mapping, whose values
     are numpy *views* into the response rather than copies. Selecting a subset of rows adds an
     index tuple and one ``(N, 4)`` gather of the boxes; selecting every row adds neither,
-    because ``Detections.boxes`` is passed straight through. A frame with no rows to embed
-    allocates nothing at all and submits nothing: it never reaches
-    :meth:`~shipinfer.topology.base.Element.process`'s model call.
+    because :meth:`~shipinfer.topology.elements.detections.Detections.boxes_at` passes the
+    array straight through. A frame with no rows to embed submits nothing — it never reaches
+    :meth:`~shipinfer.topology.base.Element.process`'s model call — and costs one
+    :meth:`~shipinfer.topology.base.ChainItem.derive`, for the empty mapping that records that
+    this element ran; when a peer embedder has already filed one, not even that
+    (:meth:`_scatter`).
     """
 
     #: This element crops, so it is opened with :attr:`ElementContext.ops` and refuses without
@@ -1096,7 +1102,9 @@ class _PoolCropElement(_PoolElement):
                 f"crop settings, got {type(crop).__name__}"
             )
         self._crop_params: Mapping[str, Any] = dict(crop)
-        self._classes = self._parse_classes(self.params.get("classes"))
+        self._classes = parse_classes(
+            self.params.get("classes"), f"{self.kind.value} element {self.name!r}"
+        )
         # Resolved at open against the model this element was given, for the reason
         # `PoolDetect`'s are: the artefact knows its own input extent and output names.
         self._ops: Any = None
@@ -1105,24 +1113,12 @@ class _PoolCropElement(_PoolElement):
         self._max_rows: int | None = None
         self._output = ""
         self._metrics = _CropMetrics(None, name)
+        # Bound once, and re-bound at `open` when the real handles arrive: `self._metrics.frame`
+        # written at the call site mints a bound-method object on every frame, and this one is
+        # on the per-frame path at a thousand frames a second (CONVENTIONS 2.5). The same
+        # binding, for the same reason, as `track`'s `_on_implicit_reset`.
+        self._on_frame: Callable[[int], None] = self._metrics.frame
         self._nothing_to_crop = _EMPTY_CROPS
-
-    def _parse_classes(self, declared: Any) -> tuple[str, ...] | None:
-        """``params: classes:`` as a tuple of labels, or ``None`` for "every row".
-
-        ``None`` and not ``()``, exactly as ``track`` reads the same key: an empty list means
-        "embed nothing", which is a strange thing to ask for but an unambiguous one, and
-        conflating it with an absent key would make a typo silently embed every detection --
-        which at this element is not a wrong answer but a doubled GPU bill.
-        """
-        if declared is None:
-            return None
-        if isinstance(declared, str) or not isinstance(declared, Sequence):
-            raise ConfigurationError(
-                f"{self.kind.value} element {self.name!r}: `params: classes:` must be a list "
-                f"of detection labels, got {type(declared).__name__}"
-            )
-        return tuple(str(entry) for entry in declared)
 
     # -- opening -----------------------------------------------------------------------
 
@@ -1166,7 +1162,8 @@ class _PoolCropElement(_PoolElement):
         self._max_rows = self._max_batch_rows()
         self._output = self._resolve_output()
         self._metrics = _CropMetrics(context.metrics, self.name)
-        # Built once, here, so a quiet camera's frame allocates nothing: `_prepare` has to
+        self._on_frame = self._metrics.frame
+        # Built once, here, so a quiet camera's frame does not build one: `_prepare` has to
         # answer with a tensor and this is the one it answers with when there is nothing to
         # crop. It is never submitted and never written to, so one instance shared by every
         # worker is safe -- which an array that a kernel wrote into would not be.
@@ -1287,7 +1284,7 @@ class _PoolCropElement(_PoolElement):
             The successor item, payload untouched, carrying this element's ``meta_key``.
         """
         crops, rows = self._prepare(item)
-        self._metrics.frame(len(rows))
+        self._on_frame(len(rows))
         if not rows:
             # An empty mapping, not an absent key: "this element ran and had nothing to crop"
             # and "this element never ran" are different facts, and only the first one is
@@ -1303,6 +1300,12 @@ class _PoolCropElement(_PoolElement):
         launch: the ops interface is batched precisely so that the loop is hard to write
         (CONVENTIONS 2.5), and the rows come back in the order the boxes went in, which is the
         whole basis of the scatter-back in :meth:`_finish`.
+
+        The pixels are scaled by the normalisation this slot resolved at ``open`` (``params:
+        {crop: {normalize: ...}}``, defaulting to
+        :class:`~shipinfer.topology.elements.detections.Normalization`) and never by a
+        re-derived one: a crop fed to a re-identification engine in the wrong scale is
+        answered without an error and shows up only as appearance matching that degrades.
 
         The crops are cut from the **source** frame the item still carries, not from the
         letterboxed one the detector submitted -- which is why ``PoolDetect`` hands its payload
@@ -1335,27 +1338,24 @@ class _PoolCropElement(_PoolElement):
             return self._nothing_to_crop, ()
         image = self._frame_of(item)
         self._refuse_a_frame_the_boxes_do_not_belong_to(item, image)
-        boxes = (
-            detections.boxes
-            if len(rows) == len(detections)
-            else np.ascontiguousarray(detections.boxes[list(rows)])
-        )
+        boxes = detections.boxes_at(rows)
         crops = self._ops.crop_batch(image, boxes, self._crop_size, self._normalize)
         return Tensor.from_numpy(crops), rows
 
-    def _selected(self, detections: Detections) -> tuple[int, ...]:
+    def _selected(self, detections: Detections) -> range | tuple[int, ...]:
         """The detection rows this slot embeds -- every one, or the declared classes.
 
-        A tuple rather than ``track``'s ``range``-or-tuple, because these indices are *kept*:
-        they are the keys of the mapping :meth:`_finish` files, so they outlive the frame's
-        walk through this element and a lazy ``range`` would only be materialised later
-        anyway. The indices are in the detector's own order, which is descending score, and
-        the crops follow that order into the model.
+        A ``range`` in the "no ``classes:``" case, exactly as ``track._selected`` returns one
+        and for the same reason: nothing here materialises it. :meth:`_finish` iterates it
+        once to build the mapping, :meth:`_prepare` reads its length, and
+        :meth:`~shipinfer.topology.elements.detections.Detections.boxes_at` reads its length
+        too — so the common case allocates no index list at all. The indices are in the
+        detector's own order, which is descending score, and the crops follow that order into
+        the model.
         """
         if self._classes is None:
-            return tuple(range(len(detections)))
-        wanted = self._classes
-        return tuple(i for i, label in enumerate(detections.labels) if label in wanted)
+            return range(len(detections))
+        return detections.indices_of_any(self._classes)
 
     def _refuse_a_frame_the_boxes_do_not_belong_to(
         self, item: ChainItem, image: np.ndarray
@@ -1425,6 +1425,11 @@ class _PoolCropElement(_PoolElement):
             for start in range(0, total, limit)
         ]
         joined = np.concatenate([self._rows_of(chunk).numpy() for chunk in chunks], axis=0)
+        # Everything except `outputs` is the **first chunk's**: `request_id`, `timings` and
+        # `executed_on` describe one of the K requests this frame cost, not their sum, and
+        # `executed_on` names one of up to K instances. `_finish` reads only `outputs`, so
+        # nothing is wrong today; a consumer that attributes device load off a crop element's
+        # response would be reading chunk 0 and must aggregate here instead.
         return replace(chunks[0], outputs={self._output: Tensor.from_numpy(joined)})
 
     def _rows_of(self, response: InferenceResponse) -> Tensor:
@@ -1463,7 +1468,7 @@ class _PoolCropElement(_PoolElement):
                 that silently drops the last object attaches every remaining vector correctly
                 and loses one identity per frame with no counter anywhere.
         """
-        rows: tuple[int, ...] = carried
+        rows: range | tuple[int, ...] = carried
         vectors = self._rows_of(response).numpy()
         if vectors.ndim < 2 or vectors.shape[0] != len(rows):
             raise InferenceError(
@@ -1487,6 +1492,12 @@ class _PoolCropElement(_PoolElement):
         both embedders ran. That is the exact failure the mapping form was chosen to make
         expressible, thrown away one line before the finish.
 
+        Nothing to add is not nothing to say: with no peer under the key, the empty mapping
+        is still filed, because "this element ran and covered no rows" and "this element never
+        ran" are different facts and only the first is evidence the chain is wired the way the
+        operator thinks. It is when a peer has already filed a mapping that there is genuinely
+        nothing to do, and then the item is handed on unchanged rather than copied.
+
         Raises:
             ValidationError: something that is not a mapping is already filed under this key.
                 An element that files raw model outputs there is a scatter-back that never
@@ -1505,9 +1516,12 @@ class _PoolCropElement(_PoolElement):
                 "the first one's coverage"
             )
         if not covered:
-            # Nothing to add, and the peer's mapping is already correct: hand it on rather
-            # than copying it, so a frame this element skips costs no allocation at all.
-            return item.derive()
+            # Nothing to add and the peer's mapping is already correct, so hand the item on
+            # **itself** rather than deriving a copy of it: `derive()` would build a second
+            # meta dict and a second `ChainItem` to say exactly what this one says, and an
+            # unchanged item is already a legal thing to flow down the chain (that is what a
+            # false `ElementNode.admits` hands on). The quiet camera is the common case.
+            return item
         return item.derive(**{self.meta_key: {**existing, **covered}})
 
 

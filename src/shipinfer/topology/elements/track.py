@@ -53,7 +53,7 @@ import numpy as np
 from shipinfer.core.errors import ConfigurationError, TrackingError, ValidationError
 from shipinfer.topology.base import ChainItem, Element, ElementContext, ElementKind
 from shipinfer.topology.bridge import load_mot, load_types
-from shipinfer.topology.elements.detections import Detections
+from shipinfer.topology.elements.detections import Detections, parse_classes
 from shipinfer.topology.registry import registry_for
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -539,7 +539,9 @@ class ShipvisionTrack(Element):
                 f"keyword arguments, got {type(options).__name__}"
             )
         self._options: dict[str, Any] = dict(options)
-        self._classes = self._parse_classes(self.params.get("classes"))
+        self._classes = parse_classes(
+            self.params.get("classes"), f"track element {self.name!r}"
+        )
         self._regression_reset = self._parse_regression_reset(
             self.params.get("regression_reset", DEFAULT_REGRESSION_RESET)
         )
@@ -558,22 +560,6 @@ class ShipvisionTrack(Element):
         self._Detection: Any = None
         self._Detections: Any = None
         self._FrameTag: Any = None
-
-    def _parse_classes(self, declared: Any) -> tuple[str, ...] | None:
-        """``params: classes:`` as a tuple of labels, or ``None`` for "everything".
-
-        ``None`` and not ``()``: an empty list in a chain file means "track nothing", which is
-        a strange thing to ask for but an unambiguous one, and conflating it with an absent key
-        would make a typo silently track everything.
-        """
-        if declared is None:
-            return None
-        if isinstance(declared, str) or not isinstance(declared, Sequence):
-            raise ConfigurationError(
-                f"track element {self.name!r}: `params: classes:` must be a list of detection "
-                f"labels, got {type(declared).__name__}"
-            )
-        return tuple(str(entry) for entry in declared)
 
     def _parse_regression_reset(self, declared: Any) -> int:
         try:
@@ -791,12 +777,14 @@ class ShipvisionTrack(Element):
         """Which detection rows this element tracks — every one, or the declared classes.
 
         A ``range`` in the common case, so the "track everything" path allocates nothing per
-        frame beyond what the tracker itself needs.
+        frame beyond what the tracker itself needs. The label match itself belongs to
+        :meth:`~shipinfer.topology.elements.detections.Detections.indices_of_any`, so this
+        element and every crop element select rows by one rule rather than by two copies of
+        one.
         """
         if self._classes is None:
             return range(len(detections))
-        wanted = self._classes
-        return tuple(i for i, label in enumerate(detections.labels) if label in wanted)
+        return detections.indices_of_any(self._classes)
 
     def _embeddings(self, item: ChainItem, detections: Detections) -> Any:
         """``meta["vectors"]`` as one appearance vector per detection row, or ``None``.

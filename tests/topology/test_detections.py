@@ -26,12 +26,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from shipinfer.core.errors import ValidationError
+from shipinfer.core.errors import ConfigurationError, ValidationError
 from shipinfer.topology.elements.detections import (
     UNKNOWN_LABEL,
     DecodeParams,
     Detections,
     decode_detections,
+    parse_classes,
 )
 
 LABELS = {0: "person", 8: "ship"}
@@ -40,6 +41,19 @@ LABELS = {0: "person", 8: "ship"}
 def row(x1: float, y1: float, x2: float, y2: float, score: float, cls: int) -> list[float]:
     """One detector row in the layout the decoder documents."""
     return [x1, y1, x2, y2, score, float(cls)]
+
+
+def mixed() -> Detections:
+    """Four rows, ship/person/ship/person — a selection no slice expresses."""
+    return Detections(
+        boxes=np.array(
+            [[0, 0, 10, 10], [20, 0, 30, 10], [40, 0, 50, 10], [60, 0, 70, 10]],
+            dtype=np.float32,
+        ),
+        scores=np.full(4, 0.9, dtype=np.float32),
+        class_ids=np.array([8, 0, 8, 0], dtype=np.int32),
+        labels=("ship", "person", "ship", "person"),
+    )
 
 
 def params(**overrides) -> DecodeParams:
@@ -247,3 +261,103 @@ class TestTheOldImportPathStillResolves:
         assert old_home.Detections is Detections
         assert old_home.decode_detections is decode_detections
         assert old_home.UNKNOWN_LABEL == UNKNOWN_LABEL
+
+
+# -- row selection, shared by every element that has a `classes:` --------------------------
+
+
+class TestParseClasses:
+    """One parser, because ``track`` and every crop element read the same key.
+
+    They had a copy each, differing only in the kind word inside the message. Two copies of a
+    row-selection rule is two places for "an absent key is not an empty list" to drift, and the
+    drift has no symptom at run time: the element covers every row instead of none, or none
+    instead of every.
+    """
+
+    def test_an_absent_key_selects_everything(self) -> None:
+        assert parse_classes(None, "track element 'tracker'") is None
+
+    def test_an_empty_list_is_not_an_absent_key(self) -> None:
+        """``()`` means "select nothing" and ``None`` means "select everything". Conflating
+        them is how a typo doubles a GPU bill in silence."""
+        assert parse_classes([], "track element 'tracker'") == ()
+
+    def test_labels_come_back_as_a_tuple_of_strings(self) -> None:
+        assert parse_classes(["ship", "person"], "x") == ("ship", "person")
+
+    def test_a_yaml_number_is_still_a_label(self) -> None:
+        """``classes: [8]`` is a chain file saying a label that happens to look like an id;
+        it is compared against ``Detections.labels``, which are strings."""
+        assert parse_classes([8], "x") == ("8",)
+
+    def test_a_bare_string_is_refused_rather_than_iterated(self) -> None:
+        """``classes: ship`` would otherwise select the rows labelled ``s``, ``h``, ``i``,
+        ``p`` — that is, none of them, and without a word said."""
+        with pytest.raises(ConfigurationError, match="must be a list of detection labels"):
+            parse_classes("ship", "embed element 'embed_ship'")
+
+    def test_the_refusal_names_the_element_that_carries_the_key(self) -> None:
+        with pytest.raises(ConfigurationError, match="embed element 'embed_ship'"):
+            parse_classes(7, "embed element 'embed_ship'")
+
+
+class TestSelectingRowsByClass:
+    def test_several_classes_at_once_in_score_order(self) -> None:
+        assert mixed().indices_of_any(("ship", "person")) == (0, 1, 2, 3)
+
+    def test_one_class_is_the_non_contiguous_subset(self) -> None:
+        """The ship rows are 0 and 2, which no slice expresses — the reason a selection by
+        label and a selection by position cannot be allowed to agree by accident."""
+        assert mixed().indices_of_any(("ship",)) == (0, 2)
+
+    def test_it_agrees_with_the_single_class_form(self) -> None:
+        assert mixed().indices_of_any(("person",)) == mixed().indices_of("person")
+
+    def test_a_label_no_row_carries_selects_nothing(self) -> None:
+        assert mixed().indices_of_any(("dinghy",)) == ()
+
+    def test_the_match_is_case_sensitive(self) -> None:
+        """Stated as a test rather than as a comment: a chain file writing ``classes: [Ship]``
+        against a detector emitting ``ship`` embeds nothing, permanently and silently, and the
+        only place that rule is decided is here."""
+        assert mixed().indices_of_any(("Ship",)) == ()
+
+    def test_selecting_nothing_selects_nothing(self) -> None:
+        assert mixed().indices_of_any(()) == ()
+
+
+class TestGatheringTheBoxesOfASelection:
+    """What a crop element hands a kernel: one contiguous ``(K, 4)`` array, in row order."""
+
+    def test_a_subset_is_the_rows_in_the_order_they_were_asked_for(self) -> None:
+        detections = mixed()
+
+        gathered = detections.boxes_at((0, 2))
+
+        assert np.array_equal(gathered, detections.boxes[[0, 2]])
+        assert gathered.flags["C_CONTIGUOUS"]
+
+    def test_every_row_is_handed_through_without_a_copy(self) -> None:
+        """The common case on a chain whose crop element declares no ``classes:``; copying
+        an ``(N, 4)`` array per frame at a thousand frames a second is free to avoid."""
+        detections = mixed()
+
+        assert detections.boxes_at(range(len(detections))) is detections.boxes
+
+    def test_selecting_nothing_is_an_empty_box_array_not_an_error(self) -> None:
+        assert mixed().boxes_at(()).shape == (0, 4)
+
+    def test_the_single_class_form_gathers_the_same_rows(self) -> None:
+        detections = mixed()
+
+        boxes, indices = detections.boxes_of("ship")
+
+        assert indices == (0, 2)
+        assert np.array_equal(boxes, detections.boxes_at(indices))
+
+    def test_a_class_the_frame_has_none_of_is_an_empty_pair(self) -> None:
+        boxes, indices = mixed().boxes_of("dinghy")
+
+        assert indices == ()
+        assert boxes.shape == (0, 4)

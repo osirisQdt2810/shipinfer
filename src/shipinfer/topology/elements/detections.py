@@ -21,12 +21,13 @@ and the pad and this module consumes them.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 
-from shipinfer.core.errors import ValidationError
+from shipinfer.core.errors import ConfigurationError, ValidationError
 
 __all__ = [
     "UNKNOWN_LABEL",
@@ -35,6 +36,7 @@ __all__ = [
     "Detections",
     "Normalization",
     "decode_detections",
+    "parse_classes",
 ]
 
 #: Label for a class id the deployment did not configure. Kept rather than dropped: a
@@ -109,6 +111,42 @@ class Detections:
         """Row indices of one class, in score order. The branch's membership list."""
         return tuple(i for i, label in enumerate(self.labels) if label == class_name)
 
+    def indices_of_any(self, class_names: Collection[str]) -> tuple[int, ...]:
+        """Row indices of any of several classes, in score order.
+
+        What a slot's ``params: classes:`` selects, and the reason the rule lives on the value
+        rather than in the elements: an exact label match, in the detector's own descending
+        score order, is one rule, and the ``track`` element and every crop element all ask for
+        it (:func:`parse_classes` is the other half). Two copies would be two places for "a
+        case difference is not a match" to drift, and the drift has no symptom — the element
+        simply covers no rows.
+
+        ``class_names`` is the tuple the caller resolved once at ``open``, so the membership
+        test is a scan of two or three strings and this allocates nothing per frame beyond the
+        answer.
+        """
+        return tuple(i for i, label in enumerate(self.labels) if label in class_names)
+
+    def boxes_at(self, indices: Collection[int]) -> np.ndarray:
+        """The ``(K, 4)`` boxes of ``indices``, contiguous, ready for a crop kernel.
+
+        Contiguous because the fancy index that gathers them is handed straight to an ops
+        implementation; a non-contiguous view would be copied inside it instead, once per
+        frame and out of sight. Selecting *every* row hands the array through without a copy,
+        which is the common case on a chain whose crop element declares no ``classes:``.
+
+        Args:
+            indices: ascending and unique — what :meth:`indices_of`, :meth:`indices_of_any`
+                and ``range(len(detections))`` return. The whole-frame fast path reads a
+                length rather than the values, so a reordered index list is not a selection
+                this answers correctly.
+        """
+        if len(indices) == len(self):
+            return self.boxes
+        if not indices:
+            return np.zeros((0, 4), dtype=np.float32)
+        return np.ascontiguousarray(self.boxes[list(indices)])
+
     def boxes_of(self, class_name: str) -> tuple[np.ndarray, tuple[int, ...]]:
         """``(boxes, indices)`` for one class: what the crop step needs, in one call.
 
@@ -118,9 +156,7 @@ class Detections:
         tracker starts swapping identities.
         """
         indices = self.indices_of(class_name)
-        if not indices:
-            return np.zeros((0, 4), dtype=np.float32), ()
-        return np.ascontiguousarray(self.boxes[list(indices)]), indices
+        return self.boxes_at(indices), indices
 
     def counts(self) -> dict[str, int]:
         """Objects per class — what the fan-out metric and a log line read."""
@@ -190,6 +226,37 @@ class Normalization:
     def __post_init__(self) -> None:
         if any(value == 0 for value in self.std):
             raise ValidationError(f"normalisation std must be non-zero, got {self.std}")
+
+
+def parse_classes(declared: Any, what: str) -> tuple[str, ...] | None:
+    """A slot's ``params: classes:`` as a tuple of labels, or ``None`` for "every row".
+
+    One function rather than one copy per element, for the reason :func:`_normalization` in
+    ``elements/pool.py`` is one: ``track`` selecting the rows it tracks and a crop element
+    selecting the rows it embeds are the same key, the same vocabulary and the same refusal,
+    and the only thing that differs is which element the message names — which is what
+    ``what`` carries (``"embed element 'embed_ship'"``). It sits here because
+    :meth:`Detections.indices_of_any` is what consumes the answer, and this module already
+    owns the label vocabulary both ends are talking about.
+
+    ``None`` and not ``()`` for an absent key: an empty list means "select nothing", which is
+    a strange thing to ask for but an unambiguous one, and conflating the two would make a
+    typo silently select *everything* — at ``track`` a wrong answer, at an embedder a doubled
+    GPU bill.
+
+    Raises:
+        ConfigurationError: anything that is not a list of labels. A bare ``classes: ship``
+            is refused by name rather than iterated, which would otherwise select the rows
+            labelled ``s``, ``h``, ``i`` and ``p`` — that is, none, silently.
+    """
+    if declared is None:
+        return None
+    if isinstance(declared, str) or not isinstance(declared, Sequence):
+        raise ConfigurationError(
+            f"{what}: `params: classes:` must be a list of detection labels, got "
+            f"{type(declared).__name__}"
+        )
+    return tuple(str(entry) for entry in declared)
 
 
 def decode_detections(

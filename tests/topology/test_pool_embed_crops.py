@@ -300,6 +300,78 @@ class TestItCropsOncePerFrameNotOncePerBox:
         assert np.allclose(crops[:1], expected)
 
 
+class TestThePixelScaleIsTheSlotsOwn:
+    """``params: {crop: {normalize: ...}}`` is what the pixels were scaled by.
+
+    The **second** silent-corruption axis of this element, and the one every other assertion in
+    this file is blind to. Crops normalised with the wrong mean and std are the right rows, in
+    the right order, at the right extent, keyed to the right detections; the engine answers
+    without an error; and the only symptom is appearance matching that degrades weeks later.
+    Before this class existed, replacing the resolved ``Normalization`` with the default at the
+    ``crop_batch`` call left every other test in this file green — and, when review ran the
+    same mutation, the entire offline tier with them. A knob the element parses, validates and
+    documents was reaching the kernel unobserved.
+    """
+
+    #: Different from the default (mean 0, std 255, ``swap_rb`` True) in all three fields, so a
+    #: crop cut with the default disagrees in every pixel rather than in a corner case.
+    ODD = {"mean": [1, 2, 3], "std": [4, 5, 6], "swap_rb": False}
+
+    #: The same three values as the element must resolve them.
+    RESOLVED = Normalization(mean=(1.0, 2.0, 3.0), std=(4.0, 5.0, 6.0), swap_rb=False)
+
+    def crop_params(self) -> dict[str, Any]:
+        return {"crop": {"size": list(CROP), "normalize": self.ODD}}
+
+    def test_the_declared_normalisation_reaches_the_crop(self) -> None:
+        embedder = FakeEmbedder()
+        element = opened(embedder, params=self.crop_params())
+        pixels = frame().numpy()[0]
+
+        element.process(item(mixed()))
+
+        expected = NumpyImageOps().crop_batch(pixels, mixed().boxes, CROP, self.RESOLVED)
+        assert np.allclose(embedder.crops[0], expected)
+
+    def test_and_the_default_would_have_produced_other_pixels(self) -> None:
+        """The other half of the test above. "The crops equal the reference" is also satisfied
+        by an element that ignored the slot *and* a reference that did too, so this says the
+        two normalisations are distinguishable in the first place."""
+        pixels = frame().numpy()[0]
+        boxes = mixed().boxes
+
+        declared = NumpyImageOps().crop_batch(pixels, boxes, CROP, self.RESOLVED)
+        default = NumpyImageOps().crop_batch(pixels, boxes, CROP, Normalization())
+
+        assert not np.allclose(declared, default)
+
+    def test_a_slot_that_declares_none_gets_the_documented_default(self) -> None:
+        """``crop.normalize`` is optional and its default is
+        :class:`~shipinfer.topology.elements.detections.Normalization`'s own — not the
+        artefact's, because a model repository config has no normalisation section to read."""
+        embedder = FakeEmbedder()
+        element = opened(embedder)
+        pixels = frame().numpy()[0]
+
+        element.process(item(mixed()))
+
+        expected = NumpyImageOps().crop_batch(pixels, mixed().boxes, CROP, Normalization())
+        assert np.allclose(embedder.crops[0], expected)
+
+    def test_a_zero_std_is_refused_at_open_not_divided_by(self) -> None:
+        """The symptom otherwise is a crop batch of infinities that a re-ID engine accepts."""
+        with pytest.raises(ConfigurationError, match="std"):
+            PoolEmbed(
+                "embed",
+                {"crop": {"size": list(CROP), "normalize": {"std": [0, 1, 1]}}},
+                model="person_embedder",
+            ).open(
+                ElementContext(
+                    models=FakePool(person_embedder=FakeEmbedder()), ops=NumpyImageOps()
+                )
+            )
+
+
 # -- the scatter-back ---------------------------------------------------------------------------
 
 
@@ -434,6 +506,43 @@ class TestAFrameWithNothingToCropCostsNothing:
         emitted = people.process(ships.process(item(only_ships)))
 
         assert sorted(emitted.meta["vectors"]) == [0, 1]
+
+    def test_covering_nothing_over_a_peer_hands_the_item_on_untouched(self) -> None:
+        """Nothing to add and the peer's mapping already correct: the item flows on *itself*
+        rather than through a ``derive()`` that would build a second meta dict and a second
+        ``ChainItem`` to say what this one already says. An unchanged item is a legal thing to
+        flow — it is what a false ``when:`` hands on — and the quiet camera is the common case
+        at this sizing, so the allocation the docstring promises not to make is worth one
+        assertion."""
+        ships = opened(FakeEmbedder(), params={"classes": ["ship"]})
+        people = opened(FakeEmbedder(), params={"classes": ["person"]})
+        only_ships = Detections(
+            boxes=np.array([[0, 0, 40, 40]], dtype=np.float32),
+            scores=np.full(1, 0.9, dtype=np.float32),
+            class_ids=np.full(1, 8, dtype=np.int32),
+            labels=("ship",),
+        )
+        embedded = ships.process(item(only_ships))
+
+        assert people.process(embedded) is embedded
+
+    def test_with_no_peer_the_empty_mapping_is_still_filed(self) -> None:
+        """The other side of it: "this element ran and covered no rows" and "this element never
+        ran" are different facts, and only the first is evidence the chain is wired the way the
+        operator thinks. So the key appears even when nothing filled it."""
+        element = opened(FakeEmbedder(), params={"classes": ["ship"]})
+        people = Detections(
+            boxes=np.array([[0, 0, 40, 40]], dtype=np.float32),
+            scores=np.full(1, 0.9, dtype=np.float32),
+            class_ids=np.zeros(1, dtype=np.int32),
+            labels=("person",),
+        )
+        arrived = item(people)
+
+        emitted = element.process(arrived)
+
+        assert emitted is not arrived
+        assert emitted.meta["vectors"] == {}
 
     def test_an_empty_frame_is_not_an_error(self) -> None:
         element = opened(FakeEmbedder())
