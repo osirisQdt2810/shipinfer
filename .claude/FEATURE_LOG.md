@@ -5,6 +5,27 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-28 — The ingest parity harness: one scenario, two planes, one committed golden (P6 PR-A)
+
+**What.** CLAUDE.md's sync rule says a change to a Python data-plane seam is not finished
+until the C++ seam carries it. Nothing checked. `test_ingest.py` and `test_ingest.cpp` assert
+the same *properties* in two languages, which catches a property somebody deleted and not a
+behaviour that quietly differs. `benchmarks/parity/` is the gate: a line-oriented scenario
+drives the **real `IngestManager`** in both planes against a scripted source, each writes a
+canonical JSONL trace, and both are held to one golden emitted once by the Python plane and
+committed. Per-camera sequences in order; cross-camera interleaving never compared.
+
+**Found on the first run, exactly as the plan expected.** Two real divergences, both in
+`CameraHealth`, both registered in `benchmarks/parity/known.py` with citations on both sides
+and an open ledger line: `last_error` carries a `"<ExceptionType>: "` prefix on the Python
+plane and not on the C++ one; `consecutive_failures` after a fatal open is 0 there and 1
+here. A third, the sticky stop fate (`actor.h:139-145`), is documentary — it shows in no
+trace field. No golden was regenerated and nothing was `xfail`ed; that is the whole point.
+
+**The seam.** `csrc/tests/` gains three header-only support files, off every link line. The
+binary is `test_ingest_parity` so CI's existing `for candidate in csrc/build/test_*` loop
+runs it: **zero workflow changes**. Offline in both planes, and no GPU tier by design.
+
 ## 2026-08-28 — `recognize` as a gallery query: `GalleryRecognize` + the gallery on disk (Phase C7)
 
 ---
