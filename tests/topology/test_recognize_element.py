@@ -213,6 +213,57 @@ class FakeDetections:
         return len(self.scores)
 
 
+@dataclass
+class UnsizedDetections:
+    """A ``detections`` with ``labels`` and no ``__len__`` — the reviewer's first double.
+
+    Legitimate as far as this element is concerned: ``meta["detections"]`` is somebody else's
+    key and a value it cannot size is treated as absent, which is what lets a chain embed
+    with no decoding detector in front of it. The consequence is that the shared reader has
+    no row count to bound the vectors against, so a ``classes:`` filter is the first thing to
+    index the labels — and with one label for three rows it is also the first thing to run
+    off the end.
+    """
+
+    labels: Sequence[str]
+
+
+@dataclass
+class ShortLabels:
+    """Sized, and still carrying fewer labels than rows — the reviewer's second double.
+
+    C3's real ``Detections.__post_init__`` refuses this, which is why the element is right to
+    trust it; nothing refuses it for a value that merely looks like one.
+    """
+
+    scores: Sequence[float]
+    labels: Sequence[str]
+
+    def __len__(self) -> int:
+        return len(self.scores)
+
+
+class WatchedScores:
+    """``FakeDetections`` that records how many times anything read its ``scores``.
+
+    A counter and not a timer: "this value is not built when nobody reads it" is a property,
+    and a property is asserted by observing the read rather than by measuring what skipping
+    it saved on a shared box.
+    """
+
+    def __init__(self, *, scores: Sequence[float]) -> None:
+        self._scores = list(scores)
+        self.reads = 0
+
+    def __len__(self) -> int:
+        return len(self._scores)
+
+    @property
+    def scores(self) -> Sequence[float]:
+        self.reads += 1
+        return self._scores
+
+
 #: The demo repository's COCO numbering, the same table ``DecodeParams`` ships with. The class
 #: id has to agree with the label or the ``Detections`` is one no decoder could emit.
 CLASS_IDS = {"person": 0, "ship": 8}
@@ -931,6 +982,39 @@ class TestTheClassFilter:
         finally:
             element.close()
 
+    @pytest.mark.parametrize(
+        "detections",
+        [
+            UnsizedDetections(labels=("ship",)),
+            ShortLabels(scores=[0.9] * 3, labels=("ship",)),
+        ],
+        ids=["unsized", "short-labels"],
+    )
+    def test_labels_that_do_not_cover_the_rows_is_a_refusal_and_not_an_index_error(
+        self, reid: Any, tmp_path: Path, detections: Any
+    ) -> None:
+        """Unreachable with C3's real ``Detections``; reachable with what this element accepts.
+
+        The element duck-types ``meta["detections"]`` on purpose — a value it cannot size is
+        treated as absent rather than refused, because it is not this element's key to
+        validate — and that is exactly the door a short ``labels`` walks through: with no
+        ``len()`` the shared reader has no row bound to check the vectors against, so
+        ``labels[index]`` is the first thing to notice. A bare ``IndexError`` reaching the
+        runner is charged to "this element has a bug"; this is a chain wired to a detector
+        that does not carry one label per box, and the two have different fixes.
+        """
+        three_identities_two_cameras(tmp_path)
+        element = build(gallery_dir=str(tmp_path), dim=DIM, classes=["ship"])
+        element.open(ElementContext())
+
+        try:
+            with pytest.raises(ValidationError, match="`classes: \\['ship'\\]`") as caught:
+                element.process(item(np.tile(PROBE, (3, 1)), detections=detections))
+        finally:
+            element.close()
+
+        assert "label(s)" in str(caught.value)
+
 
 class TestARefusalFromTheLibrary:
     """A ``shipvision`` error reaching the walk must arrive as one of ours."""
@@ -1343,6 +1427,30 @@ class TestEnrolment:
         assert first == {0: (None, None)}
         assert second == {0: (None, None)}, "nothing was learned from the first frame"
         assert element._enrolled is None, "no second store is built when enrolment is off"
+
+    @pytest.mark.parametrize("enrol", [False, True], ids=["off", "on"])
+    def test_the_confidences_are_read_only_when_something_will_read_them(
+        self, reid: Any, tmp_path: Path, enrol: bool
+    ) -> None:
+        """``_confidences`` is a ``float()`` per row, and with ``enrol: false`` nobody reads it.
+
+        ``_enrol`` returns before it looks at the value whenever enrolment is off, which is
+        the default, so building it on every frame is per-row work on the path that runs at
+        fifteen thousand rows a second — the one place this file departed from its own
+        resolve-once standard (CONVENTIONS §2.5). Asserted by counting the reads rather than
+        by timing them, because a timing assertion on a shared box measures the box.
+        """
+        three_identities_two_cameras(tmp_path)
+        element = build(gallery_dir=str(tmp_path), threshold=0.9, dim=DIM, enrol=enrol)
+        element.open(ElementContext())
+        watched = WatchedScores(scores=[1.0])
+
+        try:
+            element.process(item(np.array([self.STRANGER]), detections=watched))
+        finally:
+            element.close()
+
+        assert watched.reads == (1 if enrol else 0)
 
     def test_when_it_is_on_the_next_camera_to_see_the_same_ship_recognises_it(
         self, reid: Any, tmp_path: Path

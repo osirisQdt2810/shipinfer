@@ -81,12 +81,18 @@ this element queried. Keyed rather than positional because two ``recognize`` slo
 on two branches of one chain — a ship recogniser and, one day, something else — and the
 runner's fan-in merges their metadata into one item at the rejoin. Two lists aligned by
 position cannot be merged: they would have to agree on a length nobody owns, and the first
-writer would win the whole key. Two mappings over *disjoint* detection rows merge by union,
-which is why an unqueried row is absent rather than ``(None, None)`` — an unqueried row is
-the other branch's to answer, and filing a placeholder for it would collide with the answer.
+writer would win the whole key. Two mappings over *disjoint* detection rows **will** merge
+by union once slice C8a changes ``InprocessRunner._inbound``; today that merge is
+``meta.setdefault``, so it is first-writer-wins **per key** and a second ``identities``
+producer is dropped entirely — the shape here is chosen for the merge that is coming, not
+for the one that runs today. That is why an unqueried row is absent rather than
+``(None, None)``: an unqueried row is the other branch's to answer, and filing a placeholder
+for it would collide with the answer once the union lands.
 ``ShipvisionTrack`` reads ``meta["vectors"]`` under the same convention (a mapping of
 detection index to value), so the two elements of this phase agree about what a row index
-means.
+means — and since review they agree through one function rather than two copies of a rule:
+:mod:`shipinfer.topology.elements._vectors`, which this element is repointed at here and
+``track`` is repointed at in the rebase over slice C8a.
 
 **Two gaps, both named, neither hidden.** They are the honest state of phase C at this slice:
 
@@ -120,6 +126,7 @@ from shipinfer.core.logging import get_logger
 from shipinfer.core.metrics import Counter, Histogram, MetricsRegistry
 from shipinfer.topology import bridge
 from shipinfer.topology.base import ChainItem, Element, ElementContext, ElementKind
+from shipinfer.topology.elements._vectors import rows_by_index
 from shipinfer.topology.gallery_store import (
     GalleryFile,
     load_gallery_file,
@@ -282,13 +289,20 @@ class GalleryRecognize(Element):
     * ``gallery`` — which :data:`shipvision.reid.GALLERIES` implementation (``flat`` by
       default, for the exact same-camera exclusion rule 1 depends on; ``centroid`` for one
       folded vector per identity, which warns at open because its exclusion is best-effort).
-    * ``capacity`` / ``per_identity`` — passed to that implementation for the **curated**
-      store. Left unset, its own bound applies; both shipped galleries are bounded by
-      construction, so there is no unbounded state either way. What ``capacity`` counts
-      differs between them (rows for ``flat``, identities for ``centroid``), which is why
-      this element does not restate a default for it, and ``per_identity`` is ``flat``'s
-      second bound — how many views one ship may keep — so naming it with ``centroid``
-      selected is refused at open by the gallery itself.
+    * ``capacity`` / ``per_identity`` — the two bounds passed to that implementation, and
+      they do **not** reach the same stores. ``capacity`` bounds the **curated** store only;
+      the minted store ``enrol: true`` builds takes ``enrol_capacity`` instead, which is what
+      keeps a week of strangers from running into a bound an operator set for their own
+      ships. ``per_identity`` reaches **both**, because it describes the implementation
+      rather than one store's size, and giving two stores of one gallery type different
+      values for it would be a difference nobody chose; on the minted store it is inert, a
+      minted id being ``<prefix>:<camera>:<frame>:<row>`` and therefore never holding a
+      second view. Left unset, the implementation's own bounds apply; both shipped galleries
+      are bounded by construction, so there is no unbounded state either way. What
+      ``capacity`` counts differs between them (rows for ``flat``, identities for
+      ``centroid``), which is why this element does not restate a default for it, and
+      ``per_identity`` is ``flat``'s second bound — how many views one ship may keep — so
+      naming it with ``centroid`` selected is refused at open by the gallery itself.
     * ``classes`` — the detection labels to query, by name, read off C3's ``Detections``
       (:class:`~shipinfer.topology.elements.detections.Detections`). Default: every row an
       embedder handed over. A row this list excludes is not queried and does not appear in
@@ -304,7 +318,10 @@ class GalleryRecognize(Element):
     * ``top_k`` — how wide a ranking the gallery computes. Only the accepted match is filed.
     * ``enrol`` / ``enrol_capacity`` / ``enrol_min_confidence`` / ``enrol_prefix`` — see
       :meth:`_enrol`. ``enrol_capacity`` bounds the *second*, minted-only store and defaults
-      to that implementation's own bound.
+      to that implementation's own bound, which for ``flat`` is 50 000 rows — a second
+      ``(50 000, dim)`` float32 matrix. Turning enrolment on at ``dim: 512`` and leaving this
+      unset therefore costs about 102 MB of vectors on top of the curated store; say a number
+      here if the deployment knows one.
     * ``gallery_file`` — an explicit path to a ``gallery.npz``, which wins over the three
       below. For a deployment that keeps its identities somewhere that is not the model
       repository, and for a test.
@@ -487,7 +504,9 @@ class GalleryRecognize(Element):
         """One gallery of the configured implementation, bounded as the chain asked.
 
         Called twice when ``enrol: true``: the curated store takes ``capacity:`` and the
-        minted store takes ``enrol_capacity:``. Same implementation for both, because the
+        minted store takes ``enrol_capacity:``, while ``per_identity:`` and ``dim:`` reach
+        both — those two describe the implementation, not one store's bound, and the class
+        docstring says so beside the keys. Same implementation for both, because the
         two are searched with the same query and merged by score — a deployment that wants
         an exact search over its curated ships wants one over what it minted too.
 
@@ -696,9 +715,12 @@ class GalleryRecognize(Element):
             ``(identity, similarity)``. A row that was queried and matched nobody is
             ``(None, None)``. A row that was **not queried** — no vector was filed for it, or
             ``params: classes:`` did not select it — is **absent from the mapping**, because
-            it is not this element's row to answer: the runner's fan-in merges the branches of
-            a chain by unioning their metadata, and a placeholder here would collide with the
-            answer another branch's recogniser has for the same detection.
+            it is not this element's row to answer: the runner's fan-in *will* merge the
+            branches of a chain by unioning their metadata once slice C8a changes
+            ``InprocessRunner._inbound`` — today it is ``meta.setdefault``, first-writer-wins
+            per key, so a second ``identities`` producer is dropped entirely — and a
+            placeholder here would collide with the answer another branch's recogniser has
+            for the same detection.
 
             **No ``caps=``.** The payload is handed on unchanged, so the cap it carries is
             the cap it arrived with; see the module docstring for what stamping one here
@@ -730,7 +752,10 @@ class GalleryRecognize(Element):
         rows = self._rows(item.meta["vectors"], detections, item)
         rows = self._selected(rows, detections, item)
         camera = item.context.camera_id
-        confidences = _confidences(detections)
+        # Gated, not built-and-ignored: `_enrol` returns before it looks at this whenever
+        # enrolment is off, which is the default, and the helper is a `float()` per row on a
+        # path that runs at 15 000 rows a second (CONVENTIONS §2.5).
+        confidences = _confidences(detections) if self._enrol_enabled else None
 
         observe = None if self._metrics is None else self._metrics.latency_us.observe
         identities: dict[int, tuple[str | None, float | None]] = {}
@@ -796,94 +821,60 @@ class GalleryRecognize(Element):
                 "ahead of it"
             )
         wanted = self._classes
-        return tuple((index, vector) for index, vector in rows if labels[index] in wanted)
+        try:
+            return tuple((index, vector) for index, vector in rows if labels[index] in wanted)
+        except IndexError as exc:
+            # Unreachable with C3's real `Detections` — `__post_init__` holds one label per
+            # box and the shared reader bounded the row indices against `len(detections)` —
+            # but this element duck-types `detections` on purpose, and an *unsized* one
+            # skips that bound entirely. A bare `IndexError` reaching the runner is charged
+            # to "this element has a bug"; a `detections` that does not carry one label per
+            # row is wiring, and the two have different fixes. Wrapped around the whole
+            # comprehension rather than per row, so the hot path is unchanged.
+            named = sorted(index for index, _ in rows)
+            raise ValidationError(
+                f"recognize element {self.name!r} has `classes: {list(wanted)}` and "
+                f"{item.key} carries {_labels_size(labels)} for the row(s) `vectors` named "
+                f"({named[:4]}{', …' if len(named) > 4 else ''}). Row selection is by the "
+                "detector's own label per row, and `Detections` holds exactly one per box; "
+                "a `detections` value that does not is a wiring failure, not a row this "
+                "element may quietly skip"
+            ) from exc
 
     def _rows(
         self, vectors: Any, detections: Any, item: ChainItem
     ) -> tuple[tuple[int, np.ndarray], ...]:
-        """``(row_index, vector)`` pairs, from either shape an embedder may file.
+        """``(row_index, vector)`` pairs, read by the one shared reader of ``meta["vectors"]``.
 
-        Two shapes are accepted, and the second is not a convenience:
+        The two shapes and every edge between them live in
+        :mod:`shipinfer.topology.elements._vectors`, not here: ``track`` reads the same key
+        under the same convention and C8's scatter-back will be the third reader, and this
+        element having its own opinion about whether ``{"3": v}`` is a row index is how a
+        chain file's ``vectors`` comes to mean two things. That module's docstring is the
+        rule; this method's job is only to say *who is asking*, which is what turns a
+        refusal into something an operator can act on — a chain has several elements and
+        fifty cameras.
 
-        * a **per-row array** — ``(N, d)`` — whose row *i* is detection *i*. The shape an
-          embedder that embedded the whole frame produces.
-        * an **index → vector mapping** with integer keys. The shape a *branch* embedder
-          produces: ``embed_ship`` embeds the ship rows of a frame that also holds people, so
-          its output has fewer rows than the frame has detections and only the original index
-          says which is which. Losing that mapping is how an embedding ends up attached to
-          the wrong object — a failure with no visible symptom until a tracker starts
-          swapping identities (``pipeline/graph/detections.py``).
-
-        The count is cross-checked against ``meta["detections"]`` — C3's decoded
-        :class:`~shipinfer.topology.elements.detections.Detections`, which
-        :class:`~shipinfer.topology.elements.pool.PoolDetect` files today. The check is still
-        written as "if the key is there, it must agree" rather than as a requirement, because
-        a chain may legitimately embed without a decoding detector in front (a fixed-crop
-        source, a test), and the dependency is one ``len()``. ``classes:`` is the one setting
-        that turns it into a requirement, and :meth:`_selected` says so.
+        Materialised into a tuple because :meth:`_selected` filters it and
+        :meth:`_do_process` iterates it, and because the reader's refusals are all made
+        before the first pair, so a frame that is refused makes no gallery query at all.
 
         Raises:
-            ValidationError: any other shape, and in particular the raw
-                ``{tensor_name: Tensor}`` a ``pool`` embedder files straight from its
-                response. That one is refused with the scatter-back gap named, because
-                guessing which of its rows belongs to which detection is exactly the mistake
-                above.
+            ValidationError: any shape the reader cannot attribute to a detection row, and
+                in particular the raw ``{tensor_name: Tensor}`` a ``pool`` embedder files
+                straight from its response. That one is refused with the scatter-back gap
+                named, because guessing which of its rows belongs to which detection is
+                exactly how an embedding ends up on the wrong object.
         """
-        count = _detection_count(detections)
-        if isinstance(vectors, Mapping):
-            keys = list(vectors)
-            if not all(
-                isinstance(key, (int, np.integer)) and not isinstance(key, bool) for key in keys
-            ):
-                raise ValidationError(
-                    f"recognize element {self.name!r} was handed `vectors` as a mapping "
-                    f"keyed by {sorted(str(key) for key in keys)} for {item.key}. That is a "
-                    "model response filed verbatim by a `pool` embedder, and scattering its "
-                    "output rows back to the detections that produced them is the embed "
-                    "element's job (phase C8). This element needs one vector per detection "
-                    "row: an (N, d) array, or a mapping keyed by row index"
-                )
-            pairs = tuple(
-                (int(key), _as_vector(vectors[key], self.name, int(key)))
-                for key in sorted(keys)
-            )
-            if count is not None:
-                for index, _ in pairs:
-                    if not 0 <= index < count:
-                        raise ValidationError(
-                            f"recognize element {self.name!r}: `vectors` names row {index} "
-                            f"and {item.key} has {count} detection(s)"
-                        )
-            return pairs
+        return tuple(rows_by_index(vectors, detections, who=self._who(item)))
 
-        if isinstance(vectors, np.ndarray):
-            if vectors.ndim != 2:
-                raise ValidationError(
-                    f"recognize element {self.name!r} was handed a {vectors.ndim}-d "
-                    f"`vectors` array for {item.key} and needs (N, d), one row per detection"
-                )
-            rows = tuple((index, vectors[index]) for index in range(vectors.shape[0]))
-        elif isinstance(vectors, Sequence) and not isinstance(vectors, (str, bytes)):
-            rows = tuple(
-                (index, _as_vector(value, self.name, index))
-                for index, value in enumerate(vectors)
-            )
-        else:
-            raise ValidationError(
-                f"recognize element {self.name!r} was handed `vectors` of type "
-                f"{type(vectors).__name__} for {item.key}; it needs an (N, d) array, a "
-                "sequence of vectors, or a mapping from row index to vector"
-            )
+    def _who(self, item: ChainItem) -> str:
+        """This element and this frame, as the prefix on a refusal from a shared helper.
 
-        if count is not None and len(rows) != count:
-            raise ValidationError(
-                f"recognize element {self.name!r}: {len(rows)} vector(s) for {count} "
-                f"detection(s) on {item.key}. A positional array must be one row per "
-                "detection; an embedder that ran on a *subset* of the rows — a `when:` "
-                "branch — must file a mapping from row index to vector, or the identities "
-                "land on the wrong objects"
-            )
-        return rows
+        Built per refusal rather than per frame: it is one f-string on the failure path and
+        nothing at all on the path that runs fifteen thousand times a second.
+        """
+        return f"recognize element {self.name!r} on {item.key}"
 
     def _best_match(
         self, vector: np.ndarray, *, exclude_camera: str | None, observe: Any
@@ -1028,7 +1019,22 @@ class GalleryRecognize(Element):
         gallery queries instead of one, and an unmatched row costs two more for the
         membership check below — four rather than one. Both stores are bounded and the
         queries are gemms against them, so the cost is arithmetic rather than growth, but it
-        is not free and a deployment at 1000 fps should size for it.
+        is not free and a deployment at 1000 fps should size for it — memory included.
+        ``enrol_capacity`` left unset means the second store opens at ``flat``'s own bound of
+        50 000 rows, and with ``dim:`` declared the matrix is allocated at ``open`` rather
+        than on the first minted row: measured at ``dim: 512``, 103.5 MB (102.4 MB of
+        vectors, the rest the per-row camera/frame/sequence arrays) against 2.1 MB for
+        ``enrol_capacity: 1000``.
+
+        **The membership check is check-then-act, and there is no lock across it.** Two
+        pipeline workers holding cam-A's and cam-B's view of the same new ship in the same
+        instant both miss the excluded query, both miss :meth:`_known_anywhere`, and both
+        mint: two auto identities for one hull. Sequentially it cannot happen — cam-B's
+        excluded query finds cam-A's mint — so the window is purely concurrent, and closing
+        it would mean holding a lock across two gallery queries and an ``add``, which is the
+        one thing the module docstring says this file must not do. The race costs a duplicate
+        prototype in a bounded store that evicts its own; the lock would cost eight worker
+        threads performing like one.
 
         The entry lives in memory only; see :meth:`_do_close`.
         """
@@ -1109,19 +1115,17 @@ class GalleryRecognize(Element):
             metrics.enrolments.inc(enrolled, **labels)
 
 
-def _detection_count(detections: Any) -> int | None:
-    """How many rows the frame's detections hold, or ``None`` when the item carries none.
+def _labels_size(labels: Any) -> str:
+    """How many labels the item carried, as text, for a refusal that has to say so.
 
-    ``len()`` and nothing else, so the only thing this element assumes about C3's
-    ``Detections`` is that it is sized — which every sequence-shaped value is. A value that
-    is not sized is ignored rather than refused: it is not this element's key to validate.
+    A ``TypeError`` here is the interesting case rather than an error: a ``labels`` with no
+    ``__len__`` is exactly the duck-typed ``detections`` that reached the refusal, and
+    "unsized" is the honest thing to report about it.
     """
-    if detections is None:
-        return None
     try:
-        return len(detections)
+        return f"{len(labels)} label(s)"
     except TypeError:
-        return None
+        return "unsized labels"
 
 
 def _confidences(detections: Any) -> Sequence[float] | None:
@@ -1143,19 +1147,3 @@ def _confidences(detections: Any) -> Sequence[float] | None:
         return [float(score) for score in scores]
     except (TypeError, ValueError):
         return None
-
-
-def _as_vector(value: Any, element: str, index: int) -> np.ndarray:
-    """One row as a 1-D float32 array, or a refusal naming the row.
-
-    ``np.asarray`` and not a copy where the caller already handed one over: the gallery
-    normalises into its own buffer, so a second copy here would be per-row work on the hot
-    path for nothing.
-    """
-    array = np.asarray(value, dtype=np.float32)
-    if array.ndim != 1 or array.size == 0:
-        raise ValidationError(
-            f"recognize element {element!r}: vector for row {index} has shape "
-            f"{array.shape} and an embedding is a non-empty (d,)"
-        )
-    return array

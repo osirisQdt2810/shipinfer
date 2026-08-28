@@ -240,8 +240,10 @@ class MockRecognize(_Mock):
     ``{detection row index: (identity, similarity)}`` — for the same reason
     :func:`invented_detections` builds a real ``Detections``: a mock that filed a list would
     let everything downstream of a chain of mocks pass its tests against a shape no
-    deployment ever produces, and this key in particular is one the runner's fan-in merges
-    across branches, which is a merge a list cannot take part in.
+    deployment ever produces, and this key in particular is one the runner's fan-in *will*
+    merge across branches once slice C8a changes ``InprocessRunner._inbound`` — today it is
+    ``meta.setdefault``, first-writer-wins per key, so a second ``identities`` producer is
+    dropped entirely — which is a merge a list cannot take part in at all.
 
     The single row is row 0, which is the one detection :func:`invented_detections` invents,
     and the similarity is a flat 1.0 — invented, and obviously so.
