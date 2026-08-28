@@ -5,6 +5,176 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-28 — the `mtmc` element: anchored instants across cameras, and a barrier that never takes the last worker (Phase C6)
+
+**What.** The chain gains its cross-camera tier, in two modules and the split is the point.
+`topology/barrier.py` is **pure** — it turns a stream of single-camera frames back into
+synchronised instants and knows nothing about tracks, so every synchronisation property is
+tested with strings and a callback and no submodule. `topology/elements/mtmc.py` is the
+element that hands those instants to `shipvision.mtmc` and scatters the answer back.
+
+| Piece | Delivered |
+|---|---|
+| `InstantBarrier` (`topology/barrier.py`) | **anchored** instants on the *capture* clock: the first arrival opens a window of `sync_window_s`, later frames join while the instant's capture span stays inside it, and a camera already in the bucket reporting its **next** frame seals that instant and opens the following one. Closes on the last live camera, on a seal, or on the window. Whichever worker closes it runs the association under the barrier's lock and publishes to the waiters; late arrivals counted and never retro-fitted; buckets bounded and the one open longest evicted; `close_all(reason=…)` resolves every waiter; every wait bounded by the bucket's own deadline |
+| … `WaiterBudget` | the never-starve guard, counted **per process**: at most `workers - 1` waiters across *every* barrier in the runner. The frame that would take the last permit is emitted immediately with `mtmc` in `missing_stages` and counted. `ElementContext.workers is None` collapses to zero permits, i.e. never wait |
+| … `camera_added` / `drop_camera` | the live set drives "every camera reported". `drop_camera` also re-checks the **open** buckets and seals any the removal completed — it must not run a tracker on the lifecycle thread |
+| … `instant_stats()` / `frame_stats()` | two dictionaries, never one: `shutdown` is a member of both families and a single number would be frames plus instants |
+| `ShipvisionMtmc` | `accepts = produces = ("meta@cpu",)`, all three `ClassVar`s `False`. `meta["tracks"]` + `meta["frame_hw"]` in, `meta["global_ids"]` out — a list aligned with this item's tracks, built from a map keyed on `(camera_id, track_id)` |
+| … `params:` | `algorithm` (`cluster`), `matrix_builder` (`gated`), `clusterer` (`agglomerative`), `group`, `cameras`, `sync_window_ms` (60), `max_instants` (8), `calibration`, `options` |
+| `Element.camera_group()` + `CameraGroup` | a hook on the ABC: "these cameras must be placed together". Default `None`; `ShipvisionMtmc` answers with its parsed roster |
+| `ElementContext.waiter_budget` | the process-wide permit pool, built once by `InprocessRunner` with `workers - 1` |
+| `bridge.load_errors()` | the fifth loader: an element that has to *catch* a shipvision refusal by name needs the class |
+| `runners/fleet.py` | `_camera_groups()` + `_pin_to_group()` — a camera group is an atomic unit of placement, and the launcher learns the membership by asking every node `camera_group()`, with no kind test |
+| tests | `tests/topology/test_barrier.py` (57, pure, no submodule), `tests/topology/test_mtmc_element.py` (57), `tests/runners/test_fleet.py` (+9) |
+
+**Why.** `shipvision.mtmc` consumes a `FrameTrackCluster` — every camera of a group at one
+instant — and refuses anything less, because handing it one camera at a time turns cross-camera
+association into within-camera deduplication. The chain delivers one frame at a time on
+whichever worker took it off the fair lane. Something has to bridge that, and everything worth
+testing about the bridge is synchronisation rather than geometry — hence a pure module with its
+own test file that needs no submodule at all.
+
+**Decisions.**
+
+- **The instant is anchored by its first arrival, never gridded.** The obvious key is
+  `floor(capture_s / window)` on an absolute grid, and it is wrong at *every* setting. A window
+  wider than one frame period puts two consecutive frames of one camera into the same cell once
+  every `window / period` frames: at 20 fps against the 60 ms default that is **one frame in
+  six**, each of which is refused an answer, with the cameras perfectly genlocked and nothing
+  else wrong. A window narrower than the frame period fixes that and breaks the other half —
+  free-running cameras spread their captures over a whole period, so no cell holds the whole
+  group. The two constraints are incompatible, which is the proof that no absolute window is
+  correct. So the first frame to arrive opens the window, later frames join while the span
+  stays inside it, and a camera's *next* frame is the evidence that the instant it was in is
+  over: that instant seals and the next one opens with that frame. A camera can no longer
+  collide with itself at any window. Measured below.
+- **A sealed instant is closed by a waiter, not by the thread that sealed it.** The sealer is
+  a frame from a *different* instant; if it ran the association and the callback raised, the
+  exception would fail its own future for somebody else's instant. A waiter is a pipeline
+  worker holding the callback and owns the answer it is waiting for. Same argument as
+  `drop_camera`'s, which is why both use the same `ready` path.
+- **The barrier never blocks the last worker, and the budget is per *process*.** The walk is
+  synchronous (`arch.md` §5③): a worker inside an element is a worker not draining its lane. If
+  every worker parks waiting for cameras whose frames are still *queued*, no instant can close
+  on evidence — only on the timeout — and the shard has converted itself into a fixed latency
+  with a stalled queue behind it. Counting waiters *per element* did not deliver that: two
+  `mtmc` slots in one chain (a supported configuration — the loader takes an explicit `kind:`)
+  would have slot A admit `workers - 1` and slot B, which had seen none, admit the last worker.
+  So `WaiterBudget` is one object per runner, handed down `ElementContext`, and the rest are
+  emitted with an honest gap (`shipinfer_mtmc_would_starve_total`).
+- **The scatter is keyed on `(camera_id, track_id)`, never on list position.**
+  `FrameTrackCluster` flattens the group into one observation list and the tracker answers in
+  that order, so camera B's rows sit at offsets nobody can derive from B's own frame. A
+  positional scatter produces a plausible answer rather than an error — ADR-002's tag rule, one
+  layer up.
+- **The live set is the *announced* set, not the configured roster.** A group's roster names
+  every camera in it; a shard runs only the ones placed on it. A barrier that waited for the
+  roster would time out on every instant for the life of the process and report it as a healthy
+  chain running 60 ms slower. Before the first announcement it falls back to cameras it has seen
+  traffic from, so a runner that does not drive the hooks costs one instant of warm-up rather
+  than degrading to per-camera MTMC; the fallback latches off for good at the first
+  announcement, because a set that came back after `camera_removed` emptied it would resurrect
+  the camera that hook exists to forget.
+- **`camera_removed` drops the camera from open buckets too.** Dropping it from the live set
+  alone leaves every *currently open* instant still counting it, so each one sits out the whole
+  window for a camera that will never report again — a permanent per-frame tax. The re-check
+  seals rather than closes: it runs under the runner's lifecycle lock, behind which every
+  `add_camera`, `remove_camera`, `drain` and `stop` queues.
+- **The association runs under the barrier's own lock, and that is the only lock.** The GIL law
+  (`arch.md` §7, V142) allows shipinfer one lock around `tracker.track()`;
+  `ClusterMTMCTracker` already holds an `RLock` for the whole call, so a second one of ours
+  would buy nothing, and the results have to be published to the waiters under this lock anyway.
+  The cost is measured, not assumed, and it is **milliseconds**: 0.48 ms at 2 cameras × 2
+  tracks, 4.70 ms at 8 × 15 (`CLAUDE.md`'s own people-per-frame figure), 54.32 ms at 50 × 15.
+  The growth is quadratic in observations, so fifty cameras in one `mtmc` slot is a frame period
+  of serialised association per instant and the answer to that is *more groups*, not more locks.
+- **A camera group is an atomic unit of placement, the element declares it and the runner
+  enforces it.** `arch.md` §4. The element is told `ElementContext.shard_id` and nothing about
+  where any *camera* is, and it opens before a single camera is placed — so the check cannot
+  live there. `FleetRunner` owns `{camera_id: shard_id}`, so `add_camera` **pins** a camera to
+  its group's home shard and refuses, naming the group, both shards and the recovery, when the
+  pin cannot be honoured. What crosses between them is `Element.camera_group()`: the launcher
+  asks every node and never asks what kind it is, so there is no `ElementKind.MTMC` test in
+  `runners/`, no import of an element implementation module, and no second parse of
+  `params: cameras:` — the switch statement ADR-017 §2's registry exists to delete. A second
+  kind that needs co-located cameras is a method override, which
+  `test_the_launcher_asks_every_element_and_never_what_kind_it_is` pins with a `track` element
+  that declares a group.
+- **`sync_window_ms = 60` is a proposal, not a measurement.** Nothing in `arch.md` states one
+  (plan open question 3). With the anchored instant it is no longer constrained from *below* by
+  the frame period — self-collision cannot happen at any window — so it only has to exceed the
+  group's arrival spread, and 60 ms is a comfortable margin over the ~1 ms genlock skew of a
+  wired group while staying near one frame period at 20 fps, which is the worst-case latency it
+  bounds. `test_a_window_narrower_than_the_frame_period_is_also_fine` pins that nothing rests
+  on the number.
+- **A track with no embedding is a gap, not a dead frame.** `GlobalIdAssigner` refuses to
+  identify one, and that is a per-frame data condition — a spilled embedder, a crop that
+  produced nothing, a chain with no embedder in front of `track`. Caught, logged once per open
+  cycle, emitted with `mtmc` in `missing_stages`. The log line names **both** reasons, because
+  the refusal is per *instant*: the one frame whose thread ran the association is counted
+  `reason=unassignable` and the rest of the group's, already released by the barrier, are
+  counted `reason=failed`.
+- **A mis-wired chain is raised on: a missing or zero `meta["frame_hw"]`, and a zero
+  `captured_unix_ns`.** `CameraTracks` refuses a zero frame size precisely so the height gate,
+  the truncated-box test and the homography's domain cannot all be silently wrong. A zero
+  capture clock is the same class of thing — `RequestContext.captured_unix_ns` defaults to `0`,
+  and a source that never stamps it would put every frame of every camera into one instant,
+  which closes once and leaves the rest of the deployment `late` for good.
+
+**Measured** (offline, no GPU, `process()` entry to return through the real element, one camera
+per thread, 60 frames per camera paced at 20 fps of both capture and wall-clock time, 2 tracks
+per frame, window 60 ms, `min_hits = 1`). Coverage is the share of frames that came back with
+`meta["global_ids"]`:
+
+| Cameras | Workers | min | median | p95 | max | coverage |
+|---|---|---|---|---|---|---|
+| 2 | 3 | 0.901 ms | 1.957 ms | 2.380 ms | 2.735 ms | **100.0%** |
+| 2 | 9 | 0.925 ms | 1.797 ms | 2.346 ms | 2.606 ms | **100.0%** |
+| 2 | 32 | 0.914 ms | 1.887 ms | 2.488 ms | 3.419 ms | **100.0%** |
+| 8 | 3 | 0.038 ms | 0.119 ms | 4.568 ms | 6.189 ms | 37.5% |
+| 8 | 9 | 1.392 ms | 3.237 ms | 4.932 ms | 7.570 ms | **100.0%** |
+| 8 | 32 | 1.430 ms | 3.678 ms | 4.591 ms | 6.752 ms | **100.0%** |
+
+Read honestly. **The whole distribution is the association**, and the window never fires: every
+run above closed 60 of 60 instants `complete`, so `max` is one association and not one window.
+The 8-camera rows are ~3.5 ms because the cluster carries 16 observations rather than 4.
+
+The one row that is not 100% is **8 cameras on 3 workers**, and it is the never-starve guard
+working as designed rather than a synchronisation failure: three workers cannot hold seven
+cameras' frames while the eighth arrives, so five frames of every instant are emitted
+immediately with an honest gap (`would_starve: 300`, and 60/60 instants still closed
+`complete`). It is the number that sizes `pipeline.workers` against a group: **a shard needs
+at least as many workers as its camera group has cameras** — an instant closes on the *last*
+camera's frame and every earlier frame of it is parked until then, so coverage is
+`min(1, workers / group_size)` and 8 workers cover 8 cameras exactly. With **two** `mtmc`
+slots the requirement is the **sum** of the groups' sizes and not the larger of them, because
+the waiter budget is process-wide and its permits are first-come: measured, two 8-camera
+groups reach 100% each at 16 workers and 73% / 52% at 9, where whichever group's frames
+arrive first takes the permits. The element now warns at `open()` and at the crossing rather
+than leaving this to `shipinfer_mtmc_would_starve_total`. Its median is *lower* than the
+others precisely because a starved frame does not wait.
+
+The previous entry recorded a p95 of ~51 ms at eight cameras and attributed it to "the window
+firing … a camera's frames drift across bucket boundaries". **That diagnosis was wrong**, and
+so was the number's cause. The absolute grid made every camera land in a cell it had already
+reported once every six frames, so one frame in six was refused an answer and the instants that
+did close often closed on the timeout. Coverage on that grid, measured through the same threaded
+path with perfectly genlocked cameras and the default window:
+
+| Cameras | Absolute grid | Anchored instant |
+|---|---|---|
+| 2 | 40/48 = **83.3%** | 48/48 = **100%** |
+| 8 | 160/192 = **83.3%** | 192/192 = **100%** |
+
+`TestAGenlockedGridGetsEveryFrameAnswered` is the test that pins it, and restoring the absolute
+grid turns it red at exactly those numbers.
+
+**Not done.** No GPU tier (nothing here touches `runtime/`, `backends/` or `native/`). No demo
+YAML change — that is C8. The `output` element still does not serialise `global_id`; the event
+schema gains it in C8.
+
+---
+
 ## 2026-08-28 — the `track` element: one tracker per camera, in-chain, with the camera lifecycle wired (Phase C4 + C5)
 
 **What.** The chain gains its first stateful element. `TrackerShard` / `_CameraShard` move out

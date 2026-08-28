@@ -186,6 +186,13 @@ class PipelineSettings(BaseModel):
     #: Threads running the graph. Each one drives a frame through the DAG and blocks on
     #: every stage, so this is the *frame* concurrency; GPU batching happens inside each
     #: model, across all frames in flight.
+    #:
+    #: **A chain that associates across cameras also sizes its camera group from this.** A
+    #: cross-camera instant closes on the last camera's frame and every earlier frame of it
+    #: is parked in a worker until then, so the default of four answers four of an
+    #: eight-camera group's frames per instant and emits the other four with a gap. One
+    #: worker per camera in the group, summed over the groups a chain runs -- the permits
+    #: are process-wide -- and ``shipinfer_mtmc_would_starve_total`` counts the shortfall.
     workers: int = Field(default=4, ge=1)
     #: Frames one worker takes per queue wake-up. 1 is the lowest-latency choice and the
     #: default; a larger value amortises the queue lock at the cost of serialising those
