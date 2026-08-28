@@ -86,7 +86,13 @@ from shipinfer.core.errors import (
 )
 from shipinfer.core.request import InferenceRequest, InferenceResponse
 from shipinfer.core.types import Tensor
-from shipinfer.topology.base import ChainItem, Element, ElementContext, ElementKind
+from shipinfer.topology.base import (
+    ChainItem,
+    Element,
+    ElementContext,
+    ElementKind,
+    RowIndexed,
+)
 from shipinfer.topology.elements.detections import (
     DecodeParams,
     Detections,
@@ -1036,11 +1042,15 @@ class _PoolCropElement(_PoolElement):
 
     **The scatter-back is a mapping, and that is the load-bearing choice.** ``track`` accepts
     two forms: one row per detection, or ``{detection index: vector}``. A per-row array would
-    need a filler for the rows this slot did not embed -- and the sizing has two embedders
-    running side by side (``ship_embedder`` on the ship rows, ``person_embedder`` on the
-    person rows), so *partial coverage is the normal case*, not the exception. The mapping
+    need a filler for the rows this slot did not embed -- and the sizing puts two embedders
+    side by side (``ship_embedder`` on the ship rows, ``person_embedder`` on the person
+    rows), which is the shape C8b gives ``topology/ship_person.yaml`` and is what the
+    two-branch fixture in ``tests/topology/test_pool_embed_crops.py`` declares today. So
+    *partial coverage is the normal case*, not the exception. The mapping
     says exactly which rows were covered and stays legal when two of these elements merge
-    their answers into one frame's metadata; a NaN row would have to be recognised as absence
+    their answers into one frame's metadata (it is filed as a
+    :class:`~shipinfer.topology.base.RowIndexed`, which is what makes that merge legal at a
+    rejoin -- see :meth:`_scatter`); a NaN row would have to be recognised as absence
     by every consumer, and the first one that forgot would match a track against a vector of
     NaNs and never say so. ``track``'s own docstring names partial coverage as the thing the
     mapping form was written for.
@@ -1412,6 +1422,17 @@ class _PoolCropElement(_PoolElement):
         The slices are :meth:`~shipinfer.core.types.Tensor.slice_batch` views, so chunking
         copies no pixels.
 
+        **The chunks are submitted one at a time, and that is the latency budget to know
+        about.** Each :meth:`_submit` blocks on its own future, so a frame split into K
+        requests costs K sequential round trips and can hold this worker for up to
+        ``K * timeout_s`` -- with the default four workers, a crowded frame is a worker
+        unavailable to any camera for that long. It is not a regression (``pipeline/graph/
+        objects.py`` serialises the same way) and K is small by construction: 25 objects
+        against a plan built at batch 16 is K=2. Submitting all K first and then collecting
+        the futures would cost one round trip instead of K, at the price of K requests in
+        flight per worker against a bound the scheduler sizes for one; that trade belongs
+        with the asynchronous walk (arch.md section 5, item 5) and not here.
+
         Raises:
             InferenceError: a chunk came back without the declared output.
             RequestTimeoutError, QueueFullError: the base's, per chunk.
@@ -1495,13 +1516,23 @@ class _PoolCropElement(_PoolElement):
         **Two of them meet in one of two ways, and this method is one half of one rule.**
         In *series* -- both on one branch, the second declared ``after:`` the first -- the
         second one finds the first one's mapping in ``item.meta`` and merges into it here. In
-        *parallel* -- ``topology/ship_person.yaml``'s shape, both declared ``after: detect``
-        and rejoining at ``track`` -- neither ever sees the other's item, and the union is
-        taken at the rejoin instead
-        (:meth:`~shipinfer.runners.inprocess.InprocessRunner._merge_meta`, which merges
-        mapping-valued keys for exactly this reason). The shipped chain is the parallel one,
-        so on it the ``existing`` below is always ``None``; the series composition is legal,
-        the loader accepts it, and it must not lose half the frame either.
+        *parallel* -- the shape C8b gives ``topology/ship_person.yaml``: both slots declared
+        ``after: detect`` with ``params: classes:`` picking their rows, rejoining at ``track``
+        -- neither ever sees the other's item, and the union is taken at the rejoin instead
+        (:meth:`~shipinfer.runners.inprocess.InprocessRunner._merge_meta`). Both compositions
+        are legal today and neither may lose half the frame. What the *shipped* file declares
+        is neither of them yet: both embedders carry ``when: class == ...`` and no
+        ``classes:``, and :meth:`~shipinfer.topology.chain.Condition.matches` is ``False`` on
+        a field nothing in the chain sets, so on it neither embedder runs at all. C8b is what
+        turns those ``when:`` guards into the row filter this element reads; until it lands,
+        the wiring under test is ``tests/topology/test_pool_embed_crops.py``'s.
+
+        **What is filed is a** :class:`~shipinfer.topology.base.RowIndexed`, and that is not
+        decoration: it is what tells the fan-in that this value is keyed by detection row and
+        may therefore be unioned with a peer's. A bare ``dict`` filed here would still reach
+        ``track`` correctly and would simply not union at a rejoin -- which is the right
+        default for a value nobody declared, and the reason the two ``segment`` slots that
+        file raw ``response.outputs`` under ``meta["masks"]`` are left alone by the merge.
 
         **Both halves answer an overlap the same way: they refuse it.** Disjoint rows union;
         a row two elements both cover is an :class:`~shipinfer.core.errors.InferenceError`
@@ -1535,7 +1566,7 @@ class _PoolCropElement(_PoolElement):
         """
         existing = item.meta.get(self.meta_key)
         if existing is None:
-            return item.derive(**{self.meta_key: covered})
+            return item.derive(**{self.meta_key: RowIndexed(covered)})
         if not isinstance(existing, Mapping):
             raise ValidationError(
                 f"{self.kind.value} element {self.name!r} scatters its rows into "
@@ -1561,7 +1592,7 @@ class _PoolCropElement(_PoolElement):
                     "means the chain file asked both of them for it -- check their "
                     "`params: classes:` do not overlap"
                 )
-        return item.derive(**{self.meta_key: {**existing, **covered}})
+        return item.derive(**{self.meta_key: RowIndexed({**existing, **covered})})
 
 
 @registry_for(ElementKind.SEGMENT).register("pool")

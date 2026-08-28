@@ -22,7 +22,7 @@ import pytest
 from shipinfer.core.errors import InferenceError
 from shipinfer.core.request import RequestContext
 from shipinfer.runners.inprocess import InprocessRunner
-from shipinfer.topology import Caps, ChainItem, ChainSpec, Topology
+from shipinfer.topology import Caps, ChainItem, ChainSpec, RowIndexed, Topology
 
 #: A branch that splits and rejoins, with the two inbound edges carrying **different** caps:
 #: ``detect`` hands ``join`` a frame (``nv12@gpu``) and ``tap`` hands it metadata
@@ -40,11 +40,15 @@ elements:
   output: {impl: mock}
 """
 
-#: The shipped chain's shape, with the implementations swapped for hardware-free ones:
-#: ``topology/ship_person.yaml`` forks two embedders off ``detect`` (``embed_person`` carries
-#: ``after: detect`` precisely so it does *not* follow ``embed_ship``) and rejoins them at
-#: ``track``. Each covers its own classes and files a partial ``meta["vectors"]``, so this is
-#: the wiring on which "the metadata is the union" has to mean the union of two *mappings*.
+#: The two-embedder rejoin, with the implementations swapped for hardware-free ones: two
+#: embedders forked off ``detect`` (``embed_person`` carries ``after: detect`` precisely so it
+#: does *not* follow ``embed_ship``) and rejoined at ``track``. Each covers its own classes
+#: and files a partial ``meta["vectors"]``, so this is the wiring on which "the metadata is
+#: the union" has to mean the union of two *scatter-backs*. It is the shape C8b gives
+#: ``topology/ship_person.yaml`` and the shape ``tests/topology/test_pool_embed_crops.py``'s
+#: ``TWO_BRANCHES`` declares with the real ``pool`` elements; the shipped file itself still
+#: guards both embedders with ``when: class == ...`` against a field nothing sets, so on it
+#: neither of them runs.
 TWO_EMBEDDERS = """
 name: two_embedders
 elements:
@@ -54,6 +58,37 @@ elements:
   embed_person: {impl: mock, kind: embed, model: person_embedder, after: detect}
   track:        {impl: mock, kind: track, after: [embed_ship, embed_person]}
   output:       {impl: mock}
+"""
+
+#: The same rejoin with a *third* branch, for the refusal's re-scan. Three contributors is
+#: where "name the two the merge is holding" and "name the branches that claimed the row"
+#: stop being the same answer: branches one and two union cleanly and branch three contests a
+#: row of the union, so the merge is holding a value neither of the two culprits alone filed.
+THREE_EMBEDDERS = """
+name: three_embedders
+elements:
+  decode:        {impl: mock}
+  detect:        {impl: mock, model: ship_detector}
+  embed_ship:    {impl: mock, kind: embed, model: ship_embedder,    after: detect}
+  embed_person:  {impl: mock, kind: embed, model: person_embedder,  after: detect}
+  embed_vehicle: {impl: mock, kind: embed, model: vehicle_embedder, after: detect}
+  track:         {impl: mock, kind: track, after: [embed_ship, embed_person, embed_vehicle]}
+  output:        {impl: mock}
+"""
+
+#: Two ``segment`` slots on the same rejoining branches. ``PoolSegment`` keeps
+#: ``_PoolElement._finish``'s default and files the model's raw ``response.outputs`` --
+#: ``{output name: Tensor}`` -- under ``meta["masks"]``, which is a mapping and is *not* a
+#: scatter-back. This chain is the one that says so.
+TWO_SEGMENTERS = """
+name: two_segmenters
+elements:
+  decode:     {impl: mock}
+  detect:     {impl: mock, model: ship_detector}
+  seg_ship:   {impl: mock, kind: segment, model: ship_segmenter,   after: detect}
+  seg_person: {impl: mock, kind: segment, model: person_segmenter, after: detect}
+  track:      {impl: mock, kind: track, after: [seg_ship, seg_person]}
+  output:     {impl: mock}
 """
 
 
@@ -79,8 +114,20 @@ def runner() -> InprocessRunner:
 
 @pytest.fixture()
 def rejoin() -> InprocessRunner:
-    """A stopped runner over the two-embedder chain, for the mapping-valued merge."""
+    """A stopped runner over the two-embedder chain, for the scatter-back merge."""
     return InprocessRunner(load(TWO_EMBEDDERS))
+
+
+@pytest.fixture()
+def three_way() -> InprocessRunner:
+    """A stopped runner over the three-embedder chain, for the refusal's re-scan."""
+    return InprocessRunner(load(THREE_EMBEDDERS))
+
+
+@pytest.fixture()
+def segmenters() -> InprocessRunner:
+    """A stopped runner over the two-segmenter chain, for the mappings that are *not* rows."""
+    return InprocessRunner(load(TWO_SEGMENTERS))
 
 
 class TestTheFanInMerge:
@@ -213,23 +260,27 @@ class TestASkippedPredecessor:
 
 
 class TestTwoBranchesFilingTheSameMapping:
-    """The rejoin the shipped chain declares, and the half of the frame it used to lose.
+    """The two-embedder rejoin, and the half of the frame it used to lose.
 
-    ``topology/ship_person.yaml`` runs ``embed_ship`` and ``embed_person`` in parallel off
-    ``detect`` and rejoins them at ``track``, and each files a *partial* ``meta["vectors"]``
-    — ``{detection row: vector}`` over its own classes only. A merge that took one branch's
-    mapping wholesale would hand the tracker half the frame's appearance vectors: at the
-    sizing in ``CLAUDE.md`` that is ~15 000 person crops a second cropped, embedded on a GPU
-    and then dropped, every person arriving with ``embedding=None``, and no exception, no
-    counter and no log line anywhere — both elements' per-frame counters say they ran, and
-    they did. So a key both branches wrote as a mapping is merged, not chosen between.
+    Two embedders in parallel off ``detect``, rejoining at ``track``, each filing a *partial*
+    ``meta["vectors"]`` — a :class:`~shipinfer.topology.base.RowIndexed`, ``{detection row:
+    vector}`` over its own classes only. A merge that took one branch's mapping wholesale
+    would hand the tracker half the frame's appearance vectors: at the sizing in
+    ``CLAUDE.md`` that is ~15 000 person crops a second cropped, embedded on a GPU and then
+    dropped, every person arriving with ``embedding=None``, and no exception, no counter and
+    no log line anywhere — both elements' per-frame counters say they ran, and they did. So a
+    key both branches wrote as a *declared scatter-back* is merged, not chosen between.
+
+    Every mapping in this class is a ``RowIndexed`` on purpose. That type is the declaration
+    the merge reads; a plain ``dict`` here would test a rule the runner no longer has, and
+    :class:`TestTwoBranchesFilingAModelsRawOutputs` is what pins the other side of it.
     """
 
     def test_the_tracker_receives_both_branches_rows(self, rejoin: InprocessRunner) -> None:
         """The property: the union of the two coverages, keyed by detection row."""
         node = rejoin.topology.node("track")
-        ships = item(vectors={0: "ship-0", 2: "ship-2"})
-        people = item(vectors={1: "person-1", 3: "person-3"})
+        ships = item(vectors=RowIndexed({0: "ship-0", 2: "ship-2"}))
+        people = item(vectors=RowIndexed({1: "person-1", 3: "person-3"}))
 
         merged = rejoin._inbound(node, {"embed_ship": ships, "embed_person": people})
 
@@ -250,8 +301,8 @@ class TestTwoBranchesFilingTheSameMapping:
         vectors appearing on another's frame.
         """
         node = rejoin.topology.node("track")
-        ships = item(vectors={0: "ship-0"})
-        people = item(vectors={1: "person-1"})
+        ships = item(vectors=RowIndexed({0: "ship-0"}))
+        people = item(vectors=RowIndexed({1: "person-1"}))
 
         merged = rejoin._inbound(node, {"embed_ship": ships, "embed_person": people})
 
@@ -259,29 +310,35 @@ class TestTwoBranchesFilingTheSameMapping:
         assert ships.meta["vectors"] == {0: "ship-0"}
         assert people.meta["vectors"] == {1: "person-1"}
         assert merged.meta["vectors"] is not ships.meta["vectors"]
+        assert isinstance(
+            merged.meta["vectors"], RowIndexed
+        ), "the union stays declared, or a third branch would not union into it"
 
     def test_a_mapping_written_before_the_fork_is_not_a_collision(
         self, rejoin: InprocessRunner
     ) -> None:
         """A diamond, which is the ordinary case and must not be refused.
 
-        ``detect`` files ``meta["detections"]`` once; ``derive`` copies the dict and not the
-        values, so both branches arrive holding the *same* object and every entry in it
-        collides with itself. Those are not two branches disagreeing.
+        A scatter-back filed *before* the fork — one embedder ahead of the split — rides down
+        both branches as the same object, because ``derive`` copies the dict and not the
+        values, so every entry in it collides with itself. Those are not two branches
+        disagreeing.
         """
         node = rejoin.topology.node("track")
-        before_the_fork = {0: "row-0", 1: "row-1"}
+        before_the_fork = RowIndexed({0: "row-0", 1: "row-1"})
 
         merged = rejoin._inbound(
             node,
             {
-                "embed_ship": item(counts=before_the_fork, vectors={0: "ship-0"}),
-                "embed_person": item(counts=before_the_fork, vectors={1: "person-1"}),
+                "embed_ship": item(shared=before_the_fork, vectors=RowIndexed({0: "ship-0"})),
+                "embed_person": item(
+                    shared=before_the_fork, vectors=RowIndexed({1: "person-1"})
+                ),
             },
         )
 
         assert merged is not None
-        assert merged.meta["counts"] == before_the_fork
+        assert merged.meta["shared"] == before_the_fork
         assert merged.meta["vectors"] == {0: "ship-0", 1: "person-1"}
 
     def test_a_mapping_written_before_the_fork_is_not_copied(
@@ -294,20 +351,26 @@ class TestTwoBranchesFilingTheSameMapping:
         refusal is reachable. What it saves is the O(rows) copy, on a key that is already the
         answer, at every fan-in of every frame. Without this assertion the branch has no test
         and one refactor turns a skipped copy into a made one, invisibly.
+
+        The pre-fork value is a ``RowIndexed`` deliberately: since the union is gated on that
+        type, it is the *only* kind of value the fast path can save a copy of, so a plain dict
+        here would leave the branch as untested as deleting the assertion.
         """
         node = rejoin.topology.node("track")
-        before_the_fork = {0: "row-0", 1: "row-1"}
+        before_the_fork = RowIndexed({0: "row-0", 1: "row-1"})
 
         merged = rejoin._inbound(
             node,
             {
-                "embed_ship": item(counts=before_the_fork, vectors={0: "ship-0"}),
-                "embed_person": item(counts=before_the_fork, vectors={1: "person-1"}),
+                "embed_ship": item(shared=before_the_fork, vectors=RowIndexed({0: "ship-0"})),
+                "embed_person": item(
+                    shared=before_the_fork, vectors=RowIndexed({1: "person-1"})
+                ),
             },
         )
 
         assert merged is not None
-        assert merged.meta["counts"] is before_the_fork, "handed through, not rebuilt"
+        assert merged.meta["shared"] is before_the_fork, "handed through, not rebuilt"
 
     def test_two_branches_claiming_one_row_is_a_typed_refusal(
         self, rejoin: InprocessRunner
@@ -325,14 +388,50 @@ class TestTwoBranchesFilingTheSameMapping:
             rejoin._inbound(
                 node,
                 {
-                    "embed_ship": item(vectors={1: "ship-1"}),
-                    "embed_person": item(vectors={1: "person-1"}),
+                    "embed_ship": item(vectors=RowIndexed({1: "ship-1"})),
+                    "embed_person": item(vectors=RowIndexed({1: "person-1"})),
                 },
             )
 
         message = str(raised.value)
         assert "'embed_ship'" in message and "'embed_person'" in message
         assert "'vectors'" in message and "[1]" in message
+        assert (
+            "`params: classes:`" in message
+        ), "the fix is a chain-file knob, and only slots that have one can reach this"
+
+    def test_a_three_way_rejoin_names_only_the_branches_that_claimed_the_row(
+        self, three_way: InprocessRunner
+    ) -> None:
+        """The refusal names the two slots at fault, and not the innocent third.
+
+        This is what :meth:`~shipinfer.runners.inprocess.InprocessRunner._collision`'s re-scan
+        exists for, and with two branches it is untestable because the two the merge is
+        holding are always the two at fault. With three it is not: ``embed_ship`` covers row 0
+        and ``embed_person`` covers row 1, they union cleanly, and then ``embed_vehicle``
+        contests row 1. The merge is now holding the *union* of the first two on one side —
+        an object neither of them filed — so "name the two being merged" would send the
+        operator to ``embed_ship``, whose ``classes:`` has nothing to do with the overlap.
+
+        An operator reading this message goes and edits two ``params: classes:`` lists. Naming
+        the wrong one costs a wrong edit and leaves the real overlap in place.
+        """
+        node = three_way.topology.node("track")
+
+        with pytest.raises(InferenceError) as raised:
+            three_way._inbound(
+                node,
+                {
+                    "embed_ship": item(vectors=RowIndexed({0: "ship-0"})),
+                    "embed_person": item(vectors=RowIndexed({1: "person-1"})),
+                    "embed_vehicle": item(vectors=RowIndexed({1: "vehicle-1"})),
+                },
+            )
+
+        message = str(raised.value)
+        assert "'embed_person'" in message and "'embed_vehicle'" in message
+        assert "'embed_ship'" not in message, "it covered row 0 and is not at fault"
+        assert "[1]" in message
 
     def test_a_non_mapping_collision_still_resolves_first_writer_wins(
         self, rejoin: InprocessRunner
@@ -341,9 +440,10 @@ class TestTwoBranchesFilingTheSameMapping:
         and not a merge problem, and there is no union to take. It resolves the same way on
         every frame and every run because it resolves by ``node.inputs`` order.
 
-        A mapping meeting a non-mapping is that same disagreement — about what the key *is* —
-        so it resolves the same way rather than raising, which would turn a mis-declared chain
-        into a per-frame exception storm instead of a stable, inspectable wrong answer.
+        A ``RowIndexed`` meeting anything else is that same disagreement — about what the key
+        *is* — so it resolves the same way rather than raising, which would turn a
+        mis-declared chain into a per-frame exception storm instead of a stable, inspectable
+        wrong answer.
         """
         node = rejoin.topology.node("track")
 
@@ -357,7 +457,7 @@ class TestTwoBranchesFilingTheSameMapping:
         mixed = rejoin._inbound(
             node,
             {
-                "embed_ship": item(vectors={0: "ship-0"}),
+                "embed_ship": item(vectors=RowIndexed({0: "ship-0"})),
                 "embed_person": item(vectors="not a scatter-back"),
             },
         )
@@ -366,3 +466,68 @@ class TestTwoBranchesFilingTheSameMapping:
         assert node.inputs == ("embed_ship", "embed_person"), "the fixture's declaration order"
         assert scalars.meta["class"] == "ship"
         assert mixed.meta["vectors"] == {0: "ship-0"}
+
+
+class TestTwoBranchesFilingAModelsRawOutputs:
+    """A mapping that is not a scatter-back keeps the rule it had before the union existed.
+
+    ``PoolSegment`` and ``PoolRecognize`` keep ``_PoolElement._finish``'s default, which files
+    the model's raw ``response.outputs`` — ``{output name: Tensor}`` — under ``meta["masks"]``
+    and ``meta["identities"]``. Those are mappings and they are emphatically *not* keyed by
+    detection row, so the union must not touch them. Sniffing ``isinstance(..., Mapping)``
+    cannot tell the two apart, which is why the writer declares itself with
+    :class:`~shipinfer.topology.base.RowIndexed` and only that type unions.
+
+    Both tests below describe the *same* chain — two ``segment`` slots on rejoining branches —
+    and differ only in whether the two engines happen to name their output the same. Under a
+    ``Mapping`` gate that coincidence decides between an exception on every frame and a
+    fabricated composite; under the declared gate it decides nothing, which is the property.
+    """
+
+    def test_engines_naming_their_output_the_same_are_not_refused(
+        self, segmenters: InprocessRunner
+    ) -> None:
+        """First-writer-wins, exactly as it resolved before the union rule existed.
+
+        Both segmenters emit an output called ``masks``, so a ``Mapping``-gated union reads
+        the *output name* as a detection row, finds it claimed twice, and fails every frame of
+        the chain — with a message pointing at a ``params: classes:`` the ``segment`` family
+        does not have. There is nothing for an operator to fix and nothing wrong with the
+        chain.
+        """
+        node = segmenters.topology.node("track")
+
+        merged = segmenters._inbound(
+            node,
+            {
+                "seg_ship": item(masks={"masks": "ship-masks"}),
+                "seg_person": item(masks={"masks": "person-masks"}),
+            },
+        )
+
+        assert merged is not None
+        assert node.inputs == ("seg_ship", "seg_person"), "the fixture's declaration order"
+        assert merged.meta["masks"] == {"masks": "ship-masks"}
+
+    def test_engines_naming_their_outputs_differently_are_not_unioned(
+        self, segmenters: InprocessRunner
+    ) -> None:
+        """No composite dict is invented, either.
+
+        The other half of the same failure: with different output names there is no collision,
+        so a ``Mapping``-gated union quietly hands ``track`` a ``{'ship_masks': ...,
+        'person_masks': ...}`` that neither engine produced and no consumer was written
+        against. First-writer-wins is a stable, inspectable answer; a fabricated one is not.
+        """
+        node = segmenters.topology.node("track")
+
+        merged = segmenters._inbound(
+            node,
+            {
+                "seg_ship": item(masks={"ship_masks": "T1"}),
+                "seg_person": item(masks={"person_masks": "T2"}),
+            },
+        )
+
+        assert merged is not None
+        assert merged.meta["masks"] == {"ship_masks": "T1"}, "not a union of the two"

@@ -154,6 +154,10 @@ class Detections:
                 public method on a value type (CONVENTIONS Part 1). A selection that runs past
                 the end was built against a *different* frame, and the rows it does hit are
                 then the wrong objects' -- the one failure this module exists to prevent.
+                A selection numpy rejected for some *other* reason raises the same typed
+                error and names the whole selection, because the out-of-range scan has
+                nothing to single out and "indices [] name no row" reads as a bug in the
+                message rather than in the caller.
         """
         if isinstance(indices, range) and indices == range(len(self)):
             return self.boxes
@@ -168,8 +172,13 @@ class Detections:
                 for i in gathered
                 if not isinstance(i, (int, np.integer)) or not -len(self) <= i < len(self)
             ]
+            # numpy refused the gather for a reason this scan does not model -- a `bool` in
+            # the tuple becomes a mask of the wrong length, and every element of it is in
+            # range. Naming an empty list would report the failure as being about no index at
+            # all; name the whole selection instead, which is what there is to look at.
+            named = outside or gathered
             raise ValidationError(
-                f"detection indices {outside} name no row of a {len(self)}-row frame. "
+                f"detection indices {named} name no row of a {len(self)}-row frame. "
                 "`boxes_at` takes what `indices_of`, `indices_of_any` or "
                 "`range(len(detections))` return, all of which are indices *of this frame*; "
                 "one that is not means the selection outlived the detections it was built from"

@@ -43,6 +43,7 @@ from shipinfer.topology.base import (
     ImageOpsLike,
     LetterboxLike,
     ModelResolver,
+    RowIndexed,
 )
 from shipinfer.topology.caps import ANY, LOCATIONS, Caps, negotiate, parse_caps
 from shipinfer.topology.chain import (
@@ -88,6 +89,7 @@ __all__ = [
     "InstantBarrier",
     "LetterboxLike",
     "ModelResolver",
+    "RowIndexed",
     "Topology",
     "WaiterBudget",
     "create_element",

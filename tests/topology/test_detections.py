@@ -378,6 +378,29 @@ class TestGatheringTheBoxesOfASelection:
         assert "4" in str(raised.value), "the frame's row count"
         assert "[4]" in str(raised.value), "and the index it has no row for"
 
+    def test_a_selection_numpy_refused_for_another_reason_names_the_whole_selection(
+        self,
+    ) -> None:
+        """The recovery scan looks for out-of-range integers, and that is not the only way a
+        gather fails. ``(True, False)`` is read by numpy as a boolean *mask*, and a mask of the
+        wrong length raises — while the scan finds nothing out of range, because ``bool`` is a
+        subclass of ``int`` and both values index a four-row frame perfectly well. The message
+        would then be "detection indices [] name no row of a 4-row frame", which names no index
+        at all and is the one diagnostic an operator cannot act on.
+
+        Unreachable from ``indices_of`` / ``indices_of_any`` / ``range``, so this is about the
+        message and not about the failure; a public method on a value type does not get to
+        report a diagnostic it can see is empty.
+        """
+        detections = mixed()
+
+        with pytest.raises(ValidationError) as raised:
+            detections.boxes_at((True, False))
+
+        message = str(raised.value)
+        assert "indices []" not in message, "an empty index list names nothing"
+        assert "True" in message, "the whole selection, since no single index is at fault"
+
     def test_a_valid_selection_is_never_charged_for_the_guard(self) -> None:
         """The bounds are read off the failure, not checked before the gather, so the ordinary
         frame does one pass and not two. Pinned as a property rather than a timing: every

@@ -49,7 +49,14 @@ from shipinfer.core.types import DataType, Tensor, TensorSpec
 from shipinfer.core.types.spec import DYNAMIC
 from shipinfer.runners.inprocess import InprocessRunner
 from shipinfer.runtime.ops import NumpyImageOps
-from shipinfer.topology import Caps, ChainItem, ChainSpec, ElementContext, Topology
+from shipinfer.topology import (
+    Caps,
+    ChainItem,
+    ChainSpec,
+    ElementContext,
+    RowIndexed,
+    Topology,
+)
 from shipinfer.topology import bridge as bridge_module
 from shipinfer.topology.elements.detections import Detections, Normalization
 from shipinfer.topology.elements.pool import PoolEmbed, PoolSegment
@@ -440,10 +447,9 @@ class TestTheVectorsLandOnTheRowsTheyCameFrom:
         wholesale — every ship reaching ``track`` with no appearance, on a chain whose
         per-element counters both say they ran.
 
-        This is one of the two ways two embedders meet. The shipped chain declares the other
-        one — parallel branches rejoining at ``track`` — and that is
-        :class:`TestTheShippedChainRunsThemInParallel`, whose merge happens in the runner and
-        never reaches this method at all.
+        This is one of the two ways two embedders meet. The other one — parallel branches
+        rejoining at ``track`` — is :class:`TestTheShippedChainRunsThemInParallel`, whose
+        merge happens in the runner and never reaches this method at all.
         """
         ships = opened(FakeEmbedder(), params={"classes": ["ship"]})
         people = opened(FakeEmbedder(), params={"classes": ["person"]})
@@ -454,6 +460,9 @@ class TestTheVectorsLandOnTheRowsTheyCameFrom:
         assert sorted(vectors) == [0, 1, 2, 3], "both embedders' rows, not the last one's"
         assert [which_crop(vectors[row]) for row in (0, 2)] == [0, 1], "the ship pair"
         assert [which_crop(vectors[row]) for row in (1, 3)] == [0, 1], "the person pair"
+        assert isinstance(
+            vectors, RowIndexed
+        ), "the series merge keeps the declaration, or a later fan-in would not union it"
 
     def test_two_embedders_in_series_covering_one_row_is_a_typed_refusal(self) -> None:
         """The series half of the fan-in's rule, and it answers the same way.
@@ -979,14 +988,19 @@ class TestTheFanOutIsCounted:
         assert element._metrics.rows is None
 
 
-# -- the shipped chain's two branches ------------------------------------------------------------
+# -- the two branches, rejoining -----------------------------------------------------------------
 
-#: ``topology/ship_person.yaml``'s shape with the hardware implementations swapped out: two
-#: embedders forked off ``detect`` (``embed_person`` carries ``after: detect`` in the shipped
-#: file precisely so it does *not* follow ``embed_ship``) and rejoined at ``track``. Written as
-#: a chain file rather than as two hand-built elements because the wiring is the thing under
-#: test: the two branches never see each other's item, so ``_scatter``'s merge cannot run and
-#: the union has to be taken at the rejoin.
+#: The shape C8b gives ``topology/ship_person.yaml``, with the hardware implementations
+#: swapped out: two embedders forked off ``detect`` (``embed_person`` carries ``after: detect``
+#: in the shipped file too, precisely so it does *not* follow ``embed_ship``) and rejoined at
+#: ``track``, each picking its rows with ``params: classes:``. The shipped file guards the two
+#: with ``when: class == ...`` instead, against a field nothing in the chain sets, so on it
+#: neither embedder runs and there is no rejoin to merge; converting those guards into the row
+#: filter is C8b's job, and this fixture is what that conversion has to arrive at.
+#:
+#: Written as a chain file rather than as two hand-built elements because the wiring is the
+#: thing under test: the two branches never see each other's item, so ``_scatter``'s merge
+#: cannot run and the union has to be taken at the rejoin.
 TWO_BRANCHES = """
 name: two_embedders
 elements:
@@ -1021,7 +1035,7 @@ def two_branches() -> tuple[InprocessRunner, PoolEmbed, PoolEmbed]:
 
 
 class TestTheShippedChainRunsThemInParallel:
-    """Both embedders' vectors reach ``track`` on the wiring the chain file declares.
+    """Both embedders' vectors reach ``track`` on the wiring ``TWO_BRANCHES`` declares.
 
     The composition matters and this is why it is loaded from a spec rather than composed by
     hand: with ``embed_ship`` and ``embed_person`` both ``after: detect``, neither element ever
@@ -1031,7 +1045,27 @@ class TestTheShippedChainRunsThemInParallel:
     ``CLAUDE.md``, ~15 000 person crops a second cut, embedded on a GPU and discarded, every
     person arriving at the tracker with ``embedding=None``, with no exception and no counter
     to say so. Both elements ran; the loss is at the seam between them.
+
+    The class name is aspirational and stays that way until C8b: the shipped
+    ``topology/ship_person.yaml`` guards both embedders with ``when: class == ...`` and
+    declares no ``classes:``, so on it neither runs. ``TWO_BRANCHES`` is the wiring the
+    conversion has to produce, and it is what is under test here.
     """
+
+    def test_what_an_embedder_files_is_declared_row_indexed(self) -> None:
+        """The element says what shape it filed, and the fan-in reads that and nothing else.
+
+        This is the whole reason two rejoining embedders union while two rejoining segmenters
+        do not: ``PoolSegment`` files a model's raw ``{output name: Tensor}`` response under
+        ``meta["masks"]``, which is a ``Mapping`` too. Sniffing the shape cannot tell them
+        apart; declaring it can. Asserting the *type* rather than the contents is deliberate —
+        the contents are pinned below, and it is the type the merge dispatches on.
+        """
+        _, ships, _ = two_branches()
+
+        emitted = ships.process(item(mixed()))
+
+        assert isinstance(emitted.meta["vectors"], RowIndexed)
 
     def test_the_tracker_receives_both_branches_vectors(self) -> None:
         """The four rows of the frame, from the two elements that covered two each."""

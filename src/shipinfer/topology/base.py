@@ -54,6 +54,7 @@ __all__ = [
     "ImageOpsLike",
     "LetterboxLike",
     "ModelResolver",
+    "RowIndexed",
 ]
 
 
@@ -128,6 +129,52 @@ class ElementKind(str, enum.Enum):
 
 #: Sentinel for "leave this alone", so ``derive(payload=None)`` can mean *clear it*.
 _KEEP: Final[Any] = object()
+
+
+class RowIndexed(dict):  # type: ignore[type-arg]
+    """A ``meta`` value that is a **scatter-back**: ``{detection row: that row's result}``.
+
+    A plain ``dict`` in every respect that matters at runtime — the type *is* the payload of
+    this class, and it carries no behaviour. What it carries is a **declaration**: the value
+    under this metadata key is keyed by *detection row index* and is therefore partial by
+    design, so two elements that both filed one over disjoint rows describe one frame between
+    them and their answers compose. ``PoolEmbed`` files one per frame
+    (:meth:`~shipinfer.topology.elements.pool._PoolCropElement._scatter`) and ``track`` reads
+    it (:meth:`~shipinfer.topology.elements.track.ShipvisionTrack._embeddings`).
+
+    **Why a type and not a sniff.** The fan-in
+    (:meth:`~shipinfer.runners.inprocess.InprocessRunner._merge_meta`) has to tell "two
+    branches each covered half the rows, union them" from "two branches disagree about one
+    value, take the first". It used to answer that with ``isinstance(value, Mapping)``, and a
+    mapping is exactly what it cannot distinguish on: ``_PoolElement._finish`` files a
+    model's raw ``response.outputs`` — a ``{output name: Tensor}`` dict — under its own
+    ``meta_key``, and ``segment`` and ``recognize`` both keep that default. Sniffed, two
+    rejoining segmenters either refuse every frame (engines that name their output the same
+    collide on the *name*) or silently fabricate a composite ``{'ship_masks': …,
+    'person_masks': …}`` that no engine emitted. Neither mapping says what shape it is, so
+    the merge guessed — and this class is the shape saying so itself. Declaring it costs the
+    writer one constructor call and buys the reader a total answer.
+
+    So: **only a** ``RowIndexed`` **unions at a fan-in.** Any other mapping keeps the
+    first-writer-wins rule that predates the union, which is what an undeclared value should
+    get — it is a value the runner has no attribution rule for, not one it may invent one for.
+
+    Being a ``dict`` subclass is the other half of the design. Every consumer that tests
+    ``isinstance(..., Mapping)``, iterates it, or does ``dict(...)`` on it keeps working
+    unchanged, so nothing downstream had to learn the name; and a chain that files a bare
+    ``{row: vector}`` still reaches ``track`` correctly, it merely does not get the union it
+    never asked for.
+
+    It lives here, next to :class:`ChainItem`, because it is a statement about ``ChainItem.
+    meta`` — the only place these values exist — and because ``topology`` is the deepest
+    layer both sides of the contract may import: the elements that write it are
+    ``topology.elements``, the fan-in that reads it is ``runners``, and ``runners`` imports
+    ``topology`` (``scripts/hooks/check_layers.py``). ``core`` is the other layer both may
+    reach, and it is the wrong one: ``core`` has no word for a chain item and must not gain a
+    vocabulary for one metadata dict's conventions.
+    """
+
+    __slots__ = ()
 
 
 @dataclass(slots=True)
