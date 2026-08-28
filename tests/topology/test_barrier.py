@@ -16,6 +16,14 @@ this class used to have, and it is written the way the deployment runs: one thre
 a :class:`threading.Barrier` so every camera submits its k-th frame together at 20 fps, and
 the assertion that **every** frame comes back with an answer.
 
+**The grid runs on a clock the test owns.** Expiry is the barrier's only use of wall time, so
+on a real clock a 100% coverage assertion also asserts that no camera thread ever missed its
+60 ms window — which a loaded box does fail (an injected 70 ms hiccup turns
+``{complete: 192}`` into ``{complete: 184, window: 7, late: 1}``). A frozen
+:class:`DrivenClock` expires nothing, leaving the tally a function of the bucketing alone.
+Real time is still asserted, in :class:`TestABucketClosesOnTheWindow`, where the bounds can
+carry a busy host's slack.
+
 **Windows here are milliseconds, not the 60 ms default.** A test that closes on the window
 has to spend the window, so the ones that do use 30-60 ms and the ones that do not use a
 window wide enough that it cannot fire by accident. Every test is bounded: a hang in this file
@@ -26,7 +34,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import pytest
@@ -108,6 +116,30 @@ class Submitter(threading.Thread):
             )
         except BaseException as exc:
             self.error = exc
+
+
+class DrivenClock:
+    """A monotonic clock the test moves, so an instant expires when the test says so.
+
+    The barrier reads "now" to stamp a bucket's deadline and to decide whether a parked
+    waiter expired, so one of these puts both under the test's control; frozen means no
+    instant ever expires. Advancing needs no notification — a waiter re-derives its remaining
+    time on every wake, and wakes at least once per window of real time.
+    """
+
+    __slots__ = ("_lock", "_now")
+
+    def __init__(self, start: float = 1_000.0) -> None:
+        self._now = start
+        self._lock = threading.Lock()
+
+    def __call__(self) -> float:
+        with self._lock:
+            return self._now
+
+    def advance(self, seconds: float) -> None:
+        with self._lock:
+            self._now += seconds
 
 
 def until(predicate, timeout_s: float = 5.0) -> bool:
@@ -815,10 +847,17 @@ class TestUnderThreads:
 # -- the property the whole class exists for -----------------------------------------------
 
 
+#: Frames per camera in a grid run. Long enough that a bucketing bug repeats several times
+#: (the absolute grid collided once every ``window / period`` frames — one in six), short
+#: enough that the whole class is under two seconds.
+GRID_FRAMES = 24
+
+
 def run_grid(
     cameras: int,
     *,
-    frames: int = 24,
+    clock: Callable[[], float],
+    frames: int = GRID_FRAMES,
     window_ms: float = DEFAULT_SYNC_WINDOW_MS,
     fps: float = 20.0,
     stagger: bool = False,
@@ -830,9 +869,16 @@ def run_grid(
     frame of every camera is offered at the same moment, and capture timestamps a real frame
     period apart. ``stagger`` spreads the group's captures evenly across one frame period,
     which is what free-running cameras look like.
+
+    The threads and the contention are real; only *time* is simulated. ``clock`` is required
+    rather than defaulted — every caller passes a frozen :class:`DrivenClock`, and a default
+    could be edited back to ``time.monotonic`` with all of these tests still green. The cost
+    is where a regression shows: a bucket that stops closing on evidence parks its waiters
+    instead of timing out, so the failure is the ``is_alive`` assertion below with the tally
+    attached. A tally diluted by expiries is what hid this bug in the first place.
     """
     period = 1.0 / fps
-    held = InstantBarrier(sync_window_s=window_ms / 1e3, workers=cameras + 1)
+    held = InstantBarrier(sync_window_s=window_ms / 1e3, workers=cameras + 1, clock=clock)
     for index in range(cameras):
         held.camera_added(f"cam-{index}")
     offsets = [index * period / cameras if stagger else 0.0 for index in range(cameras)]
@@ -855,8 +901,12 @@ def run_grid(
     threads = [threading.Thread(target=drive, args=(i,), daemon=True) for i in range(cameras)]
     for thread in threads:
         thread.start()
+    # One deadline for all the joins, not 20 s each: 8 cameras x 20 s in series would overrun
+    # this module's `pytest.mark.timeout(30)`, which kills the run with a raw thread dump
+    # instead of the assertion below and its `tally`. A healthy grid takes 14 ms.
+    end = time.monotonic() + 10.0
     for thread in threads:
-        thread.join(20.0)
+        thread.join(max(0.0, end - time.monotonic()))
     assert not any(thread.is_alive() for thread in threads), tally
     assert sum(tally.values()) == cameras * frames
     return tally
@@ -877,16 +927,17 @@ class TestAGenlockedGridGetsEveryFrameAnswered:
     Both the default window and the sizing (`CLAUDE.md`: 50 cameras, 20 fps, groups of a
     berth or a quay) are pinned here, because "the default is fine" was the claim that was
     wrong.
+
+    The clock is the test's (see :func:`run_grid`), so "every frame" is not "every frame the
+    host scheduler let through" and each of these asserts the whole tally by equality:
+    ``complete`` for every frame, with nothing absorbing a miss.
     """
 
     @pytest.mark.parametrize("cameras", [2, 8])
     def test_every_frame_gets_an_answer_at_the_default_window(self, cameras: int) -> None:
-        tally = run_grid(cameras)
+        tally = run_grid(cameras, clock=DrivenClock())
 
-        answered = tally.get(CLOSED_COMPLETE, 0) + tally.get(CLOSED_WINDOW, 0)
-        assert answered == sum(tally.values()), tally
-        assert tally.get(MISSED_LATE, 0) == 0, "a camera collided with itself"
-        assert tally.get(MISSED_DUPLICATE, 0) == 0
+        assert tally == {CLOSED_COMPLETE: cameras * GRID_FRAMES}
 
     @pytest.mark.parametrize("cameras", [2, 8])
     def test_free_running_cameras_staggered_across_a_period_still_land_together(
@@ -896,16 +947,47 @@ class TestAGenlockedGridGetsEveryFrameAnswered:
         *narrow* enough to stop self-collision is too narrow to hold a group whose captures
         are spread across a frame period. The anchor holds them because the first arrival
         opens the window rather than the clock."""
-        tally = run_grid(cameras, stagger=True)
+        tally = run_grid(cameras, stagger=True, clock=DrivenClock())
 
-        assert tally.get(CLOSED_COMPLETE, 0) == sum(tally.values()), tally
+        assert tally == {CLOSED_COMPLETE: cameras * GRID_FRAMES}
 
     def test_a_window_narrower_than_the_frame_period_is_also_fine(self) -> None:
         """The default is not load-bearing for the self-collision property — nothing is."""
-        tally = run_grid(8, window_ms=25.0)
+        tally = run_grid(8, window_ms=25.0, clock=DrivenClock())
 
-        answered = tally.get(CLOSED_COMPLETE, 0) + tally.get(CLOSED_WINDOW, 0)
-        assert answered == sum(tally.values()), tally
+        assert tally == {CLOSED_COMPLETE: 8 * GRID_FRAMES}
+
+
+class TestTheDeadlineIsReadFromTheClockTheBarrierWasGiven:
+    """The seam the grid tests rest on: expiry asks ``clock``, never ``time``.
+
+    Without it the seam is used but never asserted, and the obvious tidy-up — one
+    ``wait_for(timeout=deadline - now)`` again — would leave every grid test green while
+    handing the decision back to real time.
+    """
+
+    def test_an_instant_does_not_expire_until_the_injected_clock_says_so(self) -> None:
+        clock = DrivenClock()
+        window_s = 0.02
+        held = barrier(sync_window_s=window_s, workers=4, clock=clock)
+        held.camera_added("cam-a")
+        held.camera_added("cam-b")
+
+        waiter = Submitter(held, "cam-a", 100.0)
+        waiter.start()
+        assert until(lambda: held.waiters == 1)
+
+        # The one real duration in this file that is an assertion rather than a
+        # synchronisation, because the claim is that something does *not* happen: four
+        # windows of host time, in which a wait bounded by `time.monotonic` expires.
+        waiter.join(window_s * 4)
+        assert waiter.is_alive(), "the wait expired on the host clock, not the injected one"
+
+        clock.advance(window_s)
+        waiter.join(5.0)
+        assert not waiter.is_alive()
+        assert waiter.outcome.reason == CLOSED_WINDOW
+        assert waiter.outcome.results == {"cameras": ("cam-a",)}
 
 
 # -- the waiter budget -------------------------------------------------------------------
