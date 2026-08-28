@@ -908,6 +908,12 @@ mỗi brief và mỗi PR body dẫn section nó thực hiện.
 
 > ngoài ra, về phần grpc giao tiếp giữa các processes, bạn hãy check lại trong vllm, hình như là họ hay dùng rpc gì đó để giao tiếp thì phải, nếu giao tiếp khác với src/shipinfer/launch/proto, tìm cách abstract oop nó xem có được không
 
+### V148 · 28 Aug 2026, ~17:1x UTC — test luồng full pipeline thật, xoá hết mock; input là video
+
+> vậy thì tôi yêu cầu bạn, từ giờ khi test hệ thống, hãy test trên luồng full pipeline thật từ decode->output, tuỳ vào bạn đang implement feature  dùng topology gì (ví dụ fleet, deepstream, threading...) tôi không muốn bạn code ra 1 mớ bòng bòng chỉ chạy mock. Ngoài ra, như tôi đã nói rồi, hãy xoá mọi mock.py được sử dụng
+
+> input đơn giản dùng video, thay vì dùng camera url vì ta không hề có camera url hiện tại
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
@@ -1088,6 +1094,9 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 
 | Rule | Where |
 |---|---|
+| **System tests run the real chain, decode → output**, on the topology the feature uses (fleet / deepstream / threading); mock-only verification is not verification | **V148** |
+| **Delete every `mock.py` in use** — `backends/mock.py`, `topology/elements/mock.py` | **V148**, R52, R54, V15 |
+| Test input is a **video file**, not a camera URL — there is no camera to reach | **V148** |
 | **Documentation is capped**: module docstring ≤ 15 lines, class/function ≤ 10, comment block ≤ 4; write short and dense | **V145** |
 | One logger for the whole process — not one `_LOG` per module | **V145** |
 | `envs.py` is a dict of `NAME: lambda` + `__getattr__`; `envs.NAME` is already typed; no module-global env objects | **V145** |
