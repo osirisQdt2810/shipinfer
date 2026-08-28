@@ -330,6 +330,66 @@ assembler at one row; the fake now enforces the same rule, and a real-engine tes
 crop element's whole-frame response carries chunk 0's `executed_on` — ledger item.
 ---
 
+
+---
+
+## 2026-08-28 — the event value and its transports move to the layers both generations can reach (Phase C8, the layering half)
+
+**What.** No behaviour changes in this slice. One value type and one family of transports move
+to homes the layer tables allow, so that the `output` element landing next can reach them
+without importing a layer it must not.
+
+| Piece | From | To |
+|---|---|---|
+| `PerceptionEvent`, `ObjectRecord`, `SCHEMA_VERSION`, `MESSAGE_TYPE` | `pipeline/schema.py` | `core/events/schema.py` (`pipeline/schema.py` is a re-export) |
+| `as_embedding` | `pipeline/graph/state.py` | `core/events/convert.py` (re-exported from `state.py`; the DeepStream probe now imports the real home) |
+| `ResultSink`, `RESULT_SINKS`, the `jsonlines` / `kafka` / `null` sinks | `pipeline/sinks/` | `topology/sinks/` (`pipeline/sinks/__init__.py` is a re-export) |
+| `confluent_kafka` | `FORBIDDEN_EXTERNAL["topology"]` in `check_layers.py` | `TestImportIsCheap`'s subprocess list |
+| `tests/pipeline/test_schema.py`, `tests/pipeline/test_sinks.py` | — | `tests/core/test_event_schema.py`, `tests/topology/test_sinks.py` |
+| `tests/plugins/mask_shipvision.py` | — | new: the committed `-p tests.plugins.mask_shipvision` that reproduces CI's submodule-less run |
+
+**Why.** `topology` may import `core` and nothing else (ADR-001, `scripts/hooks/check_layers.py`).
+Both generations of the pipeline build the *same* event — `pipeline/graph/` from a frame's stage
+outputs, the chain's `output` element from a chain item's metadata — so a value shared by the two
+has exactly one legal home, and it is not either of them. arch.md §9 says the same thing about
+the sinks in its own words: `sinks/{kafka,jsonlines,null}` become `output` element
+implementations, and the elements live under `topology/`.
+
+**Decisions.**
+
+- **Re-exports, not renames.** ~30 modules and their tests name `shipinfer.pipeline.schema`, and
+  `pipeline/` stays the working application until the chain replaces it (arch.md §9). A shim is
+  cheaper and more honest than a rename spread across two generations, and it is a *re-export*
+  rather than a second definition: `test_the_shim_re_exports_the_same_class` pins identity, not
+  equality, because two definitions under one name is the failure the move exists to prevent.
+- **`as_embedding` moves with the value it feeds, and there is exactly one of it.** It converts a
+  model row to the JSON array an `ObjectRecord` carries, and the spelling is load-bearing:
+  `tuple(float(v) for v in row)` is a per-element Python loop on the emission path — 2048 floats
+  per crop at ~15 000 crops/s is ~30 M `float()` calls a second, paid even with the `null` sink —
+  and `tolist()` is the same value in one C call, measured ~6x faster on this host at both 512-d
+  and 2048-d. The generator has been written and removed twice. It now has three callers on both
+  sides of the accelerator seam (the graph, the DeepStream probe, and the `output` element that
+  follows), so it lives beside the event in `core` and `tests/core/test_event_convert.py` pins
+  the *identity* of the function each of them resolves.
+- **`confluent_kafka` left the static row rather than the codebase.** `check_layers.py` walks the
+  AST and counts a function-scope import exactly like a module-scope one, so naming the client in
+  `FORBIDDEN_EXTERNAL["topology"]` would ban the only legal spelling — the import inside
+  `KafkaResultSink.__init__` — and leave none. The ban moved to where it can be enforced:
+  `TestImportIsCheap` imports `shipinfer.topology` in a subprocess and fails if a broker client
+  came with it. Exactly the precedent `shipvision` set one paragraph above it in the same file.
+- **`numpy` in `core` is not a relaxation.** ADR-001 draws the line at torch, tensorrt,
+  onnxruntime and the rest; `FORBIDDEN_EXTERNAL["core"]` has never named numpy and `core/types/`
+  has used it since the first commit. `core/events/convert.py` touches no device.
+- **The move ships alone.** It edits `scripts/hooks/check_layers.py` and
+  `tests/test_architecture.py` — the layer tables, the highest-consequence file pair in the
+  repository — and a table change deserves to be read on its own rather than as page three of a
+  feature.
+
+**Evidence.** `python scripts/hooks/check_layers.py` exits 0. Offline tier green with the
+submodule present and under the mask; `pre-commit run --all-files` clean. Numbers in the PR body.
+
+---
+
 ## 2026-08-28 — the `mtmc` element: anchored instants across cameras, and a barrier that never takes the last worker (Phase C6)
 
 **What.** The chain gains its cross-camera tier, in two modules and the split is the point.
