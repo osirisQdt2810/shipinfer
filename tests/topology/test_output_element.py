@@ -87,7 +87,7 @@ def element():
 
 
 def emitted(built: SinkOutput):
-    sink = built._sink
+    sink = built.sink
     assert isinstance(sink, NullResultSink)
     return sink.events()
 
@@ -477,6 +477,43 @@ class TestTheSourceIdIsToldNotGuessed:
             create_element("output", "null", "output", {"source_id": "  "})
 
 
+class TestTheSinkIsReadableWithoutReachingThroughAPrivate:
+    """The seam the deleted `MockOutput.emitted` used to provide.
+
+    A dozen assertions across four files need to see what the element published. Reaching
+    through `_sink` couples them to an attribute whose value changes on `close`, so a test
+    that ran in the wrong lifecycle order failed with `AttributeError` on `None` rather than
+    saying what it meant.
+    """
+
+    def test_it_is_none_before_open_and_the_sink_after(self) -> None:
+        built = create_element("output", "null", "output", {"keep_last": 1})
+
+        assert built.sink is None, "not open yet, and saying so beats a half-built object"
+
+        built.open(ElementContext())
+        try:
+            assert built.sink is not None
+            assert built.sink is built._sink, "the property is a view, not a copy"
+        finally:
+            built.close()
+
+    def test_it_returns_to_none_when_the_element_closes(self) -> None:
+        """`close` drops the sink, and the property tells the truth about that."""
+        built = create_element("output", "null", "output", {"keep_last": 1})
+        built.open(ElementContext())
+        built.close()
+
+        assert built.sink is None
+
+    def test_it_is_read_only(self) -> None:
+        """A caller that could assign it would be building a second lifecycle."""
+        built = create_element("output", "null", "output", {"keep_last": 1})
+
+        with pytest.raises(AttributeError):
+            built.sink = None  # type: ignore[misc]
+
+
 class TestTheSinkIsBuiltAtOpen:
     """A bad sink param stops the deploy, not the first frame (CONVENTIONS 2.6)."""
 
@@ -541,7 +578,7 @@ class TestAFailingSinkIsCountedNotRaised:
         built = create_element("output", "null", "output")
         built.open(ElementContext(metrics=registry))
         try:
-            built._sink.close()  # every emit now refuses, exactly as a dead broker does
+            built.sink.close()  # every emit now refuses, exactly as a dead broker does
             assert built.process(item(camera="cam-b", detections=detections("ship"))) is None
         finally:
             built.close()
@@ -562,7 +599,7 @@ class TestAFailingSinkIsCountedNotRaised:
         built = create_element("output", "null", "output")
         built.open(ElementContext(metrics=registry))
         try:
-            built._sink.drain_delivery_failures = lambda: (("cam-late", 11),)  # type: ignore[method-assign]
+            built.sink.drain_delivery_failures = lambda: (("cam-late", 11),)  # type: ignore[method-assign]
             built.process(item(camera="cam-b", detections=detections("ship")))
         finally:
             built.close()

@@ -43,9 +43,9 @@ from shipinfer.topology.registry import registry_for
 CHAIN = textwrap.dedent("""
     name: linear
     elements:
-      decode: {impl: mock}
-      detect: {impl: mock, model: ship_detector}
-      output: {impl: mock}
+      decode: {impl: replay}
+      detect: {impl: pool, model: ship_detector}
+      output: {impl: none}
     """)
 
 
@@ -599,7 +599,9 @@ class GroupedTrack(Element):
     """
 
     kind: ClassVar[ElementKind] = ElementKind.TRACK
-    accepts: ClassVar[tuple[str, ...]] = ("nv12@gpu", "meta@cpu")
+    #: The shipped tracker's caps verbatim (``elements/track.py``), so this double sits in a
+    #: chain wherever the real one does and the placement rule is asked the same question.
+    accepts: ClassVar[tuple[str, ...]] = ("meta@cpu", "bgr@cpu", "nv12@gpu")
     produces: ClassVar[tuple[str, ...]] = ("meta@cpu",)
 
     def camera_group(self) -> CameraGroup:
@@ -630,11 +632,11 @@ class TestACameraGroupIsAnAtomicUnitOfPlacement:
         chain_yaml = textwrap.dedent("""
             name: grouped
             elements:
-              decode: {impl: mock}
-              detect: {impl: mock, model: ship_detector}
-              track:  {impl: mock}
+              decode: {impl: replay}
+              detect: {impl: pool, model: ship_detector}
+              track:  {impl: shipvision}
               mtmc:   {impl: shipvision, params: {group: quay, cameras: [q-0, q-1, q-2, q-3]}}
-              output: {impl: mock}
+              output: {impl: none}
             """)
 
         def factory(shard, port):
@@ -735,9 +737,9 @@ class TestACameraGroupIsAnAtomicUnitOfPlacement:
         chain_yaml = textwrap.dedent("""
             name: grouped-by-another-kind
             elements:
-              decode: {impl: mock}
+              decode: {impl: replay}
               track:  {impl: grouped-track}
-              output: {impl: mock}
+              output: {impl: none}
             """)
 
         def factory(shard, port):
@@ -768,11 +770,11 @@ class TestACameraGroupIsAnAtomicUnitOfPlacement:
         chain_yaml = textwrap.dedent("""
             name: overlapping
             elements:
-              decode: {impl: mock}
-              track:  {impl: mock}
+              decode: {impl: replay}
+              track:  {impl: shipvision}
               mtmc:   {impl: shipvision, params: {group: quay, cameras: [q-0]}}
               mtmc_2: {impl: shipvision, kind: mtmc, params: {group: gate, cameras: [q-0]}}
-              output: {impl: mock}
+              output: {impl: none}
             """)
 
         with pytest.raises(ConfigurationError, match="claimed by camera groups"):

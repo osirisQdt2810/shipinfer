@@ -155,6 +155,18 @@ class SinkOutput(Element):
             ) from exc
         self._metrics = _OutputMetrics(context.metrics, self.name)
 
+    @property
+    def sink(self) -> ResultSink | None:
+        """The sink this element is publishing through, or ``None`` before ``open``.
+
+        Read-only and deliberately nullable: the lifecycle is the interesting part, and a
+        caller that gets ``None`` is being told the element is not open rather than handed
+        a half-built object. Exists because the alternative was a dozen assertions reaching
+        through ``_sink`` -- a private attribute whose value changes on ``close`` -- which
+        couples them to an implementation detail the class is free to change.
+        """
+        return self._sink
+
     def _do_close(self) -> None:
         sink, self._sink = self._sink, None
         if sink is not None:

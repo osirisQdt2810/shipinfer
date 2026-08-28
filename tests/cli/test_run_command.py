@@ -20,9 +20,9 @@ from shipinfer.core.errors import ConfigurationError
 CHAIN = textwrap.dedent("""
     name: mock_chain
     elements:
-      decode: {impl: mock}
-      detect: {impl: mock, model: ship_detector}
-      output: {impl: mock}
+      decode: {impl: replay}
+      detect: {impl: pool, model: ship_detector}
+      output: {impl: none}
     """)
 
 
@@ -88,7 +88,7 @@ class TestWhatItRefuses:
         """`ChainSpecError` is a `TopologyError` is a `ConfigurationError`: the operator gets
         the loader's own message, on the command they typed."""
         path = tmp_path / "broken.yaml"
-        path.write_text("elements: {detect: {impl: mock, model: m}}")
+        path.write_text("elements: {detect: {impl: pool, model: m}}")
 
         with pytest.raises(ConfigurationError):
             run(path, runner="fleet", gpus="0", dry_run=True)
