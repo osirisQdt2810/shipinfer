@@ -1,0 +1,99 @@
+"""The mosaic composer that gives T3b its 10-20-detections-per-frame source."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from PIL import Image
+
+from benchmarks.harness.crowd import compose_crowd_frames, main
+
+
+@pytest.fixture()
+def sources(tmp_path: Path) -> Path:
+    """Three distinguishable source photos of different sizes and aspects."""
+    src = tmp_path / "src"
+    src.mkdir()
+    for name, size, color in (
+        ("a.jpg", (60, 40), (255, 0, 0)),
+        ("b.jpg", (30, 90), (0, 255, 0)),
+        ("c.png", (80, 80), (0, 0, 255)),
+    ):
+        Image.new("RGB", size, color).save(src / name)
+    return src
+
+
+class TestComposition:
+    def test_writes_the_asked_count_at_the_asked_size(self, sources: Path, tmp_path: Path):
+        written = compose_crowd_frames(
+            sources, tmp_path / "out", grid=3, frames=4, size=(300, 210)
+        )
+        assert len(written) == 4
+        assert all(p.exists() for p in written)
+        assert Image.open(written[0]).size == (300, 210)
+
+    def test_two_runs_are_byte_identical(self, sources: Path, tmp_path: Path):
+        first = compose_crowd_frames(sources, tmp_path / "one", grid=2, frames=3)
+        second = compose_crowd_frames(sources, tmp_path / "two", grid=2, frames=3)
+        for a, b in zip(first, second, strict=True):
+            assert a.read_bytes() == b.read_bytes()
+
+    def test_consecutive_frames_differ(self, sources: Path, tmp_path: Path):
+        """Frame i starts the source cycle at offset i — arrangements must not repeat."""
+        written = compose_crowd_frames(sources, tmp_path / "out", grid=2, frames=2)
+        assert written[0].read_bytes() != written[1].read_bytes()
+
+    def test_every_cell_is_filled_never_distorted(self, sources: Path, tmp_path: Path):
+        """A 2:3 source in a wide cell keeps its aspect: gray pads the sides, no stretch."""
+        (written,) = compose_crowd_frames(
+            sources, tmp_path / "out", grid=1, frames=1, size=(90, 30)
+        )
+        frame = Image.open(written)
+        # b.jpg is not first in the cycle for frame 0; use a single tall source instead.
+        src2 = tmp_path / "tall"
+        src2.mkdir()
+        Image.new("RGB", (30, 90), (0, 255, 0)).save(src2 / "only.jpg")
+        (tall,) = compose_crowd_frames(src2, tmp_path / "out2", grid=1, frames=1, size=(90, 30))
+        img = Image.open(tall)
+        left = img.getpixel((1, 15))
+        center = img.getpixel((45, 15))
+        assert center[1] > 200 and center[0] < 130  # the green source, centred
+        assert left == (114, 114, 114)  # the pad, not a stretched source
+        assert frame.size == (90, 30)
+
+
+class TestRefusals:
+    def test_an_empty_source_directory_is_refused(self, tmp_path: Path):
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        with pytest.raises(ValueError, match="no .*images"):
+            compose_crowd_frames(empty, tmp_path / "out")
+
+    def test_a_nonpositive_grid_or_count_is_refused(self, sources: Path, tmp_path: Path):
+        with pytest.raises(ValueError, match="grid"):
+            compose_crowd_frames(sources, tmp_path / "out", grid=0)
+        with pytest.raises(ValueError, match="frames"):
+            compose_crowd_frames(sources, tmp_path / "out", frames=0)
+
+
+class TestCli:
+    def test_main_writes_and_reports(self, sources: Path, tmp_path: Path, capsys):
+        out = tmp_path / "cli"
+        code = main(
+            [
+                "--src",
+                str(sources),
+                "--out",
+                str(out),
+                "--grid",
+                "2",
+                "--frames",
+                "3",
+                "--size",
+                "100x60",
+            ]
+        )
+        assert code == 0
+        assert len(list(out.glob("crowd*.jpg"))) == 3
+        assert "3 frame(s) of 4 photos" in capsys.readouterr().out
