@@ -135,13 +135,19 @@ class Detections:
         frame and out of sight. Selecting *every* row hands the array through without a copy,
         which is the common case on a chain whose crop element declares no ``classes:``.
 
+        The fast path asks ``indices == range(len(self))`` and not ``len(indices) == len(self)``
+        — the values, not the count. A length test would answer a full-length *reordered*
+        selection with the boxes unpermuted, and a box that belongs to another row is exactly
+        the corruption this module exists to prevent: it has no symptom until a tracker starts
+        swapping identities. Range-to-range equality is O(1), and ``range`` is what the
+        no-``classes:`` path returns, so the check is exact and the fast path is unchanged.
+
         Args:
-            indices: ascending and unique — what :meth:`indices_of`, :meth:`indices_of_any`
-                and ``range(len(detections))`` return. The whole-frame fast path reads a
-                length rather than the values, so a reordered index list is not a selection
-                this answers correctly.
+            indices: what :meth:`indices_of`, :meth:`indices_of_any` and
+                ``range(len(detections))`` return. Any order is answered correctly; the rows
+                come back in the order asked for.
         """
-        if len(indices) == len(self):
+        if isinstance(indices, range) and indices == range(len(self)):
             return self.boxes
         if not indices:
             return np.zeros((0, 4), dtype=np.float32)
@@ -154,6 +160,13 @@ class Detections:
         traceable to the detections they came from. Losing that mapping is how an embedding
         ends up attached to the wrong object — a failure with no visible symptom until a
         tracker starts swapping identities.
+
+        The boxes are always a fresh contiguous gather, never :attr:`boxes` itself: the
+        indices are a tuple and :meth:`boxes_at`'s pass-through wants a ``range``. Worth
+        saying because the caller on the proven path (``pipeline/graph/crop.py``) stores what
+        it gets on an ``ObjectBatch`` that outlives the frame, and a single-class frame
+        silently handing that batch the live detection array is a difference no shape
+        assertion would show.
         """
         indices = self.indices_of(class_name)
         return self.boxes_at(indices), indices

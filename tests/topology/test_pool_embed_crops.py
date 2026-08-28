@@ -47,8 +47,9 @@ from shipinfer.core.request import (
 )
 from shipinfer.core.types import DataType, Tensor, TensorSpec
 from shipinfer.core.types.spec import DYNAMIC
+from shipinfer.runners.inprocess import InprocessRunner
 from shipinfer.runtime.ops import NumpyImageOps
-from shipinfer.topology import Caps, ChainItem, ElementContext
+from shipinfer.topology import Caps, ChainItem, ChainSpec, ElementContext, Topology
 from shipinfer.topology import bridge as bridge_module
 from shipinfer.topology.elements.detections import Detections, Normalization
 from shipinfer.topology.elements.pool import PoolEmbed, PoolSegment
@@ -430,12 +431,20 @@ class TestTheVectorsLandOnTheRowsTheyCameFrom:
         )
         assert np.allclose(embedder.crops[0], expected)
 
-    def test_two_embedders_merge_their_coverage_rather_than_replacing_it(self) -> None:
-        """The sizing runs ``embed_ship`` and ``embed_person`` side by side, both filing
-        ``meta["vectors"]``. ``derive`` merges metadata by key, so a plain assignment by the
-        second one would replace the first one's mapping wholesale — every ship reaching
-        ``track`` with no appearance, on a chain whose per-element counters both say they
-        ran."""
+    def test_two_embedders_in_series_merge_their_coverage_rather_than_replacing_it(
+        self,
+    ) -> None:
+        """Two embedders on **one branch**, the second declared ``after:`` the first, so the
+        second finds the first's mapping in ``item.meta``. ``derive`` merges metadata by key,
+        so a plain assignment by the second one would replace the first one's mapping
+        wholesale — every ship reaching ``track`` with no appearance, on a chain whose
+        per-element counters both say they ran.
+
+        This is one of the two ways two embedders meet. The shipped chain declares the other
+        one — parallel branches rejoining at ``track`` — and that is
+        :class:`TestTheShippedChainRunsThemInParallel`, whose merge happens in the runner and
+        never reaches this method at all.
+        """
         ships = opened(FakeEmbedder(), params={"classes": ["ship"]})
         people = opened(FakeEmbedder(), params={"classes": ["person"]})
 
@@ -949,6 +958,91 @@ class TestTheFanOutIsCounted:
         assert element._metrics.rows is None
 
 
+# -- the shipped chain's two branches ------------------------------------------------------------
+
+#: ``topology/ship_person.yaml``'s shape with the hardware implementations swapped out: two
+#: embedders forked off ``detect`` (``embed_person`` carries ``after: detect`` in the shipped
+#: file precisely so it does *not* follow ``embed_ship``) and rejoined at ``track``. Written as
+#: a chain file rather than as two hand-built elements because the wiring is the thing under
+#: test: the two branches never see each other's item, so ``_scatter``'s merge cannot run and
+#: the union has to be taken at the rejoin.
+TWO_BRANCHES = """
+name: two_embedders
+elements:
+  decode: {impl: mock}
+  detect: {impl: mock, model: ship_detector}
+  embed_ship:
+    impl: pool
+    model: ship_embedder
+    after: detect
+    params: {input: images, output: embedding, crop: {size: [16, 8]}, classes: [ship]}
+  embed_person:
+    impl: pool
+    model: person_embedder
+    after: detect
+    params: {input: images, output: embedding, crop: {size: [16, 8]}, classes: [person]}
+  track:  {impl: mock, kind: track, after: [embed_ship, embed_person]}
+  output: {impl: mock}
+"""
+
+
+def two_branches() -> tuple[InprocessRunner, PoolEmbed, PoolEmbed]:
+    """The loaded chain, with its two real ``PoolEmbed`` elements opened on fakes."""
+    runner = InprocessRunner(Topology.from_spec(ChainSpec.from_yaml(TWO_BRANCHES)))
+    opened_branches = []
+    for slot, model in (("embed_ship", "ship_embedder"), ("embed_person", "person_embedder")):
+        element = runner.topology.node(slot).element
+        element.open(
+            ElementContext(models=FakePool(**{model: FakeEmbedder()}), ops=NumpyImageOps())
+        )
+        opened_branches.append(element)
+    return runner, opened_branches[0], opened_branches[1]
+
+
+class TestTheShippedChainRunsThemInParallel:
+    """Both embedders' vectors reach ``track`` on the wiring the chain file declares.
+
+    The composition matters and this is why it is loaded from a spec rather than composed by
+    hand: with ``embed_ship`` and ``embed_person`` both ``after: detect``, neither element ever
+    sees the other's item, so :meth:`PoolEmbed._scatter`'s additive merge is never reached and
+    the whole property rests on the runner's fan-in. A fan-in that took one branch's
+    ``meta["vectors"]`` wholesale would drop the other's entirely — at the sizing in
+    ``CLAUDE.md``, ~15 000 person crops a second cut, embedded on a GPU and discarded, every
+    person arriving at the tracker with ``embedding=None``, with no exception and no counter
+    to say so. Both elements ran; the loss is at the seam between them.
+    """
+
+    def test_the_tracker_receives_both_branches_vectors(self) -> None:
+        """The four rows of the frame, from the two elements that covered two each."""
+        runner, ships, people = two_branches()
+        detected = item(mixed())
+
+        # What the walk does at a fork: the *same* item to each branch, neither seeing the
+        # other, and then one merge at the node they rejoin on.
+        merged = runner._inbound(
+            runner.topology.node("track"),
+            {"embed_ship": ships.process(detected), "embed_person": people.process(detected)},
+        )
+
+        assert merged is not None
+        vectors = merged.meta["vectors"]
+        assert sorted(vectors) == [0, 1, 2, 3], "both branches' rows, not one branch's"
+        assert [which_crop(vectors[row]) for row in (0, 2)] == [0, 1], "the ship pair"
+        assert [which_crop(vectors[row]) for row in (1, 3)] == [0, 1], "the person pair"
+
+    def test_neither_branch_covers_the_other_s_rows(self) -> None:
+        """The vacuity guard: the union is two disjoint halves and not one branch twice.
+
+        Without this, a fan-in that returned the first contributor unchanged would still pass
+        the test above on any chain where one embedder happened to cover everything.
+        """
+        _, ships, people = two_branches()
+        detected = item(mixed())
+
+        assert sorted(ships.process(detected).meta["vectors"]) == [0, 2]
+        assert sorted(people.process(detected).meta["vectors"]) == [1, 3]
+
+
 # -- end to end ---------------------------------------------------------------------------------
 
 
@@ -1010,6 +1104,27 @@ class TestTheChainReachesTrackWithAppearance:
 
         assert len(emitted.meta["tracks"]) == 2
         assert all(track.embedding is None for track in emitted.meta["tracks"])
+
+    def test_both_branches_of_the_shipped_chain_reach_it_with_appearance(self, tracker) -> None:
+        """The whole path, on the wiring the chain file declares: two embedders forked off
+        ``detect``, the runner's fan-in, and the real tracker at the end of it.
+
+        The assertion is per row and not a count: it is the person rows that the fan-in used
+        to drop, and a tracker that reported four tracks with two embeddings would have looked
+        exactly like the partial-coverage case above, which is legitimate.
+        """
+        runner, ships, people = two_branches()
+        detected = item(mixed())
+
+        merged = runner._inbound(
+            runner.topology.node("track"),
+            {"embed_ship": ships.process(detected), "embed_person": people.process(detected)},
+        )
+        assert merged is not None
+
+        tracks = tracker.process(merged).meta["tracks"]
+        assert len(tracks) == 4
+        assert [track.embedding is not None for track in tracks] == [True] * 4
 
 
 class TestTheCropHalfWorksWithoutTheSubmoduleAtAll:

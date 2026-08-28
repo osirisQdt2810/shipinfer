@@ -19,6 +19,7 @@ import textwrap
 
 import pytest
 
+from shipinfer.core.errors import InferenceError
 from shipinfer.core.request import RequestContext
 from shipinfer.runners.inprocess import InprocessRunner
 from shipinfer.topology import Caps, ChainItem, ChainSpec, Topology
@@ -37,6 +38,22 @@ elements:
   tap:    {impl: mock, kind: track, after: detect}
   join:   {impl: mock, kind: track, after: [tap, detect]}
   output: {impl: mock}
+"""
+
+#: The shipped chain's shape, with the implementations swapped for hardware-free ones:
+#: ``topology/ship_person.yaml`` forks two embedders off ``detect`` (``embed_person`` carries
+#: ``after: detect`` precisely so it does *not* follow ``embed_ship``) and rejoins them at
+#: ``track``. Each covers its own classes and files a partial ``meta["vectors"]``, so this is
+#: the wiring on which "the metadata is the union" has to mean the union of two *mappings*.
+TWO_EMBEDDERS = """
+name: two_embedders
+elements:
+  decode:       {impl: mock}
+  detect:       {impl: mock, model: ship_detector}
+  embed_ship:   {impl: mock, kind: embed, model: ship_embedder,   after: detect}
+  embed_person: {impl: mock, kind: embed, model: person_embedder, after: detect}
+  track:        {impl: mock, kind: track, after: [embed_ship, embed_person]}
+  output:       {impl: mock}
 """
 
 
@@ -58,6 +75,12 @@ def item(caps: str = "nv12@gpu", payload: object = None, **meta: object) -> Chai
 def runner() -> InprocessRunner:
     """A stopped runner over the fan-in chain: enough for the merge, no threads."""
     return InprocessRunner(load(FAN_IN))
+
+
+@pytest.fixture()
+def rejoin() -> InprocessRunner:
+    """A stopped runner over the two-embedder chain, for the mapping-valued merge."""
+    return InprocessRunner(load(TWO_EMBEDDERS))
 
 
 class TestTheFanInMerge:
@@ -187,3 +210,134 @@ class TestASkippedPredecessor:
         assert merged.meta["boxes"] == [(0, 0, 1, 1)]
         assert merged.meta["class"] == "person"
         assert merged.meta["tracks"] == [1]
+
+
+class TestTwoBranchesFilingTheSameMapping:
+    """The rejoin the shipped chain declares, and the half of the frame it used to lose.
+
+    ``topology/ship_person.yaml`` runs ``embed_ship`` and ``embed_person`` in parallel off
+    ``detect`` and rejoins them at ``track``, and each files a *partial* ``meta["vectors"]``
+    — ``{detection row: vector}`` over its own classes only. A merge that took one branch's
+    mapping wholesale would hand the tracker half the frame's appearance vectors: at the
+    sizing in ``CLAUDE.md`` that is ~15 000 person crops a second cropped, embedded on a GPU
+    and then dropped, every person arriving with ``embedding=None``, and no exception, no
+    counter and no log line anywhere — both elements' per-frame counters say they ran, and
+    they did. So a key both branches wrote as a mapping is merged, not chosen between.
+    """
+
+    def test_the_tracker_receives_both_branches_rows(self, rejoin: InprocessRunner) -> None:
+        """The property: the union of the two coverages, keyed by detection row."""
+        node = rejoin.topology.node("track")
+        ships = item(vectors={0: "ship-0", 2: "ship-2"})
+        people = item(vectors={1: "person-1", 3: "person-3"})
+
+        merged = rejoin._inbound(node, {"embed_ship": ships, "embed_person": people})
+
+        assert merged is not None
+        assert merged.meta["vectors"] == {
+            0: "ship-0",
+            1: "person-1",
+            2: "ship-2",
+            3: "person-3",
+        }
+
+    def test_neither_branch_s_mapping_is_mutated(self, rejoin: InprocessRunner) -> None:
+        """The union is a new dict.
+
+        The branches' items are what the walk stored under their names, and an element may
+        still be holding one; merging into the first contributor's dict in place would edit
+        an object the merge does not own — the kind of aliasing that shows up as one camera's
+        vectors appearing on another's frame.
+        """
+        node = rejoin.topology.node("track")
+        ships = item(vectors={0: "ship-0"})
+        people = item(vectors={1: "person-1"})
+
+        merged = rejoin._inbound(node, {"embed_ship": ships, "embed_person": people})
+
+        assert merged is not None
+        assert ships.meta["vectors"] == {0: "ship-0"}
+        assert people.meta["vectors"] == {1: "person-1"}
+        assert merged.meta["vectors"] is not ships.meta["vectors"]
+
+    def test_a_mapping_written_before_the_fork_is_not_a_collision(
+        self, rejoin: InprocessRunner
+    ) -> None:
+        """A diamond, which is the ordinary case and must not be refused.
+
+        ``detect`` files ``meta["detections"]`` once; ``derive`` copies the dict and not the
+        values, so both branches arrive holding the *same* object and every entry in it
+        collides with itself. Those are not two branches disagreeing.
+        """
+        node = rejoin.topology.node("track")
+        before_the_fork = {0: "row-0", 1: "row-1"}
+
+        merged = rejoin._inbound(
+            node,
+            {
+                "embed_ship": item(counts=before_the_fork, vectors={0: "ship-0"}),
+                "embed_person": item(counts=before_the_fork, vectors={1: "person-1"}),
+            },
+        )
+
+        assert merged is not None
+        assert merged.meta["counts"] == before_the_fork
+        assert merged.meta["vectors"] == {0: "ship-0", 1: "person-1"}
+
+    def test_two_branches_claiming_one_row_is_a_typed_refusal(
+        self, rejoin: InprocessRunner
+    ) -> None:
+        """Refused, and the message names the chain file's two slots.
+
+        Two elements covering the same detection means both cropped it and both paid for it,
+        which is what ``classes:`` exists to prevent — and there is no answer to "which of
+        these two vectors is this object's". Silently keeping one would attach an appearance
+        vector chosen by declaration order.
+        """
+        node = rejoin.topology.node("track")
+
+        with pytest.raises(InferenceError) as raised:
+            rejoin._inbound(
+                node,
+                {
+                    "embed_ship": item(vectors={1: "ship-1"}),
+                    "embed_person": item(vectors={1: "person-1"}),
+                },
+            )
+
+        message = str(raised.value)
+        assert "'embed_ship'" in message and "'embed_person'" in message
+        assert "'vectors'" in message and "[1]" in message
+
+    def test_a_non_mapping_collision_still_resolves_first_writer_wins(
+        self, rejoin: InprocessRunner
+    ) -> None:
+        """The old rule, kept: two branches disagreeing about a scalar is a chain-file problem
+        and not a merge problem, and there is no union to take. It resolves the same way on
+        every frame and every run because it resolves by ``node.inputs`` order.
+
+        A mapping meeting a non-mapping is that same disagreement — about what the key *is* —
+        so it resolves the same way rather than raising, which would turn a mis-declared chain
+        into a per-frame exception storm instead of a stable, inspectable wrong answer.
+        """
+        node = rejoin.topology.node("track")
+
+        scalars = rejoin._inbound(
+            node,
+            {
+                "embed_ship": item(**{"class": "ship"}),
+                "embed_person": item(**{"class": "person"}),
+            },
+        )
+        mixed = rejoin._inbound(
+            node,
+            {
+                "embed_ship": item(vectors={0: "ship-0"}),
+                "embed_person": item(vectors="not a scatter-back"),
+            },
+        )
+
+        assert scalars is not None and mixed is not None
+        assert node.inputs == ("embed_ship", "embed_person"), "the fixture's declaration order"
+        assert scalars.meta["class"] == "ship"
+        assert mixed.meta["vectors"] == {0: "ship-0"}

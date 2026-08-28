@@ -345,6 +345,22 @@ class TestGatheringTheBoxesOfASelection:
 
         assert detections.boxes_at(range(len(detections))) is detections.boxes
 
+    def test_a_full_length_reordering_is_permuted_not_handed_through(self) -> None:
+        """The pass-through is a value test, not a length test.
+
+        ``(3, 2, 1, 0)`` is as long as the frame and is not the frame's order, so a fast path that
+        counted rows would answer it with the boxes unpermuted — every crop cut from the wrong
+        detection, at full row count and full contiguity, with nothing to see until a tracker
+        starts swapping identities. No caller asks for this order today; the point is that the
+        method cannot be made to lie by one that does.
+        """
+        detections = mixed()
+
+        gathered = detections.boxes_at((3, 2, 1, 0))
+
+        assert np.array_equal(gathered, detections.boxes[[3, 2, 1, 0]])
+        assert not np.array_equal(gathered, detections.boxes), "the fixture is not symmetric"
+
     def test_selecting_nothing_is_an_empty_box_array_not_an_error(self) -> None:
         assert mixed().boxes_at(()).shape == (0, 4)
 

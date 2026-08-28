@@ -1073,13 +1073,13 @@ class _PoolCropElement(_PoolElement):
     one :class:`~shipinfer.core.request.InferenceRequest` per chunk -- which is one, except on
     a frame crowded past ``max_batch_size`` -- and the ``{row: vector}`` mapping, whose values
     are numpy *views* into the response rather than copies. Selecting a subset of rows adds an
-    index tuple and one ``(N, 4)`` gather of the boxes; selecting every row adds neither,
-    because :meth:`~shipinfer.topology.elements.detections.Detections.boxes_at` passes the
-    array straight through. A frame with no rows to embed submits nothing — it never reaches
+    index tuple and one ``(N, 4)`` gather of the boxes; declaring no ``classes:`` at all adds
+    neither, because :meth:`~shipinfer.topology.elements.detections.Detections.boxes_at`
+    recognises the whole frame and passes the array straight through. A frame with no rows to embed submits nothing — it never reaches
     :meth:`~shipinfer.topology.base.Element.process`'s model call — and costs one
     :meth:`~shipinfer.topology.base.ChainItem.derive`, for the empty mapping that records that
-    this element ran; when a peer embedder has already filed one, not even that
-    (:meth:`_scatter`).
+    this element ran; on a chain that puts a second embedder *in series* ahead of this one, a
+    peer's mapping is already there and not even that (:meth:`_scatter`).
     """
 
     #: This element crops, so it is opened with :attr:`ElementContext.ops` and refuses without
@@ -1348,10 +1348,10 @@ class _PoolCropElement(_PoolElement):
         A ``range`` in the "no ``classes:``" case, exactly as ``track._selected`` returns one
         and for the same reason: nothing here materialises it. :meth:`_finish` iterates it
         once to build the mapping, :meth:`_prepare` reads its length, and
-        :meth:`~shipinfer.topology.elements.detections.Detections.boxes_at` reads its length
-        too — so the common case allocates no index list at all. The indices are in the
-        detector's own order, which is descending score, and the crops follow that order into
-        the model.
+        :meth:`~shipinfer.topology.elements.detections.Detections.boxes_at` recognises it as
+        the whole frame and hands the boxes through — so the common case allocates no index
+        list and gathers no boxes at all. The indices are in the detector's own order, which
+        is descending score, and the crops follow that order into the model.
         """
         if self._classes is None:
             return range(len(detections))
@@ -1483,7 +1483,7 @@ class _PoolCropElement(_PoolElement):
     def _scatter(self, item: ChainItem, covered: dict[int, Any]) -> ChainItem:
         """File ``covered`` under this element's key, **merged** with what is already there.
 
-        Additive, and that is not a nicety. The sizing runs two of these side by side --
+        Additive, and that is not a nicety. The sizing runs two of these over disjoint rows --
         ``embed_ship`` over the ship rows and ``embed_person`` over the person rows, both
         filing ``meta["vectors"]`` -- and :meth:`~shipinfer.topology.base.ChainItem.derive`
         merges metadata *by key*, so a plain assignment by the second one would replace the
@@ -1492,11 +1492,24 @@ class _PoolCropElement(_PoolElement):
         both embedders ran. That is the exact failure the mapping form was chosen to make
         expressible, thrown away one line before the finish.
 
+        **Two of them meet in one of two ways, and this method is one half of the answer.**
+        In *series* -- both on one branch, the second declared ``after:`` the first -- the
+        second one finds the first one's mapping in ``item.meta`` and merges into it here. In
+        *parallel* -- ``topology/ship_person.yaml``'s shape, both declared ``after: detect``
+        and rejoining at ``track`` -- neither ever sees the other's item, and the union is
+        taken at the rejoin instead
+        (:meth:`~shipinfer.runners.inprocess.InprocessRunner._merge_meta`, which merges
+        mapping-valued keys for exactly this reason). The shipped chain is the parallel one,
+        so on it the ``existing`` below is always ``None``; the series composition is legal,
+        the loader accepts it, and it must not lose half the frame either.
+
         Nothing to add is not nothing to say: with no peer under the key, the empty mapping
         is still filed, because "this element ran and covered no rows" and "this element never
         ran" are different facts and only the first is evidence the chain is wired the way the
         operator thinks. It is when a peer has already filed a mapping that there is genuinely
-        nothing to do, and then the item is handed on unchanged rather than copied.
+        nothing to do, and then the item is handed on unchanged rather than copied -- the
+        series composition again, so a quiet frame on the shipped chain costs the one
+        ``derive`` and not zero.
 
         Raises:
             ValidationError: something that is not a mapping is already filed under this key.
