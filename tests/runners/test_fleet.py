@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import sys
 import textwrap
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -32,6 +32,13 @@ from shipinfer.launch.control import AddCameraResult, CameraSpec, ShardHealth, S
 from shipinfer.runners import build_runner
 from shipinfer.runners.fleet import FleetRunner
 from shipinfer.topology import Caps, ChainItem, ChainSpec, Topology
+from shipinfer.topology.base import (
+    CameraGroup,
+    Element,
+    ElementContext,
+    ElementKind,
+)
+from shipinfer.topology.registry import registry_for
 
 CHAIN = textwrap.dedent("""
     name: linear
@@ -581,6 +588,30 @@ class TestPlacingCameras:
             runner.add_camera(CameraSpec(camera_id="quay-1", url="rtsp://host"))
 
 
+@registry_for(ElementKind.TRACK).register("grouped-track")
+class GroupedTrack(Element):
+    """A ``track`` element that declares a camera group. Not a real thing — the point of it.
+
+    ``Element.camera_group()`` is on the ABC and not on ``ShipvisionMtmc``, so a launcher that
+    honours it honours *any* element that needs its cameras co-located. This double is how
+    that is asserted rather than assumed: it is not an ``mtmc`` element, and the fleet must
+    still pin its group.
+    """
+
+    kind: ClassVar[ElementKind] = ElementKind.TRACK
+    accepts: ClassVar[tuple[str, ...]] = ("nv12@gpu", "meta@cpu")
+    produces: ClassVar[tuple[str, ...]] = ("meta@cpu",)
+
+    def camera_group(self) -> CameraGroup:
+        return CameraGroup("berth", ("b-0", "b-1", "b-2"))
+
+    def _do_open(self, context: ElementContext) -> None:
+        return None
+
+    def _do_process(self, item: ChainItem) -> ChainItem:
+        return item
+
+
 class TestACameraGroupIsAnAtomicUnitOfPlacement:
     """``docs/arch.md`` §4, enforced here because nothing else can enforce it.
 
@@ -602,7 +633,7 @@ class TestACameraGroupIsAnAtomicUnitOfPlacement:
               decode: {impl: mock}
               detect: {impl: mock, model: ship_detector}
               track:  {impl: mock}
-              mtmc:   {impl: mock, params: {group: quay, cameras: [q-0, q-1, q-2, q-3]}}
+              mtmc:   {impl: shipvision, params: {group: quay, cameras: [q-0, q-1, q-2, q-3]}}
               output: {impl: mock}
             """)
 
@@ -695,6 +726,43 @@ class TestACameraGroupIsAnAtomicUnitOfPlacement:
         assert clients[0].cameras == ["q-0", "q-2"]
         assert clients[1].cameras == ["q-1", "q-3"]
 
+    def test_the_launcher_asks_every_element_and_never_what_kind_it_is(self, clients) -> None:
+        """The seam, asserted directly. ``_camera_groups`` walks ``Element.camera_group()``
+        with no ``ElementKind`` test and no import of an element implementation module, so a
+        *second* kind that needs co-located cameras is a method override rather than an
+        ``elif`` in ``runners/`` (ADR-017 §2). ``grouped-track`` is that second kind, invented
+        here, and it is a ``track`` element rather than an ``mtmc`` one on purpose."""
+        chain_yaml = textwrap.dedent("""
+            name: grouped-by-another-kind
+            elements:
+              decode: {impl: mock}
+              track:  {impl: grouped-track}
+              output: {impl: mock}
+            """)
+
+        def factory(shard, port):
+            clients[shard.index] = FakeClient(shard.index, port)
+            return clients[shard.index]
+
+        built = FleetRunner(
+            Topology.from_spec(ChainSpec.from_yaml(chain_yaml)),
+            ServerSettings(),
+            chain_yaml=chain_yaml,
+            shards=2,
+            gpus=[2, 3],
+            command=sleeps(),
+            client=factory,
+        )
+        try:
+            built.start()
+            for index in range(3):
+                built.add_camera(CameraSpec(camera_id=f"b-{index}", url="rtsp://host"))
+
+            assert clients[0].cameras == ["b-0", "b-1", "b-2"]
+            assert clients[1].cameras == []
+        finally:
+            built.stop(timeout_s=5.0)
+
     def test_one_camera_in_two_groups_is_refused_when_the_fleet_is_built(self) -> None:
         """A camera that would have to be on two shards at once, refused before a start."""
         chain_yaml = textwrap.dedent("""
@@ -702,8 +770,8 @@ class TestACameraGroupIsAnAtomicUnitOfPlacement:
             elements:
               decode: {impl: mock}
               track:  {impl: mock}
-              mtmc:   {impl: mock, params: {group: quay, cameras: [q-0]}}
-              mtmc_2: {impl: mock, kind: mtmc, params: {group: gate, cameras: [q-0]}}
+              mtmc:   {impl: shipvision, params: {group: quay, cameras: [q-0]}}
+              mtmc_2: {impl: shipvision, kind: mtmc, params: {group: gate, cameras: [q-0]}}
               output: {impl: mock}
             """)
 

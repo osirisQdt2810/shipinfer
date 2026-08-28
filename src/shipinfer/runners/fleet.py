@@ -66,8 +66,6 @@ from shipinfer.runners.base import Runner
 from shipinfer.runners.registry import RUNNERS
 from shipinfer.scheduling.sharding import Shard, ShardPlan, plan_shards
 from shipinfer.topology import ChainItem, ImageOpsLike, ModelResolver, Topology
-from shipinfer.topology.base import ElementKind
-from shipinfer.topology.elements.mtmc import parse_group
 
 __all__ = ["FleetRunner"]
 
@@ -193,11 +191,12 @@ class FleetRunner(Runner):
         #: vanished would read as "never placed", and "I have never heard of it" is the wrong
         #: answer to "where did my camera go". Nothing but :meth:`remove_camera` deletes one.
         self._placed: dict[str, int] = {}
-        #: ``{camera_id: group}`` for every camera an ``mtmc`` slot claims. Read once, off the
-        #: chain this fleet was given, because a camera group is an **atomic unit of
-        #: placement** (``docs/arch.md`` §4) and this class is the only thing that places a
-        #: camera. Empty for a chain with no ``mtmc`` element, which is every chain that does
-        #: not do cross-camera association and costs nothing to carry.
+        #: ``{camera_id: group}`` for every camera an element of this chain says must stay
+        #: together, asked once through ``Element.camera_group()`` — no kind test, no element
+        #: import. A camera group is an **atomic unit of placement** (``docs/arch.md`` §4) and
+        #: this class is the only thing that places a camera. Empty for a chain whose elements
+        #: declare no group, which is every chain that does not do cross-camera association
+        #: and costs nothing to carry.
         self._group_of: dict[str, str] = _camera_groups(topology)
         #: How many camera threads this cycle has had to abandon — a lifetime signal, not a
         #: statistic (``launch/control.py``). Non-zero means a detached thread on some shard
@@ -467,14 +466,15 @@ class FleetRunner(Runner):
         then the message carries what each of them said.
 
         **A camera group is an atomic unit of placement**, and this is the only place that
-        can enforce it (``docs/arch.md`` §4). An ``mtmc`` element associates one group's
+        can enforce it (``docs/arch.md`` §4). A cross-camera element associates one group's
         cameras against one identity space; split the group across two shards and each half
         runs its own tracker, so one object gets two contradictory global ids and nothing in
         the metrics says so. The element itself cannot see the split — it is told its own
         ``shard_id`` and nothing about where any camera went, and it opens before a single
-        camera is placed — whereas this class owns ``{camera_id: shard_id}``. So a camera whose
-        group already has a home is offered to **that shard only**: pinning is what keeps the
-        group whole, and the refusal below is what happens when the pin cannot be honoured.
+        camera is placed — whereas this class owns ``{camera_id: shard_id}``. So the element
+        declares the membership (``Element.camera_group()``) and a camera whose group already
+        has a home is offered to **that shard only**: pinning is what keeps the group whole,
+        and the refusal below is what happens when the pin cannot be honoured.
 
         **A shard whose process has exited is not offered the camera at all.** Its channel is
         still in the client map — nothing removes it, because :meth:`health` reports on it —
@@ -863,10 +863,10 @@ class FleetRunner(Runner):
     ) -> list[int]:
         """Constrain a placement to the shard that already holds this camera's group.
 
-        A camera group is an atomic unit of placement (``docs/arch.md`` §4): every camera an
-        ``mtmc`` element associates over has to reach the same tracker, and a tracker lives in
-        one shard process. So the first camera of a group is placed by load like any other,
-        and every camera after it goes where the group went.
+        A camera group is an atomic unit of placement (``docs/arch.md`` §4): every camera a
+        cross-camera element associates over has to reach the same tracker, and a tracker
+        lives in one shard process. So the first camera of a group is placed by load like any
+        other, and every camera after it goes where the group went.
 
         Call under :attr:`_lock`.
 
@@ -921,7 +921,9 @@ class FleetRunner(Runner):
                     f"have gone to shard {order[0]}, which would split the group across "
                     f"shards {home} and {order[0]}. A group is an atomic unit of placement: "
                     f"each half would run its own cross-camera tracker and issue its own "
-                    f"global ids for the same objects"
+                    f"global ids for the same objects. To move the group, remove every one "
+                    f"of its cameras first (remove_camera) — the pin is on where the group "
+                    f"*is*, so it lifts once none of it is placed"
                 ],
             )
         return [home]
@@ -991,17 +993,18 @@ def _lost_in(placed: dict[str, int], dead: frozenset[int], pending: set[str]) ->
 
 
 def _camera_groups(topology: Topology) -> dict[str, str]:
-    """``{camera_id: group}`` for every camera an ``mtmc`` slot in this chain claims.
+    """``{camera_id: group}`` for every camera an element of this chain says must stay together.
 
-    Read off the chain spec rather than from a second configuration file, because the group
-    membership is already written where the element that needs it is configured, and a fleet
-    that learned it somewhere else would be a second writer of the same fact. The parser is
-    the element's own (:func:`~shipinfer.topology.elements.mtmc.parse_group`) so the two
-    readers of ``params: cameras:`` cannot drift.
+    Asked of every node through :meth:`~shipinfer.topology.base.Element.camera_group`, with
+    **no test of what kind the element is**. That matters more than it looks: a launcher that
+    checked ``node.kind is ElementKind.MTMC`` would import an element implementation module,
+    re-parse a ``params:`` key the element had already parsed, and grow an ``elif`` for the
+    next kind that needs co-located cameras — the switch statement ADR-017 §2's registry
+    exists to delete. The element declares; this function only collects.
 
-    An ``mtmc`` slot with no ``cameras:`` roster contributes nothing: the fleet then places its
-    cameras by load and the group is whatever ended up together, which is the honest answer for
-    a chain that did not say. Declaring the roster is what buys the invariant.
+    An element that declares no group contributes nothing: the fleet then places its cameras
+    by load and the group is whatever ended up together, which is the honest answer for a
+    chain that did not say. Declaring the roster is what buys the invariant.
 
     Raises:
         ConfigurationError: one camera is claimed by two different groups. That is a chain
@@ -1010,19 +1013,18 @@ def _camera_groups(topology: Topology) -> dict[str, str]:
     """
     groups: dict[str, str] = {}
     for node in topology.nodes:
-        if node.kind is not ElementKind.MTMC:
+        declared = node.element.camera_group()
+        if declared is None:
             continue
-        declared, cameras = parse_group(node.spec.params, where=f"mtmc element {node.name!r}")
-        group = declared or node.name
-        for camera_id in cameras:
+        for camera_id in declared.cameras:
             existing = groups.get(camera_id)
-            if existing is not None and existing != group:
+            if existing is not None and existing != declared.name:
                 raise ConfigurationError(
                     f"camera {camera_id!r} is claimed by camera groups {existing!r} and "
-                    f"{group!r}. A group is an atomic unit of placement, so a camera in two "
-                    f"of them would have to be on two shards at once"
+                    f"{declared.name!r}. A group is an atomic unit of placement, so a camera "
+                    f"in two of them would have to be on two shards at once"
                 )
-            groups[camera_id] = group
+            groups[camera_id] = declared.name
     return groups
 
 
