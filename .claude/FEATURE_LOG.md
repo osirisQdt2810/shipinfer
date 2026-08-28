@@ -11,10 +11,23 @@ edits, typo fixes and pure docs.
 transitions under the same `_lifecycle_lock` `stop()` has used since #72. `_begin_start`
 claims the server (refusing a second start, and waiting out then refusing a teardown in
 flight), `_finish_start` publishes only if the claim is still held, `_abandon_start`
-releases what a lost start had loaded. A generation counter rides `stop()` into
+releases what a lost start had built. A generation counter rides `stop()` into
 `_teardown`/`_release`, and every destructive step checks it. `stats()` reads the trace
 state under the same lock and hands out a copy. Non-strict start-up re-raises the
 cooperative abort instead of logging "continuing" once per remaining model.
+
+**Round 4 (the losing start's unwind).** The claim decided who *owns* the server and said
+nothing about the thread that lost, which is the one holding models, worker threads and a
+sink. Review reproduced it two ways, and the fix binds five things to the run rather than to
+the flags: the models' abort predicate (`_start_abort`, generation *or* `_is_stopping` —
+`_is_stopping` alone goes false again the moment the next run sets `_starting`), the publish
+in `_build_and_start`, the failure path's teardown (`_stop_run(generation)`, so a losing
+start does not run a whole-server teardown on the run that replaced it), the service-mesh
+assignment (`_publish_service_tier`), and the release itself — `_abandon_start` pops the
+table by **identity** and stops by **ledger** instead of calling `_drain_models`. The trace
+sink moved with them: it is built by `start()` but installed only by `_finish_start`, so a
+losing start closes the one it built rather than leaving an open file descriptor on a
+stopped server and wiping the last run's totals.
 
 **Why.** Review of #72 (rounds 2 and 3) reproduced `is_started == True` with zero models: a
 `stop()` concurrent with the *initial* `start()` drained the table and closed the sink under
@@ -33,16 +46,46 @@ overwriting a new run's numbers — and `stats()`'s two-bytecode check-and-act r
   running. The generation check is the second line, because the first one is a timed wait.
 - **The totals and the sink swap are one transition.** Split, a scrape lands between them
   and reports the null sink's zeros as a run's final sample.
-- **A lost start releases its own leftovers.** The model whose `Model.start` finished after
-  the concurrent drain had been past the table is published into it afterwards, and nothing
-  else holds a reference to it — `_abandon_start` takes the control lock (which is also the
-  wait for the teardown) and drains what is left.
+- **A lost start releases what it built, never what it finds.** The first version drained
+  the whole table, which is the same destructive act one door to the left: a restart is let
+  through as soon as `_torn_down` is set, and that barrier is set by the teardown's
+  `finally`, which knows nothing about a start still running. So the losing start stopped the
+  *new* run's worker threads and left `is_started` true over an empty table — the readiness
+  lie this work exists to remove, re-entered from the other side.
+- **`_torn_down` means "the teardown returned", not "nobody is holding this server".** Left
+  as it is, and written down in `__init__` instead of strengthened: a barrier that also
+  waited for every losing start would be a wait with no bound, because a start is blocked on
+  an engine load. What makes it safe is that a losing start can no longer touch a newer run.
+- **A release does not publish the between-runs null sink's zeros.** `_traces` holds a
+  `NullTraceSink` between runs, so a run that never reached `_finish_start` finds one — and
+  publishing its zeros throws away the totals of the run before it. "0 traces recorded" is a
+  claim about the workload; "we stopped measuring" is the truth.
+- **The lifecycle lock is not held across a sink's `stats()`.** `TRACE_SINKS` is a registry,
+  and a third-party sink that touched a file there would hold the one lock `stop()`'s entry
+  transition needs — a metrics scrape able to stall a shutdown into a SIGKILL. The pair is
+  snapshotted atomically and the call made outside; `is_closed` on the snapshot is what tells
+  a scrape it lost the race, and the totals are published before the close, so it can just
+  read them.
 
-**Tests.** Ten new offline tests in `tests/engine/test_stop_teardown.py`, every interleaving
-forced rather than hammered for: `_WatchedLock` (a lock that records the threads which had
-to *wait*) joins `_WatchedEvent`, and `_GatedStatsServer` turns `_last_trace_stats` into a
-property so a scrape can be parked inside a window two bytecodes wide. Each of F1, F2, F3
-and F4 was revert-checked.
+**Tests.** Nineteen new offline tests in `tests/engine/test_stop_teardown.py`, every
+interleaving forced rather than hammered for: `_WatchedLock` (a lock that records the threads
+which had to *wait*) joins `_WatchedEvent`, `_GatedStatsServer` turns `_last_trace_stats` into
+a property so a scrape can be parked inside a window two bytecodes wide, `_RecordingSink`
+gained a one-shot gate inside `stats()` (the only way into the gap between `_release`'s sink
+read and its publish) and a read counter, and `_threads_of` answers "whose worker threads are
+these" where `_live_workers` cannot — two runs of one model name their threads identically.
+Every fix was revert-checked in a detached copy: F1–F4 in round 3, and in round 4 the six run
+bindings, the two halves of the sink fix, the two `_release` generation checks the earlier
+round left with no coverage, the teardown-owner write and the unlocked `stats()` call.
+
+**Future work (not this PR).** `InferenceServer` now carries the repository scan, the model
+table, the service tier, the stats surface *and* a lifecycle state machine spread over
+`_generation`, `_started`, `_starting`, `_torn_down`, `_teardown_owner` and `_lifecycle_lock`.
+That state machine is the interesting part and the part with no direct test — every test here
+reaches it by monkeypatching a private method. A `_RunState` object owning those six fields
+and answering `claim()` / `publish(gen)` / `release_for(gen)` would be testable with no
+threads and no repository at all, and round 4's blocker is the kind of bug it would have made
+obvious.
 
 ---
 
