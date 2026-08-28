@@ -34,21 +34,23 @@ from __future__ import annotations
 import abc
 import contextlib
 import enum
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Final, Protocol
 
 from shipinfer.core.errors import ServerStateError, UnknownElementKindError
+from shipinfer.core.metrics import MetricsRegistry
 from shipinfer.core.request import RequestContext
 from shipinfer.core.types import Device
 from shipinfer.topology.caps import Caps, parse_caps
 
 __all__ = [
-    "MODEL_KINDS",
     "ChainItem",
     "Element",
     "ElementContext",
     "ElementKind",
+    "ImageOpsLike",
+    "LetterboxLike",
     "ModelResolver",
 ]
 
@@ -57,9 +59,18 @@ class ElementKind(str, enum.Enum):
     """The eight kinds of step a chain is built from (arch.md §1).
 
     A closed vocabulary, unlike the implementations behind each kind. The kind decides what
-    an element *means* to the chain — whether it needs a model, whether it may be a root,
-    whether it is stateful per camera — and a ninth meaning is an architecture change, not
-    a configuration one.
+    an element *means* to the chain — whether it may be a root, whether it may be followed,
+    what its slot name resolves to — and a ninth meaning is an architecture change, not a
+    configuration one.
+
+    What a kind deliberately does **not** decide is whether an element runs a repository
+    model. That was a kind-level rule once (``detect``/``segment``/``embed``/``recognize``
+    needed ``model:``, the other four did not) and it was wrong in exactly one place that
+    matters: ``recognize`` is a *gallery query* over an embedding for the shipvision
+    implementation and a network for the pool one, so the same kind is both. The requirement
+    is :attr:`Element.requires_model_name`, declared per implementation -- and whether the
+    element resolves that name against *this process's* model pool is a second declaration,
+    :attr:`Element.needs_model`.
 
     A ``str`` enum so a kind can be written into YAML, a log line or a metric label without
     a conversion at each site.
@@ -112,13 +123,6 @@ class ElementKind(str, enum.Enum):
                 continue
         raise UnknownElementKindError(slot, cls.names())
 
-
-#: The kinds that run a model from the repository, and therefore need ``model:`` in the
-#: chain. ``track``/``mtmc`` are algorithms with their own state, ``decode``/``output`` are
-#: I/O; none of the four has a model to name.
-MODEL_KINDS: Final = frozenset(
-    {ElementKind.DETECT, ElementKind.SEGMENT, ElementKind.EMBED, ElementKind.RECOGNIZE}
-)
 
 #: Sentinel for "leave this alone", so ``derive(payload=None)`` can mean *clear it*.
 _KEEP: Final[Any] = object()
@@ -192,6 +196,67 @@ class ModelResolver(Protocol):
         ...
 
 
+class LetterboxLike(Protocol):
+    """What a letterbox call answers with: the tensor and the geometry that undoes it.
+
+    The structural half of :class:`shipinfer.runtime.ops.base.LetterboxResult`. Every member
+    is a numpy array, and they are typed ``Any`` for one reason: the scales and pads must be
+    *carried*, never recomputed. Postprocess has to invert exactly the transform preprocess
+    applied, and re-deriving the numbers from the shapes is where off-by-one box drift comes
+    from — so an element takes these four and does no arithmetic of its own.
+    """
+
+    #: ``(N, C, H, W)`` float32, already normalised.
+    tensor: Any
+    #: Per-image resize scale.
+    scales: Any
+    #: Per-image ``(pad_x, pad_y)`` in destination pixels.
+    pads: Any
+    #: Per-image ``(out_h, out_w)`` — the extent actually written, before padding.
+    extents: Any
+
+
+class ImageOpsLike(Protocol):
+    """The preprocessing an element needs, as a shape rather than an import.
+
+    :class:`shipinfer.runtime.ops.base.ImageOps` satisfies this, and ``topology`` may not say
+    so: ``runtime`` is the accelerator seam and a pure layer that named it would put torch
+    behind ``import shipinfer.topology``. The same inversion as :class:`ModelResolver` — the
+    runner is handed an ops implementation, resolves it once and puts it on
+    :attr:`ElementContext.ops`; the element calls it and never learns where it came from.
+
+    Deliberately **narrower** than ``ImageOps``. Only ``letterbox_batch`` is here, because it
+    is the only member the elements call today (``pipeline/graph/detect.py`` is the proven
+    path this follows: one letterbox per frame, its ``scales``/``pads``/``extents`` stored and
+    handed to the decode). ``crop_batch``, ``nms`` and ``letterbox_to_device`` are real and
+    are absent on purpose — a protocol member nobody calls is a coupling nobody needs, and the
+    first element that crops adds it with a test.
+
+    ``params`` and ``dst_size`` are the caller's business: an element is *told* what the model
+    wants, through its own ``params:`` or the runner's context. Typing ``params`` as ``Any``
+    rather than importing ``NormalizeParams`` is the same purity argument one member down.
+    """
+
+    def letterbox_batch(
+        self,
+        images: Sequence[Any],
+        dst_size: tuple[int, int],
+        params: Any,
+        *,
+        pad_value: int = 114,
+    ) -> LetterboxLike:
+        """Resize-with-pad, colour-convert, normalise and transpose, in one pass.
+
+        Args:
+            images: ``(H, W, 3)`` uint8 frames, possibly of differing sizes.
+            dst_size: ``(height, width)`` of the model input.
+            params: normalisation and channel order — a
+                :class:`shipinfer.runtime.ops.base.NormalizeParams`.
+            pad_value: fill for the letterbox bars.
+        """
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class ElementContext:
     """Everything the surrounding runner tells an element at :meth:`Element.open`.
@@ -212,14 +277,41 @@ class ElementContext:
             and an element falls back to its own module default.
         input_name: the input tensor name a decoded frame is submitted under, resolved by the
             runner from ``ingest.input_name``. ``None`` means the runner did not say.
+        metrics: the registry an element records its own counters on, so that one exporter
+            carries the runner's numbers and the chain's rather than two halves of a dropped
+            frame living in different places. ``None`` means the runner offered none, and an
+            element must then count nothing rather than mint a private registry nobody
+            scrapes — a metric on a registry no exporter reads is worse than an absent one,
+            because it reads as evidence.
+        workers: how many pipeline workers will walk this chain concurrently. The number an
+            element needs to know it must not block *all* of them: the walk is synchronous,
+            so an element that waits for other cameras' frames — an MTMC barrier is the
+            standing case — can close its instant only by timeout once every worker is parked
+            inside it. ``None`` means the runner did not say, and an element that needs the
+            number must then refuse to wait at all rather than guess one.
+        ops: batched image preprocessing, bound to this shard's device. **``None`` in every
+            runner in this tree today**: the field is declared here so that the elements C3
+            lands are written against it from the first line, and C3 is what wires it, in the
+            same shape ``models=`` already has -- the CLI or the shard process resolves one
+            implementation from ``runtime.ops`` (the layer that may import torch) and hands
+            it to the runner, which puts it here. Until then an element that needs it finds
+            ``None`` and must raise, rather than falling back to a per-image loop in Python.
 
-    The last two are **resolved settings, not settings**. ``topology`` is a pure package and
-    must not import :mod:`shipinfer.core.settings` — an element that read the settings tree
-    itself would also be choosing its own configuration, which is the thing this frozen object
-    exists to prevent. So the runner reads the tree once and hands over the two numbers an
-    element cannot otherwise know, and an element resolves them with a fixed precedence:
-    its own ``params:``, then this context, then its module default. Without them the two
-    settings keys mirrored in ``topology/elements/pool.py`` would apply to nothing.
+    The last five are **resolved settings, not settings**. ``topology`` is a pure package and
+    must not import :mod:`shipinfer.core.settings`, :mod:`shipinfer.runners` or
+    :mod:`shipinfer.runtime` — an element that read the settings tree itself would also be
+    choosing its own configuration, which is the thing this frozen object exists to prevent,
+    and one that imported the ops registry would put torch behind ``import
+    shipinfer.topology``. So the runner resolves each of them once and hands over what an
+    element cannot otherwise know, and an element resolves the two it can also be told twice
+    with a fixed precedence: its own ``params:``, then this context, then its module default.
+    Without them the two settings keys mirrored in ``topology/elements/pool.py`` would apply
+    to nothing.
+
+    ``metrics`` and ``ops`` are the two that arrive as **objects rather than numbers**, and
+    both are typed structurally for the reason above: ``MetricsRegistry`` lives in ``core``,
+    which this layer may import, and an ops implementation does not, which is why
+    :class:`ImageOpsLike` exists.
     """
 
     shard_id: int = 0
@@ -227,6 +319,9 @@ class ElementContext:
     models: ModelResolver | None = None
     stage_timeout_s: float | None = None
     input_name: str | None = None
+    metrics: MetricsRegistry | None = None
+    workers: int | None = None
+    ops: ImageOpsLike | None = None
 
 
 class Element(abc.ABC):
@@ -266,28 +361,40 @@ class Element(abc.ABC):
     accepts: ClassVar[tuple[str, ...]] = ()
     #: Caps this element hands on. Empty means it is a sink.
     produces: ClassVar[tuple[str, ...]] = ()
-    #: Whether :meth:`open` resolves this element against :attr:`ElementContext.models` --
-    #: **the pool question, and only that one**. ``pool`` answers ``True``; ``mock`` answers
-    #: ``False`` because it invents a box.
+    #: Whether the chain file must name a ``model:`` for this slot -- the **loader's**
+    #: question, and the only one it asks. Read off the built element by
+    #: :meth:`~shipinfer.topology.chain.Topology.from_spec`, never inferred from :attr:`kind`:
+    #: ``detect`` is a model *kind* and only some of its implementations run a repository
+    #: model, ``recognize: {impl: shipvision}`` is a gallery query with nothing to name, and
+    #: ``impl: mock`` invents a box and reads nothing.
     #:
-    #: Two readers, and they ask it together rather than each inventing their own test: the
-    #: in-process runner's expiry gate (which elements submit and wait, and so can be late)
-    #: and ``run``'s pool predicate, which builds an
-    #: :class:`~shipinfer.engine.InferenceServer` only when
-    #: :attr:`~shipinfer.runners.base.Runner.needs_model_pool` is ``True`` as well
-    #: (``cli/commands/run.py``) -- a ``fleet`` launcher runs the same chain and builds none,
-    #: because its shards each build their own.
+    #: Deliberately **not** the same declaration as :attr:`needs_model`, which asks whether
+    #: ``open()`` will reach into this process's model pool. The two agree for every
+    #: implementation phase C ships and come apart at the first one that runs its model
+    #: somewhere else: an ``nvinfer`` detect *names* a ``model:`` artefact and executes it
+    #: inside GStreamer, so it declares ``requires_model_name = True`` with
+    #: ``needs_model = False``. Folded into one attribute, that element would have to choose
+    #: between refusing a correct chain and making ``shipinfer run`` build an
+    #: ``InferenceServer`` nothing in the chain would ever submit to.
+    requires_model_name: ClassVar[bool] = False
+
+    #: Whether :meth:`open` resolves this element's model against
+    #: :attr:`ElementContext.models` -- the **pool's** question, about this process rather
+    #: than about the YAML. A class that answers ``True`` must raise from :meth:`_do_open`
+    #: when the context carries no pool, so that the declaration and the requirement cannot
+    #: drift.
     #:
-    #: **"Must this slot name a ``model:``?" is a different question and a different
-    #: ClassVar**, owned by the seam slice that replaces the kind-level check. The two are
-    #: not the same predicate and will visibly diverge: an ``nvinfer`` element names a
-    #: ``model:`` -- GStreamer needs the artefact -- and never touches this process's pool,
-    #: so it answers yes there and ``False`` here. Neither can be inferred from :attr:`kind`,
-    #: because a ``detect`` slot is a model kind whichever ``impl`` fills it.
+    #: Two callers read it, and neither is the chain loader (that one asks
+    #: :attr:`requires_model_name`):
     #:
-    #: A class that answers ``True`` must raise from :meth:`_do_open` when the context carries
-    #: no pool, so that the declaration and the requirement cannot drift; ``tests/topology``
-    #: walks every registered implementation and checks exactly that.
+    #: * the process that builds a runner, to decide whether to build an ``InferenceServer``
+    #:   at all (``cli/commands/run.py``) -- asking the *kind* there would load engines for a
+    #:   chain of mocks, and asking :attr:`requires_model_name` would load them for a
+    #:   deepstream chain whose models run inside GStreamer;
+    #: * the walk, to re-check a frame's deadline in front of the elements that can *wait*
+    #:   (``runners/inprocess.py``) -- an element that submits to the pool and sleeps on the
+    #:   answer is exactly the one a frame nobody can act on must not be given another GPU
+    #:   for, and a local one is not.
     needs_model: ClassVar[bool] = False
 
     def __init__(
@@ -402,6 +509,91 @@ class Element(abc.ABC):
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+    # -- per-camera lifecycle ----------------------------------------------------------
+    #
+    # Two announcements, both no-ops here, both **best-effort**. They exist because a
+    # stateful element keys its state on the camera id and nothing was ever telling it when
+    # a camera id stopped meaning anything: a removed camera's tracker shard leaked for the
+    # process's life, and — worse — a *re-added* camera was refused forever, because its
+    # ingest actor mints a fresh `FrameCounter` starting at 0 while the tracker still held
+    # the previous run's high-water mark. ADR-018 names remove + add as the one recovery for
+    # a lost camera, so "a re-added camera restarts at frame_id = 0" has to be a state the
+    # chain can be in.
+    #
+    # Best-effort is a promise about the runner, not an excuse: the runner calls these for
+    # every element, catches whatever one of them raises, logs it with the element's name and
+    # carries on, because a tracker that fails to drop a shard must not be able to keep a
+    # camera from being removed. An implementation should still raise rather than swallow —
+    # the log line is the evidence, and an element that hid the failure would leave the
+    # operator with a leak and no record of it.
+
+    def camera_added(self, camera_id: str) -> None:
+        """A camera is now placed on this element's runner. Reset any state held for its id.
+
+        Called **after** the ingest actor exists, so a refused placement — a duplicate id, a
+        stopped runner, a source nobody registered — announces nothing. That order costs a
+        window: the actor is started before this returns, so on a camera that opens instantly
+        a frame can reach ``process`` before this hook does. The window is worth it, because
+        the alternative is telling every element about a camera that was refused, and an
+        element cannot tell that apart from one that was placed and never sent a frame. What
+        it costs is bounded and local: an element that meets an unexpected camera id builds
+        its state lazily, and at worst the first frame of a *re-added* camera is refused by
+        state this call was about to clear.
+
+        **This is not serialised against the walk. Guard your own state.** The hook runs on
+        the thread that called ``add_camera``, holding the runner's ``_lifecycle`` lock -- the
+        ``RLock`` that serialises ``start``, ``stop``, ``add_camera``, ``remove_camera`` and
+        ``drain``, and nothing else. The walk takes no lock at all (``runners/base.py``:
+        ``_lifecycle`` is "deliberately *not* taken by ``submit``"), so up to
+        :attr:`ElementContext.workers` worker threads can be inside *this element's*
+        :meth:`process` -- including for *this camera* -- while this call is running. An
+        implementation must therefore hold its own lock around its per-camera table;
+        ``pipeline/graph/tracking.py``'s ``_admit`` is the shape (one lock around insertion
+        into the map, never held across the work itself, so one slow camera cannot stall the
+        other forty-nine).
+
+        **Return promptly.** Every lifecycle operation on this runner queues behind this
+        call, so a hook that waits on a model, a socket or another camera's frame stalls the
+        shard's whole control plane -- including the ``stop`` that would end the wait.
+
+        Called only between :meth:`open` and :meth:`close`, so an implementation may assume
+        its resources exist.
+        """
+
+    def camera_removed(self, camera_id: str) -> None:
+        """A camera is gone from this element's runner. Drop everything held for its id.
+
+        Called **after** the ingest actor is stopped, which is the safe order and the reason
+        it is worth stating: dropping per-camera state while a decoder is still publishing
+        would let the very next frame rebuild it, and the element would end up holding state
+        for a camera nobody is reading — the leak this hook exists to close, reintroduced by
+        the order it was closed in.
+
+        **"After the actor is stopped" is not "after the last frame", and this hook is not
+        serialised against the walk.** It runs on the thread that called ``remove_camera``
+        (or ``drain``), holding the runner's ``_lifecycle`` lock -- which serialises the
+        lifecycle operations against each other and nothing else. The walk takes no lock
+        (``runners/base.py``: ``_lifecycle`` is "deliberately *not* taken by ``submit``"), so
+        a worker can be inside *this element's* :meth:`process` for *this very camera* at the
+        moment this is called, and up to :attr:`ElementContext.workers` of them can be at
+        once. A removal racing an in-flight frame is ordinary rather than a bug to assert
+        against, and it has two consequences an implementation has to be written for: state
+        this call drops can be rebuilt by a frame that was already in the lane, and
+        ``remove_camera`` answering ``False`` means the decoder thread was abandoned at its
+        deadline rather than joined, so a late item can arrive well after that. So: hold the
+        element's own lock around its per-camera table (``pipeline/graph/tracking.py``'s
+        ``_admit`` is the shape), make the drop idempotent, and handle a late item as a first
+        frame rather than as an impossibility.
+
+        **Return promptly.** ``_lifecycle`` serialises ``start``, ``stop``, ``add_camera``,
+        ``remove_camera`` and ``drain``, so a hook that waits holds up every one of them --
+        including the ``stop`` that would end the wait.
+
+        Called only between :meth:`open` and :meth:`close`. Shutdown does **not** call it for
+        every camera — :meth:`close` releases everything, per camera or not, and announcing
+        fifty removals on the way out would only be a slower spelling of that.
+        """
 
     # -- subclass hooks ----------------------------------------------------------------
 

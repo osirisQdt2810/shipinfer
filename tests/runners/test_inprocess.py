@@ -57,7 +57,12 @@ from shipinfer.topology import (
     ElementKind,
     Topology,
 )
-from shipinfer.topology.elements.mock import MockDetect, MockOutput
+from shipinfer.topology.elements.mock import (
+    MockDetect,
+    MockOutput,
+    MockRecognize,
+    MockSegment,
+)
 from shipinfer.topology.registry import registry_for
 
 #: ``topology/ship_person.yaml``'s wiring with every implementation replaced by its mock: the
@@ -69,7 +74,7 @@ name: mock_ship_person
 elements:
   decode:       {impl: mock}
   detect:       {impl: __DETECT__, model: ship_detector, params: __PARAMS__}
-  segment:      {impl: mock, model: ship_segmenter, when: class == ship}
+  segment:      {impl: __SEGMENT__, model: ship_segmenter, when: class == ship}
   embed_ship:   {impl: mock, model: ship_embedder, when: class == ship, after: segment}
   embed_person: {impl: mock, model: person_embedder, when: class == person, after: detect}
   recognize:    {impl: __RECOGNIZE__, model: ship_recognizer, when: class == ship, after: embed_ship}
@@ -109,6 +114,19 @@ elements:
   output:  {impl: mock}
 """
 
+#: A gated detector in front of a ``recognize`` slot the test chooses, so the question "is
+#: this element charged an expiry check?" is asked of exactly one element. In ``MOCK_CHAIN``
+#: the answer would always come from ``segment``, which is the next element that needs a model
+#: after ``detect`` and would fail the item before ``recognize`` was reached.
+EXPIRY_CHAIN = """
+name: expiry
+elements:
+  decode:    {impl: mock}
+  detect:    {impl: runner-gate, model: ship_detector}
+  recognize: {impl: __RECOGNIZE__, after: detect__MODEL__}
+  output:    {impl: mock}
+"""
+
 #: The slots in the order the loader resolves them, which is the order elements are opened in
 #: and the reverse of the order they are closed in. ``embed_person`` before ``embed_ship``
 #: because Kahn's algorithm keeps declaration order *among the elements that are ready*, and
@@ -136,6 +154,39 @@ TAGS = (("cam-1", 1), ("cam-1", 2), ("cam-2", 1), ("cam-2", 2), ("cam-3", 1), ("
 # runner has three failure modes worth driving from a real chain -- an element that blocks, one
 # that raises mid-frame, one that refuses to open -- and none of them can be provoked from
 # outside the chain.
+
+
+class _Pooled:
+    """Mixin: a mock that declares it resolves a repository model, without owning one.
+
+    The stand-in for a ``pool`` element, and it has to be a *double* rather than a flag on the
+    shipped mocks. :attr:`~shipinfer.topology.base.Element.needs_model` is what tells the
+    process building a runner to construct an ``InferenceServer`` (``cli/commands/run.py``),
+    so a ``MockDetect`` that answered ``True`` would make a chain of mocks load the whole
+    model repository to run elements that invent a box.
+
+    What it buys here is the runner's *other* reader of the same declaration: the expiry
+    re-check in the walk, which used to ask ``node.kind in MODEL_KINDS``. That question and
+    this one differ for every mock in the file, which is why the gate needs an element that
+    says yes and there is none to hand.
+
+    :attr:`~shipinfer.topology.base.Element.requires_model_name` is deliberately left
+    ``False``: that is the *loader's* declaration, and setting it would make every chain in
+    this file carry a ``model:`` for an element that resolves nothing. The split is what lets
+    a double be one without being the other.
+    """
+
+    needs_model: ClassVar[bool] = True
+
+
+@registry_for(ElementKind.SEGMENT).register("runner-pooled")
+class PooledSegment(_Pooled, MockSegment):
+    """A segmenter that would submit to the pool and sleep on the answer."""
+
+
+@registry_for(ElementKind.RECOGNIZE).register("runner-pooled")
+class PooledRecognize(_Pooled, MockRecognize):
+    """The same, one kind over, so the gate can be asked about one element at a time."""
 
 
 @registry_for(ElementKind.DETECT).register("runner-gate")
@@ -287,14 +338,29 @@ class PausingRunner(InprocessRunner):
 
 
 def load(
-    *, detect: str = "mock", recognize: str = "mock", params: str = "{class: ship}"
+    *,
+    detect: str = "mock",
+    segment: str = "mock",
+    recognize: str = "mock",
+    params: str = "{class: ship}",
 ) -> Topology:
-    """The mock chain, with the two swappable slots filled in."""
+    """The mock chain, with the three swappable slots filled in."""
     text = (
         textwrap.dedent(MOCK_CHAIN)
         .replace("__DETECT__", detect)
+        .replace("__SEGMENT__", segment)
         .replace("__RECOGNIZE__", recognize)
         .replace("__PARAMS__", params)
+    )
+    return Topology.from_spec(ChainSpec.from_yaml(text))
+
+
+def load_expiry(*, recognize: str, model: str = "") -> Topology:
+    """The gated chain, with the element whose expiry gate is under test."""
+    text = (
+        textwrap.dedent(EXPIRY_CHAIN)
+        .replace("__RECOGNIZE__", recognize)
+        .replace("__MODEL__", f", model: {model}" if model else "")
     )
     return Topology.from_spec(ChainSpec.from_yaml(text))
 
@@ -1291,14 +1357,19 @@ class TestBackpressureAndFailure:
     ) -> None:
         """One check at the top of a nine-element walk is a check for the first element only.
 
-        Every model element submits to the pool and *sleeps* on the answer, so a chain can
-        spend several stage timeouts between the top of the walk and the segmenter. Here the
-        gate holds the item inside ``detect`` well past its 100 ms budget: it was fresh when
-        the walk began and when the detector ran, and it must be failed at ``segment`` — the
-        next element that would submit — rather than walked to the sink having consumed the
-        whole chain's GPU on a frame nobody can act on any more.
+        Every element that resolves a repository model submits to the pool and *sleeps* on the
+        answer, so a chain can spend several stage timeouts between the top of the walk and the
+        segmenter. Here the gate holds the item inside ``detect`` well past its 100 ms budget:
+        it was fresh when the walk began and when the detector ran, and it must be failed at
+        ``segment`` — the next element that would submit — rather than walked to the sink
+        having consumed the whole chain's GPU on a frame nobody can act on any more.
+
+        ``segment`` is a :class:`PooledSegment` rather than the plain mock because the gate
+        asks the *element* whether it resolves a model, and no shipped mock does. It used to
+        ask the kind, which every ``segment`` slot answers the same way — including a mock
+        that never waits for anything.
         """
-        chain = load(detect="runner-gate")
+        chain = load(detect="runner-gate", segment="runner-pooled")
         gate = chain.node("detect").element
         assert isinstance(gate, GateDetect)
         segment = chain.node("segment").element
@@ -1319,6 +1390,68 @@ class TestBackpressureAndFailure:
         assert emitted_tags(chain) == set(), "failed, not walked to the sink"
         assert runner.stats()["items"]["expired"] == 1
         assert runner.metrics.items_expired.value(camera="cam-1") == 1
+
+    def test_an_element_that_resolves_no_model_is_not_charged_an_expiry_check(
+        self, running
+    ) -> None:
+        """The gate is the implementation's business, not the kind's — the walk half of C2.
+
+        ``recognize`` is a model *kind*, and the gate used to read ``node.kind in
+        MODEL_KINDS``, so an element that submits to nothing — a gallery query in phase C, a
+        mock here — was refused an already-late item exactly as a network would be. That is
+        not a saving: the frame has crossed the whole chain and the only cost left is the
+        microseconds this element takes, so dropping it there throws away work already paid
+        for and emits nothing.
+
+        Same gate, same 100 ms budget and the same 250 ms overshoot as the test below; the
+        difference is only which implementation fills the slot.
+        """
+        chain = load_expiry(recognize="mock")
+        gate = chain.node("detect").element
+        assert isinstance(gate, GateDetect)
+        runner = running(
+            chain,
+            ServerSettings(pipeline={"workers": 1}, ingest={"frame_deadline_ms": 100}),
+        )
+
+        late = runner.submit(item("cam-1", 1, captured_ns=time.monotonic_ns()))
+        assert gate.entered.wait(10.0), "the worker never reached the gate"
+        time.sleep(0.25)
+        gate.release.set()
+
+        assert late.exception(timeout=10.0) is None, "a local element cost it its frame"
+        assert emitted_tags(chain) == {("cam-1", 1)}, "walked to the sink, not dropped"
+        assert runner.stats()["items"]["expired"] == 0
+
+    def test_the_same_slot_filled_by_a_model_element_is_still_charged_one(
+        self, running
+    ) -> None:
+        """The half that must not have moved, one element over from the test above.
+
+        :class:`PooledRecognize` on the same slot stands in for the pool implementation: it
+        declares that it resolves a repository model, so it would submit and sleep, and a
+        frame nobody can act on any more must not be given another GPU. Same chain, same
+        gate, same overshoot — one word of the element's declaration is the whole difference,
+        which is what makes the pair evidence rather than two tests.
+        """
+        chain = load_expiry(recognize="runner-pooled", model="ship_recognizer")
+        gate = chain.node("detect").element
+        assert isinstance(gate, GateDetect)
+        runner = running(
+            chain,
+            ServerSettings(pipeline={"workers": 1}, ingest={"frame_deadline_ms": 100}),
+        )
+
+        late = runner.submit(item("cam-1", 1, captured_ns=time.monotonic_ns()))
+        assert gate.entered.wait(10.0), "the worker never reached the gate"
+        time.sleep(0.25)
+        gate.release.set()
+
+        error = late.exception(timeout=10.0)
+        assert isinstance(error, RequestCancelledError)
+        assert "before element 'recognize'" in str(error)
+        assert emitted_tags(chain) == set()
+        assert runner.stats()["items"]["expired"] == 1
 
     def test_a_fan_in_refuses_to_donate_under_a_cap_nobody_negotiated(self, running) -> None:
         """The donor consumed its item, and the branch left over carries a different cap.
@@ -1409,6 +1542,42 @@ class TestWhatTheElementsAreTold:
 
         assert context.stage_timeout_s == 5.0
         assert context.input_name == "images"
+
+    def test_the_elements_record_on_the_runners_own_registry(self) -> None:
+        """Not a fresh one, and the identity is the assertion.
+
+        One exporter has to carry both halves of a dropped frame — the runner counted it
+        against ``shipinfer_runner_items_dropped_total{camera}`` and an element that counted
+        its own refusal onto a private registry would publish a number nothing scrapes. The
+        same argument ``_ingest`` makes when it hands ``IngestMetrics`` this registry.
+        """
+        runner = InprocessRunner(load())
+
+        context = runner.element_context()
+
+        assert context.metrics is runner.metrics.registry
+
+    def test_the_worker_count_is_the_one_this_runner_will_really_use(self) -> None:
+        """The constructor's override, not ``pipeline.workers`` — they can disagree.
+
+        The element that needs this number needs the true one: a barrier that waits for other
+        cameras' frames must leave a worker free to deliver them, and one told "four" on a
+        runner started with one would park the only thread there is and then close its instant
+        by timeout, forever. Asserted with the two deliberately different, which is the only
+        way to tell a carried number from a re-read setting.
+        """
+        runner = InprocessRunner(load(), ServerSettings(pipeline={"workers": 4}), workers=1)
+
+        context = runner.element_context()
+
+        assert runner.workers == 1, "the override won, as it always did"
+        assert context.workers == 1, "and it is what the elements are told"
+
+    def test_the_image_ops_are_not_resolved_yet_and_say_so(self) -> None:
+        """``None`` and not a host-side default. An element that needs ops and finds none
+        raises, which is a deploy that stops; a numpy fallback nobody asked for is a chain
+        that runs at a fiftieth of the speed and reports nothing."""
+        assert InprocessRunner(load()).element_context().ops is None
 
 
 # -- observability ------------------------------------------------------------------------

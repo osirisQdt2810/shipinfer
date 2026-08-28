@@ -704,12 +704,20 @@ class TestRefusals:
                   segment: {impl: mock, model: s, after: detect}
                 """)
 
-    def test_a_model_kind_without_a_model_is_refused(self) -> None:
+    def test_an_element_that_resolves_a_repository_model_without_one_is_refused(self) -> None:
+        """The requirement is the *implementation's*, so the chain must name a ``pool``.
+
+        It used to be the kind's -- any ``detect:`` needed a ``model:`` -- and ``impl: mock``
+        was refused here too. It is not any more, and deliberately: a mock detector invents a
+        box and resolves nothing, so a chain of them needs neither a model name nor a model
+        pool behind it. ``tests/topology/test_model_requirement.py`` is where both halves of
+        the new rule live; this is the refusal itself, in the file that owns the loader's.
+        """
         with pytest.raises(ChainStructureError, match="model"):
             load("""
                 elements:
                   decode: {impl: mock}
-                  detect: {impl: mock}
+                  detect: {impl: pool}
                   output: {impl: mock}
                 """)
 

@@ -63,7 +63,7 @@ from shipinfer.core.errors import (
     ConditionSyntaxError,
     UnknownElementError,
 )
-from shipinfer.topology.base import MODEL_KINDS, ChainItem, Element, ElementKind
+from shipinfer.topology.base import ChainItem, Element, ElementKind
 from shipinfer.topology.caps import ANY, Caps, negotiate
 from shipinfer.topology.registry import create_element
 
@@ -165,7 +165,9 @@ class ElementSpec(_Strict):
     #: error type. :meth:`Topology.from_spec` resolves it through
     #: :meth:`~shipinfer.topology.base.ElementKind.parse`, which raises that one.
     kind: Optional[str] = None
-    #: Repository model name. Required for the four model kinds, meaningless for the rest.
+    #: Repository model name. Required by the implementations that declare
+    #: :attr:`~shipinfer.topology.base.Element.requires_model_name` -- every ``pool`` element
+    #: -- and meaningless, but accepted, for the rest.
     model: Optional[str] = None
     #: Branch condition, e.g. ``class == ship``.
     when: Optional[str] = None
@@ -400,7 +402,7 @@ class Topology:
         Raises:
             ChainSpecError: the chain declares no elements.
             UnknownElementKindError: a slot, or an explicit ``kind:``, names no kind.
-            ChainStructureError: a model kind with no ``model:``, a root that is not a
+            ChainStructureError: an element that needs a model and names none, a root that is not a
                 decode element, does not say what it produces or carries a ``when:``, no
                 output element, an output element with a successor, a branch that reaches no
                 output, or a wildcard ``produces`` whose inbound edges disagree.
@@ -427,19 +429,50 @@ class Topology:
             for slot, declared in spec.elements.items()
         }
 
-        for slot, declared in spec.elements.items():
-            if kinds[slot] in MODEL_KINDS and not declared.model:
-                raise ChainStructureError(
-                    f"element {slot!r} is a {kinds[slot].value} element and needs "
-                    "`model: <repository model name>`"
-                )
-
         elements = {
             slot: create_element(
                 kinds[slot], declared.impl, slot, declared.params, model=declared.model
             )
             for slot, declared in spec.elements.items()
         }
+
+        # The implementation decides, not the kind. This used to read
+        # `kinds[slot] in MODEL_KINDS`, and the kind is the wrong thing to ask twice over:
+        #
+        # * `recognize` is a model kind and `impl: shipvision` is a *gallery query* over an
+        #   embedding, with no repository model to name. The kind rule refused that chain at
+        #   load -- "recognize needs `model:`" -- and left no spelling that got past it.
+        # * `impl: mock` is not a model element at all. It invents a box and reads nothing, so
+        #   requiring a `model:` of it was the kind rule insisting on a name nobody reads.
+        #
+        # `Element.requires_model_name` and NOT `Element.needs_model`, which is a different
+        # question with a different reader: this one is "must the chain file carry a name?"
+        # and that one is "will `open()` reach into this process's model pool?". They agree
+        # for every implementation phase C ships and come apart at `nvinfer`, which names a
+        # `model:` artefact and runs it inside GStreamer -- asking `needs_model` here would
+        # let a deepstream chain that forgot its `model:` load clean and fail at graph-compile
+        # time instead of stopping the deploy.
+        #
+        # Reading the declaration off the element costs the elements being *built* first,
+        # which is why this moved below the comprehension and is the only other visible
+        # consequence: a slot that is both misspelled and modelless now reports the unknown
+        # implementation, which is the better error anyway, because until the impl resolves
+        # nobody knows whether a model was needed.
+        #
+        # A `model:` on an element that does not need one stays *accepted* and ignored,
+        # exactly as before: `ElementSpec.model` has always been documented "meaningless for
+        # the rest", `describe()` prints it, and every mock model element in the test suite
+        # carries one it never resolves. Refusing it is a separate decision with its own blast
+        # radius, and this slice is about the requirement, not the surplus.
+        for slot, element in elements.items():
+            if element.requires_model_name and not spec.elements[slot].model:
+                # The element and its implementation, not the kind: the kind decides nothing
+                # here any more, and "detect elements need a model" is exactly the rule this
+                # message would be restating after it was removed.
+                raise ChainStructureError(
+                    f"element {slot!r} (impl {element.impl!r}) must name a "
+                    "`model: <repository model name>`"
+                )
 
         inputs = _resolve_predecessors(spec)
         order = _topological_order(inputs)
