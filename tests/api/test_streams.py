@@ -49,6 +49,12 @@ from shipinfer.launch.control import CameraSpec
 
 #: A launcher's report: where each camera was placed, with the shard's own per-camera detail
 #: one level down. `cam-001` is *pending* — placed, not yet accepted (`runners/fleet.py`).
+#:
+#: The band is one level down with the state and for the same reason: the launcher's own map
+#: knows where a camera went and nothing about how it is being served, while the shard
+#: resolved the lane and reports it (`runners/inprocess.py::_do_health`). It survives the
+#: `google.protobuf.Struct` in `HealthReply.cameras` untouched, which is why no field had to
+#: be added to `shard.proto` for a fleet listing to answer this.
 FLEET_HEALTH: dict[str, Any] = {
     "runner": "fleet",
     "state": "running",
@@ -56,7 +62,13 @@ FLEET_HEALTH: dict[str, Any] = {
         "0": {
             "placed": ["cam-000"],
             "state": "running",
-            "cameras": {"cam-000": {"camera_id": "cam-000", "state": "streaming"}},
+            "cameras": {
+                "cam-000": {
+                    "camera_id": "cam-000",
+                    "state": "streaming",
+                    "priority": "high",
+                }
+            },
         },
         "1": {"placed": [], "state": "unreachable", "detail": "TimeoutError: deadline"},
     },
@@ -83,13 +95,31 @@ FLEET_HEALTH_WITH_A_DEAD_SHARD: dict[str, Any] = {
     "lost": {"cam-002": 1},
 }
 
-#: An in-process runner's report: no shard map, the ingest state inline, and the runner's own
-#: `shard_id` is the only shard there is.
+#: An in-process runner's report: no shard map, the ingest state inline, the band inline too,
+#: and the runner's own `shard_id` is the only shard there is.
 INPROCESS_HEALTH: dict[str, Any] = {
     "runner": "inprocess",
     "state": "running",
     "shard_id": 0,
-    "cameras": {"cam-000": {"camera_id": "cam-000", "state": "streaming", "fps": 19.9}},
+    "cameras": {
+        "cam-000": {
+            "camera_id": "cam-000",
+            "state": "streaming",
+            "fps": 19.9,
+            "priority": "tracking_critical",
+        }
+    },
+}
+
+#: A controller that reports cameras and says nothing about their bands: a runner from before
+#: the field existed, or one that resolves no lanes of its own. The listing must answer `null`
+#: rather than a default -- `normal` here would be the server inventing the one fact an
+#: operator came to check.
+HEALTH_WITHOUT_BANDS: dict[str, Any] = {
+    "runner": "inprocess",
+    "state": "running",
+    "shard_id": 0,
+    "cameras": {"cam-000": {"camera_id": "cam-000", "state": "streaming"}},
 }
 
 
@@ -332,14 +362,30 @@ class TestAddingACamera:
 
         assert cameras.added[0].priority is None
 
-    @pytest.mark.parametrize("spelling", ["TRACKING_CRITICAL", "Tracking_Critical"])
-    def test_the_band_name_is_matched_whatever_case_it_arrives_in(self, spelling: str) -> None:
+    @pytest.mark.parametrize(
+        ("spelling", "band"),
+        [
+            ("TRACKING_CRITICAL", Priority.TRACKING_CRITICAL),
+            ("Tracking_Critical", Priority.TRACKING_CRITICAL),
+            ("BackGround", Priority.BACKGROUND),
+        ],
+    )
+    def test_the_band_name_is_matched_whatever_case_it_arrives_in(
+        self, spelling: str, band: Priority
+    ) -> None:
         """The name is a *member* name, and it is upper-case everywhere it is written.
 
         `Priority.TRACKING_CRITICAL` in Python, `TRACKING_CRITICAL` in a generated gRPC
         stub's enum, `tracking_critical` in the published schema -- one lane spelled three
         ways by the same deployment. Refusing the upper-cased one is a 422 for a client that
         named the right lane, so the model lower-cases a string before matching it.
+
+        Asserted on the **resolved** `CameraSpec.priority` and over two different bands,
+        because that is the property and the resolution has now moved: the router looks the
+        member up with `Priority.parse`, the one rule `core` owns, rather than spelling
+        `Priority[name.upper()]` a third time in the tree. A case that only covered
+        `TRACKING_CRITICAL` would also pass against `Priority(0)`, which is not the same
+        function of the input at all.
         """
         cameras = FakeCameras()
         with client_over(cameras) as client:
@@ -348,7 +394,7 @@ class TestAddingACamera:
             )
 
         assert response.status_code == 201, response.text
-        assert cameras.added[0].priority is Priority.TRACKING_CRITICAL
+        assert cameras.added[0].priority is band
 
     @pytest.mark.parametrize("band", ["urgent", "TRACKING-CRITICAL", "", 0, 2])
     def test_a_band_the_server_does_not_know_is_422_rather_than_a_default(
@@ -854,6 +900,7 @@ class TestListingWhatIsRunning:
                 "pending": False,
                 "state": "streaming",
                 "lost": False,
+                "priority": "high",
             },
             {
                 "camera_id": "cam-001",
@@ -862,6 +909,7 @@ class TestListingWhatIsRunning:
                 "pending": True,
                 "state": "",
                 "lost": False,
+                "priority": None,
             },
         ]
 
@@ -886,6 +934,7 @@ class TestListingWhatIsRunning:
                 "pending": False,
                 "state": "streaming",
                 "lost": False,
+                "priority": "tracking_critical",
             }
         ]
 
@@ -910,6 +959,129 @@ class TestListingWhatIsRunning:
         cameras._health = RuntimeError("the control channel is gone")  # type: ignore[assignment]
         with client_over(cameras) as client:
             assert client.get("/streams").json() == {"streams": []}
+
+
+class TestTheListingSaysWhichLaneACameraLandedIn:
+    """`priority` on the way out, in the vocabulary it went in on (#75 note 4).
+
+    A band is the one thing about a camera that nothing else could confirm. It arrives on the
+    placement (`POST /streams {"priority": ...}`) or in `ingest.cameras`, and on a fleet shard
+    the second of those is stripped (#71) -- so before this field an operator who wrote
+    `tracking_critical` had no way to find out whether it took effect, short of reading the
+    shard's logs. The listing now answers it, and answers `null` rather than guessing when the
+    controller has not said.
+    """
+
+    def test_an_in_process_listing_names_the_lane_the_camera_landed_in(self) -> None:
+        """The runner resolved it (`_priority_for`), so the report is the lane, not the ask."""
+        cameras = FakeCameras(health=INPROCESS_HEALTH)
+        with client_over(cameras) as client:
+            streams = client.get("/streams").json()["streams"]
+
+        assert streams[0]["priority"] == "tracking_critical"
+
+    def test_a_fleet_listing_reads_the_band_off_the_shard_that_resolved_it(self) -> None:
+        """The same join `state` uses, one level down into the shard's own report.
+
+        The launcher's camera map carries `{"shard": n}` and nothing else -- it knows where a
+        camera went, not what its shard decided about it -- so a band read only from that map
+        would be `null` for every camera on a fleet, which is the deployment that needs it.
+        """
+        cameras = FakeCameras(health=FLEET_HEALTH)
+        with client_over(cameras) as client:
+            streams = client.get("/streams").json()["streams"]
+
+        assert [(s["camera_id"], s["priority"]) for s in streams] == [
+            ("cam-000", "high"),
+            ("cam-001", None),
+        ], "cam-001 is on the shard that did not answer"
+
+    def test_a_controller_that_reports_no_band_answers_null_and_not_a_default(self) -> None:
+        """`null` and `normal` are different claims, and only one of them is true here.
+
+        A default would read as "your camera is in the middle lane" for a shard that never
+        said so -- an answer indistinguishable from the real thing, given to the operator who
+        is checking precisely because they suspect the band did not apply.
+        """
+        cameras = FakeCameras(health=HEALTH_WITHOUT_BANDS)
+        with client_over(cameras) as client:
+            streams = client.get("/streams").json()["streams"]
+
+        assert streams[0]["priority"] is None
+        assert streams[0]["state"] == "streaming", "the rest of the entry still reports"
+
+    def test_a_band_this_deployment_does_not_have_is_null_and_not_a_broken_listing(
+        self,
+    ) -> None:
+        """A launcher's report is assembled from replies written by other processes.
+
+        They cross a `google.protobuf.Struct`, which validates nothing about a band name, so a
+        shard from another release is a real source of a word this enum does not have. One
+        field of one camera degrades to `null`; a listing that raised would take the whole
+        report down at the moment it is being read to find out what is wrong.
+        """
+        cameras = FakeCameras(
+            health={
+                "state": "running",
+                "shard_id": 0,
+                "cameras": {"cam-000": {"state": "streaming", "priority": "urgent"}},
+            }
+        )
+        with client_over(cameras) as client:
+            response = client.get("/streams")
+
+        assert response.status_code == 200, response.text
+        assert response.json()["streams"][0] == {
+            "camera_id": "cam-000",
+            "url": "",
+            "shard": 0,
+            "pending": False,
+            "state": "streaming",
+            "lost": False,
+            "priority": None,
+        }
+
+    def test_a_201_carries_the_band_the_controller_resolved(self) -> None:
+        """The POST answers from the same report the GET reads, so the two cannot disagree."""
+        cameras = FakeCameras(health=FLEET_HEALTH)
+        with client_over(cameras) as client:
+            body = client.post("/streams", json={"camera_id": "cam-000", "url": "x"}).json()
+
+        assert body["priority"] == "high"
+
+    def test_a_201_for_a_camera_the_report_does_not_mention_echoes_nothing(self) -> None:
+        """Not the posted band: the field reports what was resolved, not what was asked for.
+
+        Echoing the request would make a 201 confirm a lane no runner has agreed to -- and it
+        would be the one case where this field cannot be trusted, which is worse than a
+        `null` an operator can follow up with a `GET`.
+        """
+        cameras = FakeCameras(health={"state": "running", "cameras": {}})
+        with client_over(cameras) as client:
+            body = client.post(
+                "/streams", json={"url": "rtsp://host", "priority": "tracking_critical"}
+            ).json()
+
+        assert cameras.added[0].priority is Priority.TRACKING_CRITICAL
+        assert body["priority"] is None
+
+    def test_the_published_schema_offers_the_same_names_the_request_takes(self) -> None:
+        """One vocabulary in both directions: a client can post back what it was told.
+
+        Typed `BandName | None` and not `Priority | None` for the reason
+        `StreamRequest.priority` is (`test_the_published_schema_offers_the_names_the_validator
+        _accepts`): `Priority` is an `IntEnum`, and a generated client would be handed
+        integers this API neither sends nor accepts.
+        """
+        cameras = FakeCameras(health=INPROCESS_HEALTH)
+        with client_over(cameras) as client:
+            schema = client.get("/openapi.json").json()
+
+        field = schema["components"]["schemas"]["StreamInfo"]["properties"]["priority"]
+        assert field["anyOf"] == [
+            {"enum": list(BAND_NAMES), "type": "string"},
+            {"type": "null"},
+        ], field
 
 
 class TestACameraWhoseShardHasGone:
