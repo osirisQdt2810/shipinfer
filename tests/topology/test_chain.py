@@ -1175,3 +1175,131 @@ class TestTheProductionChainFile:
         assert [str(node.condition) for node in fixture if node.condition] == [
             str(node.condition) for node in production if node.condition
         ]
+
+
+class TestRowSelectionIsNotAFrameCondition:
+    """``when:`` guards a frame, ``classes:`` selects rows, and the loader keeps them apart.
+
+    The mistake is silent in both directions and expensive in both: a crop element guarded
+    with ``when: class == ship`` is skipped on every frame — nothing writes a frame-level
+    ``meta["class"]`` — so the ship embedder never runs and every ship's embedding is empty,
+    with no counter saying anything is wrong. A ``classes: [vessel]`` in front of a detector
+    that emits ``ship`` matches no row, which fails the same way one level down.
+    """
+
+    HEAD = "name: rows\nelements:\n  decode: {impl: replay}\n"
+
+    def chain(self, *lines: str) -> Topology:
+        return load(self.HEAD + "".join(f"  {line}\n" for line in lines))
+
+    def test_a_row_selecting_element_may_not_carry_a_class_condition(self) -> None:
+        with pytest.raises(ChainStructureError, match=r"classes: \[ship\]") as caught:
+            self.chain(
+                "detect: {impl: pool, model: d}",
+                "embed:  {impl: pool, model: e, when: class == ship}",
+                "output: {impl: none}",
+            )
+
+        assert "embed" in str(caught.value), "the message names the slot to edit"
+        assert "FRAME" in str(caught.value)
+
+    def test_the_same_holds_for_a_track_slot(self) -> None:
+        """``track`` reads ``classes:`` too, so it is refused by the same declaration."""
+        with pytest.raises(ChainStructureError, match="classes"):
+            self.chain(
+                "detect: {impl: pool, model: d}",
+                "track:  {impl: shipvision, when: class == ship}",
+                "output: {impl: none}",
+            )
+
+    def test_the_fix_the_message_names_actually_loads(self) -> None:
+        """A refusal that names a fix has to be checked against the fix, not only asserted."""
+        chain = self.chain(
+            "detect: {impl: pool, model: d}",
+            "embed:  {impl: pool, model: e, params: {classes: [ship]}}",
+            "output: {impl: none}",
+        )
+
+        assert chain.node("embed").element.declared_classes() == ("ship",)
+
+    def test_a_frame_level_condition_is_untouched(self) -> None:
+        """Only ``class`` is refused. ``when:`` keeps the job it is genuinely good at.
+
+        A short circuit on a fact about the *whole frame* — no ships in it at all — is exactly
+        what a frame condition is for, and narrowing ``when:`` any further would delete the
+        mechanism instead of aiming it.
+        """
+        chain = self.chain(
+            "detect: {impl: pool, model: d}",
+            "embed:  {impl: pool, model: e, when: has_ship == true}",
+            "output: {impl: none}",
+        )
+
+        assert str(chain.node("embed").condition) == "has_ship == true"
+
+    def test_an_element_that_selects_no_rows_may_still_be_guarded_by_class(self) -> None:
+        """The refusal is a declaration on the implementation, not a ban on a word.
+
+        A ``mock`` element does not read ``classes:``, so ``when: class == ship`` on one is
+        still the ordinary branch condition the mock chain tests are built on — which is also
+        why ``topology/ship_person.yaml`` keeps loading with its implementations substituted.
+        """
+        chain = self.chain(
+            "detect: {impl: mock}",
+            "segment: {impl: mock, when: class == ship}",
+            "output: {impl: mock}",
+        )
+
+        assert str(chain.node("segment").condition) == "class == ship"
+
+
+class TestClassesAreCheckedAgainstWhatTheDetectorEmits:
+    """A branch that selects a label nobody detects is a dead branch that reports nothing."""
+
+    HEAD = "name: labels\nelements:\n  decode: {impl: replay}\n"
+
+    def chain(self, detect: str, embed: str) -> Topology:
+        return load(f"{self.HEAD}  {detect}\n  {embed}\n  output: {{impl: none}}\n")
+
+    LABELLED = (
+        "detect: {impl: pool, model: d, "
+        "params: {decode: {class_labels: {0: person, 8: ship}}}}"
+    )
+
+    def test_a_label_the_detector_never_emits_is_refused_naming_both_slots(self) -> None:
+        with pytest.raises(ChainStructureError) as caught:
+            self.chain(
+                self.LABELLED, "embed: {impl: pool, model: e, params: {classes: [vessel]}}"
+            )
+
+        message = str(caught.value)
+        assert "embed" in message and "detect" in message
+        assert "vessel" in message and "ship" in message
+
+    def test_a_label_it_does_emit_loads(self) -> None:
+        chain = self.chain(
+            self.LABELLED, "embed: {impl: pool, model: e, params: {classes: [person]}}"
+        )
+
+        assert chain.node("embed").element.declared_classes() == ("person",)
+
+    def test_nothing_is_checked_when_the_detector_declared_no_table(self) -> None:
+        """A default table is a fallback, not a statement about this deployment's model.
+
+        Refusing against it would invent a rule the chain never agreed to — and the default is
+        two labels, so every deployment with a third would be refused for being ordinary.
+        """
+        chain = self.chain(
+            "detect: {impl: pool, model: d}",
+            "embed: {impl: pool, model: e, params: {classes: [dinghy]}}",
+        )
+
+        assert chain.node("embed").element.declared_classes() == ("dinghy",)
+
+    def test_a_track_slots_classes_are_checked_too(self) -> None:
+        """Every reader of ``classes:`` is checked, because every one of them fails the same."""
+        with pytest.raises(ChainStructureError, match="vessel"):
+            self.chain(
+                self.LABELLED,
+                "track: {impl: shipvision, params: {classes: [vessel]}}",
+            )

@@ -574,6 +574,20 @@ class PoolDetect(_PoolElement):
     needs_image_ops: ClassVar[bool] = True
     _frame_verb: ClassVar[str] = "letterbox"
 
+    def detection_labels(self) -> tuple[str, ...] | None:
+        """The label vocabulary this detector was configured with, or ``None`` if it said none.
+
+        Answered from ``params:`` alone and before ``open()``, because the loader asks it while
+        validating a chain on a host with no pool — which is also why a malformed table is
+        ``None`` here rather than a refusal: :meth:`_resolve_decode_params` raises for that at
+        ``open()``, with the message that names the key, and two refusals for one typo is one
+        too many.
+        """
+        labels = self._decode_params.get("class_labels")
+        if not isinstance(labels, Mapping):
+            return None
+        return tuple(str(value) for value in labels.values())
+
     def __init__(
         self,
         name: str,
@@ -1099,6 +1113,10 @@ class _PoolCropElement(_PoolElement):
     #: This element crops, so it is opened with :attr:`ElementContext.ops` and refuses without
     #: one -- the same declaration, and the same refusal, as :class:`PoolDetect`.
     needs_image_ops: ClassVar[bool] = True
+    #: It selects which rows to crop with ``params: classes:``, so the loader refuses a
+    #: ``when: class == …`` on this slot and names the key that does the job -- see
+    #: :attr:`~shipinfer.topology.base.Element.selects_rows`.
+    selects_rows: ClassVar[bool] = True
     _frame_verb: ClassVar[str] = "crop"
 
     def __init__(
@@ -1355,6 +1373,10 @@ class _PoolCropElement(_PoolElement):
         boxes = detections.boxes_at(rows)
         crops = self._ops.crop_batch(image, boxes, self._crop_size, self._normalize)
         return Tensor.from_numpy(crops), rows
+
+    def declared_classes(self) -> tuple[str, ...] | None:
+        """See :meth:`~shipinfer.topology.base.Element.declared_classes`."""
+        return self._classes
 
     def _selected(self, detections: Detections) -> range | tuple[int, ...]:
         """The detection rows this slot embeds -- every one, or the declared classes.

@@ -541,6 +541,24 @@ class Element(abc.ABC):
     #: no ops, so that the declaration and the requirement cannot drift.
     needs_image_ops: ClassVar[bool] = False
 
+    #: Whether this implementation selects **detection rows** with ``params: classes:`` -- the
+    #: loader's question, asked so that the *other* filter cannot be pointed at a row.
+    #:
+    #: ``when:`` and ``classes:`` look interchangeable in a chain file and are not, and the
+    #: mistake is silent in both directions. ``when:`` guards ONE ELEMENT for a whole FRAME:
+    #: :meth:`~shipinfer.topology.chain.Condition.matches` reads ``item.meta``, an item is a
+    #: frame, and a frame holds ships *and* people at once -- so ``when: class == ship`` on a
+    #: crop element is false on every frame nobody set ``meta["class"]`` on, and would be the
+    #: wrong tool even if something did: the whole ship branch would run on a frame containing
+    #: one person. ``classes:`` selects rows within the frame, which is the question that was
+    #: being asked.
+    #:
+    #: So :meth:`~shipinfer.topology.chain.Topology.from_spec` refuses ``when: class == …`` on
+    #: an element that answers ``True`` here, naming ``classes:`` as the fix. It is a
+    #: declaration rather than a check on ``impl``, for the reason :meth:`camera_group` is a
+    #: hook: the loader must not carry a list of implementation names that read a param.
+    selects_rows: ClassVar[bool] = False
+
     def __init__(
         self,
         name: str,
@@ -767,6 +785,40 @@ class Element(abc.ABC):
             placement — including one that *is* cross-camera but whose chain declared no
             roster, because "the chain did not say" and "the chain grouped nothing" are
             different facts and only the first one lets the runner balance by load.
+        """
+        return None
+
+    def declared_classes(self) -> tuple[str, ...] | None:
+        """The detection labels this slot's ``params: classes:`` names, or ``None``.
+
+        Asked by the loader so it can check them against the labels the chain's detector will
+        actually emit — a ``classes: [vessel]`` in front of a detector whose table says
+        ``ship`` selects no rows, runs no model and reports nothing wrong, which is the most
+        expensive kind of silence in this file.
+
+        A hook, not a second parse of ``params:``, for :meth:`camera_group`'s reason: the
+        element has already parsed the key and applied its own refusals, and a loader that
+        re-read it would be a second interpretation of one setting.
+
+        Returns:
+            The labels, or ``None`` for "this slot named none" — which means *every* row, and
+            is not the same as an empty tuple ("select nothing", which is strange but
+            unambiguous). Only :attr:`selects_rows` implementations answer anything else.
+        """
+        return None
+
+    def detection_labels(self) -> tuple[str, ...] | None:
+        """The labels this element will *emit* on its detections, or ``None`` if it cannot say.
+
+        The other half of :meth:`declared_classes`. A detector that was configured with a class
+        table knows the vocabulary the whole chain downstream of it will speak; the loader asks
+        for it so that a ``classes:`` naming a label outside it is refused at load rather than
+        discovered as a branch that never fires.
+
+        Returns:
+            The declared labels, or ``None`` when this element declares no table — in which
+            case the loader checks nothing, because a default table is a fallback and not a
+            statement about this deployment's model.
         """
         return None
 
