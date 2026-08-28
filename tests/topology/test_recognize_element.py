@@ -8,22 +8,33 @@ than assuming it. The properties that need no gallery at all — the caps, the t
 declarations, every refusal in :mod:`shipinfer.topology.gallery_store` — run either way,
 which is most of this file.
 
-Four of these tests are the ones the element exists for, and each was checked by reverting
+Seven of these tests are the ones the element exists for, and each was checked by reverting
 the line it covers (the numbers are in the slice report):
 
-* ``exclude_camera`` is passed on every query. Dropped, the cross-camera test answers
-  ``ship-a`` — the identity's own camera's enrolment, an exact match, and a score that would
-  make the recogniser look perfect while measuring the tracker.
+* ``exclude_camera`` is passed on every query, **and the default gallery honours it per
+  entry**. Dropped, the cross-camera test answers ``ship-a`` — the identity's own camera's
+  enrolment, an exact match, and a score that would make the recogniser look perfect while
+  measuring the tracker. Put the default back to ``centroid`` and the same test answers
+  ``ship-a`` at 0.994 with the argument still in place, which is why the default is pinned
+  by a test of its own rather than by a comment.
 * an unknown row is ``None``. Filed as ``0`` instead, the assertion that it is not an int
   fails — and in production it would be indistinguishable from gallery id 0.
+* identities are keyed by **detection row**. Filed as a positional list, a frame whose ship
+  rows are 0 and 2 files two entries that name neither, and a frame with no ships files a
+  value byte-identical to a frame with no detections.
+* enrolment writes to the second store. Pointed back at the curated one, forty stranger
+  frames evict every identity the operator enrolled.
 * the gallery file is validated. With the checks removed, a NaN row loads clean and every
   subsequent score is NaN.
+* the archive is read with ``allow_pickle=False``. Flipped, an object array in the ``.npz``
+  executes on load, before any validation runs — the test proves the side effect does not.
 * a dim mismatch stops the deploy at ``open()``.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +49,7 @@ from shipinfer.core.request import RequestContext
 from shipinfer.topology import ChainSpec, Topology, bridge, gallery_store
 from shipinfer.topology.base import ChainItem, ElementContext, ElementKind
 from shipinfer.topology.caps import parse_caps
+from shipinfer.topology.elements.detections import Detections
 from shipinfer.topology.elements.pool import PoolRecognize
 from shipinfer.topology.elements.recognize import GalleryRecognize
 from shipinfer.topology.registry import create_element, registry_for
@@ -138,6 +150,26 @@ def three_identities_two_cameras(root: Path) -> Path:
     )
 
 
+#: Wide enough that four curated ships and forty strangers can all be *distinct basis
+#: vectors*: mutually orthogonal, so "did enrolment evict a curated identity" is answered by
+#: arithmetic rather than by a question about how random vectors happen to land in 4-d.
+WIDE = 64
+
+
+def curated_fleet(root: Path, *, count: int = 4, camera: str = "cam-A") -> Path:
+    """``count`` ships an operator enrolled offline, one view each, from one camera.
+
+    The gallery an ``enrol: true`` deployment is standing on: identities somebody curated,
+    which the server must still be able to recognise after a week of meeting strangers.
+    """
+    return write_gallery(
+        root,
+        vectors=np.eye(WIDE, dtype=np.float32)[:count],
+        identities=[f"ship-{index}" for index in range(count)],
+        cameras=[camera] * count,
+    )
+
+
 def build(name: str = "recognize", **params: Any) -> GalleryRecognize:
     """The element, built the way the chain loader builds it."""
     element = create_element(ElementKind.RECOGNIZE, "shipvision", name, params)
@@ -164,17 +196,43 @@ def item(
 
 @dataclass
 class FakeDetections:
-    """The two members of C3's ``Detections`` this element reads: ``len`` and ``scores``.
+    """The two members of ``Detections`` the *unfiltered* path reads: ``len`` and ``scores``.
 
-    Two, and that is itself the evidence the dependency is as small as the plan asked for. It
-    is a stand-in and not the real class because C3 has not landed on this branch; when it
-    does, this double keeps working, because these are the attributes it declares.
+    Two, and that is itself the evidence the dependency is as small as the plan asked for.
+    C3's real :class:`~shipinfer.topology.elements.detections.Detections` has landed and
+    :func:`detected` below builds one; this double stays because a double that carries
+    exactly the two attributes the code touches is what *proves* the dependency is those two.
+    Any test that reads a **label** — the ``classes:`` path — uses the real class instead,
+    because ``labels`` is a field with an invariant (one per row, checked in
+    ``__post_init__``) and a stand-in for it would pin nothing.
     """
 
     scores: Sequence[float]
 
     def __len__(self) -> int:
         return len(self.scores)
+
+
+#: The demo repository's COCO numbering, the same table ``DecodeParams`` ships with. The class
+#: id has to agree with the label or the ``Detections`` is one no decoder could emit.
+CLASS_IDS = {"person": 0, "ship": 8}
+
+
+def detected(*labels: str, scores: Sequence[float] | None = None) -> Detections:
+    """C3's real ``Detections`` for a frame of ``labels``, one 10x10 box each.
+
+    The real class and not a double, because these tests are about ``labels`` — the field
+    ``params: classes:`` selects on — and because a row's label, class id and score have to
+    stay parallel, which is an invariant this class enforces and a dataclass of two fields
+    cannot.
+    """
+    count = len(labels)
+    return Detections(
+        boxes=np.tile(np.array([[0.0, 0.0, 10.0, 10.0]], dtype=np.float32), (count, 1)),
+        scores=np.asarray(list(scores) if scores is not None else [0.9] * count, np.float32),
+        class_ids=np.asarray([CLASS_IDS.get(label, 99) for label in labels], np.int32),
+        labels=tuple(labels),
+    )
 
 
 class TestTheDeclarations:
@@ -246,6 +304,32 @@ class TestTheDeclarations:
     ) -> None:
         with pytest.raises(ConfigurationError, match=key):
             build(**{key: value})
+
+    @pytest.mark.parametrize("value", ["off", "no", 0, [], "true"], ids=repr)
+    def test_a_switch_that_is_not_a_switch_is_refused_rather_than_coerced(
+        self, value: Any
+    ) -> None:
+        """``bool(value)`` accepts anything, and ``enrol: "off"`` is truthy.
+
+        Which means an operator switching enrolment off in the most natural spelling there is
+        would get exactly the behaviour they were trying to prevent, on a deployment that
+        started cleanly and logged nothing. Every other value in this element is refused at
+        load with a named message; this one was the exception and is not any more.
+        """
+        with pytest.raises(ConfigurationError, match="enrol must be true or false"):
+            build(enrol=value)
+
+    @pytest.mark.parametrize("value", ["ship", 8, {"ship": True}], ids=repr)
+    def test_a_class_filter_that_is_not_a_list_of_labels_is_refused(self, value: Any) -> None:
+        """``classes: ship`` is the natural typo, and a string is a ``Sequence`` of letters.
+
+        Accepted, it would filter on ``"s"``, ``"h"``, ``"i"``… and match no row at all — an
+        element that queries nothing and reports nothing. Refused with the same message
+        ``ShipvisionTrack`` gives for the same key, because a chain file's ``classes:`` must
+        not mean two things in two slots.
+        """
+        with pytest.raises(ConfigurationError, match="`params: classes:` must be a list"):
+            build(classes=value)
 
 
 class TestWithoutTheSubmodule:
@@ -437,6 +521,46 @@ class TestTheGalleryFileOnDisk:
         assert expected in str(caught.value)
         assert str(path) in str(caught.value), "the refusal names the file to go and fix"
 
+    def test_a_pickled_object_array_is_refused_without_being_executed(
+        self, tmp_path: Path
+    ) -> None:
+        """``allow_pickle=False`` is a security claim, and this is the measurement behind it.
+
+        A ``.npz`` is a zip, and an object array inside one is a pickle: loading it *runs*
+        whatever the archive says, before a single one of this module's validations gets a
+        look at the data. A model repository is a directory an operator syncs from somewhere
+        else (the module docstring argues exactly this), so the archive is not trusted input.
+
+        The detonator's ``__reduce__`` names ``os.system`` and a ``touch``, which is the
+        crudest possible proof and deliberately so: with ``allow_pickle=True`` the marker
+        file appears, measured — the refusal that goes red without this test is a refusal
+        that *runs the payload and then complains*. The assertion is therefore two things,
+        and the second is the one that matters: the load was refused, **and** nothing ran.
+        """
+        marker = tmp_path / "the-pickle-ran"
+
+        class Detonator:
+            def __reduce__(self) -> tuple[Any, tuple[str]]:
+                return (os.system, (f"touch {marker}",))
+
+        payload = np.empty(1, dtype=object)
+        payload[0] = Detonator()
+        directory = tmp_path / "ship_gallery" / "1"
+        directory.mkdir(parents=True)
+        path = directory / gallery_store.GALLERY_FILE
+        np.savez(path, vectors=payload, identities=np.array(["a"]))
+
+        with pytest.raises(ConfigurationError) as caught:
+            gallery_store.load_gallery_file(path)
+
+        # First, and deliberately first: with `allow_pickle=True` this file is *still*
+        # refused — by the shape check, because an object array is `(1,)` and not `(N, d)` —
+        # so a test that only asserted the refusal would stay green over a loader that runs
+        # the payload and then complains. `os.system` blocks, so the marker is there or the
+        # code never ran.
+        assert not marker.exists(), "the archive's pickle executed before it was refused"
+        assert "allow_pickle" in str(caught.value) or "Object array" in str(caught.value)
+
     def test_a_file_that_is_not_an_archive_is_refused_rather_than_traced(
         self, tmp_path: Path
     ) -> None:
@@ -470,11 +594,15 @@ class TestTheQuery:
         1.0. Reverting the ``exclude_camera=`` argument turns this test red on both halves,
         which is what makes it evidence rather than decoration.
 
-        ``flat`` and not the default ``centroid`` for this one: a centroid holds one vector
-        per identity and therefore one camera — the most recent — so the six rows would fold
-        into three and the case would no longer be about per-row exclusion.
+        **The default gallery, named nowhere in this test**, and that is the half worth
+        reading twice. Rule 1 is only as strong as the implementation underneath it: a
+        gallery that folds an identity's views into one vector can record only the camera it
+        saw most recently, so this same file queried through ``gallery: centroid`` answers
+        ``ship-a`` at 0.994 with the ``exclude_camera=`` argument still in place. A test that
+        opted into ``flat`` would prove the argument is passed and say nothing about what a
+        deployment that wrote no ``gallery:`` key actually gets.
         """
-        element = build(gallery="flat", gallery_dir=str(tmp_path), threshold=0.5, dim=DIM)
+        element = build(gallery_dir=str(tmp_path), threshold=0.5, dim=DIM)
         three_identities_two_cameras(tmp_path)
         element.open(ElementContext())
 
@@ -493,9 +621,9 @@ class TestTheQuery:
         """The control for the test above: the exclusion removes rows, it does not break ranking.
 
         Without this, "``ship-b`` came back" would be equally consistent with an element that
-        never finds ``ship-a`` at all.
+        never finds ``ship-a`` at all. The default gallery here too, for the same reason.
         """
-        element = build(gallery="flat", gallery_dir=str(tmp_path), threshold=0.5, dim=DIM)
+        element = build(gallery_dir=str(tmp_path), threshold=0.5, dim=DIM)
         three_identities_two_cameras(tmp_path)
         element.open(ElementContext())
 
@@ -504,7 +632,7 @@ class TestTheQuery:
         finally:
             element.close()
 
-        assert filed == [("ship-a", pytest.approx(1.0))]
+        assert filed == {0: ("ship-a", pytest.approx(1.0))}
 
     def test_an_unmatched_row_is_none_and_never_zero(self, reid: Any, tmp_path: Path) -> None:
         """0 is a legitimate gallery id (``pipeline/schema.py``), so it cannot mean 'nobody'.
@@ -551,30 +679,52 @@ class TestTheQuery:
         assert result.context is incoming.context, "the (camera, frame) tag rides on"
         assert incoming.meta.get("identities") is None, "the input item is not mutated"
 
-    def test_an_empty_frame_files_an_empty_list_and_is_not_an_error(
-        self, reid: Any, tmp_path: Path
+    @pytest.mark.parametrize("empty", [{}, np.zeros((0, DIM), np.float32)], ids=["map", "arr"])
+    def test_an_empty_frame_files_an_empty_mapping_and_counts_nothing(
+        self, reid: Any, tmp_path: Path, empty: Any
     ) -> None:
-        """ "No ships in this frame" is not a failure and must not read like one."""
+        """ "No ships in this frame" is not a failure and must not read like one.
+
+        Both spellings of empty arrive in production: an ``(0, d)`` array from an embedder
+        that ran on a frame with no detections, and an empty **mapping** from a branch
+        embedder that was handed a frame of people and selected no ship rows. Neither is a
+        query, and — the half a length assertion would miss — neither is an *unknown*. If an
+        unembedded row were counted as unknown, the unknown rate an operator watches after a
+        model change would move with how many people walked past the ship.
+        """
+        registry = MetricsRegistry()
         element = build(gallery_dir=str(tmp_path), dim=DIM)
         three_identities_two_cameras(tmp_path)
-        element.open(ElementContext())
+        element.open(ElementContext(metrics=registry))
 
         try:
-            filed = element.process(item(np.zeros((0, DIM), np.float32))).meta["identities"]
+            filed = element.process(item(empty, detections=detected())).meta["identities"]
         finally:
             element.close()
 
-        assert filed == []
+        assert filed == {}
+        counted = {metric.name: metric for metric in registry.collect()}
+        assert counted["shipinfer_recognize_queries_total"].total() == 0
+        assert counted["shipinfer_recognize_unknown_total"].total() == 0
 
     def test_a_branch_embedder_files_a_mapping_from_row_index(
         self, reid: Any, tmp_path: Path
     ) -> None:
         """The shape ``embed_ship`` needs: it embedded rows 0 and 2 of a four-row frame.
 
-        The identities come back aligned with the *detection* rows it was given, which is the
-        alignment that keeps an embedding attached to the object it came from.
+        The identities come back **keyed by the detection row**, which is the alignment that
+        keeps an identity attached to the object it came from. Filed as a positional list —
+        the shape this element shipped with — the answer would be
+        ``[("ship-b", 1.0), ("ship-a", 0.9)]``: two entries that name neither row 0 nor row
+        2, and that a consumer can only read by assuming the embedder embedded the first two
+        detections. It did not.
+
+        Rows 1 and 3 are **absent**, not ``(None, None)``. Nothing embedded them, so this
+        element has no answer for them and must not file one: the runner merges the branches
+        of a chain by unioning their metadata, and a placeholder here is what would collide
+        with the person branch's answer for the same detection.
         """
-        element = build(gallery="flat", gallery_dir=str(tmp_path), threshold=0.5, dim=DIM)
+        element = build(gallery_dir=str(tmp_path), threshold=0.5, dim=DIM)
         three_identities_two_cameras(tmp_path)
         element.open(ElementContext())
 
@@ -589,10 +739,9 @@ class TestTheQuery:
         finally:
             element.close()
 
-        assert [identity for identity, _ in filed] == [
-            "ship-b",
-            "ship-a",
-        ], "row 0 first, row 2 second — the mapping's keys are row indices, not arrival order"
+        assert set(filed) == {0, 2}, "the keys are the detector's row indices"
+        assert filed[0][0] == "ship-b"
+        assert filed[2][0] == "ship-a"
 
     def test_a_raw_model_response_is_refused_and_the_message_names_the_gap(
         self, reid: Any, tmp_path: Path
@@ -658,6 +807,152 @@ class TestTheQuery:
             )
             with pytest.raises(ValidationError, match="found no `vectors`"):
                 element.process(bare)
+        finally:
+            element.close()
+
+
+class TestTheClassFilter:
+    """``params: {classes: [...]}`` — which detection rows this element asks about.
+
+    Separate from ``when:``, which gates the whole element on one item
+    (:meth:`TestInAChain.test_the_guard_gates_the_element_and_not_the_rows_inside_it`), and
+    the pair is the reason both exist: a frame admitted by the guard still carries every
+    detection the detector found, people included, and a ship gallery asked about a person
+    answers *something*.
+
+    Mirrors :class:`~shipinfer.topology.elements.track.ShipvisionTrack`'s key of the same
+    name, over the same ``Detections.labels``, so a chain file's ``classes:`` means one thing
+    wherever it is written.
+    """
+
+    def rows(self) -> np.ndarray:
+        """Four rows whose *person* vectors would match loudly if they were ever queried.
+
+        Rows 1 and 3 are ``PROBE`` — ``ship-a``'s own appearance. A filter that silently let
+        them through would file ``ship-a`` for two people and the assertion below would name
+        it; a filter that dropped the wrong rows would lose the two real answers.
+        """
+        return np.array([[0.0, 1.0, 0.0, 0.0], PROBE, NEARLY, PROBE], dtype=np.float32)
+
+    def test_only_the_named_class_is_queried_and_the_rest_are_absent(
+        self, reid: Any, tmp_path: Path
+    ) -> None:
+        """The person rows are not queried, not counted, and not in the mapping.
+
+        "Not in the mapping" is the load-bearing third: filing ``(None, None)`` for a person
+        would be this element asserting that nobody recognises that detection, which is false
+        — the person branch does — and the runner's fan-in would have two branches offering
+        different values for the same key.
+        """
+        three_identities_two_cameras(tmp_path)
+        registry = MetricsRegistry()
+        element = build(gallery_dir=str(tmp_path), threshold=0.5, dim=DIM, classes=["ship"])
+        element.open(ElementContext(metrics=registry))
+
+        try:
+            filed = element.process(
+                item(
+                    self.rows(),
+                    camera="cam-B",
+                    detections=detected("ship", "person", "ship", "person"),
+                )
+            ).meta["identities"]
+        finally:
+            element.close()
+
+        assert set(filed) == {0, 2}, "the person rows were never this element's to answer"
+        assert filed[0][0] == "ship-b"
+        assert filed[2][0] == "ship-a"
+        counted = {metric.name: metric for metric in registry.collect()}
+        assert counted["shipinfer_recognize_queries_total"].total() == 2
+        assert counted["shipinfer_recognize_unknown_total"].total() == 0
+
+    def test_two_slots_filtering_two_classes_produce_disjoint_keys(
+        self, reid: Any, tmp_path: Path
+    ) -> None:
+        """The property the runner's fan-in needs, stated where it can be checked.
+
+        A ship recogniser and a person recogniser sit on two branches of one chain and rejoin
+        at the tracker. Their ``identities`` mappings are merged there, and a merge is only
+        well-defined if the two never claim the same detection row. Row selection by class is
+        what makes that true by construction rather than by a comment in the runner.
+        """
+        three_identities_two_cameras(tmp_path)
+        ships = build(
+            "recognize_ship",
+            gallery_dir=str(tmp_path),
+            gallery_name="recognize",
+            dim=DIM,
+            classes=["ship"],
+        )
+        people = build(
+            "recognize_person",
+            gallery_dir=str(tmp_path),
+            gallery_name="recognize",
+            dim=DIM,
+            classes=["person"],
+        )
+        detections = detected("ship", "person", "ship", "person")
+        ships.open(ElementContext())
+        people.open(ElementContext())
+
+        try:
+            by_ship = ships.process(
+                item(self.rows(), camera="cam-B", detections=detections)
+            ).meta["identities"]
+            by_person = people.process(
+                item(self.rows(), camera="cam-B", detections=detections)
+            ).meta["identities"]
+        finally:
+            ships.close()
+            people.close()
+
+        assert set(by_ship) == {0, 2}
+        assert set(by_person) == {1, 3}
+        assert not set(by_ship) & set(by_person), "two branches, one row each, no collision"
+        assert set(by_ship) | set(by_person) == {0, 1, 2, 3}
+
+    def test_a_class_filter_with_no_detections_to_read_is_a_wiring_failure(
+        self, reid: Any, tmp_path: Path
+    ) -> None:
+        """A filter with nothing to filter on must not quietly pass everything.
+
+        Passing everything is the dangerous default here, not the safe one: it queries every
+        person in the frame against a ship gallery and files an identity for them, which is
+        the failure ``topology/ship_person.yaml``'s ``when:`` clauses were added for.
+        """
+        three_identities_two_cameras(tmp_path)
+        element = build(gallery_dir=str(tmp_path), dim=DIM, classes=["ship"])
+        element.open(ElementContext())
+
+        try:
+            with pytest.raises(ValidationError, match="carries no `detections`"):
+                element.process(item(np.array([PROBE])))
+        finally:
+            element.close()
+
+
+class TestARefusalFromTheLibrary:
+    """A ``shipvision`` error reaching the walk must arrive as one of ours."""
+
+    def test_a_query_of_the_wrong_width_is_a_wiring_failure_and_not_a_bug(
+        self, reid: Any, tmp_path: Path
+    ) -> None:
+        """Rule 4, arriving late because the chain declared no ``dim:``.
+
+        ``open()`` refuses a width mismatch it can see, and with no ``dim:`` declared there is
+        nothing to compare the file against until a vector turns up. When one does,
+        ``shipvision`` raises ``DimensionMismatchError`` — not a ``ShipInferError`` — and the
+        runner would charge it to "this element has a bug" rather than to the two embedders
+        feeding one gallery that actually caused it. The re-raise carries the fix.
+        """
+        three_identities_two_cameras(tmp_path)
+        element = build(gallery_dir=str(tmp_path))
+        element.open(ElementContext())
+
+        try:
+            with pytest.raises(ValidationError, match="declare `dim:`"):
+                element.process(item(np.zeros((1, 8), np.float32)))
         finally:
             element.close()
 
@@ -777,7 +1072,7 @@ class TestOpen:
         finally:
             element.close()
 
-        assert filed == [(None, None)]
+        assert filed == {0: (None, None)}
 
     def test_a_capacity_that_drops_identities_at_load_says_so(
         self, reid: Any, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -806,6 +1101,82 @@ class TestOpen:
         element.close()
 
         assert any("exclude_camera" in record.getMessage() for record in caplog.records)
+
+    def test_a_gallery_that_cannot_exclude_per_view_says_so_at_open(
+        self, reid: Any, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Rule 1 is only as strong as the implementation underneath it, so name the weak one.
+
+        ``centroid`` is a legitimate choice — its memory scales with the fleet rather than
+        with dwell time, and the library documents the trade honestly. What is not legitimate
+        is making that choice *silently*, because the symptom is a re-identification number
+        that looks better than the system is.
+        """
+        three_identities_two_cameras(tmp_path)
+        element = build(gallery="centroid", gallery_dir=str(tmp_path), dim=DIM)
+
+        with caplog.at_level(logging.WARNING, logger="shipinfer.topology.recognize"):
+            element.open(ElementContext())
+        element.close()
+
+        warned = [r for r in caplog.records if "exclude_camera" in r.getMessage()]
+        assert len(warned) == 1, "once, at open"
+        assert "flat" in warned[0].getMessage(), "the warning names the fix"
+
+    def test_the_default_gallery_does_not_warn_about_its_own_exclusion(
+        self, reid: Any, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The other half: a warning every deployment sees is a warning nobody reads."""
+        three_identities_two_cameras(tmp_path)
+        element = build(gallery_dir=str(tmp_path), dim=DIM)
+
+        with caplog.at_level(logging.WARNING, logger="shipinfer.topology.recognize"):
+            element.open(ElementContext())
+        element.close()
+
+        assert not [r for r in caplog.records if "exclude_camera" in r.getMessage()]
+
+    def test_the_warned_about_gallery_really_does_answer_the_self_match(
+        self, reid: Any, tmp_path: Path
+    ) -> None:
+        """The measurement behind the warning, so it is evidence rather than an opinion.
+
+        Same file, same probe, same ``exclude_camera=cam-A`` — ``flat`` answers ``ship-b``
+        (rule 1 honoured) and ``centroid`` answers ``ship-a``, the identity whose own camera
+        is asking. The fold left one vector carrying the camera of the *most recent*
+        observation (``cam-B``), so the ``cam-A`` view inside it is not excluded by anything.
+
+        This asserts a **library** behaviour on purpose. If ``shipvision``'s centroid ever
+        excludes per view, this test goes red — and that is the signal that the default and
+        the warning above have become stale, which is exactly when somebody should look.
+        """
+        three_identities_two_cameras(tmp_path)
+        folded = build(gallery="centroid", gallery_dir=str(tmp_path), threshold=0.5, dim=DIM)
+        folded.open(ElementContext())
+
+        try:
+            filed = folded.process(item(np.array([PROBE]), camera="cam-A")).meta["identities"]
+        finally:
+            folded.close()
+
+        assert filed[0][0] == "ship-a", "the fold cannot exclude the view that is asking"
+        assert filed[0][1] > 0.99, "and it scores it as a near-perfect match"
+
+    def test_an_empty_file_still_states_a_width_and_a_mismatch_stops_the_deploy(
+        self, reid: Any, tmp_path: Path
+    ) -> None:
+        """A gallery emptied for re-enrolment keeps its dtype and shape, so it keeps its claim.
+
+        That is the deployment where a stale width would otherwise be found on the first
+        frame after somebody enrolled into it — long after the deploy that introduced it.
+        """
+        write_gallery(tmp_path, vectors=np.zeros((0, 8), dtype=np.float32), identities=[])
+        element = build(gallery_dir=str(tmp_path), dim=DIM)
+
+        with pytest.raises(ConfigurationError) as caught:
+            element.open(ElementContext())
+
+        assert "8-d" in str(caught.value) and "4" in str(caught.value)
 
     def test_an_explicit_file_path_wins_over_the_repository_triple(
         self, reid: Any, tmp_path: Path
@@ -870,7 +1241,7 @@ class TestOpen:
 
         element.open(ElementContext())
         try:
-            assert len(element._gallery) == 3, "a centroid per identity, reloaded"
+            assert len(element._gallery) == 6, "every row of the file, reloaded"
         finally:
             element.close()
 
@@ -969,8 +1340,9 @@ class TestEnrolment:
         finally:
             element.close()
 
-        assert first == [(None, None)]
-        assert second == [(None, None)], "nothing was learned from the first frame"
+        assert first == {0: (None, None)}
+        assert second == {0: (None, None)}, "nothing was learned from the first frame"
+        assert element._enrolled is None, "no second store is built when enrolment is off"
 
     def test_when_it_is_on_the_next_camera_to_see_the_same_ship_recognises_it(
         self, reid: Any, tmp_path: Path
@@ -1021,9 +1393,9 @@ class TestEnrolment:
         finally:
             element.close()
 
-        assert minted == [("auto:cam-A:184102:0", None)], "identity yes, similarity no"
-        assert elsewhere == [("auto:cam-A:184102:0", pytest.approx(1.0))]
-        assert again == [(None, None)], "its own camera's enrolment is still excluded"
+        assert minted == {0: ("auto:cam-A:184102:0", None)}, "identity yes, similarity no"
+        assert elsewhere == {0: ("auto:cam-A:184102:0", pytest.approx(1.0))}
+        assert again == {0: (None, None)}, "its own camera's enrolment is still excluded"
 
         enrolments = {metric.name: metric for metric in registry.collect()}[
             "shipinfer_recognize_enrolments_total"
@@ -1032,6 +1404,159 @@ class TestEnrolment:
             "one enrolment for three unmatched-by-its-own-camera frames: the membership "
             "check is what keeps a camera from re-enrolling the ship it just enrolled"
         )
+
+    def test_forty_stranger_frames_do_not_cost_the_operator_a_curated_identity(
+        self, reid: Any, tmp_path: Path
+    ) -> None:
+        """The failure this element shipped with, and the property that replaces it.
+
+        Both shipped galleries evict the least recently *observed* entry, and this element
+        never re-adds on a match — so a file-loaded identity's observation clock is frozen at
+        load and it is the first thing a full gallery drops. Measured on the single-store
+        version: capacity 8, four curated identities, forty stranger frames from one camera
+        (two seconds at 20 fps) left ``curated survivors: []``. At the shipped default
+        capacity a 1000 fps fleet turns the whole gallery over in about ten seconds of
+        uncorrelated crops. That is ADR-005's own failure — a bounded shared buffer evicting
+        the entry nobody is refreshing — reproduced inside the gallery.
+
+        Forty *orthogonal* strangers, so this is arithmetic and not a question about how
+        random vectors land: each is unmatched, each mints, and none of them resembles a
+        curated ship enough to be declined by the membership check.
+
+        The last assertion is the one that matters to an operator: after all of it, a curated
+        ship is still recognised. A surviving *name* would also be satisfied by a gallery
+        holding a vector that had been quietly overwritten.
+        """
+        curated_fleet(tmp_path)
+        element = build(
+            gallery_dir=str(tmp_path),
+            capacity=8,
+            enrol_capacity=8,
+            dim=WIDE,
+            threshold=0.5,
+            enrol=True,
+            enrol_min_confidence=0.5,
+        )
+        element.open(ElementContext())
+
+        try:
+            for frame in range(40):
+                element.process(
+                    item(
+                        np.array([np.eye(WIDE, dtype=np.float32)[4 + frame]]),
+                        camera="cam-A",
+                        frame=frame,
+                        detections=FakeDetections(scores=[0.9]),
+                    )
+                )
+            survivors = sorted(element._gallery.identities)
+            still_known = element.process(
+                item(
+                    np.array([np.eye(WIDE, dtype=np.float32)[0]]),
+                    camera="cam-Z",
+                    detections=FakeDetections(scores=[0.9]),
+                )
+            ).meta["identities"]
+        finally:
+            element.close()
+
+        assert survivors == ["ship-0", "ship-1", "ship-2", "ship-3"]
+        assert still_known[0][0] == "ship-0", "and the vector behind the name is still its own"
+
+    def test_the_bound_enrolment_runs_into_is_the_one_it_filled_itself(
+        self, reid: Any, tmp_path: Path
+    ) -> None:
+        """The other half: bounded still, and bounded where the growth actually is.
+
+        Forty mints into a store of eight leaves eight — the eviction happened, it was the
+        library's, and every entry it discarded was one this element had minted. The counter
+        says forty because forty rows really were enrolled; a deployment reading
+        ``enrolments_total`` against ``len`` is reading turnover, which is the number that
+        tells it ``enrol_capacity`` is too small.
+        """
+        curated_fleet(tmp_path)
+        registry = MetricsRegistry()
+        element = build(
+            gallery_dir=str(tmp_path),
+            enrol_capacity=8,
+            dim=WIDE,
+            threshold=0.5,
+            enrol=True,
+            enrol_min_confidence=0.5,
+        )
+        element.open(ElementContext(metrics=registry))
+
+        try:
+            for frame in range(40):
+                element.process(
+                    item(
+                        np.array([np.eye(WIDE, dtype=np.float32)[4 + frame]]),
+                        camera="cam-A",
+                        frame=frame,
+                        detections=FakeDetections(scores=[0.9]),
+                    )
+                )
+            minted = len(element._enrolled)
+            curated = len(element._gallery)
+        finally:
+            element.close()
+
+        assert minted == 8, "the minted store held its own bound"
+        assert curated == 4, "and nothing was taken out of the curated one to make room"
+        enrolments = {metric.name: metric for metric in registry.collect()}[
+            "shipinfer_recognize_enrolments_total"
+        ]
+        assert enrolments.total() == 40
+
+    def test_a_camera_does_not_re_enrol_the_ship_it_just_enrolled(
+        self, reid: Any, tmp_path: Path
+    ) -> None:
+        """The one deliberate hole in rule 1, pinned on its own rather than as a side effect.
+
+        Two questions, two different answers to ``exclude_camera``. "Which identity may I
+        publish for this row?" excludes the row's own camera, because a same-camera match
+        measures the tracker. "Is this appearance in the gallery at all?" must **not**,
+        because a camera can never match what it itself enrolled — so with the exclusion in
+        place the same ship is enrolled again on every frame it is seen, and a gallery that
+        grows per frame is the memory leak ``BaseGallery`` warns about.
+
+        Ten frames of one ship on one camera: one enrolment, and the published answer stays
+        ``None`` throughout, because the identity exists and this camera may not claim it.
+        Give the membership check the exclusion back and this is ten enrolments.
+        """
+        curated_fleet(tmp_path)
+        registry = MetricsRegistry()
+        element = build(
+            gallery_dir=str(tmp_path),
+            dim=WIDE,
+            threshold=0.5,
+            enrol=True,
+            enrol_min_confidence=0.5,
+        )
+        element.open(ElementContext(metrics=registry))
+        stranger = np.eye(WIDE, dtype=np.float32)[9]
+
+        try:
+            filed = [
+                element.process(
+                    item(
+                        np.array([stranger]),
+                        camera="cam-A",
+                        frame=frame,
+                        detections=FakeDetections(scores=[0.9]),
+                    )
+                ).meta["identities"]
+                for frame in range(10)
+            ]
+            minted = len(element._enrolled)
+        finally:
+            element.close()
+
+        assert minted == 1, "ten frames of one ship are one identity, not ten"
+        assert filed[0] == {0: ("auto:cam-A:0:0", None)}, "the frame that minted it"
+        assert all(
+            answer == {0: (None, None)} for answer in filed[1:]
+        ), "its own camera may not claim what it enrolled — the published answer stays None"
 
     def test_a_row_the_detector_was_unsure_of_is_not_enrolled(
         self, reid: Any, tmp_path: Path
@@ -1062,13 +1587,18 @@ class TestEnrolment:
         finally:
             element.close()
 
-        assert filed == [(None, None)]
-        assert later == [(None, None)], "the blurred crop did not become an identity"
+        assert filed == {0: (None, None)}
+        assert later == {0: (None, None)}, "the blurred crop did not become an identity"
 
     def test_a_row_with_no_confidence_is_not_enrolled_and_says_so_once(
         self, reid: Any, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Until C3 lands, no item carries a per-row confidence — so nothing is enrolled.
+        """A chain that embeds with no decoding detector ahead of it enrols nobody.
+
+        ``meta["detections"]`` is C3's and is filed by ``PoolDetect`` today, so this is the
+        chain that does not have one — a fixed-crop source, a test rig — rather than a
+        temporary state of the branch. A row whose quality is unknown is not enrolled,
+        because the safe answer is the one that changes nothing.
 
         Silent, that is a deployment with enrolment configured and switched on that never
         enrols anybody. One warning, not one per frame: this runs at a thousand frames a
@@ -1081,21 +1611,23 @@ class TestEnrolment:
             with caplog.at_level(logging.WARNING, logger="shipinfer.topology.recognize"):
                 for _ in range(3):
                     element.process(item(np.array([PROBE])))
-            assert len(element._gallery) == 0
+            assert len(element._enrolled) == 0
         finally:
             element.close()
 
         warned = [r for r in caplog.records if "no per-row confidence" in r.getMessage()]
         assert len(warned) == 1
 
-    def test_enrolment_stays_inside_the_gallery_s_capacity(self, reid: Any) -> None:
+    def test_enrolment_stays_inside_the_enrolled_store_s_capacity(self, reid: Any) -> None:
         """The bound is the library's and this test is what says the element does not defeat it.
 
         A gallery that grows without one is a memory leak with a plausible name
-        (``shipvision.reid.gallery.base``).
+        (``shipvision.reid.gallery.base``). ``enrol_capacity:`` is the knob that bounds the
+        minted store specifically, so that a deployment can hold ten thousand curated ships
+        and still cap what the server teaches itself.
         """
         element = build(
-            gallery="flat", capacity=2, dim=DIM, enrol=True, enrol_min_confidence=0.5
+            gallery="flat", enrol_capacity=2, dim=DIM, enrol=True, enrol_min_confidence=0.5
         )
         element.open(ElementContext())
 
@@ -1108,7 +1640,7 @@ class TestEnrolment:
                         detections=FakeDetections(scores=[0.9]),
                     )
                 )
-            assert len(element._gallery) == 2
+            assert len(element._enrolled) == 2
         finally:
             element.close()
 
@@ -1168,8 +1700,10 @@ class TestInAChain:
 
         Worth pinning because the natural reading of "recognize only ships" is per-row, and
         it is not: a frame the condition rejects skips this element entirely, and a frame it
-        admits is queried for **every** vector it carries. Per-row class filtering needs C3's
-        per-row labels and is not this slice's.
+        admits is queried for every vector it carries. Per-row selection is a *separate*
+        setting — ``params: {classes: [ship]}``, over C3's ``Detections.labels``, pinned in
+        :class:`TestTheClassFilter` — and the two are not interchangeable: ``when:`` decides
+        whether this element runs at all, ``classes:`` decides which rows it asks about.
         """
         node = self.chain().node("recognize")
 
