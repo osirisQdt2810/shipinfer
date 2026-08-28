@@ -24,8 +24,9 @@ the embed→track scatter-back before the demo chain runs."
 | `track._embeddings` | the **empty** mapping is exempt from the coverage check |
 | `_CropMetrics` | `shipinfer_element_crops_per_frame` (object-count buckets) + `shipinfer_element_crops_total`, both labelled by element, both null-object when the runner offered no registry |
 | row selection, shared | `Detections.indices_of_any(classes)` + `Detections.boxes_at(indices)` + `parse_classes(declared, what)` in `topology/elements/detections.py`; `track` and every crop element now call one rule instead of carrying a copy each |
-| **the fan-in merge** (`runners/inprocess.py`) | **a shared seam changed.** `_inbound` merged metadata with `meta.setdefault(key, value)` — first writer wins, per key, *wholesale*. `_merge_meta` now takes the **union** when two branches wrote a `Mapping` under one key, and refuses (`InferenceError`) two branches that filed different values for the same entry |
-| tests | `tests/topology/test_pool_embed_crops.py` (58), +18 in `test_detections.py` for the shared helpers, +5 in `tests/runners/test_walk.py` for the merge rule, +1 in `test_track_element.py`; four existing tests updated where C8 changed their premise |
+| `RowIndexed` (`topology/base.py`) | **a new vocabulary word on a shared seam.** A thin `dict` subclass that *declares* "this metadata value is keyed by detection row, and is therefore partial by design". Written by `_PoolCropElement._scatter`, read by the fan-in. Carries no behaviour: every `isinstance(..., Mapping)` consumer, `track._embeddings` included, is unchanged |
+| **the fan-in merge** (`runners/inprocess.py`) | **a shared seam changed.** `_inbound` merged metadata with `meta.setdefault(key, value)` — first writer wins, per key, *wholesale*. `_merge_meta` now takes the **union** when two branches wrote a `RowIndexed` under one key, and refuses (`InferenceError`) two branches that filed different values for the same detection row. Any other pair of values, mappings included, keeps first-writer-wins |
+| tests | `tests/topology/test_pool_embed_crops.py` (60 new), +21 in `test_detections.py` for the shared helpers, +9 in `tests/runners/test_walk.py` for the merge rule, +1 in `test_track_element.py`; four existing tests updated where C8 changed their premise |
 
 **Why.** The chain's cardinality has to change somewhere — arch.md §5's "branch on class →
 crop batch → submit crops" — and the embedder is where. Everything here is the proven fan-out
@@ -50,8 +51,11 @@ that every row knows which detection it came from.
   Two embedders can meet in two ways and both had to be closed. *In series* — both on one
   branch — the second finds the first's mapping in `item.meta`, and `_scatter` merges into it
   (and refuses a non-mapping already filed under the key rather than overwriting the producer
-  that needs fixing). *In parallel* — which is what `topology/ship_person.yaml` actually
-  declares, `embed_person: after: detect` and `track: after: [recognize, embed_person]` —
+  that needs fixing). *In parallel* — the wiring `topology/ship_person.yaml` is shaped like
+  and the one C8b will give it, `embed_person: after: detect` and
+  `track: after: [recognize, embed_person]`; on the shipped file itself both embedders carry
+  `when: class == …` against a field nothing in the chain sets, so today neither of them runs
+  and the fixture in `tests/topology/test_pool_embed_crops.py` is what declares the shape —
   neither element ever sees the other's item, `_scatter`'s merge branch is never reached, and
   the union has to be taken at the fan-in. It was not: `InprocessRunner._inbound` merged branch
   metadata with `meta.setdefault(...)`, so the *first* branch's whole `vectors` mapping won and
@@ -60,12 +64,26 @@ that every row knows which detection it came from.
   no counter, both elements' per-frame counters reporting the crops they really did make. The
   fix is at the seam and not in the element: `_merge_meta` unions two mappings under one key,
   because a partial coverage is what the mapping form *means*.
-- **What the merge does not do.** A key one branch wrote as a mapping and another as something
-  else is not a union — that is two branches disagreeing about what the key *is* — so it keeps
-  the existing first-writer-wins rule, as do two scalars (`meta["class"]`), whose resolution
+- **The shape is declared, not sniffed — and that is what makes the union safe.** The first
+  cut of this rule unioned any two `Mapping` values, and a `Mapping` is exactly what it cannot
+  decide on: `_PoolElement._finish` files a model's raw `response.outputs` — `{output name:
+  Tensor}` — under its `meta_key`, and `PoolSegment` (`masks`) and `PoolRecognize`
+  (`identities`) both keep that default. Two rejoining `segment` slots therefore either failed
+  *every frame* (engines that name their output the same collided on the output *name*, with a
+  message sending the operator to a `params: classes:` that family does not have) or silently
+  produced a composite `{'ship_masks': …, 'person_masks': …}` neither engine emitted. So the
+  writer declares itself: `_scatter` files a `RowIndexed`, and only two of those union.
+  Everything else keeps first-writer-wins, which is the right default for a value whose shape
+  nobody declared — and it makes the refusal reachable only from slots that *have* a `classes:`
+  to check. The union is itself a `RowIndexed`, because a three-way rejoin merges the third
+  contributor into the result of merging the first two.
+- **What the merge does not do.** A key one branch wrote as a `RowIndexed` and another as
+  something else is not a union — that is two branches disagreeing about what the key *is* — so
+  it keeps the existing first-writer-wins rule, as do two scalars (`meta["class"]`), whose
+  resolution
   stays a property of the chain file's declaration order rather than of thread timing. Two
-  branches filing *different* values for the same entry of one mapping is refused with a typed
-  `InferenceError` naming the key, the entry and every slot that claimed it: there is no answer
+  branches filing *different* values for the same detection row is refused with a typed
+  `InferenceError` naming the key, the row and every slot that claimed it: there is no answer
   to "which of these two vectors is this object's", and it means both elements cropped it,
   which is the duplicated GPU work `classes:` exists to prevent. Identity is checked before any
   of that, so a mapping written *before* the fork and carried down both branches — a diamond,
@@ -74,18 +92,16 @@ that every row knows which detection it came from.
   array whose truth value raises.
 - **No *general* load-time check behind it, and that is a decision.** CONVENTIONS 2.6 would
   prefer the loader to refuse "two elements on rejoining branches write the same key with
-  incompatible shapes" at `from_spec`. To do that it would have to know two things about every
-  element: which metadata *keys* it writes, and what *shape* each value has. The keys are
-  declarable — every writer names them literally, so it costs a `ClassVar` on five classes, the
-  way `pool` already does it (`_PoolElement.meta_key`). The **shapes are not**: nothing says
-  "`vectors` is a `{row: array}` mapping and `class` is a string", and it is the shape, not the
-  key, that decides whether two writers union or collide. Keys alone cannot tell the legal case
-  from the illegal one — two elements under one key is the *shipped* merge when both write
-  mappings over disjoint rows — so such a check would either refuse the chain the rule exists to
-  serve or pass every pair it cannot see, which reads as coverage and is not. The check that
-  *is* sound is narrower and belongs elsewhere: two `pool` crop elements on rejoining branches
-  with the same `meta_key` and `classes:` that overlap or are absent is a static fact, and it
-  lands beside the `classes:`-against-`class_labels` cross-check that reads the same two fields.
+  incompatible shapes" at `from_spec`. To do that it would have to know two things about
+  *every* element: which metadata keys it writes, and which of them it writes as a
+  `RowIndexed`. The `pool` family declares both — `meta_key` is a `ClassVar` and only
+  `_PoolCropElement` scatters — but the family is not the tree: `Element` is an ABC anyone may
+  implement, `process` may file any key it likes, and a loader that walked only the classes it
+  recognises would pass every pair it cannot see, which reads as coverage and is not. The check
+  that *is* sound is narrower, is about `classes:` rather than about shapes, and belongs
+  elsewhere: two `pool` crop elements on rejoining branches with the same `meta_key` and
+  `classes:` that overlap or are absent is a static fact, and it lands beside the
+  `classes:`-against-`class_labels` cross-check that reads the same two fields.
 - **The series composition refuses an overlap the same way the fan-in does.** `_scatter` merged
   with `{**existing, **covered}` — silent last-writer-wins per row — so the same `classes:`
   overlap was a typed refusal when the two slots rejoined at `track` and a wrong appearance
