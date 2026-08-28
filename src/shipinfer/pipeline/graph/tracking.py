@@ -31,20 +31,30 @@ is released as soon as the crop step is past and holding it until tracking would
 alive per in-flight frame — the exact retention :mod:`shipinfer.pipeline.graph.state` exists
 to avoid. Only BoT-SORT can use pixels (camera-motion compensation), so
 ``tracking.needs_frame`` is the opt-in, and it is off unless a deployment asks.
+
+**Where the per-camera table lives now.** :class:`TrackerShard` moved to
+:mod:`shipinfer.topology.elements.track` in phase C4, because the chain's ``track`` element
+needs the same object and two copies of an invariant with no symptom is how one of them stops
+being correct. It is imported back here so this stage keeps working unchanged — the
+coexistence ``docs/arch.md`` section 9 describes, and the reason ``pipeline`` may import
+``topology`` (one-way; ``scripts/hooks/check_layers.py`` states the direction).
 """
 
 from __future__ import annotations
 
-import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 
-from shipinfer.core.errors import ConfigurationError, TrackingError
+from shipinfer.core.errors import ConfigurationError
 from shipinfer.pipeline.graph.objects import ObjectBatch
 from shipinfer.pipeline.graph.stage import Cardinality, PipelineStage
 from shipinfer.pipeline.graph.state import DETECTIONS, FRAME_INPUT
+from shipinfer.topology.elements.track import (  # noqa: F401  (re-export: see the docstring)
+    TrackerShard,
+    _CameraShard,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from shipinfer.core.settings.pipeline import TrackingSettings
@@ -112,188 +122,6 @@ def tracking_available() -> bool:
 def tracking_import_error() -> ImportError | None:
     """Why the import failed, for an error message that names the fix."""
     return _IMPORT_ERROR
-
-
-class _CameraShard:
-    """One camera's tracker, its lock, and how far through the stream it has been fed.
-
-    ``__slots__`` and a plain class: one of these exists per camera for the process's life,
-    so the shape matters less than it does per frame, but the lock and the high-water mark
-    have to sit together — reading one without the other is the race this module prevents.
-    """
-
-    __slots__ = ("last_frame_id", "lock", "out_of_order", "tracker")
-
-    def __init__(self, tracker: Any) -> None:
-        self.lock = threading.Lock()
-        self.tracker = tracker
-        #: The highest ``frame_id`` fed to this tracker. ``-1`` because ``FrameTag`` allows
-        #: frame 0 and a camera's first frame must not look like a replay.
-        self.last_frame_id = -1
-        self.out_of_order = 0
-
-
-class TrackerShard:
-    """One tracker per camera, built lazily and never shared.
-
-    The sharding is a correctness constraint, not a scaling one — see this module's
-    docstring. Everything else here exists to make that constraint hold under the pipeline's
-    worker threads.
-
-    Args:
-        algorithm: a name registered in ``shipvision.mot.TRACKERS`` (``sort``,
-            ``bytetrack``, ``ocsort``, ``botsort``, ``deepsortv2``). Resolved through that
-            registry, so adding a tracker there needs no edit here — an ``if/elif`` on this
-            string is exactly what the registry exists to replace.
-        options: constructor keyword arguments for that tracker.
-        backend: pin ``python`` or ``native``. ``None`` takes the fastest one this host can
-            actually build, which is the registry's documented behaviour.
-
-    Raises:
-        ConfigurationError: the library is absent, the algorithm is unknown, or ``options``
-            holds a key the tracker's constructor does not accept. Raised **at construction**
-            — one throwaway tracker is built here for no other reason — because a typo in a
-            deployment's tracking options must stop the deploy rather than surface identically
-            on every frame from inside a worker thread.
-    """
-
-    def __init__(
-        self,
-        algorithm: str,
-        *,
-        options: Mapping[str, Any] | None = None,
-        backend: str | None = None,
-    ) -> None:
-        if _TRACKERS is None:
-            raise ConfigurationError(
-                f"tracking is enabled but shipvision.mot cannot be imported "
-                f"({_IMPORT_ERROR}). Check out the submodule and install it — "
-                f"`git submodule update --init 3rdparty/shipvision && "
-                f"pip install -e 3rdparty/shipvision` — or set pipeline.tracking.enabled=false"
-            )
-        self._algorithm = algorithm
-        self._options = dict(options or {})
-        self._backend = backend
-        # Guards insertion into `_cameras` only. Never held across `tracker.update`, so a
-        # slow camera cannot stall the other forty-nine.
-        self._admit = threading.Lock()
-        self._cameras: dict[str, _CameraShard] = {}
-        self._build()
-
-    def _build(self) -> Any:
-        try:
-            return _TRACKERS.build(self._algorithm, backend=self._backend, **self._options)
-        except Exception as exc:
-            raise ConfigurationError(
-                f"tracking: cannot build tracker {self._algorithm!r}"
-                f"{'' if self._backend is None else f' (backend {self._backend!r})'} "
-                f"with options {sorted(self._options)}: {exc}"
-            ) from exc
-
-    # -- properties ----------------------------------------------------------------------
-
-    @property
-    def algorithm(self) -> str:
-        return self._algorithm
-
-    @property
-    def cameras(self) -> tuple[str, ...]:
-        """Cameras that have a tracker, in the order they first appeared."""
-        return tuple(self._cameras)
-
-    def tracker_for(self, camera_id: str) -> Any:
-        """One camera's tracker, for a test that wants to look at the state directly."""
-        return self._shard(camera_id).tracker
-
-    def stats(self) -> dict[str, int]:
-        """What an operator reads: how many cameras are tracked, and how many frames lost
-        the ordering race. ``stages_failed{stage="track"}`` counts the same refusals; this
-        is the per-shard view of the same fact."""
-        return {
-            "cameras": len(self._cameras),
-            "tracks": sum(s.tracker.pool_size for s in self._cameras.values()),
-            "out_of_order": sum(s.out_of_order for s in self._cameras.values()),
-        }
-
-    # -- the contract --------------------------------------------------------------------
-
-    def update(self, detections: Any, *, image: np.ndarray | None = None) -> list[Any]:
-        """Advance one camera by one frame and return its publishable tracks.
-
-        The argument is a ``shipvision.types.Detections``, tag included, so the camera and
-        the frame cannot be passed separately and cannot disagree with the boxes.
-
-        **The invariant.** A camera's tracker sees that camera's frames one at a time and in
-        strictly increasing ``frame_id`` order. The per-camera lock gives the first half; the
-        per-camera high-water mark gives the second, and it has to, because reassembly does
-        not order anything: two of one camera's frames can be in the DAG at once and the
-        later one can reach this method first.
-
-        **What a violation costs, and why it is refused rather than absorbed.** Feeding a
-        tracker a frame it has already passed advances every filter a second time, ages every
-        track a second time, and double-counts the hit that promotes a tentative track — so a
-        replayed or reordered frame silently changes *which identities exist* downstream. The
-        frame that lost the race is therefore refused: it is emitted with its detections, its
-        embeddings and its masks intact and with no track ids, and the event names ``track``
-        in ``missing_stages``. A frame with an honest gap is worth more than a fleet-wide
-        identity built on a double-counted hit.
-
-        **Not silently reordered, either.** A reorder buffer would have to wait for a frame
-        that may never arrive — the ingest queue drops on overflow and on an expired deadline
-        — so it needs a timeout, and that timeout is latency paid by every frame of every
-        camera to rescue the few that raced. If the refusal rate is high enough to matter,
-        the fix is upstream (fewer of one camera's frames in flight at once), and
-        ``stats()["out_of_order"]`` is the number that says so.
-
-        Raises:
-            TrackingError: the frame does not advance this camera's stream.
-        """
-        tag = detections.tag
-        shard = self._shard(tag.camera_id)
-        with shard.lock:
-            if tag.frame_id <= shard.last_frame_id:
-                shard.out_of_order += 1
-                raise TrackingError(
-                    f"camera {tag.camera_id!r}: frame {tag.frame_id} reached the tracker "
-                    f"after frame {shard.last_frame_id}. Tracking is stateful and ordered; "
-                    f"replaying a frame double-ages every track and double-counts the hit "
-                    f"that promotes one, so this frame is published without track ids "
-                    f"rather than with wrong ones"
-                )
-            shard.last_frame_id = tag.frame_id
-            return shard.tracker.update(detections, image=image)
-
-    def reset(self, camera_id: str) -> None:
-        """Forget one camera's tracks and its stream position.
-
-        For a camera that reconnected: continuity is broken, so the ids must not continue,
-        and the next frame's id may be lower than the last one seen.
-        """
-        shard = self._shard(camera_id)
-        with shard.lock:
-            shard.tracker.reset()
-            shard.last_frame_id = -1
-
-    def _shard(self, camera_id: str) -> _CameraShard:
-        """This camera's shard, creating it on first sight.
-
-        The unlocked ``get`` first is not a micro-optimisation: it is what keeps admitting a
-        frame off the one lock every camera shares, in the steady state where the shard
-        already exists. A ``dict`` lookup is a single bytecode under the GIL, and the
-        re-check inside the lock is what makes the create path safe.
-        """
-        shard = self._cameras.get(camera_id)
-        if shard is not None:
-            return shard
-        with self._admit:
-            shard = self._cameras.get(camera_id)
-            if shard is None:
-                shard = _CameraShard(self._build())
-                self._cameras[camera_id] = shard
-            return shard
-
-    def __repr__(self) -> str:
-        return f"<TrackerShard {self._algorithm} cameras={len(self._cameras)}>"
 
 
 class TrackStage(PipelineStage):
