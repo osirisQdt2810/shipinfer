@@ -472,10 +472,14 @@ class PoolDetect(_PoolElement):
                 f"detect element {self.name!r} needs image ops and the runner passed none. "
                 "A `pool` detector letterboxes the frame before it submits and undoes exactly "
                 "that transform to put the boxes back in source pixels, so it is opened with "
-                "an `ElementContext` carrying `ops=` — `shipinfer.runtime.ops.get_image_ops()`, "
-                "resolved by the process that builds the runner (`cli/commands/run.py`, "
-                "`cli/shard.py`), the same way `models=` is. It is not defaulted here: "
-                "`topology` may not import `runtime`, so a fallback would mean a second, "
+                "an `ElementContext` carrying `ops=` — "
+                "`shipinfer.runtime.ops.get_thread_local_image_ops(...)`, resolved by the "
+                "process that builds the runner (`cli/commands/run.py`, `cli/shard.py`), the "
+                "same way `models=` is. One per *thread*, which is why it is that call and not "
+                "`get_image_ops()`: this element is shared by every worker walking the chain, "
+                "and every implementation the latter returns is per-thread by contract. It "
+                "is not defaulted here: `topology` may not import `runtime`, so a fallback "
+                "would mean a second, "
                 "unfused letterbox living in a pure layer — at 1000 frames a second that is a "
                 "throughput cliff reported as a successful start-up"
             )
@@ -551,12 +555,21 @@ class PoolDetect(_PoolElement):
         opened successfully, and then failed inside the backend on every frame of the deploy.
         CONVENTIONS 2.6 is validate at start-up, not at first use.
 
-        **A ``decode.dst_size`` a static input contradicts.** The override exists for an
-        engine whose input is dynamic, and a dynamic spec declares nothing to disagree with —
-        which is exactly why the disagreement is only checkable against a static ``(3, H, W)``.
-        Left unchecked it is the failure :meth:`_resolve_dst_size`'s own docstring gives as its
-        reason for existing, one deployment further on: a static engine refuses the wrong
-        extent loudly, a dynamic one accepts it and makes every box on every camera wrong.
+        **A declared input the resolved letterbox cannot go into.** Asked of the spec itself,
+        with :meth:`~shipinfer.core.types.TensorSpec.matches` — the same question
+        ``stage.py`` asked of ``expected_row_shape`` — rather than of a hand-rolled predicate
+        over the extent. It is one call and it covers three families at once: a
+        ``decode.dst_size`` that contradicts a *static* ``(3, H, W)``; an input that is not
+        image-shaped at all (``x[4]``, a rank-4 ``1x3x512x512``, an NHWC ``512x512x3``); and,
+        by answering ``True``, the dynamic ``3x?x?`` that the override exists for. An earlier
+        version of this guard read the extent with :func:`_static_extent` and so let the middle
+        family through — a model that can never receive a letterboxed frame opened cleanly and
+        failed inside the backend on every frame of the deploy.
+
+        Left unchecked, the first family is the failure :meth:`_resolve_dst_size`'s own
+        docstring gives as its reason for existing, one deployment further on: a static engine
+        refuses the wrong extent loudly, a dynamic one accepts it and makes every box on every
+        camera wrong.
 
         A handle that declares no inputs at all — a test's fake, a backend that declares
         nothing — is not second-guessed: there is nothing to disagree with, and the slot's
@@ -576,16 +589,17 @@ class PoolDetect(_PoolElement):
                 "Name the model's own input on the slot: `params: {input: <name>}` — or fix "
                 "`ingest.input_name`, which is where an element that does not say gets it"
             )
-        declared = _static_extent(spec)
-        if declared is not None and declared != self._dst_size:
+        if not spec.matches((3, *self._dst_size)):
             raise ConfigurationError(
-                f"detect element {self.name!r} would letterbox to "
-                f"{list(self._dst_size)} and model {self.model!r} declares input "
-                f"{self._input!r} as (3, {declared[0]}, {declared[1]}). "
-                "`decode.dst_size` is the override for an engine whose input is *dynamic*; "
-                "against a declared static extent it is a mistake, and one that a "
-                "dynamic-shape engine would accept silently and answer with boxes that are "
-                "wrong on every camera. Drop the override, or fix the model's `config.yaml`"
+                f"detect element {self.name!r} would submit a letterboxed "
+                f"(3, {self._dst_size[0]}, {self._dst_size[1]}) frame to model "
+                f"{self.model!r}, which declares that input as {spec.describe()} — a shape "
+                "that cannot receive one. `decode.dst_size` is the override for an engine "
+                "whose input is *dynamic* (`3x?x?`); against a declared static extent it is a "
+                "mistake a dynamic-shape engine would accept silently and answer with boxes "
+                "that are wrong on every camera, and against an input that is not image-shaped "
+                "at all it says this model is not a detector. Drop the override, name the "
+                "model's own input (`params: {input: <name>}`), or fix its `config.yaml`"
             )
 
     def _resolve_boxes_output(self) -> str:
@@ -809,9 +823,14 @@ def _static_extent(spec: Any) -> tuple[int, int] | None:
     ``None`` covers "no such spec", "not an image-shaped input" and "a dynamic dimension"
     alike, and collapsing the three is the point: all of them mean *the artefact does not say*,
     which is the condition under which the slot's ``decode.dst_size`` is the only statement of
-    the truth. One function so the resolution (:meth:`PoolDetect._resolve_dst_size`) and the
-    cross-check (:meth:`PoolDetect._refuse_a_letterbox_the_model_disagrees_with`) cannot come
-    to different answers about what "the model declares its extent" means.
+    the truth.
+
+    This *extracts*, which is why it exists at all and why it has exactly one caller,
+    :meth:`PoolDetect._resolve_dst_size`. The cross-check that follows the resolution
+    (:meth:`PoolDetect._refuse_a_letterbox_the_model_disagrees_with`) *validates*, and asks
+    :meth:`~shipinfer.core.types.TensorSpec.matches` instead — a predicate written here would
+    have to agree with the library's, and the version that tried was narrower than it in a way
+    that let a non-image-shaped input open.
     """
     shape = tuple(getattr(spec, "shape", ()) or ())
     if len(shape) == 3 and shape[0] == 3 and shape[1] > 0 and shape[2] > 0:

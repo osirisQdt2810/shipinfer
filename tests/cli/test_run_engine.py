@@ -18,8 +18,8 @@ its frame and cannot resolve an implementation itself — ``topology`` may not i
 :attr:`~shipinfer.topology.base.Element.needs_image_ops`. A chain of mocks must build neither.
 
 Everything is offline. The engine is a recording double in every test but the last, which
-starts a real ``InferenceServer`` over the mock backend and a two-model repository — the one
-that proves a ``pool`` element actually opens, rather than that a keyword was forwarded. The
+starts a real ``InferenceServer`` over the mock backend and a detector-shaped repository — the
+one that proves a ``pool`` element actually opens, rather than that a keyword was forwarded. The
 ops it is handed there resolve to ``NumpyImageOps``, because ``get_image_ops`` degrades to it
 on a host with no accelerator; that is the whole reason this tier can run the real element.
 """
@@ -58,20 +58,22 @@ from shipinfer.topology.registry import registry_for
 run_module = importlib.import_module("shipinfer.cli.commands.run")
 
 #: A chain with a `pool` element: the shape of every real topology, and the one that used to
-#: fail at `open()`. `echo` is the model the offline repository fixture declares.
+#: fail at `open()`. `detector` is the model :func:`detector_repository` declares, and it is a
+#: *detector-shaped* one: one input `images[3x8x8]:FP32` and one output `output0[300x6]:FP32`.
 #:
-#: Both `params:` are named because `echo` is not a detector -- it declares one input `x[4]`
-#: and nothing else. `input: x` because a `pool` detector refuses at `open()` an input the
-#: artefact does not declare (a typo'd name would otherwise fail per frame inside the
-#: backend), and `decode.dst_size` because it resolves its letterbox target from the model's
-#: declared input and refuses rather than guessing 640x640. `x[4]` is not a static `(3, H, W)`,
-#: so there is nothing for the override to contradict -- which is the documented case for
-#: saying it on the slot, and what a deployment whose engine declares a dynamic input does too.
+#: That shape is load-bearing, not decoration. A `pool` detector submits a letterboxed
+#: `(1, 3, H, W)` frame, so it refuses at `open()` both an input the artefact does not declare
+#: and one no letterbox fits -- and the shared `tmp_repository` fixture's `echo` declares
+#: `x[4]`, which is the second of those. Naming it here (with a `decode.dst_size` to get past
+#: the extent resolution) made this file's real-engine test assert that a chain which cannot
+#: run had opened successfully. `input:` is named anyway, because `ingest.input_name` is where
+#: an element that does not say gets it and the default is not this model's; `decode.dst_size`
+#: is not, because the model declares its extent and that is the path a real deployment takes.
 POOL_CHAIN = textwrap.dedent("""
     name: pool_chain
     elements:
       decode: {impl: mock}
-      detect: {impl: pool, model: echo, params: {input: x, decode: {dst_size: [8, 8]}}}
+      detect: {impl: pool, model: detector, params: {input: images}}
       output: {impl: mock}
     """)
 
@@ -304,6 +306,37 @@ def pool_chain_file(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
+def detector_repository(tmp_path: Path) -> Path:
+    """A one-model repository whose model can actually receive a letterboxed frame.
+
+    Local to this file rather than a third model in the shared ``tmp_repository`` fixture: that
+    one is a *two-model* repository by contract (``tests/engine/test_server.py`` asserts
+    ``server.models() == ["echo", "slow"]`` and a three-instance health report), and its
+    ``echo`` declares ``x[4]`` because the engine tests submit ``(1, 4)`` tensors to it. Both
+    are right for what they are; neither is a detector.
+
+    ``platform: mock`` on a ``KIND_CPU`` group, so :class:`~shipinfer.engine.InferenceServer`
+    starts it with no accelerator. The dims are the artefact's statement of its own geometry --
+    ``PoolDetect`` resolves its letterbox target from them, which is what a real deployment
+    does -- and ``8x8`` only to keep the fixture small.
+    """
+    root = tmp_path / "detector_repository"
+    (root / "detector" / "1").mkdir(parents=True)
+    (root / "detector" / "config.yaml").write_text(textwrap.dedent("""
+        name: detector
+        platform: mock
+        max_batch_size: 4
+        inputs:
+          - {name: images, data_type: FP32, dims: [3, 8, 8]}
+        outputs:
+          - {name: output0, data_type: FP32, dims: [300, 6]}
+        instance_groups:
+          - {kind: KIND_CPU, count: 1}
+        """).lstrip())
+    return root
+
+
+@pytest.fixture()
 def mock_chain_file(tmp_path: Path) -> Path:
     return write_chain(tmp_path, MOCK_CHAIN)
 
@@ -353,7 +386,9 @@ class TestAChainThatNamesAModelItRunsElsewhere:
 
         element = chain.node("detect").element
         assert element.requires_model_name is True
-        assert element.model == "echo", "the name an operator writes is carried, not dropped"
+        assert (
+            element.model == "detector"
+        ), "the name an operator writes is carried, not dropped"
 
     def test_it_needs_no_pool_although_it_names_a_model(self) -> None:
         assert model_pool_is_needed("inprocess", topology_of(ELSEWHERE_CHAIN)) is False
@@ -396,8 +431,8 @@ class TestWhoNeedsImageOps:
         """The half that would be lost by reusing ``needs_model``: an embedder submits a
         tensor somebody else shaped, so it needs the pool and no pre-processing at all."""
         embed_only = POOL_CHAIN.replace(
-            "detect: {impl: pool, model: echo, params: {input: x, decode: {dst_size: [8, 8]}}}",
-            "embed: {impl: pool, model: echo}",
+            "detect: {impl: pool, model: detector, params: {input: images}}",
+            "embed: {impl: pool, model: detector}",
         ).replace("name: pool_chain", "name: embed_chain")
 
         assert model_pool_is_needed("inprocess", topology_of(embed_only)) is True
@@ -872,12 +907,12 @@ class TestOverARealEngine:
     in it, and looks at the element while the chain is open -- which is the thing that used to
     raise ``ConfigurationError`` before the first frame.
 
-    Offline: the repository fixture declares two ``platform: mock`` models on ``KIND_CPU``
-    instance groups, so no accelerator is touched.
+    Offline: :func:`detector_repository` declares one ``platform: mock`` model on a
+    ``KIND_CPU`` instance group, so no accelerator is touched.
     """
 
     def test_the_pool_element_resolves_its_model_while_the_chain_is_open(
-        self, pool_chain_file: Path, tmp_repository: Path, monkeypatch
+        self, pool_chain_file: Path, detector_repository: Path, monkeypatch
     ) -> None:
         opened: dict[str, Any] = {}
 
@@ -888,9 +923,18 @@ class TestOverARealEngine:
             opened["is_open"] = element.is_open
             opened["model"] = element.model
             opened["resolved"] = element._handle is not None
+            opened["dst_size"] = element._dst_size
 
         monkeypatch.setattr(run_module, "_wait", probe)
 
-        assert run(pool_chain_file, runner="inprocess", repository=tmp_repository) == 0
+        assert run(pool_chain_file, runner="inprocess", repository=detector_repository) == 0
 
-        assert opened == {"is_open": True, "model": "echo", "resolved": True}
+        # `dst_size` is in here because it is the half a forwarded keyword cannot fake: it
+        # came from the artefact's own `dims: [3, 8, 8]`, read off a repository this command
+        # loaded, which is the resolution every real deployment relies on.
+        assert opened == {
+            "is_open": True,
+            "model": "detector",
+            "resolved": True,
+            "dst_size": (8, 8),
+        }

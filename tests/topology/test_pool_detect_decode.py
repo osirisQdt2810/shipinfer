@@ -216,7 +216,10 @@ class TestItRefusesWithoutTheOpsItWasPromised:
 
         message = str(caught.value)
         assert "detect" in message
-        assert "get_image_ops" in message, "the message must name what to pass"
+        assert "get_thread_local_image_ops" in message, (
+            "the message must name what to pass -- and that is the *thread-local* call, "
+            "because one instance across four workers is one staging ring across four threads"
+        )
         assert not element.is_open, "a failed open must not leave the element half-open"
 
     def test_closing_forgets_them_so_a_reopen_takes_the_current_ones(self) -> None:
@@ -576,6 +579,45 @@ class TestWhereTheGeometryComesFrom:
         message = str(caught.value)
         assert "100" in message and "640" in message, "the message must name both ends"
         assert "ship_detector" in message
+        assert not element.is_open
+
+    @pytest.mark.parametrize(
+        ("shape", "why"),
+        [
+            ((4,), "a vector: not an image at all"),
+            ((512, 512, 3), "NHWC: the channel axis is last, so no letterbox fits it"),
+            ((1, 3, 512, 512), "rank 4: the batch dim is `max_batch_size`'s, not the spec's"),
+        ],
+    )
+    def test_an_input_no_letterbox_can_go_into_stops_the_deploy(
+        self, shape: tuple[int, ...], why: str
+    ) -> None:
+        """The family a guard written over the *extent* let through.
+
+        Reading the declared extent and comparing it to ``dst_size`` only ever fires for a
+        spec that is already ``(3, H, W)`` with both extents positive -- so every model whose
+        input cannot receive a letterboxed frame at all opened cleanly, submitted a
+        ``(1, 3, H, W)`` tensor to it, and failed inside the backend on every frame. Asking
+        ``TensorSpec.matches`` is the same question ``pipeline/graph/stage.py::validate``
+        asked, and it answers for these three as well as for the contradicting extent above.
+        """
+        detector = self._declaring(
+            (TensorSpec("images", DataType.FP32, shape),),
+            (TensorSpec("output0", DataType.FP32, (300, 6)),),
+        )
+        element = PoolDetect(
+            "detect", {"decode": {"dst_size": list(DST)}}, model="ship_detector"
+        )
+
+        with pytest.raises(ConfigurationError) as caught:
+            element.open(
+                ElementContext(models=FakePool(ship_detector=detector), ops=NumpyImageOps())
+            )
+
+        message = str(caught.value)
+        assert "images" in message, f"the message must name the declared input ({why})"
+        assert "x".join(str(d) for d in shape) in message, "and the shape it declares"
+        assert str(DST[0]) in message, "and the letterbox this element would have submitted"
         assert not element.is_open
 
     def test_an_input_the_model_does_not_declare_stops_the_deploy(self) -> None:
