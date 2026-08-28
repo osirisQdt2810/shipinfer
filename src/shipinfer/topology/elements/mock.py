@@ -39,7 +39,7 @@ from typing import Any, ClassVar
 
 import numpy as np
 
-from shipinfer.topology.base import ChainItem, Element, ElementContext, ElementKind
+from shipinfer.topology.base import ChainItem, Element, ElementContext, ElementKind, RowIndexed
 from shipinfer.topology.elements.detections import DecodeParams, Detections
 from shipinfer.topology.registry import registry_for
 
@@ -233,14 +233,29 @@ class MockEmbed(_Mock):
 
 @registry_for(ElementKind.RECOGNIZE).register("mock")
 class MockRecognize(_Mock):
-    """A recogniser: turns vectors into identities."""
+    """A recogniser: turns vectors into identities.
+
+    Files the shape the real one files —
+    :class:`~shipinfer.topology.elements.recognize.GalleryRecognize` publishes
+    ``{detection row index: (identity, similarity)}`` — for the same reason
+    :func:`invented_detections` builds a real ``Detections``: a mock that filed a list would
+    let everything downstream of a chain of mocks pass its tests against a shape no
+    deployment ever produces, and this key in particular is one the runner's fan-in merges
+    across branches: C8a made ``InprocessRunner._merge_meta`` union
+    :class:`~shipinfer.topology.base.RowIndexed` metadata row by row, which is a merge a
+    positional list cannot take part in at all.
+
+    The single row is row 0, which is the one detection :func:`invented_detections` invents,
+    and the similarity is a flat 1.0 — invented, and obviously so.
+    """
 
     kind: ClassVar[ElementKind] = ElementKind.RECOGNIZE
     accepts: ClassVar[tuple[str, ...]] = ("nv12@gpu",)
     produces: ClassVar[tuple[str, ...]] = ("nv12@gpu",)
 
     def _meta(self, item: ChainItem) -> dict[str, Any]:
-        return {"identities": ["ship-1"]}
+        # `RowIndexed` for the reason `GalleryRecognize` files one: the fan-in unions it.
+        return {"identities": RowIndexed({0: ("ship-1", 1.0)})}
 
 
 @registry_for(ElementKind.TRACK).register("mock")

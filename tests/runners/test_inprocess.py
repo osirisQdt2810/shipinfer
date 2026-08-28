@@ -529,7 +529,7 @@ class TestTheChainRuns:
         submit_all(runner, chain)
 
         emitted = sink(chain).emitted[0]
-        assert emitted.meta["identities"] == ["ship-1"]
+        assert emitted.meta["identities"] == {0: ("ship-1", 1.0)}
         assert emitted.meta["vectors"] == [[0.0, 1.0]]
         assert emitted.meta["boxes"] == [(0, 0, 10, 10)]
 

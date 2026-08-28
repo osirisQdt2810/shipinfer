@@ -1999,6 +1999,14 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       report it degraded; today it is silent.
 - [ ] B4: fleet.drain() vs an in-flight add_camera reservation (see plan-B-streams.md carry list).
 - [ ] PHASE C/E: `shipinfer run --runner inprocess` builds no engine; a pool element fails at open().
+- [ ] TRACK-VECTORS (from #85 review round 2): point `ShipvisionTrack._embeddings` at
+      `topology/elements/_vectors.rows_by_index` and delete track's private copy. Held back from
+      C7 on purpose: it makes `track` stricter (a `{"3": v}` it coerces today, and an
+      out-of-range key it drops today, both start refusing the frame), which owes its own red
+      tests, and `track.py` is the file C8b is already editing. AFTER C8b merges. The two edges
+      are already pinned as divergence by `TestTheReaderTrackStillDoesNotUse` in
+      tests/topology/test_vectors_rows.py — that class goes red when the swap lands and is
+      rewritten as agreement.
 - [ ] PHASE B (from #62 review N2): the fair queue reports per-camera evictions/expiries so the runner's
       `stats()` attributes `queue_evicted`/`queue_expired` to the camera that lost the frame (ADR-005's number).
 - [x] V129: operator paused everything; as-built restated; 4 questions asked.

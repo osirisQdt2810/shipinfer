@@ -1153,7 +1153,7 @@ class TestTheProductionChainFile:
         for ship_only in ("segment", "embed_ship", "recognize"):
             assert chain.node(ship_only).element.processes == 1, f"{ship_only} was skipped"
         assert chain.node("embed_person").element.processes == 0, "the person embedder ran"
-        assert emitted.meta["identities"] == ["ship-1"]
+        assert emitted.meta["identities"] == {0: ("ship-1", 1.0)}
         assert emitted.meta["masks"], "the segmenter's masks must reach the sink"
 
     def test_the_inline_fixture_agrees_with_the_file(self) -> None:
