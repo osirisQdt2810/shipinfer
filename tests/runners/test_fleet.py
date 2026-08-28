@@ -21,7 +21,11 @@ from typing import Any
 
 import pytest
 
-from shipinfer.core.errors import ConfigurationError, ServerStateError
+from shipinfer.core.errors import (
+    ConfigurationError,
+    NoShardAvailableError,
+    ServerStateError,
+)
 from shipinfer.core.request import RequestContext
 from shipinfer.core.settings import ServerSettings
 from shipinfer.launch.control import AddCameraResult, CameraSpec, ShardHealth, StopResult
@@ -500,12 +504,23 @@ class TestPlacingCameras:
     def test_every_shard_refusing_is_an_error_that_names_what_each_said(
         self, runner, clients
     ) -> None:
+        """And it is a *capacity* error, not a configuration one.
+
+        `NoShardAvailableError` is a `ServerStateError`, so an HTTP caller gets 503 and backs
+        off; the duplicate below stays a `ConfigurationError` and gets 400. Nothing about this
+        request is malformed — the shards are all draining, and the one that refused now will
+        take the camera in a minute (`api/errors.py`).
+        """
         runner.start()
         for client in clients.values():
             client.refuse_cameras = "draining"
 
-        with pytest.raises(ConfigurationError, match="no shard would take"):
+        with pytest.raises(NoShardAvailableError, match="no shard would take") as caught:
             runner.add_camera(CameraSpec(camera_id="quay-1", url="rtsp://host"))
+
+        assert caught.value.camera_id == "quay-1"
+        assert caught.value.refusals == ("shard 0: draining", "shard 1: draining")
+        assert not isinstance(caught.value, ConfigurationError)
 
     def test_a_duplicate_is_refused_by_the_launcher_before_any_rpc(
         self, runner, clients
@@ -628,7 +643,7 @@ class TestTheLockIsNeverHeldAcrossAnRpc:
         for client in clients.values():
             client.refuse_cameras = "draining"
 
-        with pytest.raises(ConfigurationError, match="no shard would take"):
+        with pytest.raises(NoShardAvailableError, match="no shard would take"):
             runner.add_camera(CameraSpec(camera_id="quay-1", url="rtsp://host"))
 
         assert runner.health()["cameras"] == {}

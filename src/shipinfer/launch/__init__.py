@@ -41,6 +41,7 @@ from shipinfer.launch.control import (
     ShardIdentity,
     ShardState,
     StopResult,
+    mint_camera_id,
 )
 from shipinfer.launch.signals import Stoppable, forward_signals
 from shipinfer.launch.supervisor import DEFAULT_DRAIN_S, Fleet, ShardProcess
@@ -58,4 +59,5 @@ __all__ = [
     "StopResult",
     "Stoppable",
     "forward_signals",
+    "mint_camera_id",
 ]

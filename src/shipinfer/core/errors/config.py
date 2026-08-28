@@ -6,6 +6,7 @@ from shipinfer.core.errors.base import ShipInferError
 
 __all__ = [
     "ConfigurationError",
+    "DuplicateCameraError",
     "ModelControlError",
     "ModelNotFoundError",
     "ModelVersionNotFoundError",
@@ -14,6 +15,26 @@ __all__ = [
 
 class ConfigurationError(ShipInferError):
     """A model config, server setting or instance group is self-contradictory."""
+
+
+class DuplicateCameraError(ConfigurationError):
+    """A camera with this id is already being read, so the add was refused.
+
+    Split out of the plain :class:`ConfigurationError` its two raise sites used to share --
+    :meth:`shipinfer.ingest.IngestManager.add_camera` and
+    :meth:`shipinfer.runners.fleet.FleetRunner.add_camera` -- because one caller has to tell
+    "that name is taken" from every *other* reason an add is refused. ``POST /streams`` with
+    no ``camera_id`` mints one from a health report and acts on it later, so the name it
+    picked can be taken in the window between; the router answers that by minting again
+    against a fresh report (``api/streams.py``). Retrying on a bare ``ConfigurationError``
+    made it do the whole add twice for an unrelated refusal -- an unregistered source, say --
+    which is a second placement attempt and a second health report for a request that was
+    always going to be a 400.
+
+    Still a :class:`ConfigurationError`, so nothing that catches the base has to change and
+    the HTTP mapping stays 400: the name will be taken on the next try too, and a control
+    plane that retries it forever is the failure ``api/errors.py`` names.
+    """
 
 
 class ModelControlError(ShipInferError):

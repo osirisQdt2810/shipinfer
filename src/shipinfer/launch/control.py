@@ -42,6 +42,7 @@ __all__ = [
     "ShardIdentity",
     "ShardState",
     "StopResult",
+    "mint_camera_id",
 ]
 
 
@@ -159,6 +160,24 @@ class CameraSpec:
             fps=message.fps,
             loop=message.loop if message.HasField("loop") else True,
         )
+
+
+def mint_camera_id(index: int) -> str:
+    """The name a camera gets when nobody supplied one: ``cam-000``, ``cam-001``, ...
+
+    One function rather than two format strings, because the two callers must agree or they
+    collide. ``shipinfer run --inputs`` names its cameras by position
+    (``cli/commands/run.py::cameras_from_inputs``) and ``POST /streams`` with no ``camera_id``
+    names the next free one (``api/streams.py``) — on the same running deployment, where a
+    second ``cam-1`` and a ``cam-001`` that are the same camera under two names is a tracker
+    keyed on nothing.
+
+    Zero-padded to three digits so ``cam-010`` sorts after ``cam-009`` in every log line,
+    dashboard and metric label that sorts strings, and left un-truncated past 999 rather than
+    wrapping: a fiftieth camera is the design point, a thousandth is somebody's bug and it
+    should read as one.
+    """
+    return f"cam-{index:03d}"
 
 
 @dataclass(frozen=True, slots=True)

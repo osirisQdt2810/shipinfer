@@ -42,7 +42,12 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, ClassVar
 
-from shipinfer.core.errors import ConfigurationError, ServerStateError
+from shipinfer.core.errors import (
+    ConfigurationError,
+    DuplicateCameraError,
+    NoShardAvailableError,
+    ServerStateError,
+)
 from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.request import ResponseFuture
 from shipinfer.core.settings import ServerSettings
@@ -454,12 +459,21 @@ class FleetRunner(Runner):
 
         Raises:
             ServerStateError: the fleet is not running, or was stopped mid-placement.
-            ConfigurationError: the camera is already placed, or no shard would take it.
+            DuplicateCameraError: the camera is already placed. The caller's mistake, and
+                one that will still be a mistake on a retry. A ``ConfigurationError``, and
+                named so that ``POST /streams`` can tell a taken id -- the one refusal a
+                server-minted name is allowed to be re-minted after -- from every other.
+            NoShardAvailableError: every shard refused, and the message carries what each of
+                them said. A ``ServerStateError`` rather than a ``ConfigurationError``
+                because it is a *capacity* answer: nothing about the request is wrong, there
+                is simply nowhere to put it at this moment, and the shard that is draining
+                now will take it in a minute. The two reach an HTTP caller as 400 and 503
+                respectively (``api/errors.py``), which is the whole point of the split.
         """
         with self._lock:
             self._check_running()
             if camera.camera_id in self._placed:
-                raise ConfigurationError(
+                raise DuplicateCameraError(
                     f"camera {camera.camera_id!r} is already on shard "
                     f"{self._placed[camera.camera_id]}; remove it before placing it again"
                 )
@@ -501,9 +515,7 @@ class FleetRunner(Runner):
                 if camera.camera_id in self._pending:
                     self._pending.discard(camera.camera_id)
                     self._placed.pop(camera.camera_id, None)
-        raise ConfigurationError(
-            f"no shard would take camera {camera.camera_id!r} ({'; '.join(refusals)})"
-        )
+        raise NoShardAvailableError(camera.camera_id, refusals)
 
     def remove_camera(self, camera_id: str, *, timeout_s: float = 5.0) -> bool:
         """Stop one camera on the shard that holds it.

@@ -148,6 +148,26 @@ def build_app() -> typer.Typer:
             "--drain-s",
             help="Seconds a shard gets to drain before it is killed (default: settings).",
         ),
+        http: bool = typer.Option(
+            False,
+            "--http",
+            help="Serve /streams, /cameras and /health beside the running chain.",
+        ),
+        # `None` and not the real defaults, so `commands.run` can tell "the operator asked
+        # for 127.0.0.1" from "the operator said nothing" -- which is what lets it refuse
+        # either flag given without the `--http` that is the only thing they configure.
+        host: str | None = typer.Option(
+            None,
+            "--host",
+            help=(
+                "Address --http binds [default: 127.0.0.1]. Loopback by default: /streams "
+                "starts and stops decoding and has no authentication, so put a proxy in "
+                "front to expose it. Needs --http."
+            ),
+        ),
+        port: int | None = typer.Option(
+            None, "--port", help="Port --http binds [default: 8000]. Needs --http."
+        ),
         dry_run: bool = typer.Option(
             False, "--dry-run", help="Print what would run, and spawn nothing."
         ),
@@ -165,6 +185,9 @@ def build_app() -> typer.Typer:
                 gpus=gpus,
                 policy=policy,
                 drain_s=drain_s,
+                http=http,
+                host=host,
+                port=port,
                 dry_run=dry_run,
                 log_level=log_level,
             )
