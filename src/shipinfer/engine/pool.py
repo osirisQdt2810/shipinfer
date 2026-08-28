@@ -61,6 +61,13 @@ class InferenceServer:
         # operations, which start threads and load engines and can run for seconds. Holding
         # the table lock for that long would block every inference on the server.
         self._control_lock = threading.Lock()
+        # A third lock, and the smallest of the three: it covers `stop()`'s read-and-clear
+        # of the lifecycle flags and nothing else, so it is never held for more than a few
+        # bytecodes and never contended in practice. `_control_lock` cannot do this job --
+        # `stop()` has to clear the flags *before* it takes that one, for the reason spelled
+        # out there -- and without a lock the check and the act sit either side of a log
+        # emit, which is a GIL switch point. See `stop()`.
+        self._lifecycle_lock = threading.Lock()
         self._traces: TraceSink = NullTraceSink()
         # The last run's trace totals, captured by `_teardown` before the sink is closed,
         # or None while a run is live. See `stats()` — a scrape after a shutdown wants the
@@ -74,6 +81,12 @@ class InferenceServer:
         # server that was never started has nothing to wait for.
         self._torn_down = threading.Event()
         self._torn_down.set()
+        # The name of the thread that entered `_teardown`, so an `_await_teardown` whose
+        # grace period expires can say who it gave up on. Written once per run, read without
+        # a lock: it is diagnostic text in a WARNING, so a stale read is a wrong name in a
+        # log line rather than a wrong decision. None until a teardown actually begins --
+        # the owner may still be queued on the control lock.
+        self._teardown_owner: str | None = None
         self._started = False
         # Distinct from `_started`, and the distinction is the whole of the unwind below:
         # `_started` means "the start finished", `_starting` means "the start got far enough
@@ -226,6 +239,7 @@ class InferenceServer:
         self._starting = True
         self._torn_down.clear()
         self._last_trace_stats = None
+        self._teardown_owner = None
         try:
             observability = self._settings.observability
             self._traces = build_trace_sink(
@@ -419,8 +433,32 @@ class InferenceServer:
         ``_started`` false under the lock and is refused. The cost is that a stop arriving
         mid-load waits for that load to finish, which is bounded by model start-up and is
         the right trade against dropping a GPU context on the floor.
+
+        **The entry is one atomic transition**, under ``_lifecycle_lock``, so exactly one
+        caller ever moves this server from started to stopping and every other one waits on
+        the barrier. That used to be a check and an act with a log emit between them; see
+        the comment below for what the two stops that both won the check went on to do.
         """
-        if not (self._started or self._starting):
+        with self._lifecycle_lock:
+            # Read and cleared as one step, because a second stop that also reads "started"
+            # here is a second *teardown*. The two used to be separated by the `_LOG.info`
+            # below -- an emit that formats its arguments, may take a handler lock and may
+            # write to a file, which is a guaranteed GIL switch point rather than a couple
+            # of bytecodes. Both threads then fell through, both cleared the flags, and both
+            # ran `_teardown` -> `_release` in turn: the second `_release` re-read the trace
+            # totals from the null sink the first had just installed and published
+            # `recorded: 0` for a run that traced thousands of requests, and `_torn_down`
+            # was set by the first while the second was still releasing, so a third `stop()`
+            # returned claiming a teardown that was still running.
+            already_stopped = not (self._started or self._starting)
+            if not already_stopped:
+                # Cleared here, *before* the control lock is taken rather than inside it, so
+                # a `load_model` already blocked on the control lock sees the false flag the
+                # moment it gets in. Clearing it also makes a second call a no-op even if a
+                # step below raises something this method deliberately does not catch.
+                self._started = False
+                self._starting = False
+        if already_stopped:
             # Either there was nothing to release, or another thread is releasing it right
             # now — and the flags cannot tell those apart, because the thread that got here
             # first cleared them *before* taking the control lock. Returning immediately in
@@ -430,12 +468,6 @@ class InferenceServer:
             self._await_teardown()
             return
         _LOG.info("stopping shipinfer (%d model(s))", len(self._models))
-        # Cleared *before* the lock is taken, not inside it, so a `load_model` already
-        # blocked on the control lock sees the false flag the moment it gets in. Clearing it
-        # also makes a second call a no-op even if a step below raises something this method
-        # deliberately does not catch.
-        self._started = False
-        self._starting = False
         with self._control_lock:
             self._teardown()
 
@@ -450,14 +482,19 @@ class InferenceServer:
         Expiry is logged, not raised: :meth:`stop` never raises (it runs on
         :meth:`start`'s failure path, where a teardown error would replace the load error the
         operator needs to read), so the honest signal is a WARNING naming the thread that is
-        still inside the teardown.
+        still inside the teardown -- ``_teardown`` records its own name on the way in, which
+        is what makes the log line point at a thread an operator can find in a stack dump.
+        An owner still queued on the control lock has not reached the teardown yet and has
+        no name to give, so the message says "another thread" for that case rather than
+        inventing one.
         """
         if self._torn_down.wait(self._settings.shutdown_grace_s):
             return
         _LOG.warning(
-            "stop() returned while another thread is still tearing this server down "
-            "(waited %.1fs, the shutdown grace period); models may still be draining, so "
-            "do not start() this instance again until they are",
+            "stop() returned while %s is still tearing this server down (waited %.1fs, the "
+            "shutdown grace period); models may still be draining, so do not start() this "
+            "instance again until they are",
+            self._teardown_owner or "another thread",
             self._settings.shutdown_grace_s,
         )
 
@@ -468,7 +505,11 @@ class InferenceServer:
         :meth:`stop` is blocked on that barrier, and a teardown that raised something this
         method deliberately does not catch must still release it rather than hang the
         caller for its whole grace period.
+
+        Records the running thread's name first, so a waiter whose grace period expires can
+        name whoever it gave up on instead of logging an anonymous warning.
         """
+        self._teardown_owner = threading.current_thread().name
         try:
             self._release()
         finally:

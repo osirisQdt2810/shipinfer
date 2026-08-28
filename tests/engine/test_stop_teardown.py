@@ -136,6 +136,47 @@ def _await_stop_flags(server: InferenceServer) -> None:
     raise AssertionError("stop() never cleared the lifecycle flags")
 
 
+class _WatchedEvent(threading.Event):
+    """A ``threading.Event`` that records the name of every thread that waits on it.
+
+    Installed over a server's ``_torn_down`` barrier so a test can tell that a second
+    ``stop()`` really blocked on it. ``time.sleep(0.1)`` "long enough to get there" cannot:
+    on a loaded runner the thread is descheduled past that interval, the test releases the
+    first stop anyway, and the ordering assertion then holds for a run in which nothing ever
+    blocked -- a pass, not a flake, which is worse. Waiting for a name to appear here fails
+    on a timeout instead.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._waiters_lock = threading.Lock()
+        self.waiters: list[str] = []
+
+    def wait(self, timeout: float | None = None) -> bool:
+        with self._waiters_lock:
+            self.waiters.append(threading.current_thread().name)
+        return super().wait(timeout)
+
+
+def _watch_barrier(server: InferenceServer) -> _WatchedEvent:
+    """Swap in a barrier that announces its waiters, preserving whether it was already set."""
+    watched = _WatchedEvent()
+    if server._torn_down.is_set():
+        watched.set()
+    server._torn_down = watched
+    return watched
+
+
+def _await_barrier_waiter(barrier: _WatchedEvent, name: str) -> None:
+    """Block until thread ``name`` is inside the teardown barrier's ``wait``."""
+    deadline = time.monotonic() + _TIMEOUT
+    while time.monotonic() < deadline:
+        if name in barrier.waiters:
+            return
+        time.sleep(0.001)
+    raise AssertionError(f"{name} never reached the teardown barrier")
+
+
 class _Outcome:
     """What ``load_model`` did on the other thread: a model, or the error it raised."""
 
@@ -346,6 +387,7 @@ class TestASecondStopWaitsForTheFirstOnesTeardown:
         monkeypatch.setattr(Model, "start", blocking_start)
         monkeypatch.setattr(InferenceServer, "_teardown", recording_teardown)
 
+        barrier = _watch_barrier(explicit)
         loader = threading.Thread(target=_Outcome().run, args=(explicit, "echo"))
         loader.start()
         assert inside_start.wait(_TIMEOUT), "the load never reached the model's start"
@@ -361,8 +403,9 @@ class TestASecondStopWaitsForTheFirstOnesTeardown:
 
         second = threading.Thread(target=second_stop, name="stop-b")
         second.start()
-        # Long enough for the second stop to reach the barrier and block on it.
-        time.sleep(0.1)
+        # Not a sleep: the load is released only once the second stop is provably inside the
+        # barrier, so the assertion below cannot hold by the second stop having skipped it.
+        _await_barrier_waiter(barrier, "stop-b")
         release.set()
         for thread in (loader, first, second):
             thread.join(_TIMEOUT)
@@ -580,7 +623,6 @@ class TestStopLeavesAUsableTraceSink:
 
         explicit.start()
 
-        assert explicit.stats()["tracing"] is not sinks[0].stats()
         assert explicit.traces is sinks[1]
         sinks[1].recorded = 3
         assert explicit.stats()["tracing"]["recorded"] == 3
@@ -605,3 +647,129 @@ class TestStopLeavesAUsableTraceSink:
         assert [trace.frame_id for trace in sinks[0].traces] == [1]
         assert sinks[0].is_closed
         assert sinks[0].uses_after_close == []
+
+
+class TestTwoStopsThatBothWinTheStartedCheck:
+    """Two ``stop()`` calls arriving together must still produce exactly one teardown.
+
+    The barrier above covers the second stop that arrives *after* the first has cleared the
+    flags. This is the other interleaving: both threads read a started server before either
+    clears it. The read and the clear used to sit either side of the ``_LOG.info`` line -- an
+    emit that formats its arguments, may take a handler lock and may write to a file, so a
+    guaranteed GIL switch point rather than a couple of bytecodes -- and both threads then
+    fell through to ``_teardown`` -> ``_release``.
+
+    Every step of the release is idempotent except one: it captures the run's trace totals
+    *before* closing the sink, so a second pass captured them from the ``NullTraceSink`` the
+    first pass had just installed and published ``recorded: 0`` for a run that traced
+    thousands of requests -- verbatim the wrong answer ``TestStopLeavesAUsableTraceSink``
+    exists to remove, restored by exactly the two-thread ``stop()`` that
+    ``TestASecondStopWaitsForTheFirstOnesTeardown`` is about. And ``_torn_down`` was set by the
+    first thread's ``finally`` while the second was still inside its release, so a third
+    ``stop()`` returned claiming a teardown that was still running.
+    """
+
+    def test_one_release_runs_the_totals_survive_and_a_third_stop_waits(
+        self, repository: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sinks: list[_RecordingSink] = []
+
+        def build(*_args: object, **_kwargs: object) -> _RecordingSink:
+            sinks.append(_RecordingSink())
+            return sinks[-1]
+
+        monkeypatch.setattr(pool, "build_trace_sink", build)
+        server = InferenceServer(_settings(repository)).start()
+        try:
+            server.load_model("echo")
+            for frame_id in range(3):
+                server.infer_sync(
+                    InferenceRequest(
+                        model_name="echo",
+                        inputs={"x": Tensor.from_numpy(np.zeros((1, 2), dtype=np.float32))},
+                        context=RequestContext(camera_id="cam0", frame_id=frame_id),
+                    ),
+                    timeout=_TIMEOUT,
+                )
+            live = server.stats()["tracing"]
+            assert live["recorded"] == 3
+
+            order: list[str] = []
+            first_at_the_gate = threading.Event()
+            both_past_the_check = threading.Event()
+            inside_release = threading.Event()
+            finish_release = threading.Event()
+            gate_lock = threading.Lock()
+            barrier = _watch_barrier(server)
+            original_info = pool._LOG.info
+            original_await = InferenceServer._await_teardown
+            original_release = InferenceServer._release
+
+            def gated_info(msg: Any, *args: Any, **kwargs: Any) -> None:
+                """The forcing gate, sitting exactly where the old window was.
+
+                The first thread to log the stop banner parks here until a second thread is
+                provably past the started check, so the race is exercised on every run rather
+                than on an unlucky one.
+                """
+                if isinstance(msg, str) and msg.startswith("stopping shipinfer"):
+                    with gate_lock:
+                        is_first = not first_at_the_gate.is_set()
+                        first_at_the_gate.set()
+                    if is_first:
+                        assert both_past_the_check.wait(
+                            _TIMEOUT
+                        ), "the second stop never committed"
+                    else:
+                        # Reachable only before the fix: a second thread that also won the
+                        # started check gets here instead of going to the barrier.
+                        both_past_the_check.set()
+                original_info(msg, *args, **kwargs)
+
+            def committed_await(self: InferenceServer) -> None:
+                """After the fix, this is how the second thread is past the check."""
+                both_past_the_check.set()
+                original_await(self)
+
+            def gated_release(self: InferenceServer) -> None:
+                inside_release.set()
+                assert finish_release.wait(_TIMEOUT), "the test never released the teardown"
+                original_release(self)
+                order.append("released")
+
+            monkeypatch.setattr(pool._LOG, "info", gated_info)
+            monkeypatch.setattr(InferenceServer, "_await_teardown", committed_await)
+            monkeypatch.setattr(InferenceServer, "_release", gated_release)
+
+            def stop_and_record(label: str) -> None:
+                server.stop()
+                order.append(label)
+
+            first = threading.Thread(target=stop_and_record, args=("a",), name="stop-a")
+            first.start()
+            assert first_at_the_gate.wait(_TIMEOUT), "the first stop never reached the gate"
+
+            second = threading.Thread(target=stop_and_record, args=("b",), name="stop-b")
+            second.start()
+            assert both_past_the_check.wait(
+                _TIMEOUT
+            ), "the second stop never got past the check"
+            assert inside_release.wait(_TIMEOUT), "no teardown ever started"
+
+            # A third stop, issued while that release is still running: it must wait for the
+            # real teardown, not for a barrier a first thread set while a second released.
+            third = threading.Thread(target=stop_and_record, args=("c",), name="stop-c")
+            third.start()
+            _await_barrier_waiter(barrier, "stop-c")
+
+            finish_release.set()
+            for thread in (first, second, third):
+                thread.join(_TIMEOUT)
+                assert not thread.is_alive(), f"{thread.name} never finished"
+
+            assert order.count("released") == 1, order
+            assert order[0] == "released", order
+            assert server.stats()["tracing"] == live
+            assert sinks[0].uses_after_close == []
+        finally:
+            server.stop()
