@@ -71,9 +71,9 @@ from __future__ import annotations
 import contextlib
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import InvalidStateError
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -101,9 +101,10 @@ from shipinfer.runners.registry import RUNNERS
 from shipinfer.scheduling.queues import QUEUES, BatchWindow, RequestQueue
 from shipinfer.scheduling.work import WorkItem
 from shipinfer.topology import (
-    MODEL_KINDS,
     Caps,
     ChainItem,
+    Element,
+    ElementContext,
     ElementKind,
     ElementNode,
     ModelResolver,
@@ -383,6 +384,32 @@ class InprocessRunner(Runner):
         """The counters, per camera. ``stats()`` is the rolled-up view of these."""
         return self._metrics
 
+    def element_context(self) -> ElementContext:
+        """The base runner's context, plus the two things only this runner knows.
+
+        ``metrics`` is **this runner's registry**, not a fresh one, for the reason
+        ``_ingest`` gives about the ingest plane's handles: one exporter has to carry both
+        halves of a dropped frame. An element that minted its own registry would publish
+        counters nothing scrapes, which reads as evidence and is worse than silence.
+
+        ``workers`` is :attr:`workers` — the number of threads that will actually walk this
+        chain — and not ``settings.pipeline.workers``, which is only the default the
+        constructor may have been given an override for. The element that needs it needs the
+        real number: an MTMC barrier waiting for other cameras' frames must leave one worker
+        free, and a barrier told "four" on a runner started with one would park the only
+        thread there is and close its instant by timeout for the rest of the deployment.
+
+        Both are left ``None`` by :meth:`Runner.element_context` rather than defaulted there,
+        because a runner that does not execute a chain in this process has neither to promise
+        — the fleet runner's elements live in its children, each of which builds its own.
+        ``ops`` stays ``None`` here: nothing resolves an image-ops implementation yet.
+        """
+        return replace(
+            super().element_context(),
+            metrics=self._metrics.registry,
+            workers=self._wanted_workers,
+        )
+
     @property
     def cameras(self) -> tuple[str, ...]:
         """The camera ids this runner is reading, sorted. Empty when it has none.
@@ -483,6 +510,11 @@ class InprocessRunner(Runner):
             except BaseException:
                 self._restore_band(camera.camera_id, previous)
                 raise
+            # After the actor exists, not before, and the order is the decision: a refused
+            # placement must announce nothing, and an element cannot tell a camera that was
+            # refused from one that was placed and has yet to send a frame. See
+            # `Element.camera_added` for what that costs.
+            self._announce(Element.camera_added, camera.camera_id)
 
     def remove_camera(self, camera_id: str, *, timeout_s: float = 5.0) -> bool:
         """Stop and forget one camera.
@@ -519,6 +551,12 @@ class InprocessRunner(Runner):
             # decoder thread is still a camera this runner no longer holds a placement for.
             with self._priority_lock:
                 self._placed_bands.pop(camera_id, None)
+            # After the actor is stopped, which is the safe order: dropping a tracker's shard
+            # while its decoder is still publishing would let the very next frame rebuild it.
+            # `removed` being False means the thread was abandoned at the deadline rather than
+            # joined, so a late frame is more than theoretical -- `Element.camera_removed`
+            # says so, and an element must treat one as a first frame.
+            self._announce(Element.camera_removed, camera_id)
             return removed
 
     def drain(self, timeout_s: float = 20.0) -> int:
@@ -546,13 +584,65 @@ class InprocessRunner(Runner):
             manager = self._ingest_manager
             if manager is None:
                 return 0
+            # Snapshotted *before* the stop, because `IngestManager.stop` clears the actor map
+            # and the ids would be gone by the time there was anything to announce. A drain is
+            # a removal of every camera at once, so every element hears about every one of
+            # them -- a shard drained and then placed on again must not keep the previous
+            # deployment's per-camera state, which is the same argument ADR-018 makes for the
+            # single-camera path.
+            placed = tuple(manager.camera_ids)
             abandoned = manager.stop(timeout_s=timeout_s)
             # Every camera is released, so every band a launcher placed with one is stale --
             # the same fact :meth:`remove_camera` records one camera at a time, through the
             # door that empties the shard in one call.
             with self._priority_lock:
                 self._placed_bands.clear()
+            for camera_id in placed:
+                self._announce(Element.camera_removed, camera_id)
             return abandoned
+
+    def _announce(self, hook: Callable[[Element, str], None], camera_id: str) -> None:
+        """Tell every element that a camera arrived or left. Best-effort, never fatal.
+
+        The shape :meth:`_do_stop` uses to close the chain, for the same reason: one element
+        that raises must not take the operation with it. A tracker that fails to drop a shard
+        is a leak worth a log line; a tracker that fails to drop a shard *and* keeps the camera
+        from being removed is a shard that cannot be recovered, and ADR-018 names remove + add
+        as the only recovery there is. So the failure is logged with the element's name -- the
+        one thing that says which implementation to go and read -- and the loop continues.
+
+        Called with :attr:`Runner._lifecycle` held, by all three camera methods, so an element
+        sees the announcements for one camera in order and never sees an add racing a remove.
+
+        In topological order for both directions, unlike ``close``, which unwinds in reverse.
+        There is nothing to unwind: an element's per-camera state is its own and no element
+        holds another's, so the two orders would differ only in the sequence of log lines, and
+        one order is easier to reason about than two.
+
+        Args:
+            hook: the :class:`~shipinfer.topology.base.Element` method to call, named through
+                the ABC so the call site reads ``self._announce(Element.camera_added, id)``
+                and a typo is a ``NameError`` at import rather than a silently missing
+                announcement -- which is all a bare string would have given.
+        """
+        for node in self._topology.nodes:
+            # Resolved on the *instance*, not called as `hook(node.element, ...)`.
+            # `Element.camera_added` is the ABC's own function object, and invoking it with
+            # an instance runs the base no-op straight past every override -- an announcement
+            # loop that reaches every element and tells none of them anything, with nothing
+            # to see in a log. `getattr` is the ordinary bound lookup, so the override runs;
+            # the argument stays the ABC's method so the name is still checked at import.
+            announce = getattr(node.element, hook.__name__)
+            try:
+                announce(camera_id)
+            except Exception:
+                _LOG.exception(
+                    "element %r raised in %s(%r); the camera lifecycle continues without it",
+                    node.name,
+                    hook.__name__,
+                    camera_id,
+                    extra=log_context(camera_id=camera_id),
+                )
 
     # -- resolving the ingest plane ----------------------------------------------------
 
@@ -1405,15 +1495,21 @@ class InprocessRunner(Runner):
                 # negotiated that bypass pair, which is why it is safe to do here.
                 produced[node.name] = incoming
                 continue
-            if node.kind in MODEL_KINDS and self._expired(
+            if node.element.needs_model and self._expired(
                 work, f"before element {node.name!r}"
             ):
-                # Re-checked in front of every element that can *wait*. The four model kinds
-                # are the ones that submit to the pool and sleep on the answer, so a nine-step
-                # chain can spend several stage timeouts between the check at the top of the
-                # walk and this element — and a frame that is already too late to act on must
-                # not be given another GPU. The other four kinds are local work with no wait
-                # in them, so checking in front of them would only cost a clock read.
+                # Re-checked in front of every element that can *wait*. The elements that need
+                # a model are the ones that submit to the pool and sleep on the answer, so a
+                # nine-step chain can spend several stage timeouts between the check at the
+                # top of the walk and this element — and a frame that is already too late to
+                # act on must not be given another GPU. Everything else is local work with no
+                # wait in it, so checking in front of it would only cost a clock read.
+                #
+                # The element's declaration and not `node.kind in MODEL_KINDS`, which read
+                # the same for every implementation that exists today and stops doing so at
+                # the first `recognize` that queries a gallery instead of a network: that one
+                # is local work, it never touches the pool, and charging it an expiry check
+                # would drop frames in front of an element that cannot be slow.
                 return
             try:
                 result = node.element.process(incoming)

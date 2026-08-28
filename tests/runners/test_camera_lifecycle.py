@@ -29,7 +29,7 @@ import sys
 import textwrap
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -221,6 +221,52 @@ class GateCloseOutput(MockOutput):
         self.closing.set()
         self.may_close.wait(10.0)
         super()._do_close()
+
+
+@registry_for(ElementKind.OUTPUT).register("camera-recording")
+class RecordingOutput(MockOutput):
+    """A sink that writes down every per-camera announcement it is given, in order.
+
+    ``probe`` is what turns the documented *order* into an assertion. The hooks are called at
+    a particular moment relative to the ingest actor — added after it exists, removed after it
+    is stopped — and an element cannot see the runner, so a test that wants to pin the moment
+    has to sample something from inside the hook. It is a plain attribute rather than a
+    constructor argument because the element is built by the chain loader, which passes only
+    ``name``, ``params`` and ``model``.
+    """
+
+    def __init__(self, name: str, params: Any = None, *, model: str | None = None) -> None:
+        super().__init__(name, params, model=model)
+        self.events: list[tuple[str, str]] = []
+        self.probe: Callable[[], Any] | None = None
+        self.probed: list[tuple[str, Any]] = []
+
+    def _record(self, event: str, camera_id: str) -> None:
+        self.events.append((event, camera_id))
+        if self.probe is not None:
+            self.probed.append((event, self.probe()))
+
+    def camera_added(self, camera_id: str) -> None:
+        self._record("added", camera_id)
+
+    def camera_removed(self, camera_id: str) -> None:
+        self._record("removed", camera_id)
+
+
+@registry_for(ElementKind.DETECT).register("camera-hostile")
+class HostileDetect(MockDetect):
+    """An element whose lifecycle hooks always raise. The one a removal must survive.
+
+    Sits in the *middle* of the chain on purpose: the elements after it are what prove the
+    runner carried on rather than stopped at the first failure, and a raiser at the end would
+    prove nothing at all.
+    """
+
+    def camera_added(self, camera_id: str) -> None:
+        raise RuntimeError(f"no gallery for {camera_id}")
+
+    def camera_removed(self, camera_id: str) -> None:
+        raise RuntimeError(f"cannot drop the shard for {camera_id}")
 
 
 @registry_for(ElementKind.DECODE).register("camera-two-caps")
@@ -1126,6 +1172,136 @@ class TestAddRemoveAndDrain:
 
 
 # -- what health and stats say ---------------------------------------------------------------
+
+
+class TestTheElementsHearAboutEveryCamera:
+    """The hooks ADR-018 needs, and the order that makes them safe.
+
+    Before them a removed camera's per-camera state -- a tracker shard, a gallery's live set --
+    leaked for the process's life, and a *re-added* camera was refused forever: its ingest
+    actor mints a fresh ``FrameCounter`` starting at 0 while the tracker still holds the
+    previous run's high-water mark, so every frame arrives "out of order". ADR-018 names
+    remove + add as the one recovery for a camera whose shard died, which makes "a re-added
+    camera restarts at frame_id = 0" a state the chain has to be able to be in.
+
+    Nothing here needs a stateful element to exist yet. The seam is what is under test: the
+    runner reaches every element, in order, and one that raises cannot stop it.
+    """
+
+    def make(self, runner_over, **kwargs: Any):
+        """A started runner over a chain whose sink records the announcements."""
+        chain = load(output="camera-recording", **kwargs)
+        runner = runner_over(
+            chain, settings=settings(), source_factory=scripted(frames=64, finite=False)
+        )
+        recorder = chain.node("output").element
+        assert isinstance(recorder, RecordingOutput)
+        return runner, recorder
+
+    def test_an_element_hears_the_add_and_then_the_remove_for_one_camera(
+        self, runner_over
+    ) -> None:
+        runner, recorder = self.make(runner_over)
+
+        runner.add_camera(CameraSpec("cam-a", "injected://a"))
+        assert runner.remove_camera("cam-a", timeout_s=5.0) is True
+
+        assert recorder.events == [("added", "cam-a"), ("removed", "cam-a")]
+
+    def test_the_add_is_announced_once_the_actor_exists_and_the_remove_once_it_is_gone(
+        self, runner_over
+    ) -> None:
+        """The order the hooks' docstrings promise, sampled from inside them.
+
+        ``camera_removed`` after the actor is stopped is the load-bearing half: an element
+        that dropped its per-camera state while the decoder was still publishing would have it
+        rebuilt by the very next frame, which is the leak the hook exists to close reappearing
+        through the order it was closed in.
+        """
+        runner, recorder = self.make(runner_over)
+        recorder.probe = lambda: runner.cameras
+
+        runner.add_camera(CameraSpec("cam-a", "injected://a"))
+        runner.remove_camera("cam-a", timeout_s=5.0)
+
+        assert recorder.probed == [("added", ("cam-a",)), ("removed", ())]
+
+    def test_a_drain_announces_every_placed_camera(self, runner_over) -> None:
+        """A drain is a removal of all of them at once, and an element must hear all of them.
+
+        A shard is drained and then placed on again (``runners/service.py`` owns whether that
+        is allowed), so per-camera state from the previous deployment must not survive it.
+        """
+        runner, recorder = self.make(runner_over)
+        runner.add_camera(CameraSpec("cam-a", "injected://a"))
+        runner.add_camera(CameraSpec("cam-b", "injected://b"))
+
+        assert runner.drain(timeout_s=5.0) == 0
+
+        assert {event for event in recorder.events if event[0] == "removed"} == {
+            ("removed", "cam-a"),
+            ("removed", "cam-b"),
+        }
+        assert runner.cameras == ()
+
+    def test_an_element_that_raises_does_not_abort_the_removal(self, runner_over) -> None:
+        """Best-effort, in the shape ``_do_stop`` uses to close the chain.
+
+        A tracker that fails to drop a shard is a leak worth a log line. A tracker that fails
+        to drop a shard *and* keeps the camera from being removed is a shard nobody can
+        recover, and ADR-018 has no second recovery to offer. The sink is behind the raiser in
+        topological order, so its record is what says the loop continued rather than stopped.
+        """
+        runner, recorder = self.make(runner_over, detect="camera-hostile")
+
+        runner.add_camera(CameraSpec("cam-a", "injected://a"))
+        assert runner.remove_camera("cam-a", timeout_s=5.0) is True
+
+        assert runner.cameras == (), "the camera left despite the element that objected"
+        assert recorder.events == [("added", "cam-a"), ("removed", "cam-a")]
+
+    def test_a_refused_placement_announces_nothing(self, runner_over) -> None:
+        """An element cannot tell a camera that was refused from one that has yet to send a
+        frame, so it must not be told about the first at all -- a tracker that reset a live
+        camera's shard on somebody's duplicate ``AddCamera`` would drop every track under it."""
+        runner, recorder = self.make(runner_over)
+        runner.add_camera(CameraSpec("cam-a", "injected://a"))
+
+        with pytest.raises(ConfigurationError, match="already running"):
+            runner.add_camera(CameraSpec("cam-a", "injected://again"))
+
+        assert recorder.events == [("added", "cam-a")], "the refusal announced nothing"
+
+    def test_removing_a_camera_nobody_placed_announces_nothing(self, runner_over) -> None:
+        runner, recorder = self.make(runner_over)
+        runner.add_camera(CameraSpec("cam-a", "injected://a"))
+
+        with pytest.raises(ConfigurationError, match="cam-b"):
+            runner.remove_camera("cam-b")
+
+        assert recorder.events == [("added", "cam-a")]
+
+    def test_a_camera_removed_and_added_again_is_announced_both_times(
+        self, runner_over
+    ) -> None:
+        """ADR-018's recovery, end to end at this seam.
+
+        The point of the pair: the element is told to drop the id and then told to start it
+        again, so a shard whose high-water mark would refuse ``frame_id = 0`` has been given
+        the two calls it needs to clear it. Without the hooks this sequence reached no element
+        at all and the re-added camera was refused for the life of the process.
+        """
+        runner, recorder = self.make(runner_over)
+
+        runner.add_camera(CameraSpec("cam-a", "injected://a"))
+        runner.remove_camera("cam-a", timeout_s=5.0)
+        runner.add_camera(CameraSpec("cam-a", "injected://again"))
+
+        assert recorder.events == [
+            ("added", "cam-a"),
+            ("removed", "cam-a"),
+            ("added", "cam-a"),
+        ]
 
 
 class TestHealthAndStatsCarryTheCameras:
