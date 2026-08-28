@@ -266,6 +266,16 @@ class Element(abc.ABC):
     accepts: ClassVar[tuple[str, ...]] = ()
     #: Caps this element hands on. Empty means it is a sink.
     produces: ClassVar[tuple[str, ...]] = ()
+    #: Whether :meth:`open` will ask for :attr:`ElementContext.models`. Declared by the
+    #: implementation rather than inferred from :attr:`kind`, because the two answers differ:
+    #: every ``detect`` element is a model *kind* and must name a ``model:``, but only the
+    #: ``pool`` implementation runs it through this process's model pool -- ``mock`` invents
+    #: a box and ``nvinfer`` will run it inside GStreamer. It is what lets the process that
+    #: builds a runner decide whether to build an ``InferenceServer`` at all
+    #: (``cli/commands/run.py``); asking the *kind* there would load engines for a chain of
+    #: mocks. A class that answers ``True`` must raise from :meth:`_do_open` when the context
+    #: carries no pool, so that the declaration and the requirement cannot drift.
+    needs_model: ClassVar[bool] = False
 
     def __init__(
         self,

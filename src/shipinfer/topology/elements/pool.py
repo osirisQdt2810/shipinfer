@@ -106,6 +106,11 @@ class _PoolElement(Element):
     #: cap here would relabel.
     produces: ClassVar[tuple[str, ...]] = ("*@*",)
 
+    #: The one thing in this file the process that builds the runner reads *before* the
+    #: chain is opened: a chain carrying one of these is a chain whose runner has to be handed
+    #: a model pool, and `shipinfer run` builds an `InferenceServer` because of it.
+    needs_model: ClassVar[bool] = True
+
     #: Where this kind's results are filed in :attr:`ChainItem.meta`. The one thing a
     #: subclass must declare, and the vocabulary the downstream elements read: ``track``
     #: wants ``boxes``, ``mtmc`` wants ``vectors``.
