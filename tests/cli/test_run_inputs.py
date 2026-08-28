@@ -27,7 +27,6 @@ from shipinfer.cli.commands.run import (
     run,
 )
 from shipinfer.core.errors import ConfigurationError, NoShardAvailableError
-
 from shipinfer.core.request import ResponseFuture
 from shipinfer.core.settings import ServerSettings
 from shipinfer.launch.control import CameraSpec
