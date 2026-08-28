@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 
 from shipinfer.core.errors import BackendUnavailableError, ConfigurationError
-from shipinfer.pipeline.schema import PerceptionEvent
-from shipinfer.pipeline.sinks import (
+from shipinfer.core.events import PerceptionEvent
+from shipinfer.topology.sinks import (
     RESULT_SINKS,
     JsonLinesResultSink,
     NullResultSink,
@@ -202,7 +202,7 @@ def install_fake_kafka(monkeypatch, *, error: str | None = None) -> list[FakePro
 class TestTheKafkaSinkReportsDeliveryFailures:
     """A ``produce()`` that returns is not a publish.
 
-    The failure this pins is the one :mod:`shipinfer.pipeline.sinks.base` says the ``bool``
+    The failure this pins is the one :mod:`shipinfer.topology.sinks.base` says the ``bool``
     return exists to prevent: point the sink at a broker that connects and then rejects the
     topic — an unknown topic, an ACL denial — and every ``emit()`` used to report success
     while nothing whatsoever was published.
@@ -280,7 +280,7 @@ class TestTheKafkaSinkReportsDeliveryFailures:
 
     def test_the_failure_names_the_camera_an_operator_has_to_look_at(self, monkeypatch, caplog):
         sink, _ = self._sink(monkeypatch, error=self.UNKNOWN_TOPIC)
-        with caplog.at_level(logging.ERROR, logger="shipinfer.pipeline.sinks.kafka"):
+        with caplog.at_level(logging.ERROR, logger="shipinfer.topology.sinks.kafka"):
             sink.emit(event(0, camera="quay_west"))
             sink.emit(event(1, camera="quay_west"))
 

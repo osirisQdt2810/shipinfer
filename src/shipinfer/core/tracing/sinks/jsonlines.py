@@ -5,7 +5,7 @@ A line is Triton's trace shape: an id, the model, and a ``timestamps`` array of
 and diffs against a Triton one without a translation table.
 
 The buffering decision is the only interesting one, and it is the same trade
-``pipeline.sinks.jsonlines`` makes: flushing per line is a write syscall — on many
+``topology.sinks.jsonlines`` makes: flushing per line is a write syscall — on many
 filesystems a metadata update too — at whatever rate the sampler lets through, which is
 enough to make the *instrument* the bottleneck. So writes go through Python's buffer and are
 flushed every ``flush_every`` records, on :meth:`flush`, and on close. A ``SIGKILL`` loses up

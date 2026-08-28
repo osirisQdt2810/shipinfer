@@ -293,14 +293,19 @@ class TestImportIsCheap:
         that promise honest when the day comes to relax the static rule: importing the
         package, and therefore every registered element class, still costs nothing.
 
-        ``shipvision`` is in the list and is the name that makes this test load-bearing
-        *today*. The static rule cannot ban it — ``check_layers.py`` walks the AST and counts
-        a function-scope import the same as a module-scope one, so a ``FORBIDDEN_EXTERNAL``
+        ``shipvision`` and ``confluent_kafka`` are in the list and are the names that make
+        this test load-bearing *today*. The static rule cannot ban either —
+        ``check_layers.py`` walks the AST and counts a function-scope import the same as a
+        module-scope one, so a ``FORBIDDEN_EXTERNAL``
         row would ban the lazy loaders in ``topology/bridge.py`` as well and leave no legal
         spelling. A subprocess assertion is therefore the only enforcement of the laziness:
         the day a loader is called at module scope, or an element module writes ``from
         shipvision import mot`` at the top, the offline tier starts needing a checked-out
-        submodule and this is what says so.
+        submodule and this is what says so. ``confluent_kafka`` arrived with the ``output``
+        element: arch.md §9 moved the result sinks under ``topology/sinks/``, the Kafka one
+        imports its client inside ``KafkaResultSink.__init__``, and that laziness is what lets
+        a chain naming ``output: {impl: kafka}`` be *validated* on a host with no librdkafka.
+        Move the import to module scope and this goes red — which is the only place it can.
 
         It reaches ``bridge.py`` because ``topology/__init__.py`` imports it, which is why
         that import is there — a module this cannot reach is a module the laziness is not
@@ -311,7 +316,7 @@ class TestImportIsCheap:
             "import sys, shipinfer.topology as t; "
             "assert t.ELEMENTS, 'nothing registered'; "
             "heavy = [m for m in ('torch', 'tensorrt', 'cv2', 'gi', 'shipvision', "
-            "'shipinfer.engine', 'shipinfer.api', 'shipinfer.runtime', "
+            "'confluent_kafka', 'shipinfer.engine', 'shipinfer.api', 'shipinfer.runtime', "
             "'shipinfer.scheduling') if m in sys.modules]; "
             "assert not heavy, heavy"
         )

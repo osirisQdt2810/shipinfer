@@ -146,7 +146,7 @@ class TraceSink(abc.ABC):
     worker thread that just finished a batch. An exception there would fail a request that
     already succeeded, so the hook may fail, the wrapper counts it and returns ``False``.
 
-    **The caller must be able to tell.** ``pipeline.sinks.ResultSink`` shipped "never
+    **The caller must be able to tell.** ``topology.sinks.ResultSink`` shipped "never
     raises" while meaning "the caller learns nothing", and the failure counter it documented
     became unreachable. So the bool is real: ``False`` means the trace was not written,
     whether because it was sampled out, the sink is closed, or the write failed.
