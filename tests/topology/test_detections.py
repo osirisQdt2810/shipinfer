@@ -14,6 +14,11 @@ Each of these was green before this file existed:
 - ignoring ``count``, so a detector reporting 3 filled rows of 300 yields 297 crops of
   undefined memory;
 - the ``max_detections`` cap and ``UNKNOWN_LABEL``, both entirely unexercised.
+
+It sits under ``tests/topology/`` because the module does: ``track`` consumes decoded
+detections, so the decode moved into the pure layer the elements live in. The last class here
+is the other half of that move -- ``pipeline/graph/detections.py`` is now a re-export, and a
+copy instead of a re-export would break every ``isinstance`` that crosses the boundary.
 """
 
 from __future__ import annotations
@@ -22,7 +27,12 @@ import numpy as np
 import pytest
 
 from shipinfer.core.errors import ValidationError
-from shipinfer.pipeline.graph.detections import UNKNOWN_LABEL, DecodeParams, decode_detections
+from shipinfer.topology.elements.detections import (
+    UNKNOWN_LABEL,
+    DecodeParams,
+    Detections,
+    decode_detections,
+)
 
 LABELS = {0: "person", 8: "ship"}
 
@@ -180,3 +190,20 @@ class TestTheShapeContract:
 
     def test_an_empty_output_is_empty_detections(self) -> None:
         assert len(decode_detections(np.zeros((0, 6), dtype=np.float32), params=params())) == 0
+
+
+class TestTheOldImportPathStillResolves:
+    """The shim ``pipeline/graph/detections.py`` re-exports; it does not redefine.
+
+    The counting-simulation graph builds a ``Detections`` and hands it to a stage, and phase
+    C's chain will hand one the other way. Two classes with identical fields would satisfy no
+    ``isinstance`` across that boundary and no ``is`` comparison in a test, and the symptom
+    would be a tracker that silently sees no detections rather than an import error.
+    """
+
+    def test_it_is_the_same_class_object_not_a_copy(self) -> None:
+        from shipinfer.pipeline.graph import detections as old_home
+
+        assert old_home.Detections is Detections
+        assert old_home.decode_detections is decode_detections
+        assert old_home.UNKNOWN_LABEL == UNKNOWN_LABEL
