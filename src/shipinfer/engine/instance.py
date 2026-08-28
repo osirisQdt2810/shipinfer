@@ -18,7 +18,7 @@ from typing import Any
 
 from shipinfer.backends.base import ModelBackend
 from shipinfer.core.errors import InferenceError, RequestCancelledError
-from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.logging import LOG, log_context
 from shipinfer.core.metrics import ServerMetrics
 from shipinfer.core.request import InferenceResponse
 from shipinfer.core.settings import SchedulerSettings
@@ -34,7 +34,6 @@ from shipinfer.scheduling.work import WorkItem
 
 __all__ = ["ModelInstance"]
 
-_LOG = get_logger("engine.instance")
 
 #: How long a worker waits for an execution slot before re-checking that it should still be
 #: running. The wait has to be bounded or a stopping server would sit inside the limiter
@@ -198,7 +197,7 @@ class ModelInstance:
             thread.join(timeout=grace_s)
             if thread.is_alive():
                 self._abandoned = True
-                _LOG.error(
+                LOG.error(
                     "instance %s did not stop within %.1fs; abandoning its backend rather "
                     "than finalising it underneath a running batch (the memory is leaked "
                     "for the life of the process)",
@@ -241,7 +240,7 @@ class ModelInstance:
             warmup = self._backend.context.execution.warmup_iterations
             self._backend.warmup(warmup)
         except Exception as exc:
-            _LOG.exception("instance %s failed to start", self.name)
+            LOG.exception("instance %s failed to start", self.name)
             self._start_error = exc
             self._queue.close(InferenceError(f"instance {self.name} failed to start: {exc}"))
             self._settled.set()
@@ -251,7 +250,7 @@ class ModelInstance:
         self._settled.set()
         self._counted_ready = True
         self._metrics.instances_ready.inc(model=label)
-        _LOG.info(
+        LOG.info(
             "instance %s ready",
             self.name,
             extra=log_context(model=label, device=str(self.device), instance=self.name),
@@ -285,7 +284,7 @@ class ModelInstance:
             # `BaseException`: a `KeyboardInterrupt` or a `SystemExit` on this thread must
             # still clear readiness before it propagates, or a shutting-down server advertises
             # an instance it no longer has.
-            _LOG.exception("instance %s died in its worker loop", self.name)
+            LOG.exception("instance %s died in its worker loop", self.name)
             self._start_error = exc
             self._running.clear()
             raise
@@ -483,7 +482,7 @@ class ModelInstance:
 
     def _fail_batch(self, items: list[WorkItem], error: BaseException) -> None:
         label = self._model_label()
-        _LOG.error(
+        LOG.error(
             "batch of %d failed on %s: %s",
             len(items),
             self.name,

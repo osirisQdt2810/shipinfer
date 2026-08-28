@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from shipinfer.core.errors import DeviceError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.types import Device
 from shipinfer.runtime.graphs.base import CapturedGraph, GraphCache
 from shipinfer.runtime.graphs.registry import GRAPH_CACHES
@@ -15,8 +15,6 @@ from shipinfer.runtime.providers import CudaProvider, get_cuda_provider
 from shipinfer.runtime.stream import Stream
 
 __all__ = ["CustomCapturedGraph", "CustomGraphCache"]
-
-_LOG = get_logger("runtime.graphs.custom")
 
 
 class CustomCapturedGraph(CapturedGraph):
@@ -109,7 +107,7 @@ class CustomGraphCache(GraphCache):
         self._lock = threading.Lock()
         self._enabled = enabled and device.is_cuda and self._provider.supports_graphs
         if enabled and not self._enabled:
-            _LOG.debug(
+            LOG.debug(
                 "custom graph cache disabled on %s: provider %s cannot capture",
                 device,
                 self._provider.name,
@@ -144,7 +142,7 @@ class CustomGraphCache(GraphCache):
                 handle = self._provider.end_capture(stream.handle)
             except Exception as exc:
                 self._failures += 1
-                log = _LOG.warning if self._failures >= self._max_failures else _LOG.debug
+                log = LOG.warning if self._failures >= self._max_failures else LOG.debug
                 log(
                     "custom graph capture failed on %s at batch %d (%d/%d): %s",
                     self._device,
@@ -164,7 +162,7 @@ class CustomGraphCache(GraphCache):
                 outputs,
             )
             self._graphs[batch_size] = captured
-            _LOG.info("captured raw CUDA graph on %s for batch %d", self._device, batch_size)
+            LOG.info("captured raw CUDA graph on %s for batch %d", self._device, batch_size)
             return captured
 
     def close(self) -> None:

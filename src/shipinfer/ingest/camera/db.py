@@ -19,13 +19,12 @@ from pathlib import Path
 from typing import Any
 
 from shipinfer.core.errors import ConfigurationError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.redact import redact, redact_in
 from shipinfer.core.settings.ingest import CameraConfig
 
 __all__ = ["load_camera_db", "translate_reference_record"]
 
-_LOG = get_logger("ingest.camera_db")
 
 #: ``codecType`` values that mean "use the NVIDIA hardware decoder". Anything else leaves
 #: hwaccel unset, so the fleet-wide default or the environment decides.
@@ -81,7 +80,7 @@ def _read_gst_ini(path: Path) -> dict[str, Any]:
         if not parser.read(path):
             return {}
     except configparser.Error as exc:
-        _LOG.warning("ignoring unreadable gst config %s: %s", path, redact_in(str(exc)))
+        LOG.warning("ignoring unreadable gst config %s: %s", path, redact_in(str(exc)))
         return {}
 
     extracted: dict[str, Any] = {}
@@ -212,5 +211,5 @@ def load_camera_db(path: str | Path) -> list[CameraConfig]:
         seen.add(camera.camera_id)
         cameras.append(camera)
 
-    _LOG.info("loaded %d camera(s) from %s", len(cameras), file_path)
+    LOG.info("loaded %d camera(s) from %s", len(cameras), file_path)
     return cameras

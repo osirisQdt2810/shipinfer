@@ -197,7 +197,7 @@ class TestCleanShutdownDoesNotAbandonThreads:
         manager.start()
         try:
             assert _wait_for(lambda: manager.summary().streaming == 3)
-            with caplog.at_level(logging.WARNING, logger="shipinfer.ingest.camera"):
+            with caplog.at_level(logging.WARNING, logger="shipinfer"):
                 manager.stop()
         finally:
             manager.stop()

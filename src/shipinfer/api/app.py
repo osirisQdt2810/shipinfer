@@ -9,14 +9,13 @@ from typing import Any
 from shipinfer.api.routes import build_router
 from shipinfer.api.streams import CameraController, build_streams_router
 from shipinfer.core.errors import ConfigurationError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.engine.pool import InferenceServer
 
 __all__ = ["BackgroundHttpServer", "create_app", "require_server_extra", "serve_http"]
 
 # The logger name stays "server.api" on purpose: an operator's log filter is behaviour,
 # and this move promises none changed. It is retargeted when server/ is deleted (A2 PR-6).
-_LOG = get_logger("api")
 
 #: One message for the one missing thing, so a host that installed neither is told about
 #: whichever import failed first and always about the same extra.
@@ -108,7 +107,7 @@ def serve_http(server: InferenceServer, *, host: str = "0.0.0.0", port: int = 80
     except ImportError as exc:
         raise ConfigurationError(_MISSING.format(name="uvicorn")) from exc
 
-    _LOG.info("serving KServe v2 on http://%s:%d (docs at /docs)", host, port)
+    LOG.info("serving KServe v2 on http://%s:%d (docs at /docs)", host, port)
     uvicorn.run(
         create_app(server),
         host=host,
@@ -239,7 +238,7 @@ class BackgroundHttpServer:
                 f"{self._bind_timeout_s:.1f}s (the address is most likely already in use; "
                 "uvicorn logged the reason) -- choose another --port, or stop what holds it"
             )
-        _LOG.info("serving /streams on http://%s:%d (docs at /docs)", self._host, self._port)
+        LOG.info("serving /streams on http://%s:%d (docs at /docs)", self._host, self._port)
         return self
 
     def _serving_within(self, timeout_s: float) -> bool:
@@ -280,7 +279,7 @@ class BackgroundHttpServer:
         self._server.should_exit = True
         self._thread.join(timeout=timeout_s)
         if self._thread.is_alive():
-            _LOG.warning(
+            LOG.warning(
                 "the HTTP thread did not finish within %.1fs; it is a daemon and the "
                 "process will not wait for it",
                 timeout_s,

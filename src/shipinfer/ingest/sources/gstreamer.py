@@ -28,7 +28,7 @@ from shipinfer.core.errors import (
     SourceOpenError,
     SourceUnavailableError,
 )
-from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.logging import LOG, log_context
 from shipinfer.core.redact import redact_in
 from shipinfer.ingest.base import FrameSource
 from shipinfer.ingest.registry import SOURCES
@@ -43,7 +43,6 @@ __all__ = [
     "select_decoder",
 ]
 
-_LOG = get_logger("ingest.gstreamer")
 
 #: The name given to the appsink in the generated pipeline, so it can be looked up again.
 APPSINK_NAME = "shipinfer_sink"
@@ -267,7 +266,7 @@ class GStreamerSource(FrameSource):
             max_buffers=envs.GST_APPSINK_MAX_BUFFERS.get(),
         )
         self._pipeline_description = description
-        _LOG.info(
+        LOG.info(
             # The description embeds `location=<uri>`, so it is redacted before logging
             # even though that makes it not quite copy-pasteable: a fleet credential in a
             # log is a worse outcome than retyping a password into a debug command.

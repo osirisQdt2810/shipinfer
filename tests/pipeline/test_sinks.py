@@ -280,7 +280,7 @@ class TestTheKafkaSinkReportsDeliveryFailures:
 
     def test_the_failure_names_the_camera_an_operator_has_to_look_at(self, monkeypatch, caplog):
         sink, _ = self._sink(monkeypatch, error=self.UNKNOWN_TOPIC)
-        with caplog.at_level(logging.ERROR, logger="shipinfer.pipeline.sinks.kafka"):
+        with caplog.at_level(logging.ERROR, logger="shipinfer"):
             sink.emit(event(0, camera="quay_west"))
             sink.emit(event(1, camera="quay_west"))
 

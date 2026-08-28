@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from shipinfer.core.errors import ConfigurationError
-from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.logging import LOG, log_context
 from shipinfer.core.settings import CameraConfig, ServerSettings
 from shipinfer.pipeline.deepstream.builder import build_branch
 from shipinfer.pipeline.deepstream.configs import GeneratedConfigs, write_configs
@@ -60,7 +60,6 @@ from shipinfer.runtime.gstreamer import load_pyds
 
 __all__ = ["PR1_MISSING_STAGES", "DeepStreamPipeline", "MetadataProbe"]
 
-_LOG = get_logger("pipeline.deepstream")
 
 #: The stages this topology does not run yet, named on every event it publishes. The Python
 #: DAG segments ships and recognises their identity; PR1's DeepStream graph is detector,
@@ -128,7 +127,7 @@ class MetadataProbe:
         except Exception:
             # Not the sink's fault and not counted against it: this is our own metadata walk.
             self._metrics.build_failures.inc(camera="unknown")
-            _LOG.exception("the DeepStream metadata probe failed on one buffer")
+            LOG.exception("the DeepStream metadata probe failed on one buffer")
         return ok
 
     def _publish(self, view: FrameView) -> None:
@@ -139,9 +138,7 @@ class MetadataProbe:
             # frames in the same batch.
             self.unknown_pad_frames += 1
             self._metrics.build_failures.inc(camera="unknown")
-            _LOG.warning(
-                "frame on muxer pad %d belongs to no configured camera", view.pad_index
-            )
+            LOG.warning("frame on muxer pad %d belongs to no configured camera", view.pad_index)
             return
         camera = self._cameras.get(camera_id)
         try:
@@ -164,7 +161,7 @@ class MetadataProbe:
             )
         except Exception:
             self._metrics.build_failures.inc(camera=camera_id)
-            _LOG.exception("failed to build the event for camera %s", camera_id)
+            LOG.exception("failed to build the event for camera %s", camera_id)
             return
         self._emit(camera_id, event)
 
@@ -177,7 +174,7 @@ class MetadataProbe:
         # to and deliberately after this frame is settled.
         for camera, frame in self._sink.drain_delivery_failures():
             self._metrics.sink_failures.inc(sink=self._sink.name)
-            _LOG.error(
+            LOG.error(
                 "sink %s did not deliver camera %s frame %d",
                 self._sink.name,
                 camera,
@@ -319,7 +316,7 @@ class DeepStreamPipeline:
         # with neither GStreamer nor pyds, which is what keeps the tier above offline.
         self._gst, self._glib, self._pyds = load_pyds()
         self._configs = self.write_configs()
-        _LOG.info(
+        LOG.info(
             "shard %d: %d camera(s) on gpu %d, configs in %s",
             self._shard_index,
             len(self._cameras),
@@ -434,7 +431,7 @@ class DeepStreamPipeline:
         gst = self._gst
         if message.type == gst.MessageType.ERROR:
             error, debug = message.parse_error()
-            _LOG.error(
+            LOG.error(
                 "shard %d: %s (%s)", self._shard_index, error.message, debug or "no detail"
             )
             self._exit_code = 1
@@ -442,15 +439,15 @@ class DeepStreamPipeline:
         elif message.type == gst.MessageType.EOS:
             # Every source ended. For a file fixture that is success; for a live fleet it means
             # the cameras are gone, and the supervisor is what decides whether to restart.
-            _LOG.info("shard %d: end of stream", self._shard_index)
+            LOG.info("shard %d: end of stream", self._shard_index)
             self._quit()
         elif message.type == gst.MessageType.WARNING:
             error, debug = message.parse_warning()
-            _LOG.warning("shard %d: %s (%s)", self._shard_index, error.message, debug or "")
+            LOG.warning("shard %d: %s (%s)", self._shard_index, error.message, debug or "")
         return True
 
     def _on_signal(self, number: int, _frame: object) -> None:
-        _LOG.info("shard %d: received signal %d; stopping", self._shard_index, number)
+        LOG.info("shard %d: received signal %d; stopping", self._shard_index, number)
         self._quit()
 
     def _quit(self) -> None:

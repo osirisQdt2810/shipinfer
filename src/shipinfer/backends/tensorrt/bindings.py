@@ -28,7 +28,7 @@ from typing import Any
 import numpy as np
 
 from shipinfer.core.errors import InferenceError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.types import DataType, Device
 from shipinfer.runtime.memory import PinnedStagingPool
 from shipinfer.runtime.platform import require_torch
@@ -36,8 +36,6 @@ from shipinfer.runtime.stream import Stream
 from shipinfer.runtime.tensor import torch_dtype
 
 __all__ = ["Binding", "BindingSet"]
-
-_LOG = get_logger("backends.tensorrt.bindings")
 
 
 @dataclass(slots=True)
@@ -78,7 +76,7 @@ class BindingSet:
             name=name, is_input=is_input, device_tensor=tensor, dtype=dtype, shape=shape
         )
         self._bindings[name] = binding
-        _LOG.debug(
+        LOG.debug(
             "allocated binding %s %s %s (%d B) on %s",
             name,
             shape,

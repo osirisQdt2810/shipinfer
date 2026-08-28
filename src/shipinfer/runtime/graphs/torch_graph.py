@@ -29,7 +29,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from shipinfer.core.errors import DeviceError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.types import Device
 from shipinfer.runtime.graphs.base import CapturedGraph, GraphCache
 from shipinfer.runtime.graphs.registry import GRAPH_CACHES
@@ -37,8 +37,6 @@ from shipinfer.runtime.platform import is_available, require_torch
 from shipinfer.runtime.stream import Stream
 
 __all__ = ["TorchCapturedGraph", "TorchGraphCache"]
-
-_LOG = get_logger("runtime.graph")
 
 
 class TorchCapturedGraph(CapturedGraph):
@@ -124,7 +122,7 @@ class TorchGraphCache(GraphCache):
         self._pool: Any = None
 
         if enabled and not self._enabled:
-            _LOG.debug("CUDA graphs disabled on %s: no accelerator", device)
+            LOG.debug("CUDA graphs disabled on %s: no accelerator", device)
 
     @property
     def enabled(self) -> bool:
@@ -181,7 +179,7 @@ class TorchGraphCache(GraphCache):
                 with contextlib.suppress(Exception):
                     torch.cuda.synchronize(self._device.index)
                 self._failures += 1
-                log = _LOG.warning if self._failures >= self._max_failures else _LOG.debug
+                log = LOG.warning if self._failures >= self._max_failures else LOG.debug
                 log(
                     "CUDA graph capture failed on %s at batch %d (%d/%d): %s",
                     self._device,
@@ -192,7 +190,7 @@ class TorchGraphCache(GraphCache):
                 )
                 return None
             self._graphs[batch_size] = captured
-            _LOG.info("captured CUDA graph on %s for batch %d", self._device, batch_size)
+            LOG.info("captured CUDA graph on %s for batch %d", self._device, batch_size)
             return captured
 
     def _warmup(self, torch: Any, stream: Stream, run: Callable[[], Mapping[str, Any]]) -> None:

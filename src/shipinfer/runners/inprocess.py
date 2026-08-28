@@ -88,7 +88,7 @@ from shipinfer.core.errors import (
     ShipInferError,
     WireRefusedError,
 )
-from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.logging import LOG, log_context
 from shipinfer.core.request import InferenceRequest, Priority, ResponseFuture
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.settings.ingest import CameraConfig
@@ -119,7 +119,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only; `ingest` is imported inside
 
 __all__ = ["InprocessRunner"]
 
-_LOG = get_logger("runners.inprocess")
 
 #: The share of a stop's budget the cameras get before the workers are joined. Cameras are
 #: released first because they are the producers, and joining workers while frames keep
@@ -663,7 +662,7 @@ class InprocessRunner(Runner):
             try:
                 announce(camera_id)
             except Exception:
-                _LOG.exception(
+                LOG.exception(
                     "element %r raised in %s(%r); the camera lifecycle continues without it",
                     node.name,
                     hook.__name__,
@@ -999,7 +998,7 @@ class InprocessRunner(Runner):
             existing = self._configured.get(camera_id)
             if existing is not None:
                 return existing
-            _LOG.info(
+            LOG.info(
                 "camera %s is not in the ingest config; admitting it at priority %s",
                 camera_id,
                 Priority.NORMAL.name,
@@ -1053,7 +1052,7 @@ class InprocessRunner(Runner):
             try:
                 node.element.open(context)
             except BaseException:
-                _LOG.error(
+                LOG.error(
                     "element %r failed to open; the %d already open are closed by the "
                     "unwind in Runner.start",
                     node.name,
@@ -1079,7 +1078,7 @@ class InprocessRunner(Runner):
             )
             thread.start()
             self._threads.append(thread)
-        _LOG.info(
+        LOG.info(
             "runner %s ready on shard %d: %s | %d worker(s) | queue=%s(%d) | head=%s",
             self.name,
             self._shard_id,
@@ -1170,7 +1169,7 @@ class InprocessRunner(Runner):
                     abandoned += 1
             self._threads.clear()
             if abandoned:
-                _LOG.warning(
+                LOG.warning(
                     "%d worker(s) did not stop within %.1fs; abandoning them",
                     abandoned,
                     timeout_s,
@@ -1191,7 +1190,7 @@ class InprocessRunner(Runner):
                 # fail for its producer *and* did eventually run — and the alternative,
                 # suppressing the walk's own count from a thread the runner has stopped
                 # tracking, would need the hot path to check a flag.
-                _LOG.warning(
+                LOG.warning(
                     "%d in-flight item(s) failed with the runner; their workers were "
                     "abandoned mid-walk",
                     stranded,
@@ -1201,10 +1200,10 @@ class InprocessRunner(Runner):
             try:
                 node.element.close()
             except Exception:
-                _LOG.exception("element %r failed to close cleanly", node.name)
+                LOG.exception("element %r failed to close cleanly", node.name)
 
         totals = self._metrics.totals()
-        _LOG.info(
+        LOG.info(
             "runner %s stopped: %d item(s) failed in the queue, %d walked, %d failed",
             self.name,
             lost,
@@ -1237,7 +1236,7 @@ class InprocessRunner(Runner):
             return 0
         abandoned = manager.stop(timeout_s=timeout_s)
         if abandoned:
-            _LOG.warning(
+            LOG.warning(
                 "%d camera thread(s) did not stop within %.1fs; they still hold this "
                 "runner's sink",
                 abandoned,
@@ -1441,7 +1440,7 @@ class InprocessRunner(Runner):
                     # — and the item's future is resolved, because a frame that vanishes with
                     # no typed outcome is the failure ADR-005 exists to prevent.
                     self._count_failure(work, exc)
-                    _LOG.exception("runner failed on %s", work.request.context.key)
+                    LOG.exception("runner failed on %s", work.request.context.key)
                     self._fail(work, self._typed(exc, "the runner failed"))
                 finally:
                     inflight[slot] = batch[index + 1 :]
@@ -1502,7 +1501,7 @@ class InprocessRunner(Runner):
                 # typed reason naming the node, and the walk stops rather than handing a
                 # payload on under a cap nobody negotiated.
                 self._count_failure(work, exc)
-                _LOG.error(
+                LOG.error(
                     "fan-in %s could not be merged for %s: %s",
                     node.name,
                     work.request.context.key,
@@ -1542,7 +1541,7 @@ class InprocessRunner(Runner):
                 result = node.element.process(incoming)
             except Exception as exc:
                 self._count_failure(work, exc)
-                _LOG.exception(
+                LOG.exception(
                     "element %s failed on %s",
                     node.name,
                     incoming.key,

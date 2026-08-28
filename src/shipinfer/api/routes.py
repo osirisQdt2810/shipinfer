@@ -17,7 +17,7 @@ from shipinfer.api.schemas import (
     tensor_to_wire,
 )
 from shipinfer.core.errors import ModelVersionNotFoundError, ShipInferError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.request import InferenceRequest, RequestContext
 from shipinfer.engine.health import check_health
 from shipinfer.engine.pool import InferenceServer
@@ -26,7 +26,6 @@ __all__ = ["build_router"]
 
 # The logger name stays "server.api" on purpose: an operator's log filter is behaviour,
 # and this move promises none changed. It is retargeted when server/ is deleted (A2 PR-6).
-_LOG = get_logger("api")
 
 #: Ceiling on how long one HTTP request may hold a worker. Generous enough that a cold
 #: model finishing its first batch is not cut off, short enough that a wedged backend
@@ -125,7 +124,7 @@ def build_router(server: InferenceServer) -> Any:
                 504, f"{name} did not respond within {_INFER_TIMEOUT_S:.0f}s"
             ) from exc
         except Exception as exc:  # a backend failure surfaced through the future
-            _LOG.exception("inference failed for %s", name)
+            LOG.exception("inference failed for %s", name)
             raise HTTPException(500, str(exc)) from exc
 
         return InferenceResponseBody(
@@ -209,7 +208,7 @@ def build_router(server: InferenceServer) -> Any:
         except ShipInferError as exc:
             raise http_error(exc) from exc
         except Exception as exc:  # a backend or engine failure during load
-            _LOG.exception("loading model %s failed", name)
+            LOG.exception("loading model %s failed", name)
             raise HTTPException(500, str(exc)) from exc
         return {"name": model.name, "version": str(model.version), "state": "READY"}
 

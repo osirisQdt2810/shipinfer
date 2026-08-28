@@ -19,7 +19,7 @@ from typing import Any, ClassVar
 import numpy as np
 
 from shipinfer.core.errors import FrameDecodeError, SourceOpenError, SourceUnavailableError
-from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.logging import LOG, log_context
 from shipinfer.core.redact import redact_in
 from shipinfer.ingest.base import FrameSource
 from shipinfer.ingest.registry import SOURCES
@@ -27,7 +27,6 @@ from shipinfer.ingest.timing.pacing import DeadlinePacer
 
 __all__ = ["FRAME_SUFFIXES", "ReplaySource"]
 
-_LOG = get_logger("ingest.replay")
 
 #: Image suffixes recognised when the URI is a directory of frames. A directory is the more
 #: robust fixture of the two: it needs no container format and no codec, so it cannot fail
@@ -177,7 +176,7 @@ class ReplaySource(FrameSource):
         self._index = 0
         self._pacer = DeadlinePacer(self.fps)
         self._pacer.reset()
-        _LOG.info(
+        LOG.info(
             "camera %s replaying %s: %dx%d @ %g fps, loop=%s",
             self.camera_id,
             path,
@@ -231,7 +230,7 @@ class ReplaySource(FrameSource):
                 image = self._next_image()
             if image is None:
                 self._exhausted = True
-                _LOG.info(
+                LOG.info(
                     "camera %s: replay source exhausted after %d frame(s)",
                     self.camera_id,
                     self.counter.stamped,

@@ -16,12 +16,11 @@ from __future__ import annotations
 import signal
 from typing import Protocol
 
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 
 __all__ = ["Stoppable", "forward_signals"]
 
 # Renamed with `server/` itself; the reason is in `launch/supervisor.py`, once.
-_LOG = get_logger("launch.signals")
 
 
 class Stoppable(Protocol):
@@ -47,7 +46,7 @@ def forward_signals(target: Stoppable) -> None:
     def _handle(signum: int, _frame: object) -> None:
         # Record only. The terminating happens on the supervising thread, which is the one
         # that can block: a handler that drains would deadlock on the second signal.
-        _LOG.info("received signal %d; stopping", signum)
+        LOG.info("received signal %d; stopping", signum)
         target.request_stop()
 
     signal.signal(signal.SIGINT, _handle)

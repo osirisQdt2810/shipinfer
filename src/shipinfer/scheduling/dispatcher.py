@@ -17,14 +17,12 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 
 from shipinfer.core.errors import QueueFullError, ServerStateError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.request import InferenceRequest
 from shipinfer.scheduling.policies import Placeable, PlacementPolicy
 from shipinfer.scheduling.work import WorkItem
 
 __all__ = ["DispatchResult", "Dispatcher"]
-
-_LOG = get_logger("scheduling.dispatcher")
 
 
 class DispatchResult:
@@ -127,7 +125,7 @@ class Dispatcher:
                 continue
             if self._on_spill is not None:
                 self._on_spill(first, candidate)
-            _LOG.debug(
+            LOG.debug(
                 "spilled %s from %s to %s", self.model_name, first.device, candidate.device
             )
             return DispatchResult(candidate, attempts=attempt, spilled=True)

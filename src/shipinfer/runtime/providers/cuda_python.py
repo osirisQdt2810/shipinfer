@@ -6,7 +6,7 @@ import threading
 from typing import Any
 
 from shipinfer.core.errors import DeviceError, DeviceOutOfMemoryError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.runtime.providers.base import (
     CudaProvider,
     RawDeviceProperties,
@@ -16,8 +16,6 @@ from shipinfer.runtime.providers.base import (
 from shipinfer.runtime.providers.registry import PROVIDERS
 
 __all__ = ["CudaPythonProvider"]
-
-_LOG = get_logger("runtime.providers.cuda_python")
 
 
 @PROVIDERS.register("cuda_python", "cuda")
@@ -51,7 +49,7 @@ class CudaPythonProvider(CudaProvider):
         try:
             err, count = runtime.cudaGetDeviceCount()
         except Exception as exc:
-            _LOG.debug("cuda-python present but unusable: %s", exc)
+            LOG.debug("cuda-python present but unusable: %s", exc)
             return None
         if int(err) != 0 or count == 0:
             return None

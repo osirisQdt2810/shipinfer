@@ -593,7 +593,7 @@ class TestARequestTheSchemaCanRefuseOnItsOwn:
         """
         cameras = FakeCameras(refuse=ValueError("codec 'h266' is not supported"))
         with (
-            caplog.at_level(logging.ERROR, logger="shipinfer.api"),
+            caplog.at_level(logging.ERROR, logger="shipinfer"),
             client_over(cameras) as client,
         ):
             response = client.post("/streams", json={"url": "rtsp://host"})

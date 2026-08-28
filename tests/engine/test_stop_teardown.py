@@ -833,7 +833,7 @@ class TestTwoStopsThatBothWinTheStartedCheck:
             finish_release = threading.Event()
             gate_lock = threading.Lock()
             barrier = _watch_barrier(server)
-            original_info = pool._LOG.info
+            original_info = pool.LOG.info
             original_await = InferenceServer._await_teardown
             original_release = InferenceServer._release
 
@@ -869,7 +869,7 @@ class TestTwoStopsThatBothWinTheStartedCheck:
                 original_release(self, generation)
                 order.append("released")
 
-            monkeypatch.setattr(pool._LOG, "info", gated_info)
+            monkeypatch.setattr(pool.LOG, "info", gated_info)
             monkeypatch.setattr(InferenceServer, "_await_teardown", committed_await)
             monkeypatch.setattr(InferenceServer, "_release", gated_release)
 
@@ -1149,7 +1149,7 @@ class TestANonStrictStartRacingAStop:
 
         outcome = _Outcome()
         starter = threading.Thread(target=outcome.run_start, args=(server,), name="starter")
-        with caplog.at_level(logging.DEBUG, logger="shipinfer.engine"):
+        with caplog.at_level(logging.DEBUG, logger="shipinfer"):
             starter.start()
             assert entered.wait(_TIMEOUT), "the start never reached the first instance"
             stopper = threading.Thread(target=server.stop, name="stopper")
@@ -1465,7 +1465,7 @@ class TestAStartThatLostTheClaimUnwinding:
 
         outcome = _Outcome()
         starter = threading.Thread(target=outcome.run_start, args=(server,), name="starter")
-        with caplog.at_level(logging.DEBUG, logger="shipinfer.engine"):
+        with caplog.at_level(logging.DEBUG, logger="shipinfer"):
             starter.start()
             assert entered.wait(_TIMEOUT), "the start never reached the first instance"
 
@@ -2079,7 +2079,7 @@ class TestATeardownThatWasOvertakenByANewRun:
 
         stopper = threading.Thread(target=server.stop, name="stopper")
         stranded: list[Any] = []
-        with caplog.at_level(logging.WARNING, logger="shipinfer.engine"):
+        with caplog.at_level(logging.WARNING, logger="shipinfer"):
             stopper.start()
             try:
                 assert inside_release.wait(_TIMEOUT), "no teardown ever started"
@@ -2190,7 +2190,7 @@ class TestATeardownOvertakenPartWayThrough:
         monkeypatch.setattr(InferenceServer, "_drain_models", gated_drain)
 
         stopper = threading.Thread(target=server.stop, name="stopper")
-        with caplog.at_level(logging.WARNING, logger="shipinfer.engine"):
+        with caplog.at_level(logging.WARNING, logger="shipinfer"):
             stopper.start()
             try:
                 assert in_drain.wait(_TIMEOUT), "the teardown never reached the drain"
@@ -2266,7 +2266,7 @@ class TestATeardownOvertakenPartWayThrough:
         sinks[0].stats_gate = gate
 
         stopper = threading.Thread(target=server.stop, name="stopper")
-        with caplog.at_level(logging.WARNING, logger="shipinfer.engine"):
+        with caplog.at_level(logging.WARNING, logger="shipinfer"):
             stopper.start()
             try:
                 assert parked.wait(_TIMEOUT), "the teardown never read the totals"

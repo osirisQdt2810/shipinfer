@@ -15,7 +15,7 @@ from shipinfer.core.errors import (
     ServerStateError,
     ValidationError,
 )
-from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.logging import LOG, log_context
 from shipinfer.core.metrics import ServerMetrics
 from shipinfer.core.request import InferenceRequest, InferenceResponse, ResponseFuture
 from shipinfer.core.settings import ServerSettings
@@ -38,8 +38,6 @@ from shipinfer.scheduling.queues import QUEUES, BatchWindow
 from shipinfer.scheduling.work import WorkItem
 
 __all__ = ["Model"]
-
-_LOG = get_logger("engine.model")
 
 
 def _graphs_enabled(execution: Any) -> bool:
@@ -188,7 +186,7 @@ class Model:
             fits = [size for size in override if 1 <= int(size) <= self._window.max_batch_size]
             dropped = [size for size in override if size not in fits]
             if dropped:
-                _LOG.info(
+                LOG.info(
                     "model %s: graph sizes %s from %s exceed max_batch_size %d and were "
                     "dropped; capturing %s",
                     self._artifact.name,
@@ -225,7 +223,7 @@ class Model:
         # Logged only when capture is on, because that is the only case where the answer
         # changes what the process does; `stats()` carries it unconditionally.
         if self._graphs_on:
-            _LOG.info(
+            LOG.info(
                 "model %s captures CUDA graphs for batch size(s) %s (%s)",
                 self._artifact.name,
                 list(spec.batch_sizes),
@@ -255,7 +253,7 @@ class Model:
         limits = self._artifact.config.rate_limiter
         limiter = build_rate_limiter(limits.kind, limits.max_concurrent_executions)
         if limits.enabled:
-            _LOG.info(
+            LOG.info(
                 "model %s is rate limited to %d concurrent execution(s) across %s",
                 self._artifact.name,
                 limits.max_concurrent_executions,
@@ -448,7 +446,7 @@ class Model:
             self._unwind(started)
             raise
         self._started = True
-        _LOG.info(
+        LOG.info(
             "model %s v%d ready with %d instance(s) across %s",
             self.name,
             self.version,
@@ -489,7 +487,7 @@ class Model:
             try:
                 instance.stop(self._settings.shutdown_grace_s)
             except Exception:
-                _LOG.exception(
+                LOG.exception(
                     "error stopping instance %s while unwinding a failed start of model %s",
                     instance.name,
                     self.name,
@@ -661,13 +659,13 @@ class Model:
                 pass
             except Exception:
                 # A cache is an optimisation; it must never fail the request it served.
-                _LOG.exception("response cache write failed for %s", self.name)
+                LOG.exception("response cache write failed for %s", self.name)
 
         future.add_done_callback(_store)
 
     def _on_spill(self, wanted: Any, actual: Any) -> None:
         self._metrics.spills_total.inc(model=self.name, device=str(actual.device))
-        _LOG.debug(
+        LOG.debug(
             "spilled from %s to %s",
             wanted.device,
             actual.device,

@@ -13,7 +13,7 @@ is not installed". Those are different problems with different fixes.
 
 from __future__ import annotations
 
-from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.logging import LOG, log_context
 from shipinfer.core.registry import Registry
 from shipinfer.core.settings.ingest import CameraConfig, IngestSettings
 from shipinfer.ingest.base import FrameSource
@@ -22,7 +22,6 @@ from shipinfer.ingest.resolve import resolve_source_name
 
 __all__ = ["SOURCES", "create_source"]
 
-_LOG = get_logger("ingest.registry")
 
 SOURCES: Registry[FrameSource] = Registry("video source", FrameSource)
 
@@ -45,7 +44,7 @@ def create_source(
             twenty-minute detour.
     """
     name = resolve_source_name(config, settings)
-    _LOG.debug(
+    LOG.debug(
         "creating %r source for camera %s",
         name,
         config.camera_id,

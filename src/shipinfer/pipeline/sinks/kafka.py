@@ -47,14 +47,13 @@ from shipinfer.core.errors import (
     BackendUnavailableError,
     ConfigurationError,
 )
-from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.logging import LOG, log_context
 from shipinfer.pipeline.schema import PerceptionEvent
 from shipinfer.pipeline.sinks.base import ResultSink
 from shipinfer.pipeline.sinks.registry import RESULT_SINKS
 
 __all__ = ["KafkaResultSink"]
 
-_LOG = get_logger("pipeline.sinks.kafka")
 
 #: One delivery failure in this many is logged at ERROR; the rest go to DEBUG. A rejected
 #: topic fails *every* message, so at 1000 frames a second an unthrottled log line would
@@ -145,7 +144,7 @@ class KafkaResultSink(ResultSink):
         }
         settings.update(config or {})
         self._producer = Producer(settings)
-        _LOG.info("kafka result sink -> %s on %s", self.topic, self.brokers)
+        LOG.info("kafka result sink -> %s on %s", self.topic, self.brokers)
 
     def _do_emit(self, event: PerceptionEvent) -> None:
         payload = event.as_det2mot() if self.legacy else event.as_dict()
@@ -182,7 +181,7 @@ class KafkaResultSink(ResultSink):
             self._pending_tags.append((camera, frame))
             self._last_delivery_error = str(error)
             failures = self.delivery_failures
-        log = _LOG.error if failures == 1 or failures % _LOG_EVERY == 0 else _LOG.debug
+        log = LOG.error if failures == 1 or failures % _LOG_EVERY == 0 else LOG.debug
         log(
             "kafka sink: broker refused camera %s frame %d on topic %s (%s) "
             "[%d delivery failure(s) so far]",
@@ -228,12 +227,12 @@ class KafkaResultSink(ResultSink):
             self._pending_tags.clear()
             failures = self.delivery_failures
         if remaining:
-            _LOG.warning("kafka sink closed with %d message(s) undelivered", remaining)
+            LOG.warning("kafka sink closed with %d message(s) undelivered", remaining)
         if undrained:
             # These arrived after the pipeline stopped draining, so no metric will ever carry
             # them. Naming the frames is the whole point: at shutdown the log is the only
             # record, and "some messages were refused" is not something an operator can act on.
-            _LOG.error(
+            LOG.error(
                 "kafka sink: %d refused message(s) were never counted, for %s "
                 "(%d delivery failure(s) in total, last: %s)",
                 len(undrained),

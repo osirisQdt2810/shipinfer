@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 from shipinfer.core.errors import InferenceError, ShipInferError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.settings import ExecutionSettings
 from shipinfer.core.types import Device, Tensor, TensorSpec
 from shipinfer.repository import (
@@ -33,8 +33,6 @@ from shipinfer.runtime.memory import MemoryPool
 from shipinfer.runtime.stream import StreamPool
 
 __all__ = ["BackendContext", "ModelBackend"]
-
-_LOG = get_logger("backends")
 
 
 def _annotate(exc: BaseException, note: str) -> None:
@@ -142,7 +140,7 @@ class ModelBackend(abc.ABC):
             return
         self._do_initialize()
         self._initialized = True
-        _LOG.info("loaded %s on %s", self._context.instance_name, self.device)
+        LOG.info("loaded %s on %s", self._context.instance_name, self.device)
 
     def finalize(self) -> None:
         """Release everything. Idempotent, and must not raise during shutdown."""
@@ -151,7 +149,7 @@ class ModelBackend(abc.ABC):
         try:
             self._do_finalize()
         except Exception:
-            _LOG.exception("error finalising %s", self._context.instance_name)
+            LOG.exception("error finalising %s", self._context.instance_name)
         finally:
             self._initialized = False
 
@@ -216,11 +214,11 @@ class ModelBackend(abc.ABC):
         try:
             batch = self._warmup_batch()
         except Exception as exc:
-            _LOG.debug("cannot build a warm-up batch for %s: %s", self.platform, exc)
+            LOG.debug("cannot build a warm-up batch for %s: %s", self.platform, exc)
             return
         for _ in range(iterations):
             self.execute(batch, batch_size=1)
-        _LOG.debug("warmed up %s with %d iteration(s)", self._context.instance_name, iterations)
+        LOG.debug("warmed up %s with %d iteration(s)", self._context.instance_name, iterations)
 
     def _run_warmup_samples(self, samples: Sequence[WarmupBatch]) -> None:
         """Execute each declared sample ``count`` times, naming it if it fails.
@@ -251,7 +249,7 @@ class ModelBackend(abc.ABC):
                         f"{self._context.instance_name}: warm-up sample {sample.name!r} "
                         f"(batch {sample.batch_size}) failed: {exc}"
                     ) from exc
-        _LOG.info(
+        LOG.info(
             "warmed up %s with %d declared sample(s): %s",
             self._context.instance_name,
             len(samples),

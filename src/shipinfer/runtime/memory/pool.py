@@ -6,7 +6,7 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.settings import MemorySettings
 from shipinfer.core.types import Device, MemoryKind
 from shipinfer.runtime.memory.base import Allocator, Buffer
@@ -16,8 +16,6 @@ from shipinfer.runtime.memory.staging import PinnedStagingPool
 from shipinfer.runtime.platform import is_available
 
 __all__ = ["MemoryPool"]
-
-_LOG = get_logger("runtime.memory.pool")
 
 
 class MemoryPool:
@@ -94,7 +92,7 @@ class MemoryPool:
 
     def _build_pinned(self) -> Allocator:
         if not is_available():
-            _LOG.debug("no accelerator: pinned pool falls back to pageable host memory")
+            LOG.debug("no accelerator: pinned pool falls back to pageable host memory")
             return self._host
         if self._settings.allocator == "custom":
             return ALLOCATORS.create(
@@ -116,7 +114,7 @@ class MemoryPool:
                 if allocator is None:
                     allocator = self._build_device(device)
                     self._device_allocators[device] = allocator
-                    _LOG.debug("created %s for %s", allocator.name, device)
+                    LOG.debug("created %s for %s", allocator.name, device)
         return allocator
 
     def _build_device(self, device: Device) -> Allocator:

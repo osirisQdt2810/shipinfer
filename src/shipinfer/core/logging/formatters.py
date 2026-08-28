@@ -10,7 +10,7 @@ from shipinfer.core.logging.context import CONTEXT_FIELDS
 
 __all__ = ["DEFAULT_DATEFMT", "DEFAULT_FORMAT", "ContextFormatter", "JsonFormatter"]
 
-DEFAULT_FORMAT = "%(asctime)s %(levelname)-7s %(name)-36s %(message)s"
+DEFAULT_FORMAT = "%(asctime)s %(levelname)-7s %(module)-22s %(message)s"
 DEFAULT_DATEFMT = "%H:%M:%S"
 
 #: Attributes :class:`logging.LogRecord` always has — anything else on a record came from

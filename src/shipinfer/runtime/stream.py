@@ -19,13 +19,11 @@ from contextlib import contextmanager
 from typing import Any
 
 from shipinfer.core.errors import DeviceError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.types import Device
 from shipinfer.runtime.platform import require_torch
 
 __all__ = ["Stream", "StreamPool"]
-
-_LOG = get_logger("runtime.stream")
 
 
 class Stream:
@@ -108,7 +106,7 @@ class StreamPool:
         self._device = device
         self._streams: list[Stream] = [Stream(device) for _ in range(count)]
         self._cursor = itertools.count()
-        _LOG.debug("created %d stream(s) on %s", count, device)
+        LOG.debug("created %d stream(s) on %s", count, device)
 
     @property
     def device(self) -> Device:

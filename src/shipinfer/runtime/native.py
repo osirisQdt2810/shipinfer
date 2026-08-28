@@ -30,7 +30,7 @@ import importlib
 from types import ModuleType
 
 from shipinfer.core.errors import ConfigurationError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.settings import ExecutionProvider
 
 __all__ = [
@@ -40,8 +40,6 @@ __all__ = [
     "require_native",
     "resolve_provider",
 ]
-
-_LOG = get_logger("runtime.native")
 
 
 @functools.lru_cache(maxsize=1)
@@ -68,18 +66,18 @@ def native_module() -> ModuleType | None:
     except ImportError as exc:
         # The package may be absent, or present as pure Python with no build. Both are
         # ordinary, and both arrive here as ImportError.
-        _LOG.debug("shipvision kernels are not installed: %s", exc)
+        LOG.debug("shipvision kernels are not installed: %s", exc)
         return None
 
     if not _reports_devices(kernels):
-        _LOG.debug(
+        LOG.debug(
             "shipvision kernels are installed but report no usable device "
             "(platform=%s); build them with `python 3rdparty/shipvision/build.py`",
             _describe(kernels, "platform"),
         )
         return None
 
-    _LOG.info(
+    LOG.info(
         # `__version__`, not `version` — the extension has only ever set the attribute. The
         # banner degraded to "shipvision ?" because `_describe` swallowed the AttributeError,
         # which is exactly why fixing `native_version()` alone left this behind: a guard that

@@ -5,11 +5,10 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 
 __all__ = ["build_trt_logger"]
 
-_LOG = get_logger("backends.tensorrt")
 
 #: One ILogger for the process. TensorRT keeps a global logger and warns that it is
 #: *ignoring* every later one, so building a fresh subclass per backend created N Python
@@ -39,15 +38,15 @@ def build_trt_logger(trt: Any, verbose: bool = False) -> Any:
 
         def log(self, severity: Any, msg: str) -> None:
             if severity == trt.ILogger.INTERNAL_ERROR:
-                _LOG.error("TensorRT internal error: %s", msg)
+                LOG.error("TensorRT internal error: %s", msg)
             elif severity == trt.ILogger.ERROR:
-                _LOG.error("TensorRT: %s", msg)
+                LOG.error("TensorRT: %s", msg)
             elif severity == trt.ILogger.WARNING:
-                _LOG.warning("TensorRT: %s", msg)
+                LOG.warning("TensorRT: %s", msg)
             elif verbose:
-                _LOG.info("TensorRT: %s", msg)
+                LOG.info("TensorRT: %s", msg)
             else:
-                _LOG.debug("TensorRT: %s", msg)
+                LOG.debug("TensorRT: %s", msg)
 
     with _LOGGER_LOCK:
         existing = _LOGGERS.get(verbose)

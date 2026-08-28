@@ -29,7 +29,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from shipinfer.core.errors import ConfigurationError, ServerStateError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.launch.control import (
     AddCameraResult,
     CameraSpec,
@@ -41,7 +41,6 @@ from shipinfer.launch.proto import load_grpc, load_json_format, load_pb
 
 __all__ = ["ShardClient"]
 
-_LOG = get_logger("launch.client")
 
 #: How long to sleep between the first two `Ready` polls, and the cap it backs off to. A
 #: freshly spawned interpreter takes O(1s) to import and bind, so polling every 50 ms wastes
@@ -225,7 +224,7 @@ class ShardClient:
                 reply = self._call("Ready", self._pb().ReadyRequest(), poll_deadline)
             except ServerStateError:
                 if time.monotonic() >= deadline:
-                    _LOG.warning(
+                    LOG.warning(
                         "shard %d at %s was not ready within %.1fs",
                         self._shard_id,
                         self.address,
@@ -236,7 +235,7 @@ class ShardClient:
                 sleep_s = min(sleep_s * 2, _POLL_MAX_S)
                 continue
             self._identity = ShardIdentity.from_pb(reply.identity)
-            _LOG.info(
+            LOG.info(
                 "shard %d ready at %s (pid %d, state %s)",
                 self._shard_id,
                 self.address,

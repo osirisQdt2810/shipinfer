@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.settings import ExecutionProvider
 from shipinfer.core.types import Device
 from shipinfer.runtime.native import resolve_provider
@@ -55,8 +55,6 @@ __all__ = [
     "get_thread_local_image_ops",
     "staging_owner",
 ]
-
-_LOG = get_logger("runtime.ops")
 
 
 def get_image_ops(
@@ -91,12 +89,12 @@ def get_image_ops(
         except Exception as exc:
             if provider is ExecutionProvider.NATIVE:
                 raise
-            _LOG.warning("native image ops unavailable (%s); falling back", exc)
+            LOG.warning("native image ops unavailable (%s); falling back", exc)
     if is_available():
         try:
             return TorchImageOps(device_index=device_index, staging=staging)
         except Exception as exc:  # pragma: no cover - a broken torch install
-            _LOG.warning("torch image ops unavailable (%s); falling back to numpy", exc)
+            LOG.warning("torch image ops unavailable (%s); falling back to numpy", exc)
     return NumpyImageOps()
 
 

@@ -1,16 +1,15 @@
-"""Logging: a logger factory, structured context fields, and pluggable sinks.
+"""One logger for the process, structured context fields, and pluggable sinks.
 
-Two rules hold everywhere in this codebase:
+Two rules hold everywhere here:
 
-1. **Library code configures nothing at import time.** Only :func:`configure` touches
-   handlers, and only an entry point calls it. Anything else steals control from whoever
-   embeds this package.
-2. **Every logger is named** ``shipinfer.<area>``, so an operator can silence one
-   subsystem without an edit — ``logging.getLogger("shipinfer.scheduling").setLevel(...)``.
+1. **One logger** (V145): every module imports :data:`LOG` and writes to it. Where a line
+   came from is the record's own ``%(module)s``, not a logger name, so there is one level,
+   one handler and one format — and nothing to keep in step.
+2. **Library code configures nothing at import time.** Only :func:`configure` touches
+   handlers, and only an entry point calls it.
 
-Sinks are a registry (:data:`SINKS`) rather than an if/elif, so
-``configure(sink="async")`` and ``configure(sink=AsyncSink(RotatingFileSink(path)))`` are
-both first-class, and a deployment that needs syslog adds a file instead of a branch.
+Sinks are a registry (:data:`SINKS`), so ``configure(sink="async")`` and
+``configure(sink=AsyncSink(RotatingFileSink(path)))`` are both first-class.
 """
 
 from __future__ import annotations
@@ -27,6 +26,7 @@ from shipinfer.core.logging.sinks import AsyncSink, NullSink, RotatingFileSink, 
 
 __all__ = [
     "CONTEXT_FIELDS",
+    "LOG",
     "LOG_LEVEL_ENV",
     "LOG_SINK_ENV",
     "SINKS",
@@ -50,9 +50,14 @@ _ROOT = "shipinfer"
 _active_sink: LogSink | None = None
 
 
-def get_logger(area: str) -> logging.Logger:
-    """Return the logger for ``area`` (e.g. ``"scheduling.dispatcher"``)."""
-    return logging.getLogger(area if area.startswith(_ROOT) else f"{_ROOT}.{area}")
+#: The process's logger. Import it, do not build another: one name means one level, one
+#: handler and one format, and the emitting module is already on every record.
+LOG: logging.Logger = logging.getLogger(_ROOT)
+
+
+def get_logger() -> logging.Logger:
+    """:data:`LOG`. Kept for an embedder that would rather call than import."""
+    return LOG
 
 
 def configure(

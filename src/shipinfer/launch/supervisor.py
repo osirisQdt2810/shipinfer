@@ -69,7 +69,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from shipinfer.core.errors import ConfigurationError, ShardExitedError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.scheduling.sharding import Shard, ShardPlan
 
 __all__ = [
@@ -82,7 +82,6 @@ __all__ = [
 # through the move so that an operator's log filter — which is behaviour — changed exactly
 # once, at the deletion, rather than at every step of the split. `launch/signals.py` is the
 # other half of that rename; this comment is the only copy of the reason.
-_LOG = get_logger("launch.supervisor")
 
 #: What a child must NOT inherit, because the control plane owns what these used to say
 #: (arch.md §2). Removed from the child's environment rather than overwritten: there is no
@@ -184,7 +183,7 @@ class Fleet:
         if self._running:
             raise ConfigurationError("this fleet is already running")
 
-        _LOG.info("starting fleet\n%s", self.plan.describe())
+        LOG.info("starting fleet\n%s", self.plan.describe())
         self._stopped.clear()
         try:
             for shard in self.plan.shards:
@@ -192,7 +191,7 @@ class Fleet:
         except BaseException:
             self.stop()
             raise
-        _LOG.info("fleet up: %d shard(s)", len(self._running))
+        LOG.info("fleet up: %d shard(s)", len(self._running))
 
     def _spawn(self, shard: Shard) -> ShardProcess:
         argv = list(self.command(shard))
@@ -210,7 +209,7 @@ class Fleet:
         # to every shard at once and race this class's own orderly shutdown.
         process = subprocess.Popen(argv, env=child_env, start_new_session=True)
         running = ShardProcess(shard=shard, process=process)
-        _LOG.info("spawned %s: CUDA_VISIBLE_DEVICES=%s", running, shard.cuda_visible_devices)
+        LOG.info("spawned %s: CUDA_VISIBLE_DEVICES=%s", running, shard.cuda_visible_devices)
         return running
 
     def request_stop(self) -> None:
@@ -247,7 +246,7 @@ class Fleet:
                 try:
                     running.process.wait(timeout=remaining)
                 except subprocess.TimeoutExpired:
-                    _LOG.warning("%s did not drain in time; killing", running)
+                    LOG.warning("%s did not drain in time; killing", running)
                     running.process.kill()
                     # Reaped unconditionally: a killed child that is never waited for is a zombie,
                     # and a supervisor that leaks those is worse than one that never ran.

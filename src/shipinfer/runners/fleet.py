@@ -56,7 +56,7 @@ from shipinfer.core.errors import (
     NoShardAvailableError,
     ServerStateError,
 )
-from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.logging import LOG, log_context
 from shipinfer.core.request import ResponseFuture
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Device
@@ -69,7 +69,6 @@ from shipinfer.topology import ChainItem, ImageOpsLike, ModelResolver, Topology
 
 __all__ = ["FleetRunner"]
 
-_LOG = get_logger("runners.fleet")
 
 #: The first shard's control port; shard *n* gets ``base + n``. Above the ephemeral range's
 #: usual floor on Linux (32768) would collide with the kernel's own allocations, so this sits
@@ -276,7 +275,7 @@ class FleetRunner(Runner):
         overwritten with a zero by the pass that ran second.
         """
         plan = self._build_plan()
-        _LOG.info("fleet plan\n%s", plan.describe())
+        LOG.info("fleet plan\n%s", plan.describe())
         fleet = Fleet(
             plan=plan,
             command=self._command_for,
@@ -296,7 +295,7 @@ class FleetRunner(Runner):
                 installs[shard.index] = pool.submit(self._install, plan, shard)
         for shard_id in sorted(installs):
             installs[shard_id].result()
-        _LOG.info("fleet up: %d shard(s) running %r", len(plan), self._topology.name)
+        LOG.info("fleet up: %d shard(s) running %r", len(plan), self._topology.name)
 
     def _install(self, plan: ShardPlan, shard: Shard) -> None:
         """Wait for one shard, then hand it the chain and its share of its devices."""
@@ -313,7 +312,7 @@ class FleetRunner(Runner):
             share_rank=plan.rank_for(shard),
             timeout_s=self._topology_timeout_s,
         )
-        _LOG.info(
+        LOG.info(
             "shard %d installed %r (gpus %s, shared_by=%s)",
             shard.index,
             installed,
@@ -363,11 +362,11 @@ class FleetRunner(Runner):
             except Exception as exc:
                 # A shard that cannot be asked is a shard that gets SIGTERM in a moment. Not
                 # raising here is what keeps the *other* shards' stops from being skipped.
-                _LOG.warning("shard %d could not be stopped over RPC: %s", shard_id, exc)
+                LOG.warning("shard %d could not be stopped over RPC: %s", shard_id, exc)
                 continue
             abandoned += result.abandoned
             if not result.clean:
-                _LOG.warning(
+                LOG.warning(
                     "shard %d stopped with %d camera(s) abandoned%s",
                     shard_id,
                     result.abandoned,
@@ -384,7 +383,7 @@ class FleetRunner(Runner):
             try:
                 client.close()
             except Exception:  # pragma: no cover - a channel close that fails is not news
-                _LOG.debug("closing a shard channel failed", exc_info=True)
+                LOG.debug("closing a shard channel failed", exc_info=True)
         fleet, self._fleet = self._fleet, None
         if fleet is not None:
             fleet.stop()
@@ -563,7 +562,7 @@ class FleetRunner(Runner):
                     if result.accepted:
                         self._pending.discard(camera.camera_id)
                 if result.accepted:
-                    _LOG.info(
+                    LOG.info(
                         "camera %s placed on shard %d",
                         camera.camera_id,
                         shard_id,
@@ -623,7 +622,7 @@ class FleetRunner(Runner):
                 )
             if shard_id in dead:
                 self._placed.pop(camera_id, None)
-                _LOG.warning(
+                LOG.warning(
                     "camera %s was on shard %d, whose process exited; dropping the placement "
                     "without asking it to stop",
                     camera_id,
@@ -678,7 +677,7 @@ class FleetRunner(Runner):
             try:
                 abandoned += client.drain(remaining, deadline_s=remaining)
             except Exception as exc:
-                _LOG.warning("shard %d could not be drained: %s", shard_id, exc)
+                LOG.warning("shard %d could not be drained: %s", shard_id, exc)
         with self._lock:
             in_flight = set(self._pending)
             self._placed = {

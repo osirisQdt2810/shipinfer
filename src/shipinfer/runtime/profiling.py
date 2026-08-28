@@ -44,7 +44,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.envs import PROFILE_DIR, PROFILE_PHASES, PROFILE_STEPS
 from shipinfer.runtime.platform import torch_module
 
@@ -58,7 +58,6 @@ __all__ = [
     "torch_profiler",
 ]
 
-_LOG = get_logger("runtime.profiling")
 
 #: The phases an instance executes, named as **Triton** names them.
 #:
@@ -270,7 +269,7 @@ def torch_profiler(label: str) -> Iterator[Any | None]:
         activities.append(torch.profiler.ProfilerActivity.CUDA)
 
     steps = PROFILE_STEPS.get()
-    _LOG.info("torch profiler active: %s steps -> %s", steps, target)
+    LOG.info("torch profiler active: %s steps -> %s", steps, target)
     schedule = torch.profiler.schedule(wait=1, warmup=1, active=steps, repeat=1)
     with torch.profiler.profile(
         activities=activities,

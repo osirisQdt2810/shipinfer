@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from shipinfer.core.errors import ConfigurationError, RingClosedError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.settings.runner import ServiceSettings
 from shipinfer.engine.spill.remote_instance import (
     IngressLane,
@@ -37,8 +37,6 @@ from shipinfer.engine.spill.remote_instance import (
 from shipinfer.runtime.memory.shared_ring import RingLayout, SharedRing, reap_pending_closes
 
 __all__ = ["ServiceMesh", "ring_name", "wire_slot_bytes"]
-
-_LOG = get_logger(__name__)
 
 
 def ring_name(run_id: str, submitter: int, owner: int, model: str, kind: str) -> str:
@@ -173,7 +171,7 @@ class ServiceMesh:
                         owner=me,
                     )
                 )
-        _LOG.info(
+        LOG.info(
             "service mesh: shard %d created %d ring(s) for %d peer(s)",
             self.shard,
             len(self._owned),
@@ -249,7 +247,7 @@ class ServiceMesh:
         reader.start()
         for name, proxies in self._proxies.items():
             self.models[name].attach_remote(proxies)
-        _LOG.info(
+        LOG.info(
             "service mesh: shard %d joined the tier — %d proxy(ies), one sweeper over %d lane(s)",
             self.shard,
             sum(len(v) for v in self._proxies.values()),

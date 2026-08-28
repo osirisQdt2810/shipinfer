@@ -8,7 +8,7 @@ from collections import Counter
 from collections.abc import Sequence
 
 from shipinfer.core.errors import QueueFullError, RequestCancelledError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.request import Priority
 from shipinfer.core.settings import OverflowPolicy
 from shipinfer.scheduling.queues.base import BatchWindow, QueueStats, RequestQueue
@@ -18,7 +18,6 @@ from shipinfer.scheduling.work import WorkItem
 
 __all__ = ["FairPriorityQueue"]
 
-_LOG = get_logger("scheduling.queues.fair")
 _PRIORITY_LEVELS = len(Priority)
 
 
@@ -281,7 +280,5 @@ class FairPriorityQueue(RequestQueue):
         for item in drained:
             item.fail(reason)
         if drained:
-            _LOG.warning(
-                "queue %s closed with %d in-flight request(s)", self.name, len(drained)
-            )
+            LOG.warning("queue %s closed with %d in-flight request(s)", self.name, len(drained))
         return drained

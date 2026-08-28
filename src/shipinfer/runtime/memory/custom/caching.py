@@ -5,13 +5,11 @@ from __future__ import annotations
 import threading
 from collections import defaultdict, deque
 
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.runtime.memory.base import Allocator, Buffer, align_up
 from shipinfer.runtime.memory.registry import ALLOCATORS
 
 __all__ = ["CustomCachingAllocator"]
-
-_LOG = get_logger("runtime.memory.custom.caching")
 
 
 @ALLOCATORS.register("custom_caching")
@@ -106,7 +104,7 @@ class CustomCachingAllocator(Allocator):
         for buffer in buffers:
             _reown(buffer, self._inner)
             self._inner.deallocate(buffer)
-        _LOG.debug("released %d cached block(s) for %s", len(buffers), self._device)
+        LOG.debug("released %d cached block(s) for %s", len(buffers), self._device)
         self._inner.close()
 
     def __repr__(self) -> str:

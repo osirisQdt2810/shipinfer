@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from shipinfer.core.errors import ConfigurationError, DeviceError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.settings import DeviceSettings
 from shipinfer.core.types import Device
 from shipinfer.runtime.platform import (
@@ -23,7 +23,6 @@ from shipinfer.runtime.platform import (
 
 __all__ = ["DeviceManager", "bind_thread", "current_device"]
 
-_LOG = get_logger("runtime.device")
 
 #: Which device each worker thread is bound to. Used to *assert* the invariant "one thread,
 #: one context, one GPU" rather than trusting it (ADR-002).
@@ -64,11 +63,11 @@ class DeviceManager:
                 raise ConfigurationError(
                     "no accelerators visible and devices.allow_cpu_only is false"
                 )
-            _LOG.warning("no accelerators visible; CPU backends only")
+            LOG.warning("no accelerators visible; CPU backends only")
             return
         for index in self._visible:
             free, total = memory_info(index)
-            _LOG.info(
+            LOG.info(
                 "%s  free=%d MiB / %d MiB",
                 device_properties(index),
                 free // (1 << 20),
@@ -152,7 +151,7 @@ class DeviceManager:
         if device.is_cuda:
             require_torch().cuda.set_device(device.index)
         _THREAD_DEVICE.device = device
-        _LOG.debug("thread %s bound to %s", threading.current_thread().name, device)
+        LOG.debug("thread %s bound to %s", threading.current_thread().name, device)
 
     @contextmanager
     def activate(self, device: Device) -> Iterator[Device]:

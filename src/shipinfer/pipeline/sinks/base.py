@@ -25,12 +25,10 @@ from __future__ import annotations
 import abc
 from typing import Any, ClassVar
 
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.pipeline.schema import PerceptionEvent
 
 __all__ = ["ResultSink"]
-
-_LOG = get_logger("pipeline.sinks")
 
 
 class ResultSink(abc.ABC):
@@ -59,13 +57,13 @@ class ResultSink(abc.ABC):
         """
         if self._closed:
             self.failed += 1
-            _LOG.debug("sink %s is closed; dropping %s", self.name, event.key)
+            LOG.debug("sink %s is closed; dropping %s", self.name, event.key)
             return False
         try:
             self._do_emit(event)
         except Exception:
             self.failed += 1
-            _LOG.exception(
+            LOG.exception(
                 "sink %s failed to publish camera %s frame %d",
                 self.name,
                 event.camera_id,
@@ -109,7 +107,7 @@ class ResultSink(abc.ABC):
         try:
             self.flush()
         except Exception:
-            _LOG.exception("sink %s failed to flush on close", self.name)
+            LOG.exception("sink %s failed to flush on close", self.name)
         self._do_close()
 
     def _do_close(self) -> None:

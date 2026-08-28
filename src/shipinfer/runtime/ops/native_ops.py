@@ -8,15 +8,12 @@ from typing import Any
 import numpy as np
 
 from shipinfer.core.errors import ConfigurationError, ValidationError
-from shipinfer.core.logging import get_logger
 from shipinfer.runtime.native import require_native
 from shipinfer.runtime.ops.base import ImageOps, LetterboxResult, NormalizeParams
 from shipinfer.runtime.ops.registry import IMAGE_OPS
 from shipinfer.runtime.platform import require_torch
 
 __all__ = ["NativeImageOps", "check_device_output"]
-
-_LOG = get_logger("runtime.ops.native")
 
 
 def check_device_output(out: Any, *, device_index: int, rows: int, caller: str) -> None:

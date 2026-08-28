@@ -16,12 +16,10 @@ import threading
 from typing import Any
 
 from shipinfer.core.errors import DeviceError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.runtime.platform import is_available, require_torch
 
 __all__ = ["PinnedStagingPool"]
-
-_LOG = get_logger("runtime.memory.staging")
 
 
 def _capturing(torch: Any) -> bool:
@@ -124,7 +122,7 @@ class PinnedStagingPool:
                 self._buffers.pop(next(iter(self._buffers)))
             self._buffers[key] = buffer
             self._misses += 1
-            _LOG.debug(
+            LOG.debug(
                 "allocated %s staging buffer %s/%s %s %s",
                 "pinned" if self.pinned else "pageable",
                 self.owner,
