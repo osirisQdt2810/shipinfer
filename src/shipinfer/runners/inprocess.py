@@ -321,13 +321,29 @@ class InprocessRunner(Runner):
         #: live producer into the new cycle's queue.
         self._ingest_manager: IngestManager | None = None
         self._source_factory = source_factory
-        #: ``camera_id -> priority``, the per-camera band the fair queue reads. Resolved by
-        #: camera and not carried on a frame, exactly as ``pipeline/sink.py`` resolves it: a
-        #: frame is data and a priority is configuration, so there is one place it can be
-        #: wrong and it is the config file. Filled from the configured camera set when the
-        #: ingest manager is built; a camera added over the control plane afterwards is not in
-        #: it and gets the default, once, with a log line.
-        self._priorities: dict[str, Priority] = {}
+        #: ``camera_id -> priority`` for the cameras **this process's own configuration**
+        #: names, plus the default learned once for a camera it does not
+        #: (:meth:`_learn_priority`). Filled from ``ingest.cameras`` when the ingest manager
+        #: is built (:meth:`_ingest`) and never emptied, because it is a fact about the
+        #: settings this process loaded rather than about any one placement: a camera removed
+        #: and posted again is the same camera, and the operator's band for it did not change.
+        #:
+        #: Resolved by camera and not carried on a frame, exactly as ``pipeline/sink.py``
+        #: resolves it: a frame is data and a priority is configuration, so there is one place
+        #: it can be wrong and it is the config file.
+        self._configured: dict[str, Priority] = {}
+        #: ``camera_id -> priority`` for the band a **launcher** named on the
+        #: :class:`~shipinfer.launch.control.CameraSpec` of a camera this runner is holding
+        #: right now (:meth:`_admit_at`). Kept apart from :attr:`_configured` rather than
+        #: merged into it because the two have different *lifetimes*, and merging them cost a
+        #: camera its lane: one dict meant nothing could be un-said, so a ``DELETE`` followed
+        #: by a ``POST`` with no band left the re-posted camera in the removed one's
+        #: ``tracking_critical`` -- an escalation nobody asked for, and the wrong direction to
+        #: get wrong (ADR-005). This one therefore tracks the manager's live camera set: an
+        #: entry is written when a spec carries a band, dropped when a spec carries none
+        #: (:meth:`_admit_at`), and dropped again whenever the placement ends
+        #: (:meth:`remove_camera`, :meth:`drain`, :meth:`_stop_ingest`).
+        self._placed_bands: dict[str, Priority] = {}
         #: Only taken when a camera is seen for the first time, which is once per camera for
         #: the life of the process -- never on the steady-state submission path.
         self._priority_lock = threading.Lock()
@@ -442,10 +458,6 @@ class InprocessRunner(Runner):
                     "thread); the chain is not open, so the camera would decode into a "
                     "closed queue -- call start() first"
                 )
-            # `_ingest()` FIRST, then the spec's band: building the manager is what loads
-            # this shard's configured priority table, and it does so with `dict.update`, so a
-            # band recorded before it would be overwritten by the very table it is meant to
-            # outrank.
             manager = self._ingest()
             self._admit_at(camera)
             manager.add_camera(self._camera_config(camera))
@@ -477,7 +489,15 @@ class InprocessRunner(Runner):
                 raise ConfigurationError(
                     f"camera {camera_id!r} is not running; runner {self.name!r} has no cameras"
                 )
-            return manager.remove_camera(camera_id, timeout_s=timeout_s)
+            removed = manager.remove_camera(camera_id, timeout_s=timeout_s)
+            # The placement is over, so the band that came with it is over too. Without this
+            # the entry outlived the camera and the *next* spec for the same id -- a re-`POST`
+            # with no band, which means "leave it to the deployment" -- inherited a lane the
+            # caller never asked for. Popped even when `removed` is `False`: an abandoned
+            # decoder thread is still a camera this runner no longer holds a placement for.
+            with self._priority_lock:
+                self._placed_bands.pop(camera_id, None)
+            return removed
 
     def drain(self, timeout_s: float = 20.0) -> int:
         """Stop reading every camera and let what is already admitted finish.
@@ -502,7 +522,15 @@ class InprocessRunner(Runner):
         """
         with self._lifecycle:
             manager = self._ingest_manager
-            return 0 if manager is None else manager.stop(timeout_s=timeout_s)
+            if manager is None:
+                return 0
+            abandoned = manager.stop(timeout_s=timeout_s)
+            # Every camera is released, so every band a launcher placed with one is stale --
+            # the same fact :meth:`remove_camera` records one camera at a time, through the
+            # door that empties the shard in one call.
+            with self._priority_lock:
+                self._placed_bands.clear()
+            return abandoned
 
     # -- resolving the ingest plane ----------------------------------------------------
 
@@ -606,13 +634,13 @@ class InprocessRunner(Runner):
         return self._head_resolved
 
     def _camera_config(self, camera: CameraSpec) -> CameraConfig:
-        """The launcher's three-field :class:`CameraSpec` as an ingest camera.
+        """The launcher's five-field :class:`CameraSpec` as an ingest camera.
 
         Every other field is left ``None`` on purpose, which in
         :class:`~shipinfer.core.settings.ingest.CameraConfig` means *inherit*: codec,
         transport, hardware decode, jitter buffer and the reconnect schedule are **deployment**
         settings and a shard resolves them from the tree it loaded (CONVENTIONS 2.6). What only
-        the launcher knows is which camera goes where, and that is the three fields it sends.
+        the launcher knows is which camera goes where, and that is what the spec carries.
 
         ``source`` is the exception, because it is neither: it is what the *chain* asked for,
         and it is the one line that makes ``decode: {impl: replay}`` mean anything at all.
@@ -627,12 +655,18 @@ class InprocessRunner(Runner):
         It rides on the spec so that ``--no-loop`` reaches a shard too.
 
         ``priority`` is the third, and it is read back out of :meth:`_priority_for` rather
-        than off the spec, so that the band on this record and the band the queue admits the
-        camera's frames into are the *same* resolution and cannot disagree: the spec has
-        already been folded into the table by :meth:`_admit_at` when this runs. Nothing in
-        ``shipinfer.ingest`` reads the field — a frame is data and a band is policy — but a
-        health report that named a lane this runner does not use would be a lie an operator
-        has no way to check.
+        than off the spec. ``camera.priority or Priority.NORMAL`` would pass every test that
+        only inspects the record, and be wrong twice: it demotes ``tracking_critical``, which
+        is ``0`` and therefore falsy, and it answers ``normal`` for a spec with no band on a
+        single-process deployment whose ``ingest.cameras`` names a band for that very camera
+        -- while the queue, which asks :meth:`_priority_for`, admits its frames into the
+        operator's lane. The record and the lane must be one resolution, because they are one
+        claim. :meth:`add_camera` calls :meth:`_admit_at` before this for that reason: the
+        placement's band has to be recorded before the record that reports it is built.
+
+        Nothing in ``shipinfer.ingest`` reads the field — a frame is data and a band is
+        policy — but a health report that named a lane this runner does not use would be a lie
+        an operator has no way to check, which is what makes the read-back worth the coupling.
         """
         return CameraConfig(
             camera_id=camera.camera_id,
@@ -651,17 +685,25 @@ class InprocessRunner(Runner):
         there is empty and every band an operator wrote would resolve to
         :attr:`~shipinfer.core.request.Priority.NORMAL`; ``cli/commands/run.py`` reads the
         fleet config in the launching process and copies each camera's band onto its spec, and
-        this is where that arrives. A spec with no band (``None``) records nothing and leaves
-        :meth:`_priority_for` to the shard's own table — which is the right answer in a
-        single-process deployment, where that table is the operator's own.
+        this is where that arrives.
+
+        A spec with no band (``None``) **erases** any band a previous placement of the same id
+        left behind and falls back to :attr:`_configured` -- the shard's own table, which is
+        the right answer in a single-process deployment because it is the operator's own. It
+        erases rather than merely declining to write because these are two independent
+        sources and not one dict: ``None`` on a spec is a caller saying "leave the band to the
+        deployment", and the only way to honour that after a ``DELETE`` and a re-``POST`` is to
+        drop what the dead placement said. :meth:`remove_camera` already popped it; this is
+        the same guarantee for the door that re-places a camera without removing it first.
 
         Under :attr:`_priority_lock` rather than the lifecycle lock it is already inside,
-        because :meth:`_priority_for` runs on the submit path and reads the same dict.
+        because :meth:`_priority_for` runs on the submit path and reads the same tables.
         """
-        if camera.priority is None:
-            return
         with self._priority_lock:
-            self._priorities[camera.camera_id] = camera.priority
+            if camera.priority is None:
+                self._placed_bands.pop(camera.camera_id, None)
+            else:
+                self._placed_bands[camera.camera_id] = camera.priority
 
     def _ingest(self) -> IngestManager:
         """This cycle's ingest manager, built on first use.
@@ -724,10 +766,11 @@ class InprocessRunner(Runner):
         # `ingest.cameras` is cleared a few lines up and a shard's settings come from the
         # environment, so `configured_cameras` here yields nothing and no band an operator
         # wrote can be resolved from it -- which is why the launcher sends the band on the
-        # `CameraSpec` and `_admit_at` folds it in on top of this. What is left over for this
-        # line is the single-process deployment, where the config IS the operator's. A camera
-        # neither door names gets the default, once, with a log line (`_priority_for`).
-        self._priorities.update(
+        # `CameraSpec` and `_admit_at` records it in `_placed_bands`, which this one is only
+        # consulted behind. What is left over for this line is the single-process deployment,
+        # where the config IS the operator's. A camera neither door names gets the default,
+        # once, with a log line (`_priority_for`).
+        self._configured.update(
             {camera.camera_id: camera.priority for camera in configured_cameras(ingest)}
         )
         self._ingest_manager = manager
@@ -736,21 +779,30 @@ class InprocessRunner(Runner):
     def _priority_for(self, camera_id: str) -> Priority:
         """The lane band this camera's items are admitted into.
 
-        One dict, three writers, in this precedence: the band the launcher put on the
-        :class:`~shipinfer.launch.control.CameraSpec` (:meth:`_admit_at`), then this
-        process's own ``ingest.cameras`` (:meth:`_ingest`), then
-        :attr:`Priority.NORMAL` (:meth:`_learn_priority`). Precedence is expressed as *write
-        order* rather than as a chain of lookups here because this runs on the submit path
-        for every frame: resolution happens once, at ``add_camera``, and the hot path is a
-        dict get.
+        Three sources, in this precedence: the band the launcher put on the
+        :class:`~shipinfer.launch.control.CameraSpec` of the placement this camera is running
+        under (:attr:`_placed_bands`), then this process's own ``ingest.cameras``
+        (:attr:`_configured`), then :attr:`Priority.NORMAL` (:meth:`_learn_priority`).
+
+        Precedence is expressed as *lookups* and not as write order into one dict, which is
+        what it was. Write order made the answer depend on the sequence of two statements in
+        :meth:`add_camera`, and -- worse -- made a placement's band impossible to un-say: a
+        camera removed and posted again with no band inherited the removed one's lane, so
+        ``tracking_critical`` -> ``DELETE`` -> ``POST {"url": ...}`` still admitted at
+        ``tracking_critical``. Two dicts have two lifetimes and can disagree honestly. The
+        cost on the submit path is one extra ``dict.get`` on a miss, both O(1) and neither
+        allocating (CONVENTIONS 2.5).
 
         ``is not None`` and never ``or``: :attr:`Priority.TRACKING_CRITICAL` is ``0`` and
         therefore falsy, so the shorter spelling would silently demote the one camera whose
         priority was the point of having priorities (ADR-005).
         """
-        priority = self._priorities.get(camera_id)
-        if priority is not None:
-            return priority
+        placed = self._placed_bands.get(camera_id)
+        if placed is not None:
+            return placed
+        configured = self._configured.get(camera_id)
+        if configured is not None:
+            return configured
         return self._learn_priority(camera_id)
 
     def _learn_priority(self, camera_id: str) -> Priority:
@@ -762,9 +814,15 @@ class InprocessRunner(Runner):
         an invisible configuration gap, and memoised because paying for that discovery on
         every frame would make it a performance bug as well. The same shape, and the same
         argument, as ``pipeline/sink.py::_policy_for``.
+
+        Memoised into :attr:`_configured` and not into :attr:`_placed_bands`, which is the
+        difference between the two spelled out once more: what is being recorded is that
+        *this process's configuration has nothing to say about this camera*, which is true for
+        as long as those settings are, and is not undone by the camera being removed. A band a
+        launcher named is undone by exactly that, which is why it lives in the other dict.
         """
         with self._priority_lock:
-            existing = self._priorities.get(camera_id)
+            existing = self._configured.get(camera_id)
             if existing is not None:
                 return existing
             _LOG.info(
@@ -773,7 +831,7 @@ class InprocessRunner(Runner):
                 Priority.NORMAL.name,
                 extra=log_context(camera_id=camera_id),
             )
-            self._priorities[camera_id] = Priority.NORMAL
+            self._configured[camera_id] = Priority.NORMAL
             return Priority.NORMAL
 
     # -- lifecycle ---------------------------------------------------------------------
@@ -996,6 +1054,11 @@ class InprocessRunner(Runner):
         no-op costing one attribute read.
         """
         manager, self._ingest_manager = self._ingest_manager, None
+        # For :meth:`drain`'s reason, and one more: the next cycle rebuilds the manager and
+        # therefore re-reads :attr:`_configured` from settings, so a band left here from the
+        # last cycle would outrank the operator's table on a runner that holds no cameras.
+        with self._priority_lock:
+            self._placed_bands.clear()
         if manager is None:
             return 0
         abandoned = manager.stop(timeout_s=timeout_s)

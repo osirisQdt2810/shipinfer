@@ -24,7 +24,7 @@ import logging
 import threading
 import time
 from collections.abc import Container
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
@@ -34,7 +34,7 @@ from fastapi.testclient import TestClient
 
 from shipinfer.api import create_app
 from shipinfer.api import streams as streams_module
-from shipinfer.api.schemas import StreamRequest
+from shipinfer.api.schemas import BAND_NAMES, BandName, StreamRequest
 from shipinfer.api.streams import CameraController
 from shipinfer.core.errors import (
     ConfigurationError,
@@ -344,6 +344,32 @@ class TestAddingACamera:
 
         assert response.status_code == 422
         assert "priority" in response.text
+
+    def test_the_published_schema_offers_the_names_the_validator_accepts(self, client) -> None:
+        """`/openapi.json` and the 422 above must describe the same field.
+
+        `Priority` is an `IntEnum`, so typing the wire field as `Priority | None` had FastAPI
+        publish `{"enum": [0, 1, 2, 3], "type": "integer"}` -- while every one of those four
+        integers was refused. A generated client did exactly what the document told it to and
+        got a 422 it could not read its way out of, which is worse than no document. The wire
+        type is the band *names*, and the schema says so.
+        """
+        schema = client.get("/openapi.json").json()
+        field = schema["components"]["schemas"]["StreamRequest"]["properties"]["priority"]
+        offered = [option for option in field["anyOf"] if option.get("type") != "null"]
+
+        assert offered == [
+            {"enum": ["tracking_critical", "high", "normal", "background"], "type": "string"}
+        ], field
+
+    def test_the_offered_names_are_every_band_and_only_bands(self) -> None:
+        """The schema is derived from `Priority`, so a fifth band cannot be silently unposted.
+
+        Spelled-out strings would have to be edited a second time, and the failure of not
+        doing so is invisible: the new lane simply cannot be asked for over HTTP.
+        """
+        assert tuple(band.name.lower() for band in Priority) == BAND_NAMES
+        assert get_args(BandName) == BAND_NAMES
 
     def test_a_finite_video_can_be_asked_to_stop_at_its_end(self, client, cameras) -> None:
         """`loop: false` is `--no-loop` over HTTP, and it has to reach the spec to mean it.

@@ -428,9 +428,35 @@ class ShardService:
         ``UpdateTopology`` take, so the four lifecycle-changing calls are serialised with each
         other and with nothing else: the probes an operator needs during a shutdown
         (``Ready``, ``Health``, ``Stats``) still take no lock at all.
+
+        **The decode is refused as data too, and that is not decoration.**
+        :meth:`~shipinfer.launch.control.CameraSpec.from_pb` raises a
+        ``ConfigurationError`` for a band this build has no name for -- proto3 enums are open,
+        so a newer launcher's lane arrives here as an unknown integer -- and it runs *before*
+        the guard below, so an uncaught one would leave the servicer through gRPC's generic
+        handler as ``UNKNOWN``. ``ShardClient`` reads a status that is not ``OK`` as a shard
+        that failed, and ``FleetRunner.add_camera`` treats that as a dead peer and **aborts
+        the whole placement** instead of offering the camera to the next shard. A refusal in
+        the reply body says the one true thing -- this shard cannot take this camera -- and
+        leaves the launcher free to try a sibling that can.
+
+        Raises:
+            Nothing. Every failure this handler can produce is an ``AddCameraReply`` with
+            ``accepted=False`` and a reason, which is the module docstring's rule.
         """
         pb = load_pb()
-        camera = CameraSpec.from_pb(request.camera)
+        try:
+            camera = CameraSpec.from_pb(request.camera)
+        except ShipInferError as exc:
+            _LOG.info(
+                "shard %d could not read the camera spec it was offered: %s",
+                self._identity.shard_id,
+                exc,
+            )
+            return pb.AddCameraReply(accepted=False, reason=str(exc))
+        except Exception as exc:  # module docstring: no traceback reaches the wire
+            _LOG.exception("shard %d failed reading a camera spec", self._identity.shard_id)
+            return pb.AddCameraReply(accepted=False, reason=f"{type(exc).__name__}: {exc}")
         refuse = self._refusal()  # fast path only; the check that decides is under the lock
         if refuse is not None:
             return self._refused(pb, refuse)

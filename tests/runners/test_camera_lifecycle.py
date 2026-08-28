@@ -277,6 +277,44 @@ class RecordingQueue(FairPriorityQueue):
     def band_of(self, camera_id: str) -> set[Priority]:
         return {band for camera, band in self.bands if camera == camera_id}
 
+    def bands_since(self, mark: int, camera_id: str) -> set[Priority]:
+        """The same, over items admitted after ``mark = len(queue.bands)``.
+
+        What a camera is admitted at *now* is a different question from what it was ever
+        admitted at, and the difference is the whole of the remove-then-re-add case: the
+        first placement's band is legitimately in ``bands`` and must not be read as the
+        second's.
+        """
+        return {band for camera, band in self.bands[mark:] if camera == camera_id}
+
+
+class RecordingSources:
+    """:func:`scripted`'s factory, plus the :class:`CameraConfig` the runner resolved.
+
+    The record is what ``InprocessRunner._camera_config`` hands the ingest plane, and the
+    source factory is a **public** seam a test can read it through -- the alternative is
+    reaching into the runner's private band tables, which pins the implementation instead of
+    the behaviour (CONVENTIONS 2.9).
+
+    It exists for one field. ``priority`` on that record is not copied off the spec: it is
+    read back out of the runner's own resolution, so that the band an operator sees on a
+    camera and the band its frames are actually admitted into are one answer and not two.
+    Nothing else asserts that, and ``camera.priority or Priority.NORMAL`` -- which is wrong
+    twice over, since ``TRACKING_CRITICAL`` is ``0`` and a configured band is not on the spec
+    at all -- passes every test that only reads the queue.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.configs: dict[str, CameraConfig] = {}
+        self._build = scripted(**kwargs)
+
+    def __call__(self, config: CameraConfig, counter: FrameCounter) -> ScriptedSource:
+        self.configs[config.camera_id] = config
+        return self._build(config, counter)
+
+    def band_of(self, camera_id: str) -> Priority:
+        return self.configs[camera_id].priority
+
 
 # -- helpers -------------------------------------------------------------------------------
 
@@ -645,13 +683,12 @@ class TestThePriorityBandComesFromTheCameraConfig:
         assert queue.band_of("cam-hot") == {Priority.TRACKING_CRITICAL}
 
     def test_the_spec_outranks_a_configured_table_that_disagrees(self) -> None:
-        """Both doors named a band; the launcher's wins, and the order of writes says so.
+        """Both doors named a band; the launcher's wins.
 
-        ``_ingest`` loads the configured table with ``dict.update`` the first time a camera is
-        added, so a spec folded in before it would be silently overwritten by the very table
-        it is meant to outrank. The launcher wins because it is the process that can still
-        read the fleet config -- on a shard, the table is whatever the environment happened to
-        carry.
+        The launcher wins because it is the process that can still read the fleet config --
+        on a shard, the table is whatever the environment happened to carry. Precedence is a
+        *lookup order* over two tables and not a write order into one, so this holds however
+        ``add_camera`` sequences its two statements.
         """
         chain = load()
         queue = RecordingQueue("recording", 64)
@@ -680,17 +717,127 @@ class TestThePriorityBandComesFromTheCameraConfig:
 
         assert queue.band_of("cam-x") == {Priority.TRACKING_CRITICAL}
 
-    def test_the_critical_band_survives_the_falsy_zero(self) -> None:
-        """``Priority.TRACKING_CRITICAL`` is ``0``, so ``get(...) or default`` demotes it.
+    @pytest.mark.parametrize("band", [Priority.TRACKING_CRITICAL, Priority.BACKGROUND])
+    @pytest.mark.parametrize("door", ["config", "spec"])
+    def test_the_record_and_the_queue_name_the_same_band(
+        self, door: str, band: Priority
+    ) -> None:
+        """The camera record reports the lane its frames are actually admitted into.
 
-        The bug is invisible in every ordinary test — every other band is truthy — and it
-        silently demotes the one camera whose priority was the reason for having priorities.
+        Two claims about one camera -- the band on the :class:`CameraConfig` the runner hands
+        the ingest plane, and the band the queue admitted its items at -- and they must be one
+        resolution. ``_camera_config`` therefore reads the answer back out of
+        ``_priority_for`` rather than copying ``camera.priority``, and this is what makes
+        that worth doing: ``camera.priority or Priority.NORMAL`` passes every assertion about
+        the queue and is wrong on the record in both directions tested here.
+
+        * ``door="config"`` -- the band is in this process's ``ingest.cameras`` and the spec
+          carries none, which is the single-process deployment. Copying the spec would record
+          ``normal`` for a camera the queue is admitting into the operator's lane.
+        * ``door="spec"`` -- the launcher named it and the table is empty, which is the fleet
+          shard. With ``TRACKING_CRITICAL`` that is also the falsy-zero trap: it is ``0``, so
+          ``or`` demotes the one camera whose priority was the reason for having priorities
+          (ADR-005), and every other band in the enum is truthy enough to hide it.
         """
         chain = load()
-        runner = InprocessRunner(chain, settings=settings())
-        runner._priorities["cam-x"] = Priority.TRACKING_CRITICAL
+        queue = RecordingQueue("recording", 64)
+        sources = RecordingSources(frames=2)
+        configured = (
+            [{"camera_id": "cam-hot", "uri": "injected://hot", "priority": band}]
+            if door == "config"
+            else []
+        )
+        runner = InprocessRunner(
+            chain,
+            settings=settings(ingest={"cameras": configured}),
+            queue=queue,
+            source_factory=sources,
+        )
+        runner.start()
+        try:
+            runner.add_camera(
+                CameraSpec(
+                    "cam-hot",
+                    "injected://hot",
+                    priority=None if door == "config" else band,
+                )
+            )
+            assert until(lambda: queue.band_of("cam-hot")), queue.bands
+        finally:
+            runner.stop(timeout_s=5.0)
 
-        assert runner._priority_for("cam-x") is Priority.TRACKING_CRITICAL
+        assert queue.band_of("cam-hot") == {band}
+        assert sources.band_of("cam-hot") is band
+
+    def test_a_removed_cameras_band_does_not_outlive_it(self) -> None:
+        """``DELETE`` then ``POST`` with no band must not inherit the dead camera's lane.
+
+        The launcher's band used to be written into the same dict the configured table lives
+        in, and nothing ever took it out again -- so on a fleet shard, where that table is
+        empty, ``tracking_critical`` -> ``remove_camera`` -> a spec carrying ``None`` ("leave
+        the band to the deployment") still admitted every frame at ``tracking_critical``. A
+        camera silently escalated above the operator's own, and an escalation is the wrong
+        direction for a fair queue to be wrong in: the lane it takes is taken from someone
+        (ADR-005).
+
+        Observed on the injected queue, over items admitted **after** the re-add, because the
+        first placement's band is legitimately in the record of the second.
+        """
+        chain = load()
+        queue = RecordingQueue("recording", 64)
+        sources = RecordingSources(frames=2)
+        # No `ingest.cameras`: the fleet-shard shape, where nothing but the spec can name a
+        # band and therefore nothing but the spec can un-name one.
+        runner = InprocessRunner(
+            chain, settings=settings(), queue=queue, source_factory=sources
+        )
+        runner.start()
+        try:
+            runner.add_camera(
+                CameraSpec("cam-x", "injected://x", priority=Priority.TRACKING_CRITICAL)
+            )
+            assert until(lambda: queue.band_of("cam-x")), queue.bands
+            assert queue.band_of("cam-x") == {Priority.TRACKING_CRITICAL}
+            assert runner.remove_camera("cam-x", timeout_s=5.0)
+
+            mark = len(queue.bands)
+            runner.add_camera(CameraSpec("cam-x", "injected://x", priority=None))
+            assert until(lambda: queue.bands_since(mark, "cam-x")), queue.bands
+        finally:
+            runner.stop(timeout_s=5.0)
+
+        assert queue.bands_since(mark, "cam-x") == {Priority.NORMAL}
+        assert sources.band_of("cam-x") is Priority.NORMAL
+
+    def test_a_drain_releases_every_placed_band_with_its_camera(self) -> None:
+        """The same fact through the door that empties a shard in one call.
+
+        A drain stops every camera and keeps the manager, so a camera may be added again
+        afterwards -- and a band left behind by the drained placement would be inherited by
+        whatever is added under that id next, exactly as a missing ``remove_camera`` pop was.
+        """
+        chain = load()
+        queue = RecordingQueue("recording", 64)
+        sources = RecordingSources(frames=2)
+        runner = InprocessRunner(
+            chain, settings=settings(), queue=queue, source_factory=sources
+        )
+        runner.start()
+        try:
+            runner.add_camera(
+                CameraSpec("cam-x", "injected://x", priority=Priority.TRACKING_CRITICAL)
+            )
+            assert until(lambda: queue.band_of("cam-x")), queue.bands
+            runner.drain(timeout_s=5.0)
+
+            mark = len(queue.bands)
+            runner.add_camera(CameraSpec("cam-x", "injected://x"))
+            assert until(lambda: queue.bands_since(mark, "cam-x")), queue.bands
+        finally:
+            runner.stop(timeout_s=5.0)
+
+        assert queue.bands_since(mark, "cam-x") == {Priority.NORMAL}
+        assert sources.band_of("cam-x") is Priority.NORMAL
 
 
 # -- the control plane's three methods -------------------------------------------------------
