@@ -33,7 +33,7 @@ from shipinfer.core.errors import (
     ServerStateError,
     SourceUnavailableError,
 )
-from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.logging import LOG, log_context
 from shipinfer.core.redact import redact, redact_in
 from shipinfer.core.settings.ingest import CameraConfig, IngestSettings
 from shipinfer.ingest.base import FrameSource
@@ -47,7 +47,6 @@ from shipinfer.ingest.timing.backoff import ExponentialBackoff
 
 __all__ = ["CameraActor", "SourceFactory"]
 
-_LOG = get_logger("ingest.camera")
 
 #: How a caller substitutes a source. The counter is passed in, never created by the
 #: factory, because frame ids must survive the reconnect that replaces the source.
@@ -203,7 +202,7 @@ class CameraActor:
             thread.join(timeout_s)
             if thread.is_alive():
                 abandoned = True
-                _LOG.warning(
+                LOG.warning(
                     "camera %s did not stop within %.1fs; abandoning the thread",
                     self.camera_id,
                     timeout_s,
@@ -235,7 +234,7 @@ class CameraActor:
         self._stop.wait(delay)
 
     def _run(self) -> None:
-        _LOG.info(
+        LOG.info(
             "camera %s: ingest actor started (%s)",
             self.camera_id,
             redact(self.config.uri),
@@ -253,7 +252,7 @@ class CameraActor:
                     # not kill its thread and leave the fleet quietly 49 cameras wide. The
                     # backoff means a *persistent* bug does not become a hot loop either.
                     self._record_failure(exc)
-                    _LOG.exception(
+                    LOG.exception(
                         "camera %s: unexpected ingest failure; backing off",
                         self.camera_id,
                         extra=log_context(camera_id=self.camera_id),
@@ -264,7 +263,7 @@ class CameraActor:
             self._teardown()
             if not self._state_is_final():
                 self._set_state(CameraState.STOPPED)
-            _LOG.info(
+            LOG.info(
                 "camera %s: ingest actor stopped after %d frame(s), %d dropped",
                 self.camera_id,
                 self._frames_read,
@@ -287,7 +286,7 @@ class CameraActor:
             self._record_failure(exc)
             self._fatal = True
             self._set_state(CameraState.UNHEALTHY)
-            _LOG.error(
+            LOG.error(
                 "camera %s: %s — giving up; retrying cannot fix this",
                 self.camera_id,
                 redact_in(str(exc)),
@@ -298,7 +297,7 @@ class CameraActor:
         except Exception as exc:  # a decoder can fail in any number of ways
             self._record_failure(exc)
             delay = self._backoff.next_delay()
-            _LOG.warning(
+            LOG.warning(
                 "camera %s: connect attempt %d failed (%s); retrying in %.2fs",
                 self.camera_id,
                 self._backoff.attempts,
@@ -314,7 +313,7 @@ class CameraActor:
             self._connects += 1
             self._consecutive_empty = 0
         self.metrics.reconnects_total.inc(camera=self.camera_id)
-        _LOG.info(
+        LOG.info(
             "camera %s: connected (%dx%d @ %g fps)",
             self.camera_id,
             source.width,
@@ -333,7 +332,7 @@ class CameraActor:
         except Exception as exc:  # decode failures are the expected case here
             self._record_failure(exc)
             delay = self._backoff.next_delay()
-            _LOG.warning(
+            LOG.warning(
                 "camera %s: read failed (%s); reconnecting in %.2fs",
                 self.camera_id,
                 redact_in(str(exc)),
@@ -367,7 +366,7 @@ class CameraActor:
         if source.is_exhausted:
             # A finite replay source finishing is not a fault, and reconnecting to it would
             # loop forever. This is what lets a bench or a test terminate on its own.
-            _LOG.info(
+            LOG.info(
                 "camera %s: source exhausted after %d frame(s); actor finishing",
                 self.camera_id,
                 self._frames_read,
@@ -379,7 +378,7 @@ class CameraActor:
         if consecutive >= self.settings.empty_reads_before_reconnect:
             self._record_failure(TimeoutError(f"{consecutive} consecutive empty reads"))
             delay = self._backoff.next_delay()
-            _LOG.warning(
+            LOG.warning(
                 "camera %s: %d consecutive empty read(s); reconnecting in %.2fs",
                 self.camera_id,
                 consecutive,
@@ -414,7 +413,7 @@ class CameraActor:
             self._sink.put(frame)
         except QueueFullError as exc:
             self._record_drop("sink_full")
-            _LOG.debug(
+            LOG.debug(
                 "camera %s: frame %d dropped, %s",
                 self.camera_id,
                 frame.frame_id,
@@ -426,7 +425,7 @@ class CameraActor:
             # The consumer is gone: the server is shutting down, so finish cleanly rather
             # than logging one line per frame for as long as the process lives.
             self._record_drop("sink_closed")
-            _LOG.info(
+            LOG.info(
                 "camera %s: sink closed; actor finishing",
                 self.camera_id,
                 extra=log_context(camera_id=self.camera_id),
@@ -523,7 +522,7 @@ class CameraActor:
         try:
             source.close()
         except Exception as exc:  # closing a broken stream can raise
-            _LOG.debug(
+            LOG.debug(
                 "camera %s: error closing source: %s",
                 self.camera_id,
                 redact_in(str(exc)),

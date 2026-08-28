@@ -35,6 +35,7 @@ Quick start::
 """
 
 from shipinfer.core import (
+    LOG,
     DataType,
     Device,
     InferenceRequest,
@@ -52,6 +53,7 @@ from shipinfer.core import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "LOG",
     "DataType",
     "Device",
     "InferenceRequest",

@@ -8,12 +8,9 @@ import numpy as np
 
 from shipinfer.backends.base import BackendContext, ModelBackend
 from shipinfer.core.errors import BackendUnavailableError, InferenceError
-from shipinfer.core.logging import get_logger
 from shipinfer.core.types import Tensor
 
 __all__ = ["TorchScriptBackend"]
-
-_LOG = get_logger("backends.torch")
 
 
 class TorchScriptBackend(ModelBackend):

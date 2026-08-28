@@ -24,7 +24,7 @@ from shipinfer.core.errors import (
     DuplicateCameraError,
     ServerStateError,
 )
-from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.logging import LOG, log_context
 from shipinfer.core.settings.ingest import CameraConfig, IngestSettings
 from shipinfer.ingest.camera.actor import CameraActor, SourceFactory
 from shipinfer.ingest.camera.db import load_camera_db
@@ -33,8 +33,6 @@ from shipinfer.ingest.metrics import IngestMetrics
 from shipinfer.ingest.sink import FrameSink
 
 __all__ = ["IngestManager", "configured_cameras"]
-
-_LOG = get_logger("ingest.manager")
 
 
 def configured_cameras(settings: IngestSettings) -> list[CameraConfig]:
@@ -117,7 +115,7 @@ class IngestManager:
         self._started = True
         for camera in cameras:
             self.add_camera(camera)
-        _LOG.info("ingest started with %d camera(s)", len(cameras))
+        LOG.info("ingest started with %d camera(s)", len(cameras))
 
     def stop(self, timeout_s: float = 5.0) -> int:
         """Stop every actor. Idempotent, and safe before :meth:`start`.
@@ -151,7 +149,7 @@ class IngestManager:
         self._started = False
         self._refresh_gauges([])
         if actors:
-            _LOG.info(
+            LOG.info(
                 "ingest stopped %d camera(s)%s",
                 len(actors),
                 f", {abandoned} abandoned" if abandoned else "",
@@ -218,7 +216,7 @@ class IngestManager:
                 "is stopping or the camera was removed — add it again once the manager is "
                 "running"
             )
-        _LOG.info(
+        LOG.info(
             "camera %s added",
             config.camera_id,
             extra=log_context(camera_id=config.camera_id),
@@ -245,7 +243,7 @@ class IngestManager:
                     f"camera {camera_id!r} is not running; running: {sorted(self._actors)}"
                 )
         clean = actor.stop(timeout_s=timeout_s)
-        _LOG.info("camera %s removed", camera_id, extra=log_context(camera_id=camera_id))
+        LOG.info("camera %s removed", camera_id, extra=log_context(camera_id=camera_id))
         self._refresh_gauges(self._snapshot())
         return clean
 

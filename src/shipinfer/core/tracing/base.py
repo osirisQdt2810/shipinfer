@@ -26,12 +26,11 @@ from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from shipinfer.core.errors import ConfigurationError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.request import InferenceResponse
 
 __all__ = ["TRACE_EVENTS", "RequestTrace", "TraceSink"]
 
-_LOG = get_logger("core.tracing")
 
 #: Trace event names, as Triton's trace API emits them, in the order they occur.
 #:
@@ -192,7 +191,7 @@ class TraceSink(abc.ABC):
             self._do_record(trace)
         except Exception:
             self.failed += 1
-            _LOG.exception(
+            LOG.exception(
                 "trace sink %s failed on request %d (%s frame %d)",
                 self.name,
                 trace.request_id,
@@ -218,7 +217,7 @@ class TraceSink(abc.ABC):
         try:
             self.flush()
         except Exception:
-            _LOG.exception("trace sink %s failed to flush on close", self.name)
+            LOG.exception("trace sink %s failed to flush on close", self.name)
         self._do_close()
 
     def _do_close(self) -> None:

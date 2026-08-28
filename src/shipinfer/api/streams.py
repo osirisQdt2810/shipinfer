@@ -46,13 +46,12 @@ from shipinfer.core.errors import (
     ServerStateError,
     ShipInferError,
 )
-from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.logging import LOG, log_context
 from shipinfer.core.request import Priority
 from shipinfer.launch.control import CameraSpec, mint_camera_id
 
 __all__ = ["CameraController", "build_streams_router"]
 
-_LOG = get_logger("api")
 
 #: Ceiling on how long ``POST /streams`` may hold a request open waiting for a runner to take
 #: the camera. Mirrors ``routes.py``'s ``_INFER_TIMEOUT_S`` and for the same reason: an
@@ -176,7 +175,7 @@ def build_streams_router(cameras: CameraController) -> Any:
         try:
             return cameras.health()
         except Exception as exc:  # a control-plane failure, reported rather than raised
-            _LOG.warning("the camera controller could not report health: %s", exc)
+            LOG.warning("the camera controller could not report health: %s", exc)
             if needed:
                 raise ServerStateError(
                     "the camera controller could not report which ids are in use, so the "
@@ -402,12 +401,12 @@ def build_streams_router(cameras: CameraController) -> Any:
             # common case. The message travels either way, and the traceback that says which
             # it really was is written here -- an `HTTPException` is handled by starlette and
             # would otherwise leave no trace on the server at all.
-            _LOG.exception(
+            LOG.exception(
                 "POST /streams refused a value the schema did not constrain",
                 extra=log_context(camera_id=camera.camera_id),
             )
             raise HTTPException(400, str(exc)) from exc
-        _LOG.info(
+        LOG.info(
             "camera %s added over HTTP",
             camera.camera_id,
             extra=log_context(camera_id=camera.camera_id),
@@ -436,7 +435,7 @@ def build_streams_router(cameras: CameraController) -> Any:
         except ShipInferError as exc:
             raise http_error(exc) from exc
         if not clean:
-            _LOG.warning(
+            LOG.warning(
                 "camera %s was removed but its thread was abandoned",
                 camera_id,
                 extra=log_context(camera_id=camera_id),

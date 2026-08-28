@@ -8,12 +8,11 @@ import numpy as np
 
 from shipinfer.backends.base import BackendContext, ModelBackend
 from shipinfer.core.errors import BackendUnavailableError, InferenceError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.types import DataType, Tensor, TensorSpec
 
 __all__ = ["OnnxRuntimeBackend"]
 
-_LOG = get_logger("backends.onnx")
 
 #: ONNX type strings -> ours. Only the ones a perception model actually emits.
 _ONNX_TYPES = {
@@ -77,7 +76,7 @@ class OnnxRuntimeBackend(ModelBackend):
         )
         active = self._session.get_providers()
         if self.device.is_cuda and "CUDAExecutionProvider" not in active:
-            _LOG.warning(
+            LOG.warning(
                 "%s asked for CUDA but ONNX Runtime fell back to %s",
                 self.context.instance_name,
                 active,

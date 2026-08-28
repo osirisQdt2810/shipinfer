@@ -40,15 +40,13 @@ from typing import Any, ClassVar
 
 import numpy as np
 
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 
 # `..base`, not the package: `runtime.ops.__init__` imports this module, so naming the
 # package here would be a cycle at the first import of `shipinfer.runtime.ops`.
 from shipinfer.runtime.ops.base import ImageOps, LetterboxResult, NormalizeParams
 
 __all__ = ["ThreadLocalImageOps", "staging_owner"]
-
-_LOG = get_logger("runtime.ops")
 
 
 def staging_owner(device_index: int) -> str:
@@ -123,7 +121,7 @@ class ThreadLocalImageOps(ImageOps):
             with self._lock:
                 self._per_device[device] = self._per_device.get(device, 0) + 1
             self._local.ops = ops
-            _LOG.info(
+            LOG.info(
                 "thread %s preprocesses on device %d with %s",
                 threading.current_thread().name,
                 device,

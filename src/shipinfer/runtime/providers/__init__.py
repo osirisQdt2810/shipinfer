@@ -15,7 +15,7 @@ import os
 import threading
 
 from shipinfer.core.errors import DeviceError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.runtime.providers.base import (
     CudaProvider,
     DevicePtr,
@@ -45,7 +45,6 @@ __all__ = [
 
 PROVIDER_ENV = "SHIPINFER_CUDA_PROVIDER"
 
-_LOG = get_logger("runtime.providers")
 _provider: CudaProvider | None = None
 _lock = threading.Lock()
 
@@ -58,7 +57,7 @@ def get_cuda_provider() -> CudaProvider:
     with _lock:
         if _provider is None:
             _provider = _select()
-            _LOG.debug("low-level CUDA provider: %s", _provider.describe())
+            LOG.debug("low-level CUDA provider: %s", _provider.describe())
     return _provider
 
 

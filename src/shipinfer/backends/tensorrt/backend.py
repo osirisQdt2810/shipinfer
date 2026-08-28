@@ -11,14 +11,12 @@ from shipinfer.backends.tensorrt.bindings import BindingSet
 from shipinfer.backends.tensorrt.engine import DYNAMIC, LoadedEngine, load_engine
 from shipinfer.backends.tensorrt.logger import build_trt_logger
 from shipinfer.core.errors import BackendUnavailableError, ConfigurationError, InferenceError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.types import Tensor, TensorSpec
 from shipinfer.runtime.platform import require_torch
 from shipinfer.runtime.stream import Stream
 
 __all__ = ["TensorRTBackend"]
-
-_LOG = get_logger("backends.tensorrt")
 
 
 class TensorRTBackend(ModelBackend):
@@ -165,7 +163,7 @@ class TensorRTBackend(ModelBackend):
                 dtype=tensor.dtype,
                 shape=self._concrete_shape(tensor.shape, batch),
             )
-        _LOG.info(
+        LOG.info(
             "%s: allocated %.1f MiB of persistent bindings",
             context.instance_name,
             self._bindings.total_bytes() / (1 << 20),

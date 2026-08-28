@@ -34,7 +34,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
-from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.logging import LOG, log_context
 from shipinfer.core.settings.pipeline import ReassemblySettings
 from shipinfer.pipeline.graph.state import EmissionInputs, FrameState
 from shipinfer.pipeline.metrics import PipelineMetrics
@@ -42,7 +42,6 @@ from shipinfer.pipeline.reassembly.policy import EVICTION_POLICIES, EvictionPoli
 
 __all__ = ["FrameCollector", "FrameResult", "PendingFrame"]
 
-_LOG = get_logger("pipeline.reassembly")
 
 #: Why a frame was emitted. Carried on the event, because "no people in this frame" and "the
 #: person embedder never answered" must not look the same to a consumer.
@@ -316,7 +315,7 @@ class FrameCollector:
                 # break the "every opened frame is reported exactly once" invariant. So the
                 # newcomer is refused and the collision is named.
                 self.duplicates += 1
-                _LOG.error(
+                LOG.error(
                     "duplicate reassembly key %s: a frame with this tag is already in "
                     "flight, so the new one is refused. A camera's frame_id must never "
                     "repeat (ADR-002); check first_frame_id after a re-add.",
@@ -359,9 +358,7 @@ class FrameCollector:
         """
         if self._metrics is not None:
             self._metrics.frames_evicted.inc(camera=evicted.camera_id)
-        log = (
-            _LOG.warning if self.evicted == 1 or self.evicted % _WARN_EVERY == 0 else _LOG.debug
-        )
+        log = LOG.warning if self.evicted == 1 or self.evicted % _WARN_EVERY == 0 else LOG.debug
         log(
             "reassembly full (%d/%d): dropped %s frame %d after %d us, missing %s "
             "[%d evicted so far]",

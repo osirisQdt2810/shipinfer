@@ -53,7 +53,7 @@ from shipinfer.core.errors import (
     RequestCancelledError,
     ServerStateError,
 )
-from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.logging import LOG, log_context
 from shipinfer.core.request import ResponseFuture
 from shipinfer.core.settings import ServerSettings
 from shipinfer.pipeline.graph import (
@@ -73,8 +73,6 @@ from shipinfer.scheduling.queues import QUEUES, BatchWindow, RequestQueue
 from shipinfer.scheduling.work import WorkItem
 
 __all__ = ["FrameProducer", "PipelineRunner"]
-
-_LOG = get_logger("pipeline.runner")
 
 
 class FrameProducer(Protocol):
@@ -114,7 +112,7 @@ class _CollectorObserver:
             return
         if outcome.status is StageStatus.FAILED:
             self._metrics.stages_failed.inc(stage=outcome.stage)
-            _LOG.warning(
+            LOG.warning(
                 "stage %s failed for %s: %r",
                 outcome.stage,
                 self._key,
@@ -332,7 +330,7 @@ class PipelineRunner:
         if self._producer_factory is not None:
             self._producer = self._producer_factory(self._frame_sink)
             self._producer.start()
-        _LOG.info(
+        LOG.info(
             "pipeline ready: %s | %d worker(s) | sink=%s",
             " -> ".join(self._graph.stage_names),
             pipeline.workers,
@@ -384,7 +382,7 @@ class PipelineRunner:
             try:
                 self._producer.stop()
             except Exception:
-                _LOG.exception("frame producer failed to stop cleanly")
+                LOG.exception("frame producer failed to stop cleanly")
             self._producer = None
 
         lost = self._queue.close()
@@ -412,7 +410,7 @@ class PipelineRunner:
             for owner in owners:
                 memory.release_staging(owner)
         self._started = False
-        _LOG.info(
+        LOG.info(
             "pipeline stopped: %d queued frame(s) failed, %d in-flight frame(s) published",
             len(lost),
             drained,
@@ -446,7 +444,7 @@ class PipelineRunner:
                     # survives one bad frame. The graph already contains per-stage failures;
                     # reaching here means something outside a stage went wrong.
                     self._metrics.frames_failed.inc(camera=item.request.context.camera_id)
-                    _LOG.exception("pipeline worker failed on %s", item.request.context.key)
+                    LOG.exception("pipeline worker failed on %s", item.request.context.key)
                     # Fail the future *here*, because the two cases that reach this handler
                     # both raise before `_run_frame` registers the key in `_awaiting`:
                     # `FrameState.from_request` rejects a request with no tensor under
@@ -517,7 +515,7 @@ class PipelineRunner:
                 self._collector.sweep()
                 self._metrics.queue_depth.set(self._queue.depth)
             except Exception:  # pragma: no cover - the sweeper must outlive a bad frame
-                _LOG.exception("reassembly sweep failed")
+                LOG.exception("reassembly sweep failed")
 
     # -- emission ------------------------------------------------------------------------
 
@@ -560,7 +558,7 @@ class PipelineRunner:
             # as a sink failure sent operators to an innocent broker while the real fault
             # was a field-map typo raising once per frame.
             self._metrics.build_failures.inc(camera=result.state.camera_id)
-            _LOG.exception("failed to build the event for %s", result.key)
+            LOG.exception("failed to build the event for %s", result.key)
             return
         # `emit` returns whether it published, and never raises — so this has to be a
         # return-value check, not an `except`. It was an `except`, which made
@@ -580,7 +578,7 @@ class PipelineRunner:
         # into `emit()` used to do.
         for camera, frame in self._sink.drain_delivery_failures():
             self._metrics.sink_failures.inc(sink=self._sink.name)
-            _LOG.error(
+            LOG.error(
                 "sink %s did not deliver camera %s frame %d",
                 self._sink.name,
                 camera,
@@ -595,7 +593,7 @@ class PipelineRunner:
             # After a successful emit. Also not the sink's fault, and the distinction
             # matters: the event *was* published.
             self._metrics.build_failures.inc(camera=result.state.camera_id)
-            _LOG.exception("post-emit bookkeeping failed for %s", result.key)
+            LOG.exception("post-emit bookkeeping failed for %s", result.key)
 
     def _build_event(self, result: FrameResult) -> PerceptionEvent:
         state = result.state

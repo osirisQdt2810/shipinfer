@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from shipinfer.core.errors import ConfigurationError, ShipInferError
-from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.logging import LOG, log_context
 from shipinfer.launch.control import CameraSpec, ShardHealth, ShardIdentity, ShardState
 from shipinfer.launch.proto import load_grpc, load_pb
 from shipinfer.runners.base import Runner
@@ -56,7 +56,6 @@ __all__ = ["RunnerFactory", "ShardServer", "ShardService", "serve_shard"]
 #: one; this class cannot, and must not know that an engine exists.
 RunnerFactory = Callable[[ChainSpec, Sequence[int], Sequence[int]], Runner]
 
-_LOG = get_logger("runners.service")
 
 #: Enough threads to answer a health probe while a Stop is draining, and few enough that a
 #: wedged RPC cannot spawn a pool. Every handler here is either instant or bounded by the
@@ -325,7 +324,7 @@ class ShardService:
                 # Same rule as the start below: the launcher has to be told which shard
                 # could not be built and why, as data rather than as an UNKNOWN status.
                 except Exception as exc:
-                    _LOG.exception(
+                    LOG.exception(
                         "shard %d could not build its runner", self._identity.shard_id
                     )
                     return pb.TopologyReply(
@@ -345,7 +344,7 @@ class ShardService:
             # A start failure is an answer, not a crash: the launcher has to be told
             # which shard could not open its chain, and told it as data.
             except Exception as exc:
-                _LOG.exception("shard %d could not start", self._identity.shard_id)
+                LOG.exception("shard %d could not start", self._identity.shard_id)
                 if built_here:
                     self._discard_runner()
                 return pb.TopologyReply(accepted=False, reason=f"{type(exc).__name__}: {exc}")
@@ -357,7 +356,7 @@ class ShardService:
             self._drained = False
             self._drain_detail = ""
 
-        _LOG.info(
+        LOG.info(
             "shard %d installed topology %r (shared_by=%s share_rank=%s)",
             self._identity.shard_id,
             held or spec.name,
@@ -448,14 +447,14 @@ class ShardService:
         try:
             camera = CameraSpec.from_pb(request.camera)
         except ShipInferError as exc:
-            _LOG.info(
+            LOG.info(
                 "shard %d could not read the camera spec it was offered: %s",
                 self._identity.shard_id,
                 exc,
             )
             return pb.AddCameraReply(accepted=False, reason=str(exc))
         except Exception as exc:  # module docstring: no traceback reaches the wire
-            _LOG.exception("shard %d failed reading a camera spec", self._identity.shard_id)
+            LOG.exception("shard %d failed reading a camera spec", self._identity.shard_id)
             return pb.AddCameraReply(accepted=False, reason=f"{type(exc).__name__}: {exc}")
         refuse = self._refusal()  # fast path only; the check that decides is under the lock
         if refuse is not None:
@@ -467,7 +466,7 @@ class ShardService:
             try:
                 self._runner.add_camera(camera)
             except ShipInferError as exc:
-                _LOG.info(
+                LOG.info(
                     "shard %d refused camera %s: %s",
                     self._identity.shard_id,
                     camera.camera_id,
@@ -476,7 +475,7 @@ class ShardService:
                 )
                 return pb.AddCameraReply(accepted=False, reason=str(exc))
             except Exception as exc:  # module docstring: no traceback reaches the wire
-                _LOG.exception(
+                LOG.exception(
                     "shard %d failed adding camera %s",
                     self._identity.shard_id,
                     camera.camera_id,
@@ -519,7 +518,7 @@ class ShardService:
         except ShipInferError as exc:
             if not self._runner.manages_cameras:
                 return pb.RemoveCameraReply(removed=False, clean=False, reason=str(exc))
-            _LOG.warning(
+            LOG.warning(
                 "shard %d could not remove camera %s: %s",
                 self._identity.shard_id,
                 request.camera_id,
@@ -528,7 +527,7 @@ class ShardService:
             )
             return pb.RemoveCameraReply(removed=True, clean=False, reason=str(exc))
         except Exception as exc:  # see the module docstring: no traceback reaches the wire
-            _LOG.exception(
+            LOG.exception(
                 "shard %d failed removing camera %s", self._identity.shard_id, request.camera_id
             )
             return pb.RemoveCameraReply(
@@ -562,7 +561,7 @@ class ShardService:
             )
             return health.to_pb()
         except Exception as exc:  # see the module docstring: no traceback reaches the wire
-            _LOG.exception("shard %d could not report health", self._identity.shard_id)
+            LOG.exception("shard %d could not report health", self._identity.shard_id)
             return ShardHealth(
                 state=str(ShardState.UNKNOWN), detail=f"{type(exc).__name__}: {exc}"
             ).to_pb()
@@ -576,7 +575,7 @@ class ShardService:
         try:
             reply.stats.update(self._runner.stats())
         except Exception as exc:  # see the module docstring: no traceback reaches the wire
-            _LOG.exception("shard %d could not report stats", self._identity.shard_id)
+            LOG.exception("shard %d could not report stats", self._identity.shard_id)
             reply.detail = f"{type(exc).__name__}: {exc}"
         return reply
 
@@ -662,12 +661,12 @@ class ShardService:
                 if self._runner is not None:
                     self._runner.stop(timeout_s=timeout_s)
             except Exception as exc:  # see the module docstring: no traceback reaches the wire
-                _LOG.exception("shard %d could not stop its runner", self._identity.shard_id)
+                LOG.exception("shard %d could not stop its runner", self._identity.shard_id)
                 detail = f"{detail}; {type(exc).__name__}: {exc}".lstrip("; ")
             self._draining = False
             self._drained = False
             self._stopped = True
-        _LOG.info(
+        LOG.info(
             "shard %d stopped%s",
             self._identity.shard_id,
             f", {abandoned} camera(s) abandoned" if abandoned else "",
@@ -694,7 +693,7 @@ class ShardService:
                 return 0, ""
             return 0, str(exc)
         except Exception as exc:  # see the module docstring: no traceback reaches the wire
-            _LOG.exception("shard %d could not drain", self._identity.shard_id)
+            LOG.exception("shard %d could not drain", self._identity.shard_id)
             return 0, f"{type(exc).__name__}: {exc}"
 
     def _report(self) -> dict[str, Any]:
@@ -705,7 +704,7 @@ class ShardService:
         try:
             return self.state()
         except Exception:  # Ready must answer even from a runner that cannot say
-            _LOG.exception("shard %d could not determine its state", self._identity.shard_id)
+            LOG.exception("shard %d could not determine its state", self._identity.shard_id)
             return ShardState.UNKNOWN
 
     def __repr__(self) -> str:
@@ -827,7 +826,7 @@ def serve_shard(
     except BaseException:
         _release(server)
         raise
-    _LOG.info("shard %d control plane on %s:%d", shard_id, host, bound)
+    LOG.info("shard %d control plane on %s:%d", shard_id, host, bound)
     return ShardServer(server=server, identity=identity, service=service)
 
 

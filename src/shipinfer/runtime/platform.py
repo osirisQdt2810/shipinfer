@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from shipinfer.core.errors import DeviceError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 
 __all__ = [
     "AcceleratorKind",
@@ -31,8 +31,6 @@ __all__ = [
     "require_torch",
     "torch_module",
 ]
-
-_LOG = get_logger("runtime.platform")
 
 
 class AcceleratorKind(str, enum.Enum):
@@ -71,7 +69,7 @@ def torch_module() -> Any | None:
     try:
         import torch
     except ImportError as exc:  # pragma: no cover - torch is a hard dependency
-        _LOG.debug("torch unavailable: %s", exc)
+        LOG.debug("torch unavailable: %s", exc)
         return None
     return torch
 

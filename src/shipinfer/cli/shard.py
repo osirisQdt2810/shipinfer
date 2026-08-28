@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING, Any
 
 from shipinfer.cli.common import build_settings
 from shipinfer.core.errors import ConfigurationError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.settings import DeviceSettings, ServerSettings
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; the runtime imports are inside main()
@@ -54,7 +54,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only; the runtime imports are ins
 
 __all__ = ["apply_sharing", "build_parser", "main"]
 
-_LOG = get_logger("cli.shard")
 
 #: How long the shard's runner gets to be built and started before the launcher's
 #: ``UpdateTopology`` deadline is the one that matters. Not enforced here — it is the
@@ -253,7 +252,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         control_port=args.control_port,
         build=process.build,
     )
-    _LOG.info(
+    LOG.info(
         "shard %d waiting for a topology on port %d (a build takes up to ~%.0fs)",
         args.shard_id,
         shard.identity.control_port,
@@ -271,14 +270,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             if shard.service.stopped:
                 break
     except KeyboardInterrupt:  # pragma: no cover - the operator's Ctrl-C on a hand-run shard
-        _LOG.info("shard %d interrupted", args.shard_id)
+        LOG.info("shard %d interrupted", args.shard_id)
     finally:
         shard.stop()
         runner = shard.service.runner
         if runner is not None:
             runner.stop()
         process.release()
-    _LOG.info("shard %d exited", args.shard_id)
+    LOG.info("shard %d exited", args.shard_id)
     return 0
 
 

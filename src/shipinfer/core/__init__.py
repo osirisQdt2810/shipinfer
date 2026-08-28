@@ -25,6 +25,7 @@ from shipinfer.core.errors import (
     ShipInferError,
     ValidationError,
 )
+from shipinfer.core.logging import LOG
 from shipinfer.core.logging import configure as configure_logging
 from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.metrics import MetricsRegistry, ServerMetrics
@@ -62,6 +63,7 @@ from shipinfer.core.types import (
 
 __all__ = [
     "DYNAMIC",
+    "LOG",
     "BackendLoadError",
     "BackendUnavailableError",
     "ConfigurationError",

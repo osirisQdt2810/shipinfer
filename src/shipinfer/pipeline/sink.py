@@ -38,7 +38,7 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 
-from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.logging import LOG, log_context
 from shipinfer.core.request import InferenceRequest, Priority, RequestContext, ResponseFuture
 from shipinfer.core.settings.ingest import CameraConfig, IngestSettings
 from shipinfer.core.types import Tensor
@@ -46,8 +46,6 @@ from shipinfer.scheduling.queues import RequestQueue
 from shipinfer.scheduling.work import WorkItem
 
 __all__ = ["QueueFrameSink", "TaggedFrame"]
-
-_LOG = get_logger("pipeline.sink")
 
 
 @runtime_checkable
@@ -177,7 +175,7 @@ class QueueFrameSink:
             existing = self._policies.get(camera_id)
             if existing is not None:
                 return existing
-            _LOG.info(
+            LOG.info(
                 "camera %s is not in the ingest config; using model=%s priority=%s",
                 camera_id,
                 self._default.model,

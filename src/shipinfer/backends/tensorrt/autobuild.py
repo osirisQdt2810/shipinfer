@@ -39,11 +39,10 @@ from pathlib import Path
 from typing import Any
 
 from shipinfer.core.errors import BackendLoadError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 
 __all__ = ["cache_name", "resolve_engine"]
 
-_LOG = get_logger("backends.tensorrt.autobuild")
 
 #: How long to wait for another process's build before giving up. A yolo26n plan takes ~90 s
 #: and a larger model several minutes, so the timeout is generous — waiting is always better
@@ -119,7 +118,7 @@ def resolve_engine(
         onnx, trt_version=version, capability=capability, fp16=fp16, max_batch=max_batch
     )
     if target.is_file():
-        _LOG.info("reusing cached plan %s", target.name)
+        LOG.info("reusing cached plan %s", target.name)
         return target
 
     return _build_once(onnx, target, fp16=fp16, builder=builder)
@@ -198,7 +197,7 @@ def _build_once(onnx: Path, target: Path, *, fp16: bool, builder: Any) -> Path:
             # it. Every later start-up then waited the full 900 s and failed, needing manual
             # cleanup — the docstring claimed the lock's age was "visible" and nothing ever
             # looked at it. Now it is read, and an abandoned lock is taken over.
-            _LOG.warning("taking over an abandoned build lock %s", lock.name)
+            LOG.warning("taking over an abandoned build lock %s", lock.name)
             lock.unlink(missing_ok=True)
             return _build_once(onnx, target, fp16=fp16, builder=builder)
         return _wait_for(target, lock)
@@ -207,13 +206,13 @@ def _build_once(onnx: Path, target: Path, *, fp16: bool, builder: Any) -> Path:
         os.write(handle, f"{os.getpid()}\n".encode())
         os.close(handle)
         started = time.monotonic()
-        _LOG.info("building %s from %s (fp16=%s)", target.name, onnx.name, fp16)
+        LOG.info("building %s from %s (fp16=%s)", target.name, onnx.name, fp16)
         # Written to a temporary name and renamed, so a reader never sees a partial plan:
         # rename is atomic within a filesystem and a half-written plan deserialises to None.
         staging = target.with_suffix(".partial")
         builder(onnx, staging, fp16=fp16, timing_cache=onnx.parent / "timing.cache")
         staging.replace(target)
-        _LOG.info("built %s in %.1fs", target.name, time.monotonic() - started)
+        LOG.info("built %s in %.1fs", target.name, time.monotonic() - started)
         return target
     except Exception:
         target.with_suffix(".partial").unlink(missing_ok=True)
@@ -254,7 +253,7 @@ def _lock_is_abandoned(lock: Path) -> bool:
 
 def _wait_for(target: Path, lock: Path) -> Path:
     """Wait for another builder, then return its plan."""
-    _LOG.info("another process is building %s; waiting", target.name)
+    LOG.info("another process is building %s; waiting", target.name)
     deadline = time.monotonic() + _BUILD_TIMEOUT_S
     while time.monotonic() < deadline:
         if target.is_file():

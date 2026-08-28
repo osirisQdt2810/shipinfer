@@ -8,12 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from shipinfer.core.errors import BackendLoadError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.types import DYNAMIC, DataType, TensorSpec
 
 __all__ = ["EngineIO", "LoadedEngine", "load_engine", "trt_dtype_to_datatype"]
 
-_LOG = get_logger("backends.tensorrt.engine")
 
 #: TensorRT's ``DataType`` names -> ours. Keyed on the name so this table survives the
 #: enum reshuffles between TensorRT 8 and 10.
@@ -126,7 +125,7 @@ def load_engine(trt: Any, logger: Any, path: Path) -> LoadedEngine:
         )
 
     io = tuple(_introspect(trt, engine))
-    _LOG.debug(
+    LOG.debug(
         "engine %s: %d input(s) %s, %d output(s) %s",
         path.name,
         len([t for t in io if t.is_input]),

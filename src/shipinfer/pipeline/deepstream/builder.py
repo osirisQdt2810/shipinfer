@@ -30,14 +30,12 @@ from itertools import pairwise
 from typing import Any
 
 from shipinfer.core.errors import ConfigurationError, SourceUnavailableError
-from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.logging import LOG, log_context
 from shipinfer.core.settings import CameraConfig, IngestSettings
 from shipinfer.core.settings.runner import DeepStreamSettings
 from shipinfer.pipeline.deepstream.configs import GeneratedConfigs, source_uri
 
 __all__ = ["Branch", "build_branch", "make"]
-
-_LOG = get_logger("pipeline.deepstream")
 
 
 def make(gst: Any, factory: str, name: str) -> Any:
@@ -227,7 +225,7 @@ def _add_source(
         caps = pad.get_current_caps() or pad.query_caps()
         media = caps.get_structure(0).get_name() if caps and caps.get_size() else ""
         if not media.startswith("video/"):
-            _LOG.debug(
+            LOG.debug(
                 "camera %s: ignoring non-video pad %s (%s)",
                 camera.camera_id,
                 pad.get_name(),
@@ -239,7 +237,7 @@ def _add_source(
             # Logged, not raised: this runs on a streaming thread, where an exception is
             # swallowed by the C caller and the camera goes dark with nothing said. The log
             # names the camera, and `frames_emitted` for it stays at zero.
-            _LOG.error(
+            LOG.error(
                 "camera %s: linking %s to the muxer was refused (%r)",
                 camera.camera_id,
                 pad.get_name(),
@@ -303,7 +301,7 @@ def _set_if_present(element: Any, name: str, value: Any) -> None:
     if element.find_property(name) is not None:
         element.set_property(name, value)
     else:
-        _LOG.debug("%s has no optional property %r; leaving it", element.get_name(), name)
+        LOG.debug("%s has no optional property %r; leaving it", element.get_name(), name)
 
 
 def _property_names(element: Any) -> list[str]:

@@ -29,12 +29,11 @@ from shipinfer.core.errors import (
     ModelNotFoundError,
     ModelVersionNotFoundError,
 )
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.repository.model_config import ModelConfig, load_model_config
 
 __all__ = ["CONFIG_FILENAMES", "ModelArtifact", "ModelEntry", "ModelRepository"]
 
-_LOG = get_logger("repository")
 
 #: Accepted config filenames, most-preferred first. ``config.pbtxt`` is *listed* so the
 #: error message can say "found a Triton config, convert it" instead of "no config".
@@ -112,7 +111,7 @@ class ModelRepository:
                 continue
             config_path = self._find_config(model_dir)
             if config_path is None:
-                _LOG.warning("skipping %s: no config.yaml", model_dir.name)
+                LOG.warning("skipping %s: no config.yaml", model_dir.name)
                 continue
 
             config = load_model_config(config_path, name_hint=model_dir.name)
@@ -126,7 +125,7 @@ class ModelRepository:
             self._entries[config.name] = ModelEntry(
                 name=config.name, root=model_dir, config=config, versions=versions
             )
-            _LOG.info(
+            LOG.info(
                 "indexed model %s (platform=%s, versions=%s)",
                 config.name,
                 config.platform,
@@ -134,7 +133,7 @@ class ModelRepository:
             )
 
         if not self._entries:
-            _LOG.warning("model repository %s contains no models", self._root)
+            LOG.warning("model repository %s contains no models", self._root)
 
     @staticmethod
     def _find_config(model_dir: Path) -> Path | None:

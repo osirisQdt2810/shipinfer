@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 import numpy as np
 
 from shipinfer.core.errors import FrameDecodeError, SourceOpenError, SourceUnavailableError
-from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.logging import LOG, log_context
 from shipinfer.core.redact import redact_in
 from shipinfer.core.settings.ingest import CameraConfig
 from shipinfer.ingest.base import FrameSource
@@ -32,7 +32,6 @@ from shipinfer.ingest.resolve import resolve_latency_ms, resolve_transport
 
 __all__ = ["PyAvSource", "build_open_options", "is_network_uri"]
 
-_LOG = get_logger("ingest.pyav")
 
 _NETWORK_SCHEMES = frozenset({"rtsp", "rtsps", "rtmp", "rtmps", "http", "https", "udp", "rtp"})
 
@@ -151,7 +150,7 @@ class PyAvSource(FrameSource):
         fps = float(stream.average_rate) if stream.average_rate else self.config.fps
         self._set_format(stream.codec_context.height, stream.codec_context.width, fps)
         self._frames = container.decode(video=0)
-        _LOG.info(
+        LOG.info(
             "camera %s opened via pyav: %dx%d @ %.3g fps, hwaccel=%s, options=%s",
             self.camera_id,
             self.width,
@@ -183,7 +182,7 @@ class PyAvSource(FrameSource):
             return av.open(self.config.uri, **kwargs)
         except Exception as exc:  # PyAV's error tree varies across versions
             if hwaccel:
-                _LOG.warning(
+                LOG.warning(
                     "camera %s: hardware decode unavailable (%s); falling back to software",
                     self.camera_id,
                     redact_in(str(exc)),
@@ -197,7 +196,7 @@ class PyAvSource(FrameSource):
         try:
             return av.codec.hwaccel.HWAccel(device_type="cuda", allow_software_fallback=True)
         except Exception as exc:  # AttributeError on PyAV < 13, or no device
-            _LOG.debug(
+            LOG.debug(
                 "camera %s: no PyAV hwaccel support (%s)",
                 self.camera_id,
                 redact_in(str(exc)),
@@ -222,7 +221,7 @@ class PyAvSource(FrameSource):
             try:
                 self._container.close()
             except Exception as exc:  # closing a dead socket can raise
-                _LOG.debug(
+                LOG.debug(
                     "camera %s: error closing container: %s",
                     self.camera_id,
                     redact_in(str(exc)),

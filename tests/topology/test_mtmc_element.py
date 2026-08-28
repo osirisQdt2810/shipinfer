@@ -918,7 +918,7 @@ class TestAGroupItsWorkersCannotCoverIsSaidOutLoud:
         self, caplog
     ) -> None:
         roster = [f"cam-{index}" for index in range(8)]
-        with caplog.at_level(logging.WARNING, logger="shipinfer.topology.mtmc"):
+        with caplog.at_level(logging.WARNING, logger="shipinfer"):
             built = opened({"group": "quay", "cameras": roster}, workers=4)
         built.close()
 
@@ -936,7 +936,7 @@ class TestAGroupItsWorkersCannotCoverIsSaidOutLoud:
         cameras. The ramp from an empty shard always passes through a covered count, so a
         latch set at ``open()`` would be cleared by the ramp anyway."""
         roster = [f"cam-{index}" for index in range(8)]
-        with caplog.at_level(logging.WARNING, logger="shipinfer.topology.mtmc"):
+        with caplog.at_level(logging.WARNING, logger="shipinfer"):
             built = opened({"group": "quay", "cameras": roster}, workers=4)
             try:
                 for camera in roster:
@@ -951,7 +951,7 @@ class TestAGroupItsWorkersCannotCoverIsSaidOutLoud:
 
     def test_a_group_the_workers_do_cover_says_nothing(self, caplog) -> None:
         roster = [f"cam-{index}" for index in range(8)]
-        with caplog.at_level(logging.WARNING, logger="shipinfer.topology.mtmc"):
+        with caplog.at_level(logging.WARNING, logger="shipinfer"):
             built = opened({"group": "quay", "cameras": roster}, workers=8)
         built.close()
 
@@ -965,7 +965,7 @@ class TestAGroupItsWorkersCannotCoverIsSaidOutLoud:
         crossing and not once per announcement: this runs on the lifecycle thread."""
         built = opened(workers=4)  # no roster: nothing to warn about at open
         try:
-            with caplog.at_level(logging.WARNING, logger="shipinfer.topology.mtmc"):
+            with caplog.at_level(logging.WARNING, logger="shipinfer"):
                 for index in range(4):
                     built.camera_added(f"cam-{index}")
                 assert self._warnings(caplog) == [], "four workers cover four cameras"
@@ -989,7 +989,7 @@ class TestAGroupItsWorkersCannotCoverIsSaidOutLoud:
     def test_no_worker_count_but_a_budget_says_the_barrier_still_waits(self, caplog) -> None:
         """The element used to log "it will emit every frame immediately" whichever way the
         barrier was built, and a supplied budget wins over an absent worker count."""
-        with caplog.at_level(logging.WARNING, logger="shipinfer.topology.mtmc"):
+        with caplog.at_level(logging.WARNING, logger="shipinfer"):
             built = opened(workers=None, budget=WaiterBudget(2))
         try:
             assert built.barrier.budget.permits == 2
@@ -1000,7 +1000,7 @@ class TestAGroupItsWorkersCannotCoverIsSaidOutLoud:
             built.close()
 
     def test_no_worker_count_and_no_budget_does_say_it_never_waits(self, caplog) -> None:
-        with caplog.at_level(logging.WARNING, logger="shipinfer.topology.mtmc"):
+        with caplog.at_level(logging.WARNING, logger="shipinfer"):
             built = opened(workers=None)
         try:
             warned = self._warnings(caplog)

@@ -54,7 +54,7 @@ from shipinfer.core.errors import (
     ValidationError,
     WireRefusedError,
 )
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.request import InferenceRequest, InferenceResponse
 from shipinfer.core.types import Device
 from shipinfer.engine.spill import wire
@@ -63,7 +63,6 @@ from shipinfer.scheduling.work import WorkItem
 
 __all__ = ["RemoteInstance", "ResultReader", "RingIngress"]
 
-_LOG = get_logger(__name__)
 
 #: A heartbeat older than this many seconds means the owner is gone. Five stamps at the
 #: default 200 ms — one missed stamp is a scheduler hiccup, five is a dead process.
@@ -159,7 +158,7 @@ class RemoteInstance:
             cause = type(exc).__name__
             if cause not in self._warned:
                 self._warned.add(cause)
-                _LOG.warning("the wire to %r refuses %r: %s", self.owner, self.model_name, exc)
+                LOG.warning("the wire to %r refuses %r: %s", self.owner, self.model_name, exc)
             raise WireRefusedError(self.owner, self.model_name, exc) from exc
         except Exception:
             # The slot was claimed but never published: hand it straight back.
@@ -325,7 +324,7 @@ class ResultReader(threading.Thread):
         with self._lock:
             entry = self._pending.pop(request_id, None)
         if entry is None:
-            _LOG.warning("result for unknown request %d from %s; dropped", request_id, owner)
+            LOG.warning("result for unknown request %d from %s; dropped", request_id, owner)
             return
         item, _, _ = entry
         try:
@@ -395,7 +394,7 @@ class ResultReader(threading.Thread):
             for _, item in stranded
         ]
         error = PeerLostError(owner, tags)
-        _LOG.error("%s", error)
+        LOG.error("%s", error)
         for _, item in stranded:
             item.fail(error)
 
@@ -698,7 +697,7 @@ class RingIngress(threading.Thread):
             except RingFullError:
                 if time.monotonic() >= reply.deadline:
                     self.dropped += 1
-                    _LOG.error(
+                    LOG.error(
                         "result ring to %s stayed full for %.0fs; reply for request %d dropped",
                         reply.lane.submitter,
                         self._result_patience_s,

@@ -58,7 +58,7 @@ from shipinfer.core.errors import (
     RequestCancelledError,
     ServerStateError,
 )
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.metrics import ServerMetrics
 from shipinfer.core.request import InferenceRequest, InferenceResponse, ResponseFuture
 from shipinfer.core.settings import ServerSettings
@@ -69,7 +69,6 @@ from shipinfer.repository import EnsembleStep, ModelArtifact
 
 __all__ = ["EnsembleModel"]
 
-_LOG = get_logger("engine.ensemble")
 
 _NO_PRODUCERS: frozenset[int] = frozenset()
 
@@ -266,7 +265,7 @@ class EnsembleModel:
             for plan in self._plans
         }
         self._started = True
-        _LOG.info(
+        LOG.info(
             "ensemble %s ready: %s",
             self.name,
             " -> ".join(step.model for step in self._steps),
@@ -501,7 +500,7 @@ class EnsembleModel:
         try:
             self._pump(state)
         except Exception as exc:
-            _LOG.exception("ensemble %s failed to schedule a step", self.name)
+            LOG.exception("ensemble %s failed to schedule a step", self.name)
             self._fail(state, exc)
 
     def _pump(self, state: _Execution) -> None:
@@ -834,7 +833,7 @@ def _settle(
         else:
             future.set_result(result)
     except InvalidStateError:  # pragma: no cover - the caller cancelled between checks
-        _LOG.debug("ensemble future for %s was already resolved", future.request_id)
+        LOG.debug("ensemble future for %s was already resolved", future.request_id)
 
 
 def _is_truthy(tensor: Tensor | None) -> bool:

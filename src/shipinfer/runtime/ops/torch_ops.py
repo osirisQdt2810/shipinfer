@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import numpy as np
 
 from shipinfer.core.errors import ConfigurationError, DeviceError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.runtime.ops.base import ImageOps, LetterboxResult, NormalizeParams
 from shipinfer.runtime.ops.registry import IMAGE_OPS
 from shipinfer.runtime.platform import require_torch
@@ -51,8 +51,6 @@ if TYPE_CHECKING:  # a type only; importing the pool here would tie every ops im
     from shipinfer.runtime.memory.staging import PinnedStagingPool
 
 __all__ = ["TorchImageOps"]
-
-_LOG = get_logger("runtime.ops.torch")
 
 
 @IMAGE_OPS.register("torch")
@@ -255,7 +253,7 @@ class TorchImageOps(ImageOps):
             # the array is identical either way, and an optimisation must not be able to
             # take a worker down.
             self._staging = None
-            _LOG.warning(
+            LOG.warning(
                 "pinned staging unavailable for %s on %s (%s); copying pageable from now on",
                 name,
                 self._device,

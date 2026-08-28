@@ -13,7 +13,7 @@ from shipinfer.core.errors import (
     ModelNotFoundError,
     ServerStateError,
 )
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.core.metrics import EXPORTERS, ServerMetrics
 from shipinfer.core.request import InferenceRequest, InferenceResponse, ResponseFuture
 from shipinfer.core.settings import ModelControlMode, ServerSettings
@@ -32,7 +32,6 @@ __all__ = ["InferenceServer"]
 # behaviour, and a rename per PR would have changed it four times — so this is the one place
 # the change is recorded: `shipinfer.server*` filters become `shipinfer.engine*`, and
 # `shipinfer.server.api` becomes `shipinfer.api`.
-_LOG = get_logger("engine")
 
 
 class InferenceServer:
@@ -305,7 +304,7 @@ class InferenceServer:
         mesh: Any = None
         try:
             provider = resolve_provider(self._settings.execution.provider)
-            _LOG.info(
+            LOG.info(
                 "starting shipinfer | devices: %s | data plane: %s%s",
                 self._devices.describe(),
                 provider.value,
@@ -364,7 +363,7 @@ class InferenceServer:
                 "start aborted: this server was stopped while it was starting, so the "
                 "models this start had loaded have been released rather than published"
             )
-        _LOG.info("shipinfer ready: %d model(s) — %s", len(self._models), self.models())
+        LOG.info("shipinfer ready: %d model(s) — %s", len(self._models), self.models())
         return self
 
     def _begin_start(self) -> int | None:
@@ -547,7 +546,7 @@ class InferenceServer:
             sink: The trace sink this run built, or None if it never got that far.
             mesh: The service tier this run joined, or None if it joined none.
         """
-        _LOG.debug("releasing what run %d built after it lost the claim", generation)
+        LOG.debug("releasing what run %d built after it lost the claim", generation)
         with self._control_lock:
             self._release_models(mine)
         # Both outside the lock, and for one reason: `close()` on a `JsonLinesTraceSink`
@@ -558,12 +557,12 @@ class InferenceServer:
             try:
                 mesh.stop()
             except Exception:
-                _LOG.exception("error leaving the service tier of a start that was abandoned")
+                LOG.exception("error leaving the service tier of a start that was abandoned")
         if sink is not None:
             try:
                 sink.close()
             except Exception:
-                _LOG.exception("error closing the trace sink of a start that was abandoned")
+                LOG.exception("error closing the trace sink of a start that was abandoned")
 
     def _release_models(self, mine: Sequence[Model | EnsembleModel]) -> None:
         """Stop every model in ``mine``, and unpublish the ones the table still holds.
@@ -586,7 +585,7 @@ class InferenceServer:
             try:
                 model.stop()
             except Exception:
-                _LOG.exception("error stopping model %s", model.name)
+                LOG.exception("error stopping model %s", model.name)
 
     def _join_service_tier(self) -> Any:
         """Offer the shared models to this shard's peers and take theirs (ADR-015).
@@ -612,7 +611,7 @@ class InferenceServer:
                     f"— share the models it composes instead"
                 )
         if not shared:
-            _LOG.warning(
+            LOG.warning(
                 "service tier: none of the shared models %s is loaded here; no tier joined",
                 service.shared_models,
             )
@@ -711,7 +710,7 @@ class InferenceServer:
             # Non-strict start-up is for a heterogeneous fleet where one node genuinely
             # cannot host one model. It is logged at ERROR, never swallowed: a server
             # silently serving nine of ten models is a worse outage than not starting.
-            _LOG.exception("failed to load model %r; continuing (strict_startup=false)", name)
+            LOG.exception("failed to load model %r; continuing (strict_startup=false)", name)
             return None
 
     def _build_and_start(
@@ -793,7 +792,7 @@ class InferenceServer:
             try:
                 model.stop()
             except Exception:
-                _LOG.exception("error stopping model %s after a failed start", name)
+                LOG.exception("error stopping model %s after a failed start", name)
             raise
         with self._lifecycle_lock:
             if self._generation == generation:
@@ -871,7 +870,7 @@ class InferenceServer:
                 # `_abandon_start`, by identity, on the caller's next line.
                 return
             # Read and cleared as one step, because a second stop that also reads "started"
-            # here is a second *teardown*. The two used to be separated by the `_LOG.info`
+            # here is a second *teardown*. The two used to be separated by the `LOG.info`
             # below -- an emit that formats its arguments, may take a handler lock and may
             # write to a file, which is a guaranteed GIL switch point rather than a couple
             # of bytecodes. Both threads then fell through, both cleared the flags, and both
@@ -903,7 +902,7 @@ class InferenceServer:
             # drained, its trace sink closed. So wait for the barrier instead.
             self._await_teardown()
             return
-        _LOG.info("stopping shipinfer (%d model(s))", len(self._models))
+        LOG.info("stopping shipinfer (%d model(s))", len(self._models))
         with self._control_lock:
             self._teardown(run)
 
@@ -938,7 +937,7 @@ class InferenceServer:
         """
         if self._torn_down.wait(self._settings.shutdown_grace_s):
             return
-        _LOG.warning(
+        LOG.warning(
             "stop() returned while %s is still tearing this server down (waited %.1fs, the "
             "shutdown grace period); models may still be draining, so do not start() this "
             "instance again until they are",
@@ -1051,11 +1050,11 @@ class InferenceServer:
         try:
             sink.close()
         except Exception:
-            _LOG.exception("error closing the trace sink")
+            LOG.exception("error closing the trace sink")
         try:
             self._memory.close()
         except Exception:
-            _LOG.exception("error closing the memory pool")
+            LOG.exception("error closing the memory pool")
 
     def _stale(self, generation: int) -> bool:
         """Whether ``generation``'s teardown has been overtaken by a later run."""
@@ -1069,7 +1068,7 @@ class InferenceServer:
         """Say that a teardown stood down, and why. A WARNING because reaching it means a
         teardown outlived its own grace period — the state :meth:`_await_teardown` warns
         about, seen from the other side."""
-        _LOG.warning(
+        LOG.warning(
             "abandoning the teardown of run %d: run %d has since started on this server, "
             "and releasing its models, trace sink or memory pool now would tear down a "
             "server that is up",
@@ -1092,7 +1091,7 @@ class InferenceServer:
         try:
             mesh.stop()
         except Exception:
-            _LOG.exception("error leaving the service tier")
+            LOG.exception("error leaving the service tier")
 
     def _drain_models(self) -> None:
         """Empty the model table and stop what was in it. Guarded per model.
@@ -1113,7 +1112,7 @@ class InferenceServer:
             try:
                 model.stop()
             except Exception:
-                _LOG.exception("error stopping model %s", model.name)
+                LOG.exception("error stopping model %s", model.name)
 
     # -- explicit model control ------------------------------------------------------------
 
@@ -1168,9 +1167,7 @@ class InferenceServer:
                 generation = self._generation
             self._repository = ModelRepository.load(self._settings.model_repository)
             model = self._build_and_start(name, generation=generation)
-        _LOG.info(
-            "loaded model %s on request (%d model(s) now loaded)", name, len(self._models)
-        )
+        LOG.info("loaded model %s on request (%d model(s) now loaded)", name, len(self._models))
         return model
 
     def unload_model(self, name: str) -> None:
@@ -1211,7 +1208,7 @@ class InferenceServer:
             with self._lock:
                 self._models.pop(name, None)
             model.stop()
-        _LOG.info("unloaded model %s on request", name)
+        LOG.info("unloaded model %s on request", name)
 
     def index(self) -> list[dict[str, str]]:
         """Every model the repository knows, and whether it is serving.
@@ -1408,7 +1405,7 @@ class InferenceServer:
         try:
             return sink.stats()
         except Exception:
-            _LOG.exception("error reading the totals of trace sink %s", sink.name)
+            LOG.exception("error reading the totals of trace sink %s", sink.name)
             return None
 
     def render_metrics(self, exporter: str | None = None) -> str:

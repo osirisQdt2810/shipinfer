@@ -64,7 +64,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from shipinfer.core.errors import ConfigurationError, ValidationError
-from shipinfer.core.logging import get_logger
+from shipinfer.core.logging import LOG
 from shipinfer.topology.barrier import (
     DEFAULT_MAX_INSTANTS,
     DEFAULT_SYNC_WINDOW_MS,
@@ -103,7 +103,6 @@ __all__ = [
     "parse_group",
 ]
 
-_LOG = get_logger("topology.mtmc")
 
 # -- the element's own vocabulary ---------------------------------------------------------
 #
@@ -468,7 +467,7 @@ class ShipvisionMtmc(Element):
         if context.workers is None and self._barrier.budget.permits:
             # A supplied budget wins over the worker count, so this barrier *does* wait --
             # saying it would not would send an operator looking for the wrong symptom.
-            _LOG.warning(
+            LOG.warning(
                 "mtmc element %r was given no worker count but was given a waiter budget: "
                 "group %r will wait for the rest of its instant on the budget's %d "
                 "permit(s), not on a worker count. The runner sets ElementContext.workers",
@@ -477,7 +476,7 @@ class ShipvisionMtmc(Element):
                 self._barrier.budget.permits,
             )
         elif context.workers is None:
-            _LOG.warning(
+            LOG.warning(
                 "mtmc element %r was given no worker count and no waiter budget; it will "
                 "emit every frame immediately rather than wait for the rest of group %r. "
                 "The runner sets ElementContext.workers",
@@ -499,7 +498,7 @@ class ShipvisionMtmc(Element):
                 is wrong" without saying which camera sends an operator to re-survey a site.
         """
         if not self._calibration:
-            _LOG.info(
+            LOG.info(
                 "mtmc element %r (group %r) has no `calibration:`; the %r matcher runs "
                 "appearance-only. Cross-camera association will not use ground-plane "
                 "geometry until homographies are supplied",
@@ -570,7 +569,7 @@ class ShipvisionMtmc(Element):
         if self._barrier is None:
             return
         if self._roster and camera_id not in self._roster:
-            _LOG.warning(
+            LOG.warning(
                 "mtmc element %r: camera %r is not in group %r's declared roster %s; "
                 "associating it anyway. Update `params: cameras:` — the fleet reads it to "
                 "keep the group on one shard",
@@ -752,7 +751,7 @@ class ShipvisionMtmc(Element):
         if self._warned_unassignable:
             return
         self._warned_unassignable = True
-        _LOG.warning(
+        LOG.warning(
             "mtmc element %r could not associate an instant of group %r: %s. Every frame of "
             "that instant is emitted with `mtmc` in missing_stages, but under two reasons: "
             "the one frame whose thread ran the association counts as reason=%s and the rest "
@@ -822,7 +821,7 @@ class ShipvisionMtmc(Element):
         answerable = permits + 1
         if cameras <= answerable:
             return
-        _LOG.warning(
+        LOG.warning(
             "mtmc element %r: group %r has %d cameras (%s) but only %d frame(s) of each "
             "instant can be answered -- %d worker(s) may park in a barrier at once and the "
             "one that closes the instant is the next. The other %d frame(s) per instant are "
