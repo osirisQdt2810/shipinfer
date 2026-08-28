@@ -5,6 +5,117 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-28 — the engine's lifecycle is a claim: `start()` owns a run, a teardown owns a generation
+
+**What.** `InferenceServer.start()` now performs its entry and its exit as atomic
+transitions under the same `_lifecycle_lock` `stop()` has used since #72. `_begin_start`
+claims the server (refusing a second start, and waiting out then refusing a teardown in
+flight), `_finish_start` publishes only if the claim is still held, `_abandon_start`
+releases what a lost start had built. A generation counter rides `stop()` into
+`_teardown`/`_release`, and every destructive step checks it. `stats()` reads the trace
+state under the same lock and hands out a copy. Non-strict start-up re-raises the
+cooperative abort — the run's own, not the flags' — instead of logging "continuing" once per
+remaining model.
+
+**Round 4 (the losing start's unwind).** The claim decided who *owns* the server and said
+nothing about the thread that lost, which is the one holding models, worker threads and a
+sink. Review reproduced it two ways, and the fix binds five things to the run rather than to
+the flags: the models' abort predicate (`_start_abort`, generation *or* `_is_stopping` —
+`_is_stopping` alone goes false again the moment the next run sets `_starting`), the publish
+in `_build_and_start`, the failure path's teardown (`_stop_run(generation)`, so a losing
+start does not run a whole-server teardown on the run that replaced it), the service-mesh
+assignment, and the release itself — `_abandon_start` pops the table by **identity** and
+stops by **ledger** instead of calling `_drain_models`. The trace sink moved with them: it is
+built by `start()` but installed only by `_finish_start`, so a losing start closes the one it
+built rather than leaving an open file descriptor on a stopped server and wiping the last
+run's totals.
+
+**Round 5 (the fifth consumer of "have I lost the server?", and the field that was not
+carried).** The second review pass found one hole left in the run binding: `_load`'s
+`strict_startup=false` skip still asked `_is_stopping()`. So a non-strict start that lost its
+claim did not stop loading — it logged one ERROR with a full traceback per remaining model,
+"failed to load … continuing", of a run that is not continuing and about models that did not
+fail, and built a whole `Model` for each (a backend, a queue, and on a CUDA host a stream
+pool and a graph cache per instance) on devices that belong to the new run. It asks
+`abort()` now, the predicate the models poll. That predicate answers the **reason** rather
+than a bool, because there are two of them and `Model._check_abort` printed "the server is
+stopping" for both — including for the restart that overtook the start, which is the string
+an operator greps. The service mesh moved next to the trace sink in `_finish_start`: it had
+been published under the generation alone, a weaker question than the claim by exactly "a
+`stop()` for this same run has been and gone", and in that window a torn-down server held a
+live mesh whose rings a restart then stranded with its peers still writing into them.
+`_publish_service_tier` is gone — `start()` carries the joined mesh as a local exactly as it
+carries the sink, and `_abandon_start` stops the one a losing start built. Both process-wide
+resources now obey one rule: *published by the claim, released by the ledger*. Finally
+`_sink_stats` is one guarded `sink.stats()` shared by the teardown and the scrape;
+`TRACE_SINKS` is a registry, the teardown had guarded its call from the beginning, and the
+unguarded one was the scrape's — the KServe stats route and the metrics exporter, where a
+sink that raises turns a monitoring poll into a 500.
+
+**Why.** Review of #72 (rounds 2 and 3) reproduced `is_started == True` with zero models: a
+`stop()` concurrent with the *initial* `start()` drained the table and closed the sink under
+a start that published itself anyway. A readiness probe reads that as "up and serving
+nothing". The trace-totals field #72 added made a second version of it — a late `_release`
+overwriting a new run's numbers — and `stats()`'s two-bytecode check-and-act restored the
+`{"sink": "none", "recorded": 0}` answer #72 existed to remove.
+
+**Decisions.**
+
+- **A generation, not a flag.** `_starting` cannot tell "still mine" from "cleared by a stop,
+  and a later start set it again". Every teardown carries the run it was started for.
+- **The grace period's expiry is a refusal, not a downgrade.** `_await_teardown` still
+  returns on expiry (`stop()` never raises), but a `start()` on the other side of it is now
+  refused with a `ServerStateError` rather than proceeding into a teardown that is still
+  running. The generation check is the second line, because the first one is a timed wait.
+- **The totals and the sink swap are one transition.** Split, a scrape lands between them
+  and reports the null sink's zeros as a run's final sample.
+- **A lost start releases what it built, never what it finds.** The first version drained
+  the whole table, which is the same destructive act one door to the left: a restart is let
+  through as soon as `_torn_down` is set, and that barrier is set by the teardown's
+  `finally`, which knows nothing about a start still running. So the losing start stopped the
+  *new* run's worker threads and left `is_started` true over an empty table — the readiness
+  lie this work exists to remove, re-entered from the other side.
+- **`_torn_down` means "the teardown returned", not "nobody is holding this server".** Left
+  as it is, and written down in `__init__` instead of strengthened: a barrier that also
+  waited for every losing start would be a wait with no bound, because a start is blocked on
+  an engine load. What makes it safe is that a losing start can no longer touch a newer run.
+- **A release does not publish the between-runs null sink's zeros.** `_traces` holds a
+  `NullTraceSink` between runs, so a run that never reached `_finish_start` finds one — and
+  publishing its zeros throws away the totals of the run before it. "0 traces recorded" is a
+  claim about the workload; "we stopped measuring" is the truth.
+- **The lifecycle lock is not held across a sink's `stats()`.** `TRACE_SINKS` is a registry,
+  and a third-party sink that touched a file there would hold the one lock `stop()`'s entry
+  transition needs — a metrics scrape able to stall a shutdown into a SIGKILL. The pair is
+  snapshotted atomically and the call made outside; `is_closed` on the snapshot is what tells
+  a scrape it lost the race, and the totals are published before the close, so it can just
+  read them.
+
+**Tests.** Twenty-two new offline tests in `tests/engine/test_stop_teardown.py`, every
+interleaving forced rather than hammered for: `_WatchedLock` (a lock that records the threads
+which had to *wait*) joins `_WatchedEvent`, `_GatedStatsServer` turns `_last_trace_stats` into
+a property so a scrape can be parked inside a window two bytecodes wide, `_RecordingSink`
+gained a one-shot gate inside `stats()` (the only way into the gap between `_release`'s sink
+read and its publish) and a read counter, and `_threads_of` answers "whose worker threads are
+these" where `_live_workers` cannot — two runs of one model name their threads identically.
+Every fix was revert-checked in a detached copy: F1–F4 in round 3, in round 4 the six run
+bindings, the two halves of the sink fix, the two `_release` generation checks the earlier
+round left with no coverage, the teardown-owner write and the unlocked `stats()` call, and in
+round 5 the non-strict skip's abort, the abort's reason, the deferred mesh install and the
+guarded scrape — each red on the test whose name describes it.
+
+**Future work (not this PR).** `InferenceServer` now carries the repository scan, the model
+table, the service tier, the stats surface *and* a lifecycle state machine spread over
+`_generation`, `_started`, `_starting`, `_torn_down`, `_teardown_owner` and `_lifecycle_lock`.
+That state machine is the interesting part and the part with no direct test — every test here
+reaches it by monkeypatching a private method. A `_RunState` object owning those six fields
+and answering `claim()` / `publish(gen)` / `release_for(gen)` would be testable with no
+threads and no repository at all, and round 4's blocker is the kind of bug it would have made
+obvious.
+
+---
+
+---
+
 ## 2026-08-27 — a dead shard's cameras are reported lost, never re-placed (Phase B4)
 
 `Fleet.dead_indices()` names exited shards by plan index and `runners.fleet._lost_in()` maps them

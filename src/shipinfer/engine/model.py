@@ -390,16 +390,18 @@ class Model:
     # -- lifecycle -----------------------------------------------------------------------
 
     def start(
-        self, timeout_s: float = 120.0, should_abort: Callable[[], bool] | None = None
+        self, timeout_s: float = 120.0, abort_reason: Callable[[], str | None] | None = None
     ) -> None:
         """Start every instance and wait for at least one to become ready.
 
         Args:
             timeout_s: How long to wait for all instances to settle.
-            should_abort: Polled between instances; ``True`` means the owner has begun
-                shutting down and this start should give up. The owner is the server, and
-                the flag it exposes is "a ``stop()`` has started" — see
-                :meth:`~shipinfer.engine.pool.InferenceServer._is_stopping`.
+            abort_reason: Polled between instances. A string means the owner wants this
+                start to give up and *is the reason*, carried verbatim into the error; None
+                means carry on. A reason rather than a bool because the owner has two of
+                them — a shutdown, and a later run that claimed the server — and they read
+                as different events to whoever finds the log. See
+                :meth:`~shipinfer.engine.pool.InferenceServer._start_abort`.
 
         Why the abort exists: ``stop()`` takes the control lock, so it queues behind a
         ``load_model`` in progress, and a TensorRT engine of any size takes minutes to
@@ -416,19 +418,19 @@ class Model:
 
         Raises:
             ServerStateError: when an instance fails to become ready under
-                ``strict_startup``, and when ``should_abort`` says to stop. The instances
+                ``strict_startup``, and when ``abort_reason`` gives one. The instances
                 this call already started are stopped before either error leaves — the
                 caller may have no other handle on them.
         """
         started: list[ModelInstance] = []
         try:
             for instance in self._instances:
-                self._check_abort(should_abort, started)
+                self._check_abort(abort_reason, started)
                 instance.start()
                 started.append(instance)
             deadline = time.monotonic() + timeout_s
             for instance in self._instances:
-                self._check_abort(should_abort, started)
+                self._check_abort(abort_reason, started)
                 remaining = max(0.0, deadline - time.monotonic())
                 if not instance.wait_ready(remaining) and self._settings.strict_startup:
                     # The instance's own error when it has one: "did not become ready
@@ -455,13 +457,23 @@ class Model:
         )
 
     def _check_abort(
-        self, should_abort: Callable[[], bool] | None, started: list[ModelInstance]
+        self, abort_reason: Callable[[], str | None] | None, started: list[ModelInstance]
     ) -> None:
-        """Raise if the owner has begun shutting down. ``started`` is only for the message."""
-        if should_abort is None or not should_abort():
+        """Raise if the owner wants this start to give up, naming *its* reason.
+
+        The reason comes from the predicate and not from a constant here, because the owner
+        has more than one and they are not the same event to an operator: "the server is
+        stopping" sends them looking for a shutdown, "a later run has claimed this server"
+        for the restart that overtook this start. Both used to print the first, and this
+        string is what gets grepped for.
+
+        ``started`` is only for the message.
+        """
+        reason = abort_reason() if abort_reason is not None else None
+        if not reason:
             return
         raise ServerStateError(
-            f"start aborted: the server is stopping (model {self.name} had started "
+            f"start aborted: {reason} (model {self.name} had started "
             f"{len(started)} of {len(self._instances)} instance(s))"
         )
 
