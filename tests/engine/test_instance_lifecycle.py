@@ -274,15 +274,22 @@ class TestAWorkerThatDiesReadsAsDead:
 
     def test_the_readiness_gauge_comes_back_down(self) -> None:
         """Otherwise a dashboard counts an instance that no longer exists, and the pool looks
-        larger than it is for as long as the process lives."""
+        larger than it is for as long as the process lives.
+
+        The wait is on the gauge, not on ``is_ready``: the worker clears the flag first and
+        decrements the gauge after, so waiting on the flag reads a value not yet written.
+        """
         instance = self._instance_whose_completion_explodes()
         instance.start()
         try:
             assert instance.wait_ready(10)
-            before = instance._metrics.instances_ready.value(model=instance._model_label())
+            label = instance._model_label()
+            before = instance._metrics.instances_ready.value(model=label)
             instance.enqueue(_item())
-            assert _wait_for(lambda: not instance.is_ready)
-            after = instance._metrics.instances_ready.value(model=instance._model_label())
+            assert _wait_for(
+                lambda: instance._metrics.instances_ready.value(model=label) == before - 1
+            )
+            after = instance._metrics.instances_ready.value(model=label)
         finally:
             instance.stop(grace_s=5.0)
 
