@@ -17,6 +17,13 @@ real element is how a chain ends up copying every frame to host memory to run a 
 Nothing here does any work. ``MockDetect`` invents one box; it does not pretend to detect.
 A mock that produced plausible numbers would eventually be trusted for something.
 
+**What a mock does copy is the *type*.** ``MockDetect`` files its invented box under
+``meta["detections"]`` as a real :class:`~shipinfer.topology.elements.detections.Detections`,
+beside the older ``meta["boxes"]`` list the chain and runner tests read. That is what lets the
+stateful elements phase C adds — ``track`` first — be tested end to end on a mock chain with no
+model repository, against the parallel-array shape a ``pool`` detector actually decodes into
+rather than a stand-in for it.
+
 **No mock declares ``requires_model_name`` or ``needs_model``**, and that is the honest
 answer rather than an omission: ``MockDetect`` invents a box and resolves nothing against a
 model pool, so a chain of these needs neither a ``model:`` in front of it (the loader's
@@ -30,7 +37,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, ClassVar
 
+import numpy as np
+
 from shipinfer.topology.base import ChainItem, Element, ElementContext, ElementKind
+from shipinfer.topology.elements.detections import DecodeParams, Detections
 from shipinfer.topology.registry import registry_for
 
 __all__ = [
@@ -47,6 +57,7 @@ __all__ = [
     "MockRecognize",
     "MockSegment",
     "MockTrack",
+    "invented_detections",
 ]
 
 
@@ -116,6 +127,47 @@ class MockDecode(_Mock):
         )
 
 
+#: The default class table, inverted. Built from :class:`DecodeParams` rather than written
+#: out, because the two disagreeing is exactly the bug this replaces: ``invented_detections``
+#: filed ``class_ids=[0]`` under the label ``"ship"`` while the table maps 0 to ``person`` and
+#: 8 to ``ship``. A mock whose id contradicts its own label is worse than an obviously fake
+#: one — it is the first thing a tracker test copies, and a class-conditional chain step
+#: (``when: class == ship``) reads the id.
+_CLASS_IDS: dict[str, int] = {
+    label: class_id for class_id, label in DecodeParams().class_labels.items()
+}
+
+#: What a label the default table has no id for is filed as. Deliberately not ``0``: ``0`` is
+#: ``person``, so reusing it would put an invented class under a real one's number.
+_UNKNOWN_CLASS_ID = -1
+
+
+def invented_detections(label: str) -> Detections:
+    """One 10x10 box of ``label``, in the shape a real detector produces.
+
+    The same :class:`~shipinfer.topology.elements.detections.Detections` a ``pool`` detector
+    decodes into ``meta["detections"]``, so a chain of mocks exercises the *type* the stateful
+    elements behind it consume rather than a stand-in for it. That matters more here than
+    anywhere else in this module: ``track`` reads the parallel arrays, and a mock that filed a
+    list of tuples would let a tracker element pass its tests against a shape no deployment
+    ever produces.
+
+    The numbers are still invented and still say so — one box at the origin, score 0.9. A mock
+    that produced plausible detections would eventually be trusted for something.
+
+    The **class id agrees with the label**, which is the one thing here that is not free to be
+    arbitrary: a real decode derives one from the other through
+    :attr:`DecodeParams.class_labels`, so a mock filing them independently produces a
+    ``Detections`` no decoder could ever emit.
+    """
+    return Detections(
+        boxes=np.array([[0.0, 0.0, 10.0, 10.0]], dtype=np.float32),
+        scores=np.array([0.9], dtype=np.float32),
+        class_ids=np.array([_CLASS_IDS.get(label, _UNKNOWN_CLASS_ID)], dtype=np.int32),
+        labels=(label,),
+    )
+
+
 @registry_for(ElementKind.DETECT).register("mock")
 class MockDetect(_Mock):
     """A detector on the device path, with a host fallback it never prefers."""
@@ -125,7 +177,13 @@ class MockDetect(_Mock):
     produces: ClassVar[tuple[str, ...]] = ("nv12@gpu",)
 
     def _meta(self, item: ChainItem) -> dict[str, Any]:
-        return {"boxes": [(0, 0, 10, 10)], "class": self.params.get("class", "ship")}
+        label = str(self.params.get("class", "ship"))
+        return {
+            "boxes": [(0, 0, 10, 10)],
+            "detections": invented_detections(label),
+            "frame_hw": (100, 100),
+            "class": label,
+        }
 
 
 @registry_for(ElementKind.DETECT).register("mock-cpu")
@@ -141,7 +199,12 @@ class MockCpuDetect(_Mock):
     produces: ClassVar[tuple[str, ...]] = ("bgr@cpu",)
 
     def _meta(self, item: ChainItem) -> dict[str, Any]:
-        return {"boxes": [(0, 0, 10, 10)], "class": "ship"}
+        return {
+            "boxes": [(0, 0, 10, 10)],
+            "detections": invented_detections("ship"),
+            "frame_hw": (100, 100),
+            "class": "ship",
+        }
 
 
 @registry_for(ElementKind.SEGMENT).register("mock")

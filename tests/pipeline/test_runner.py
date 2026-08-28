@@ -10,6 +10,7 @@ possible, so it is asserted rather than assumed.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from shipinfer.pipeline.graph.state import FrameState
 from shipinfer.pipeline.reassembly.collector import FrameCollector
 from shipinfer.pipeline.schema import SCHEMA_VERSION
 from shipinfer.pipeline.sinks import NullResultSink
+from shipinfer.runtime.ops.numpy_ops import NumpyImageOps
 from shipinfer.scheduling.queues import FairPriorityQueue
 
 from .conftest import CROP_SIZE, DETECTOR_INPUT, FakeServer, StubModel
@@ -145,6 +147,86 @@ def publish(runner: PipelineRunner, count: int, camera: str = "cam0") -> list[tu
         runner.frame_sink.put(frame)
         keys.append(frame.key)
     return keys
+
+
+class TestTheRunnerStillReleasesEveryPoolItClaims:
+    """The one thing this runner does that the shared wiring does not do for free.
+
+    ``_build_ops`` is :func:`~shipinfer.runtime.ops.get_thread_local_image_ops` — the same
+    call ``shipinfer run`` and ``shipinfer-shard`` make — except for ``claim=``, which records
+    each pinned pool's owner key so :meth:`~shipinfer.pipeline.PipelineRunner.stop` can hand
+    the page-locked pages back. This runner is the one caller that stops and starts inside a
+    process, and every cycle mints fresh keys (they embed the worker's thread ident), so
+    without the release each cycle strands tens of MB of pinned memory for the server's life.
+
+    Asserted here because it is exactly what a future edit would drop: the shared helper is one
+    call with a keyword, and the keyword is the whole difference.
+    """
+
+    def test_the_keys_are_recorded_on_the_way_out_and_released_on_stop(
+        self, build_graph, models, monkeypatch
+    ):
+        from shipinfer.runtime import ops as ops_module
+
+        class RecordingMemory:
+            def __init__(self) -> None:
+                self.claimed: list[str] = []
+                self.released: list[str] = []
+
+            def staging_for(self, owner: str) -> str:
+                self.claimed.append(owner)
+                return owner
+
+            def release_staging(self, owner: str) -> None:
+                self.released.append(owner)
+
+        class FakeDevices:
+            """A ``DeviceManager``'s two attributes, and nothing that needs a driver."""
+
+            has_accelerator = True
+            visible_gpus = (0, 1)
+
+            def bind_current_thread(self, device) -> None:
+                pass
+
+        # Nothing on this path may construct a real implementation: on a box that *has* a
+        # driver the torch one would be handed this test's string in place of a pool.
+        monkeypatch.setattr(
+            ops_module,
+            "get_image_ops",
+            lambda provider, *, device_index=0, staging=None: NumpyImageOps(),
+        )
+        memory = RecordingMemory()
+        settings = settings_for()
+        server = FakeServer(models=models, settings=settings)
+        server.devices = FakeDevices()
+        server.memory = memory
+        # No `ops=`: the point is what the runner builds for itself.
+        runner = PipelineRunner(
+            server, settings=settings, graph=build_graph([SHIP]), sink=NullResultSink()
+        ).start()
+        try:
+
+            def touch() -> None:
+                runner._ops.on_device  # noqa: B018 - first touch builds this thread's delegate
+
+            workers = [threading.Thread(target=touch) for _ in range(2)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(5.0)
+
+            assert len(set(memory.claimed)) == 2, "two threads shared one pinned pool"
+            assert sorted(runner._staging_owners) == sorted(memory.claimed), (
+                "the claim went straight to `staging_for` and the key was never recorded, so "
+                "`stop()` has nothing to release"
+            )
+            assert memory.released == []
+        finally:
+            runner.stop(timeout_s=5.0)
+
+        assert sorted(memory.released) == sorted(memory.claimed)
+        assert runner._staging_owners == []
 
 
 class TestTheRunnerRefusesABadWiring:

@@ -13,6 +13,14 @@ all four hold the same four promises:
   :class:`~shipinfer.core.errors.QueueFullError`; it never becomes an empty result, because
   "no ships in this frame" and "the detector is saturated" demand opposite responses.
 
+The element under test is :class:`PoolSegment` wherever one kind has to stand for the four:
+it is the plainest of them, and since C3 the *detector* is not — ``PoolDetect`` replaces both
+of ``_do_process``'s hooks to letterbox its frame and decode the boxes back into source pixels,
+so it needs image ops to open at all and files a decoded ``Detections`` rather than the raw
+outputs. Testing the shared behaviour through the one subclass that overrides it would be
+testing the override. ``tests/topology/test_pool_detect_decode.py`` is where the detector's own
+contract lives.
+
 The pool is a **fake with one method**, which is the honest measure of how narrow
 :class:`~shipinfer.topology.base.ModelResolver` is: ``get(name)``. That is why this file
 needs no server, no engine and no driver.
@@ -69,10 +77,20 @@ from shipinfer.topology.elements.pool import (
 
 #: kind -> (class, the metadata key its results are filed under)
 KINDS = {
-    ElementKind.DETECT: (PoolDetect, "boxes"),
+    ElementKind.DETECT: (PoolDetect, "detections"),
     ElementKind.SEGMENT: (PoolSegment, "masks"),
     ElementKind.EMBED: (PoolEmbed, "vectors"),
     ElementKind.RECOGNIZE: (PoolRecognize, "identities"),
+}
+
+#: The three that file the model's outputs raw and hand the payload on untouched — the shared
+#: behaviour this file is about. ``detect`` is deliberately absent: it replaces both of
+#: ``_do_process``'s hooks to letterbox and decode, so it is neither a fair sample of the
+#: shared code nor openable without image ops. Its own contract is pinned in
+#: ``tests/topology/test_pool_detect_decode.py``, and what is asserted *here* is that the
+#: three untouched kinds stayed untouched.
+PASSTHROUGH_KINDS = {
+    kind: value for kind, value in KINDS.items() if kind is not ElementKind.DETECT
 }
 
 
@@ -170,52 +188,52 @@ class TestTheRegistrations:
 
 class TestResolvingTheModel:
     def test_the_model_is_resolved_at_open(self) -> None:
-        pool = FakePool(ship_detector=FakeModel())
-        element = PoolDetect("detect", model="ship_detector")
+        pool = FakePool(ship_segmenter=FakeModel())
+        element = PoolSegment("segment", model="ship_segmenter")
 
         element.open(ElementContext(models=pool))
 
-        assert pool.lookups == ["ship_detector"]
+        assert pool.lookups == ["ship_segmenter"]
 
     def test_an_unknown_model_stops_the_deploy_rather_than_the_first_frame(self) -> None:
         """The whole reason the lookup is at ``open``: §2.6, validate at start-up."""
         pool = FakePool(person_embedder=FakeModel())
-        element = PoolDetect("detect", model="ship_detector")
+        element = PoolSegment("segment", model="ship_segmenter")
 
         with pytest.raises(ModelNotFoundError) as caught:
             element.open(ElementContext(models=pool))
 
-        assert "ship_detector" in str(caught.value)
+        assert "ship_segmenter" in str(caught.value)
         assert not element.is_open, "a failed open must not leave the element half-open"
 
     def test_it_is_resolved_once_and_not_per_frame(self) -> None:
-        pool = FakePool(ship_detector=FakeModel())
-        element = PoolDetect("detect", model="ship_detector")
+        pool = FakePool(ship_segmenter=FakeModel())
+        element = PoolSegment("segment", model="ship_segmenter")
         element.open(ElementContext(models=pool))
 
         for frame in range(5):
             element.process(item(**{"frame": frame}))
 
-        assert pool.lookups == ["ship_detector"], "one lookup, five frames"
+        assert pool.lookups == ["ship_segmenter"], "one lookup, five frames"
 
     def test_a_runner_that_passes_no_pool_is_a_wiring_mistake(self) -> None:
-        element = PoolDetect("detect", model="ship_detector")
+        element = PoolSegment("segment", model="ship_segmenter")
 
         with pytest.raises(ConfigurationError, match="needs a model pool"):
             element.open(ElementContext())
 
     def test_an_element_with_no_model_name_says_so(self) -> None:
         """Unreachable through the loader, which refuses a model kind with no ``model:``."""
-        element = PoolDetect("detect")
+        element = PoolSegment("segment")
 
         with pytest.raises(ConfigurationError, match="has no model"):
             element.open(ElementContext(models=FakePool()))
 
 
 class TestSubmittingOneItem:
-    @pytest.mark.parametrize("kind", list(KINDS))
+    @pytest.mark.parametrize("kind", list(PASSTHROUGH_KINDS))
     def test_the_outputs_land_under_the_kind_s_metadata_key(self, kind: ElementKind) -> None:
-        cls, meta_key = KINDS[kind]
+        cls, meta_key = PASSTHROUGH_KINDS[kind]
         outputs = {"out": tensor()}
         pool = FakePool(some_model=FakeModel(outputs))
         element = cls("slot", model="some_model")
@@ -230,8 +248,8 @@ class TestSubmittingOneItem:
     def test_the_request_carries_the_item_s_context_by_identity(self) -> None:
         """A copy would let the two tags drift the moment anything stamped one (ADR-002)."""
         model = FakeModel()
-        element = PoolDetect("detect", model="ship_detector")
-        element.open(ElementContext(models=FakePool(ship_detector=model)))
+        element = PoolSegment("segment", model="ship_segmenter")
+        element.open(ElementContext(models=FakePool(ship_segmenter=model)))
         walked = item()
 
         element.process(walked)
@@ -240,14 +258,14 @@ class TestSubmittingOneItem:
 
     def test_the_payload_is_submitted_under_the_model_s_input_name(self) -> None:
         model = FakeModel()
-        element = PoolDetect("detect", {"input": "pixels"}, model="ship_detector")
-        element.open(ElementContext(models=FakePool(ship_detector=model)))
+        element = PoolSegment("segment", {"input": "pixels"}, model="ship_segmenter")
+        element.open(ElementContext(models=FakePool(ship_segmenter=model)))
         payload = tensor(rows=2)
 
         element.process(item(payload=payload))
 
         assert model.requests[0].inputs == {"pixels": payload}
-        assert model.requests[0].model_name == "ship_detector"
+        assert model.requests[0].model_name == "ship_segmenter"
 
     @pytest.mark.parametrize("caps", ["nv12@gpu", "tensor@gpu", "bgr@cpu"])
     def test_the_successor_carries_the_cap_it_arrived_with(self, caps: str) -> None:
@@ -259,8 +277,8 @@ class TestSubmittingOneItem:
         element downstream. The cap on an item is the cap of the edge it is travelling, and
         that is the loader's answer, not this element's.
         """
-        element = PoolDetect("detect", model="ship_detector")
-        element.open(ElementContext(models=FakePool(ship_detector=FakeModel())))
+        element = PoolSegment("segment", model="ship_segmenter")
+        element.open(ElementContext(models=FakePool(ship_segmenter=FakeModel())))
 
         result = element.process(item(caps=caps))
 
@@ -277,7 +295,7 @@ class TestSubmittingOneItem:
         than the deployment was tuned for. This is the assertion that ties them.
         """
         assert ServerSettings().pipeline.stage_timeout_ms / 1000.0 == _DEFAULT_TIMEOUT_S
-        assert PoolDetect("detect", model="m")._timeout_s == _DEFAULT_TIMEOUT_S
+        assert PoolSegment("segment", model="m")._timeout_s == _DEFAULT_TIMEOUT_S
 
 
 class TestWhereTheTwoKnobsComeFrom:
@@ -289,11 +307,11 @@ class TestWhereTheTwoKnobsComeFrom:
     """
 
     def test_the_context_supplies_both_when_the_slot_declares_neither(self) -> None:
-        element = PoolDetect("detect", model="ship_detector")
+        element = PoolSegment("segment", model="ship_segmenter")
 
         element.open(
             ElementContext(
-                models=FakePool(ship_detector=FakeModel()),
+                models=FakePool(ship_segmenter=FakeModel()),
                 stage_timeout_s=0.5,
                 input_name="pixels",
             )
@@ -304,13 +322,13 @@ class TestWhereTheTwoKnobsComeFrom:
 
     def test_the_slot_s_params_win_over_the_deployment_s_settings(self) -> None:
         """A tensor name belongs to the model and one slot may need a longer wait."""
-        element = PoolDetect(
-            "detect", {"timeout_s": 2.0, "input": "frames"}, model="ship_detector"
+        element = PoolSegment(
+            "segment", {"timeout_s": 2.0, "input": "frames"}, model="ship_segmenter"
         )
 
         element.open(
             ElementContext(
-                models=FakePool(ship_detector=FakeModel()),
+                models=FakePool(ship_segmenter=FakeModel()),
                 stage_timeout_s=0.5,
                 input_name="pixels",
             )
@@ -321,17 +339,17 @@ class TestWhereTheTwoKnobsComeFrom:
 
     def test_a_context_that_says_nothing_leaves_the_module_defaults(self) -> None:
         """What a chain-validation test and a hand-built context get."""
-        element = PoolDetect("detect", model="ship_detector")
+        element = PoolSegment("segment", model="ship_segmenter")
 
-        element.open(ElementContext(models=FakePool(ship_detector=FakeModel())))
+        element.open(ElementContext(models=FakePool(ship_segmenter=FakeModel())))
 
         assert element._timeout_s == _DEFAULT_TIMEOUT_S
         assert element._input == _DEFAULT_INPUT
 
     def test_reopening_under_a_different_context_takes_the_new_numbers(self) -> None:
         """A restarted shard must not keep the previous run's timeout."""
-        pool = FakePool(ship_detector=FakeModel())
-        element = PoolDetect("detect", model="ship_detector")
+        pool = FakePool(ship_segmenter=FakeModel())
+        element = PoolSegment("segment", model="ship_segmenter")
 
         element.open(ElementContext(models=pool, stage_timeout_s=0.25))
         element.close()
@@ -346,10 +364,10 @@ class TestWhereTheTwoKnobsComeFrom:
         this call is the bound — and the bound has to be the context's 10 ms rather than the
         module's five seconds, or the test would hang for five seconds before passing.
         """
-        element = PoolDetect("detect", model="ship_detector")
+        element = PoolSegment("segment", model="ship_segmenter")
         element.open(
             ElementContext(
-                models=FakePool(ship_detector=FakeModel(answer=False)), stage_timeout_s=0.01
+                models=FakePool(ship_segmenter=FakeModel(answer=False)), stage_timeout_s=0.01
             )
         )
 
@@ -363,9 +381,9 @@ class TestWhereTheTwoKnobsComeFrom:
 class TestFailuresAreCarriedNotSwallowed:
     def test_a_full_pool_propagates_and_never_becomes_an_empty_result(self) -> None:
         """Backpressure reaches the runner, which counts it against the right camera (ADR-005)."""
-        refused = QueueFullError("ship_detector", 256, 256)
-        element = PoolDetect("detect", model="ship_detector")
-        element.open(ElementContext(models=FakePool(ship_detector=FakeModel(error=refused))))
+        refused = QueueFullError("ship_segmenter", 256, 256)
+        element = PoolSegment("segment", model="ship_segmenter")
+        element.open(ElementContext(models=FakePool(ship_segmenter=FakeModel(error=refused))))
 
         with pytest.raises(QueueFullError) as caught:
             element.process(item())
@@ -374,16 +392,16 @@ class TestFailuresAreCarriedNotSwallowed:
 
     def test_a_pool_that_does_not_answer_in_time_is_a_typed_timeout(self) -> None:
         """A worker blocked forever on one model takes a whole shard's throughput with it."""
-        element = PoolDetect("detect", {"timeout_s": 0.01}, model="ship_detector")
-        element.open(ElementContext(models=FakePool(ship_detector=FakeModel(answer=False))))
+        element = PoolSegment("segment", {"timeout_s": 0.01}, model="ship_segmenter")
+        element.open(ElementContext(models=FakePool(ship_segmenter=FakeModel(answer=False))))
 
-        with pytest.raises(RequestTimeoutError, match="ship_detector"):
+        with pytest.raises(RequestTimeoutError, match="ship_segmenter"):
             element.process(item())
 
     def test_a_payload_that_is_not_a_tensor_is_refused_with_its_type(self) -> None:
         """Until phase D a device frame handle is not submittable, and saying so is the fix."""
-        element = PoolDetect("detect", model="ship_detector")
-        element.open(ElementContext(models=FakePool(ship_detector=FakeModel())))
+        element = PoolSegment("segment", model="ship_segmenter")
+        element.open(ElementContext(models=FakePool(ship_segmenter=FakeModel())))
 
         with pytest.raises(ValidationError) as caught:
             element.process(item(payload="frame:cam-1:7"))
@@ -395,14 +413,14 @@ class TestFailuresAreCarriedNotSwallowed:
 class TestTheLifecycle:
     def test_close_forgets_the_handle_and_open_resolves_it_again(self) -> None:
         """The handle belongs to the pool, whose life is longer than the element's."""
-        pool = FakePool(ship_detector=FakeModel())
-        element = PoolDetect("detect", model="ship_detector")
+        pool = FakePool(ship_segmenter=FakeModel())
+        element = PoolSegment("segment", model="ship_segmenter")
 
         element.open(ElementContext(models=pool))
         element.close()
         element.open(ElementContext(models=pool))
 
-        assert pool.lookups == ["ship_detector", "ship_detector"]
+        assert pool.lookups == ["ship_segmenter", "ship_segmenter"]
         assert element.is_open
 
 

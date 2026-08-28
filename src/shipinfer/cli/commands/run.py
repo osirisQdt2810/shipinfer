@@ -16,7 +16,7 @@ what to do over the control plane.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,6 +33,7 @@ __all__ = [
     "cameras_from_inputs",
     "cameras_from_settings",
     "cameras_to_place",
+    "image_ops_are_needed",
     "model_pool_is_needed",
     "place_cameras",
     "refuse_flags_that_would_be_ignored",
@@ -250,13 +251,63 @@ def run(
     # which only ever read two `ClassVar`s. What is left below is `build_runner`, and it is
     # below because `models=` is the keyword this engine is built to be.
     engine = None
+    ops = None
     try:
         if not dry_run and model_pool_is_needed(chosen, chain):
             from shipinfer.engine import InferenceServer
 
             engine = InferenceServer(settings)
+        if not dry_run and image_ops_are_needed(chosen, chain):
+            # The other dependency an element cannot resolve for itself, gated the same way and
+            # for the same reason: `topology` may not import `runtime`, so the composition root
+            # is where an ops implementation is chosen and handed over.
+            #
+            # `get_thread_local_image_ops`, not `get_image_ops`, and the difference is the
+            # whole point of the line. `pipeline.workers` threads walk this chain at once
+            # (`runners/inprocess.py`), one `PoolDetect` instance is shared by all of them, and
+            # every implementation `get_image_ops` can return is per-thread by contract: the
+            # native one keeps a staging ring inside the extension, the torch one binds a
+            # device on the constructing thread and caches an event on the instance. One
+            # instance across four workers is four threads in one ring -- plausible pixels, no
+            # error, and invisible to the offline tier because `NumpyImageOps` is stateless.
+            # It also put every camera's pre-processing on `cuda:0` regardless of how many GPUs
+            # this process can see, which is this project's founding bug one layer up.
+            #
+            # The devices come from the engine's `DeviceManager` when there is one, and are
+            # *not* resolved by building one here: `DeviceManager.__init__` takes a CUDA
+            # primary context per visible GPU (~200 MiB each) that nothing in this process
+            # gives back, which is the same reason the engine itself is constructed as late as
+            # it is. A chain that needs ops and no pool (the first `crop` element will be one)
+            # therefore falls back to what the operator pinned in `devices.visible_gpus`, and
+            # to `(0,)` when that is empty -- on a host with no accelerator the delegate
+            # degrades to `NumpyImageOps` and the index is never used, which is what keeps the
+            # offline tier running the real element rather than a stubbed one.
+            #
+            # What that fallback does NOT do, stated because it is the founding bug's
+            # neighbourhood: with no engine there is no `DeviceManager`, so `device_manager=`
+            # is `None`, so no worker thread is bound (ADR-002) and no pinned staging pool is
+            # claimed. The threads still spread over the device list, and each delegate is
+            # *constructed with* its own index -- `TorchImageOps` and `NativeImageOps` both
+            # carry their device rather than reading the ambient current one -- so today it is
+            # unbound, not misplaced. The first chain that reaches it is the `crop` element
+            # named above; when one exists, it needs a `DeviceManager` here, and building one
+            # just for the device list is the trade this block already refuses. Pinned by
+            # `tests/cli/test_run_engine.py::TestAChainThatNeedsOpsAndNoPool` so the day it
+            # changes, it changes on purpose.
+            from shipinfer.runtime.ops import get_thread_local_image_ops
 
-        built = build_runner(chosen, chain, settings, chain_yaml=chain_yaml, models=engine)
+            manager = getattr(engine, "devices", None)
+            ops = get_thread_local_image_ops(
+                settings.execution.provider,
+                devices=tuple(getattr(manager, "visible_gpus", ()) or ())
+                or tuple(settings.devices.visible_gpus),
+                device_manager=manager,
+                memory=getattr(engine, "memory", None),
+            )
+
+        built = build_runner(
+            chosen, chain, settings, chain_yaml=chain_yaml, models=engine, ops=ops
+        )
         if dry_run:
             # On the contract, not probed for: `Runner.describe_plan` has an in-process default
             # ("no plan: one process") and the fleet overrides it with the plan it would run.
@@ -324,25 +375,43 @@ def run(
     return 0
 
 
-def model_pool_is_needed(runner: str, chain: Topology) -> bool:
-    """Whether this run has to build a model pool and hand it to the runner as ``models=``.
+#: The dependencies a chain is *handed* rather than imports: the ``build_runner`` keyword,
+#: and the :class:`~shipinfer.topology.base.Element` attribute by which an implementation
+#: declares it needs one. A table rather than a function each, because the two were the same
+#: four lines with one attribute name changed and phase D adds a third (a DataPool) — at which
+#: point the copies would be the design rather than an accident.
+#:
+#: Both halves are **declarations**, never a check against ``"inprocess"`` or ``"pool"``, so a
+#: new runner or a new element answers for itself instead of being added to a condition here
+#: (CONVENTIONS 2.3).
+_HANDED_IN: Mapping[str, str] = {
+    "models": "needs_model",
+    "ops": "needs_image_ops",
+}
+
+
+def dependency_is_needed(keyword: str, runner: str, chain: Topology) -> bool:
+    """Whether this run has to build ``keyword=`` and hand it to the runner.
 
     Two questions, and neither is answered by a name:
 
     * **does this runner open the chain here?** ``Runner.needs_model_pool``, read off the
-      registered class before anything is built, because ``models=`` is a constructor
-      argument. ``fleet`` answers ``False`` — its shards each build their own engine
-      (``cli/shard.py``), and a launcher that built one too would hold a CUDA context on every
-      device it can see while running no inference.
-    * **does anything in the chain resolve a model against it?** ``Element.needs_model``,
-      declared by the implementation. Asking ``node.kind in MODEL_KINDS`` instead is the
-      version of this that looks right and is not: every ``detect`` element is a model kind
-      and must name a ``model:``, so a chain of mocks would load the whole repository to run
-      elements that invent a box.
+      registered class before anything is built, because these are constructor arguments. The
+      attribute is named for the pool because that was the first dependency to need it; what
+      it declares is "this runner calls ``open()`` on these elements in this process", which
+      is the condition for every dependency an element is handed. ``fleet`` answers ``False``
+      — its shards each build their own (``cli/shard.py``), and a launcher that built one too
+      would hold a CUDA context on every device it can see while running no inference.
+    * **does anything in the chain ask for it?** The element attribute from
+      :data:`_HANDED_IN`, declared by the implementation. Asking ``node.kind in MODEL_KINDS``
+      instead is the version of this that looks right and is not: every ``detect`` element is
+      a model kind and must name a ``model:``, so a chain of mocks would load the whole
+      repository to run elements that invent a box.
 
-    Both are declarations rather than a check against ``"inprocess"`` or ``"pool"``, so a new
-    runner or a new element answers for itself instead of being added to a condition here
-    (CONVENTIONS 2.3).
+    The two dependencies are asked separately and not folded into one answer, because they
+    come apart in both directions: a chain of ``pool`` embedders needs a pool and no ops
+    (somebody upstream shaped the tensor), and the first element that crops without running a
+    repository model will need ops and no pool.
 
     Raises:
         ConfigurationError: no runner is registered under that name; the message lists the
@@ -353,7 +422,27 @@ def model_pool_is_needed(runner: str, chain: Topology) -> bool:
 
     if not RUNNERS.get(runner).needs_model_pool:
         return False
-    return any(node.element.needs_model for node in chain)
+    attribute = _HANDED_IN[keyword]
+    return any(getattr(node.element, attribute) for node in chain)
+
+
+def model_pool_is_needed(runner: str, chain: Topology) -> bool:
+    """Whether this run has to build a model pool and hand it in as ``models=``.
+
+    A name for :func:`dependency_is_needed`'s ``models`` row, kept because it is what the call
+    site reads like and what the tests ask for.
+    """
+    return dependency_is_needed("models", runner, chain)
+
+
+def image_ops_are_needed(runner: str, chain: Topology) -> bool:
+    """Whether this run has to resolve image ops and hand them in as ``ops=``.
+
+    A name for :func:`dependency_is_needed`'s ``ops`` row. Only ``PoolDetect`` answers
+    ``True`` today, and the gate is worth having because ``get_image_ops`` is not free: under
+    a non-``AUTO`` provider it constructs a torch implementation bound to a device.
+    """
+    return dependency_is_needed("ops", runner, chain)
 
 
 def cameras_from_inputs(inputs: Sequence[str] | None, *, loop: bool = True) -> list[CameraSpec]:

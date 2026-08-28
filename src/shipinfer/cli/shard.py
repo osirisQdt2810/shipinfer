@@ -50,7 +50,7 @@ from shipinfer.core.settings import DeviceSettings, ServerSettings
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; the runtime imports are inside main()
     from shipinfer.runners.base import Runner
-    from shipinfer.topology import ChainSpec
+    from shipinfer.topology import ChainSpec, Topology
 
 __all__ = ["apply_sharing", "build_parser", "main"]
 
@@ -176,10 +176,46 @@ class _ShardProcess:
                 settings,
                 shard_id=self._shard_id,
                 models=engine,
+                ops=self._image_ops(settings, topology),
             )
         except BaseException:
             self.release()
             raise
+
+    def _image_ops(self, settings: ServerSettings, topology: Topology) -> Any:
+        """Image pre-processing for this shard's chain, or ``None`` when nothing needs it.
+
+        The shard's half of what ``cli/commands/run.py`` does for a single-process run, and it
+        has to be its own resolution rather than something the launcher passes down: an
+        ``ImageOps`` may hold a device binding, and a launcher holds no CUDA context at all
+        (``launch/supervisor.py`` exists so that it does not).
+
+        ``devices=(0,)`` and not this shard's GPU number, because they are the same number
+        here: the launcher execs the child with ``CUDA_VISIBLE_DEVICES`` set to its own device,
+        so the shard's device set is renumbered to ``0..n-1`` and the GPU it owns is device 0
+        inside this process. Passing the launcher's index would bind to a device this process
+        cannot see. It is a one-element spread rather than a bare instance because a shard
+        still walks its chain on ``pipeline.workers`` threads: they share this shard's single
+        GPU, and what they must **not** share is the ops object on it — a staging ring reused
+        by two threads is a pinned buffer overwritten mid-DMA, which produces plausible pixels
+        and no error at all (CONVENTIONS 2.8). One device, one instance per worker.
+
+        Gated on the chain, exactly as the engine is not: an engine is built unconditionally
+        here because a shard exists to run models, but a chain with no element that
+        pre-processes must not construct an ops implementation -- under a pinned provider that
+        is a torch object bound to a device, built for nothing to call.
+        """
+        if not any(node.element.needs_image_ops for node in topology):
+            return None
+        from shipinfer.runtime.ops import get_thread_local_image_ops
+
+        engine = self._engine
+        return get_thread_local_image_ops(
+            settings.execution.provider,
+            devices=(0,),
+            device_manager=getattr(engine, "devices", None),
+            memory=getattr(engine, "memory", None),
+        )
 
     def release(self) -> None:
         """Give the GPU back.

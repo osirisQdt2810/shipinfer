@@ -82,7 +82,7 @@ def _unavailable(subpackage: str, exc: BaseException) -> ConfigurationError:
 def load_mot() -> ModuleType:
     """``shipvision.mot`` — the multi-object trackers and their association helpers.
 
-    Memoised with :func:`functools.lru_cache`, which caches the *success* and not the failure:
+    Memoised with :func:`functools.cache`, which caches the *success* and not the failure:
     a host that installs the submodule while the process is running gets the module on the
     next call rather than a cached refusal, and a host that never does pays one failed import
     per call instead of holding a stale exception. ``load_mot.cache_clear()`` is how a test

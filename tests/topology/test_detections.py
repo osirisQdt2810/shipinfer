@@ -14,6 +14,11 @@ Each of these was green before this file existed:
 - ignoring ``count``, so a detector reporting 3 filled rows of 300 yields 297 crops of
   undefined memory;
 - the ``max_detections`` cap and ``UNKNOWN_LABEL``, both entirely unexercised.
+
+It sits under ``tests/topology/`` because the module does: ``track`` consumes decoded
+detections, so the decode moved into the pure layer the elements live in. The last class here
+is the other half of that move -- ``pipeline/graph/detections.py`` is now a re-export, and a
+copy instead of a re-export would break every ``isinstance`` that crosses the boundary.
 """
 
 from __future__ import annotations
@@ -22,7 +27,12 @@ import numpy as np
 import pytest
 
 from shipinfer.core.errors import ValidationError
-from shipinfer.pipeline.graph.detections import UNKNOWN_LABEL, DecodeParams, decode_detections
+from shipinfer.topology.elements.detections import (
+    UNKNOWN_LABEL,
+    DecodeParams,
+    Detections,
+    decode_detections,
+)
 
 LABELS = {0: "person", 8: "ship"}
 
@@ -180,3 +190,60 @@ class TestTheShapeContract:
 
     def test_an_empty_output_is_empty_detections(self) -> None:
         assert len(decode_detections(np.zeros((0, 6), dtype=np.float32), params=params())) == 0
+
+
+class TestTheMockDetectorAgreesWithTheDecode:
+    """``invented_detections`` files a class id its own label maps to.
+
+    The mocks exist so the elements behind a detector can be tested offline against the type a
+    real one produces, and an id that contradicts its label is a type no decode could ever
+    emit: it filed ``class_ids=[0]`` under ``"ship"`` while the shipped table maps 0 to
+    ``person`` and 8 to ``ship``. The first thing a tracker test does is copy it, and a
+    class-conditional chain step (``when: class == ship``) reads the id.
+    """
+
+    def test_the_ship_mock_files_the_ship_id(self) -> None:
+        from shipinfer.topology.elements.mock import invented_detections
+
+        invented = invented_detections("ship")
+
+        assert invented.labels == ("ship",)
+        assert invented.class_ids.tolist() == [8]
+
+    def test_the_id_it_files_decodes_back_to_the_label_it_claims(self) -> None:
+        """The property, rather than the number: run the id through the real decode."""
+        from shipinfer.topology.elements.mock import invented_detections
+
+        for label in ("ship", "person"):
+            invented = invented_detections(label)
+            rows = np.array(
+                [row(0, 0, 10, 10, 0.9, int(invented.class_ids[0]))], dtype=np.float32
+            )
+
+            assert decode_detections(rows, params=params()).labels == (label,)
+
+    def test_a_label_the_table_has_no_id_for_is_not_filed_as_person(self) -> None:
+        """``0`` is a real class, so an invented one must not borrow its number."""
+        from shipinfer.topology.elements.mock import invented_detections
+
+        invented = invented_detections("dinghy")
+
+        assert invented.class_ids.tolist() == [-1]
+        assert invented.labels == ("dinghy",)
+
+
+class TestTheOldImportPathStillResolves:
+    """The shim ``pipeline/graph/detections.py`` re-exports; it does not redefine.
+
+    The counting-simulation graph builds a ``Detections`` and hands it to a stage, and phase
+    C's chain will hand one the other way. Two classes with identical fields would satisfy no
+    ``isinstance`` across that boundary and no ``is`` comparison in a test, and the symptom
+    would be a tracker that silently sees no detections rather than an import error.
+    """
+
+    def test_it_is_the_same_class_object_not_a_copy(self) -> None:
+        from shipinfer.pipeline.graph import detections as old_home
+
+        assert old_home.Detections is Detections
+        assert old_home.decode_detections is decode_detections
+        assert old_home.UNKNOWN_LABEL == UNKNOWN_LABEL

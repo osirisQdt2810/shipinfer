@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 
 import pytest
 from pydantic import ValidationError
@@ -30,6 +31,7 @@ from shipinfer.repository.model_config import (
     InstanceKind,
     ModelConfig,
 )
+from shipinfer.runtime.ops import NumpyImageOps
 from shipinfer.topology import ChainSpec
 
 
@@ -178,6 +180,17 @@ elements:
   output: {impl: mock}
 """
 
+#: The same chain with a `pool` detector in it — a chain that needs image pre-processing.
+#: `decode.dst_size` is named because nothing in this test has a model repository to read an
+#: input extent out of, which is the documented override for exactly that case.
+DETECT_CHAIN = """
+name: detect_chain
+elements:
+  decode: {impl: mock}
+  detect: {impl: pool, model: ship_detector, params: {decode: {dst_size: [640, 640]}}}
+  output: {impl: mock}
+"""
+
 
 class TestTheHopThatActuallyCarriesTheSharing:
     """``_ShardProcess.build`` — the RPC path, not the helper it calls.
@@ -268,6 +281,98 @@ class TestTheHopThatActuallyCarriesTheSharing:
         assert topology.name == "two_step"
         assert runner_settings is seen["engine_settings"]
         assert kwargs["shard_id"] == 1
+
+    def test_a_chain_that_pre_processes_gets_its_own_image_ops(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A shard resolves its own ops, because a launcher must hold no device binding.
+
+        One instance **per worker thread**, not one per process: a shard walks its chain on
+        ``pipeline.workers`` threads sharing one `PoolDetect`, and every implementation
+        `get_image_ops` can return keeps per-instance staging. So what the runner is handed is
+        the thread-local decorator, over this shard's one device.
+        """
+        from shipinfer.runtime.ops import ThreadLocalImageOps
+
+        process, seen = self._process(monkeypatch)
+
+        process.build(ChainSpec.from_yaml(DETECT_CHAIN), (2,), (1,))
+
+        _, _, _, kwargs = seen["runner"]
+        assert isinstance(kwargs["ops"], ThreadLocalImageOps)
+        assert kwargs["ops"]._devices == (0,)
+
+    def test_every_worker_thread_of_that_shard_gets_its_own_delegate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The property the decorator exists for, asserted through `build` rather than of it.
+
+        Three threads touching the handed-in object must produce three delegates. Handing a
+        bare `get_image_ops(...)` back turns this red and nothing else in this file, because
+        `NumpyImageOps` is stateless and every other assertion here is about wiring.
+        """
+        process, seen = self._process(monkeypatch)
+
+        process.build(ChainSpec.from_yaml(DETECT_CHAIN), (2,), (1,))
+        _, _, _, kwargs = seen["runner"]
+        ops = kwargs["ops"]
+        # The *objects*, not their ids: a delegate is dropped when its thread exits, and
+        # CPython hands the next one the same address -- an id-only assertion is flaky here
+        # and was, at 2 of 3.
+        delegates: list[object] = []
+        lock = threading.Lock()
+
+        def touch() -> None:
+            delegate = ops._ops
+            with lock:
+                delegates.append(delegate)
+
+        threads = [threading.Thread(target=touch) for _ in range(3)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(5.0)
+
+        assert len(delegates) == 3
+        assert len({id(d) for d in delegates}) == 3, "worker threads shared one ImageOps"
+
+    def test_the_delegate_is_resolved_for_device_zero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The one decision in ``_image_ops`` that can be wrong, and it was only in a docstring.
+
+        `CUDA_VISIBLE_DEVICES` is set to this shard's own GPU by the launcher
+        (`launch/supervisor.py`), so inside this process the device it owns *is* index 0 —
+        passing the launcher's ordinal would bind to a device this process cannot see. Both
+        assertions above are true for any index, so this monkeypatches the resolver and reads
+        the number.
+        """
+        asked: list[int] = []
+
+        def fake_get_image_ops(provider, *, device_index=0, staging=None):
+            asked.append(device_index)
+            return NumpyImageOps()
+
+        monkeypatch.setattr("shipinfer.runtime.ops.get_image_ops", fake_get_image_ops)
+        process, seen = self._process(monkeypatch)
+
+        process.build(ChainSpec.from_yaml(DETECT_CHAIN), (2,), (1,))
+        _, _, _, kwargs = seen["runner"]
+        kwargs["ops"].on_device  # noqa: B018 - first touch is what builds the delegate
+
+        assert asked == [0]
+
+    def test_a_chain_that_pre_processes_nothing_resolves_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Under a pinned provider `get_image_ops` builds a torch object bound to a device.
+        A chain with nothing to call it must not pay for one."""
+        process, seen = self._process(monkeypatch)
+
+        process.build(ChainSpec.from_yaml(CHAIN), (2,), (1,))
+
+        _, _, _, kwargs = seen["runner"]
+        assert kwargs["ops"] is None
 
     def test_nothing_said_leaves_the_settings_alone(
         self, monkeypatch: pytest.MonkeyPatch
