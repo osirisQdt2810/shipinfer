@@ -229,6 +229,50 @@ class TestADeadShardTakesTheFleetDown:
             Fleet(plan=plan(), command=sleeps()).supervise()
 
 
+class TestNamingTheDeadWithoutHandingOverTheProcesses:
+    """`dead_indices()` is what a launcher above this module asks, and all it may need.
+
+    Its client map, its placement map and its health report are all keyed by the plan index,
+    so handing it `ShardProcess` objects to unpack would put `subprocess.Popen` in the hands
+    of the layer whose job is the *conversation* with a shard (`runners/fleet.py`).
+    """
+
+    def test_a_live_fleet_has_no_dead_shards(self) -> None:
+        fleet = Fleet(plan=plan(shards=2), command=sleeps())
+        fleet.start()
+        try:
+            assert fleet.dead_indices() == frozenset()
+        finally:
+            fleet.stop()
+
+    def test_it_names_the_index_of_the_shard_that_exited(self) -> None:
+        def command(shard):
+            return exits(code=1)(shard) if shard.index == 1 else sleeps()(shard)
+
+        fleet = Fleet(plan=plan(shards=2), command=command)
+        fleet.start()
+        try:
+            for running in fleet.running:
+                if running.shard.index == 1:
+                    running.process.wait(timeout=5.0)
+
+            assert fleet.dead_indices() == frozenset({1})
+        finally:
+            fleet.stop()
+
+    def test_a_fleet_that_never_started_names_nobody_rather_than_raising(self) -> None:
+        """It is read on the health path, and a probe that raises because the fleet is down
+        is a probe that fails exactly when it is being read to find out that the fleet is."""
+        assert Fleet(plan=plan(), command=sleeps()).dead_indices() == frozenset()
+
+    def test_a_stopped_fleet_names_nobody_because_it_holds_nothing(self) -> None:
+        fleet = Fleet(plan=plan(shards=2), command=sleeps())
+        fleet.start()
+        fleet.stop(drain_s=5.0)
+
+        assert fleet.dead_indices() == frozenset()
+
+
 class TestStartUpIsAllOrNothing:
     """Three of four shards up means three-quarters of the cameras are watched, silently."""
 

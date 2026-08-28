@@ -240,6 +240,14 @@ def build_streams_router(cameras: CameraController) -> Any:
         indistinguishable from "the deployment is unreachable". ``/v2/health/live`` and
         ``/v2/health/ready`` are the ones a load balancer reads, and they are the engine's
         (``routes.py``).
+
+        The body is the runner's own report, passed through. On a fleet it carries
+        ``lost: {camera_id: shard_id}`` — the cameras of shards whose process has exited,
+        which are not being read and will not be re-placed (ADR-018). **That view lags**: it
+        is a poll of the child processes taken as the report is built, so a shard that died
+        a moment ago shows up on the next probe, within the launcher's supervision interval
+        (``poll_s``, one second by default). An empty ``lost`` a fraction of a second after a
+        crash is not a promise that nothing died.
         """
         return dict(_health())
 
@@ -361,7 +369,12 @@ def build_streams_router(cameras: CameraController) -> Any:
             # pydantic's exception type in an HTTP handler and *still* 500 on the settings
             # tree's own plain `ValueError`s, which are about the posted values and are the
             # common case. The message travels either way, and the traceback that says which
-            # it really was is in this process's log.
+            # it really was is written here -- an `HTTPException` is handled by starlette and
+            # would otherwise leave no trace on the server at all.
+            _LOG.exception(
+                "POST /streams refused a value the schema did not constrain",
+                extra=log_context(camera_id=camera.camera_id),
+            )
             raise HTTPException(400, str(exc)) from exc
         _LOG.info(
             "camera %s added over HTTP",
@@ -498,7 +511,12 @@ def _streams(health: Mapping[str, Any]) -> list[StreamInfo]:
       there and the shard is the runner's own ``shard_id``;
     * fleet — ``cameras: {id: {"shard": n, "pending": True}}`` with the per-camera detail one
       level down in ``shards[n]["cameras"][id]``, because that is the shard's own report and
-      the launcher passes it through rather than re-deriving it.
+      the launcher passes it through rather than re-deriving it, plus a top-level
+      ``lost: {id: shard}`` naming the cameras of shards that have exited (ADR-018). ``lost``
+      is read from *there* rather than from the per-camera entry because it is a fact about
+      the shard, not about the camera: one dead process makes a dozen cameras lost at once,
+      and a runner that had to stamp each entry would be keeping a derived flag in step with
+      a poll.
 
     Read defensively — ``.get`` and an ``isinstance`` per level — because a health report is a
     ``dict`` by design (``launch/control.py`` explains why it is not a wire message) and a
@@ -509,6 +527,8 @@ def _streams(health: Mapping[str, Any]) -> list[StreamInfo]:
     if not isinstance(entries, Mapping):
         return []
     default_shard = health.get("shard_id")
+    lost = health.get("lost")
+    lost_ids = frozenset(lost) if isinstance(lost, Mapping) else frozenset()
     streams: list[StreamInfo] = []
     for camera_id, entry in sorted(entries.items()):
         detail = entry if isinstance(entry, Mapping) else {}
@@ -521,6 +541,7 @@ def _streams(health: Mapping[str, Any]) -> list[StreamInfo]:
                 shard=shard if isinstance(shard, int) else None,
                 pending=bool(detail.get("pending", False)),
                 state=str(state or ""),
+                lost=str(camera_id) in lost_ids,
             )
         )
     return streams

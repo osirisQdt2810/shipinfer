@@ -20,6 +20,7 @@ What is under test is mostly the **mapping**, because that is what a client acts
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Container
@@ -57,6 +58,26 @@ FLEET_HEALTH: dict[str, Any] = {
         "1": {"placed": [], "state": "unreachable", "detail": "TimeoutError: deadline"},
     },
     "cameras": {"cam-000": {"shard": 0}, "cam-001": {"shard": 1, "pending": True}},
+    "lost": {},
+}
+
+#: The same launcher after shard 1's process exited. `cam-002` was placed there and is not
+#: being read; nothing will re-place it (ADR-018), and it stays in the camera map because a
+#: missing entry would say it was never placed. Shard 1's own `placed` list excludes it, so
+#: the report does not contradict itself.
+FLEET_HEALTH_WITH_A_DEAD_SHARD: dict[str, Any] = {
+    "runner": "fleet",
+    "state": "running",
+    "shards": {
+        "0": {
+            "placed": ["cam-000"],
+            "state": "running",
+            "cameras": {"cam-000": {"camera_id": "cam-000", "state": "streaming"}},
+        },
+        "1": {"placed": [], "state": "unreachable", "detail": "TimeoutError: deadline"},
+    },
+    "cameras": {"cam-000": {"shard": 0}, "cam-002": {"shard": 1}},
+    "lost": {"cam-002": 1},
 }
 
 #: An in-process runner's report: no shard map, the ingest state inline, and the runner's own
@@ -397,20 +418,33 @@ class TestARequestTheSchemaCanRefuseOnItsOwn:
                 StreamRequest(camera_id=bad, url="x.mp4")
         assert StreamRequest(camera_id="quay-1", url="x.mp4").camera_id == "quay-1"
 
-    def test_a_value_the_schema_did_not_constrain_is_400_and_not_500(self) -> None:
+    def test_a_value_the_schema_did_not_constrain_is_400_and_not_500(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """The net under everything else the settings tree validates.
 
         `StreamRequest` cannot mirror all twenty of `CameraConfig`'s fields, so a value it
         does not know about is still refused a layer down with a `ValueError`. That is the
         caller's mistake and a retry sends it again, which makes it a 400 -- not the 500 that
         reads like a ShipInfer bug in the operator's deployment log.
+
+        The net is wider than the posted values, so the same clause also relabels a genuine
+        internal `ValueError` as the caller's mistake; the traceback that tells the two apart
+        has to be written by this handler, because starlette answers an `HTTPException`
+        without logging anything.
         """
         cameras = FakeCameras(refuse=ValueError("codec 'h266' is not supported"))
-        with client_over(cameras) as client:
+        with (
+            caplog.at_level(logging.ERROR, logger="shipinfer.api"),
+            client_over(cameras) as client,
+        ):
             response = client.post("/streams", json={"url": "rtsp://host"})
 
         assert response.status_code == 400, response.text
         assert "h266" in response.json()["detail"]
+        refusals = [r for r in caplog.records if "did not constrain" in r.getMessage()]
+        assert len(refusals) == 1 and refusals[0].exc_info is not None, caplog.text
+        assert "h266" in caplog.text
 
 
 class TestWhyACameraIsRefused:
@@ -707,8 +741,16 @@ class TestListingWhatIsRunning:
                 "shard": 0,
                 "pending": False,
                 "state": "streaming",
+                "lost": False,
             },
-            {"camera_id": "cam-001", "url": "", "shard": 1, "pending": True, "state": ""},
+            {
+                "camera_id": "cam-001",
+                "url": "",
+                "shard": 1,
+                "pending": True,
+                "state": "",
+                "lost": False,
+            },
         ]
 
     def test_a_pending_camera_is_reported_as_pending_and_not_as_running(self) -> None:
@@ -731,6 +773,7 @@ class TestListingWhatIsRunning:
                 "shard": 0,
                 "pending": False,
                 "state": "streaming",
+                "lost": False,
             }
         ]
 
@@ -755,6 +798,69 @@ class TestListingWhatIsRunning:
         cameras._health = RuntimeError("the control channel is gone")  # type: ignore[assignment]
         with client_over(cameras) as client:
             assert client.get("/streams").json() == {"streams": []}
+
+
+class TestACameraWhoseShardHasGone:
+    """`lost` is the launcher's word for "the process holding this camera exited".
+
+    Terminal, unlike `unreachable`: a wedged shard may answer the next probe, but nothing
+    respawns a dead one and nothing re-places its cameras (ADR-018). The distinction is what
+    tells an operator to remove-and-re-add rather than to wait.
+    """
+
+    def test_a_listing_marks_the_camera_lost(self) -> None:
+        cameras = FakeCameras(health=FLEET_HEALTH_WITH_A_DEAD_SHARD)
+        with client_over(cameras) as client:
+            streams = client.get("/streams").json()["streams"]
+
+        assert [(s["camera_id"], s["lost"]) for s in streams] == [
+            ("cam-000", False),
+            ("cam-002", True),
+        ]
+
+    def test_a_lost_camera_is_listed_rather_than_omitted(self) -> None:
+        """An absent entry says "no such camera", which is the wrong answer to "where did my
+        camera go" — and it is what a launcher that deleted the placement would give."""
+        cameras = FakeCameras(health=FLEET_HEALTH_WITH_A_DEAD_SHARD)
+        with client_over(cameras) as client:
+            streams = client.get("/streams").json()["streams"]
+
+        assert [s["camera_id"] for s in streams] == ["cam-000", "cam-002"]
+        assert [s["shard"] for s in streams] == [0, 1], "a lost camera still says where it was"
+
+    def test_health_carries_the_whole_map(self) -> None:
+        """The route passes the runner's report through, so an operator gets the shard too —
+        one dead process makes a dozen cameras lost at once and the shard id is what groups
+        them. The view lags a death by up to the launcher's supervision poll."""
+        cameras = FakeCameras(health=FLEET_HEALTH_WITH_A_DEAD_SHARD)
+        with client_over(cameras) as client:
+            body = client.get("/health").json()
+
+        assert body["lost"] == {"cam-002": 1}
+
+    def test_nothing_is_lost_on_a_healthy_fleet(self) -> None:
+        cameras = FakeCameras(health=FLEET_HEALTH)
+        with client_over(cameras) as client:
+            body = client.get("/streams").json()
+
+        assert body["streams"] and not any(s["lost"] for s in body["streams"])
+        assert client.get("/health").json()["lost"] == {}
+
+    def test_a_runner_that_reports_no_loss_at_all_is_read_as_none(self) -> None:
+        """An in-process runner has no shards to lose and writes no `lost` key; the listing
+        reads the absence as "nothing lost" rather than raising over the missing level."""
+        cameras = FakeCameras(health=INPROCESS_HEALTH)
+        with client_over(cameras) as client:
+            assert client.get("/streams").json()["streams"][0]["lost"] is False
+
+    def test_a_camera_placed_right_now_is_not_lost(self) -> None:
+        """201 answers from the report, and a camera that was just accepted is on a shard
+        that was alive a moment ago."""
+        cameras = FakeCameras(health=FLEET_HEALTH_WITH_A_DEAD_SHARD)
+        with client_over(cameras) as client:
+            body = client.post("/streams", json={"url": "rtsp://quay"}).json()
+
+        assert body["lost"] is False
 
 
 class TestDraining:
