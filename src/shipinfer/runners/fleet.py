@@ -191,6 +191,13 @@ class FleetRunner(Runner):
         #: vanished would read as "never placed", and "I have never heard of it" is the wrong
         #: answer to "where did my camera go". Nothing but :meth:`remove_camera` deletes one.
         self._placed: dict[str, int] = {}
+        #: ``{camera_id: group}`` for every camera an element of this chain says must stay
+        #: together, asked once through ``Element.camera_group()`` — no kind test, no element
+        #: import. A camera group is an **atomic unit of placement** (``docs/arch.md`` §4) and
+        #: this class is the only thing that places a camera. Empty for a chain whose elements
+        #: declare no group, which is every chain that does not do cross-camera association
+        #: and costs nothing to carry.
+        self._group_of: dict[str, str] = _camera_groups(topology)
         #: How many camera threads this cycle has had to abandon — a lifetime signal, not a
         #: statistic (``launch/control.py``). Non-zero means a detached thread on some shard
         #: still references buffers nobody may unwind. **Accumulated**, never assigned: a
@@ -458,6 +465,17 @@ class FleetRunner(Runner):
         next-least-loaded shard. Only when *every* shard has refused is this an error, and
         then the message carries what each of them said.
 
+        **A camera group is an atomic unit of placement**, and this is the only place that
+        can enforce it (``docs/arch.md`` §4). A cross-camera element associates one group's
+        cameras against one identity space; split the group across two shards and each half
+        runs its own tracker, so one object gets two contradictory global ids and nothing in
+        the metrics says so. The element itself cannot see the split — it is told its own
+        ``shard_id`` and nothing about where any camera went, and it opens before a single
+        camera is placed — whereas this class owns ``{camera_id: shard_id}``. So the element
+        declares the membership (``Element.camera_group()``) and a camera whose group already
+        has a home is offered to **that shard only**: pinning is what keeps the group whole,
+        and the refusal below is what happens when the pin cannot be honoured.
+
         **A shard whose process has exited is not offered the camera at all.** Its channel is
         still in the client map — nothing removes it, because :meth:`health` reports on it —
         so the loop below would otherwise open an ``AddCamera`` against a corpse and spend
@@ -523,6 +541,7 @@ class FleetRunner(Runner):
                         if shard_id in dead
                     ],
                 )
+            order = self._pin_to_group(camera.camera_id, order, dead)
             self._placed[camera.camera_id] = order[0]
             self._pending.add(camera.camera_id)
         refusals: list[str] = []
@@ -839,6 +858,76 @@ class FleetRunner(Runner):
             counts[shard_id] = counts.get(shard_id, 0) + 1
         return sorted(counts, key=lambda shard_id: (counts[shard_id], shard_id))
 
+    def _pin_to_group(
+        self, camera_id: str, order: list[int], dead: frozenset[int]
+    ) -> list[int]:
+        """Constrain a placement to the shard that already holds this camera's group.
+
+        A camera group is an atomic unit of placement (``docs/arch.md`` §4): every camera a
+        cross-camera element associates over has to reach the same tracker, and a tracker
+        lives in one shard process. So the first camera of a group is placed by load like any
+        other, and every camera after it goes where the group went.
+
+        Call under :attr:`_lock`.
+
+        Args:
+            camera_id: the camera being placed.
+            order: the shards it would otherwise be offered to, least-loaded first.
+            dead: shards whose process has exited, for the wording of the refusal.
+
+        Returns:
+            ``order`` unchanged for a camera in no group or in a group with no home yet, and
+            ``[home]`` otherwise.
+
+        Raises:
+            NoShardAvailableError: the group's home shard cannot take this camera — it has
+                exited, or its channel is gone. A ``ServerStateError``, and deliberately not a
+                ``ConfigurationError``: nothing about the request is wrong, the group simply
+                has nowhere to be whole right now. Placing the camera on a survivor instead
+                would be the tracker reset dressed as failover that ADR-018 refuses, one tier
+                up: every global id under that group would change, and the fleet would look
+                healthy while doing it.
+        """
+        group = self._group_of.get(camera_id)
+        if group is None:
+            return order
+        homes = sorted(
+            {
+                shard_id
+                for other, name in self._group_of.items()
+                if name == group and (shard_id := self._placed.get(other)) is not None
+            }
+        )
+        if not homes:
+            return order
+        if len(homes) > 1:
+            # Not reachable through this method, which is the only placer; a group split by a
+            # future caller must still be named rather than silently extended.
+            raise NoShardAvailableError(
+                camera_id,
+                [
+                    f"camera group {group!r} is already split across shards "
+                    f"{homes}; a group is an atomic unit of placement and its cross-camera "
+                    f"tracker lives in one process"
+                ],
+            )
+        home = homes[0]
+        if home not in order:
+            why = "its process has exited" if home in dead else "it is no longer connected"
+            raise NoShardAvailableError(
+                camera_id,
+                [
+                    f"camera group {group!r} is on shard {home} and {why}; this camera would "
+                    f"have gone to shard {order[0]}, which would split the group across "
+                    f"shards {home} and {order[0]}. A group is an atomic unit of placement: "
+                    f"each half would run its own cross-camera tracker and issue its own "
+                    f"global ids for the same objects. To move the group, remove every one "
+                    f"of its cameras first (remove_camera) — the pin is on where the group "
+                    f"*is*, so it lifts once none of it is placed"
+                ],
+            )
+        return [home]
+
     def _require_running(self) -> None:
         """Refuse, typed, unless this fleet has shards to talk to. Takes :attr:`_lock`."""
         with self._lock:
@@ -901,6 +990,42 @@ def _lost_in(placed: dict[str, int], dead: frozenset[int], pending: set[str]) ->
         for camera, shard in placed.items()
         if shard in dead and camera not in pending
     }
+
+
+def _camera_groups(topology: Topology) -> dict[str, str]:
+    """``{camera_id: group}`` for every camera an element of this chain says must stay together.
+
+    Asked of every node through :meth:`~shipinfer.topology.base.Element.camera_group`, with
+    **no test of what kind the element is**. That matters more than it looks: a launcher that
+    checked ``node.kind is ElementKind.MTMC`` would import an element implementation module,
+    re-parse a ``params:`` key the element had already parsed, and grow an ``elif`` for the
+    next kind that needs co-located cameras — the switch statement ADR-017 §2's registry
+    exists to delete. The element declares; this function only collects.
+
+    An element that declares no group contributes nothing: the fleet then places its cameras
+    by load and the group is whatever ended up together, which is the honest answer for a
+    chain that did not say. Declaring the roster is what buys the invariant.
+
+    Raises:
+        ConfigurationError: one camera is claimed by two different groups. That is a chain
+            nobody can place — the camera would have to be on two shards — so it is refused
+            when the fleet is built rather than on the camera that happens to be added second.
+    """
+    groups: dict[str, str] = {}
+    for node in topology.nodes:
+        declared = node.element.camera_group()
+        if declared is None:
+            continue
+        for camera_id in declared.cameras:
+            existing = groups.get(camera_id)
+            if existing is not None and existing != declared.name:
+                raise ConfigurationError(
+                    f"camera {camera_id!r} is claimed by camera groups {existing!r} and "
+                    f"{declared.name!r}. A group is an atomic unit of placement, so a camera "
+                    f"in two of them would have to be on two shards at once"
+                )
+            groups[camera_id] = declared.name
+    return groups
 
 
 def _placed_on(

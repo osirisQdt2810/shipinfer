@@ -42,9 +42,11 @@ from shipinfer.core.errors import ServerStateError, UnknownElementKindError
 from shipinfer.core.metrics import MetricsRegistry
 from shipinfer.core.request import RequestContext
 from shipinfer.core.types import Device
+from shipinfer.topology.barrier import WaiterBudget
 from shipinfer.topology.caps import Caps, parse_caps
 
 __all__ = [
+    "CameraGroup",
     "ChainItem",
     "Element",
     "ElementContext",
@@ -258,6 +260,31 @@ class ImageOpsLike(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class CameraGroup:
+    """Cameras that have to be placed on one runner, and the name they are grouped under.
+
+    What :meth:`Element.camera_group` answers. A cross-camera element associates one group
+    against one identity space, and that state lives in one process: split the group across
+    two shards and each half runs its own tracker, so one object is given two ids, both of
+    them plausible, and nothing in the metrics disagrees (``docs/arch.md`` §4).
+
+    The element declares the membership; **the runner decides the placement**, because only
+    the runner knows where any camera is. This object is the whole of what crosses between
+    them, which is what keeps the fleet from having to know that ``mtmc`` exists.
+
+    Args:
+        name: what to call the group in a refusal — the element's ``params: group:``, or its
+            slot name when the chain did not say.
+        cameras: the declared roster. Never empty: an element with nothing to declare answers
+            ``None`` rather than an empty group, so "this chain does not group cameras" and
+            "this chain groups them into nothing" cannot be the same value.
+    """
+
+    name: str
+    cameras: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ElementContext:
     """Everything the surrounding runner tells an element at :meth:`Element.open`.
 
@@ -289,6 +316,15 @@ class ElementContext:
             standing case — can close its instant only by timeout once every worker is parked
             inside it. ``None`` means the runner did not say, and an element that needs the
             number must then refuse to wait at all rather than guess one.
+        waiter_budget: the permits those waits are drawn from, **shared by every element in
+            this process**. ``workers`` alone is not enough, because each element counts only
+            its own waiters: a chain with two ``mtmc`` slots would have each barrier admit
+            ``workers - 1`` and park every worker between them. One
+            :class:`~shipinfer.topology.barrier.WaiterBudget` with ``workers - 1`` permits,
+            built by the runner, makes the invariant hold however many waiting elements there
+            are. ``None`` means the runner did not say, and an element that waits then falls
+            back to a private budget sized from ``workers`` — correct when it is the only
+            such element, which is what the offline tier builds.
         ops: batched image preprocessing, bound to this shard's device, in the same shape
             ``models=`` already has -- ``shipinfer run`` (``cli/commands/run.py``) or the
             shard process (``cli/shard.py``) resolves one implementation from ``runtime.ops``,
@@ -326,6 +362,7 @@ class ElementContext:
     metrics: MetricsRegistry | None = None
     workers: int | None = None
     ops: ImageOpsLike | None = None
+    waiter_budget: WaiterBudget | None = None
 
 
 class Element(abc.ABC):
@@ -618,6 +655,37 @@ class Element(abc.ABC):
         every camera — :meth:`close` releases everything, per camera or not, and announcing
         fifty removals on the way out would only be a slower spelling of that.
         """
+
+    # -- what a runner may ask of any element -------------------------------------------
+
+    def camera_group(self) -> CameraGroup | None:
+        """The cameras this element must see **together**, or ``None``. Default: ``None``.
+
+        Asked by a runner that places cameras across processes, once, when it is built. An
+        element that associates across cameras — ``mtmc`` is the standing case — holds one
+        identity space for a group, and that state lives in one process; a runner that split
+        the group would give each half its own tracker and one object two ids, both plausible
+        (``docs/arch.md`` §4). So the element declares the membership and the runner enforces
+        the placement, which is the only split that works: the element is told
+        :attr:`ElementContext.shard_id` and nothing about where any *camera* is, and it opens
+        before a single camera has been placed, so it cannot see a split; the runner owns
+        ``{camera_id: shard_id}`` and cannot know which cameras belong together.
+
+        **A hook and not a kind test**, deliberately. A runner asking every node
+        ``node.element.camera_group()`` needs no ``ElementKind`` switch, no import of an
+        element implementation module, and no second parse of a ``params:`` key the element
+        has already read — which is the ``if/elif`` per implementation that ADR-017 §2's
+        registry exists to delete.
+
+        Called on an element that may not be open, so answer from ``params:`` alone.
+
+        Returns:
+            The group, or ``None`` for the ordinary element that does not constrain
+            placement — including one that *is* cross-camera but whose chain declared no
+            roster, because "the chain did not say" and "the chain grouped nothing" are
+            different facts and only the first one lets the runner balance by load.
+        """
+        return None
 
     # -- subclass hooks ----------------------------------------------------------------
 
