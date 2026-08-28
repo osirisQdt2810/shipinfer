@@ -370,6 +370,40 @@ class TestTheDeclarations:
         with pytest.raises(ConfigurationError, match="enrol must be true or false"):
             build(enrol=value)
 
+    @pytest.mark.parametrize("value", ["high", True, [0.9]], ids=repr)
+    def test_an_enrol_floor_that_is_not_a_number_is_a_named_refusal_not_a_builtin(
+        self, value: Any
+    ) -> None:
+        """It was the one key read with a bare ``float()``, so it escaped this element's own
+        validation: ``enrol_min_confidence: high`` raised a builtin ``ValueError`` out of
+        ``Topology.from_spec``, which names neither the element nor the key and reads to an
+        operator as a bug in the loader rather than as a typo in their chain file.
+        """
+        with pytest.raises(ConfigurationError, match="enrol_min_confidence"):
+            build(enrol=True, enrol_min_confidence=value)
+
+    @pytest.mark.parametrize("value", [5, 1.5, -0.1, None], ids=repr)
+    def test_an_enrol_floor_outside_zero_to_one_is_refused_rather_than_silently_disabling(
+        self, value: Any
+    ) -> None:
+        """The dangerous half, because ``5`` used to be *accepted*.
+
+        The floor is compared against a detection score, so a floor above 1 is one no
+        detector can clear: ``enrol: true`` then enrols nothing, warns about nothing and
+        logs nothing, and the operator watches an identity count that never moves while
+        believing enrolment is on. ``true`` coerced to ``1.0`` the same way. Refused at load
+        is the only outcome that tells them, because there is no later moment that can.
+        """
+        with pytest.raises(ConfigurationError, match=r"enrol_min_confidence must be a number"):
+            build(enrol=True, enrol_min_confidence=value)
+
+    def test_the_enrol_floor_at_either_end_of_the_range_is_accepted(self) -> None:
+        """The bound is inclusive: ``0`` is "enrol anything the detector kept" and ``1`` is
+        "only a perfect score", and both are settings somebody may mean.
+        """
+        assert build(enrol=True, enrol_min_confidence=0)._enrol_floor == 0.0
+        assert build(enrol=True, enrol_min_confidence=1)._enrol_floor == 1.0
+
     @pytest.mark.parametrize("value", ["ship", 8, {"ship": True}], ids=repr)
     def test_a_class_filter_that_is_not_a_list_of_labels_is_refused(self, value: Any) -> None:
         """``classes: ship`` is the natural typo, and a string is a ``Sequence`` of letters.
@@ -1029,16 +1063,24 @@ class TestARefusalFromTheLibrary:
         ``shipvision`` raises ``DimensionMismatchError`` — not a ``ShipInferError`` — and the
         runner would charge it to "this element has a bug" rather than to the two embedders
         feeding one gallery that actually caused it. The re-raise carries the fix.
+
+        It also carries ``item.key``. This was the last per-frame failure path in the element
+        that did not: every other one names the camera and the frame, and a mismatch reported
+        against "the element" alone leaves an operator with fifty cameras and no way to find
+        the one whose embedder is the wrong width.
         """
         three_identities_two_cameras(tmp_path)
         element = build(gallery_dir=str(tmp_path))
         element.open(ElementContext())
 
         try:
-            with pytest.raises(ValidationError, match="declare `dim:`"):
-                element.process(item(np.zeros((1, 8), np.float32)))
+            with pytest.raises(ValidationError, match="declare `dim:`") as raised:
+                element.process(item(np.zeros((1, 8), np.float32), camera="cam-K", frame=91))
         finally:
             element.close()
+
+        assert "'cam-K'" in str(raised.value)
+        assert "91" in str(raised.value)
 
 
 class TestWhatTheGalleryIsAsked:

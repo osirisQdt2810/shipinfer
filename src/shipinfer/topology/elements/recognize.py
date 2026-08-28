@@ -188,11 +188,15 @@ class GalleryRecognize(Element):
     ``classes`` (detection labels to query, by name, off C3's ``Detections``; an excluded row
     is absent from ``identities``), ``dim`` (the embedder's width — the one number a pure
     layer cannot discover, and what turns a two-model mix-up into a start-up refusal),
-    ``threshold`` (``null`` accepts the best match and warns), ``top_k``, the four
-    ``enrol*`` keys (:meth:`_enrol`; ``enrol_capacity`` defaults to the implementation's own
-    bound — 50 000 rows for ``flat``, so about 102 MB at ``dim: 512``), and the path keys
-    ``gallery_file`` or ``gallery_dir``/``gallery_name``/``gallery_version``
-    (:mod:`shipinfer.topology.gallery_store`).
+    ``threshold`` (``null`` accepts the best match and warns), ``top_k`` (a **cost** knob and
+    nothing else: one identity per row is published, so only the top accepted match is ever
+    read and a wider ranking changes what the gallery does, never what this element files),
+    the four ``enrol*`` keys (:meth:`_enrol`; ``enrol_min_confidence`` is a detection
+    confidence and so must be in ``[0, 1]``; ``enrol_capacity`` defaults to the
+    implementation's own bound — 50 000 rows for ``flat``, so about 102 MB at ``dim: 512``),
+    and the path keys ``gallery_file`` or ``gallery_dir``/``gallery_name``/``gallery_version``
+    (:mod:`shipinfer.topology.gallery_store`; version directories are numbered from **1**,
+    Triton's rule, so ``gallery_version: 0`` names no version and is refused).
 
     With no path key the element opens on an **empty** gallery and says so once at WARNING:
     legitimate (a deployment that enrols later, a test) but never silent, because an empty
@@ -239,9 +243,7 @@ class GalleryRecognize(Element):
         )
         self._enrol_enabled = self._flag("enrol", False)
         self._enrol_capacity = self._positive_int("enrol_capacity", None)
-        self._enrol_floor = float(
-            self.params.get("enrol_min_confidence", _DEFAULT_ENROL_CONFIDENCE)
-        )
+        self._enrol_floor = self._confidence("enrol_min_confidence", _DEFAULT_ENROL_CONFIDENCE)
         self._enrol_prefix = str(self.params.get("enrol_prefix", _DEFAULT_ENROL_PREFIX))
         self._gallery_file = self.params.get("gallery_file")
         self._gallery_dir = self.params.get("gallery_dir")
@@ -298,6 +300,23 @@ class GalleryRecognize(Element):
                 f"got {value!r}"
             )
         return value
+
+    def _confidence(self, key: str, default: float) -> float:
+        """A detection confidence from ``params:``: a number, and one inside ``[0, 1]``.
+
+        The bound is the point. ``enrol_min_confidence: 5`` was accepted and set a floor no
+        detector's score can clear, so ``enrol: true`` enrolled nothing, logged nothing, and
+        the operator watched an identity count that never moved. A value that is not a number
+        is refused one step earlier by :meth:`_optional_float`, whose ``null`` is no option
+        here: "no floor at all" already has a spelling, and it is leaving ``enrol`` off.
+        """
+        floor = self._optional_float(key, default)
+        if floor is None or not 0.0 <= floor <= 1.0:
+            raise ConfigurationError(
+                f"recognize element {self.name!r}: {key} must be a number in [0, 1] (it is "
+                f"compared against a detection score), got {self.params.get(key, default)!r}"
+            )
+        return floor
 
     def _optional_float(self, key: str, default: float | None) -> float | None:
         """A number or an explicit ``null`` — the two are different settings, not one."""
@@ -608,7 +627,9 @@ class GalleryRecognize(Element):
         try:
             for index, vector in rows:
                 # `exclude_camera` on every identity query, no way to turn it off. Rule 1.
-                accepted = self._best_match(vector, exclude_camera=camera, observe=observe)
+                accepted = self._best_match(
+                    vector, item, exclude_camera=camera, observe=observe
+                )
                 queried += 1
                 if accepted is not None:
                     matched += 1
@@ -691,12 +712,12 @@ class GalleryRecognize(Element):
 
         The two shapes and every edge between them live in
         :mod:`shipinfer.topology.elements._vectors`, not here: ``track`` reads the same key
-        under the same convention and C8's scatter-back will be the third reader, and this
-        element having its own opinion about whether ``{"3": v}`` is a row index is how a
-        chain file's ``vectors`` comes to mean two things. That module's docstring is the
-        rule; this method's job is only to say *who is asking*, which is what turns a
-        refusal into something an operator can act on — a chain has several elements and
-        fifty cameras.
+        for the same purpose — under its own laxer copy of the rule until TRACK-VECTORS
+        retires it — and this element having a third opinion about whether ``{"3": v}`` is a
+        row index is how a chain file's ``vectors`` comes to mean three things. That module's
+        docstring is the rule; this method's job is only to say *who is asking*, which is what
+        turns a refusal into something an operator can act on — a chain has several elements
+        and fifty cameras.
 
         Materialised into a tuple because :meth:`_selected` filters it and
         :meth:`_do_process` iterates it, and because the reader's refusals are all made
@@ -714,13 +735,16 @@ class GalleryRecognize(Element):
     def _who(self, item: ChainItem) -> str:
         """This element and this frame, as the prefix on a refusal from a shared helper.
 
-        Built per refusal rather than per frame: it is one f-string on the failure path and
-        nothing at all on the path that runs fifteen thousand times a second.
+        :meth:`_rows` passes it positionally, so it is one f-string **per frame** — not per
+        refusal, whatever an earlier version of this docstring said. Making it lazy means a
+        ``str | Callable`` union at every refusal site in the shared reader, which is a worse
+        module for a saving nobody has measured against a gallery gemm per row. :meth:`_query`
+        calls it inside its ``except``, where it is genuinely paid only when a query fails.
         """
         return f"recognize element {self.name!r} on {item.key}"
 
     def _best_match(
-        self, vector: np.ndarray, *, exclude_camera: str | None, observe: Any
+        self, vector: np.ndarray, item: ChainItem, *, exclude_camera: str | None, observe: Any
     ) -> Any:
         """The better accepted match across the stores this element holds, or ``None``.
 
@@ -732,30 +756,32 @@ class GalleryRecognize(Element):
         would be a ranked list nobody reads.
 
         Args:
+            item: carried only so a refusal from the library names the frame it happened on.
             exclude_camera: the item's own camera. Rule 1, on every store.
             observe: the histogram's bound ``observe``, or ``None``.
         """
         accepted = self._query(
-            self._gallery, vector, exclude_camera=exclude_camera, observe=observe
+            self._gallery, vector, item, exclude_camera=exclude_camera, observe=observe
         ).accepted
         if self._enrolled is None:
             return accepted
         minted = self._query(
-            self._enrolled, vector, exclude_camera=exclude_camera, observe=observe
+            self._enrolled, vector, item, exclude_camera=exclude_camera, observe=observe
         ).accepted
         if accepted is None or minted is None:
             return accepted if minted is None else minted
         return minted if minted.score > accepted.score else accepted
 
-    def _known_anywhere(self, vector: np.ndarray, observe: Any) -> bool:
+    def _known_anywhere(self, vector: np.ndarray, item: ChainItem, observe: Any) -> bool:
         """Whether this appearance is already in **either** store, from any camera at all.
 
-        Deliberately without the exclusion; :meth:`_enrol` argues why at length.
+        Deliberately without the exclusion; :meth:`_enrol` argues why at length. ``item`` is
+        the frame a refusal from the library would otherwise fail to name.
         """
         for store in (self._gallery, self._enrolled):
             if store is None:
                 continue
-            if self._query(store, vector, exclude_camera=None, observe=observe).accepted:
+            if self._query(store, vector, item, exclude_camera=None, observe=observe).accepted:
                 return True
         return False
 
@@ -763,6 +789,7 @@ class GalleryRecognize(Element):
         self,
         store: Any,
         vector: np.ndarray,
+        item: ChainItem,
         *,
         exclude_camera: str | None,
         observe: Any,
@@ -771,6 +798,10 @@ class GalleryRecognize(Element):
 
         Args:
             store: which of the two galleries to ask.
+            item: the frame being queried, named in the refusal below. This was the one
+                per-frame failure path that carried no ``item.key``, so a width mismatch
+                named the element and the gallery and left the operator to guess which of
+                fifty cameras filed the vector that caused it.
             exclude_camera: the camera whose rows are dropped before ranking. Always the
                 item's own for an identity query; see :meth:`_enrol` for the one other
                 caller and why its answer to this is different.
@@ -797,10 +828,10 @@ class GalleryRecognize(Element):
             raise
         except Exception as exc:
             raise ValidationError(
-                f"recognize element {self.name!r}: the {self._gallery_impl!r} gallery "
-                f"refused a query ({exc}). A width mismatch here is two embedders feeding "
-                f"one gallery; declare `dim:` on this element to have it refused at "
-                f"start-up instead of on a frame"
+                f"{self._who(item)}: the {self._gallery_impl!r} gallery refused a query "
+                f"({exc}). A width mismatch here is two embedders feeding one gallery; "
+                f"declare `dim:` on this element to have it refused at start-up instead "
+                f"of on a frame"
             ) from exc
         if observe is not None:
             observe((time.perf_counter() - started) * 1e6)
@@ -898,7 +929,7 @@ class GalleryRecognize(Element):
             return None
         if confidence < self._enrol_floor:
             return None
-        if self._known_anywhere(vector, observe):
+        if self._known_anywhere(vector, item, observe):
             # Already in the gallery — from this row's own camera, which is precisely why the
             # identity query above did not find it. Asking a second time WITHOUT the
             # exclusion is deliberate and is not a hole in rule 1: the two questions are
