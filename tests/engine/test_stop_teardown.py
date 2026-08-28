@@ -32,15 +32,36 @@ already passed a check, waiting on the control lock:
   minutes inside TensorRT, and the fleet drains its shards on a shared deadline — so the
   polite wait is what gets the shard SIGKILLed. ``Model.start`` now polls an abort.
 
+And four more from the review of *that* work, all of them about the ``start()`` side of the
+same window:
+
+* **``start()`` took no lifecycle lock at all.** A ``stop()`` concurrent with the *initial*
+  ``start()`` cleared the flags, drained the table and closed the sink under a start that
+  then published ``_started = True`` regardless — ``is_started`` true with an empty model
+  table, which every readiness probe reads as "up and serving nothing".
+* **A teardown that outlives its grace period.** ``_await_teardown`` expires and returns; a
+  ``start()`` on the other side of it used to re-arm the barrier and get the still-queued
+  teardown landing on the fresh server. The start is refused now, and the teardown checks its
+  own generation before touching anything.
+* **``stats()`` re-read the trace state.** "Is ``_last_trace_stats`` None?" and "load
+  ``_traces``" are two bytecodes, and ``_release`` swapping in the null sink between them
+  publishes ``{"sink": "none", "recorded": 0}`` for a run that traced thousands of requests —
+  the exact answer ``_last_trace_stats`` was added to remove. It also handed the stored dict
+  out by reference, so a scraper could edit what every later scrape reported.
+* **Non-strict start-up swallowed the abort.** ``strict_startup=false`` logged "failed to
+  load model 'm0'; continuing" once per remaining model for one shutdown, and went on
+  building models the teardown had already been past.
+
 Offline throughout — the mock backend, ``KIND_CPU`` instances and real worker threads,
 because the evidence for the first one is ``threading.enumerate()``.
 """
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +128,27 @@ def _started(root: Path) -> Iterator[InferenceServer]:
 @pytest.fixture()
 def explicit(repository: Path) -> Iterator[InferenceServer]:
     yield from _started(repository)
+
+
+def _startup_settings(
+    root: Path, *, strict: bool = True, grace: float | None = None
+) -> ServerSettings:
+    """Every model in the repository loaded by ``start()`` itself.
+
+    The other settings above run under explicit control with nothing loaded at start-up,
+    which is what ``load_model`` needs. The races below are between ``stop()`` and the
+    *start's own* loading, so the models have to belong to the start.
+    """
+    settings: dict[str, Any] = {
+        "model_repository": root,
+        "devices": {"visible_gpus": []},
+        "execution": {"warmup_iterations": 0},
+        "strict_startup": strict,
+        "load_all_models": True,
+    }
+    if grace is not None:
+        settings["shutdown_grace_s"] = grace
+    return ServerSettings(**settings)
 
 
 def _live_workers(model: str) -> list[str]:
@@ -195,6 +237,14 @@ class _Outcome:
     def run_unload(self, server: InferenceServer, name: str) -> None:
         try:
             server.unload_model(name)
+        except BaseException as exc:
+            self.error = exc
+
+    def run_start(self, server: InferenceServer) -> None:
+        """``start()`` on another thread. What it returned lands in ``model`` — the same
+        "what came back" slot the loads use, because the assertions are all on ``error``."""
+        try:
+            self.model = server.start()
         except BaseException as exc:
             self.error = exc
 
@@ -380,11 +430,11 @@ class TestASecondStopWaitsForTheFirstOnesTeardown:
             assert release.wait(_TIMEOUT), "the test never released the model's start"
             original_start(self, **kwargs)
 
-        def recording_release(self: InferenceServer) -> None:
+        def recording_release(self: InferenceServer, generation: int) -> None:
             # Patched at `_release`, not `_teardown`: `_teardown`'s own `finally` sets the
             # barrier before it returns, so an append AFTER `_teardown` would race the waiter
             # it releases. Inside `_release` the record lands before the barrier by construction.
-            original_release(self)
+            original_release(self, generation)
             order.append("teardown")
 
         monkeypatch.setattr(Model, "start", blocking_start)
@@ -647,6 +697,21 @@ class TestStopLeavesAUsableTraceSink:
         sinks[1].recorded = 3
         assert explicit.stats()["tracing"]["recorded"] == 3
 
+    def test_the_totals_are_handed_out_as_a_copy(
+        self, explicit: InferenceServer, sinks: list[_RecordingSink]
+    ) -> None:
+        """`stats()` used to return the stored dict itself. Its two callers are a metrics
+        exporter and the KServe stats route, and either of them editing what came back edits
+        what every later scrape reports — a wrong number with no way to trace it back."""
+        explicit.stop()
+
+        first = explicit.stats()["tracing"]
+        first["recorded"] = 999
+        first["sink"] = "edited"
+
+        assert explicit.stats()["tracing"]["recorded"] != 999
+        assert explicit.stats()["tracing"]["sink"] == "recording"
+
     def test_the_last_traces_still_land_and_the_sink_is_still_closed(
         self, explicit: InferenceServer, sinks: list[_RecordingSink]
     ) -> None:
@@ -752,10 +817,10 @@ class TestTwoStopsThatBothWinTheStartedCheck:
                 both_past_the_check.set()
                 original_await(self)
 
-            def gated_release(self: InferenceServer) -> None:
+            def gated_release(self: InferenceServer, generation: int) -> None:
                 inside_release.set()
                 assert finish_release.wait(_TIMEOUT), "the test never released the teardown"
-                original_release(self)
+                original_release(self, generation)
                 order.append("released")
 
             monkeypatch.setattr(pool._LOG, "info", gated_info)
@@ -794,3 +859,534 @@ class TestTwoStopsThatBothWinTheStartedCheck:
             assert sinks[0].uses_after_close == []
         finally:
             server.stop()
+
+
+# -- the start side of the same window ---------------------------------------------------
+
+
+@pytest.fixture()
+def three_models(tmp_path: Path) -> Path:
+    """Three start-up models, so "the remaining models" is a set a test can look at."""
+    root = tmp_path / "fleet"
+    for name in ("a_first", "b_second", "c_third"):
+        (root / name / "1").mkdir(parents=True)
+        (root / name / "config.yaml").write_text(_MODEL.lstrip())
+    return root
+
+
+def _await_torn_down(server: InferenceServer) -> None:
+    """Block until the teardown running on another thread has finished.
+
+    The forcing wait that makes "the drain happened *before* the start published" a fact
+    rather than a hope: the barrier is set in ``_teardown``'s ``finally``, so once it is set
+    the model table has provably been emptied.
+    """
+    assert server._torn_down.wait(_TIMEOUT), "the teardown never finished"
+
+
+class TestAStopRacingTheInitialStart:
+    """``stop()`` and the *initial* ``start()`` must not both believe they own this server.
+
+    ``stop()`` has taken the lifecycle lock for its entry transition since the two-stops fix
+    above; ``start()`` took no lock at all. So a stop arriving mid-start cleared the flags,
+    drained the model table and closed the trace sink, and the start then set
+    ``_started = True`` on top of it — a server answering ``is_started`` with an empty model
+    table, which is what a readiness probe reads as "up, and serving nothing". Either the
+    start completes and a later ``stop()`` drains what it loaded, or the start is refused
+    with a typed error and leaves nothing running. There is no third state.
+    """
+
+    def test_a_stop_that_drains_the_table_under_a_start_refuses_it_typed(
+        self, repository: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The exact interleaving, forced: the models are up and published, the start has not
+        claimed ``_started`` yet, and a stop runs its whole teardown in that window."""
+        server = InferenceServer(_startup_settings(repository))
+        entered = threading.Event()
+        release = threading.Event()
+        original_join = InferenceServer._join_service_tier
+
+        def gated_join(self: InferenceServer) -> Any:
+            # The last step of the start before it publishes itself, so everything the start
+            # loaded is in the table and nothing has been claimed.
+            entered.set()
+            assert release.wait(_TIMEOUT), "the test never released the start"
+            return original_join(self)
+
+        monkeypatch.setattr(InferenceServer, "_join_service_tier", gated_join)
+
+        outcome = _Outcome()
+        starter = threading.Thread(target=outcome.run_start, args=(server,), name="starter")
+        starter.start()
+        assert entered.wait(_TIMEOUT), "the start never reached the service tier"
+        assert server.models() == ["echo"], "the start had not published its models yet"
+
+        stopper = threading.Thread(target=server.stop, name="stopper")
+        stopper.start()
+        _await_stop_flags(server)
+        _await_torn_down(server)
+        release.set()
+        for thread in (starter, stopper):
+            thread.join(_TIMEOUT)
+            assert not thread.is_alive(), f"{thread.name} never finished"
+
+        assert isinstance(outcome.error, ServerStateError), f"got {outcome.error!r}"
+        assert "stopped while it was starting" in str(outcome.error)
+        # The property, stated as the disjunction the class docstring gives.
+        assert not (server.is_started and server.models() == [])
+        assert not server.is_started
+        assert server.models() == []
+        assert _live_workers("echo") == [], "the abandoned start left worker threads running"
+
+    def test_a_model_published_after_the_drain_is_released_by_the_start_that_lost(
+        self, repository: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The narrower half: the stop's drain runs *before* the start publishes, so the
+        teardown never sees the model and only the losing start can release it.
+
+        Without that, the model is running — two worker threads, a backend, in production a
+        CUDA context — under a server that reports itself stopped and holds no reference to
+        it. That is the leak the whole of this module is about, entered from the start side.
+        """
+        server = InferenceServer(_startup_settings(repository))
+        inside_start = threading.Event()
+        release = threading.Event()
+        original_start = Model.start
+
+        def blocking_start(self: Model, **kwargs: Any) -> None:
+            original_start(self, **kwargs)
+            # Started, not yet published: `_build_and_start` puts it in the table after this
+            # returns, which is after the drain below has been and gone.
+            inside_start.set()
+            assert release.wait(_TIMEOUT), "the test never released the model's start"
+
+        monkeypatch.setattr(Model, "start", blocking_start)
+
+        outcome = _Outcome()
+        starter = threading.Thread(target=outcome.run_start, args=(server,), name="starter")
+        starter.start()
+        assert inside_start.wait(_TIMEOUT), "the start never reached the model's start"
+        assert server.models() == [], "the model reached the table before the drain"
+
+        stopper = threading.Thread(target=server.stop, name="stopper")
+        stopper.start()
+        _await_stop_flags(server)
+        _await_torn_down(server)
+        release.set()
+        for thread in (starter, stopper):
+            thread.join(_TIMEOUT)
+            assert not thread.is_alive(), f"{thread.name} never finished"
+
+        assert isinstance(outcome.error, ServerStateError), f"got {outcome.error!r}"
+        assert _live_workers("echo") == [], "the model published after the drain still runs"
+        assert server.models() == []
+        assert not server.is_started
+
+    def test_a_second_start_while_one_is_in_progress_is_refused_typed(
+        self, repository: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two starts are the same collision as a start and a stop: unclaimed, both loaded
+        every model and the second one's copies were the leak."""
+        server = InferenceServer(_startup_settings(repository))
+        entered = threading.Event()
+        release = threading.Event()
+        original_join = InferenceServer._join_service_tier
+
+        def gated_join(self: InferenceServer) -> Any:
+            entered.set()
+            assert release.wait(_TIMEOUT), "the test never released the start"
+            return original_join(self)
+
+        monkeypatch.setattr(InferenceServer, "_join_service_tier", gated_join)
+
+        outcome = _Outcome()
+        starter = threading.Thread(target=outcome.run_start, args=(server,), name="starter")
+        starter.start()
+        try:
+            assert entered.wait(_TIMEOUT), "the start never reached the service tier"
+            with pytest.raises(ServerStateError, match="already starting"):
+                server.start()
+        finally:
+            release.set()
+            starter.join(_TIMEOUT)
+            server.stop()
+
+        assert outcome.error is None, f"the first start failed: {outcome.error!r}"
+        assert len(_live_workers("echo")) == 0, "the stop left the models running"
+
+    def test_a_start_while_a_teardown_is_in_flight_is_refused_typed(
+        self, repository: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The documented downgrade, closed. ``_await_teardown`` expires after
+        ``shutdown_grace_s`` and returns; a ``start()`` on the other side of that used to
+        re-arm the barrier and take the still-queued teardown's release on the fresh
+        server's models. It waits the same budget and then refuses.
+        """
+        server = InferenceServer(_startup_settings(repository, grace=0.2)).start()
+        inside_release = threading.Event()
+        finish_release = threading.Event()
+        original_release = InferenceServer._release
+
+        def gated_release(self: InferenceServer, generation: int) -> None:
+            inside_release.set()
+            assert finish_release.wait(_TIMEOUT), "the test never released the teardown"
+            original_release(self, generation)
+
+        monkeypatch.setattr(InferenceServer, "_release", gated_release)
+
+        stopper = threading.Thread(target=server.stop, name="stopper")
+        stopper.start()
+        try:
+            assert inside_release.wait(_TIMEOUT), "no teardown ever started"
+            began = time.monotonic()
+            with pytest.raises(ServerStateError, match="still tearing this server down"):
+                server.start()
+            waited = time.monotonic() - began
+        finally:
+            finish_release.set()
+            stopper.join(_TIMEOUT)
+            server.stop()
+
+        # It waited the grace period rather than refusing on sight: a teardown that finishes
+        # inside its own budget must let the start through, which is the restart below.
+        assert waited >= 0.2, f"the start refused after {waited:.3f}s without waiting"
+        assert _live_workers("echo") == []
+
+    def test_a_start_after_the_teardown_finished_is_let_through(self, repository: Path) -> None:
+        """The refusal is on the teardown being *in flight*, not on there having been one:
+        stop-then-start is what an operator does after fixing a config, and the barrier is
+        already set by then."""
+        server = InferenceServer(_startup_settings(repository)).start()
+        server.stop()
+
+        server.start()
+        try:
+            assert server.is_ready
+            assert server.models() == ["echo"]
+        finally:
+            server.stop()
+        assert _live_workers("echo") == []
+
+
+class TestANonStrictStartRacingAStop:
+    """``strict_startup=false`` logs and continues past a model that will not load — and used
+    to do the same for the *abort*, which is not a model failing but the server going away.
+
+    One shutdown produced one ERROR with a full traceback per remaining model ("failed to
+    load model 'b_second'; continuing"), and the start then went on building models the
+    teardown had already been past — the leak ``stop()`` takes the control lock to prevent,
+    arriving through the door non-strict start-up left open. "Continuing" is meaningless once
+    a stop has begun: there is nothing to continue towards.
+    """
+
+    def test_the_abort_ends_the_start_instead_of_being_logged_per_model(
+        self,
+        three_models: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        server = InferenceServer(_startup_settings(three_models, strict=False))
+        entered = threading.Event()
+        release = threading.Event()
+        attempted: list[str] = []
+        original_start = ModelInstance.start
+
+        def gated_start(self: ModelInstance) -> None:
+            attempted.append(self.name)
+            if len(attempted) == 1:
+                # Instance 1 of model 1 is slow — the TensorRT deserialisation, in miniature.
+                entered.set()
+                assert release.wait(_TIMEOUT), "the test never released instance 1"
+            original_start(self)
+
+        monkeypatch.setattr(ModelInstance, "start", gated_start)
+
+        outcome = _Outcome()
+        starter = threading.Thread(target=outcome.run_start, args=(server,), name="starter")
+        with caplog.at_level(logging.DEBUG, logger="shipinfer.engine"):
+            starter.start()
+            assert entered.wait(_TIMEOUT), "the start never reached the first instance"
+            stopper = threading.Thread(target=server.stop, name="stopper")
+            stopper.start()
+            _await_stop_flags(server)
+            release.set()
+            for thread in (starter, stopper):
+                thread.join(_TIMEOUT)
+                assert not thread.is_alive(), f"{thread.name} never finished"
+
+        # The abort itself came out, once, naming the model it gave up in the middle of --
+        # not the generic refusal that would mean the start had run to the end of the loop.
+        assert isinstance(outcome.error, ServerStateError), f"got {outcome.error!r}"
+        assert "start aborted: the server is stopping" in str(outcome.error)
+        assert "model a_first" in str(outcome.error)
+        continuing = [r.getMessage() for r in caplog.records if "continuing" in r.getMessage()]
+        assert continuing == [], continuing
+        # Only the first model was ever attempted; the abort is checked before each instance,
+        # so the two later models never reached one.
+        assert len(attempted) == 1, attempted
+        for name in ("a_first", "b_second", "c_third"):
+            assert _live_workers(name) == [], f"{name} was left running"
+        assert server.models() == []
+        assert not server.is_started
+
+    def test_a_model_that_will_not_load_is_still_skipped(self, tmp_path: Path) -> None:
+        """The re-raise is gated on the server stopping, not on the mode: a heterogeneous
+        fleet where one node genuinely cannot host one model is what the mode is for."""
+        root = tmp_path / "mixed"
+        for name, config in (("a_first", _MODEL), ("b_second", _MODEL), ("c_third", _MODEL)):
+            (root / name / "1").mkdir(parents=True)
+            text = config if name != "b_second" else config.replace("mock", "no_such_runtime")
+            (root / name / "config.yaml").write_text(text.lstrip())
+
+        server = InferenceServer(_startup_settings(root, strict=False))
+        with server:
+            assert server.models() == ["a_first", "c_third"]
+            assert server.is_ready
+
+
+# -- the scrape that races the teardown ---------------------------------------------------
+
+
+class _WatchedLock:
+    """A stand-in for ``threading.Lock`` that records every thread which had to *wait*.
+
+    ``threading.Lock`` cannot be subclassed, and a name recorded on entry to ``acquire``
+    would not tell "took it" from "blocked on it" — which is the whole of the distinction
+    the scrape test turns on: it has to know the stop is parked *outside* the lock, not
+    merely that it reached it. The same reason ``_WatchedEvent`` exists, one primitive down.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._names_lock = threading.Lock()
+        self.blocked: list[str] = []
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if self._lock.acquire(blocking=False):
+            return True
+        if not blocking:
+            return False
+        with self._names_lock:
+            self.blocked.append(threading.current_thread().name)
+        return self._lock.acquire(True, timeout)
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __enter__(self) -> bool:
+        return self.acquire()
+
+    def __exit__(self, *exc: object) -> None:
+        self.release()
+
+
+class _GatedStatsServer(InferenceServer):
+    """A server whose ``stats()`` can be suspended *inside* the trace lookup.
+
+    ``_last_trace_stats`` becomes a property so a test can park a scrape at the exact point
+    the unlocked version checked it — between "is it None?" and the load of ``_traces``. That
+    window is two bytecodes wide: no sleep can be placed in it, and nothing observable from
+    outside ``stats()`` distinguishes a scrape that is in it from one that is not. So the
+    hook goes where the read is.
+
+    Class attributes rather than an ``__init__``: ``InferenceServer.__init__`` assigns
+    ``_last_trace_stats`` itself, and that assignment has to find the setter already there.
+    """
+
+    _trace_stats_value: dict[str, Any] | None = None
+    _trace_stats_gate: Callable[[], None] | None = None
+
+    @property
+    def _last_trace_stats(self) -> dict[str, Any] | None:  # type: ignore[override]
+        # The value is taken *before* the gate and returned after it, because that is what
+        # the window is: the read happened, and then the thread lost the GIL holding what it
+        # had read. A getter that re-read afterwards would hand the caller the teardown's own
+        # totals and quietly repair the bug it is here to expose.
+        value = self._trace_stats_value
+        gate, self._trace_stats_gate = self._trace_stats_gate, None
+        if gate is not None:
+            gate()
+        return value
+
+    @_last_trace_stats.setter
+    def _last_trace_stats(self, value: dict[str, Any] | None) -> None:
+        self._trace_stats_value = value
+
+
+def _await_swap_or_block(server: InferenceServer, lock: _WatchedLock, name: str) -> None:
+    """Block until the teardown has either swapped the sink in or blocked on ``lock``.
+
+    Two outcomes, one wait, because the point of the test is which of them happens. With the
+    lookup serialised the stop cannot get past the lifecycle lock the scrape is holding, so
+    it is recorded as blocked; without it the stop runs to completion and the null sink is
+    the observable. Waiting for the *swap* rather than for the totals is what makes the
+    second branch deterministic: the totals are published before the sink is replaced, and
+    resuming between the two would let the scrape read the live sink and pass by luck.
+    """
+    deadline = time.monotonic() + _TIMEOUT
+    while time.monotonic() < deadline:
+        if name in lock.blocked or isinstance(server.traces, NullTraceSink):
+            return
+        time.sleep(0.001)
+    raise AssertionError(f"{name} neither blocked on the lifecycle lock nor swapped the sink")
+
+
+class TestAScrapeRacingTheTeardownsSwap:
+    """``stats()`` reads two fields that ``_release`` rewrites, so it must read them as one.
+
+    Unlocked it was a check and an act: a scrape that found ``_last_trace_stats`` still None
+    and then loaded ``_traces`` after the swap reports ``{"sink": "none", "recorded": 0}`` —
+    verbatim the wrong answer ``_last_trace_stats`` was added to remove, arriving through the
+    door the fix left open. A scrape does not stop when the server does, so that zero is the
+    last sample a dashboard takes of the shard.
+    """
+
+    def test_a_scrape_parked_in_the_lookup_never_reports_the_null_sinks_zeros(
+        self, repository: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sinks: list[_RecordingSink] = []
+
+        def build(*_args: object, **_kwargs: object) -> _RecordingSink:
+            sinks.append(_RecordingSink())
+            return sinks[-1]
+
+        monkeypatch.setattr(pool, "build_trace_sink", build)
+        server = _GatedStatsServer(_settings(repository))
+        lifecycle = _WatchedLock()
+        # Installed before the start, so every acquisition of it is recorded.
+        server._lifecycle_lock = lifecycle  # type: ignore[assignment]
+        server.start()
+        try:
+            server.load_model("echo")
+            server.infer_sync(
+                InferenceRequest(
+                    model_name="echo",
+                    inputs={"x": Tensor.from_numpy(np.zeros((1, 2), dtype=np.float32))},
+                    context=RequestContext(camera_id="cam0", frame_id=11),
+                ),
+                timeout=_TIMEOUT,
+            )
+            _await_recorded(sinks[0], 1)
+            live = server.stats()["tracing"]
+            assert live["recorded"] == 1
+
+            parked = threading.Event()
+            resume = threading.Event()
+            scraped: dict[str, Any] = {}
+
+            def gate() -> None:
+                parked.set()
+                assert resume.wait(_TIMEOUT), "the test never resumed the scrape"
+
+            def scrape() -> None:
+                scraped.update(server.stats()["tracing"])
+
+            server._trace_stats_gate = gate
+            scraper = threading.Thread(target=scrape, name="scraper")
+            scraper.start()
+            assert parked.wait(_TIMEOUT), "the scrape never reached the trace lookup"
+
+            stopper = threading.Thread(target=server.stop, name="stopper")
+            stopper.start()
+            _await_swap_or_block(server, lifecycle, "stopper")
+            resume.set()
+            for thread in (scraper, stopper):
+                thread.join(_TIMEOUT)
+                assert not thread.is_alive(), f"{thread.name} never finished"
+
+            assert scraped == live, "the scrape read across the teardown's swap"
+            assert scraped["sink"] == "recording"
+            # And the run's totals are what a scrape after the shutdown reports, as before.
+            assert server.stats()["tracing"] == live
+            assert sinks[0].uses_after_close == []
+        finally:
+            server.stop()
+
+
+class TestATeardownThatWasOvertakenByANewRun:
+    """A teardown carries the generation it was started for, and stands down if it lost it.
+
+    :meth:`InferenceServer._begin_start` refuses to start while a teardown is in flight, so
+    this state cannot be reached through the public API any more — that refusal is the first
+    line of defence and this is the second. It exists because the first one is a *timed*
+    wait: ``_await_teardown`` gives up after ``shutdown_grace_s``, and a teardown wedged on
+    an instance that will not drain outlives it. Everything a release does is destructive —
+    it empties the model table, closes the trace sink and closes the memory pool — so a
+    release that has fallen behind must do none of it.
+
+    The overtaking is therefore forced by hand: the barrier is set while the release is still
+    inside, which is precisely the one step the fix makes unreachable. What is under test is
+    what the release does *next*.
+    """
+
+    def test_it_releases_none_of_the_new_runs_models_sink_or_totals(
+        self,
+        repository: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        sinks: list[_RecordingSink] = []
+
+        def build(*_args: object, **_kwargs: object) -> _RecordingSink:
+            sinks.append(_RecordingSink())
+            return sinks[-1]
+
+        monkeypatch.setattr(pool, "build_trace_sink", build)
+        server = InferenceServer(_startup_settings(repository, grace=0.2)).start()
+        inside_release = threading.Event()
+        finish_release = threading.Event()
+        original_release = InferenceServer._release
+
+        def gated_release(self: InferenceServer, generation: int) -> None:
+            inside_release.set()
+            assert finish_release.wait(_TIMEOUT), "the test never released the teardown"
+            original_release(self, generation)
+
+        monkeypatch.setattr(InferenceServer, "_release", gated_release)
+
+        stopper = threading.Thread(target=server.stop, name="stopper")
+        stranded: list[Any] = []
+        with caplog.at_level(logging.WARNING, logger="shipinfer.engine"):
+            stopper.start()
+            try:
+                assert inside_release.wait(_TIMEOUT), "no teardown ever started"
+                # Run 1's models, held while they are still reachable. They are stranded by
+                # what follows: `_models` is keyed by name, so run 2 publishes its "echo"
+                # over run 1's entry and no reference to run 1's copy survives inside the
+                # server. That is *why* `_begin_start` refuses to enter this state — the
+                # guard's job is to keep the live run intact, not to make the state good —
+                # and it is why the test has to hold them itself to stop them at the end.
+                stranded.extend(server)
+                # The forced step: a wedged teardown outliving its grace period, seen from
+                # the inside. From here a start is let through with a release still running.
+                server._torn_down.set()
+                server.start()
+                assert server.models() == ["echo"], "the new run did not load its models"
+                assert server.model("echo") is not stranded[0]
+                sinks[1].recorded = 5
+
+                finish_release.set()
+                stopper.join(_TIMEOUT)
+                assert not stopper.is_alive(), "the stale teardown never finished"
+
+                assert server.models() == ["echo"], "the stale teardown drained the live run"
+                assert server.model("echo") is not stranded[0]
+                assert server.is_ready, "the stale teardown stopped the live run's instances"
+                assert server.traces is sinks[1]
+                assert not sinks[1].is_closed, "the stale teardown closed the live sink"
+                assert server.stats()["tracing"] == {**sinks[1].stats(), "recorded": 5}
+            finally:
+                finish_release.set()
+                stopper.join(_TIMEOUT)
+                server.stop()
+                for model in stranded:
+                    model.stop()
+
+        overtaken = [
+            r.getMessage()
+            for r in caplog.records
+            if "abandoning the teardown" in r.getMessage()
+        ]
+        assert len(overtaken) == 1, overtaken
+        assert "run 1" in overtaken[0] and "run 2" in overtaken[0]
+        assert _live_workers("echo") == []
