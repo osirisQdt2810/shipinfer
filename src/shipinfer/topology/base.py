@@ -537,6 +537,22 @@ class Element(abc.ABC):
         its state lazily, and at worst the first frame of a *re-added* camera is refused by
         state this call was about to clear.
 
+        **This is not serialised against the walk. Guard your own state.** The hook runs on
+        the thread that called ``add_camera``, holding the runner's ``_lifecycle`` lock -- the
+        ``RLock`` that serialises ``start``, ``stop``, ``add_camera``, ``remove_camera`` and
+        ``drain``, and nothing else. The walk takes no lock at all (``runners/base.py``:
+        ``_lifecycle`` is "deliberately *not* taken by ``submit``"), so up to
+        :attr:`ElementContext.workers` worker threads can be inside *this element's*
+        :meth:`process` -- including for *this camera* -- while this call is running. An
+        implementation must therefore hold its own lock around its per-camera table;
+        ``pipeline/graph/tracking.py``'s ``_admit`` is the shape (one lock around insertion
+        into the map, never held across the work itself, so one slow camera cannot stall the
+        other forty-nine).
+
+        **Return promptly.** Every lifecycle operation on this runner queues behind this
+        call, so a hook that waits on a model, a socket or another camera's frame stalls the
+        shard's whole control plane -- including the ``stop`` that would end the wait.
+
         Called only between :meth:`open` and :meth:`close`, so an implementation may assume
         its resources exist.
         """
@@ -550,11 +566,25 @@ class Element(abc.ABC):
         for a camera nobody is reading — the leak this hook exists to close, reintroduced by
         the order it was closed in.
 
-        "After the actor is stopped" is not "after the last frame", and an implementation must
-        not read it that way. Items already admitted into the runner's lane are walked after
-        this returns, and ``remove_camera`` answering ``False`` means the decoder thread was
-        abandoned at its deadline rather than joined. So a late item for a removed camera is
-        ordinary: handle it as a first frame, not as an impossibility.
+        **"After the actor is stopped" is not "after the last frame", and this hook is not
+        serialised against the walk.** It runs on the thread that called ``remove_camera``
+        (or ``drain``), holding the runner's ``_lifecycle`` lock -- which serialises the
+        lifecycle operations against each other and nothing else. The walk takes no lock
+        (``runners/base.py``: ``_lifecycle`` is "deliberately *not* taken by ``submit``"), so
+        a worker can be inside *this element's* :meth:`process` for *this very camera* at the
+        moment this is called, and up to :attr:`ElementContext.workers` of them can be at
+        once. A removal racing an in-flight frame is ordinary rather than a bug to assert
+        against, and it has two consequences an implementation has to be written for: state
+        this call drops can be rebuilt by a frame that was already in the lane, and
+        ``remove_camera`` answering ``False`` means the decoder thread was abandoned at its
+        deadline rather than joined, so a late item can arrive well after that. So: hold the
+        element's own lock around its per-camera table (``pipeline/graph/tracking.py``'s
+        ``_admit`` is the shape), make the drop idempotent, and handle a late item as a first
+        frame rather than as an impossibility.
+
+        **Return promptly.** ``_lifecycle`` serialises ``start``, ``stop``, ``add_camera``,
+        ``remove_camera`` and ``drain``, so a hook that waits holds up every one of them --
+        including the ``stop`` that would end the wait.
 
         Called only between :meth:`open` and :meth:`close`. Shutdown does **not** call it for
         every camera — :meth:`close` releases everything, per camera or not, and announcing

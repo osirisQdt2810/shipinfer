@@ -269,6 +269,41 @@ class HostileDetect(MockDetect):
         raise RuntimeError(f"cannot drop the shard for {camera_id}")
 
 
+@registry_for(ElementKind.DETECT).register("camera-blocking")
+class BlockingDetect(MockDetect):
+    """An element a worker can be *parked inside* while its lifecycle hooks are called.
+
+    The double that turns :meth:`~shipinfer.topology.base.Element.camera_removed`'s threading
+    contract into an assertion. The hook runs on the caller's thread under the runner's
+    ``_lifecycle`` lock; the walk takes no lock at all, so a worker can be inside this very
+    element's ``process()`` -- for the very camera being removed -- while the hook runs. That
+    is the fact an implementation has to guard its per-camera table against, and it is the
+    fact a docstring alone cannot keep true.
+
+    ``entered``/``left`` bracket the parked ``_do_process`` and the hook samples both, so the
+    overlap is recorded from *inside* the window rather than inferred from timings afterwards.
+    """
+
+    def __init__(self, name: str, params: Any = None, *, model: str | None = None) -> None:
+        super().__init__(name, params, model=model)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.left = threading.Event()
+        #: Every camera whose ``camera_removed`` ran while a worker was inside ``process()``.
+        self.removed_mid_process: list[str] = []
+
+    def _do_process(self, item: ChainItem) -> ChainItem | None:
+        self.entered.set()
+        self.release.wait(10.0)
+        result = super()._do_process(item)
+        self.left.set()
+        return result
+
+    def camera_removed(self, camera_id: str) -> None:
+        if self.entered.is_set() and not self.left.is_set():
+            self.removed_mid_process.append(camera_id)
+
+
 @registry_for(ElementKind.DECODE).register("camera-two-caps")
 class TwoCapDecode(ReplayDecode):
     """A decode element offering two head caps. The chain the runner refuses.
@@ -1302,6 +1337,79 @@ class TestTheElementsHearAboutEveryCamera:
             ("removed", "cam-a"),
             ("added", "cam-a"),
         ]
+
+
+class TestTheHooksRunConcurrentlyWithTheWalk:
+    """The threading contract on :meth:`Element.camera_removed`, forced rather than described.
+
+    The runner makes **no** sequencing promise between a removal and the frames already in the
+    lane: ``_lifecycle`` orders the lifecycle operations against each other, ``submit`` and the
+    walk take no lock, and the hook runs on the caller's thread. So an element that dropped its
+    per-camera table without a lock of its own would race a worker that is *inside* it for the
+    same camera -- an intermittent ``KeyError`` under camera churn, which is the hardest class
+    of bug to reproduce and the easiest to write by trusting a docstring that once said "items
+    already admitted are walked after this returns".
+
+    This is the test that keeps the rewritten sentence honest. It is deterministic: the worker
+    is held on an ``Event`` inside ``process()``, so "the hook ran during the walk" is arranged
+    and not hoped for.
+    """
+
+    def test_a_removal_runs_while_a_worker_is_inside_the_same_element(
+        self, runner_over
+    ) -> None:
+        """The race the contract now describes, made to happen on purpose.
+
+        One worker (``settings()`` configures one), parked in ``detect`` on cam-a's first
+        frame. ``remove_camera`` is called from this thread while it is parked. Three claims:
+        the removal does not wait for the element (it returns while ``process`` is still
+        running), the hook observes the overlap from inside itself, and nothing deadlocks --
+        ``_lifecycle`` is not held by the walk, so the two threads share no lock at all.
+        """
+        chain = load(detect="camera-blocking")
+        runner = runner_over(
+            chain, settings=settings(), source_factory=scripted(frames=64, finite=False)
+        )
+        element = chain.node("detect").element
+        assert isinstance(element, BlockingDetect)
+
+        runner.add_camera(CameraSpec("cam-a", "injected://a"))
+        assert element.entered.wait(10.0), "no worker ever reached the element"
+
+        runner.remove_camera("cam-a", timeout_s=5.0)
+
+        assert element.removed_mid_process == [
+            "cam-a"
+        ], "the hook did not overlap the walk, so this test is no longer arranging the race"
+        assert not element.left.is_set(), "the removal waited for the element to finish"
+        assert runner.cameras == ()
+
+        element.release.set()
+        assert until(element.left.is_set), "the parked worker never finished its frame"
+
+    def test_the_frame_the_worker_was_holding_still_reaches_the_sink(self, runner_over) -> None:
+        """ "A late item for a removed camera is ordinary" — the other half of the same
+        sentence, and the reason an element must handle one as a first frame.
+
+        The item was admitted before the removal and is walked after it: the chain is still
+        open, the workers are still running, and nothing about ``remove_camera`` reaches into
+        the lane. An element that treated a post-removal item as impossible would raise here,
+        on a frame the runner is quite deliberately still delivering.
+        """
+        chain = load(detect="camera-blocking")
+        runner = runner_over(
+            chain, settings=settings(), source_factory=scripted(frames=64, finite=False)
+        )
+        element = chain.node("detect").element
+        assert isinstance(element, BlockingDetect)
+
+        runner.add_camera(CameraSpec("cam-a", "injected://a"))
+        assert element.entered.wait(10.0)
+        runner.remove_camera("cam-a", timeout_s=5.0)
+        element.release.set()
+
+        assert until(lambda: len(sink(chain).emitted) >= 1), "the held frame was dropped"
+        assert sink(chain).emitted[0].key[0] == "cam-a"
 
 
 class TestHealthAndStatsCarryTheCameras:

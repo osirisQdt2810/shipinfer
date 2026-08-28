@@ -613,6 +613,11 @@ class InprocessRunner(Runner):
 
         Called with :attr:`Runner._lifecycle` held, by all three camera methods, so an element
         sees the announcements for one camera in order and never sees an add racing a remove.
+        That lock orders the announcements against *each other* and against ``start``/``stop``
+        -- and against nothing else. It is not taken by ``submit`` or by the walk, so this
+        runs concurrently with :meth:`Element.process` on every worker thread, for the same
+        camera included; :meth:`Element.camera_removed` states the contract that follows from
+        that, and an element that keeps a per-camera table needs its own lock.
 
         In topological order for both directions, unlike ``close``, which unwinds in reverse.
         There is nothing to unwind: an element's per-camera state is its own and no element
