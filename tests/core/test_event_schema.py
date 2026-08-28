@@ -37,6 +37,43 @@ V1_KEYS = {
 }
 
 
+#: Every key a v3 ``as_dict()`` payload carried, transcribed from ``pipeline/schema.py`` at
+#: ``9bb6486`` — the last commit before the v4 bump. The additivity claim in this file's
+#: docstring is only worth anything if it is checked against the *previous* contract rather
+#: than against the current source, so this list is a literal and stays one.
+V3_KEYS = {
+    "body_bbox_vec",
+    "body_feature_vec",
+    "body_track_id_vec",
+    "body_track_state_vec",
+    "camera_id",
+    "captured_unix_ns",
+    "det_body_score_vec",
+    "det_id_vec",
+    "det_ship_score_vec",
+    "emitted_unix_ns",
+    "image_id",
+    "img_fps",
+    "img_height",
+    "img_width",
+    "latency_us",
+    "missing_stages",
+    "partial",
+    "reason",
+    "schema_version",
+    "ship_bbox_vec",
+    "ship_det_id_vec",
+    "ship_feature_vec",
+    "ship_id_vec",
+    "ship_mask_area_vec",
+    "ship_similarity_vec",
+    "ship_track_id_vec",
+    "ship_track_state_vec",
+    "sub_id",
+    "type",
+}
+
+
 def person(index: int, *, score: float = 0.9) -> ObjectRecord:
     return ObjectRecord(
         det_id=f"cam0_1_{index}",
@@ -143,8 +180,8 @@ class TestShipsAreAnExtension:
         Pinned to a literal, not to the constant: the number *is* the contract, and a test
         that read the constant would agree with any value the source happened to hold.
         """
-        assert SCHEMA_VERSION == 3
-        assert event().as_dict()["schema_version"] == 3
+        assert SCHEMA_VERSION == 4
+        assert event().as_dict()["schema_version"] == 4
 
     def test_masks_are_summarised_not_published(self):
         """This bus carries metadata; a 512x512 float mask is 1 MB and stays out of it."""
@@ -216,6 +253,87 @@ class TestTheSchemaIsPortable:
                 roots.add((node.module or "").split(".")[0])
         foreign = sorted(r for r in roots if r and r not in sys.stdlib_module_names)
         assert not foreign, f"schema.py stopped being copy-out-able: {foreign}"
+
+
+class TestTheGlobalIdIsAnExtension:
+    """v4 carries the cross-camera identity beside the per-camera one, and changes nothing.
+
+    ``track_id`` is unique within a camera's timeline; ``global_id`` is unique across the
+    fleet, and the same object seen by two cameras carries one of each. They are two answers
+    to two questions, so the second is added rather than folded into the first — a consumer
+    following one camera keeps reading ``track_id`` and never learns this key exists.
+    """
+
+    def identified(self, **fields) -> PerceptionEvent:
+        return event(
+            replace(person(0), track_id=7, track_state="confirmed", **fields),
+            replace(ship(1), track_id=7, track_state="confirmed", **fields),
+        )
+
+    def test_the_global_id_follows_the_parallel_array_idiom(self):
+        payload = self.identified(global_id=31).as_dict()
+
+        assert payload["body_global_id_vec"] == [31]
+        assert payload["ship_global_id_vec"] == [31]
+
+    def test_it_stays_aligned_with_the_boxes_it_describes(self):
+        payload = self.identified(global_id=31).as_dict()
+
+        assert len(payload["body_global_id_vec"]) == len(payload["body_bbox_vec"])
+        assert len(payload["ship_global_id_vec"]) == len(payload["ship_bbox_vec"])
+
+    def test_an_unassociated_object_serialises_as_null_not_zero(self):
+        """0 is a legitimate global id; ``null`` means the cross-camera tier said nothing."""
+        payload = self.identified().as_dict()
+
+        assert payload["body_global_id_vec"] == [None]
+        assert payload["ship_global_id_vec"] == [None]
+
+    def test_it_is_distinct_from_the_track_id(self):
+        """The bug this field exists to prevent is one number pretending to be both."""
+        payload = self.identified(global_id=31).as_dict()
+
+        assert payload["body_track_id_vec"] == [7]
+        assert payload["body_global_id_vec"] == [31]
+
+    def test_the_legacy_payload_gains_no_key(self):
+        assert set(self.identified(global_id=31).as_det2mot()) == V1_KEYS
+
+    def test_a_v3_consumer_sees_new_keys_and_no_changed_ones(self):
+        """The whole compatibility claim, checked against v3 rather than asserted in prose.
+
+        ``V3_KEYS`` is the literal key set a v3 message carried, transcribed from
+        ``pipeline/schema.py`` as it stood at the last commit before this bump. A v4 payload
+        must be a superset of it and the difference must be exactly the two new arrays: a
+        renamed key, a dropped key or a third new one all fail here. Pinned to a literal and
+        not derived from the current code, for the same reason the version number is — a set
+        computed from the source agrees with whatever the source happens to say.
+        """
+        payload = self.identified(global_id=31).as_dict()
+
+        assert set(payload) >= V3_KEYS, f"v4 dropped: {sorted(V3_KEYS - set(payload))}"
+        assert set(payload) - V3_KEYS == {"body_global_id_vec", "ship_global_id_vec"}
+
+    def test_setting_the_new_field_changes_no_other_value(self):
+        """The other half: v4's keys are present either way, and nothing else moves."""
+        with_ids = self.identified(global_id=31).as_dict()
+        without = self.identified().as_dict()
+        volatile = {"emitted_unix_ns", "latency_us"}
+
+        assert set(with_ids) == set(without), "a key that appears only when a value is set"
+        changed = {
+            key
+            for key in set(without) - volatile
+            if with_ids[key] != without[key] and not key.endswith("global_id_vec")
+        }
+        assert changed == set(), f"v4 changed a v3 key: {sorted(changed)}"
+
+    def test_it_round_trips_through_json(self):
+        payload = json.loads(self.identified(global_id=31).to_json())
+
+        assert payload["schema_version"] == 4
+        assert payload["body_global_id_vec"] == [31]
+        assert payload["ship_global_id_vec"] == [31]
 
 
 class TestTheOldImportPathStillResolves:

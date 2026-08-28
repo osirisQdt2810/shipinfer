@@ -1,8 +1,8 @@
 """The perception event: one frame's finished answer, as the wire and the file see it.
 
-Schema v3: per-object parallel arrays (``*_bbox_vec``, ``*_track_id_vec``,
-``*_feature_vec``) split by class, plus frame identity (``camera_id``, ``image_id``,
-``sub_id``), geometry (``img_width/height/fps``) and ``missing_stages`` — a partial frame
+Schema v4: per-object parallel arrays (``*_bbox_vec``, ``*_track_id_vec``,
+``*_global_id_vec``, ``*_feature_vec``) split by class, plus frame identity (``camera_id``,
+``image_id``, ``sub_id``), geometry (``img_width/height/fps``) and ``missing_stages`` — a partial frame
 says so instead of reading as an empty complete one. Why every v1 key keeps its name, type
 and people-only meaning (a deployed ``motservice`` must need no rebuild):
 ``docs/design/event-schema.md``. Stdlib only, by construction and by test
@@ -31,9 +31,10 @@ __all__ = [
 MESSAGE_TYPE = "Det2MOT"
 
 #: 1 was ``DetectionMOTFrameData``. 2 adds ships, timing and completeness; 3 adds the
-#: track id and its state. Every step is additive, and the number is bumped rather than
-#: left alone precisely so a consumer can branch on it instead of probing for a key.
-SCHEMA_VERSION = 3
+#: track id and its state; 4 adds the cross-camera ``global_id``. Every step is additive, and
+#: the number is bumped rather than left alone precisely so a consumer can branch on it
+#: instead of probing for a key.
+SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +79,16 @@ class ObjectRecord:
     #: That track's lifecycle state, as the tracker reported it. Carried rather than assumed
     #: because a consumer that has to trust our filtering cannot apply its own.
     track_state: str | None = None
+    #: Fleet-wide identity for this object's tracklet, from the cross-camera tier (v4). The
+    #: same object seen by two cameras carries the same ``global_id`` and two different
+    #: ``track_id``\ s, which is the whole distinction between the two fields: one is unique
+    #: within a camera's timeline, the other across the deployment.
+    #:
+    #: ``None`` when cross-camera association is off, when the frame's instant closed without
+    #: this camera (``mtmc`` in :attr:`PerceptionEvent.missing_stages`), or when this object
+    #: had no published track for an id to attach to. Distinguishable from ``0``, which the
+    #: assigner never issues.
+    global_id: int | None = None
 
     @property
     def bbox_list(self) -> list[float]:
@@ -220,6 +231,13 @@ class PerceptionEvent:
                 "body_track_state_vec": [o.track_state for o in people],
                 "ship_track_id_vec": [o.track_id for o in ships],
                 "ship_track_state_vec": [o.track_state for o in ships],
+                # Cross-camera identity (v4), one entry per object, beside the per-camera
+                # track id rather than replacing it: a consumer that joins two cameras reads
+                # these, and one that only follows a single camera keeps reading the pair
+                # above. A null entry means this object has no global identity — see
+                # ObjectRecord.global_id for the three ways that happens.
+                "body_global_id_vec": [o.global_id for o in people],
+                "ship_global_id_vec": [o.global_id for o in ships],
                 "captured_unix_ns": self.captured_unix_ns,
                 "emitted_unix_ns": self.emitted_unix_ns,
                 "latency_us": self.latency_us,
