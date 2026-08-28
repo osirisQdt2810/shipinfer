@@ -5,6 +5,49 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-28 — the engine's lifecycle is a claim: `start()` owns a run, a teardown owns a generation
+
+**What.** `InferenceServer.start()` now performs its entry and its exit as atomic
+transitions under the same `_lifecycle_lock` `stop()` has used since #72. `_begin_start`
+claims the server (refusing a second start, and waiting out then refusing a teardown in
+flight), `_finish_start` publishes only if the claim is still held, `_abandon_start`
+releases what a lost start had loaded. A generation counter rides `stop()` into
+`_teardown`/`_release`, and every destructive step checks it. `stats()` reads the trace
+state under the same lock and hands out a copy. Non-strict start-up re-raises the
+cooperative abort instead of logging "continuing" once per remaining model.
+
+**Why.** Review of #72 (rounds 2 and 3) reproduced `is_started == True` with zero models: a
+`stop()` concurrent with the *initial* `start()` drained the table and closed the sink under
+a start that published itself anyway. A readiness probe reads that as "up and serving
+nothing". The trace-totals field #72 added made a second version of it — a late `_release`
+overwriting a new run's numbers — and `stats()`'s two-bytecode check-and-act restored the
+`{"sink": "none", "recorded": 0}` answer #72 existed to remove.
+
+**Decisions.**
+
+- **A generation, not a flag.** `_starting` cannot tell "still mine" from "cleared by a stop,
+  and a later start set it again". Every teardown carries the run it was started for.
+- **The grace period's expiry is a refusal, not a downgrade.** `_await_teardown` still
+  returns on expiry (`stop()` never raises), but a `start()` on the other side of it is now
+  refused with a `ServerStateError` rather than proceeding into a teardown that is still
+  running. The generation check is the second line, because the first one is a timed wait.
+- **The totals and the sink swap are one transition.** Split, a scrape lands between them
+  and reports the null sink's zeros as a run's final sample.
+- **A lost start releases its own leftovers.** The model whose `Model.start` finished after
+  the concurrent drain had been past the table is published into it afterwards, and nothing
+  else holds a reference to it — `_abandon_start` takes the control lock (which is also the
+  wait for the teardown) and drains what is left.
+
+**Tests.** Ten new offline tests in `tests/engine/test_stop_teardown.py`, every interleaving
+forced rather than hammered for: `_WatchedLock` (a lock that records the threads which had
+to *wait*) joins `_WatchedEvent`, and `_GatedStatsServer` turns `_last_trace_stats` into a
+property so a scrape can be parked inside a window two bytecodes wide. Each of F1, F2, F3
+and F4 was revert-checked.
+
+---
+
+---
+
 ## 2026-08-27 — a dead shard's cameras are reported lost, never re-placed (Phase B4)
 
 `Fleet.dead_indices()` names exited shards by plan index and `runners.fleet._lost_in()` maps them
