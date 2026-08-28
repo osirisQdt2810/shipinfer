@@ -490,7 +490,7 @@ class TestAnInvalidCudaGraphsOverrideIsRefusedEverywhere:
 
         monkeypatch.setenv("SHIPINFER_CUDA_GRAPHS", "1")
 
-        with pytest.raises(ConfigurationError, match="expected 'on' or 'off'"):
+        with pytest.raises(ConfigurationError, match=r"one of \['off', 'on'\]"):
             _graphs_enabled(ExecutionSettings())
 
     def test_on_and_off_both_win_over_the_setting(self, monkeypatch) -> None:

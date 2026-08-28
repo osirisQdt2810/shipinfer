@@ -45,31 +45,14 @@ _LOG = get_logger("engine.model")
 def _graphs_enabled(execution: Any) -> bool:
     """Whether to capture graphs for this model, honouring the operator override.
 
-    `SHIPINFER_CUDA_GRAPHS` wins over the per-model setting when it is set at all: an
-    operator who typed it is answering "is the graph path what is hurting?" and a config file
-    silently overruling that answer would make the experiment useless. Unset — the normal
-    case — leaves every model's own setting alone, because whether a model *can* be captured
-    is a property of the model, not of the deployment.
-
-    Read here rather than in `core.settings`: the layer rule forbids `core` from importing
-    `shipinfer.envs`, and it is right to, because a settings object that changes meaning with
-    the environment cannot be reasoned about from the config file alone.
+    Set, `SHIPINFER_CUDA_GRAPHS` wins over the per-model setting: an operator who typed it is
+    asking whether the graph path is what hurts, and a config file overruling that makes the
+    experiment useless. Unset leaves each model alone — whether a model *can* be captured is a
+    property of the model. Read here, not in `core.settings`: `core` may not import
+    `shipinfer.envs`, and `envs` refuses a value that is neither `on` nor `off`.
     """
-    override = envs.CUDA_GRAPHS.get()
-    if not override:
-        return execution.cuda_graphs
-    if override not in ("on", "off"):
-        raise ConfigurationError(
-            f"{envs.CUDA_GRAPHS.name}={override!r} is invalid; expected 'on' or 'off'"
-        )
-        # Refused even on a host with no accelerator, and deliberately: this is read at
-        # `Model.__init__` now rather than per CUDA instance, so `shipinfer repo ls` on a
-        # laptop with a typo'd value fails instead of starting. That is the right direction.
-        # An operator who typed this variable is asking a question — "is the graph path what
-        # is hurting?" — and a deployment that quietly ignores the answer on some hosts and
-        # honours it on others makes the experiment worthless. A refusal names the typo where
-        # it was made; a shrug surfaces as a graph path that did not change.
-    return override == "on"
+    override = envs.SHIPINFER_CUDA_GRAPHS
+    return execution.cuda_graphs if not override else override == "on"
 
 
 class Model:

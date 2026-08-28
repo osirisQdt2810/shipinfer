@@ -32,7 +32,7 @@ def resolve_source_name(config: CameraConfig, settings: IngestSettings | None = 
         return config.source
     if settings is not None and settings.backend:
         return settings.backend
-    return envs.INGEST_BACKEND.get()
+    return envs.SHIPINFER_INGEST_BACKEND
 
 
 def resolve_hwaccel(config: CameraConfig, settings: IngestSettings | None = None) -> bool:
@@ -41,7 +41,7 @@ def resolve_hwaccel(config: CameraConfig, settings: IngestSettings | None = None
         return config.hwaccel
     if settings is not None and settings.hwaccel is not None:
         return settings.hwaccel
-    return envs.INGEST_HWACCEL.get()
+    return envs.SHIPINFER_INGEST_HWACCEL
 
 
 def resolve_transport(config: CameraConfig, settings: IngestSettings | None = None) -> str:
@@ -50,7 +50,7 @@ def resolve_transport(config: CameraConfig, settings: IngestSettings | None = No
         return config.transport
     if settings is not None and settings.transport is not None:
         return settings.transport
-    return envs.INGEST_RTSP_TRANSPORT.get()
+    return envs.SHIPINFER_INGEST_RTSP_TRANSPORT
 
 
 def resolve_latency_ms(config: CameraConfig, settings: IngestSettings | None = None) -> int:
@@ -59,18 +59,18 @@ def resolve_latency_ms(config: CameraConfig, settings: IngestSettings | None = N
         return config.latency_ms
     if settings is not None and settings.latency_ms is not None:
         return settings.latency_ms
-    return envs.INGEST_LATENCY_MS.get()
+    return envs.SHIPINFER_INGEST_LATENCY_MS
 
 
 def resolve_read_timeout_s(settings: IngestSettings | None = None) -> float:
     """How long a single read may block. Fleet-wide; not a per-camera knob."""
     if settings is not None and settings.read_timeout_ms is not None:
         return settings.read_timeout_ms / 1000.0
-    return envs.INGEST_READ_TIMEOUT_S.get()
+    return envs.SHIPINFER_INGEST_READ_TIMEOUT_S
 
 
 def resolve_open_timeout_s(settings: IngestSettings | None = None) -> float:
     """How long a connection attempt may take before it counts as a failure."""
     if settings is not None and settings.open_timeout_ms is not None:
         return settings.open_timeout_ms / 1000.0
-    return envs.INGEST_OPEN_TIMEOUT_S.get()
+    return envs.SHIPINFER_INGEST_OPEN_TIMEOUT_S
