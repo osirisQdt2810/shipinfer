@@ -96,6 +96,12 @@ HERE_CHAIN = POOL_CHAIN.replace("{impl: pool", "{impl: run-engine-here").replace
     "name: pool_chain", "name: here_chain"
 )
 
+#: A chain that needs image ops and *no* model pool (:class:`DetectWithOpsAndNoPool`) -- the
+#: shape of the first `crop` element, and the only combination the shipped set cannot make.
+OPS_ONLY_CHAIN = POOL_CHAIN.replace(
+    "{impl: pool, model: detector, params: {input: images}}", "{impl: run-engine-ops-only}"
+).replace("name: pool_chain", "name: ops_only_chain")
+
 #: What happened, in order, across the engine double and the runner double. One list rather
 #: than a counter per object because the failure this file exists to prevent is an *ordering*
 #: one -- a pool started after the chain opened against it, or stopped while a worker was
@@ -213,6 +219,21 @@ class DetectHere(DetectElsewhere):
         """
         if context.models is None:
             raise ConfigurationError(f"{self.name!r} was opened with no model pool")
+
+
+@registry_for(ElementKind.DETECT).register("run-engine-ops-only")
+class DetectWithOpsAndNoPool(MockDetect):
+    """An element that pre-processes and runs no model in this process.
+
+    The one combination no shipped element makes today, and the one the comment in
+    ``run.py`` promises is handled: ``needs_image_ops`` without ``needs_model``. Phase C's
+    ``crop`` element is it -- it letterboxes or crops for something downstream and asks this
+    process's pool for nothing -- so the wiring it will land on is pinned here before it
+    exists rather than after it is found to be wrong.
+    """
+
+    needs_image_ops: ClassVar[bool] = True
+    needs_model: ClassVar[bool] = False
 
 
 @RUNNERS.register("recording-pool")
@@ -339,6 +360,11 @@ def detector_repository(tmp_path: Path) -> Path:
 @pytest.fixture()
 def mock_chain_file(tmp_path: Path) -> Path:
     return write_chain(tmp_path, MOCK_CHAIN)
+
+
+@pytest.fixture()
+def ops_only_chain_file(tmp_path: Path) -> Path:
+    return write_chain(tmp_path, OPS_ONLY_CHAIN)
 
 
 def topology_of(text: str) -> Topology:
@@ -625,6 +651,51 @@ class TestEveryWorkerThreadGetsItsOwnImageOps:
             thread.join(5.0)
 
         assert built.ops.assignments() == {0: 2, 1: 2, 2: 2, 3: 2}
+
+
+class TestAChainThatNeedsOpsAndNoPool:
+    """The two dependencies coming apart in the direction nothing ships yet.
+
+    `dependency_is_needed` asks its two questions separately precisely so this chain is
+    possible, and it is the shape of phase C's `crop` element. What it gets today is recorded
+    here rather than assumed, because the recording is the honest half: with no engine there
+    is no `DeviceManager`, so `get_thread_local_image_ops` binds no thread (ADR-002) and
+    claims no pinned pool, and the device list comes from what the operator pinned.
+
+    That is safe -- `TorchImageOps` and `NativeImageOps` are each constructed *with* their
+    device index and act on it rather than on the ambient current device -- and it is not the
+    full arrangement. Building a `DeviceManager` here to close the gap is the trade `run.py`
+    refuses on purpose (a CUDA primary context per visible GPU, ~200 MiB each, that nothing in
+    this process gives back), so the gap is documented at both ends and pinned here.
+    """
+
+    def test_it_resolves_ops_and_builds_no_engine_at_all(
+        self, ops_only_chain_file: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("shipinfer.engine.InferenceServer", RefusingEngine)
+        handed = object()
+        recorded: dict[str, Any] = {}
+
+        def fake_ops(provider, **kwargs: Any) -> object:
+            recorded.update(kwargs, provider=provider)
+            return handed
+
+        monkeypatch.setattr("shipinfer.runtime.ops.get_thread_local_image_ops", fake_ops)
+
+        # `--gpus 0,1` so the fallback has something to fall back to, and so `_fill_in_gpus`
+        # asks no driver: the whole point is that this path resolves a device list without an
+        # engine to read one off.
+        assert run(ops_only_chain_file, runner="recording-pool", gpus="0,1") == 0
+
+        (built,) = RecordingRunner.instances
+        assert built.models is None, "a chain that runs no model here was handed a pool"
+        assert built.ops is handed
+        assert recorded["devices"] == (0, 1), "the operator's `devices.visible_gpus`"
+        assert recorded["device_manager"] is None, (
+            "there is no engine, so there is no DeviceManager -- no thread is bound and no "
+            "staging pool is claimed. Documented at both ends; change this and change those"
+        )
+        assert recorded["memory"] is None
 
 
 class TestWhenNoPoolIsNeededNoneIsBuilt:

@@ -96,7 +96,13 @@ class ThreadLocalImageOps(ImageOps):
         self._devices = tuple(devices) or (0,)
         self._local = threading.local()
         self._lock = threading.Lock()
+        #: The round-robin cursor: how many device slots have been *handed out*, including to
+        #: builds that then failed. Advancing it on a failure is deliberate — a thread whose
+        #: construction raised retries onto the next device rather than back onto the one that
+        #: just refused it — which is why it is not the ledger. See :meth:`assignments`.
         self._assigned = 0
+        #: ``device -> delegates that exist``. Written after the factory returns, so a run
+        #: whose builds failed does not report a spread it does not have.
         self._per_device: dict[int, int] = {}
 
     @property
@@ -106,8 +112,16 @@ class ThreadLocalImageOps(ImageOps):
             with self._lock:
                 device = self._devices[self._assigned % len(self._devices)]
                 self._assigned += 1
-                self._per_device[device] = self._per_device.get(device, 0) + 1
+            # The factory is called with the lock released: it binds a CUDA context and may
+            # allocate a pinned pool, and holding a process-wide lock across that serialises
+            # every worker's first frame behind the slowest construction.
             ops = self._factory(device)
+            # Counted *after* the build, not before: a factory that raises used to leave the
+            # device credited with a delegate that does not exist, and `assignments()` is what
+            # a `-m multigpu` run is read for. "The spread is even" must not be true of a
+            # process where half the constructions failed.
+            with self._lock:
+                self._per_device[device] = self._per_device.get(device, 0) + 1
             self._local.ops = ops
             _LOG.info(
                 "thread %s preprocesses on device %d with %s",
@@ -161,7 +175,11 @@ class ThreadLocalImageOps(ImageOps):
         return self._ops.nms(boxes, scores, iou_threshold, score_threshold, max_output)
 
     def assignments(self) -> dict[int, int]:
-        """``device -> threads assigned`` — how a test proves the spread is a spread."""
+        """``device -> live delegates`` — how a test proves the spread is a spread.
+
+        Only successful builds are in here. A thread that has never touched the ops is not in
+        it either, because construction is lazy and there is nothing on that thread yet.
+        """
         with self._lock:
             return dict(self._per_device)
 
@@ -169,4 +187,6 @@ class ThreadLocalImageOps(ImageOps):
         return f"thread-local over devices {list(self._devices)}"
 
     def __repr__(self) -> str:
-        return f"<ThreadLocalImageOps devices={list(self._devices)} threads={self._assigned}>"
+        with self._lock:
+            built = sum(self._per_device.values())
+        return f"<ThreadLocalImageOps devices={list(self._devices)} threads={built}>"

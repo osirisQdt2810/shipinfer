@@ -282,6 +282,18 @@ def run(
             # to `(0,)` when that is empty -- on a host with no accelerator the delegate
             # degrades to `NumpyImageOps` and the index is never used, which is what keeps the
             # offline tier running the real element rather than a stubbed one.
+            #
+            # What that fallback does NOT do, stated because it is the founding bug's
+            # neighbourhood: with no engine there is no `DeviceManager`, so `device_manager=`
+            # is `None`, so no worker thread is bound (ADR-002) and no pinned staging pool is
+            # claimed. The threads still spread over the device list, and each delegate is
+            # *constructed with* its own index -- `TorchImageOps` and `NativeImageOps` both
+            # carry their device rather than reading the ambient current one -- so today it is
+            # unbound, not misplaced. The first chain that reaches it is the `crop` element
+            # named above; when one exists, it needs a `DeviceManager` here, and building one
+            # just for the device list is the trade this block already refuses. Pinned by
+            # `tests/cli/test_run_engine.py::TestAChainThatNeedsOpsAndNoPool` so the day it
+            # changes, it changes on purpose.
             from shipinfer.runtime.ops import get_thread_local_image_ops
 
             manager = getattr(engine, "devices", None)

@@ -56,7 +56,6 @@ from shipinfer.core.errors import (
 from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.request import ResponseFuture
 from shipinfer.core.settings import ServerSettings
-from shipinfer.core.types import Device
 from shipinfer.pipeline.graph import (
     FrameState,
     PipelineGraph,
@@ -64,13 +63,12 @@ from shipinfer.pipeline.graph import (
     StageStatus,
     build_perception_graph,
 )
-from shipinfer.pipeline.graph.ops import ThreadLocalImageOps, staging_owner
 from shipinfer.pipeline.metrics import PipelineMetrics
 from shipinfer.pipeline.reassembly import EVICTED, FrameCollector, FrameResult
 from shipinfer.pipeline.schema import PerceptionEvent
 from shipinfer.pipeline.sink import QueueFrameSink
 from shipinfer.pipeline.sinks import RESULT_SINKS, ResultSink
-from shipinfer.runtime.ops import ImageOps, get_image_ops
+from shipinfer.runtime.ops import ImageOps, get_thread_local_image_ops
 from shipinfer.scheduling.queues import QUEUES, BatchWindow, RequestQueue
 from shipinfer.scheduling.work import WorkItem
 
@@ -249,30 +247,24 @@ class PipelineRunner:
         makes the locked pages visible in ``stats()`` and releases them on ``close()``. It is
         passed down because ``runtime`` may not reach up into ``server`` — the layer that
         owns the memory is the layer that hands it out.
+
+        All of which is :func:`~shipinfer.runtime.ops.get_thread_local_image_ops`, and used to
+        be a second copy of it here. The one thing this caller does differently is ``claim=``:
+        it records each owner key so :meth:`stop` can release the page-locked pages, because a
+        runner that stops and starts within one process mints fresh keys every cycle. That is a
+        hook, not a reason for a second copy — the copies had already drifted in two places by
+        the time the third caller appeared.
         """
-        provider = self._settings.execution.provider
         manager = getattr(self._server, "devices", None)
-        devices = tuple(getattr(manager, "visible_gpus", ()) or (0,))
-        # `is not None` rather than truthiness, as everywhere else in this class: these are
-        # objects whose emptiness is not their absence.
-        memory = getattr(self._server, "memory", None)
-
-        def build(index: int) -> ImageOps:
-            accelerated = manager is not None and getattr(manager, "has_accelerator", False)
-            if accelerated:
-                # Called lazily, on the worker thread itself: a CUDA context belongs to the
-                # thread that created it, so binding from `start()` would bind the wrong one.
-                manager.bind_current_thread(Device.cuda(index))
-            # The owner key is per *thread*, not per device: several workers share a device
-            # in rotation, and one pool between two of them is one buffer between two DMAs.
-            staging = (
-                self._claim_staging(memory, staging_owner(index))
-                if accelerated and memory is not None
-                else None
-            )
-            return get_image_ops(provider, device_index=index, staging=staging)
-
-        return ThreadLocalImageOps(build, devices=devices)
+        return get_thread_local_image_ops(
+            self._settings.execution.provider,
+            devices=getattr(manager, "visible_gpus", ()) or (),
+            device_manager=manager,
+            # `is not None` rather than truthiness, as everywhere else in this class: these
+            # are objects whose emptiness is not their absence.
+            memory=getattr(self._server, "memory", None),
+            claim=self._claim_staging,
+        )
 
     # -- properties ----------------------------------------------------------------------
 

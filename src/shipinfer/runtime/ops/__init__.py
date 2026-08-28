@@ -22,7 +22,7 @@ the one call that wires it to a device manager and a pinned pool.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from shipinfer.core.logging import get_logger
@@ -37,7 +37,9 @@ from shipinfer.runtime.ops.thread_local import ThreadLocalImageOps, staging_owne
 from shipinfer.runtime.ops.torch_ops import TorchImageOps
 from shipinfer.runtime.platform import is_available
 
-if TYPE_CHECKING:  # a type only; a bare `import shipinfer.runtime.ops` stays cheap
+if TYPE_CHECKING:  # types only; a bare `import shipinfer.runtime.ops` stays cheap
+    from shipinfer.runtime.device import DeviceManager
+    from shipinfer.runtime.memory import MemoryPool
     from shipinfer.runtime.memory.staging import PinnedStagingPool
 
 __all__ = [
@@ -102,8 +104,9 @@ def get_thread_local_image_ops(
     provider: ExecutionProvider = ExecutionProvider.AUTO,
     *,
     devices: Sequence[int] = (),
-    device_manager: Any = None,
-    memory: Any = None,
+    device_manager: DeviceManager | None = None,
+    memory: MemoryPool | None = None,
+    claim: Callable[[Any, str], PinnedStagingPool] | None = None,
 ) -> ThreadLocalImageOps:
     """Image ops for a caller with several worker threads: one instance each, spread over GPUs.
 
@@ -118,7 +121,8 @@ def get_thread_local_image_ops(
     So a caller that walks a chain on ``pipeline.workers`` threads asks for this instead. It
     is one call rather than the same twenty lines in every composition root: ``shipinfer run``,
     ``shipinfer-shard`` and :class:`~shipinfer.pipeline.PipelineRunner` all need exactly this,
-    and the third one predates it.
+    and the third one predates it — it kept its own copy for one line, which is now the
+    ``claim`` hook, because two copies of this wiring drift and the drift is silent.
 
     Args:
         provider: the execution provider each delegate is resolved under.
@@ -136,14 +140,29 @@ def get_thread_local_image_ops(
             thread claims its own pinned staging pool from it, keyed by :func:`staging_owner`
             — per *thread*, not per device, because several workers share a device in rotation
             and one pool between two of them is one buffer between two DMAs.
+        claim: how a pool is taken out of ``memory``, defaulting to
+            :meth:`~shipinfer.runtime.memory.MemoryPool.staging_for`. The one thing a caller
+            that stops and restarts in-process needs to change: it passes a bound method that
+            calls ``staging_for`` *and records the owner key*, so ``stop()`` can hand the
+            page-locked pages back (see the Note). Called ``(memory, owner)`` on the worker
+            thread that owns the key, and only when a pool would have been claimed at all.
 
     Note:
         The pools are released when the :class:`~shipinfer.runtime.memory.MemoryPool` closes.
         A caller that stops and restarts within one process mints fresh keys each cycle and
-        must release them itself, which is what
-        :meth:`~shipinfer.pipeline.PipelineRunner._build_ops` does with its own copy of this
-        wiring; a composition root that builds one runner for the life of the process does
-        not need to.
+        must release them itself: that is what ``claim`` exists for, and
+        :meth:`~shipinfer.pipeline.PipelineRunner._build_ops` is the caller that passes one. A
+        composition root that builds one runner for the life of the process does not need to.
+
+        With ``device_manager=None`` nothing is bound and no pool is claimed — the delegates
+        still spread over ``devices``, and each is *constructed with* its index, which is what
+        :class:`TorchImageOps` and :class:`NativeImageOps` actually act on (both carry their
+        own device rather than reading the ambient current one). It is safe and it is not the
+        full arrangement: ADR-002's binding is missing, so a delegate that later reached for
+        the current device would find the wrong one. Every caller that has an accelerator has
+        a :class:`~shipinfer.runtime.device.DeviceManager` to pass, and the one path that does
+        not — a chain needing ops but no model pool, in ``cli/commands/run.py`` — says so at
+        its call site.
     """
     spread = tuple(devices) or (0,)
     # `is not None` and an explicit attribute read, so a test double that is not a real
@@ -154,12 +173,15 @@ def get_thread_local_image_ops(
 
     def build(device_index: int) -> ImageOps:
         if accelerated:
+            # Called lazily, on the worker thread itself: a CUDA context belongs to the thread
+            # that created it, so binding from the composition root would bind the wrong one.
             device_manager.bind_current_thread(Device.cuda(device_index))
-        staging = (
-            memory.staging_for(staging_owner(device_index))
-            if accelerated and memory is not None
-            else None
-        )
+        staging = None
+        if accelerated and memory is not None:
+            # The owner key is per *thread*, not per device: several workers share a device in
+            # rotation, and one pool between two of them is one buffer between two DMAs.
+            owner = staging_owner(device_index)
+            staging = memory.staging_for(owner) if claim is None else claim(memory, owner)
         return get_image_ops(provider, device_index=device_index, staging=staging)
 
     return ThreadLocalImageOps(build, devices=spread)

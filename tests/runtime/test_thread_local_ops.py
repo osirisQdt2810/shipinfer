@@ -18,6 +18,7 @@ import threading
 import numpy as np
 import pytest
 
+from shipinfer.core.errors import DeviceError
 from shipinfer.runtime.ops import NormalizeParams
 from shipinfer.runtime.ops.numpy_ops import NumpyImageOps
 from shipinfer.runtime.ops.thread_local import ThreadLocalImageOps, staging_owner
@@ -130,6 +131,55 @@ class TestPreprocessingIsSpreadAcrossDevices:
         ops = ThreadLocalImageOps(CountingOps, devices=())
         assert ops.on_device is False
         assert ops.assignments() == {0: 1}
+
+
+class TestTheLedgerCountsDelegatesThatExist:
+    """``assignments()`` is what a ``-m multigpu`` run is read for, so it must not overcount.
+
+    The ledger used to be written *before* the factory ran, so a build that raised still
+    credited its device with a delegate that does not exist -- and "the spread is even" then
+    reads as true of a process where half the constructions failed. There is nothing else to
+    catch that: a failed build raises into the worker, which dies, and the number left behind
+    is the only account of what happened.
+    """
+
+    def test_a_failed_build_leaves_the_device_uncredited(self):
+        def explode(device_index: int):
+            raise DeviceError(f"no context on cuda:{device_index}")
+
+        ops = ThreadLocalImageOps(explode, devices=(0, 1))
+
+        for _ in range(3):
+            with pytest.raises(DeviceError):
+                ops.on_device  # noqa: B018 - the first touch is the build
+
+        assert ops.assignments() == {}, "a delegate that was never built was counted"
+        assert "threads=0" in repr(ops)
+
+    def test_the_cursor_still_moves_so_a_retry_lands_on_the_next_device(self):
+        """The failure is not free: the *cursor* advances, and deliberately.
+
+        A thread whose construction raised retries onto the next device rather than back onto
+        the one that just refused it — on a box with one sick GPU that is the difference
+        between a worker that comes up and a worker that cannot. What must not move is the
+        ledger, which is the assertion above and the second one here.
+        """
+        attempted: list[int] = []
+
+        def explode_once(device_index: int):
+            attempted.append(device_index)
+            if len(attempted) == 1:
+                raise DeviceError("the first device said no")
+            return CountingOps(device_index)
+
+        ops = ThreadLocalImageOps(explode_once, devices=(0, 1))
+
+        with pytest.raises(DeviceError):
+            ops.on_device  # noqa: B018 - the failing build
+        assert ops.on_device is False  # the retry, on the same thread
+
+        assert attempted == [0, 1]
+        assert ops.assignments() == {1: 1}, "only the delegate that exists is counted"
 
 
 class TestStagingOwners:
@@ -274,6 +324,49 @@ class TestTheCompositionRootsGetItInOneCall:
         built.on_device  # noqa: B018 - first touch builds the delegate
 
         assert asked == [(3, None)]
+
+    def test_a_caller_that_must_release_its_pools_claims_them_through_its_own_hook(
+        self, monkeypatch
+    ):
+        """``claim=`` is the one line :class:`~shipinfer.pipeline.PipelineRunner` needs.
+
+        It stops and starts inside one process, and the owner keys embed the worker's thread
+        ident, so every cycle mints fresh ones: without recording them, ``stop()`` has nothing
+        to release and each cycle strands its pinned pages for the server's life. That is a
+        hook rather than a second copy of this wiring — the second copy had already drifted
+        from this one in two places before it was removed.
+        """
+        from shipinfer.runtime import ops as ops_module
+
+        class FakeManager:
+            has_accelerator = True
+
+            def bind_current_thread(self, device) -> None:
+                pass
+
+        class FakeMemory:
+            def staging_for(self, owner: str) -> str:  # pragma: no cover - `claim` wins
+                raise AssertionError("the hook was bypassed")
+
+        recorded: list[tuple[object, str]] = []
+
+        def claim(memory, owner: str) -> str:
+            recorded.append((memory, owner))
+            return owner
+
+        monkeypatch.setattr(
+            ops_module,
+            "get_image_ops",
+            lambda provider, *, device_index=0, staging=None: NumpyImageOps(),
+        )
+        memory = FakeMemory()
+        built = ops_module.get_thread_local_image_ops(
+            devices=(1,), device_manager=FakeManager(), memory=memory, claim=claim
+        )
+        built.on_device  # noqa: B018 - first touch builds the delegate
+
+        assert [owner for _, owner in recorded] == [staging_owner(1)]
+        assert recorded[0][0] is memory, "the hook is handed the pool it claims out of"
 
     def test_an_accelerated_manager_binds_the_thread_and_claims_its_own_pool(self, monkeypatch):
         """One instance per thread is only half the fix; the pinned pool has to split too.
