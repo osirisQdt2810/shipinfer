@@ -100,6 +100,10 @@ class CameraConfig(BaseModel):
     #: scheduler's priority lanes. This is the customisation a generic server has no word
     #: for (ADR-005). Read by the `FrameSink` adapter, not by `shipinfer.ingest`: a frame is
     #: data, a priority is policy, and the decode path should not know about lanes.
+    #:
+    #: Written **by name** — ``priority: tracking_critical``, in any case — or as the number
+    #: it has always taken; :meth:`~shipinfer.core.request.Priority.parse` is the vocabulary,
+    #: and it is the same one ``POST /streams`` matches.
     priority: Priority = Priority.NORMAL
     #: Override the model these frames are submitted to; ``None`` inherits. Also read by the
     #: sink adapter rather than by this package.
@@ -121,6 +125,24 @@ class CameraConfig(BaseModel):
     def _camera_id_is_usable(cls, value: str) -> str:
         """:func:`usable_camera_id` is the rule; this is the last layer that applies it."""
         return usable_camera_id(value)
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def _priority_is_a_band_name_or_a_number(cls, value: object) -> object:
+        """``priority: tracking_critical`` is what the docstrings promised; this makes it true.
+
+        A bare ``Priority`` annotation gets pydantic's ``IntEnum`` coercion, which takes
+        numbers only — so the band *name* an operator reads in this file's own comment, in
+        ``launch/control.py`` and in ``api/schemas.py`` was a start-up ``ValidationError``,
+        and ``priority: 0`` was the only spelling of the highest lane that a config file
+        could carry. The HTTP door has matched names since it existed; the file that
+        configures the fleet is the door that had to catch up.
+
+        :meth:`~shipinfer.core.request.Priority.parse` is the rule, shared with
+        :meth:`shipinfer.api.schemas.StreamRequest._band_name_is_case_insensitive`, so an
+        unknown band is refused in the same words wherever an operator wrote it.
+        """
+        return Priority.parse(value)
 
     @field_validator("uri")
     @classmethod

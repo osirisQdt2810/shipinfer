@@ -27,6 +27,7 @@ from collections.abc import Container
 from typing import Any, get_args
 
 import pytest
+from pydantic import ValidationError as SchemaValidationError
 
 pytest.importorskip("fastapi")
 pytest.importorskip("httpx")
@@ -43,6 +44,7 @@ from shipinfer.core.errors import (
     ServerStateError,
 )
 from shipinfer.core.request import Priority
+from shipinfer.core.settings.ingest import CameraConfig
 from shipinfer.launch.control import CameraSpec
 
 #: A launcher's report: where each camera was placed, with the shard's own per-camera detail
@@ -366,6 +368,28 @@ class TestAddingACamera:
 
         assert response.status_code == 422
         assert "priority" in response.text
+
+    def test_both_doors_refuse_an_unknown_band_in_the_same_words(self, client) -> None:
+        """A camera arrives here or in `ingest.cameras`, and one lane vocabulary owns both.
+
+        The two doors used to disagree about more than wording: this one had always matched
+        band *names*, while `CameraConfig.priority` was a bare `Priority` annotation whose
+        `IntEnum` coercion took the numbers only — so `priority: tracking_critical`, the
+        spelling three docstrings in `src/` tell an operator to write, was a start-up
+        failure. Both now call `Priority.parse`, and the cheapest way to keep them calling
+        the *same* rule is to assert that a band neither knows is refused in one set of
+        words. Reimplementing the check here would pass this file's own tests forever while
+        the config door drifted.
+        """
+        with pytest.raises(SchemaValidationError) as excinfo:
+            CameraConfig(camera_id="gate", uri="rtsp://x", priority="urgent")
+        configured = excinfo.value.errors()[0]["msg"]
+
+        response = client.post("/streams", json={"url": "rtsp://host", "priority": "urgent"})
+
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["msg"] == configured
+        assert "tracking_critical" in configured, configured
 
     def test_the_published_schema_offers_the_names_the_validator_accepts(self, client) -> None:
         """`/openapi.json` and the 422 above must describe the same field.
