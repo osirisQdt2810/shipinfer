@@ -198,6 +198,26 @@ class TestTrackletsAreAnExtension:
         assert json.loads(self.tracked().to_json())["ship_track_id_vec"] == [None]
 
 
+class TestTheSchemaIsPortable:
+    """`schema.py` is the module a consumer copies out wholesale — stdlib only, enforced."""
+
+    def test_every_module_scope_import_is_stdlib(self) -> None:
+        import ast
+        import sys
+        from pathlib import Path
+
+        path = Path(__file__).resolve().parents[2] / "src/shipinfer/core/events/schema.py"
+        tree = ast.parse(path.read_text())
+        roots: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                roots.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                roots.add((node.module or "").split(".")[0])
+        foreign = sorted(r for r in roots if r and r not in sys.stdlib_module_names)
+        assert not foreign, f"schema.py stopped being copy-out-able: {foreign}"
+
+
 class TestTheOldImportPathStillResolves:
     """``pipeline/`` keeps working off the moved type, rather than owning a second copy.
 

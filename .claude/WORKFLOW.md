@@ -33,7 +33,7 @@ pytest                                  # the same selection, but WITH your GPUs
 pytest tests/scheduling -q              # one area
 pytest -q -m gpu                        # real devices
 pytest -q -m multigpu                   # the balancing evidence (needs >= 2 GPUs)
-pytest -p tests.plugins.mask_shipvision # the CI-shaped run: `3rdparty/shipvision` hidden
+python -m pytest -p tests.plugins.mask_shipvision # the CI-shaped run: `3rdparty/shipvision` hidden
 
 ruff check src tests scripts
 black --check src tests scripts

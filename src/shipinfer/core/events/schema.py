@@ -1,11 +1,12 @@
 """The perception event: one frame's finished answer, as the wire and the file see it.
 
-Schema v4: per-object parallel arrays (``*_bbox_vec``, ``*_track_id_vec``,
-``*_global_id_vec``, ``*_feature_vec``) split by class, plus frame identity
-(``camera_id``, ``image_id``, ``sub_id``), geometry (``img_width/height/fps``) and
-``missing_stages`` — a partial frame says so instead of reading as an empty complete one.
-Stdlib only, by construction and by test (``TestTheSchemaIsPortable``): this module is what
-a consumer on another machine may copy out wholesale, so it must drag nothing with it.
+Schema v3: per-object parallel arrays (``*_bbox_vec``, ``*_track_id_vec``,
+``*_feature_vec``) split by class, plus frame identity (``camera_id``, ``image_id``,
+``sub_id``), geometry (``img_width/height/fps``) and ``missing_stages`` — a partial frame
+says so instead of reading as an empty complete one. Why every v1 key keeps its name, type
+and people-only meaning (a deployed ``motservice`` must need no rebuild):
+``docs/design/event-schema.md``. Stdlib only, by construction and by test
+(``TestTheSchemaIsPortable``): a consumer may copy this module out wholesale.
 ``PerceptionEvent.build`` is the one constructor; ``pipeline/schema.py`` re-exports for the
 old spelling.
 """

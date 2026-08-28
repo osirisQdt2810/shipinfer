@@ -19,10 +19,12 @@ __all__ = ["as_embedding"]
 
 
 def as_embedding(row: np.ndarray) -> tuple[float, ...]:
-    """One detection row's vector as the schema's plain-float list, or ``None``.
+    """One detection row's vector as the schema's plain-float list.
 
-    The single tolist seam (B1): every publisher of ``*_feature_vec`` converts here, so a
-    dtype or NaN rule changes in one place. ``None`` means "this row was never embedded" —
-    distinct from an empty vector, which would read as an embedder that returned nothing.
+    The single conversion seam: every publisher of ``*_feature_vec`` goes through here, so
+    the dtype rule changes in one place. ``tolist()`` and not a generator, because a
+    half-consumed generator serialises as its repr; no ``.astype(float)`` first, because
+    ``tolist()`` already yields Python floats and the copy would be pure cost. This
+    spelling has been written and removed twice — that is why it is a function.
     """
     return tuple(np.asarray(row).reshape(-1).tolist())

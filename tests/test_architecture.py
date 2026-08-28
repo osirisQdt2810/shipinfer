@@ -353,7 +353,7 @@ class TestImportIsCheap:
         files = sorted((SRC / "topology").rglob("*.py"))
         assert files, "topology package not found — this check is scanning nothing"
         for path in files:
-            visit(ast.parse(path.read_text()), path.name)
+            visit(ast.parse(path.read_text()), str(path.relative_to(SRC)))
         assert not offenders, offenders
 
 
