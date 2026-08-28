@@ -439,6 +439,12 @@ class InprocessRunner(Runner):
         side of a ``stop()`` left a brand-new manager, with a live decoder thread in it, on a
         runner that had already been torn down. Nothing stops that thread afterwards.
 
+        **A refusal leaves the priority table exactly as it found it.** The launcher's band
+        has to be recorded before :meth:`_camera_config` reads it back, so it is recorded and
+        then rolled back by :meth:`_restore_band` if the add raises -- every refusal below
+        arrives after that write, and :meth:`_priority_for` is consulted per frame, so a band
+        left behind by a refused add would re-lane a camera that is already running.
+
         Raises:
             ServerStateError: this runner is not running -- before the first ``start()``, or
                 because a ``stop()`` on another thread got here first -- or the fleet forgot
@@ -459,8 +465,20 @@ class InprocessRunner(Runner):
                     "closed queue -- call start() first"
                 )
             manager = self._ingest()
+            # The band is recorded first because `_camera_config` reads it back (the record
+            # and the lane are one resolution), and undone if the placement is refused --
+            # `_placed_bands` is read per frame by `_priority_for`, so a band left behind by
+            # an add that raised would move a *running* camera's lane on the strength of a
+            # request the server rejected. `None` is a sound "there was none" here: the table
+            # never holds `None`, which is the invariant `_priority_for`'s `is not None`
+            # already rests on.
+            previous = self._placed_band(camera.camera_id)
             self._admit_at(camera)
-            manager.add_camera(self._camera_config(camera))
+            try:
+                manager.add_camera(self._camera_config(camera))
+            except BaseException:
+                self._restore_band(camera.camera_id, previous)
+                raise
 
     def remove_camera(self, camera_id: str, *, timeout_s: float = 5.0) -> bool:
         """Stop and forget one camera.
@@ -704,6 +722,41 @@ class InprocessRunner(Runner):
                 self._placed_bands.pop(camera.camera_id, None)
             else:
                 self._placed_bands[camera.camera_id] = camera.priority
+
+    def _placed_band(self, camera_id: str) -> Priority | None:
+        """The band a placement has recorded for this camera, or ``None`` if none has.
+
+        Separate from :meth:`_priority_for`, which answers what *lane* a camera admits into
+        by falling back through :attr:`_configured`; this one answers only what
+        :attr:`_placed_bands` holds, because that is the single value
+        :meth:`_restore_band` has to be able to put back.
+        """
+        with self._priority_lock:
+            return self._placed_bands.get(camera_id)
+
+    def _restore_band(self, camera_id: str, previous: Priority | None) -> None:
+        """Put :attr:`_placed_bands` back the way :meth:`_placed_band` found it.
+
+        The undo half of :meth:`_admit_at`, and the reason :meth:`add_camera` can record a
+        band before the placement exists. ``IngestManager.add_camera`` refuses a duplicate id
+        and a camera the fleet forgot while it was starting, and both refusals arrive *after*
+        the band was written -- so without this a ``POST /streams`` naming a camera that is
+        already running would answer ``400`` and still move that camera's lane for the rest
+        of its life, and an id-less ``POST`` that lost the minting race would silently re-band
+        a camera belonging to somebody else behind a ``201`` (``api/streams.py`` re-mints on
+        exactly that refusal). Restoring is what keeps :meth:`_do_submit`'s "the answer cannot
+        change under a running camera" true.
+
+        ``previous is None`` means the camera had no placed band, so the entry is popped
+        rather than written: :attr:`_placed_bands` never stores ``None``, because
+        :meth:`_admit_at` pops for a spec that carries no band. Never ``if previous:`` --
+        :attr:`~shipinfer.core.request.Priority.TRACKING_CRITICAL` is ``0`` (ADR-005).
+        """
+        with self._priority_lock:
+            if previous is None:
+                self._placed_bands.pop(camera_id, None)
+            else:
+                self._placed_bands[camera_id] = previous
 
     def _ingest(self) -> IngestManager:
         """This cycle's ingest manager, built on first use.
@@ -1134,7 +1187,9 @@ class InprocessRunner(Runner):
         shared one lane and ``priority:`` in the ingest config applied to nothing: a camera
         watching a restricted area queued behind an idle one, which is the exact customisation
         ADR-005 says a generic server cannot express. One dict lookup per item, no allocation,
-        and the answer cannot change under a running camera.
+        and the answer cannot change under a running camera -- :meth:`add_camera` rolls its
+        band write back when the placement is refused, so the only things that move a band are
+        a placement that took and the removal that ends it.
 
         Raises:
             QueueFullError: this camera's lane is full and the policy rejects. Propagated

@@ -36,7 +36,11 @@ from typing import Any, ClassVar
 import numpy as np
 import pytest
 
-from shipinfer.core.errors import ConfigurationError, ServerStateError
+from shipinfer.core.errors import (
+    ConfigurationError,
+    DuplicateCameraError,
+    ServerStateError,
+)
 from shipinfer.core.request import Priority
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.settings.ingest import CameraConfig
@@ -838,6 +842,82 @@ class TestThePriorityBandComesFromTheCameraConfig:
 
         assert queue.bands_since(mark, "cam-x") == {Priority.NORMAL}
         assert sources.band_of("cam-x") is Priority.NORMAL
+
+    def test_a_refused_add_does_not_re_band_the_camera_that_is_already_running(self) -> None:
+        """A refusal must not change a lane. The band is recorded before the placement is
+        real -- ``_camera_config`` reads it back -- so an add that is *rejected* used to leave
+        it written, and ``_priority_for`` is asked per frame.
+
+        The door is ordinary: ``POST /streams {"camera_id": "cam-x", "priority":
+        "tracking_critical"}`` for an id that is already running answers ``400``
+        (``api/streams.py`` re-raises the duplicate when the caller named the id), and the
+        running camera was nonetheless promoted into the critical lane from the next frame
+        onward -- a lane taken from every other camera on the fair queue, granted by a request
+        the server refused. That is the ADR-005 inversion arriving through the error path.
+
+        Read over items admitted **after** the refusal, because the pre-refusal ones are
+        legitimately at the first placement's band and would answer the wrong question.
+        """
+        chain = load()
+        queue = RecordingQueue("recording", 64)
+        # The fleet-shard shape: nothing but the spec can name a band here, so what the queue
+        # reports after the refusal is the placement's own record and not a config fallback.
+        runner = InprocessRunner(
+            chain,
+            settings=settings(),
+            queue=queue,
+            source_factory=scripted(frames=64, finite=False),
+        )
+        runner.start()
+        try:
+            runner.add_camera(CameraSpec("cam-x", "injected://x", priority=Priority.BACKGROUND))
+            assert until(lambda: queue.band_of("cam-x")), queue.bands
+
+            mark = len(queue.bands)
+            with pytest.raises(DuplicateCameraError, match="already running"):
+                runner.add_camera(
+                    CameraSpec("cam-x", "injected://again", priority=Priority.TRACKING_CRITICAL)
+                )
+            assert until(lambda: queue.bands_since(mark, "cam-x")), queue.bands
+        finally:
+            runner.stop(timeout_s=5.0)
+
+        assert runner.cameras == ()
+        assert queue.bands_since(mark, "cam-x") == {Priority.BACKGROUND}
+
+    def test_a_refused_add_with_no_band_does_not_erase_the_running_bands(self) -> None:
+        """The mirror case, and the one that ends in a ``201``.
+
+        A spec carrying ``None`` means "leave the band to the deployment", so ``_admit_at``
+        *pops* the placed entry -- correct for a placement that happens, wrong for one that is
+        refused. Two id-less ``POST /streams`` racing in ``_mint`` is how it arrives without
+        anybody naming the camera: the loser's spec has already popped the winner's band, and
+        ``api/streams.py`` re-mints and answers ``201``, so nothing anywhere reports that a
+        third party's ``tracking_critical`` camera was just dropped to ``normal``.
+        """
+        chain = load()
+        queue = RecordingQueue("recording", 64)
+        runner = InprocessRunner(
+            chain,
+            settings=settings(),
+            queue=queue,
+            source_factory=scripted(frames=64, finite=False),
+        )
+        runner.start()
+        try:
+            runner.add_camera(
+                CameraSpec("cam-x", "injected://x", priority=Priority.TRACKING_CRITICAL)
+            )
+            assert until(lambda: queue.band_of("cam-x")), queue.bands
+
+            mark = len(queue.bands)
+            with pytest.raises(DuplicateCameraError, match="already running"):
+                runner.add_camera(CameraSpec("cam-x", "injected://again", priority=None))
+            assert until(lambda: queue.bands_since(mark, "cam-x")), queue.bands
+        finally:
+            runner.stop(timeout_s=5.0)
+
+        assert queue.bands_since(mark, "cam-x") == {Priority.TRACKING_CRITICAL}
 
 
 # -- the control plane's three methods -------------------------------------------------------

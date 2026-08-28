@@ -115,7 +115,8 @@ given a fifty-first camera by anything but a restart.
   configured had nowhere to be resolved from once the camera crossed the process boundary;
   `cli/commands/run.py` now reads it where it is still true. On the runner the launcher's band
   and the configured table are two dicts with two lifetimes, so a removed camera's lane does
-  not outlive it (`runners/inprocess.py::_priority_for`).
+  not outlive it (`runners/inprocess.py::_priority_for`) — and a placement that is *refused*
+  restores the band it recorded, so a 400 cannot re-lane a camera that is already running.
 - **The camera ids are minted by one helper.** `launch/control.py::mint_camera_id` is what
   `--inputs` uses and what a `POST` with no `camera_id` uses (lowest free index), because two
   spellings of "the next camera" collide on a deployment that uses both doors.
