@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import importlib
 import textwrap
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -147,6 +148,22 @@ class RecordingRunner(Runner):
 
     def _do_submit(self, item: ChainItem) -> ResponseFuture:  # pragma: no cover - unused
         raise NotImplementedError
+
+
+@RUNNERS.register("recording-pool-cameraless")
+class CameralessPoolRunner(RecordingRunner):
+    """A runner that opens its chain here and owns no ingest plane.
+
+    The two ``ClassVar``s are independent, and this is the combination that makes the order of
+    the two questions observable: a pool would be built for it, and the cameras it was given
+    have to be refused *before* that happens. No production runner is shaped this way yet --
+    ``inprocess`` is the only ``needs_model_pool`` runner and it manages cameras too -- which
+    is why the case exists as a double rather than as a name from the registry.
+    """
+
+    name: ClassVar[str] = "recording-pool-cameraless"
+    manages_cameras: ClassVar[bool] = False
+    needs_model_pool: ClassVar[bool] = True
 
 
 @pytest.fixture(autouse=True)
@@ -369,6 +386,56 @@ class TestWhenThePoolWillNotStart:
         assert not RecordingRunner.instances[0].is_running
 
 
+#: What an arming function returns: the keyword arguments ``run()`` needs for its case.
+#: A callable rather than a table of settings because each refusal is armed differently --
+#: one patches an import, one sets an environment variable, one changes the ``--runner``.
+Arm = Callable[[pytest.MonkeyPatch, Path], dict[str, Any]]
+
+
+def arm_a_host_without_the_server_extra(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> dict[str, Any]:
+    """``--http`` where ``pip install "shipinfer[server]"`` was never run.
+
+    The one an operator actually hits. Asked inside ``_wait`` -- after ``built.start()`` --
+    it cost a fleet sixteen spawned shards and a full shutdown to learn it.
+    """
+    monkeypatch.setattr(
+        "shipinfer.api.require_server_extra",
+        lambda: (_ for _ in ()).throw(ConfigurationError("install shipinfer[server]")),
+    )
+    return {"http": True}
+
+
+def arm_an_unreadable_camera_db(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> dict[str, Any]:
+    """``ingest.camera_db`` naming a file that is not there.
+
+    ``cameras_to_place`` reads it off the disk (``ingest/camera/db.py`` raises for a missing
+    file, unparseable JSON or a duplicate id), and it is a fact about the settings tree that
+    needs no accelerator to establish. The environment variable is how an operator sets it and
+    the only way in through ``run()``'s signature, which takes no ingest keyword.
+    """
+    monkeypatch.setenv("SHIPINFER_INGEST__CAMERA_DB", str(tmp_path / "no-such-fleet.json"))
+    return {}
+
+
+def arm_a_runner_that_manages_no_cameras(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> dict[str, Any]:
+    """Cameras on a runner that owns no ingest plane, over a chain that wants a pool.
+
+    ``refuse_if_it_manages_no_cameras`` reads two ``ClassVar``s off the registered class --
+    ``manages_cameras`` and ``name`` -- so it needs no runner instance, and therefore no
+    engine either. It is the combination that makes the ordering matter:
+    :class:`CameralessPoolRunner` is the one runner in the registry that would build a pool
+    *and* refuse the cameras, which in production is nothing today and is exactly the shape a
+    service-style runner would have.
+    """
+    return {"runner": CameralessPoolRunner.name, "inputs": ["a.mp4"]}
+
+
 class TestTheGpuGoesBackWhateverFails:
     """One guard over the whole bring-up, because every line of it can leak an engine.
 
@@ -417,7 +484,13 @@ class TestTheGpuGoesBackWhateverFails:
         with pytest.raises(KeyboardInterrupt):
             run(pool_chain_file, runner="recording-pool")
 
-        assert EVENTS[-1] == "engine.stop"
+        # The whole sequence, not just its last entry: `EVENTS[-1] == "engine.stop"` also
+        # holds when the guard stops the engine *twice*, which is the one property this class
+        # exists to pin. `runner.stop` is there for the sibling test's reason -- `Runner.start`
+        # catches `BaseException` and unwinds under `contextlib.suppress` (`runners/base.py`),
+        # so a `KeyboardInterrupt` closes the elements it had opened exactly as a
+        # `RuntimeError` does.
+        assert EVENTS == ["engine.start", "runner.start", "runner.stop", "engine.stop"]
         assert RecordingEngine.instances[0].stopped
 
     def test_a_runner_whose_stop_raises_still_gives_the_pool_back(
@@ -439,8 +512,17 @@ class TestTheGpuGoesBackWhateverFails:
         assert EVENTS == ["engine.start", "runner.start", "wait", "runner.stop", "engine.stop"]
         assert RecordingEngine.instances[0].stopped
 
+    @pytest.mark.parametrize(
+        ("arm", "message"),
+        [
+            (arm_a_host_without_the_server_extra, r"shipinfer\[server\]"),
+            (arm_an_unreadable_camera_db, "does not exist"),
+            (arm_a_runner_that_manages_no_cameras, "manages no cameras"),
+        ],
+        ids=["http-without-the-extra", "unreadable-camera-db", "runner-manages-no-cameras"],
+    )
     def test_a_refusal_the_command_can_make_without_a_gpu_builds_no_engine(
-        self, pool_chain_file: Path, monkeypatch
+        self, pool_chain_file: Path, tmp_path: Path, monkeypatch, arm: Arm, message: str
     ) -> None:
         """The cheap half: construction is not free, so it happens after the cheap refusals.
 
@@ -450,16 +532,17 @@ class TestTheGpuGoesBackWhateverFails:
         reaching ``_release``. So a refusal that needs no accelerator to make must be made
         before the constructor runs, and the guard above cannot substitute for that ordering.
 
-        ``--http`` on a host with no ``server`` extra is the one an operator actually hits.
+        One case per refusal that was moved above the constructor, because they are moved
+        independently and a revert of any one of them costs the same 200 MiB per device. Each
+        is pinned on its own line: with only the ``--http`` case here, ``cameras_to_place``
+        could be dropped back below ``InferenceServer(settings)`` and the whole suite stayed
+        green.
         """
         monkeypatch.setattr("shipinfer.engine.InferenceServer", RefusingEngine)
-        monkeypatch.setattr(
-            "shipinfer.api.require_server_extra",
-            lambda: (_ for _ in ()).throw(ConfigurationError("install shipinfer[server]")),
-        )
+        keywords: dict[str, Any] = {"runner": "recording-pool", **arm(monkeypatch, tmp_path)}
 
-        with pytest.raises(ConfigurationError, match=r"shipinfer\[server\]"):
-            run(pool_chain_file, runner="recording-pool", http=True)
+        with pytest.raises(ConfigurationError, match=message):
+            run(pool_chain_file, **keywords)
 
         assert EVENTS == [], "something was built for a run that was refused"
 

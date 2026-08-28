@@ -133,17 +133,19 @@ def run(
             from ``built.start()``, one line further on than the engine's own start, which is
             why every one of these travels through the guard below rather than past it.
 
+    Note:
         **Every one of them leaves the GPU as it found it.** The bring-up -- the engine's
         construction, the runner's construction, both ``start()`` calls -- sits under one
         ``except BaseException`` that stops the engine if one was built, and the cheap
-        refusals are made above it so that no context is taken to answer them. The list is
-        not closed, either: the engine's start surfaces whatever a backend raises, including
-        the bare ``ValueError`` :class:`~shipinfer.backends.base.ModelBackend` raises for a
-        ``requires_gpu`` backend placed on a CPU device -- an untyped refusal that should be
-        a :class:`~shipinfer.core.errors.ConfigurationError` at its source, and is documented
-        here rather than changed because ``backends/`` cannot be touched without the GPU tier.
+        refusals are made above it so that no context is taken to answer them.
+
+        The list above is not closed. The engine's start surfaces whatever a backend raises,
+        and not every backend raises a typed error: a ``requires_gpu`` backend placed on a
+        CPU device is refused by :class:`~shipinfer.backends.base.ModelBackend` with a bare
+        ``ValueError``. It leaves the GPU as the typed ones do -- the guard catches
+        ``BaseException`` -- so this is about what an operator reads, not about what is held.
     """
-    from shipinfer.runners import build_runner
+    from shipinfer.runners import RUNNERS, build_runner
     from shipinfer.runtime.containment import require_container
     from shipinfer.topology import ChainSpec, Topology
 
@@ -219,6 +221,17 @@ def run(
     if from_inputs:
         out.print(f"cameras: {len(from_inputs)} from --inputs ({from_inputs[0].camera_id} ...)")
 
+    # The capability refusal is made HERE, before anything is built, because it is a fact
+    # about the runner the operator picked and not about this particular execution: reached
+    # only after `start()`, `--dry-run --inputs deepstream` printed a plan and exited 0 for a
+    # combination that can never work, and the operator learned it on the real run. It needs
+    # no runner *instance* either -- `manages_cameras` and `name` are `ClassVar`s, read off
+    # the registered class exactly as `model_pool_is_needed` reads `needs_model_pool` one line
+    # on -- so it belongs above the constructor, with the other refusals that cost no CUDA
+    # context. The *placement* still happens after `start()`, because a camera is placed on a
+    # running runner; the two halves of the check sit either side of it deliberately.
+    refuse_if_it_manages_no_cameras(RUNNERS.get(chosen), cameras)
+
     # The model pool this run owns, or `None` when nothing here would ask for one: a chain of
     # mocks, a `--dry-run` that spawns nothing, or a `fleet` whose shards each build their own
     # (`cli/shard.py`). Without it a real chain could not run in this process at all -- a
@@ -233,8 +246,9 @@ def run(
     # branch and returns without reaching `_release`, and there is no other teardown to call.
     # So every refusal that can be made without them has to be made above this line, and the
     # two that used to sit below it -- an unreadable `ingest.camera_db` and a `--http` on a
-    # host with no `server` extra -- now do. What is left below is `build_runner` and
-    # `refuse_if_it_manages_no_cameras`, which need the runner this keyword is for.
+    # host with no `server` extra -- now do, and so does the camera-capability refusal above,
+    # which only ever read two `ClassVar`s. What is left below is `build_runner`, and it is
+    # below because `models=` is the keyword this engine is built to be.
     engine = None
     try:
         if not dry_run and model_pool_is_needed(chosen, chain):
@@ -243,13 +257,6 @@ def run(
             engine = InferenceServer(settings)
 
         built = build_runner(chosen, chain, settings, chain_yaml=chain_yaml, models=engine)
-        # The capability refusal is made HERE, before the dry-run branch, because it is a fact
-        # about the runner the operator picked and not about this particular execution: reached
-        # only after `start()`, `--dry-run --inputs deepstream` printed a plan and exited 0 for
-        # a combination that can never work, and the operator learned it on the real run. The
-        # *placement* still happens after `start()` -- a camera is placed on a running runner --
-        # so the two halves of the check sit either side of it deliberately.
-        refuse_if_it_manages_no_cameras(built, cameras)
         if dry_run:
             # On the contract, not probed for: `Runner.describe_plan` has an in-process default
             # ("no plan: one process") and the fleet overrides it with the plan it would run.
@@ -260,6 +267,11 @@ def run(
         # every element, and that is where a `pool` element resolves its model
         # (`topology/elements/pool.py`) -- against a pool that has to be loaded by then.
         if engine is not None:
+            # Whatever a backend raises comes out of here unwrapped, and not all of it is
+            # typed: `ModelBackend` (`backends/base.py`) still refuses a `requires_gpu`
+            # backend placed on a CPU device with a bare `ValueError` where a
+            # `ConfigurationError` belongs. Left as a follow-up rather than fixed from this
+            # command, because `backends/` cannot be touched without running the GPU tier.
             engine.start()
         built.start()
     except BaseException:
@@ -463,7 +475,9 @@ def refuse_flags_that_would_be_ignored(
     )
 
 
-def refuse_if_it_manages_no_cameras(runner: Runner, cameras: Sequence[CameraSpec]) -> None:
+def refuse_if_it_manages_no_cameras(
+    runner: Runner | type[Runner], cameras: Sequence[CameraSpec]
+) -> None:
     """Refuse cameras on a runner that owns no ingest plane. Starts nothing.
 
     ``cameras`` is whatever this run would place — ``--inputs``, the configured fleet, or
@@ -471,11 +485,17 @@ def refuse_if_it_manages_no_cameras(runner: Runner, cameras: Sequence[CameraSpec
     opens neither kind, and a message that named only the flag would send an operator whose
     fleet is in ``ingest.camera_db`` looking for a flag they never typed.
 
+    **A class or an instance**, because the two attributes read here are ``ClassVar``s and
+    the answer is therefore known before anything is built. :func:`run` passes
+    ``RUNNERS.get(name)`` so that the refusal is made above ``InferenceServer(...)``, whose
+    construction takes a CUDA primary context per visible device that nothing gives back
+    inside the process; :func:`place_cameras` passes the running runner it already holds.
+
     Separate from :func:`place_cameras` because the two answer at different moments.
     Placement needs a *running* runner — a camera is placed on an open chain — while this is a
-    fact about the class the operator named, known as soon as it is built. Asking it late made
-    ``--dry-run --inputs`` print a plan and exit ``0`` for a combination that cannot run at
-    all, which is the one thing a dry run exists to catch.
+    fact about the class the operator named, known as soon as that name is resolved. Asking it
+    late made ``--dry-run --inputs`` print a plan and exit ``0`` for a combination that cannot
+    run at all, which is the one thing a dry run exists to catch.
 
     Raises:
         ConfigurationError: the runner manages no cameras (the ``--runner`` chosen executes a
