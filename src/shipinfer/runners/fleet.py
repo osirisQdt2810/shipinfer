@@ -281,6 +281,7 @@ class FleetRunner(Runner):
             plan=plan,
             command=self._command_for,
             drain_s=self._settings.runner.drain_s,
+            env=self._child_environment(),
         )
         self._plan, self._fleet = plan, fleet
         with self._lock:
@@ -786,6 +787,18 @@ class FleetRunner(Runner):
         return stats
 
     # -- helpers -------------------------------------------------------------------------
+
+    def _child_environment(self) -> dict[str, str]:
+        """What a shard must be told rather than left to resolve for itself.
+
+        The model repository. A shard is *sent* its chain, and a chain's `pool` elements
+        name models that only mean something against a repository — so the one the parent
+        resolved is the one they must resolve against. Without this, `shipinfer run
+        --repository X --runner fleet` honoured X in the parent and silently not in the
+        children, which fails later and somewhere else: the shard reports a missing engine
+        for a path nobody pointed it at.
+        """
+        return {"SHIPINFER_MODEL_REPOSITORY": str(self._settings.model_repository)}
 
     def _build_plan(self) -> ShardPlan:
         """Who gets which GPUs. Pure, and printed before a process exists.

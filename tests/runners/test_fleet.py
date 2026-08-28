@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import sys
 import textwrap
+from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
@@ -175,6 +176,42 @@ def runner(clients):
     )
     yield built
     built.stop(timeout_s=5.0)
+
+
+class TestTheShardIsToldWhereTheModelsAre:
+    """The argv carries the identity; the repository has to reach the child some other way.
+
+    `shipinfer run --repository X --runner fleet` honoured X in the parent and silently not
+    in the children, so a shard resolved `model_repository` from its own defaults and failed
+    later, elsewhere, reporting a missing engine for a path nobody had pointed it at.
+    """
+
+    def test_the_resolved_repository_reaches_the_children(self, tmp_path: Path) -> None:
+        settings = ServerSettings(model_repository=tmp_path / "repo")
+        runner = FleetRunner(topology(), settings, chain_yaml=CHAIN, shards=1, gpus=[0])
+
+        assert runner._child_environment() == {
+            "SHIPINFER_MODEL_REPOSITORY": str(tmp_path / "repo")
+        }
+
+    def test_it_is_the_settings_value_not_the_flag_verbatim(self) -> None:
+        """The parent resolves the flag into settings first, so a default propagates too."""
+        runner = FleetRunner(topology(), ServerSettings(), chain_yaml=CHAIN, shards=1, gpus=[0])
+
+        environment = runner._child_environment()
+        assert environment["SHIPINFER_MODEL_REPOSITORY"] == str(
+            ServerSettings().model_repository
+        )
+
+    def test_the_fleet_that_spawns_the_children_actually_carries_it(self, runner) -> None:
+        """The wiring, not the helper: asserting what `_child_environment` returns says
+        nothing about whether anyone passes it to `Fleet`, and a helper nobody calls is the
+        shape this bug already had once."""
+        runner.start()
+
+        assert runner._fleet.env["SHIPINFER_MODEL_REPOSITORY"] == str(
+            runner._settings.model_repository
+        )
 
 
 class TestTheArgvIsTheIdentityAndNothingElse:
