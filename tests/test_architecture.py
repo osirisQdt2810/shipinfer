@@ -295,7 +295,7 @@ class TestTheCameraDoorCannotBuildARunner:
     B3 grew `api`'s row by exactly one name — `launch`, for `CameraSpec` and
     `mint_camera_id`, the vocabulary `add_camera` takes and the helper `--inputs` names its
     cameras with. What it deliberately did *not* grow is `runners`: the thing behind the
-    routes arrives as the six-member `CameraController` protocol (`api/streams.py`), so an
+    routes arrives as the five-member `CameraController` protocol (`api/streams.py`), so an
     HTTP handler can start and stop the cameras of the runner it was given and cannot build
     an executor, choose a placement or open a chain — which would be the dispatch layer
     wearing a router (arch.md §6).

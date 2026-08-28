@@ -219,6 +219,26 @@ class TestAPostedUrlIsRead:
         assert listed[0]["camera_id"] == "quay-1"
         assert listed[0]["shard"] == 0, "the in-process runner is its own shard"
 
+    def test_an_empty_url_is_422_here_too_and_no_camera_is_started(self, deployment) -> None:
+        """The failure the schema constraints exist for, against the runner that hit it.
+
+        Over the fake controller an unconstrained ``url`` merely reached the double; here it
+        reached ``CameraConfig``, whose refusal is a pydantic ``ValidationError`` -- a
+        ``ValueError``, not a ``ShipInferError`` -- and fell past ``add_stream``'s typed
+        mapping into a **500**. The same body over ``--runner fleet`` was refused by every
+        shard and answered **503**, which a load balancer retries forever. 422 naming the
+        field is the answer both runners now give, and it is FastAPI's, before the handler
+        runs at all.
+        """
+        streamed = deployment(frames=1)
+        with streamed.client as client:
+            response = client.post("/streams", json={"url": ""})
+
+            assert response.status_code == 422, response.text
+            assert "url" in response.text
+            assert client.get("/streams").json() == {"streams": []}
+        assert streamed.runner.cameras == ()
+
     def test_a_second_camera_with_the_same_id_is_400(self, deployment) -> None:
         """The ingest manager's duplicate refusal, reaching the client as the caller's error."""
         streamed = deployment(frames=200, pause_s=0.002)

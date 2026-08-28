@@ -5,7 +5,7 @@ Two doors, and they answer different callers (arch.md §2 and §6).
 ``/streams`` is where **cameras and videos enter a running deployment** — ``POST /streams
 {"url": "rtsp://..."}`` and a runner starts reading it. It is served by ``shipinfer run
 --http``, because the runner that owns the cameras is what that command composes; the routes
-reach it through the six-member :class:`~shipinfer.api.streams.CameraController` protocol, so
+reach it through the five-member :class:`~shipinfer.api.streams.CameraController` protocol, so
 this package can *use* a runner and cannot *build* one.
 
 ``/v2/...`` is the engine's **side-door**: a caller that brings its own tensors posts them to

@@ -74,7 +74,8 @@ def run(
         loop: whether an ``--inputs`` file restarts at EOF. ``True`` is the historical
             behaviour and what a stress run wants; ``--no-loop`` is how a file is processed
             once. It applies to ``--inputs`` only: a camera the settings tree configures
-            already has its own ``loop:`` and keeps it.
+            already has its own ``loop:`` and keeps it, and one posted to ``/streams`` carries
+            its own (``StreamRequest.loop``, which defaults the same way this flag does).
         shards: how many shard processes, for the runners that have any. ``None`` leaves
             ``runner.shards``, whose own default is one per visible GPU (ADR-006).
         gpus: which devices, as ``0,1,2``. ``None`` leaves ``devices.visible_gpus``, and

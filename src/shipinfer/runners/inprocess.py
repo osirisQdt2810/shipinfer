@@ -406,12 +406,16 @@ class InprocessRunner(Runner):
     def add_camera(self, camera: CameraSpec) -> None:
         """Start one camera on this runner.
 
-        Nothing is caught. ``IngestManager.add_camera`` raises exactly two things and both
-        are answers a launcher acts on: a duplicate id is a
-        :class:`~shipinfer.core.errors.ConfigurationError`, and a camera the fleet forgot
+        Nothing is caught, and that includes the *type*. ``IngestManager.add_camera``
+        raises exactly two things and both are answers a launcher acts on: a duplicate id is
+        a :class:`~shipinfer.core.errors.DuplicateCameraError`, and a camera the fleet forgot
         between the insert and the start is a :class:`~shipinfer.core.errors.ServerStateError`
         -- ``runners/service.py`` maps each to ``accepted=False`` with its reason, and
         swallowing either would have the launcher mark a camera placed that nobody is reading.
+        The duplicate is deliberately *not* re-raised as a plain ``ConfigurationError`` here:
+        ``POST /streams`` re-mints a server-chosen id on that one refusal and on no other
+        (``api/streams.py``), so flattening it would put the unregistered-source case below
+        through the whole add twice.
 
         The state check and the add are **one atomic step**, which is the whole reason this
         method holds :attr:`_lifecycle`: this is the one camera method that can *build* an
@@ -425,8 +429,10 @@ class InprocessRunner(Runner):
                 the camera while it was starting. Refused rather than implicitly started: the
                 chain's elements are not open, so the first frame would meet a typed refusal
                 from the element rather than from here.
-            ConfigurationError: a camera with this id is already running, or the source the
-                chain names is not registered.
+            DuplicateCameraError: a camera with this id is already running.
+            ConfigurationError: the source the chain names is not registered. Deliberately
+                the base type and not the duplicate one -- a second attempt under a different
+                name would be refused for the same reason.
         """
         with self._lifecycle:
             if not self._running:

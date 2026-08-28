@@ -1,6 +1,6 @@
 """``/streams`` over a fake controller: every status code, and why each one is that code.
 
-The router is handed a :class:`~shipinfer.api.streams.CameraController` — six members — so a
+The router is handed a :class:`~shipinfer.api.streams.CameraController` — five members — so a
 fake is ten lines and every branch is reachable without a runner, a camera or a GPU. That the
 fake is this small is itself the evidence the protocol is the right size (CONVENTIONS 2.9);
 ``tests/api/test_streams_over_a_runner.py`` is the other half, where a real
@@ -36,6 +36,7 @@ from shipinfer.api import streams as streams_module
 from shipinfer.api.streams import CameraController
 from shipinfer.core.errors import (
     ConfigurationError,
+    DuplicateCameraError,
     NoShardAvailableError,
     ServerStateError,
 )
@@ -89,6 +90,9 @@ class FakeCameras:
         self.clean = clean
         self.abandoned = abandoned
         self.added: list[CameraSpec] = []
+        #: Every spec `add_camera` was *entered* with, refused ones included. `added` counts
+        #: placements; this counts attempts, which is what the re-mint is bounded on.
+        self.attempts: list[CameraSpec] = []
         self.removed: list[tuple[str, float]] = []
         self.drained: list[float] = []
         #: Held for the duration of `add_camera`, so a test can make one take forever.
@@ -97,11 +101,14 @@ class FakeCameras:
 
     def add_camera(self, camera: CameraSpec) -> None:
         self.block.wait(10.0)
+        self.attempts.append(camera)
         if self.refuse is not None:
             raise self.refuse
         if camera.camera_id in self.refuse_ids:
             self._remember(camera.camera_id)
-            raise ConfigurationError(f"camera {camera.camera_id!r} is already running")
+            # The manager's own type (`ingest/manager.py`), not the base `ConfigurationError`:
+            # a taken id is the one refusal a server-minted name may be re-minted after.
+            raise DuplicateCameraError(f"camera {camera.camera_id!r} is already running")
         self.added.append(camera)
         self._remember(camera.camera_id)
 
@@ -133,9 +140,6 @@ class FakeCameras:
         if isinstance(self._health, Exception):  # pragma: no cover - set by one test
             raise self._health
         return dict(self._health)
-
-    def stats(self) -> dict[str, Any]:
-        return {"cameras": len(self.added)}
 
 
 class ThreadWatchingCameras:
@@ -198,9 +202,6 @@ class ThreadWatchingCameras:
         with self._lock:
             placed = {camera.camera_id: {} for camera in self.added}
         return {"state": "running", "cameras": placed}
-
-    def stats(self) -> dict[str, Any]:
-        return {"cameras": len(self.added)}
 
 
 def client_over(cameras: CameraController) -> TestClient:
@@ -276,10 +277,86 @@ class TestAddingACamera:
         assert response.status_code == 422
         assert "priority" in response.text
 
+    def test_a_finite_video_can_be_asked_to_stop_at_its_end(self, client, cameras) -> None:
+        """`loop: false` is `--no-loop` over HTTP, and it has to reach the spec to mean it.
+
+        `CameraSpec.loop` decides whether *this* camera ever ends, so a client that posts a
+        finite file and cannot say "once" gets it replayed forever.
+        """
+        assert (
+            client.post("/streams", json={"url": "clip.mp4", "loop": False}).status_code == 201
+        )
+
+        assert cameras.added[0] == CameraSpec("cam-000", "clip.mp4", 0.0, loop=False)
+
+    def test_a_camera_loops_by_default_because_a_live_source_never_ends(
+        self, client, cameras
+    ) -> None:
+        client.post("/streams", json={"url": "rtsp://host"})
+
+        assert cameras.added[0].loop is True
+
+
+class TestARequestTheSchemaCanRefuseOnItsOwn:
+    """422 before the handler runs, which is the only way both runners answer the same thing.
+
+    `CameraSpec` validates nothing, so an unconstrained field was first inspected by
+    `CameraConfig` a layer *below* the router -- and its refusal is a pydantic
+    `ValidationError`, a `ValueError` and not a `ShipInferError`, so `add_stream`'s typed
+    mapping never saw it. In process that was a 500; on a fleet the shard refused, the
+    launcher collected a refusal from every shard and raised `NoShardAvailableError`, and the
+    caller got a **retryable 503** for a request that can never succeed. Declaring the
+    constraint on `StreamRequest` moves the answer ahead of the handler, where FastAPI names
+    the field and neither runner is involved.
+    """
+
+    def test_an_empty_url_names_the_field_instead_of_500ing(self, client, cameras) -> None:
+        response = client.post("/streams", json={"url": ""})
+
+        assert response.status_code == 422, response.text
+        assert "url" in response.text
+        assert cameras.attempts == [], "a camera with no source reached the controller"
+
+    def test_a_whitespace_only_url_is_the_same_mistake_and_the_same_answer(
+        self, client, cameras
+    ) -> None:
+        """What a shell renders when the variable it interpolated was unset."""
+        response = client.post("/streams", json={"url": "   "})
+
+        assert response.status_code == 422, response.text
+        assert "url must not be empty" in response.text
+        assert cameras.attempts == []
+
+    def test_a_negative_fps_is_refused_at_the_door_like_camera_config_refuses_it(
+        self, client, cameras
+    ) -> None:
+        response = client.post("/streams", json={"url": "x.mp4", "fps": -1})
+
+        assert response.status_code == 422, response.text
+        assert "fps" in response.text
+        assert cameras.attempts == []
+
+    def test_a_value_the_schema_did_not_constrain_is_400_and_not_500(self) -> None:
+        """The net under everything else the settings tree validates.
+
+        `StreamRequest` cannot mirror all twenty of `CameraConfig`'s fields, so a value it
+        does not know about is still refused a layer down with a `ValueError`. That is the
+        caller's mistake and a retry sends it again, which makes it a 400 -- not the 500 that
+        reads like a ShipInfer bug in the operator's deployment log.
+        """
+        cameras = FakeCameras(refuse=ValueError("codec 'h266' is not supported"))
+        with client_over(cameras) as client:
+            response = client.post("/streams", json={"url": "rtsp://host"})
+
+        assert response.status_code == 400, response.text
+        assert "h266" in response.json()["detail"]
+
 
 class TestWhyACameraIsRefused:
     def test_a_duplicate_id_is_400_because_a_retry_would_be_a_duplicate_too(self) -> None:
-        cameras = FakeCameras(refuse=ConfigurationError("camera 'cam-000' is already running"))
+        cameras = FakeCameras(
+            refuse=DuplicateCameraError("camera 'cam-000' is already running")
+        )
         with client_over(cameras) as client:
             response = client.post("/streams", json={"camera_id": "cam-000", "url": "x"})
 
@@ -370,6 +447,23 @@ class TestTwoPostsThatMintTheSameName:
 
         assert response.status_code == 400
         assert cameras.added == []
+
+    def test_a_refusal_that_is_not_a_duplicate_is_not_retried_under_another_name(self) -> None:
+        """One placement attempt, not two: re-minting fixes a taken name and nothing else.
+
+        `InprocessRunner.add_camera` raises a plain `ConfigurationError` when the chain names
+        a source that is not registered, and that is a 400 whatever the camera is called. On
+        a bare `except ConfigurationError` an id-less POST did the entire add twice -- a
+        second health report and a second placement -- before answering exactly the same
+        thing.
+        """
+        cameras = FakeCameras(refuse=ConfigurationError("source 'rtsp' is not registered"))
+        with client_over(cameras) as client:
+            response = client.post("/streams", json={"url": "rtsp://host"})
+
+        assert response.status_code == 400
+        assert "not registered" in response.json()["detail"]
+        assert len(cameras.attempts) == 1, "an unrelated refusal was retried"
 
     def test_the_retry_happens_once_and_the_second_refusal_is_the_answer(self) -> None:
         """A loop here would be a POST that races forever against a busy deployment."""

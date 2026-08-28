@@ -20,6 +20,7 @@ from shipinfer.core.errors.chain import (
 )
 from shipinfer.core.errors.config import (
     ConfigurationError,
+    DuplicateCameraError,
     ModelControlError,
     ModelNotFoundError,
     ModelVersionNotFoundError,
@@ -65,6 +66,7 @@ __all__ = [
     "ConfigurationError",
     "DeviceError",
     "DeviceOutOfMemoryError",
+    "DuplicateCameraError",
     "FrameDecodeError",
     "InferenceError",
     "IngestError",

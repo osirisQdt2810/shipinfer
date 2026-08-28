@@ -44,6 +44,7 @@ from typing import Any, ClassVar
 
 from shipinfer.core.errors import (
     ConfigurationError,
+    DuplicateCameraError,
     NoShardAvailableError,
     ServerStateError,
 )
@@ -458,8 +459,10 @@ class FleetRunner(Runner):
 
         Raises:
             ServerStateError: the fleet is not running, or was stopped mid-placement.
-            ConfigurationError: the camera is already placed. The caller's mistake, and one
-                that will still be a mistake on a retry.
+            DuplicateCameraError: the camera is already placed. The caller's mistake, and
+                one that will still be a mistake on a retry. A ``ConfigurationError``, and
+                named so that ``POST /streams`` can tell a taken id -- the one refusal a
+                server-minted name is allowed to be re-minted after -- from every other.
             NoShardAvailableError: every shard refused, and the message carries what each of
                 them said. A ``ServerStateError`` rather than a ``ConfigurationError``
                 because it is a *capacity* answer: nothing about the request is wrong, there
@@ -470,7 +473,7 @@ class FleetRunner(Runner):
         with self._lock:
             self._check_running()
             if camera.camera_id in self._placed:
-                raise ConfigurationError(
+                raise DuplicateCameraError(
                     f"camera {camera.camera_id!r} is already on shard "
                     f"{self._placed[camera.camera_id]}; remove it before placing it again"
                 )

@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from shipinfer.core.errors import ValidationError
 from shipinfer.core.types import DataType, Tensor
@@ -157,6 +157,19 @@ class StreamRequest(BaseModel):
     recognise gets a 201 and a camera reading nothing, or a camera at the wrong rate -- and
     finds out from a dashboard rather than from the response. A 422 naming the field is the
     cheaper failure.
+
+    **The field constraints make the same argument about values, and they are not cosmetic.**
+    The next thing to inspect a ``url`` or an ``fps`` is
+    :class:`~shipinfer.core.settings.ingest.CameraConfig`, a layer below the router, and its
+    refusal is a *pydantic* ``ValidationError`` -- a ``ValueError``, and not a
+    :class:`~shipinfer.core.errors.ShipInferError`, so the handler's typed mapping does not
+    see it. Unconstrained here, ``{"url": ""}`` from a deploy script whose variable did not
+    expand answered **500** in process and, over gRPC, a refusal from every shard -> a
+    ``NoShardAvailableError`` -> a **retryable 503** for a request that can never succeed.
+    Declared here, FastAPI answers 422 naming the field before the handler is entered, so
+    both runners give the caller the same terminal answer. The constraints deliberately
+    mirror ``CameraConfig``'s own (``core/settings/ingest.py``): non-empty ``uri``,
+    ``fps >= 0``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -165,9 +178,34 @@ class StreamRequest(BaseModel):
     #: with :func:`~shipinfer.launch.control.mint_camera_id`, the same helper
     #: ``shipinfer run --inputs`` uses, so ids minted by the two paths cannot collide.
     camera_id: str = ""
-    url: str
-    #: Target frame rate; ``0.0`` means "whatever the source delivers".
-    fps: float = 0.0
+    #: ``rtsp://...`` for a camera, or a file path for a replayed video. Required, and never
+    #: blank: a camera with no source is a decoder thread that fails on its first open.
+    url: str = Field(min_length=1)
+    #: Target frame rate; ``0.0`` means "whatever the source delivers". Never negative --
+    #: a rate below zero has no meaning downstream and ``CameraConfig`` refuses it anyway,
+    #: one layer too late to be a 422.
+    fps: float = Field(default=0.0, ge=0.0)
+    #: ``replay`` sources only: restart the file at EOF. Exposed because it is the one field
+    #: of :class:`~shipinfer.launch.control.CameraSpec` that decides whether *this* camera
+    #: ever ends, and it is not a deployment default -- ``shipinfer run --inputs`` has
+    #: ``--no-loop`` for exactly this, and without it here a client that posts a finite video
+    #: file gets it replayed forever with no way to ask otherwise. Ignored by a live source,
+    #: which has no end to reach.
+    loop: bool = True
+
+    @field_validator("url")
+    @classmethod
+    def _url_is_not_blank(cls, value: str) -> str:
+        """``min_length`` catches ``""``; this catches ``"   "``, which is the same mistake.
+
+        A shell that renders an unset variable into a JSON body produces whitespace as
+        readily as it produces nothing, and a whitespace-only url is a source no decoder can
+        open. ``CameraConfig.uri`` rejects both with this same message a layer down; saying
+        it here is what makes it a 422 instead of a 500.
+        """
+        if not value.strip():
+            raise ValueError("url must not be empty")
+        return value
 
 
 class StreamInfo(BaseModel):
@@ -197,6 +235,12 @@ class StreamInfo(BaseModel):
     #: The ingest state as the shard reports it (``connecting``, ``streaming``,
     #: ``exhausted``, ...), or ``""`` when nothing has said yet.
     state: str = ""
+
+    # `loop` is deliberately absent, for the reason `url` is optional-shaped: no runner's
+    # health report carries it, so a field here would answer `true` for every camera --
+    # including one posted with `loop: false` -- and be confidently wrong about the one
+    # thing that decides whether a video ever ends. `StreamRequest.loop` is where it is
+    # asked for; `state: "exhausted"` is how a listing shows a non-looping file finished.
 
 
 class StreamList(BaseModel):

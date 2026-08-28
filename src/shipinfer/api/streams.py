@@ -11,7 +11,7 @@ cameras (``runners/base.py``); ``serve`` builds an engine and no runner, so on t
 there would be nothing behind these routes to talk to.
 
 **What this module may not do is build a runner.** It is handed one, through
-:class:`CameraController` — a six-member ``Protocol`` that :class:`shipinfer.runners.base.Runner`
+:class:`CameraController` — a five-member ``Protocol`` that :class:`shipinfer.runners.base.Runner`
 happens to satisfy structurally. ``api`` may name ``launch`` (``CameraSpec`` is the launcher's
 vocabulary and is what ``add_camera`` takes) and may **not** name ``runners``, which is what
 keeps an HTTP handler from constructing an executor, choosing a placement or deciding what to
@@ -40,7 +40,11 @@ from shipinfer.api.schemas import (
     StreamRemoved,
     StreamRequest,
 )
-from shipinfer.core.errors import ConfigurationError, ShipInferError
+from shipinfer.core.errors import (
+    ConfigurationError,
+    DuplicateCameraError,
+    ShipInferError,
+)
 from shipinfer.core.logging import get_logger, log_context
 from shipinfer.launch.control import CameraSpec, mint_camera_id
 
@@ -71,7 +75,13 @@ _REMOVE_TIMEOUT_S = 5.0
 
 
 class CameraController(Protocol):
-    """What ``/streams`` needs from whatever is behind it. Six members, no more.
+    """What ``/streams`` needs from whatever is behind it. Five members, no more.
+
+    ``stats()`` was a sixth and is gone: no route called it, and a protocol member that
+    nothing uses is a requirement placed on every future controller for nothing -- the
+    opposite of the claim this docstring makes. Per-camera counters are the metrics
+    exporter's job (``core/metrics``); if a ``GET /stats`` is ever wanted, the member comes
+    back with the route that needs it.
 
     Structural rather than an import of :class:`shipinfer.runners.base.Runner`, and that is
     the point rather than a convenience: ``api`` must be *unable* to build a runner, so the
@@ -96,8 +106,6 @@ class CameraController(Protocol):
     def drain(self, timeout_s: float = 20.0) -> int: ...
 
     def health(self) -> dict[str, Any]: ...
-
-    def stats(self) -> dict[str, Any]: ...
 
 
 def build_streams_router(cameras: CameraController) -> Any:
@@ -200,7 +208,7 @@ def build_streams_router(cameras: CameraController) -> Any:
     async def _named(body: StreamRequest) -> CameraSpec:
         """The posted camera, named by the server when the caller did not name it."""
         camera_id = body.camera_id or _mint(_camera_ids(await _report()))
-        return CameraSpec(camera_id=camera_id, url=body.url, fps=body.fps)
+        return CameraSpec(camera_id=camera_id, url=body.url, fps=body.fps, loop=body.loop)
 
     async def _hand_over(camera: CameraSpec) -> None:
         """Give one camera to the controller, on a worker thread it may hold past the scope."""
@@ -237,22 +245,34 @@ def build_streams_router(cameras: CameraController) -> Any:
         name is minted once more against a fresh report. An id the *caller* chose is never
         retried -- that duplicate is their 400 and it will be a duplicate on the next try too.
 
+        The retry is keyed on :class:`~shipinfer.core.errors.DuplicateCameraError` and on
+        nothing wider. ``add_camera`` refuses for other configuration reasons too -- an
+        in-process runner whose chain names an unregistered source raises a plain
+        ``ConfigurationError`` (``runners/inprocess.py``) -- and re-minting on those did the
+        entire add a second time, a second health report and a second placement attempt, for
+        a request that was a 400 either way.
+
         Raises:
             HTTPException: 501 if this runner manages no cameras; 400 for a duplicate id
-                (``ConfigurationError``); 503 for a runner that is not running or a fleet with
-                no room (``ServerStateError``, and ``NoShardAvailableError`` is one — see
-                ``api/errors.py``); 504 if the placement outran ``_ADD_TIMEOUT_S``.
+                (``DuplicateCameraError``), any other configuration refusal, or a value the
+                schema did not constrain that a layer below rejected (a ``ValueError``, which
+                is what a pydantic ``ValidationError`` is); 503 for a runner that is not
+                running or a fleet with no room (``ServerStateError``, and
+                ``NoShardAvailableError`` is one — see ``api/errors.py``); 504 if the
+                placement outran ``_ADD_TIMEOUT_S``.
         """
         _refuse_if_it_manages_no_cameras()
         # The request as posted, so a timeout taken before the server has named anything still
         # has something to name in its answer. Replaced by the named spec below.
-        camera = CameraSpec(camera_id=body.camera_id, url=body.url, fps=body.fps)
+        camera = CameraSpec(
+            camera_id=body.camera_id, url=body.url, fps=body.fps, loop=body.loop
+        )
         try:
             with anyio.fail_after(_ADD_TIMEOUT_S):
                 camera = await _named(body)
                 try:
                     await _hand_over(camera)
-                except ConfigurationError:
+                except DuplicateCameraError:
                     if body.camera_id:
                         raise
                     camera = await _named(body)
@@ -271,6 +291,16 @@ def build_streams_router(cameras: CameraController) -> Any:
             ) from exc
         except ShipInferError as exc:
             raise http_error(exc) from exc
+        except ValueError as exc:
+            # A value this router did not think to constrain, refused a layer down. Pydantic's
+            # own `ValidationError` is a `ValueError` and is NOT a `ShipInferError`, so
+            # `CameraConfig`'s refusal used to fall past the clause above into a 500 -- and
+            # over gRPC into a refusal from every shard, which is a retryable 503 for a
+            # request that can never succeed. `StreamRequest` now rejects the two values a
+            # client actually gets wrong before this handler runs; this is the net under
+            # everything else the settings tree validates (a codec name, a decode size), and
+            # it is a 400 because the caller sent it and a retry will send it again.
+            raise HTTPException(400, str(exc)) from exc
         _LOG.info(
             "camera %s added over HTTP",
             camera.camera_id,

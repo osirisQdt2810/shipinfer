@@ -16,7 +16,7 @@ stops it, `GET /streams` (alias `GET /cameras`) lists what the runner says it is
 | Piece | Delivered |
 |---|---|
 | `core/errors/launch.py` | `NoShardAvailableError(ServerStateError)`, carrying the camera id and every shard's refusal; `runners/fleet.py` raises it where it raised `ConfigurationError` |
-| `api/streams.py` | the six-member `CameraController` protocol + `build_streams_router`, with the status-code mapping and the minting of `cam-<n>` |
+| `api/streams.py` | the five-member `CameraController` protocol + `build_streams_router`, with the status-code mapping and the minting of `cam-<n>` |
 | `api/errors.py` | `routes.py`'s `_fail` extracted, so both routers share one table |
 | `api/app.py` | `create_app(server=None, *, cameras=None)` mounts whichever routers it was given; `BackgroundHttpServer` runs uvicorn on a thread |
 | `cli/commands/run.py` + `cli/__init__.py` | `--http/--host/--port`, and `_wait` supervising with the ingress up |
@@ -33,7 +33,7 @@ given a fifty-first camera by anything but a restart.
   different routers, and `create_app` mounts what it was handed rather than assuming both.
 - **`api` may import `launch`, and may NOT import `runners`.** The grant is `CameraSpec` and
   `mint_camera_id` — the launcher's vocabulary, which is what `add_camera` takes. What is
-  behind the routes arrives as the structural `CameraController` (six members), so an HTTP
+  behind the routes arrives as the structural `CameraController` (five members), so an HTTP
   handler can drive the runner it was handed and cannot build one, choose a placement or open
   a chain. Both halves are asserted: the table in `tests/test_architecture.py`, and a
   subprocess that imports `shipinfer.api` and refuses if `shipinfer.runners` came with it.
@@ -48,6 +48,24 @@ given a fifty-first camera by anything but a restart.
 - **`add_camera` runs in a worker thread with a request deadline**, mirroring `routes.py`'s
   `_INFER_TIMEOUT_S`, with `abandon_on_cancel=True` — without that, anyio's cancel scope waits
   for the very thread it is cancelling and the deadline is decorative.
+- **A malformed body is refused by the schema, not by a layer below it.** `StreamRequest`
+  constrains `url` (non-empty, not whitespace) and `fps` (`>= 0`), mirroring `CameraConfig`'s
+  own validators, so FastAPI answers 422 naming the field before the handler runs. Without
+  them the first thing to inspect those values was `CameraConfig`, whose refusal is a
+  *pydantic* `ValidationError` — a `ValueError`, not a `ShipInferError` — which fell past the
+  typed mapping: `{"url": ""}` was a **500** in process and, over gRPC, a refusal from every
+  shard → `NoShardAvailableError` → a **retryable 503** for a request that can never succeed.
+  `add_stream` also maps a leaked `ValueError` to 400 as the net under the other eighteen
+  fields of the settings tree.
+- **The re-mint fires on `DuplicateCameraError` and on nothing wider.** A server-minted id can
+  be taken between the report it was read from and the add that uses it, and that one refusal
+  is retried under a fresh name. On a bare `ConfigurationError` an unrelated refusal — an
+  unregistered source — did the whole add twice before answering the same 400, so the
+  duplicate got its own type in `core/errors/config.py` and both raise sites use it.
+- **`StreamRequest.loop` reaches `CameraSpec.loop`.** `--inputs` has `--no-loop`; without the
+  field a client that posted a finite video over HTTP got it replayed forever. `StreamInfo`
+  deliberately does not echo it back — no runner's health carries it, so the answer would be
+  `true` for every camera including the one that asked for `false`.
 - **The camera ids are minted by one helper.** `launch/control.py::mint_camera_id` is what
   `--inputs` uses and what a `POST` with no `camera_id` uses (lowest free index), because two
   spellings of "the next camera" collide on a deployment that uses both doors.
@@ -58,8 +76,8 @@ given a fifty-first camera by anything but a restart.
   these routes start and stop decoding on a shared GPU box and phase B has no authentication:
   exposing them is a proxy in front, not a different default.
 
-**Evidence.** `tests/api/test_streams.py` (32 cases over a ten-line fake controller — every
-status code), `tests/api/test_streams_over_a_runner.py` (10 cases: a real `InprocessRunner`
+**Evidence.** `tests/api/test_streams.py` (46 cases over a ten-line fake controller — every
+status code, and the four a malformed body earns), `tests/api/test_streams_over_a_runner.py` (11 cases: a real `InprocessRunner`
 behind a `TestClient`; a posted URL's frames arrive at the sink tagged with the caller's
 camera id, `DELETE` stops them), `tests/cli/test_run_http.py` (8 cases: the thread, the
 config, `should_exit` on return, and SIGINT still routed to the runner). Offline throughout.
