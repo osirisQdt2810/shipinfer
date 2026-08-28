@@ -26,12 +26,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from shipinfer.core.errors import ValidationError
+from shipinfer.core.errors import ConfigurationError, ValidationError
 from shipinfer.topology.elements.detections import (
     UNKNOWN_LABEL,
     DecodeParams,
     Detections,
     decode_detections,
+    parse_classes,
 )
 
 LABELS = {0: "person", 8: "ship"}
@@ -40,6 +41,19 @@ LABELS = {0: "person", 8: "ship"}
 def row(x1: float, y1: float, x2: float, y2: float, score: float, cls: int) -> list[float]:
     """One detector row in the layout the decoder documents."""
     return [x1, y1, x2, y2, score, float(cls)]
+
+
+def mixed() -> Detections:
+    """Four rows, ship/person/ship/person — a selection no slice expresses."""
+    return Detections(
+        boxes=np.array(
+            [[0, 0, 10, 10], [20, 0, 30, 10], [40, 0, 50, 10], [60, 0, 70, 10]],
+            dtype=np.float32,
+        ),
+        scores=np.full(4, 0.9, dtype=np.float32),
+        class_ids=np.array([8, 0, 8, 0], dtype=np.int32),
+        labels=("ship", "person", "ship", "person"),
+    )
 
 
 def params(**overrides) -> DecodeParams:
@@ -247,3 +261,174 @@ class TestTheOldImportPathStillResolves:
         assert old_home.Detections is Detections
         assert old_home.decode_detections is decode_detections
         assert old_home.UNKNOWN_LABEL == UNKNOWN_LABEL
+
+
+# -- row selection, shared by every element that has a `classes:` --------------------------
+
+
+class TestParseClasses:
+    """One parser, because ``track`` and every crop element read the same key.
+
+    They had a copy each, differing only in the kind word inside the message. Two copies of a
+    row-selection rule is two places for "an absent key is not an empty list" to drift, and the
+    drift has no symptom at run time: the element covers every row instead of none, or none
+    instead of every.
+    """
+
+    def test_an_absent_key_selects_everything(self) -> None:
+        assert parse_classes(None, "track element 'tracker'") is None
+
+    def test_an_empty_list_is_not_an_absent_key(self) -> None:
+        """``()`` means "select nothing" and ``None`` means "select everything". Conflating
+        them is how a typo doubles a GPU bill in silence."""
+        assert parse_classes([], "track element 'tracker'") == ()
+
+    def test_labels_come_back_as_a_tuple_of_strings(self) -> None:
+        assert parse_classes(["ship", "person"], "x") == ("ship", "person")
+
+    def test_a_yaml_number_is_still_a_label(self) -> None:
+        """``classes: [8]`` is a chain file saying a label that happens to look like an id;
+        it is compared against ``Detections.labels``, which are strings."""
+        assert parse_classes([8], "x") == ("8",)
+
+    def test_a_bare_string_is_refused_rather_than_iterated(self) -> None:
+        """``classes: ship`` would otherwise select the rows labelled ``s``, ``h``, ``i``,
+        ``p`` — that is, none of them, and without a word said."""
+        with pytest.raises(ConfigurationError, match="must be a list of detection labels"):
+            parse_classes("ship", "embed element 'embed_ship'")
+
+    def test_the_refusal_names_the_element_that_carries_the_key(self) -> None:
+        with pytest.raises(ConfigurationError, match="embed element 'embed_ship'"):
+            parse_classes(7, "embed element 'embed_ship'")
+
+
+class TestSelectingRowsByClass:
+    def test_several_classes_at_once_in_score_order(self) -> None:
+        assert mixed().indices_of_any(("ship", "person")) == (0, 1, 2, 3)
+
+    def test_one_class_is_the_non_contiguous_subset(self) -> None:
+        """The ship rows are 0 and 2, which no slice expresses — the reason a selection by
+        label and a selection by position cannot be allowed to agree by accident."""
+        assert mixed().indices_of_any(("ship",)) == (0, 2)
+
+    def test_it_agrees_with_the_single_class_form(self) -> None:
+        assert mixed().indices_of_any(("person",)) == mixed().indices_of("person")
+
+    def test_a_label_no_row_carries_selects_nothing(self) -> None:
+        assert mixed().indices_of_any(("dinghy",)) == ()
+
+    def test_the_match_is_case_sensitive(self) -> None:
+        """Stated as a test rather than as a comment: a chain file writing ``classes: [Ship]``
+        against a detector emitting ``ship`` embeds nothing, permanently and silently, and the
+        only place that rule is decided is here."""
+        assert mixed().indices_of_any(("Ship",)) == ()
+
+    def test_selecting_nothing_selects_nothing(self) -> None:
+        assert mixed().indices_of_any(()) == ()
+
+
+class TestGatheringTheBoxesOfASelection:
+    """What a crop element hands a kernel: one contiguous ``(K, 4)`` array, in row order."""
+
+    def test_a_subset_is_the_rows_in_the_order_they_were_asked_for(self) -> None:
+        detections = mixed()
+
+        gathered = detections.boxes_at((0, 2))
+
+        assert np.array_equal(gathered, detections.boxes[[0, 2]])
+        assert gathered.flags["C_CONTIGUOUS"]
+
+    def test_every_row_is_a_flat_copy_never_the_live_array(self) -> None:
+        """The whole-frame path answers with a copy: the caller hands it to an arbitrary
+        ``ImageOps`` (a fused kernel takes a device pointer) and may hold it past the frame,
+        so mutating the answer must never write through to the detections."""
+        detections = mixed()
+
+        answered = detections.boxes_at(range(len(detections)))
+
+        assert answered is not detections.boxes
+        assert np.array_equal(answered, detections.boxes)
+        assert answered.flags["C_CONTIGUOUS"]
+        answered[0, 0] = -1.0
+        assert detections.boxes[0, 0] != -1.0
+
+    def test_a_full_length_reordering_is_permuted_not_handed_through(self) -> None:
+        """The pass-through is a value test, not a length test.
+
+        ``(3, 2, 1, 0)`` is as long as the frame and is not the frame's order, so a fast path that
+        counted rows would answer it with the boxes unpermuted — every crop cut from the wrong
+        detection, at full row count and full contiguity, with nothing to see until a tracker
+        starts swapping identities. No caller asks for this order today; the point is that the
+        method cannot be made to lie by one that does.
+        """
+        detections = mixed()
+
+        gathered = detections.boxes_at((3, 2, 1, 0))
+
+        assert np.array_equal(gathered, detections.boxes[[3, 2, 1, 0]])
+        assert not np.array_equal(gathered, detections.boxes), "the fixture is not symmetric"
+
+    def test_an_index_past_the_end_is_a_typed_refusal(self) -> None:
+        """A selection built against a different frame, refused in this module's vocabulary.
+
+        ``range(1, 5)`` is as long as a four-row frame and is not a selection *of* it. The
+        value-not-length pass-through already declines to answer it with the boxes unpermuted;
+        what is left is numpy's bare ``IndexError`` out of a public method on a value type,
+        which CONVENTIONS Part 1 does not allow and which tells an operator nothing about
+        which frame or which row.
+        """
+        detections = mixed()
+
+        with pytest.raises(ValidationError) as raised:
+            detections.boxes_at(range(1, 5))
+
+        assert "4" in str(raised.value), "the frame's row count"
+        assert "[4]" in str(raised.value), "and the index it has no row for"
+
+    def test_a_selection_numpy_refused_for_another_reason_names_the_whole_selection(
+        self,
+    ) -> None:
+        """The recovery scan looks for out-of-range integers, and that is not the only way a
+        gather fails. ``(True, False)`` is read by numpy as a boolean *mask*, and a mask of the
+        wrong length raises — while the scan finds nothing out of range, because ``bool`` is a
+        subclass of ``int`` and both values index a four-row frame perfectly well. The message
+        would then be "detection indices [] name no row of a 4-row frame", which names no index
+        at all and is the one diagnostic an operator cannot act on.
+
+        Unreachable from ``indices_of`` / ``indices_of_any`` / ``range``, so this is about the
+        message and not about the failure; a public method on a value type does not get to
+        report a diagnostic it can see is empty.
+        """
+        detections = mixed()
+
+        with pytest.raises(ValidationError) as raised:
+            detections.boxes_at((True, False))
+
+        message = str(raised.value)
+        assert "indices []" not in message, "an empty index list names nothing"
+        assert "True" in message, "the whole selection, since no single index is at fault"
+
+    def test_a_valid_selection_is_never_charged_for_the_guard(self) -> None:
+        """The bounds are read off the failure, not checked before the gather, so the ordinary
+        frame does one pass and not two. Pinned as a property rather than a timing: every
+        in-range selection still answers, including the negative index numpy accepts."""
+        detections = mixed()
+
+        assert np.array_equal(detections.boxes_at((-1,)), detections.boxes[[3]])
+
+    def test_selecting_nothing_is_an_empty_box_array_not_an_error(self) -> None:
+        assert mixed().boxes_at(()).shape == (0, 4)
+
+    def test_the_single_class_form_gathers_the_same_rows(self) -> None:
+        detections = mixed()
+
+        boxes, indices = detections.boxes_of("ship")
+
+        assert indices == (0, 2)
+        assert np.array_equal(boxes, detections.boxes_at(indices))
+
+    def test_a_class_the_frame_has_none_of_is_an_empty_pair(self) -> None:
+        boxes, indices = mixed().boxes_of("dinghy")
+
+        assert indices == ()
+        assert boxes.shape == (0, 4)

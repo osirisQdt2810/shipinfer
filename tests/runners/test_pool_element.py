@@ -83,14 +83,18 @@ KINDS = {
     ElementKind.RECOGNIZE: (PoolRecognize, "identities"),
 }
 
-#: The three that file the model's outputs raw and hand the payload on untouched — the shared
-#: behaviour this file is about. ``detect`` is deliberately absent: it replaces both of
-#: ``_do_process``'s hooks to letterbox and decode, so it is neither a fair sample of the
-#: shared code nor openable without image ops. Its own contract is pinned in
-#: ``tests/topology/test_pool_detect_decode.py``, and what is asserted *here* is that the
-#: three untouched kinds stayed untouched.
+#: The two that file the model's outputs raw and hand the payload on untouched — the shared
+#: behaviour this file is about. ``detect`` and ``embed`` are deliberately absent: both replace
+#: ``_do_process``'s two hooks and both need image ops, so neither is a fair sample of the
+#: shared code and neither is openable without a runner that resolved an implementation.
+#: ``detect`` letterboxes the frame and decodes the boxes back
+#: (``tests/topology/test_pool_detect_decode.py``); ``embed`` cuts one crop per detection and
+#: scatters the vectors back onto the rows (``tests/topology/test_pool_embed_crops.py``). What
+#: is asserted *here* is that the untouched kinds stayed untouched.
 PASSTHROUGH_KINDS = {
-    kind: value for kind, value in KINDS.items() if kind is not ElementKind.DETECT
+    kind: value
+    for kind, value in KINDS.items()
+    if kind not in (ElementKind.DETECT, ElementKind.EMBED)
 }
 
 

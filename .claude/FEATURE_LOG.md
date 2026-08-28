@@ -5,6 +5,188 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-28 — `PoolEmbed` crops per detection, files the vectors per row, and the fan-in merges them (Phase C8a)
+
+**What.** The embed→track scatter-back, the last missing link before the demo chain runs.
+`embed` submitted the *whole payload* — the frame — to a re-identification model whose input
+is `3x256x128`, and filed the raw `response.outputs` under `meta["vectors"]`. That is a
+`{name: Tensor}` dict, exactly the form `ShipvisionTrack._embeddings` refuses by name, so the
+chain could not reach `track` with appearance at all. C4's build report said so: "C8 will need
+the embed→track scatter-back before the demo chain runs."
+
+| Piece | Delivered |
+|---|---|
+| `_PoolCropElement` (`topology/elements/pool.py`) | the fan-out element: `needs_image_ops = True`; `_prepare` reads `meta["detections"]` + `meta["frame_hw"]`, selects rows, cuts them in **one** `ctx.ops.crop_batch(frame, boxes, size, normalize)`; `_submit_crops` chunks at the model's `max_batch_size` and rejoins; `_finish` scatters `{detection index: vector}` |
+| `PoolEmbed` | now a `_PoolCropElement`. `meta_key` and caps unchanged: payload untouched, `produces *@*` |
+| `params:` | `classes: [ship]` (row filter), `crop: {size, normalize}`, `output: embedding`. Every one of them resolved at `open` against the artefact first |
+| `_PoolElement` (lifted) | `_declared`, `_frame_of`, `_max_batch_rows` and `_submit` moved up out of `PoolDetect` — the two elements that read pixels now share one set of refusals |
+| `ImageOpsLike.crop_batch` | the second member of the protocol, added the way `topology/base.py` says one should: by the first element that calls it, with the test that needs it |
+| `track._embeddings` | the **empty** mapping is exempt from the coverage check |
+| `_CropMetrics` | `shipinfer_element_crops_per_frame` (object-count buckets) + `shipinfer_element_crops_total`, both labelled by element, both null-object when the runner offered no registry |
+| row selection, shared | `Detections.indices_of_any(classes)` + `Detections.boxes_at(indices)` + `parse_classes(declared, what)` in `topology/elements/detections.py`; `track` and every crop element now call one rule instead of carrying a copy each |
+| `RowIndexed` (`topology/base.py`) | **a new vocabulary word on a shared seam.** A thin `dict` subclass that *declares* "this metadata value is keyed by detection row, and is therefore partial by design". Written by `_PoolCropElement._scatter`, read by the fan-in. Carries no behaviour: every `isinstance(..., Mapping)` consumer, `track._embeddings` included, is unchanged |
+| **the fan-in merge** (`runners/inprocess.py`) | **a shared seam changed.** `_inbound` merged metadata with `meta.setdefault(key, value)` — first writer wins, per key, *wholesale*. `_merge_meta` now takes the **union** when two branches wrote a `RowIndexed` under one key, and refuses (`InferenceError`) two branches that filed different values for the same detection row. Any other pair of values, mappings included, keeps first-writer-wins |
+| tests | `tests/topology/test_pool_embed_crops.py` (60 new), +21 in `test_detections.py` for the shared helpers, +9 in `tests/runners/test_walk.py` for the merge rule, +1 in `test_track_element.py`; four existing tests updated where C8 changed their premise |
+
+**Why.** The chain's cardinality has to change somewhere — arch.md §5's "branch on class →
+crop batch → submit crops" — and the embedder is where. Everything here is the proven fan-out
+of `pipeline/graph/crop.py` + `objects.py` moved onto the chain, not a second implementation
+of it (ponytail principle): one batched crop call, chunking at `max_batch_size`, and the rule
+that every row knows which detection it came from.
+
+**Decisions.**
+
+- **The row filter is `params: classes:`, not the chain's `when:`.** A `when:` guard is
+  evaluated once per *item* against `item.meta` (`ElementNode.admits`), and an item is a whole
+  frame — so `when: class == ship` can only decide whether the element runs on this frame at
+  all, and it reads `meta["class"]`, a key nothing in the chain sets today. A frame holds ships
+  *and* people; the question is per row. The two mechanisms compose without overlapping:
+  `when:` skips frames, `classes:` selects rows.
+- **The mapping form, not a NaN-padded per-row array.** The sizing runs two embedders side by
+  side (`ship_embedder` on the ship rows, `person_embedder` on the person rows), so partial
+  coverage is the *normal* case. The mapping says exactly which rows were covered; a NaN row
+  would have to be recognised as absence by every consumer, and the first one that forgot would
+  match a track against a vector of NaNs and never say so.
+- **The scatter is additive — and so is the rejoin, which is where the shipped chain needs it.**
+  Two embedders can meet in two ways and both had to be closed. *In series* — both on one
+  branch — the second finds the first's mapping in `item.meta`, and `_scatter` merges into it
+  (and refuses a non-mapping already filed under the key rather than overwriting the producer
+  that needs fixing). *In parallel* — the wiring `topology/ship_person.yaml` is shaped like
+  and the one C8b will give it, `embed_person: after: detect` and
+  `track: after: [recognize, embed_person]`; on the shipped file itself both embedders carry
+  `when: class == …` against a field nothing in the chain sets, so today neither of them runs
+  and the fixture in `tests/topology/test_pool_embed_crops.py` is what declares the shape —
+  neither element ever sees the other's item, `_scatter`'s merge branch is never reached, and
+  the union has to be taken at the fan-in. It was not: `InprocessRunner._inbound` merged branch
+  metadata with `meta.setdefault(...)`, so the *first* branch's whole `vectors` mapping won and
+  the second's was dropped. At the sizing that is ~15 000 person crops a second cut, embedded on
+  a GPU and discarded, every person reaching the tracker with `embedding=None` — no exception,
+  no counter, both elements' per-frame counters reporting the crops they really did make. The
+  fix is at the seam and not in the element: `_merge_meta` unions two mappings under one key,
+  because a partial coverage is what the mapping form *means*.
+- **The shape is declared, not sniffed — and that is what makes the union safe.** The first
+  cut of this rule unioned any two `Mapping` values, and a `Mapping` is exactly what it cannot
+  decide on: `_PoolElement._finish` files a model's raw `response.outputs` — `{output name:
+  Tensor}` — under its `meta_key`, and `PoolSegment` (`masks`) and `PoolRecognize`
+  (`identities`) both keep that default. Two rejoining `segment` slots therefore either failed
+  *every frame* (engines that name their output the same collided on the output *name*, with a
+  message sending the operator to a `params: classes:` that family does not have) or silently
+  produced a composite `{'ship_masks': …, 'person_masks': …}` neither engine emitted. So the
+  writer declares itself: `_scatter` files a `RowIndexed`, and only two of those union.
+  Everything else keeps first-writer-wins, which is the right default for a value whose shape
+  nobody declared — and it makes the refusal reachable only from slots that *have* a `classes:`
+  to check. The union is itself a `RowIndexed`, because a three-way rejoin merges the third
+  contributor into the result of merging the first two.
+- **What the merge does not do.** A key one branch wrote as a `RowIndexed` and another as
+  something else is not a union — that is two branches disagreeing about what the key *is* — so
+  it keeps the existing first-writer-wins rule, as do two scalars (`meta["class"]`), whose
+  resolution
+  stays a property of the chain file's declaration order rather than of thread timing. Two
+  branches filing *different* values for the same detection row is refused with a typed
+  `InferenceError` naming the key, the row and every slot that claimed it: there is no answer
+  to "which of these two vectors is this object's", and it means both elements cropped it,
+  which is the duplicated GPU work `classes:` exists to prevent. Identity is checked before any
+  of that, so a mapping written *before* the fork and carried down both branches — a diamond,
+  the ordinary case — is not mistaken for a disagreement. Equality is deliberately not
+  attempted beyond identity: the values are numpy arrays and `a == b` on two of them is an
+  array whose truth value raises.
+- **No *general* load-time check behind it, and that is a decision.** CONVENTIONS 2.6 would
+  prefer the loader to refuse "two elements on rejoining branches write the same key with
+  incompatible shapes" at `from_spec`. To do that it would have to know two things about
+  *every* element: which metadata keys it writes, and which of them it writes as a
+  `RowIndexed`. The `pool` family declares both — `meta_key` is a `ClassVar` and only
+  `_PoolCropElement` scatters — but the family is not the tree: `Element` is an ABC anyone may
+  implement, `process` may file any key it likes, and a loader that walked only the classes it
+  recognises would pass every pair it cannot see, which reads as coverage and is not. The check
+  that *is* sound is narrower, is about `classes:` rather than about shapes, and belongs
+  elsewhere: two `pool` crop elements on rejoining branches with the same `meta_key` and
+  `classes:` that overlap or are absent is a static fact, and it lands beside the
+  `classes:`-against-`class_labels` cross-check that reads the same two fields.
+- **The series composition refuses an overlap the same way the fan-in does.** `_scatter` merged
+  with `{**existing, **covered}` — silent last-writer-wins per row — so the same `classes:`
+  overlap was a typed refusal when the two slots rejoined at `track` and a wrong appearance
+  vector when they were declared `after:` one another. "Two elements covering one detection
+  means the chain file asked both of them for it" is a property of the chain file, not of the
+  wiring, so both compositions now raise `InferenceError` naming the key, the row and the two
+  slots. Disjoint rows still union and an empty coverage still hands the item on unchanged.
+- **An empty mapping is coverage of no rows, not an off-by-N.** `track._embeddings` refused a
+  mapping "whose keys name no row at all". With a crop element in the chain that is the ordinary
+  frame — `embed_person` sees three ships and covers none — so the empty mapping is now exempt.
+  Keys `{100, 101, 102}` on a three-row frame is still arithmetic that went wrong; zero keys
+  index nothing because there was nothing to index.
+- **Zero rows means zero requests.** An empty crop batch handed to a model costs a queue slot,
+  an instance slot and a round trip to be told nothing; 50 cameras of empty water at 20 fps is a
+  thousand of those a second. `_do_process` is overridden for that one line.
+- **Chunking at `max_batch_size`, read off the artefact.** A frame holds however many objects
+  the detector found (25 was observed) and an engine's plan is built at a fixed batch. Without
+  it one crowded frame becomes a single oversized request and *every* crop in it is lost — the
+  failure `objects.py::_chunks` exists because of. `max_batch_size: 0` is Triton's "batching
+  off", so it means no bound, not batch one.
+- **The pixel scale is the slot's own, and it is pinned.** `crop.normalize` is resolved at
+  `open` from `params: {crop: {normalize: {mean, std, swap_rb}}}`, defaulting to
+  `Normalization()` — not read off the artefact, because a model repository `config.yaml` has
+  no normalisation section, and the proven path does the same (`CropStage.__init__`).
+  Crops normalised with the wrong mean and std are the right rows, in the right order, at the
+  right extent: the engine answers without an error and the only symptom is appearance
+  matching that degrades. So `TestThePixelScaleIsTheSlotsOwn` asserts the crop batch equals
+  `NumpyImageOps().crop_batch(pixels, boxes, size, <the declared Normalization>)` *and* that
+  the default would have produced other pixels — before it existed, replacing the resolved
+  normalisation with the default at the `crop_batch` call left the whole offline tier green.
+- **One row-selection rule, on the value that owns the labels.** `classes:` parsing and the
+  label match were a copy each in `pool.py` and `track.py`, differing only in the kind word
+  inside the message. They are now `parse_classes` and `Detections.indices_of_any`, with
+  `Detections.boxes_at` doing the contiguous gather the crop path had open-coded (and
+  `boxes_of` expressed in terms of it). Two copies of a row filter is two places for "a case
+  difference is not a match" to drift, and the drift has no symptom — the element covers no
+  rows, silently. C8b adds a third crop element, which is why this moved now.
+- **No L2 normalisation here.** Both embedders in the demo repository are already global-pooled
+  and L2-normalised (their `config.yaml` says so) and the proven path normalised nothing in
+  Python either. Re-normalising would be a silent divide-by-a-tiny-number on the row where the
+  engine answered with zeros.
+- **`PoolSegment` stays the forwarding element.** Its crop half is one line away — the demo
+  repository does feed it 640x640 ship crops — but its `_finish` is a fold over *two* outputs
+  (rows × mask prototypes → one area, `pipeline/graph/masks.py::InstanceMaskArea`) that a
+  per-row scatter-back cannot express, and filing the raw rows would pin a `(32, 160, 160)`
+  prototype tensor per frame alive for the rest of the walk. Half a feature is worse than none.
+- **The caps are unchanged and the *frame* is refused instead.** `accepts` keeps
+  `nv12@gpu, tensor@gpu, bgr@cpu`: narrowing it would refuse the chain phase D makes work, and
+  staying silent would download six megabytes per frame. `_frame_of` refuses a device-resident
+  payload by name, with the phase that fixes it — the same refusal `PoolDetect` already made,
+  now shared.
+
+**What allocates per frame** (CONVENTIONS 2.5): the crop batch itself, one `Tensor` wrapper,
+one `InferenceRequest` per chunk (one, except past `max_batch_size`), and the `{row: vector}`
+mapping whose values are numpy *views*. Selecting a subset adds an index tuple and one `(N, 4)`
+gather; declaring no `classes:` adds neither — `_selected` returns a `range` and `boxes_at`
+recognises it as the whole frame and hands the array through (a *value* test, `indices ==
+range(len(self))`, not a length test, so a full-length reordering is permuted rather than
+handed back unpermuted). A frame with nothing to crop submits nothing and costs **one**
+`derive()`, for the empty mapping that records that this element ran; only where a second
+embedder sits *in series* ahead of it is a peer's mapping already there and not even that — on
+the shipped parallel wiring the quiet frame costs the one `derive`. The metric handle is bound
+once at `open` rather than looked up off `self._metrics` per frame.
+
+**Not done here.** The demo chain (`topology/ship_person.yaml`) still names `gstreamer-gpu` and
+`kafka` and does not load; nothing in the chain sets `meta["class"]`, so every `when:` in that
+file is currently false for every frame — both are C8's remaining slices, not this one.
+
+**C8b must cross-check `classes:` against the detector's labels.** Now that the empty mapping
+is legal at `track`, a `classes:` value naming a label the detector never emits is a permanent,
+silent no-op: the element covers no row on any frame, and the only signal is
+`shipinfer_element_crops_per_frame` recording zeros. `Topology.from_spec` already sees both
+slots, so refusing a crop element whose `classes:` is absent from the upstream detect slot's
+`decode.class_labels` is CONVENTIONS 2.6 ("validate at start-up, not at first use") and costs
+nothing per frame. Same slice as replacing that file's four `when: class == …` guards with
+`params: {classes: [...]}`.
+
+
+Round 3 (CI): the crop chunk bound is the engine's, not Triton's — `_max_batch_rows` asks
+`effective_max_batch_size` and falls back to 1, never None (`max_batch_size: 0` bounds the
+assembler at one row; the fake now enforces the same rule, and a real-engine test pins it).
+`boxes_at` never aliases the live array; `_scatter` keeps a plain peer's mapping plain. A
+crop element's whole-frame response carries chunk 0's `executed_on` — ledger item.
+---
+
 ## 2026-08-28 — the `mtmc` element: anchored instants across cameras, and a barrier that never takes the last worker (Phase C6)
 
 **What.** The chain gains its cross-camera tier, in two modules and the split is the point.

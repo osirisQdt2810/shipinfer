@@ -109,6 +109,7 @@ from shipinfer.topology import (
     ElementNode,
     ImageOpsLike,
     ModelResolver,
+    RowIndexed,
     Topology,
     WaiterBudget,
 )
@@ -1570,11 +1571,25 @@ class InprocessRunner(Runner):
         The merge rule, and it is deliberately boring, because "whichever branch finished
         last wins" is not an answer when two branches carry different metadata:
 
-        * **metadata is the union, in ``node.inputs`` order, first writer wins.** So a fan-in
-          at ``track`` sees the ship branch's ``identities`` *and* the person branch's
-          ``vectors``. First-writer-wins rather than last, so the resolution of a genuine
-          collision is a property of the chain file's declaration order and does not change
-          between runs.
+        * **metadata is the union, in ``node.inputs`` order.** So a fan-in at ``track`` sees
+          the ship branch's ``identities`` *and* the person branch's ``vectors``.
+        * **a key two branches both wrote is merged if both wrote a**
+          :class:`~shipinfer.topology.base.RowIndexed`, **and otherwise resolved
+          first-writer-wins.** The merged case is the two-embedder rejoin -- the shape C8b
+          gives ``topology/ship_person.yaml``, and the shape
+          ``tests/topology/test_pool_embed_crops.py``'s two-branch fixture declares today:
+          ``embed_ship`` and ``embed_person`` both ``after: detect``, each with its own
+          ``params: classes:``, rejoining here, and each filing a *partial* ``meta["vectors"]``
+          -- ``{detection row: vector}`` covering only its own classes.
+          Taking one wholesale would hand ``track`` half the frame's appearance vectors with
+          no exception and no counter, which is the failure the mapping form exists to make
+          impossible; so two row-indexed mappings under one key become their union. For
+          anything else there is no union to take -- two branches disagreeing about
+          ``meta["class"]`` is a chain-file problem, not a merge problem -- and the first
+          writer wins, so that the
+          resolution is a property of the chain file's declaration order and does not change
+          between runs. A ``RowIndexed`` meeting anything else is that same disagreement about
+          what the key *is*, so it resolves the same way.
         * **payload and caps come from one donor**, the predecessor the *loader* nominated
           (:attr:`~shipinfer.topology.chain.ElementNode.donor`, resolved from the negotiated
           edge caps). A payload is a frame handle or a tensor, and half of one plus half of
@@ -1584,9 +1599,47 @@ class InprocessRunner(Runner):
         * **a skipped predecessor contributes its own inbound item**, because that is what
           skip-and-continue means — the walk stored it under that predecessor's name.
 
+        **The shape is declared, not sniffed, and that is what makes this rule total.** An
+        earlier version of it unioned any two ``Mapping`` values, which cannot tell a
+        ``{detection row: vector}`` attribution from a model's raw ``{output name: Tensor}``
+        response -- and ``_PoolElement._finish`` files exactly the latter under its
+        ``meta_key``, which ``segment`` and ``recognize`` both keep. Two rejoining
+        ``segment`` slots therefore either failed every frame (engines naming their output
+        the same collided on the *name*, and the refusal sent the operator to a
+        ``params: classes:`` that family does not have) or silently produced a composite
+        mapping neither engine emitted. So the writer says what it wrote:
+        :meth:`~shipinfer.topology.elements.pool._PoolCropElement._scatter` files a
+        :class:`~shipinfer.topology.base.RowIndexed`, and only that type unions here.
+        Everything else keeps first-writer-wins, which is the right answer for a value whose
+        shape nobody declared -- and it makes the refusal below reachable *only* from slots
+        that have a ``classes:`` to check.
+
+        There is still deliberately **no general load-time check** behind this rule, and that
+        is a decision rather than an omission (CONVENTIONS 2.6 would prefer one). To refuse
+        "two elements on rejoining branches write the same key with incompatible shapes" at
+        ``from_spec``, the loader would have to know two things about *every* element: which
+        metadata keys it writes, and which of them it writes as a ``RowIndexed``. The ``pool``
+        family declares both -- ``meta_key`` is a ClassVar and only ``_PoolCropElement``
+        scatters -- but the family is not the tree: an ``Element`` is an ABC anyone may
+        implement, ``process`` may file any key it likes, and a loader that walked only the
+        classes it recognises would pass every pair it cannot see, which reads as coverage and
+        is not. The check that *is* sound is correspondingly narrower, it is about ``classes:``
+        rather than about shapes, and it is described in the next paragraph. The shape question
+        is answered here, where the values are -- and now it is answered by reading a
+        declaration rather than by guessing at one.
+
+        The check that *is* sound is a narrower one, and it is deliberately not here either:
+        two ``pool`` crop elements on rejoining branches with the same ``meta_key`` and
+        ``params: classes:`` that overlap or are absent is a *static* fact, because ``meta_key``
+        is a ClassVar and ``classes:`` is a param. It belongs beside the
+        ``classes:``-against-``class_labels`` cross-check, which reads the same two fields, and
+        lands with it rather than as a second reader of them here.
+
         Raises:
             InferenceError: the nominated donor produced nothing and no other contributor
-                donates under the same negotiated cap. See :meth:`_substitute_donor`.
+                donates under the same negotiated cap (see :meth:`_substitute_donor`); or two
+                branches filed *different* values for the same entry of the same mapping-valued
+                key (see :meth:`_merge_meta`).
         """
         contributors = [
             (name, contributed)
@@ -1602,12 +1655,140 @@ class InprocessRunner(Runner):
             # The common case — a straight line — allocates nothing.
             return donor
 
-        meta: dict[str, Any] = {}
+        return ChainItem(
+            context=donor.context,
+            caps=donor.caps,
+            payload=donor.payload,
+            meta=self._merge_meta(node, contributors),
+        )
+
+    def _merge_meta(
+        self, node: ElementNode, contributors: list[tuple[str, ChainItem]]
+    ) -> dict[str, Any]:
+        """The merged metadata of a fan-in: union by key, and union again inside a scatter-back.
+
+        Split out of :meth:`_inbound` because it is the half with a rule in it. See that
+        method's docstring for the rule; this is how it is spelled.
+
+        The inner union is gated on :class:`~shipinfer.topology.base.RowIndexed` and **not**
+        on ``Mapping``, and that one word is the whole correctness of this method. A
+        ``Mapping`` gate reads any dict as an attribution, and the tree has another kind: the
+        raw ``{output name: Tensor}`` response ``_PoolElement._finish`` files under
+        ``meta_key``, which ``segment`` (``masks``) and ``recognize`` (``identities``) both
+        keep. Under a ``Mapping`` gate two rejoining ``segment`` slots collide on an *engine
+        output name* -- refusing every frame of a chain that used to resolve
+        first-writer-wins -- or, when the engines name their outputs differently, union into a
+        composite dict neither of them produced. Gated on the declared type, those two keys
+        are untouched by this method and keep the pre-existing rule, and the only values that
+        union are the ones an element said were keyed by detection row.
+
+        The union is itself a ``RowIndexed``, not a plain ``dict``. A three-way rejoin merges
+        contributor three into the result of merging one and two, so a union that lost the
+        declaration would union the first pair and then quietly take the first writer for the
+        third -- half of a frame's coverage, by arithmetic on the number of branches.
+
+        The identity test before the merge is a **fast path, not a correctness guard**, and
+        saying so is the point of this paragraph. A key written before the fork rides down both
+        branches as the same object, because :meth:`~shipinfer.topology.base.ChainItem.derive`
+        copies the dict and not the values, so a diamond arrives with both contributors holding
+        one mapping. Merging that mapping into itself would answer correctly anyway -- every
+        entry would meet itself, and ``union[entry] is not row`` is false against the same
+        object, so no refusal is reachable -- and the branch buys nothing but the O(rows) copy
+        it skips. What it is worth is that copy, at 1000 frames a second, on a chain that
+        embeds before it forks; it is pinned by a test that files a ``RowIndexed`` before the
+        fork -- the only kind that would otherwise be copied -- and asserts the merged value
+        *is* that object, so a refactor that drops the branch fails rather than quietly copying
+        every pre-fork scatter-back at every fan-in.
+
+        ``meta["missing_stages"]`` is the tree's *other* partial-coverage value and it does not
+        get the union: it is a ``tuple[str, ...]`` appended to by ``track`` and ``mtmc``, so two
+        branches each naming a different gap resolve first-writer-wins and one name is dropped.
+        That is not live -- on ``topology/ship_person.yaml`` both writers sit *after* the
+        rejoin -- and unioning tuples in general would be wrong, because ``meta["frame_hw"]`` is
+        a tuple too and two branches disagreeing about a frame's size must not resolve to a
+        four-tuple. Special-casing the name here would put a pipeline key in the pure runner.
+        The next chain that loses a stage per branch should reach for the ``RowIndexed`` form,
+        which is the shape ``vectors`` moved to for exactly this reason.
+
+        Equality is deliberately *not* attempted beyond identity. The values under a
+        ``RowIndexed`` key are numpy arrays -- an embedding per detection row -- and
+        ``a == b`` on two arrays is an array, whose truth value raises; a merge that crashed
+        the walk while deciding whether to raise would be worse than the loss it replaced. So
+        two branches that independently computed a row are refused even if the numbers would
+        have matched, which is right anyway: it means both embedders cropped it, and that is
+        the duplicated GPU work this element's ``classes:`` exists to prevent.
+
+        Args:
+            node: the fan-in being merged, named in the refusal.
+            contributors: ``(predecessor name, its contribution)`` in ``node.inputs`` order.
+
+        Raises:
+            InferenceError: two branches filed different values for the same detection row of
+                the same ``RowIndexed`` key. Names the key, the row and every branch that
+                claimed it, because the fix is in the chain file -- two elements were told to
+                cover the same detection.
+        """
+        merged: dict[str, Any] = {}
         for _, contributed in contributors:
             for key, value in contributed.meta.items():
-                meta.setdefault(key, value)
-        return ChainItem(
-            context=donor.context, caps=donor.caps, payload=donor.payload, meta=meta
+                if key not in merged:
+                    merged[key] = value
+                    continue
+                held = merged[key]
+                if held is value:
+                    # Fast path, not a guard: the same object down both branches (written
+                    # before the fork) merges into itself entry-for-entry and cannot be
+                    # refused, so skipping the merge only skips the copy.
+                    continue
+                if not (isinstance(held, RowIndexed) and isinstance(value, RowIndexed)):
+                    # Not a *declared* union to take: the first writer wins. Two plain
+                    # mappings land here too, on purpose -- a model's raw `{output name:
+                    # Tensor}` response is a mapping and is not an attribution.
+                    continue
+                union = RowIndexed(held)
+                for entry, row in value.items():
+                    if entry in union and union[entry] is not row:
+                        raise InferenceError(self._collision(node, key, entry, contributors))
+                    union[entry] = row
+                merged[key] = union
+        return merged
+
+    def _collision(
+        self,
+        node: ElementNode,
+        key: str,
+        entry: Any,
+        contributors: list[tuple[str, ChainItem]],
+    ) -> str:
+        """The message for two branches filing different values for one detection row.
+
+        Off the ordinary path by construction, so it re-scans the contributors to name *every*
+        branch that claimed the row rather than only the two the merge happened to be holding.
+        On a three-way rejoin the pair being merged need not be the pair at fault -- branches
+        one and two may cover disjoint rows and branch three contest one of them, in which
+        case the merge is holding the *union* of one and two on one side and the culprit on
+        the other -- and an operator sent to the wrong two slots of the chain file is worse
+        served than one sent to none. Pinned by
+        ``tests/runners/test_walk.py::TestTwoBranchesFilingTheSameMapping::
+        test_a_three_way_rejoin_names_only_the_branches_that_claimed_the_row``.
+
+        The re-scan matches on :class:`~shipinfer.topology.base.RowIndexed` for the same
+        reason the merge does: a third branch carrying a plain mapping under this key never
+        entered the union, so naming it would send the operator to a slot that is not
+        involved.
+        """
+        claimants = [
+            name
+            for name, contributed in contributors
+            if isinstance(inbound := contributed.meta.get(key), RowIndexed) and entry in inbound
+        ]
+        return (
+            f"fan-in {node.name!r}: branches {', '.join(repr(name) for name in claimants)} "
+            f"each filed a different value for meta[{key!r}][{entry!r}]. Rejoining branches "
+            "merge a row-indexed scatter-back rather than one replacing the other, and two "
+            "elements covering detection row "
+            f"{entry!r} means the chain file asked both of them for it -- check their "
+            "`params: classes:` do not overlap"
         )
 
     def _substitute_donor(

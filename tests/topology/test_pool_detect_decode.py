@@ -196,15 +196,22 @@ class TestItRefusesWithoutTheOpsItWasPromised:
     def test_it_declares_that_it_needs_them(self) -> None:
         assert PoolDetect.needs_image_ops is True
 
-    def test_no_other_element_does(self) -> None:
-        """The gating is only worth having if it is selective: a chain of mocks, or of `pool`
-        embedders, must resolve no ops at all."""
+    def test_only_the_elements_that_read_pixels_do(self) -> None:
+        """The gating is only worth having if it is selective: a chain of mocks, or of
+        forwarding `pool` elements, must resolve no ops at all.
+
+        ``PoolEmbed`` answers ``True`` since C8 — it cuts one crop per detection out of the
+        source frame (``tests/topology/test_pool_embed_crops.py``). ``PoolSegment`` does not
+        *yet*: its crop half is one line away and its ``_finish`` is a fold over two outputs
+        that a per-row scatter-back cannot express, so it keeps the forwarding default rather
+        than gaining half a feature.
+        """
         from shipinfer.topology.elements.mock import MockDetect
         from shipinfer.topology.elements.pool import PoolEmbed, PoolRecognize, PoolSegment
 
         assert [
             cls.needs_image_ops for cls in (PoolSegment, PoolEmbed, PoolRecognize, MockDetect)
-        ] == [False, False, False, False]
+        ] == [False, True, False, False]
 
     def test_a_context_with_no_ops_is_a_typed_refusal_at_open(self) -> None:
         element = PoolDetect(

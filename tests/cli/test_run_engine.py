@@ -453,16 +453,24 @@ class TestWhoNeedsImageOps:
     def test_a_chain_of_mocks_needs_none_although_its_kinds_are_the_same(self) -> None:
         assert image_ops_are_needed("inprocess", topology_of(MOCK_CHAIN)) is False
 
-    def test_a_pool_chain_with_no_detector_in_it_needs_none(self) -> None:
-        """The half that would be lost by reusing ``needs_model``: an embedder submits a
-        tensor somebody else shaped, so it needs the pool and no pre-processing at all."""
-        embed_only = POOL_CHAIN.replace(
-            "detect: {impl: pool, model: detector, params: {input: images}}",
-            "embed: {impl: pool, model: detector}",
-        ).replace("name: pool_chain", "name: embed_chain")
+    def test_a_pool_chain_that_reads_no_pixels_needs_none(self) -> None:
+        """The half that would be lost by reusing ``needs_model``: a ``pool`` element that
+        forwards its payload submits a tensor somebody else shaped, so it needs the pool and
+        no pre-processing at all.
 
-        assert model_pool_is_needed("inprocess", topology_of(embed_only)) is True
-        assert image_ops_are_needed("inprocess", topology_of(embed_only)) is False
+        ``segment`` and not ``embed``: since C8 an embedder cuts one crop per detection out of
+        the source frame and therefore *does* need ops
+        (``tests/topology/test_pool_embed_crops.py``), which makes it the wrong witness for
+        "needs the pool, needs no ops" — but not for the property, which is that the two
+        declarations are independent.
+        """
+        segment_only = POOL_CHAIN.replace(
+            "detect: {impl: pool, model: detector, params: {input: images}}",
+            "segment: {impl: pool, model: detector}",
+        ).replace("name: pool_chain", "name: segment_chain")
+
+        assert model_pool_is_needed("inprocess", topology_of(segment_only)) is True
+        assert image_ops_are_needed("inprocess", topology_of(segment_only)) is False
 
     def test_the_fleet_needs_none_because_each_shard_resolves_its_own(self) -> None:
         assert image_ops_are_needed("fleet", topology_of(POOL_CHAIN)) is False
