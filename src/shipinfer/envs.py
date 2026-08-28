@@ -1,313 +1,167 @@
-"""The one place process environment variables are read.
+"""Environment knobs, read at access time.
 
-Scattered ``os.getenv`` calls are how a deployment ends up running the wrong code path in
-silence: a typo'd variable name falls back to the default, everything starts, and the
-operator's evidence that hardware decode is on is a shell history entry rather than the
-program's behaviour. Declaring each variable once — name, type, default, meaning — buys
-three things:
+``envs.SHIPINFER_INGEST_BACKEND`` *is* the parsed value — str, int, float or bool — so no
+call site casts. Add a knob by adding one entry to :data:`environment_variables`.
 
-* a **typed** parse, so ``SHIPINFER_INGEST_BACKEND=gstremaer`` fails loudly at start-up
-  with the valid options listed, instead of silently selecting the default;
-* :func:`describe`, so ``shipinfer doctor`` can print what the process actually resolved;
-* one grep-able inventory of the process's environment contract.
+Unset or blank takes the default. Set but malformed raises
+:class:`~shipinfer.core.errors.ConfigurationError` naming the variable and, for a closed
+vocabulary, the options: a server that ignores an operator's explicit instruction and starts
+anyway is worse than one that refuses to start.
 
-**Deliberately not here.** Two families of variable are read elsewhere, and both are
-one-way dependencies that this module must not invert:
-
-* ``SHIPINFER_*`` settings-tree overrides (``SHIPINFER_SCHEDULER__PLACEMENT_POLICY``, ...)
-  are pydantic-settings' job — see :mod:`shipinfer.core.settings`. Duplicating them here
-  would create two owners of the same key.
-* ``SHIPINFER_LOG_LEVEL`` / ``SHIPINFER_LOG_SINK`` are read in
-  :mod:`shipinfer.core.logging`, because ``core`` sits below this module in the layering
-  and may not import upward (ADR-001).
-
-This module imports nothing but the standard library and
-:mod:`shipinfer.core.errors`: no torch, no cv2, and no side effects at import time.
+Not here, deliberately: the ``SHIPINFER_<SECTION>__<FIELD>`` settings tree, owned by
+pydantic-settings (:mod:`shipinfer.core.settings`), and ``SHIPINFER_LOG_LEVEL`` /
+``SHIPINFER_LOG_SINK``, read in :mod:`shipinfer.core.logging`, which sits below this module.
 """
 
 from __future__ import annotations
 
 import os
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import Any
 
 from shipinfer.core.errors import ConfigurationError
 
-__all__ = [
-    "ALL",
-    "GST_APPSINK_MAX_BUFFERS",
-    "GST_DECODER_OVERRIDE",
-    "INGEST_BACKEND",
-    "INGEST_BACKENDS",
-    "INGEST_HWACCEL",
-    "INGEST_LATENCY_MS",
-    "INGEST_OPEN_TIMEOUT_S",
-    "INGEST_READ_TIMEOUT_S",
-    "INGEST_RTSP_TRANSPORT",
-    "EnvVar",
-    "describe",
-]
-
-T = TypeVar("T")
+__all__ = ["INGEST_BACKENDS", "describe", "environment_variables", "is_set"]
 
 _TRUE = frozenset({"1", "true", "yes", "on", "y", "t"})
 _FALSE = frozenset({"0", "false", "no", "off", "n", "f"})
 
-
-@dataclass(frozen=True, slots=True)
-class EnvVar(Generic[T]):
-    """One environment variable: its name, its parser, its default and why it exists.
-
-    Read with :meth:`get`. A malformed value raises
-    :class:`~shipinfer.core.errors.ConfigurationError` rather than falling back to the
-    default: a server that ignores an operator's explicit instruction and starts anyway is
-    worse than one that refuses to start.
-    """
-
-    name: str
-    default: T
-    parse: Callable[[str], T]
-    doc: str
-    #: Populated for closed vocabularies, so an error message can list the alternatives.
-    choices: tuple[str, ...] = ()
-
-    def get(self) -> T:
-        """The parsed value, or the default when the variable is unset or empty.
-
-        Raises:
-            ConfigurationError: if the variable is set to something unparseable. The
-                message names the variable and, for a closed vocabulary, every valid
-                option — the two things a `KeyError` deep in a factory never says.
-        """
-        raw = os.environ.get(self.name)
-        if raw is None or not raw.strip():
-            return self.default
-        try:
-            return self.parse(raw.strip())
-        except (ConfigurationError, TypeError, ValueError) as exc:
-            # Re-wrapped rather than re-raised so the message always names the variable: a
-            # parser knows what it expected but not which key carried the wrong value.
-            raise ConfigurationError(f"{self.name}={raw.strip()!r} is invalid: {exc}") from exc
-
-    def is_set(self) -> bool:
-        """Whether the operator said anything, as opposed to taking the default."""
-        raw = os.environ.get(self.name)
-        return raw is not None and bool(raw.strip())
-
-    def __str__(self) -> str:
-        return f"{self.name}={self.get()!r}{'' if self.is_set() else ' (default)'}"
-
-
-def _bool(value: str) -> bool:
-    lowered = value.lower()
-    if lowered in _TRUE:
-        return True
-    if lowered in _FALSE:
-        return False
-    raise ConfigurationError(
-        f"expected a boolean, got {value!r}; use one of {sorted(_TRUE | _FALSE)}"
-    )
-
-
-def _choice(options: Sequence[str]) -> Callable[[str], str]:
-    def parse(value: str) -> str:
-        if value not in options:
-            raise ConfigurationError(f"not a valid choice; valid options: {sorted(options)}")
-        return value
-
-    return parse
-
-
-def _positive_float(value: str) -> float:
-    parsed = float(value)
-    if parsed <= 0.0:
-        raise ConfigurationError(f"expected a positive number, got {value!r}")
-    return parsed
-
-
-def _positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed <= 0:
-        raise ConfigurationError(f"expected a positive integer, got {value!r}")
-    return parsed
-
-
-#: The video-source implementations selectable from the environment. Kept as a literal
-#: rather than read from :data:`shipinfer.ingest.SOURCES`, because this module sits below
-#: ``ingest`` and importing upward would be a cycle. ``tests/ingest/test_envs.py`` asserts
-#: the two agree, so the duplication cannot drift.
+#: Video sources selectable from the environment. A literal, not a read of
+#: ``ingest.SOURCES``: that package sits above this one. ``tests/ingest/test_envs.py``
+#: asserts the two agree, so the duplication cannot drift.
 INGEST_BACKENDS: tuple[str, ...] = ("gstreamer", "pyav", "replay")
 
-INGEST_BACKEND: EnvVar[str] = EnvVar(
-    name="SHIPINFER_INGEST_BACKEND",
-    default="gstreamer",
-    parse=_choice(INGEST_BACKENDS),
-    doc=(
-        "Which video source implementation to use when a camera does not name one. "
-        "`gstreamer` is the production path (NVDEC via nvv4l2decoder); `pyav` is the "
-        "portable fallback; `replay` reads a local file or frame directory and is what "
-        "makes the 50-camera stress test runnable with no camera."
+
+def _raw(name: str) -> str | None:
+    """The variable's value, or ``None`` when unset or blank."""
+    value = os.environ.get(name)
+    return value.strip() if value and value.strip() else None
+
+
+def is_set(name: str) -> bool:
+    """Whether the operator said anything, as opposed to taking the default."""
+    return _raw(name) is not None
+
+
+def _refuse(name: str, raw: str, expected: str) -> ConfigurationError:
+    return ConfigurationError(f"{name}={raw!r} is invalid: expected {expected}")
+
+
+def _str(name: str, default: str = "") -> str:
+    return _raw(name) or default
+
+
+def _bool(name: str, default: bool) -> bool:
+    raw = _raw(name)
+    if raw is None:
+        return default
+    if raw.lower() in _TRUE:
+        return True
+    if raw.lower() in _FALSE:
+        return False
+    raise _refuse(name, raw, f"a boolean, one of {sorted(_TRUE | _FALSE)}")
+
+
+def _int(name: str, default: int, *, positive: bool = True) -> int:
+    raw = _raw(name)
+    if raw is None:
+        return default
+    try:
+        parsed = int(raw)
+    except ValueError as exc:
+        raise _refuse(name, raw, "an integer") from exc
+    if positive and parsed <= 0:
+        raise _refuse(name, raw, "a positive integer")
+    return parsed
+
+
+def _float(name: str, default: float, *, positive: bool = True) -> float:
+    raw = _raw(name)
+    if raw is None:
+        return default
+    try:
+        parsed = float(raw)
+    except ValueError as exc:
+        raise _refuse(name, raw, "a number") from exc
+    if positive and parsed <= 0.0:
+        raise _refuse(name, raw, "a positive number")
+    return parsed
+
+
+def _choice(name: str, default: str, options: Sequence[str]) -> str:
+    raw = _raw(name)
+    if raw is None:
+        return default
+    if raw not in options:
+        raise _refuse(name, raw, f"one of {sorted(options)}")
+    return raw
+
+
+environment_variables: dict[str, Callable[[], Any]] = {
+    # ── ingest ──
+    # Which source implementation a camera that names none gets: `gstreamer` is the
+    # production path (NVDEC), `pyav` the portable fallback, `replay` reads a file or frame
+    # directory and is what makes the 50-camera stress test runnable with no camera.
+    "SHIPINFER_INGEST_BACKEND": lambda: _choice(
+        "SHIPINFER_INGEST_BACKEND", "gstreamer", INGEST_BACKENDS
     ),
-    choices=INGEST_BACKENDS,
-)
-
-INGEST_HWACCEL: EnvVar[bool] = EnvVar(
-    name="SHIPINFER_INGEST_HWACCEL",
-    default=True,
-    parse=_bool,
-    doc=(
-        "Prefer hardware decode (NVDEC) where the backend supports it. Turn it off to "
-        "isolate a decoder bug or to run on a host whose driver has no video engine; the "
-        "source then falls back to software decode and says so in the log."
+    # Off isolates a decoder bug, or a driver with no video engine; the source falls back to
+    # software decode and says so.
+    "SHIPINFER_INGEST_HWACCEL": lambda: _bool("SHIPINFER_INGEST_HWACCEL", True),
+    # TCP by default: UDP loses packets under load, and the decode artefacts that follow
+    # look exactly like a model regression.
+    "SHIPINFER_INGEST_RTSP_TRANSPORT": lambda: _choice(
+        "SHIPINFER_INGEST_RTSP_TRANSPORT", "tcp", ("tcp", "udp", "auto")
     ),
-)
-
-INGEST_RTSP_TRANSPORT: EnvVar[str] = EnvVar(
-    name="SHIPINFER_INGEST_RTSP_TRANSPORT",
-    default="tcp",
-    parse=_choice(("tcp", "udp", "auto")),
-    doc=(
-        "RTSP lower transport. TCP by default: UDP loses packets under load and the "
-        "resulting decode artefacts look exactly like a model regression."
-    ),
-    choices=("tcp", "udp", "auto"),
-)
-
-INGEST_LATENCY_MS: EnvVar[int] = EnvVar(
-    name="SHIPINFER_INGEST_LATENCY_MS",
-    default=200,
-    parse=_positive_int,
-    doc=(
-        "Jitter buffer the source keeps, in milliseconds. It is a direct latency cost, so "
-        "the 1000 ms of the previous generation is not a default here; raise it only if a "
-        "camera's network genuinely needs it."
-    ),
-)
-
-INGEST_OPEN_TIMEOUT_S: EnvVar[float] = EnvVar(
-    name="SHIPINFER_INGEST_OPEN_TIMEOUT_S",
-    default=10.0,
-    parse=_positive_float,
-    doc=(
-        "How long a connection attempt may take before it counts as a failure and the "
-        "reconnect backoff advances. Without it an unreachable camera blocks its own "
-        "actor thread forever and reports as healthy."
-    ),
-)
-
-INGEST_READ_TIMEOUT_S: EnvVar[float] = EnvVar(
-    name="SHIPINFER_INGEST_READ_TIMEOUT_S",
-    default=5.0,
-    parse=_positive_float,
-    doc=(
-        "How long a single frame read may block. This is also what lets a camera actor "
-        "notice a stop request: the loop checks the stop event once per read."
-    ),
-)
-
-CUDA_GRAPHS: EnvVar[str] = EnvVar(
-    name="SHIPINFER_CUDA_GRAPHS",
-    default="",
-    parse=str,
-    choices=("on", "off"),
-    doc=(
-        "Override CUDA graph capture for every model: 'on' or 'off'. Empty leaves each "
-        "model's `execution.cuda_graphs` setting alone, which is the normal case. "
-        "An operator switch rather than the only control, because a graph records device "
-        "addresses and the cases where capture must be refused are per-model — a shape "
-        "tensor, or a model whose batch shape genuinely varies. Triton makes this decision "
-        "per model too, via `optimization { cuda { graphs: true } }`; this is the blunter "
-        "instrument for answering 'is the graph path what is hurting?' in one restart "
-        "without editing six config files. See docs/qa/triton.md."
-    ),
-)
-
-PROFILE_DIR: EnvVar[str] = EnvVar(
-    name="SHIPINFER_PROFILE_DIR",
-    default="",
-    parse=str,
-    doc=(
-        "Directory for torch-profiler Chrome traces. Empty disables profiling entirely. "
-        "Heavy: never set this in production. Bounded by SHIPINFER_PROFILE_STEPS, because "
-        "an unbounded profiler at 1000 frames a second fills a disk in minutes and produces "
-        "a trace too large to open — which is a failed measurement, not a thorough one."
-    ),
-)
-
-PROFILE_STEPS: EnvVar[int] = EnvVar(
-    name="SHIPINFER_PROFILE_STEPS",
-    default=8,
-    parse=int,
-    doc=(
-        "How many batches the torch profiler captures once SHIPINFER_PROFILE_DIR is set. "
-        "Eight is enough to see a steady-state pattern and small enough to open."
-    ),
-)
-
-PROFILE_PHASES: EnvVar[bool] = EnvVar(
-    name="SHIPINFER_PROFILE_PHASES",
-    default=False,
-    parse=_bool,
-    doc=(
-        "Split compute_us into h2d_us / execute_us / d2h_us with timed CUDA events, and "
-        "report the device-idle fraction. Answers 'is the GPU idle while we copy?' as a "
-        "Prometheus histogram rather than a trace someone has to open. Opt-in because "
-        "Event(enable_timing=True) plus the synchronise needed to read it serialises the very "
-        "overlap the numbers are meant to inform: measuring this changes it."
-    ),
-)
-
-GST_DECODER_OVERRIDE: EnvVar[str] = EnvVar(
-    name="SHIPINFER_GST_DECODER",
-    default="",
-    parse=str,
-    doc=(
-        "Force a specific GStreamer decoder element (e.g. `nvh264dec`) instead of probing "
-        "the plugin registry. An escape hatch for a box where the probe picks a decoder "
-        "that is installed but broken."
-    ),
-)
-
-GST_APPSINK_MAX_BUFFERS: EnvVar[int] = EnvVar(
-    name="SHIPINFER_GST_APPSINK_MAX_BUFFERS",
-    default=2,
-    parse=_positive_int,
-    doc=(
-        "Frames the appsink may hold before it drops the oldest. Deliberately tiny: a deep "
-        "decoder queue converts a throughput problem into a latency problem and hides it."
-    ),
-)
-
-#: Every variable this module owns, for :func:`describe` and for the drift test.
-#:
-#: ``SHIPINFER_SHARD_CAMERAS`` used to be here. It is gone with the argv-and-environment
-#: mechanism (arch.md section 2, A2 PR-6): a shard is told which cameras to read by
-#: ``AddCamera``, one at a time, on a process that is already running — which is what lets a
-#: camera be added to a live fleet at all.
-ALL: tuple[EnvVar[object], ...] = (
-    INGEST_BACKEND,
-    INGEST_HWACCEL,
-    INGEST_RTSP_TRANSPORT,
-    INGEST_LATENCY_MS,
-    INGEST_OPEN_TIMEOUT_S,
-    INGEST_READ_TIMEOUT_S,
-    GST_DECODER_OVERRIDE,
-    GST_APPSINK_MAX_BUFFERS,
-    # Omitted until now, so `describe()` and `shipinfer doctor` hid four variables the
-    # comment above claims they list — including the CUDA-graph switch, the one an operator
-    # is most likely to go looking for.
-    CUDA_GRAPHS,
-    PROFILE_DIR,
-    PROFILE_STEPS,
-    PROFILE_PHASES,
-)
+    # Jitter buffer, milliseconds. A direct latency cost, so not the 1000 ms of the previous
+    # generation; raise it only for a camera whose network needs it.
+    "SHIPINFER_INGEST_LATENCY_MS": lambda: _int("SHIPINFER_INGEST_LATENCY_MS", 200),
+    # Without a connect deadline an unreachable camera blocks its own actor thread forever
+    # and reports healthy.
+    "SHIPINFER_INGEST_OPEN_TIMEOUT_S": lambda: _float("SHIPINFER_INGEST_OPEN_TIMEOUT_S", 10.0),
+    # Also what lets a camera actor notice a stop: the loop checks the stop event once per
+    # read.
+    "SHIPINFER_INGEST_READ_TIMEOUT_S": lambda: _float("SHIPINFER_INGEST_READ_TIMEOUT_S", 5.0),
+    # Force a GStreamer decoder element instead of probing the registry — an escape hatch
+    # for a box whose probe picks a decoder that is installed but broken.
+    "SHIPINFER_GST_DECODER": lambda: _str("SHIPINFER_GST_DECODER"),
+    # Frames the appsink may hold before dropping the oldest. Deliberately tiny: a deep
+    # decoder queue turns a throughput problem into a latency problem and hides it.
+    "SHIPINFER_GST_APPSINK_MAX_BUFFERS": lambda: _int("SHIPINFER_GST_APPSINK_MAX_BUFFERS", 2),
+    # ── engine ──
+    # Override CUDA graph capture for every model; empty leaves each model's
+    # `execution.cuda_graphs` alone, which is the normal case. The blunt instrument answers
+    # "is the graph path what is hurting?" in one restart. Triton decides per model too.
+    "SHIPINFER_CUDA_GRAPHS": lambda: _choice("SHIPINFER_CUDA_GRAPHS", "", ("on", "off")),
+    # ── profiling (heavy; never in production) ──
+    # Directory for torch-profiler traces; empty disables profiling. Bounded by
+    # SHIPINFER_PROFILE_STEPS: an unbounded profiler at 1000 fps fills a disk in minutes and
+    # writes a trace too large to open, which is a failed measurement.
+    "SHIPINFER_PROFILE_DIR": lambda: _str("SHIPINFER_PROFILE_DIR"),
+    # Batches captured once the directory is set. Eight shows a steady-state pattern and
+    # still opens.
+    "SHIPINFER_PROFILE_STEPS": lambda: _int("SHIPINFER_PROFILE_STEPS", 8),
+    # Split compute_us into h2d/execute/d2h with timed CUDA events. Opt-in because the
+    # synchronise needed to read them serialises the overlap the numbers describe.
+    "SHIPINFER_PROFILE_PHASES": lambda: _bool("SHIPINFER_PROFILE_PHASES", False),
+}
 
 
-def describe() -> list[tuple[str, str, bool, str]]:
-    """``(name, resolved value, was it set, doc)`` for every variable declared here.
+def __getattr__(name: str) -> Any:
+    # PEP 562: resolved at access, not at import, so a test's monkeypatch.setenv is seen.
+    if name in environment_variables:
+        return environment_variables[name]()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-    What ``shipinfer doctor`` prints. Showing *resolved* values rather than raw strings is
-    the point: it is the only way an operator can tell a working override from a typo.
+
+def __dir__() -> list[str]:
+    return [*__all__, *environment_variables]
+
+
+def describe() -> list[tuple[str, str, bool]]:
+    """``(name, resolved value, was it set)`` for every knob — what ``doctor`` prints.
+
+    Resolved values rather than raw strings: it is the only way an operator can tell a
+    working override from a typo.
     """
-    return [(var.name, str(var.get()), var.is_set(), var.doc) for var in ALL]
+    return [(name, str(read()), is_set(name)) for name, read in environment_variables.items()]

@@ -247,7 +247,7 @@ class GStreamerSource(FrameSource):
             return gst.ElementFactory.find(element) is not None
 
         codec = self.config.codec
-        override = envs.GST_DECODER_OVERRIDE.get()
+        override = envs.SHIPINFER_GST_DECODER
         if codec == "auto":
             decoder = "decodebin"
         elif override:
@@ -264,7 +264,7 @@ class GStreamerSource(FrameSource):
             converter=select_converter(available),
             width=self.config.width,
             height=self.config.height,
-            max_buffers=envs.GST_APPSINK_MAX_BUFFERS.get(),
+            max_buffers=envs.SHIPINFER_GST_APPSINK_MAX_BUFFERS,
         )
         self._pipeline_description = description
         _LOG.info(
