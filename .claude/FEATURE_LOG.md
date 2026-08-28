@@ -5,7 +5,7 @@ edits, typo fixes and pure docs.
 
 ---
 
-## 2026-08-28 — `PoolEmbed` crops per detection and files the vectors per row (Phase C8a)
+## 2026-08-28 — `PoolEmbed` crops per detection, files the vectors per row, and the fan-in merges them (Phase C8a)
 
 **What.** The embed→track scatter-back, the last missing link before the demo chain runs.
 `embed` submitted the *whole payload* — the frame — to a re-identification model whose input
@@ -24,7 +24,8 @@ the embed→track scatter-back before the demo chain runs."
 | `track._embeddings` | the **empty** mapping is exempt from the coverage check |
 | `_CropMetrics` | `shipinfer_element_crops_per_frame` (object-count buckets) + `shipinfer_element_crops_total`, both labelled by element, both null-object when the runner offered no registry |
 | row selection, shared | `Detections.indices_of_any(classes)` + `Detections.boxes_at(indices)` + `parse_classes(declared, what)` in `topology/elements/detections.py`; `track` and every crop element now call one rule instead of carrying a copy each |
-| tests | `tests/topology/test_pool_embed_crops.py` (55), +17 in `test_detections.py` for the shared helpers, +1 in `test_track_element.py`; four existing tests updated where C8 changed their premise |
+| **the fan-in merge** (`runners/inprocess.py`) | **a shared seam changed.** `_inbound` merged metadata with `meta.setdefault(key, value)` — first writer wins, per key, *wholesale*. `_merge_meta` now takes the **union** when two branches wrote a `Mapping` under one key, and refuses (`InferenceError`) two branches that filed different values for the same entry |
+| tests | `tests/topology/test_pool_embed_crops.py` (58), +18 in `test_detections.py` for the shared helpers, +5 in `tests/runners/test_walk.py` for the merge rule, +1 in `test_track_element.py`; four existing tests updated where C8 changed their premise |
 
 **Why.** The chain's cardinality has to change somewhere — arch.md §5's "branch on class →
 crop batch → submit crops" — and the embedder is where. Everything here is the proven fan-out
@@ -45,11 +46,42 @@ that every row knows which detection it came from.
   coverage is the *normal* case. The mapping says exactly which rows were covered; a NaN row
   would have to be recognised as absence by every consumer, and the first one that forgot would
   match a track against a vector of NaNs and never say so.
-- **The scatter is additive.** `ChainItem.derive` merges metadata by key, so two embedders both
-  writing `meta["vectors"]` would have the second replacing the first wholesale — every ship
-  reaching `track` with no appearance, on a chain whose per-element counters both say they ran.
-  `_scatter` merges, and refuses a non-mapping already filed under the key rather than
-  overwriting the producer that needs fixing.
+- **The scatter is additive — and so is the rejoin, which is where the shipped chain needs it.**
+  Two embedders can meet in two ways and both had to be closed. *In series* — both on one
+  branch — the second finds the first's mapping in `item.meta`, and `_scatter` merges into it
+  (and refuses a non-mapping already filed under the key rather than overwriting the producer
+  that needs fixing). *In parallel* — which is what `topology/ship_person.yaml` actually
+  declares, `embed_person: after: detect` and `track: after: [recognize, embed_person]` —
+  neither element ever sees the other's item, `_scatter`'s merge branch is never reached, and
+  the union has to be taken at the fan-in. It was not: `InprocessRunner._inbound` merged branch
+  metadata with `meta.setdefault(...)`, so the *first* branch's whole `vectors` mapping won and
+  the second's was dropped. At the sizing that is ~15 000 person crops a second cut, embedded on
+  a GPU and discarded, every person reaching the tracker with `embedding=None` — no exception,
+  no counter, both elements' per-frame counters reporting the crops they really did make. The
+  fix is at the seam and not in the element: `_merge_meta` unions two mappings under one key,
+  because a partial coverage is what the mapping form *means*.
+- **What the merge does not do.** A key one branch wrote as a mapping and another as something
+  else is not a union — that is two branches disagreeing about what the key *is* — so it keeps
+  the existing first-writer-wins rule, as do two scalars (`meta["class"]`), whose resolution
+  stays a property of the chain file's declaration order rather than of thread timing. Two
+  branches filing *different* values for the same entry of one mapping is refused with a typed
+  `InferenceError` naming the key, the entry and every slot that claimed it: there is no answer
+  to "which of these two vectors is this object's", and it means both elements cropped it,
+  which is the duplicated GPU work `classes:` exists to prevent. Identity is checked before any
+  of that, so a mapping written *before* the fork and carried down both branches — a diamond,
+  the ordinary case — is not mistaken for a disagreement. Equality is deliberately not
+  attempted beyond identity: the values are numpy arrays and `a == b` on two of them is an
+  array whose truth value raises.
+- **No load-time check behind it, and that is a decision.** CONVENTIONS 2.6 would prefer the
+  loader to refuse "two elements on rejoining branches write the same key with incompatible
+  shapes" at `from_spec`. To do that it would have to know which metadata keys each element
+  writes and the shape of each value. Only the `pool` family declares anything of the sort
+  (`_PoolElement.meta_key`); `track`, `mtmc` and `decode` write theirs as literal keyword
+  arguments to `derive` inside `process`, and `mock` — the implementation every offline chain
+  loads — computes its keys from `params:` at runtime. A `ClassVar` that three families out of
+  five leave empty would make the check pass for every pair it cannot see, which reads as
+  coverage and is not. So the question is answered where the values are, and the only outcome
+  that is silent is the one that is correct.
 - **An empty mapping is coverage of no rows, not an off-by-N.** `track._embeddings` refused a
   mapping "whose keys name no row at all". With a crop element in the chain that is the ordinary
   frame — `embed_person` sees three ships and covers none — so the empty mapping is now exempt.
@@ -98,11 +130,14 @@ that every row knows which detection it came from.
 **What allocates per frame** (CONVENTIONS 2.5): the crop batch itself, one `Tensor` wrapper,
 one `InferenceRequest` per chunk (one, except past `max_batch_size`), and the `{row: vector}`
 mapping whose values are numpy *views*. Selecting a subset adds an index tuple and one `(N, 4)`
-gather; selecting every row adds neither — `_selected` returns a `range` and `boxes_at` hands
-the array through. A frame with nothing to crop submits nothing and costs **one** `derive()`,
-for the empty mapping that records that this element ran; when a peer embedder has already
-filed a mapping there is nothing left to say and the item flows on unchanged. The metric handle
-is bound once at `open` rather than looked up off `self._metrics` per frame.
+gather; declaring no `classes:` adds neither — `_selected` returns a `range` and `boxes_at`
+recognises it as the whole frame and hands the array through (a *value* test, `indices ==
+range(len(self))`, not a length test, so a full-length reordering is permuted rather than
+handed back unpermuted). A frame with nothing to crop submits nothing and costs **one**
+`derive()`, for the empty mapping that records that this element ran; only where a second
+embedder sits *in series* ahead of it is a peer's mapping already there and not even that — on
+the shipped parallel wiring the quiet frame costs the one `derive`. The metric handle is bound
+once at `open` rather than looked up off `self._metrics` per frame.
 
 **Not done here.** The demo chain (`topology/ship_person.yaml`) still names `gstreamer-gpu` and
 `kafka` and does not load; nothing in the chain sets `meta["class"]`, so every `when:` in that
@@ -116,10 +151,6 @@ slots, so refusing a crop element whose `classes:` is absent from the upstream d
 `decode.class_labels` is CONVENTIONS 2.6 ("validate at start-up, not at first use") and costs
 nothing per frame. Same slice as replacing that file's four `when: class == …` guards with
 `params: {classes: [...]}`.
-
----
-
-## 2026-08-28 — the `mtmc` element: instants across cameras, and a barrier that never takes the last worker (Phase C6)
 
 ---
 
