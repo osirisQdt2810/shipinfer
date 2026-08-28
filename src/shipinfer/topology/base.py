@@ -54,6 +54,7 @@ __all__ = [
     "ImageOpsLike",
     "LetterboxLike",
     "ModelResolver",
+    "RowIndexed",
 ]
 
 
@@ -128,6 +129,52 @@ class ElementKind(str, enum.Enum):
 
 #: Sentinel for "leave this alone", so ``derive(payload=None)`` can mean *clear it*.
 _KEEP: Final[Any] = object()
+
+
+class RowIndexed(dict):  # type: ignore[type-arg]
+    """A ``meta`` value that is a **scatter-back**: ``{detection row: that row's result}``.
+
+    A plain ``dict`` in every respect that matters at runtime — the type *is* the payload of
+    this class, and it carries no behaviour. What it carries is a **declaration**: the value
+    under this metadata key is keyed by *detection row index* and is therefore partial by
+    design, so two elements that both filed one over disjoint rows describe one frame between
+    them and their answers compose. ``PoolEmbed`` files one per frame
+    (:meth:`~shipinfer.topology.elements.pool._PoolCropElement._scatter`) and ``track`` reads
+    it (:meth:`~shipinfer.topology.elements.track.ShipvisionTrack._embeddings`).
+
+    **Why a type and not a sniff.** The fan-in
+    (:meth:`~shipinfer.runners.inprocess.InprocessRunner._merge_meta`) has to tell "two
+    branches each covered half the rows, union them" from "two branches disagree about one
+    value, take the first". It used to answer that with ``isinstance(value, Mapping)``, and a
+    mapping is exactly what it cannot distinguish on: ``_PoolElement._finish`` files a
+    model's raw ``response.outputs`` — a ``{output name: Tensor}`` dict — under its own
+    ``meta_key``, and ``segment`` and ``recognize`` both keep that default. Sniffed, two
+    rejoining segmenters either refuse every frame (engines that name their output the same
+    collide on the *name*) or silently fabricate a composite ``{'ship_masks': …,
+    'person_masks': …}`` that no engine emitted. Neither mapping says what shape it is, so
+    the merge guessed — and this class is the shape saying so itself. Declaring it costs the
+    writer one constructor call and buys the reader a total answer.
+
+    So: **only a** ``RowIndexed`` **unions at a fan-in.** Any other mapping keeps the
+    first-writer-wins rule that predates the union, which is what an undeclared value should
+    get — it is a value the runner has no attribution rule for, not one it may invent one for.
+
+    Being a ``dict`` subclass is the other half of the design. Every consumer that tests
+    ``isinstance(..., Mapping)``, iterates it, or does ``dict(...)`` on it keeps working
+    unchanged, so nothing downstream had to learn the name; and a chain that files a bare
+    ``{row: vector}`` still reaches ``track`` correctly, it merely does not get the union it
+    never asked for.
+
+    It lives here, next to :class:`ChainItem`, because it is a statement about ``ChainItem.
+    meta`` — the only place these values exist — and because ``topology`` is the deepest
+    layer both sides of the contract may import: the elements that write it are
+    ``topology.elements``, the fan-in that reads it is ``runners``, and ``runners`` imports
+    ``topology`` (``scripts/hooks/check_layers.py``). ``core`` is the other layer both may
+    reach, and it is the wrong one: ``core`` has no word for a chain item and must not gain a
+    vocabulary for one metadata dict's conventions.
+    """
+
+    __slots__ = ()
 
 
 @dataclass(slots=True)
@@ -227,12 +274,14 @@ class ImageOpsLike(Protocol):
     runner is handed an ops implementation, resolves it once and puts it on
     :attr:`ElementContext.ops`; the element calls it and never learns where it came from.
 
-    Deliberately **narrower** than ``ImageOps``. Only ``letterbox_batch`` is here, because it
-    is the only member the elements call today (``pipeline/graph/detect.py`` is the proven
-    path this follows: one letterbox per frame, its ``scales``/``pads``/``extents`` stored and
-    handed to the decode). ``crop_batch``, ``nms`` and ``letterbox_to_device`` are real and
-    are absent on purpose — a protocol member nobody calls is a coupling nobody needs, and the
-    first element that crops adds it with a test.
+    Deliberately **narrower** than ``ImageOps``. Two members are here, because two are what
+    the elements call: ``letterbox_batch`` for the detector (``pipeline/graph/detect.py`` is
+    the proven path it follows: one letterbox per frame, its ``scales``/``pads``/``extents``
+    stored and handed to the decode) and ``crop_batch`` for the embedder
+    (``pipeline/graph/crop.py``: one call for all N boxes of a frame, never a Python loop
+    around a kernel launch). ``nms`` and ``letterbox_to_device`` are real and are absent on
+    purpose — a protocol member nobody calls is a coupling nobody needs, and the element that
+    needs one adds it with a test, which is exactly how ``crop_batch`` arrived.
 
     ``params`` and ``dst_size`` are the caller's business: an element is *told* what the model
     wants, through its own ``params:`` or the runner's context. Typing ``params`` as ``Any``
@@ -255,6 +304,40 @@ class ImageOpsLike(Protocol):
             params: normalisation and channel order — a
                 :class:`shipinfer.runtime.ops.base.NormalizeParams`.
             pad_value: fill for the letterbox bars.
+        """
+        ...
+
+    def crop_batch(
+        self,
+        image: Any,
+        boxes: Any,
+        dst_size: tuple[int, int],
+        params: Any,
+    ) -> Any:
+        """Cut N boxes out of one frame and resize them into one ``(N, C, h, w)`` tensor.
+
+        The mirror of :meth:`letterbox_batch` for the fan-out: one frame in, one row per
+        detection out. **One call for all N boxes** — the signature is batched precisely so
+        that a per-crop Python loop around a kernel launch is hard to write (CONVENTIONS 2.5),
+        and at 10-20 people a frame across a thousand frames a second that loop is the
+        difference between a shard that keeps up and one that does not.
+
+        The rows come back in the order the boxes went in, which is the whole basis of the
+        scatter-back: the element that called this holds the detection index of every box and
+        pairs it with the row at the same position. Losing that order is how an embedding ends
+        up attached to the wrong object — a corruption with no exception and no symptom short
+        of a tracker that swaps identities.
+
+        Args:
+            image: the ``(H, W, 3)`` uint8 source frame, in **source** pixels — not the
+                letterboxed one the detector submitted. Cropping from the full-resolution
+                frame is both cheaper and sharper than cropping the letterbox and resizing
+                again (``pipeline/graph/crop.py``).
+            boxes: ``(N, 4)`` float32 ``[x1, y1, x2, y2]`` in ``image`` pixel coordinates —
+                the layout :class:`~shipinfer.topology.elements.detections.Detections` stores.
+            dst_size: ``(height, width)`` of one crop, matching the consuming model's declared
+                input.
+            params: normalisation and channel order, as for :meth:`letterbox_batch`.
         """
         ...
 

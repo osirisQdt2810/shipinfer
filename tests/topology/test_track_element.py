@@ -891,6 +891,19 @@ class TestWhatItReadsOffTheItem:
         embeddings = [t.embedding is not None for t in emitted.meta["tracks"]]
         assert sorted(embeddings) == [False, True]
 
+    def test_an_empty_vectors_mapping_covers_nothing_and_is_not_an_off_by_n(
+        self, element
+    ) -> None:
+        """The ordinary frame once a crop element is in the chain: ``embed_person`` sees three
+        ships and covers none of them, so it files ``{}``
+        (:class:`~shipinfer.topology.elements.pool._PoolCropElement`). Zero keys index nothing
+        because there was nothing to index, which is not the same as keys that index nothing —
+        and refusing it would fail a whole camera for being unremarkable."""
+        emitted = element.process(item(detections=detections((0, 0, 40, 40)), vectors={}))
+
+        assert len(emitted.meta["tracks"]) == 1
+        assert emitted.meta["tracks"][0].embedding is None
+
     def test_vectors_that_cannot_be_attributed_to_rows_are_refused(self, element) -> None:
         """A re-ID model's raw output tensors under their own names are not an attribution.
         Ignoring them would be a measurable accuracy loss reported as a healthy chain."""
