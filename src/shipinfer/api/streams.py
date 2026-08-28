@@ -369,7 +369,12 @@ def build_streams_router(cameras: CameraController) -> Any:
             # pydantic's exception type in an HTTP handler and *still* 500 on the settings
             # tree's own plain `ValueError`s, which are about the posted values and are the
             # common case. The message travels either way, and the traceback that says which
-            # it really was is in this process's log.
+            # it really was is written here -- an `HTTPException` is handled by starlette and
+            # would otherwise leave no trace on the server at all.
+            _LOG.exception(
+                "POST /streams refused a value the schema did not constrain",
+                extra=log_context(camera_id=camera.camera_id),
+            )
             raise HTTPException(400, str(exc)) from exc
         _LOG.info(
             "camera %s added over HTTP",

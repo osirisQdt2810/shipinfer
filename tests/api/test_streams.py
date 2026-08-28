@@ -20,6 +20,7 @@ What is under test is mostly the **mapping**, because that is what a client acts
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Container
@@ -417,20 +418,33 @@ class TestARequestTheSchemaCanRefuseOnItsOwn:
                 StreamRequest(camera_id=bad, url="x.mp4")
         assert StreamRequest(camera_id="quay-1", url="x.mp4").camera_id == "quay-1"
 
-    def test_a_value_the_schema_did_not_constrain_is_400_and_not_500(self) -> None:
+    def test_a_value_the_schema_did_not_constrain_is_400_and_not_500(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """The net under everything else the settings tree validates.
 
         `StreamRequest` cannot mirror all twenty of `CameraConfig`'s fields, so a value it
         does not know about is still refused a layer down with a `ValueError`. That is the
         caller's mistake and a retry sends it again, which makes it a 400 -- not the 500 that
         reads like a ShipInfer bug in the operator's deployment log.
+
+        The net is wider than the posted values, so the same clause also relabels a genuine
+        internal `ValueError` as the caller's mistake; the traceback that tells the two apart
+        has to be written by this handler, because starlette answers an `HTTPException`
+        without logging anything.
         """
         cameras = FakeCameras(refuse=ValueError("codec 'h266' is not supported"))
-        with client_over(cameras) as client:
+        with (
+            caplog.at_level(logging.ERROR, logger="shipinfer.api"),
+            client_over(cameras) as client,
+        ):
             response = client.post("/streams", json={"url": "rtsp://host"})
 
         assert response.status_code == 400, response.text
         assert "h266" in response.json()["detail"]
+        refusals = [r for r in caplog.records if "did not constrain" in r.getMessage()]
+        assert len(refusals) == 1 and refusals[0].exc_info is not None, caplog.text
+        assert "h266" in caplog.text
 
 
 class TestWhyACameraIsRefused:
