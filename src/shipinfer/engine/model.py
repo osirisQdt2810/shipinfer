@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from shipinfer import envs
@@ -389,23 +389,62 @@ class Model:
 
     # -- lifecycle -----------------------------------------------------------------------
 
-    def start(self, timeout_s: float = 120.0) -> None:
-        """Start every instance and wait for at least one to become ready."""
-        for instance in self._instances:
-            instance.start()
-        deadline = time.monotonic() + timeout_s
-        for instance in self._instances:
-            remaining = max(0.0, deadline - time.monotonic())
-            if not instance.wait_ready(remaining) and self._settings.strict_startup:
-                # The instance's own error when it has one: "did not become ready within
-                # 120s" describes the symptom and hides the cause, and the cause is usually
-                # a missing artefact or a warm-up sample that could not be built.
-                reason = instance.start_error
-                raise ServerStateError(
-                    f"instance {instance.name} failed to start: {reason}"
-                    if reason is not None
-                    else f"instance {instance.name} did not become ready within {timeout_s:.0f}s"
-                )
+    def start(
+        self, timeout_s: float = 120.0, should_abort: Callable[[], bool] | None = None
+    ) -> None:
+        """Start every instance and wait for at least one to become ready.
+
+        Args:
+            timeout_s: How long to wait for all instances to settle.
+            should_abort: Polled between instances; ``True`` means the owner has begun
+                shutting down and this start should give up. The owner is the server, and
+                the flag it exposes is "a ``stop()`` has started" — see
+                :meth:`~shipinfer.engine.pool.InferenceServer._is_stopping`.
+
+        Why the abort exists: ``stop()`` takes the control lock, so it queues behind a
+        ``load_model`` in progress, and a TensorRT engine of any size takes minutes to
+        deserialise. The fleet's supervisor drains its shards on a *shared* deadline
+        (`launch/supervisor.py`) and SIGKILLs whatever has not exited — so a shard that
+        politely waits out a load it is about to throw away is a shard that gets killed
+        mid-drain, with its in-flight requests unresolved and its rings unlinked by nobody.
+        Giving the start a way to bail turns that into an ordinary refused load.
+
+        It is checked at instance boundaries, not continuously: one instance's own
+        readiness wait is not interruptible from here, so an abort arriving while the
+        *first* instance deserialises still waits that one out. That bounds the delay by one
+        engine load rather than by all of them, which is the part that mattered.
+
+        Raises:
+            ServerStateError: when an instance fails to become ready under
+                ``strict_startup``, and when ``should_abort`` says to stop. The instances
+                this call already started are stopped before either error leaves — the
+                caller may have no other handle on them.
+        """
+        started: list[ModelInstance] = []
+        try:
+            for instance in self._instances:
+                self._check_abort(should_abort, started)
+                instance.start()
+                started.append(instance)
+            deadline = time.monotonic() + timeout_s
+            for instance in self._instances:
+                self._check_abort(should_abort, started)
+                remaining = max(0.0, deadline - time.monotonic())
+                if not instance.wait_ready(remaining) and self._settings.strict_startup:
+                    # The instance's own error when it has one: "did not become ready
+                    # within 120s" describes the symptom and hides the cause, and the cause
+                    # is usually a missing artefact or a warm-up sample that could not be
+                    # built.
+                    reason = instance.start_error
+                    raise ServerStateError(
+                        f"instance {instance.name} failed to start: {reason}"
+                        if reason is not None
+                        else f"instance {instance.name} did not become ready within "
+                        f"{timeout_s:.0f}s"
+                    )
+        except BaseException:
+            self._unwind(started)
+            raise
         self._started = True
         _LOG.info(
             "model %s v%d ready with %d instance(s) across %s",
@@ -414,6 +453,35 @@ class Model:
             len(self._instances),
             sorted({str(i.device) for i in self._instances}),
         )
+
+    def _check_abort(
+        self, should_abort: Callable[[], bool] | None, started: list[ModelInstance]
+    ) -> None:
+        """Raise if the owner has begun shutting down. ``started`` is only for the message."""
+        if should_abort is None or not should_abort():
+            return
+        raise ServerStateError(
+            f"start aborted: the server is stopping (model {self.name} had started "
+            f"{len(started)} of {len(self._instances)} instance(s))"
+        )
+
+    def _unwind(self, started: list[ModelInstance]) -> None:
+        """Stop the instances this start had already started, newest first.
+
+        Guarded per instance so a teardown error cannot replace the reason the start
+        failed — that reason is the one the operator has to read. Idempotent with the
+        caller's own ``model.stop()``: :meth:`ModelInstance.stop` returns early once it has
+        run.
+        """
+        for instance in reversed(started):
+            try:
+                instance.stop(self._settings.shutdown_grace_s)
+            except Exception:
+                _LOG.exception(
+                    "error stopping instance %s while unwinding a failed start of model %s",
+                    instance.name,
+                    self.name,
+                )
 
     def stop(self) -> None:
         for instance in self._instances:
