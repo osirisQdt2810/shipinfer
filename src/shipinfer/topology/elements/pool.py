@@ -356,22 +356,25 @@ class _PoolElement(Element):
         specs = getattr(config, attribute, None) or ()
         return {spec.name: spec for spec in specs}
 
-    def _max_batch_rows(self) -> int | None:
-        """The model's ``max_batch_size``, or ``None`` when it declares none.
+    def _max_batch_rows(self) -> int:
+        """The rows one request may carry: the engine's bound, never ``None``.
 
-        Read off the artefact for the reason :meth:`_declared` is: the number belongs to the
-        engine, not to the chain file. A TensorRT plan built at batch 16 cannot be handed 25
-        rows however many the detector found, and the proven path learned that the expensive
-        way — ``pipeline/graph/objects.py::_chunks`` exists because one crowded frame turned
-        into a single oversized request and *every* crop in it was lost.
+        Read off the artefact for the reason :meth:`_declared` is -- the number belongs to the
+        engine, not to the chain file -- and it is ``effective_max_batch_size``, because that
+        is what the assembler is built with (``engine/model.py``) and therefore what a request
+        is refused against.
 
-        ``0`` and ``None`` collapse to ``None``, and that is right: ``max_batch_size: 0`` in
-        Triton's vocabulary means server-side batching is off, so there is no row bound to
-        respect and one request carries whatever it carries.
+        ``max_batch_size: 0`` is **not** "no bound" here. Triton reads it as server-side
+        batching off; this engine reads it as ``max_batch_size or 1``
+        (``repository/model_config.py``), and ``0`` is what a ``config.yaml`` gets by
+        *omission* -- so an unchunked frame of 15 people is refused whole, every frame. The
+        fallback is ``1``: one crop per request beats every crop lost.
         """
         config = getattr(getattr(self._handle, "artifact", None), "config", None)
-        limit = getattr(config, "max_batch_size", None)
-        return int(limit) if limit else None
+        limit = getattr(config, "effective_max_batch_size", None) or getattr(
+            config, "max_batch_size", None
+        )
+        return int(limit) if limit else 1
 
     def _frame_of(self, item: ChainItem) -> np.ndarray:
         """One ``(H, W, 3)`` uint8 frame out of the item's payload.
@@ -1083,9 +1086,10 @@ class _PoolCropElement(_PoolElement):
     one :class:`~shipinfer.core.request.InferenceRequest` per chunk -- which is one, except on
     a frame crowded past ``max_batch_size`` -- and the ``{row: vector}`` mapping, whose values
     are numpy *views* into the response rather than copies. Selecting a subset of rows adds an
-    index tuple and one ``(N, 4)`` gather of the boxes; declaring no ``classes:`` at all adds
-    neither, because :meth:`~shipinfer.topology.elements.detections.Detections.boxes_at`
-    recognises the whole frame and passes the array straight through. A frame with no rows to embed submits nothing — it never reaches
+    index tuple and one ``(N, 4)`` gather of the boxes; declaring no ``classes:`` adds no index
+    tuple, because :meth:`~shipinfer.topology.elements.detections.Detections.boxes_at`
+    recognises the whole frame and answers with one flat ``(N, 4)`` copy rather than a fancy
+    gather (it never aliases the live array). A frame with no rows to embed submits nothing — it never reaches
     :meth:`~shipinfer.topology.base.Element.process`'s model call — and costs one
     :meth:`~shipinfer.topology.base.ChainItem.derive`, for the empty mapping that records that
     this element ran; on a chain that puts a second embedder *in series* ahead of this one, a
@@ -1359,8 +1363,8 @@ class _PoolCropElement(_PoolElement):
         and for the same reason: nothing here materialises it. :meth:`_finish` iterates it
         once to build the mapping, :meth:`_prepare` reads its length, and
         :meth:`~shipinfer.topology.elements.detections.Detections.boxes_at` recognises it as
-        the whole frame and hands the boxes through — so the common case allocates no index
-        list and gathers no boxes at all. The indices are in the detector's own order, which
+        the whole frame and copies the boxes flat instead of gathering them — so the common
+        case allocates no index list. The indices are in the detector's own order, which
         is descending score, and the crops follow that order into the model.
         """
         if self._classes is None:
@@ -1427,8 +1431,10 @@ class _PoolCropElement(_PoolElement):
         requests costs K sequential round trips and can hold this worker for up to
         ``K * timeout_s`` -- with the default four workers, a crowded frame is a worker
         unavailable to any camera for that long. It is not a regression (``pipeline/graph/
-        objects.py`` serialises the same way) and K is small by construction: 25 objects
-        against a plan built at batch 16 is K=2. Submitting all K first and then collecting
+        objects.py`` serialises the same way) and K is small on a *batching* model: 25 objects
+        against a plan built at batch 16 is K=2. On ``max_batch_size: 0`` it is not -- the
+        engine's bound is then one row, K == N, and a 15-person frame is 15 round trips, so
+        declare a ``max_batch_size`` on a model a crop element feeds. Submitting all K first and then collecting
         the futures would cost one round trip instead of K, at the price of K requests in
         flight per worker against a bound the scheduler sizes for one; that trade belongs
         with the asynchronous walk (arch.md section 5, item 5) and not here.
@@ -1439,7 +1445,7 @@ class _PoolCropElement(_PoolElement):
         """
         total = crops.shape[0]
         limit = self._max_rows
-        if limit is None or total <= limit:
+        if total <= limit:
             return self._submit(item, crops)
         chunks = [
             self._submit(item, crops.slice_batch(start, min(start + limit, total)))
@@ -1533,6 +1539,7 @@ class _PoolCropElement(_PoolElement):
         ``track`` correctly and would simply not union at a rejoin -- which is the right
         default for a value nobody declared, and the reason the two ``segment`` slots that
         file raw ``response.outputs`` under ``meta["masks"]`` are left alone by the merge.
+        Merging into a peer therefore keeps the *peer's* declaration: a plain dict stays plain.
 
         **Both halves answer an overlap the same way: they refuse it.** Disjoint rows union;
         a row two elements both cover is an :class:`~shipinfer.core.errors.InferenceError`
@@ -1592,7 +1599,11 @@ class _PoolCropElement(_PoolElement):
                     "means the chain file asked both of them for it -- check their "
                     "`params: classes:` do not overlap"
                 )
-        return item.derive(**{self.meta_key: RowIndexed({**existing, **covered})})
+        merged = {**existing, **covered}
+        # `RowIndexed` only if the peer declared one: the writer says what it wrote, and
+        # promoting a plain dict here would declare on its behalf.
+        declared = RowIndexed(merged) if isinstance(existing, RowIndexed) else merged
+        return item.derive(**{self.meta_key: declared})
 
 
 @registry_for(ElementKind.SEGMENT).register("pool")

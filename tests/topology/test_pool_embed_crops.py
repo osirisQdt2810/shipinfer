@@ -96,12 +96,23 @@ class FakeConfig:
 
     input_specs: tuple[TensorSpec, ...] = ()
     output_specs: tuple[TensorSpec, ...] = ()
+    #: Defaulted to ``0`` like ``ModelConfig``'s, so "the line is absent" is expressible.
     max_batch_size: int = 0
+
+    @property
+    def effective_max_batch_size(self) -> int:
+        """``max_batch_size or 1`` — ``ModelConfig``'s rule, and what the assembler enforces."""
+        return self.max_batch_size or 1
 
 
 @dataclass(frozen=True)
 class FakeArtifact:
     config: FakeConfig
+
+
+#: What ``FakeEmbedder()`` declares unless a test says otherwise. A handle always carries a
+#: config in the engine, and ``max_batch_size: 0`` would bound every test at one row.
+DECLARED = FakeArtifact(FakeConfig(max_batch_size=8))
 
 
 class FakeEmbedder:
@@ -111,12 +122,18 @@ class FakeEmbedder:
     chunked frame produces ``0,1,2,0,1`` and a test can tell a correct join from one that
     dropped or duplicated a chunk. ``requests`` keeps every request in submission order, which
     is what the chunking assertions read.
+
+    **It enforces the row bound the engine enforces.** ``StackingBatcher.assemble`` refuses a
+    request carrying more rows than ``effective_max_batch_size`` and the engine fails the
+    future with it; a double that accepted any batch would pass a chunking bug that loses
+    every crop of every crowded frame in production. ``artifact=None`` is a handle that
+    declares nothing, which bounds nothing here.
     """
 
     def __init__(
         self,
         *,
-        artifact: FakeArtifact | None = None,
+        artifact: FakeArtifact | None = DECLARED,
         output: str = "embedding",
         answer: np.ndarray | None = None,
     ) -> None:
@@ -133,6 +150,17 @@ class FakeEmbedder:
     def infer(self, request: InferenceRequest) -> ResponseFuture:
         self.requests.append(request)
         rows = next(iter(request.inputs.values())).shape[0]
+        bound = getattr(
+            getattr(self.artifact, "config", None), "effective_max_batch_size", None
+        )
+        if bound is not None and rows > bound:
+            # Word for word `StackingBatcher.assemble`'s, delivered the way the engine
+            # delivers it: on the future, from `_fail_batch`, not out of `infer`.
+            future = ResponseFuture(request)
+            future.set_exception(
+                InferenceError(f"assembled batch of {rows} rows exceeds max_batch_size {bound}")
+            )
+            return future
         answer = (
             self.answer
             if self.answer is not None
@@ -652,15 +680,29 @@ class TestACrowdedFrameIsChunkedAtTheModelsBatch:
 
         assert len(embedder.requests) == 1
 
-    def test_a_model_declaring_no_bound_is_never_chunked(self) -> None:
-        """``max_batch_size: 0`` is Triton's "server-side batching is off", not "batch one"."""
-        embedder = FakeEmbedder()
+    def test_a_config_with_no_max_batch_size_line_is_chunked_to_one_row(self) -> None:
+        """``0`` is what a ``config.yaml`` gets by *omission*, and this engine reads it as a
+        bound of **one row** (``ModelConfig.effective_max_batch_size``), not as "no bound".
+        Read the other way, a 25-person frame is one 25-row request the assembler refuses and
+        every crop of every crowded frame is lost -- the reviewer's `person_embedder`
+        scenario, and slow beats gone."""
+        embedder = self.bounded(0)
         element = opened(embedder)
 
-        element.process(item(self.crowd(25)))
+        emitted = element.process(item(self.crowd(25)))
 
-        assert len(embedder.requests) == 1
-        assert embedder.crops[0].shape[0] == 25
+        assert [crops.shape[0] for crops in embedder.crops] == [1] * 25
+        assert sorted(emitted.meta["vectors"]) == list(range(25))
+
+    def test_a_handle_that_declares_no_config_at_all_is_chunked_to_one_row_too(self) -> None:
+        """The fallback is the same number: a resolver that answers with no artefact says
+        nothing about the bound, and one row per request is the only size always accepted."""
+        embedder = FakeEmbedder(artifact=None)
+        element = opened(embedder)
+
+        element.process(item(self.crowd(5)))
+
+        assert [crops.shape[0] for crops in embedder.crops] == [1] * 5
 
     def test_the_chunks_carry_the_same_frame_tag(self) -> None:
         """Reassembly, tracing and every log line group on the tag (ADR-002), so two requests
@@ -1215,3 +1257,54 @@ class TestTheCropHalfWorksWithoutTheSubmoduleAtAll:
         emitted = element.process(item(mixed()))
 
         assert [which_crop(emitted.meta["vectors"][row]) for row in range(4)] == [0, 1, 2, 3]
+
+
+class TestOverARealEngine:
+    """The reviewer's `person_embedder` scenario on the real assembler, not a double.
+
+    `FakeEmbedder` now enforces the engine's row bound, but that bound is still a fixture's
+    claim. This drives a real :class:`~shipinfer.engine.InferenceServer` (mock backend,
+    `KIND_CPU`) over a config whose `max_batch_size:` line is absent — the omission that
+    used to lose every crop of every multi-detection frame.
+    """
+
+    @pytest.fixture()
+    def embedder_repository(self, tmp_path):
+        # No `max_batch_size:` line: omission means 0, and 0 means the assembler bounds every
+        # request at one row. A bare omission is refused at load (dynamic_batching defaults
+        # enabled and demands a bound), so the reachable spelling turns batching off too.
+        root = tmp_path / "embedder_repository"
+        (root / "embedder" / "1").mkdir(parents=True)
+        (root / "embedder" / "config.yaml").write_text(
+            "name: embedder\n"
+            "platform: mock\n"
+            "dynamic_batching: {enabled: false}\n"
+            "inputs:\n"
+            "  - {name: images, data_type: FP32, dims: [3, 8, 8]}\n"
+            "outputs:\n"
+            "  - {name: embedding, data_type: FP32, dims: [16]}\n"
+            "instance_groups:\n"
+            "  - {kind: KIND_CPU, count: 1}\n"
+        )
+        return root
+
+    def test_an_omitted_max_batch_size_loses_no_crop(self, embedder_repository) -> None:
+        from shipinfer.core.settings import ServerSettings
+        from shipinfer.engine import InferenceServer
+
+        settings = ServerSettings(model_repository=embedder_repository)
+        with InferenceServer(settings) as engine:
+            element = PoolEmbed(
+                "embed", {"input": "images", "output": "embedding"}, model="embedder"
+            )
+            element.open(ElementContext(models=engine, ops=NumpyImageOps()))
+            try:
+                emitted = element.process(
+                    item(TestACrowdedFrameIsChunkedAtTheModelsBatch.crowd(3))
+                )
+            finally:
+                element.close()
+
+        vectors = emitted.meta["vectors"]
+        assert sorted(vectors) == [0, 1, 2], "a crop was lost to the one-row bound"
+        assert all(v.shape == (16,) for v in vectors.values())

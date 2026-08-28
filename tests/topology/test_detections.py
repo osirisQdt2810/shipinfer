@@ -338,12 +338,19 @@ class TestGatheringTheBoxesOfASelection:
         assert np.array_equal(gathered, detections.boxes[[0, 2]])
         assert gathered.flags["C_CONTIGUOUS"]
 
-    def test_every_row_is_handed_through_without_a_copy(self) -> None:
-        """The common case on a chain whose crop element declares no ``classes:``; copying
-        an ``(N, 4)`` array per frame at a thousand frames a second is free to avoid."""
+    def test_every_row_is_a_flat_copy_never_the_live_array(self) -> None:
+        """The whole-frame path answers with a copy: the caller hands it to an arbitrary
+        ``ImageOps`` (a fused kernel takes a device pointer) and may hold it past the frame,
+        so mutating the answer must never write through to the detections."""
         detections = mixed()
 
-        assert detections.boxes_at(range(len(detections))) is detections.boxes
+        answered = detections.boxes_at(range(len(detections)))
+
+        assert answered is not detections.boxes
+        assert np.array_equal(answered, detections.boxes)
+        assert answered.flags["C_CONTIGUOUS"]
+        answered[0, 0] = -1.0
+        assert detections.boxes[0, 0] != -1.0
 
     def test_a_full_length_reordering_is_permuted_not_handed_through(self) -> None:
         """The pass-through is a value test, not a length test.

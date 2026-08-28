@@ -130,17 +130,19 @@ class Detections:
     def boxes_at(self, indices: Collection[int]) -> np.ndarray:
         """The ``(K, 4)`` boxes of ``indices``, contiguous, ready for a crop kernel.
 
-        Contiguous because the fancy index that gathers them is handed straight to an ops
-        implementation; a non-contiguous view would be copied inside it instead, once per
-        frame and out of sight. Selecting *every* row hands the array through without a copy,
-        which is the common case on a chain whose crop element declares no ``classes:``.
+        Contiguous because the array goes straight to an ops implementation; a non-contiguous
+        view would be copied inside it instead, once per frame and out of sight.
 
-        The fast path asks ``indices == range(len(self))`` and not ``len(indices) == len(self)``
-        — the values, not the count. A length test would answer a full-length *reordered*
-        selection with the boxes unpermuted, and a box that belongs to another row is exactly
-        the corruption this module exists to prevent: it has no symptom until a tracker starts
-        swapping identities. Range-to-range equality is O(1), and ``range`` is what the
-        no-``classes:`` path returns, so the check is exact and the fast path is unchanged.
+        **Never :attr:`boxes` itself**, whole-frame selection included: the caller hands what
+        it gets to an arbitrary ``ImageOps`` — a fused kernel takes a device pointer — and on
+        the proven path (``pipeline/graph/crop.py``) stores it on a batch that outlives the
+        frame. An ``(N, 4)`` copy is nothing beside the crops it is about to cut.
+
+        The whole-frame path asks ``indices == range(len(self))``, the values and not the
+        count: a length test would answer a full-length *reordered* selection with the boxes
+        unpermuted, which is a box belonging to another row and has no symptom until a tracker
+        swaps identities. Range-to-range equality is O(1) and ``range`` is what the
+        no-``classes:`` path returns, so the check is exact.
 
         Args:
             indices: what :meth:`indices_of`, :meth:`indices_of_any` and
@@ -160,7 +162,7 @@ class Detections:
                 message rather than in the caller.
         """
         if isinstance(indices, range) and indices == range(len(self)):
-            return self.boxes
+            return self.boxes.copy()
         if not indices:
             return np.zeros((0, 4), dtype=np.float32)
         gathered = list(indices)
@@ -192,12 +194,8 @@ class Detections:
         ends up attached to the wrong object — a failure with no visible symptom until a
         tracker starts swapping identities.
 
-        The boxes are always a fresh contiguous gather, never :attr:`boxes` itself: the
-        indices are a tuple and :meth:`boxes_at`'s pass-through wants a ``range``. Worth
-        saying because the caller on the proven path (``pipeline/graph/crop.py``) stores what
-        it gets on an ``ObjectBatch`` that outlives the frame, and a single-class frame
-        silently handing that batch the live detection array is a difference no shape
-        assertion would show.
+        The boxes are a fresh contiguous array and never :attr:`boxes` itself, which is
+        :meth:`boxes_at`'s promise for every selection and not a property of this one.
         """
         indices = self.indices_of(class_name)
         return self.boxes_at(indices), indices

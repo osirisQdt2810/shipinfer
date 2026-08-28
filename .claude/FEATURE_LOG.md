@@ -179,6 +179,12 @@ slots, so refusing a crop element whose `classes:` is absent from the upstream d
 nothing per frame. Same slice as replacing that file's four `when: class == …` guards with
 `params: {classes: [...]}`.
 
+
+Round 3 (CI): the crop chunk bound is the engine's, not Triton's — `_max_batch_rows` asks
+`effective_max_batch_size` and falls back to 1, never None (`max_batch_size: 0` bounds the
+assembler at one row; the fake now enforces the same rule, and a real-engine test pins it).
+`boxes_at` never aliases the live array; `_scatter` keeps a plain peer's mapping plain. A
+crop element's whole-frame response carries chunk 0's `executed_on` — ledger item.
 ---
 
 ## 2026-08-28 — the `mtmc` element: anchored instants across cameras, and a barrier that never takes the last worker (Phase C6)
