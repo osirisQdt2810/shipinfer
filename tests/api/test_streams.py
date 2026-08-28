@@ -42,6 +42,7 @@ from shipinfer.core.errors import (
     NoShardAvailableError,
     ServerStateError,
 )
+from shipinfer.core.request import Priority
 from shipinfer.launch.control import CameraSpec
 
 #: A launcher's report: where each camera was placed, with the shard's own per-camera detail
@@ -300,7 +301,46 @@ class TestAddingACamera:
 
     def test_an_unknown_field_is_refused_rather_than_silently_dropped(self, client) -> None:
         """A client that posts `{"uri": ...}` must not get a 201 and a camera reading nothing."""
-        response = client.post("/streams", json={"url": "rtsp://host", "priority": "high"})
+        response = client.post("/streams", json={"url": "rtsp://host", "uri": "rtsp://host"})
+
+        assert response.status_code == 422
+        assert "uri" in response.text
+
+    def test_the_posted_band_reaches_the_spec_the_controller_is_given(self) -> None:
+        """A band is what the caller came for: the shard cannot work it out for itself.
+
+        A fleet shard's ingest config is stripped (`runners/inprocess.py::_ingest`), so a
+        camera posted here and placed by RPC has no configured table to resolve a lane from.
+        If the name does not travel on the spec, it does not travel at all.
+        """
+        cameras = FakeCameras()
+        with client_over(cameras) as client:
+            response = client.post(
+                "/streams", json={"url": "rtsp://host", "priority": "tracking_critical"}
+            )
+
+        assert response.status_code == 201, response.text
+        assert cameras.added[0].priority is Priority.TRACKING_CRITICAL
+
+    def test_a_camera_posted_without_a_band_leaves_the_choice_to_the_deployment(self) -> None:
+        """`None`, not `normal`: "I have no opinion" and "put it in the middle lane" differ."""
+        cameras = FakeCameras()
+        with client_over(cameras) as client:
+            assert client.post("/streams", json={"url": "rtsp://host"}).status_code == 201
+
+        assert cameras.added[0].priority is None
+
+    @pytest.mark.parametrize("band", ["urgent", "TRACKING-CRITICAL", "", 0, 2])
+    def test_a_band_the_server_does_not_know_is_422_rather_than_a_default(
+        self, client, band: object
+    ) -> None:
+        """Including the *numbers*, and that is the case worth having.
+
+        `Priority.TRACKING_CRITICAL` is 0, so `{"priority": 0}` is a client that meant "unset"
+        asking for the highest lane on the deployment. Names only, so the question cannot be
+        asked ambiguously.
+        """
+        response = client.post("/streams", json={"url": "rtsp://host", "priority": band})
 
         assert response.status_code == 422
         assert "priority" in response.text
