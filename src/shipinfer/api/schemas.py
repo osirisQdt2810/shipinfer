@@ -234,7 +234,9 @@ class StreamRequest(BaseModel):
     #: it on the wire would also accept ``{"priority": 0}`` --
     #: :attr:`~shipinfer.core.request.Priority.TRACKING_CRITICAL`, one keystroke away from a
     #: caller who meant "unset" and got the highest lane on the deployment. A name cannot be
-    #: misread that way, and it is what the operator wrote in ``ingest.cameras`` anyway.
+    #: misread that way, and it is what the operator wrote in ``ingest.cameras`` anyway --
+    #: literally so: :class:`~shipinfer.core.settings.ingest.CameraConfig` resolves that
+    #: field through :meth:`~shipinfer.core.request.Priority.parse` too.
     #: An unknown name is a 422 naming the field, which FastAPI answers before the handler
     #: runs -- the same answer an unknown key gets, for the same reason.
     priority: BandName | None = None
@@ -285,13 +287,25 @@ class StreamRequest(BaseModel):
         caller making a mistake. ``api/streams.py`` already looks the member up with
         ``Priority[name.upper()]``, so the case was never what it was checking.
 
+        The *acceptance* test is :meth:`~shipinfer.core.request.Priority.parse`, the same
+        call :class:`~shipinfer.core.settings.ingest.CameraConfig` makes, so a client and an
+        operator who name a band this deployment does not have are told so in one set of
+        words. What is *published* stays :data:`BandName`: the parsed band is deliberately
+        thrown away and the lower-cased string returned, because ``parse`` also accepts the
+        numbers and this door must not -- returning ``Priority.TRACKING_CRITICAL`` for
+        ``{"priority": "0"}`` would smuggle the falsy-zero trap back in through a string.
+
         Only ``str`` is touched, and only its case. Everything the field refused before it
         still refuses: ``{"priority": 0}`` is an ``int`` and passes through untouched to be
-        rejected by the :data:`BandName` literal (the falsy-zero trap this field exists for,
-        ADR-005), ``"tracking-critical"`` is not a member name in any case, and ``""`` is not
-        one either. This normalises a spelling; it does not widen the vocabulary.
+        rejected by the :data:`BandName` literal (ADR-005), ``"0"`` survives ``parse`` and is
+        then rejected by that same literal, ``"tracking-critical"`` is not a member name in
+        any case, and ``""`` is not one either. This normalises a spelling and refuses an
+        unknown one; it does not widen the vocabulary.
         """
-        return value.lower() if isinstance(value, str) else value
+        if not isinstance(value, str):
+            return value
+        Priority.parse(value)
+        return value.lower()
 
 
 class StreamInfo(BaseModel):
