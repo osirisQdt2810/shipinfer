@@ -17,6 +17,13 @@ real element is how a chain ends up copying every frame to host memory to run a 
 Nothing here does any work. ``MockDetect`` invents one box; it does not pretend to detect.
 A mock that produced plausible numbers would eventually be trusted for something.
 
+**What a mock does copy is the *type*.** ``MockDetect`` files its invented box under
+``meta["detections"]`` as a real :class:`~shipinfer.topology.elements.detections.Detections`,
+beside the older ``meta["boxes"]`` list the chain and runner tests read. That is what lets the
+stateful elements phase C adds — ``track`` first — be tested end to end on a mock chain with no
+model repository, against the parallel-array shape a ``pool`` detector actually decodes into
+rather than a stand-in for it.
+
 **No mock declares ``requires_model_name`` or ``needs_model``**, and that is the honest
 answer rather than an omission: ``MockDetect`` invents a box and resolves nothing against a
 model pool, so a chain of these needs neither a ``model:`` in front of it (the loader's
@@ -30,7 +37,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, ClassVar
 
+import numpy as np
+
 from shipinfer.topology.base import ChainItem, Element, ElementContext, ElementKind
+from shipinfer.topology.elements.detections import Detections
 from shipinfer.topology.registry import registry_for
 
 __all__ = [
@@ -47,6 +57,7 @@ __all__ = [
     "MockRecognize",
     "MockSegment",
     "MockTrack",
+    "invented_detections",
 ]
 
 
@@ -116,6 +127,27 @@ class MockDecode(_Mock):
         )
 
 
+def invented_detections(label: str) -> Detections:
+    """One 10x10 box of ``label``, in the shape a real detector produces.
+
+    The same :class:`~shipinfer.topology.elements.detections.Detections` a ``pool`` detector
+    decodes into ``meta["detections"]``, so a chain of mocks exercises the *type* the stateful
+    elements behind it consume rather than a stand-in for it. That matters more here than
+    anywhere else in this module: ``track`` reads the parallel arrays, and a mock that filed a
+    list of tuples would let a tracker element pass its tests against a shape no deployment
+    ever produces.
+
+    The numbers are still invented and still say so — one box at the origin, score 0.9. A mock
+    that produced plausible detections would eventually be trusted for something.
+    """
+    return Detections(
+        boxes=np.array([[0.0, 0.0, 10.0, 10.0]], dtype=np.float32),
+        scores=np.array([0.9], dtype=np.float32),
+        class_ids=np.array([0], dtype=np.int32),
+        labels=(label,),
+    )
+
+
 @registry_for(ElementKind.DETECT).register("mock")
 class MockDetect(_Mock):
     """A detector on the device path, with a host fallback it never prefers."""
@@ -125,7 +157,13 @@ class MockDetect(_Mock):
     produces: ClassVar[tuple[str, ...]] = ("nv12@gpu",)
 
     def _meta(self, item: ChainItem) -> dict[str, Any]:
-        return {"boxes": [(0, 0, 10, 10)], "class": self.params.get("class", "ship")}
+        label = str(self.params.get("class", "ship"))
+        return {
+            "boxes": [(0, 0, 10, 10)],
+            "detections": invented_detections(label),
+            "frame_hw": (100, 100),
+            "class": label,
+        }
 
 
 @registry_for(ElementKind.DETECT).register("mock-cpu")
@@ -141,7 +179,12 @@ class MockCpuDetect(_Mock):
     produces: ClassVar[tuple[str, ...]] = ("bgr@cpu",)
 
     def _meta(self, item: ChainItem) -> dict[str, Any]:
-        return {"boxes": [(0, 0, 10, 10)], "class": "ship"}
+        return {
+            "boxes": [(0, 0, 10, 10)],
+            "detections": invented_detections("ship"),
+            "frame_hw": (100, 100),
+            "class": "ship",
+        }
 
 
 @registry_for(ElementKind.SEGMENT).register("mock")

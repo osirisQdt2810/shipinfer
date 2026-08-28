@@ -397,6 +397,26 @@ class Element(abc.ABC):
     #:   for, and a local one is not.
     needs_model: ClassVar[bool] = False
 
+    #: Whether :meth:`open` reads :attr:`ElementContext.ops` -- the third of these
+    #: declarations and the newest, asked by the same caller as :attr:`needs_model` and for
+    #: the same reason: the process that builds a runner has to know, *before* it builds one,
+    #: whether to resolve an image-ops implementation out of ``shipinfer.runtime.ops``. That
+    #: resolution is not free and it is not portable -- ``get_image_ops`` may construct a
+    #: torch context bound to this shard's device -- so a chain of mocks must not pay for it,
+    #: which is exactly the mistake ``node.kind in MODEL_KINDS`` was for the model pool.
+    #:
+    #: Separate from :attr:`needs_model` rather than folded into it, because the two come
+    #: apart in both directions: ``PoolSegment`` submits a crop somebody else prepared
+    #: (``needs_model``, no ops), and a future ``crop`` element would preprocess without
+    #: running a repository model at all (ops, no ``needs_model``). Today only
+    #: :class:`~shipinfer.topology.elements.pool.PoolDetect` answers ``True`` -- it is the one
+    #: element that letterboxes a whole frame and then has to undo exactly that transform to
+    #: put the boxes back in source pixels.
+    #:
+    #: A class that answers ``True`` must raise from :meth:`_do_open` when the context carries
+    #: no ops, so that the declaration and the requirement cannot drift.
+    needs_image_ops: ClassVar[bool] = False
+
     def __init__(
         self,
         name: str,
