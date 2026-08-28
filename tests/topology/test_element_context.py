@@ -41,6 +41,11 @@ class TestTheNewFieldsDefaultToNotTold:
         Every field is optional so a chain can be loaded, validated and walked with mock
         elements before a runner, an engine or a device exists — which is what the offline
         tier does on every one of these tests. The three added in phase C keep that property.
+
+        ``ops`` is ``None`` in every runner in this tree: C3 is what resolves an
+        implementation and hands it over, in the shape ``models=`` already has. Until then
+        this is the only behaviour it has, and pinning it is what makes "an element must
+        raise rather than guess" a rule with something behind it.
         """
         assert getattr(ElementContext(), field) is None
 
@@ -81,16 +86,24 @@ class TestTheImageOpsProtocolStillMatchesTheRealOne:
             stand_in.parameters["pad_value"].default
         )
 
-    def test_a_real_implementation_would_satisfy_the_protocol(self) -> None:
-        """Structurally, which is the only way it can be satisfied: nothing subclasses this.
+    def test_every_member_the_protocol_names_exists_on_the_class_it_stands_for(self) -> None:
+        """The membership half, read *off the protocol* rather than written out again.
 
-        ``hasattr`` and not ``isinstance``: the protocol is deliberately not
-        ``runtime_checkable`` — an ``isinstance`` against it would check the *names* and none
-        of the signatures, which is exactly the reassurance that would let the test above
-        rot.
+        The signature test above pins ``letterbox_batch`` by name. This one pins the set: the
+        day somebody adds a member to ``ImageOpsLike`` — the first element that crops is the
+        expected occasion — it fails unless ``ImageOps`` really has it, without anybody
+        remembering to extend a hard-coded list here. A list written out by hand could only
+        ever restate what the test above already checks.
+
+        Not ``isinstance``: the protocol is deliberately not ``runtime_checkable``, because an
+        ``isinstance`` against it would check the names and none of the signatures, which is
+        exactly the reassurance that would let the signature test rot.
         """
-        for member in ("letterbox_batch",):
-            assert callable(getattr(ImageOps, member, None)), member
+        named = {name for name in vars(ImageOpsLike) if not name.startswith("_")}
+        assert named, "the protocol names nothing, so this asserts nothing"
+
+        missing = {name for name in named if not callable(getattr(ImageOps, name, None))}
+        assert not missing, f"ImageOpsLike names members ImageOps has not: {sorted(missing)}"
 
     def test_the_letterbox_result_carries_every_member_the_protocol_names(self) -> None:
         """The scales and pads must be *carried*, never recomputed — postprocess has to invert

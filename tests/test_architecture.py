@@ -297,10 +297,15 @@ class TestImportIsCheap:
         *today*. The static rule cannot ban it — ``check_layers.py`` walks the AST and counts
         a function-scope import the same as a module-scope one, so a ``FORBIDDEN_EXTERNAL``
         row would ban the lazy loaders in ``topology/bridge.py`` as well and leave no legal
-        spelling. This subprocess is therefore the *only* enforcement of the laziness: the
-        day a loader is called at module scope, or an element module writes ``from shipvision
-        import mot`` at the top, the offline tier starts needing a checked-out submodule and
-        this is what says so.
+        spelling. A subprocess assertion is therefore the only enforcement of the laziness:
+        the day a loader is called at module scope, or an element module writes ``from
+        shipvision import mot`` at the top, the offline tier starts needing a checked-out
+        submodule and this is what says so.
+
+        It reaches ``bridge.py`` because ``topology/__init__.py`` imports it, which is why
+        that import is there — a module this cannot reach is a module the laziness is not
+        enforced on. ``tests/topology/test_bridge.py`` makes the narrower assertion against
+        the module on its own, so the two go red in the same direction for different reasons.
         """
         code = (
             "import sys, shipinfer.topology as t; "

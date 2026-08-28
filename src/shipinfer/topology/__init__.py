@@ -26,6 +26,13 @@ inside ``_do_open`` — see that package's docstring for the rule.
 
 from __future__ import annotations
 
+# Imported so that `import shipinfer.topology` covers it: `bridge` is the one module in this
+# package that names `shipvision`, and the enforcement of "it is never imported at module
+# scope" is the subprocess assertion in `tests/test_architecture.py`, which imports *this*
+# package. A module that assertion cannot reach is a module the laziness is not enforced on.
+# Free to import: `bridge` imports `functools`, `types` and `shipinfer.core.errors`, and its
+# four loaders each `from shipvision import ...` inside the function body.
+from shipinfer.topology import bridge
 from shipinfer.topology.base import (
     ChainItem,
     Element,

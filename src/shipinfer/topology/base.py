@@ -289,9 +289,13 @@ class ElementContext:
             standing case — can close its instant only by timeout once every worker is parked
             inside it. ``None`` means the runner did not say, and an element that needs the
             number must then refuse to wait at all rather than guess one.
-        ops: batched image preprocessing, bound to this shard's device. ``None`` until a
-            runner resolves one; an element that needs it and finds ``None`` raises rather
-            than falling back to a per-image loop in Python.
+        ops: batched image preprocessing, bound to this shard's device. **``None`` in every
+            runner in this tree today**: the field is declared here so that the elements C3
+            lands are written against it from the first line, and C3 is what wires it, in the
+            same shape ``models=`` already has -- the CLI or the shard process resolves one
+            implementation from ``runtime.ops`` (the layer that may import torch) and hands
+            it to the runner, which puts it here. Until then an element that needs it finds
+            ``None`` and must raise, rather than falling back to a per-image loop in Python.
 
     The last five are **resolved settings, not settings**. ``topology`` is a pure package and
     must not import :mod:`shipinfer.core.settings`, :mod:`shipinfer.runners` or

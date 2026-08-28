@@ -13,8 +13,10 @@ memoised module behind for the next one.
 
 from __future__ import annotations
 
+import builtins
 import sys
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 
@@ -87,13 +89,33 @@ class TestTheRefusalNamesTheFix:
         """:func:`functools.lru_cache` caches a return value and never an exception.
 
         Which is the behaviour worth having: a cached refusal would outlive the ``pip install``
-        that fixed it and make a restart the only cure. Asserted by counting the attempts, so
-        the property is pinned rather than inferred from a docstring.
+        that fixed it and make a restart the only cure.
+
+        The attempts are **counted**, and that is the assertion that carries the property. Two
+        failing calls both raising proves only that both raised; a memoised refusal would do
+        that too, and would do it without ever touching the import machinery again. So
+        ``__import__`` is wrapped for the duration and every ``shipvision`` name it is asked
+        for is recorded — two calls, two real attempts — and the third call, made after the
+        module is put back, is what says the cache did not poison the recovery.
         """
+        attempts: list[str] = []
+        real_import = builtins.__import__
+
+        def counting_import(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "shipvision" or name.startswith("shipvision."):
+                attempts.append(name)
+            return real_import(name, *args, **kwargs)
+
         monkeypatch.setitem(sys.modules, "shipvision", None)
+        monkeypatch.setattr(builtins, "__import__", counting_import)
         for _ in range(2):
             with pytest.raises(ConfigurationError):
                 bridge.load_mot()
+
+        assert attempts == [
+            "shipvision",
+            "shipvision",
+        ], "the second call replayed a cached refusal instead of trying the import again"
 
         monkeypatch.undo()
         pytest.importorskip("shipvision.mot")
