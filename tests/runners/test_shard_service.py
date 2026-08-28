@@ -420,6 +420,31 @@ class TestAddingACamera:
 
         assert runner.cameras["cam-9"] == CameraSpec("cam-9", "rtsp://10.0.0.9/live", 19.5)
 
+    def test_a_spec_this_build_cannot_decode_is_a_refusal_and_not_a_status(self) -> None:
+        """A band from a newer ``shard.proto`` is refused in the body, like every other no.
+
+        proto3 enums are open, so a launcher built against a ``.proto`` with a fifth band
+        sends an integer this process has no name for, and ``CameraSpec.from_pb`` raises for
+        it rather than mapping it to a neighbouring lane (``launch/control.py``). That decode
+        happens *before* the drain guard below, so an uncaught one leaves the servicer through
+        gRPC's generic handler as **UNKNOWN** -- and ``FleetRunner.add_camera`` reads a status
+        that is not ``OK`` as a shard that failed, aborts the placement and never offers the
+        camera to the next shard. Every other refusal here is data for a reason; so is this
+        one.
+        """
+        runner = CameraRunner(chain())
+        svc = service(runner)
+        install(svc)
+        request = pb.AddCameraRequest(camera=CameraSpec("cam-1", "rtsp://x", 20.0).to_pb())
+        # Hand-built: nothing in this build can *produce* this value, which is the point.
+        request.camera.priority = 99
+
+        reply = svc.AddCamera(request)
+
+        assert not reply.accepted
+        assert "99" in reply.reason
+        assert not runner.cameras
+
 
 class TestAShardThatIsGoingDownTakesNoCameras:
     """`accepted=True` from a stopped shard is a camera nobody will ever read.

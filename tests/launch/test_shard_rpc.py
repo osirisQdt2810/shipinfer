@@ -21,13 +21,19 @@ from __future__ import annotations
 import socket
 import textwrap
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from typing import Any
 
 import pytest
 
 pytest.importorskip("grpc", reason="the grpc extra is not installed")
 
 from shipinfer.core.errors import ConfigurationError
+from shipinfer.core.request import Priority
+from shipinfer.core.settings.ingest import CameraConfig
+from shipinfer.ingest.base import FrameSource
+from shipinfer.ingest.frame import FrameCounter
+from shipinfer.ingest.registry import create_source
 from shipinfer.launch import CameraSpec, ShardClient, ShardState
 from shipinfer.runners.inprocess import InprocessRunner
 from shipinfer.runners.service import ShardServer, serve_shard
@@ -48,6 +54,38 @@ elements:
 """
 
 
+class RecordingRunner(InprocessRunner):
+    """The in-process runner, keeping the :class:`CameraConfig` it resolved per camera.
+
+    One added attribute and no changed behaviour: the factory notes the record and then builds
+    the source the registry would have built anyway, so the shard under test is still driving
+    a real replay source at a path that does not exist.
+
+    It exists so this file can assert what a launcher's band *became* without reading the
+    runner's private tables. That record is the runner's own resolution of the band
+    (``runners/inprocess.py::_camera_config``), which is the thing that has to be right after
+    the value has crossed a socket.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.records: dict[str, CameraConfig] = {}
+        super().__init__(*args, source_factory=self._record, **kwargs)
+
+    def _record(self, config: CameraConfig, counter: FrameCounter) -> FrameSource:
+        self.records[config.camera_id] = config
+        return create_source(config, counter)
+
+
+def _eventually(predicate: Callable[[], bool], timeout_s: float = 5.0) -> bool:
+    """Poll a predicate to a deadline. The camera's record is written on the actor's thread."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
+
+
 def _free_port() -> int:
     """A port nothing is listening on. The usual trick: bind 0, read it back, release it."""
     with socket.socket() as probe:
@@ -56,10 +94,10 @@ def _free_port() -> int:
 
 
 @pytest.fixture()
-def shard() -> Iterator[tuple[ShardServer, InprocessRunner]]:
+def shard() -> Iterator[tuple[ShardServer, RecordingRunner]]:
     """A shard serving on a loopback ephemeral port, torn down whatever the test does."""
     chain = Topology.from_spec(ChainSpec.from_yaml(textwrap.dedent(CHAIN)))
-    runner = InprocessRunner(chain, workers=1)
+    runner = RecordingRunner(chain, workers=1)
     server = serve_shard(runner, shard_id=4, control_port=0)
     try:
         yield server, runner
@@ -69,7 +107,7 @@ def shard() -> Iterator[tuple[ShardServer, InprocessRunner]]:
 
 
 @pytest.fixture()
-def client(shard: tuple[ShardServer, InprocessRunner]) -> Iterator[ShardClient]:
+def client(shard: tuple[ShardServer, RecordingRunner]) -> Iterator[ShardClient]:
     server, _ = shard
     with ShardClient(server.identity.control_port, shard_id=4, timeout_s=5.0) as connected:
         yield connected
@@ -77,7 +115,7 @@ def client(shard: tuple[ShardServer, InprocessRunner]) -> Iterator[ShardClient]:
 
 class TestALauncherTalksToAShard:
     def test_the_whole_sequence_a_launcher_performs(
-        self, shard: tuple[ShardServer, InprocessRunner], client: ShardClient
+        self, shard: tuple[ShardServer, RecordingRunner], client: ShardClient
     ) -> None:
         """Spawn -> wait_ready -> UpdateTopology -> AddCamera -> Health -> Stop, in order.
 
@@ -111,10 +149,23 @@ class TestALauncherTalksToAShard:
 
         # The in-process runner owns an ingest manager (phase B1), so the camera is taken and
         # the shard's state follows from the camera map rather than from a flag.
-        accepted = client.add_camera(CameraSpec("cam-1", "/nonexistent/clip.mp4", 20.0))
+        accepted = client.add_camera(
+            CameraSpec(
+                "cam-1", "/nonexistent/clip.mp4", 20.0, priority=Priority.TRACKING_CRITICAL
+            )
+        )
         assert accepted.accepted, accepted.reason
         assert client.health().state == ShardState.RUNNING
         assert set(client.health().cameras) == {"cam-1"}
+        # The band crossed a real socket into a shard with an EMPTY camera config -- which is
+        # the shape a fleet shard actually has (`runners/inprocess.py::_ingest`), and the one
+        # in which `tracking_critical` used to arrive as `normal`. `TRACKING_CRITICAL` is 0,
+        # so this also fails if the wire ever carries the band as a bare int. Read off the
+        # camera record the runner resolved rather than out of its band tables: the record is
+        # what the ingest plane was told, and it is written on the actor's thread.
+        assert not runner.settings.ingest.cameras
+        assert _eventually(lambda: "cam-1" in runner.records)
+        assert runner.records["cam-1"].priority is Priority.TRACKING_CRITICAL
 
         # A camera that is not running is a typed refusal reaching the launcher as data, and
         # the id it names is the one the launcher asked about.
@@ -153,7 +204,7 @@ class TestALauncherTalksToAShard:
 
 class TestABoundPortIsRefusedBeforeAnyCamera:
     def test_a_second_shard_on_the_same_port_refuses_typed(
-        self, shard: tuple[ShardServer, InprocessRunner]
+        self, shard: tuple[ShardServer, RecordingRunner]
     ) -> None:
         """grpc reports a failed bind by returning 0, which is the shape that gets ignored.
 

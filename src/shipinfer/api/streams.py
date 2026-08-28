@@ -47,6 +47,7 @@ from shipinfer.core.errors import (
     ShipInferError,
 )
 from shipinfer.core.logging import get_logger, log_context
+from shipinfer.core.request import Priority
 from shipinfer.launch.control import CameraSpec, mint_camera_id
 
 __all__ = ["CameraController", "build_streams_router"]
@@ -253,6 +254,29 @@ def build_streams_router(cameras: CameraController) -> Any:
 
     # -- writing -------------------------------------------------------------------------
 
+    def _spec(body: StreamRequest, camera_id: str) -> CameraSpec:
+        """The posted camera as the launcher's vocabulary, under the id it will be placed at.
+
+        One function for the two constructions in :func:`add_stream` -- the provisional spec
+        the timeout message names and the named one that is actually placed. They were two
+        argument lists, which is how ``priority`` would have reached the runner on one path
+        and not the other, and the path it would have missed is the one that places cameras.
+
+        The band arrives as a *name* (:data:`~shipinfer.api.schemas.BandName`) and is turned
+        into a :class:`~shipinfer.core.request.Priority` here, at the one place the wire
+        vocabulary meets the launcher's. The lookup cannot fail: the schema already refused
+        every string that is not a member name -- in any case, having lower-cased it first
+        (:meth:`~shipinfer.api.schemas.StreamRequest._band_name_is_case_insensitive`) -- which
+        is what makes this a 422 rather than a 500.
+        """
+        return CameraSpec(
+            camera_id=camera_id,
+            url=body.url,
+            fps=body.fps,
+            loop=body.loop,
+            priority=None if body.priority is None else Priority[body.priority.upper()],
+        )
+
     async def _named(body: StreamRequest) -> CameraSpec:
         """The posted camera, named by the server when the caller did not name it.
 
@@ -268,7 +292,7 @@ def build_streams_router(cameras: CameraController) -> Any:
                 ones are in use.
         """
         camera_id = body.camera_id or _mint(_camera_ids(await _report(needed=True)))
-        return CameraSpec(camera_id=camera_id, url=body.url, fps=body.fps, loop=body.loop)
+        return _spec(body, camera_id)
 
     async def _hand_over(camera: CameraSpec) -> None:
         """Give one camera to the controller, on a worker thread it may hold past the scope."""
@@ -325,9 +349,7 @@ def build_streams_router(cameras: CameraController) -> Any:
         _refuse_if_it_manages_no_cameras()
         # The request as posted, so a timeout taken before the server has named anything still
         # has something to name in its answer. Replaced by the named spec below.
-        camera = CameraSpec(
-            camera_id=body.camera_id, url=body.url, fps=body.fps, loop=body.loop
-        )
+        camera = _spec(body, body.camera_id)
         try:
             with anyio.fail_after(_ADD_TIMEOUT_S):
                 camera = await _named(body)

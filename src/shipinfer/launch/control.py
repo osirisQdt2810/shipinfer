@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from shipinfer.core.errors import ConfigurationError
+from shipinfer.core.request import Priority
 from shipinfer.launch.proto import load_json_format, load_pb
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; never imported at runtime
@@ -117,11 +119,11 @@ class ShardIdentity:
 class CameraSpec:
     """One camera, as a launcher hands it to a shard.
 
-    Deliberately four fields and not
+    Deliberately five fields and not
     :class:`shipinfer.core.settings.ingest.CameraConfig`'s twenty. The rest of a camera's
-    configuration — codec, transport, decode size, priority — is *deployment* settings, and a
-    shard resolves them from the settings tree it loaded (CONVENTIONS 2.6). What only the
-    launcher knows is which camera goes where, and that is this.
+    configuration — codec, transport, decode size — is *deployment* settings, and a shard
+    resolves them from the settings tree it loaded (CONVENTIONS 2.6). What only the launcher
+    knows is which camera goes where, and that is this.
 
     :attr:`loop` is the field that had to join them, and the argument for it is the one the
     rest of the class makes in reverse: it is not a deployment default, because it decides
@@ -130,6 +132,16 @@ class CameraSpec:
     field there was no configuration anywhere that could make a file be processed once —
     and a configured camera placed across a fleet would have lost the ``loop: false`` its
     operator wrote, because a shard is told its cameras and not the file they came from.
+
+    :attr:`priority` joined them for the same reason one layer further out, and it is the
+    field that had to *stop* being deployment configuration. A fleet shard is an
+    ``InprocessRunner`` built from an env-only settings tree whose ``ingest.cameras`` is
+    **cleared** on purpose (``runners/inprocess.py::_ingest``, #71), so the shard has no
+    configured camera table to resolve a band from: ``priority: tracking_critical`` written
+    against a camera reached the launcher, was dropped at the wire, and every camera placed by
+    RPC was admitted at ``normal`` — the one customisation ADR-005 exists for, configured and
+    then silently discarded. ``None`` still means "the shard decides", which is the right
+    answer for a single-process deployment that *can* read its own config.
     """
 
     camera_id: str
@@ -140,12 +152,22 @@ class CameraSpec:
     #: ``replay`` only: restart the file at EOF. ``True`` keeps a stress test running;
     #: ``False`` makes a finite input finish, which is what ``--no-loop`` asks for.
     loop: bool = True
+    #: The scheduler lane this camera's frames are admitted into. ``None`` is **not** a band:
+    #: it means "whatever the shard's own config says, and ``NORMAL`` if it says nothing",
+    #: which is what a camera nobody gave an opinion about should get. A value here overrides
+    #: the shard's table, because a launcher that read the fleet config is better informed
+    #: than a shard whose copy of it was stripped.
+    priority: Priority | None = None
 
     def to_pb(self) -> shard_pb2.CameraSpec:
         shard_pb2 = load_pb()
 
         return shard_pb2.CameraSpec(
-            camera_id=self.camera_id, url=self.url, fps=self.fps, loop=self.loop
+            camera_id=self.camera_id,
+            url=self.url,
+            fps=self.fps,
+            loop=self.loop,
+            priority=_priority_to_pb(self.priority),
         )
 
     @classmethod
@@ -159,7 +181,74 @@ class CameraSpec:
             url=message.url,
             fps=message.fps,
             loop=message.loop if message.HasField("loop") else True,
+            priority=_priority_from_pb(message.priority),
         )
+
+
+#: What ``CameraPriority``'s value names add to :class:`~shipinfer.core.request.Priority`'s.
+#: protobuf enum values share their enclosing scope, so a bare ``NORMAL`` would be a name
+#: this package owns globally; the prefix is the convention that keeps it ours.
+_BAND_PREFIX = "CAMERA_PRIORITY_"
+
+
+def _priority_to_pb(priority: Priority | None) -> int:
+    """One :class:`~shipinfer.core.request.Priority`, or ``None``, as a wire band.
+
+    Mapped **by name**, never by number. The two vocabularies are numbered differently on
+    purpose — the wire reserves 0 for "unspecified" so that
+    :attr:`~shipinfer.core.request.Priority.TRACKING_CRITICAL`, which *is* 0, cannot be
+    confused with silence — and a hand-written offset between them would be one edit away
+    from admitting every critical camera into ``high``. A name that does not exist on the
+    wire is a loud failure instead.
+
+    Raises:
+        ConfigurationError: a band exists in ``Priority`` that ``shard.proto`` has no name
+            for. That is a missed edit to the ``.proto``, not a client's mistake, and it
+            fails here rather than travelling as a neighbouring lane.
+    """
+    shard_pb2 = load_pb()
+    if priority is None:
+        return int(shard_pb2.CAMERA_PRIORITY_UNSPECIFIED)
+    try:
+        return int(shard_pb2.CameraPriority.Value(_BAND_PREFIX + priority.name))
+    except ValueError:
+        raise ConfigurationError(
+            f"priority {priority.name} has no name in shard.proto's CameraPriority; "
+            f"add {_BAND_PREFIX + priority.name} to it and regenerate the stubs "
+            "(python scripts/gen_proto.py)"
+        ) from None
+
+
+def _priority_from_pb(value: int) -> Priority | None:
+    """A wire band as a :class:`~shipinfer.core.request.Priority`, or ``None`` when unset.
+
+    ``None`` for the unspecified zero, and that is the whole point of spending a value on it:
+    a reader here cannot mistake "the launcher said nothing" for the critical band, and does
+    not have to remember to ask ``HasField`` to avoid doing so.
+
+    Raises:
+        ConfigurationError: a band this build has no name for. proto3 enums are open, so a
+            newer launcher's lane arrives as an unknown integer; refusing it names the value,
+            where mapping it to ``NORMAL`` would place a camera in a lane nobody asked for
+            and say nothing.
+    """
+    shard_pb2 = load_pb()
+    if value == shard_pb2.CAMERA_PRIORITY_UNSPECIFIED:
+        return None
+    try:
+        name = shard_pb2.CameraPriority.Name(value)
+    except ValueError:
+        raise ConfigurationError(
+            f"camera priority {value} is not a band this build knows; "
+            "it comes from a newer shard.proto than this process was built against"
+        ) from None
+    try:
+        return Priority[name.removeprefix(_BAND_PREFIX)]
+    except KeyError:
+        raise ConfigurationError(
+            f"wire priority {name} has no counterpart in core.request.Priority; "
+            "the two vocabularies are mapped by name and this one has drifted"
+        ) from None
 
 
 def mint_camera_id(index: int) -> str:

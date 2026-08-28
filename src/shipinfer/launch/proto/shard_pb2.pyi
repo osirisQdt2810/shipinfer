@@ -2,11 +2,25 @@
 # Regenerate with:  python scripts/gen_proto.py
 from google.protobuf import struct_pb2 as _struct_pb2
 from google.protobuf.internal import containers as _containers
+from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
 from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Mapping, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
+
+class CameraPriority(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    CAMERA_PRIORITY_UNSPECIFIED: _ClassVar[CameraPriority]
+    CAMERA_PRIORITY_TRACKING_CRITICAL: _ClassVar[CameraPriority]
+    CAMERA_PRIORITY_HIGH: _ClassVar[CameraPriority]
+    CAMERA_PRIORITY_NORMAL: _ClassVar[CameraPriority]
+    CAMERA_PRIORITY_BACKGROUND: _ClassVar[CameraPriority]
+CAMERA_PRIORITY_UNSPECIFIED: CameraPriority
+CAMERA_PRIORITY_TRACKING_CRITICAL: CameraPriority
+CAMERA_PRIORITY_HIGH: CameraPriority
+CAMERA_PRIORITY_NORMAL: CameraPriority
+CAMERA_PRIORITY_BACKGROUND: CameraPriority
 
 class ShardIdentity(_message.Message):
     __slots__ = ("shard_id", "control_port", "pid")
@@ -51,16 +65,18 @@ class TopologyReply(_message.Message):
     def __init__(self, accepted: bool = ..., reason: _Optional[str] = ..., topology: _Optional[str] = ...) -> None: ...
 
 class CameraSpec(_message.Message):
-    __slots__ = ("camera_id", "url", "fps", "loop")
+    __slots__ = ("camera_id", "url", "fps", "loop", "priority")
     CAMERA_ID_FIELD_NUMBER: _ClassVar[int]
     URL_FIELD_NUMBER: _ClassVar[int]
     FPS_FIELD_NUMBER: _ClassVar[int]
     LOOP_FIELD_NUMBER: _ClassVar[int]
+    PRIORITY_FIELD_NUMBER: _ClassVar[int]
     camera_id: str
     url: str
     fps: float
     loop: bool
-    def __init__(self, camera_id: _Optional[str] = ..., url: _Optional[str] = ..., fps: _Optional[float] = ..., loop: bool = ...) -> None: ...
+    priority: CameraPriority
+    def __init__(self, camera_id: _Optional[str] = ..., url: _Optional[str] = ..., fps: _Optional[float] = ..., loop: bool = ..., priority: _Optional[_Union[CameraPriority, str]] = ...) -> None: ...
 
 class AddCameraRequest(_message.Message):
     __slots__ = ("camera",)

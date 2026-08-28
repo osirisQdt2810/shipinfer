@@ -24,7 +24,7 @@ import logging
 import threading
 import time
 from collections.abc import Container
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
@@ -34,7 +34,7 @@ from fastapi.testclient import TestClient
 
 from shipinfer.api import create_app
 from shipinfer.api import streams as streams_module
-from shipinfer.api.schemas import StreamRequest
+from shipinfer.api.schemas import BAND_NAMES, BandName, StreamRequest
 from shipinfer.api.streams import CameraController
 from shipinfer.core.errors import (
     ConfigurationError,
@@ -42,6 +42,7 @@ from shipinfer.core.errors import (
     NoShardAvailableError,
     ServerStateError,
 )
+from shipinfer.core.request import Priority
 from shipinfer.launch.control import CameraSpec
 
 #: A launcher's report: where each camera was placed, with the shard's own per-camera detail
@@ -300,10 +301,97 @@ class TestAddingACamera:
 
     def test_an_unknown_field_is_refused_rather_than_silently_dropped(self, client) -> None:
         """A client that posts `{"uri": ...}` must not get a 201 and a camera reading nothing."""
-        response = client.post("/streams", json={"url": "rtsp://host", "priority": "high"})
+        response = client.post("/streams", json={"url": "rtsp://host", "uri": "rtsp://host"})
+
+        assert response.status_code == 422
+        assert "uri" in response.text
+
+    def test_the_posted_band_reaches_the_spec_the_controller_is_given(self) -> None:
+        """A band is what the caller came for: the shard cannot work it out for itself.
+
+        A fleet shard's ingest config is stripped (`runners/inprocess.py::_ingest`), so a
+        camera posted here and placed by RPC has no configured table to resolve a lane from.
+        If the name does not travel on the spec, it does not travel at all.
+        """
+        cameras = FakeCameras()
+        with client_over(cameras) as client:
+            response = client.post(
+                "/streams", json={"url": "rtsp://host", "priority": "tracking_critical"}
+            )
+
+        assert response.status_code == 201, response.text
+        assert cameras.added[0].priority is Priority.TRACKING_CRITICAL
+
+    def test_a_camera_posted_without_a_band_leaves_the_choice_to_the_deployment(self) -> None:
+        """`None`, not `normal`: "I have no opinion" and "put it in the middle lane" differ."""
+        cameras = FakeCameras()
+        with client_over(cameras) as client:
+            assert client.post("/streams", json={"url": "rtsp://host"}).status_code == 201
+
+        assert cameras.added[0].priority is None
+
+    @pytest.mark.parametrize("spelling", ["TRACKING_CRITICAL", "Tracking_Critical"])
+    def test_the_band_name_is_matched_whatever_case_it_arrives_in(self, spelling: str) -> None:
+        """The name is a *member* name, and it is upper-case everywhere it is written.
+
+        `Priority.TRACKING_CRITICAL` in Python, `TRACKING_CRITICAL` in a generated gRPC
+        stub's enum, `tracking_critical` in the published schema -- one lane spelled three
+        ways by the same deployment. Refusing the upper-cased one is a 422 for a client that
+        named the right lane, so the model lower-cases a string before matching it.
+        """
+        cameras = FakeCameras()
+        with client_over(cameras) as client:
+            response = client.post(
+                "/streams", json={"url": "rtsp://host", "priority": spelling}
+            )
+
+        assert response.status_code == 201, response.text
+        assert cameras.added[0].priority is Priority.TRACKING_CRITICAL
+
+    @pytest.mark.parametrize("band", ["urgent", "TRACKING-CRITICAL", "", 0, 2])
+    def test_a_band_the_server_does_not_know_is_422_rather_than_a_default(
+        self, client, band: object
+    ) -> None:
+        """Including the *numbers*, and that is the case worth having.
+
+        `Priority.TRACKING_CRITICAL` is 0, so `{"priority": 0}` is a client that meant "unset"
+        asking for the highest lane on the deployment. Names only, so the question cannot be
+        asked ambiguously.
+
+        Every one of these survives the case normalisation above, which is the point of
+        normalising only a `str` and only its case: `0` is an `int` and reaches the literal
+        untouched, and `tracking-critical` is not a member name in any case.
+        """
+        response = client.post("/streams", json={"url": "rtsp://host", "priority": band})
 
         assert response.status_code == 422
         assert "priority" in response.text
+
+    def test_the_published_schema_offers_the_names_the_validator_accepts(self, client) -> None:
+        """`/openapi.json` and the 422 above must describe the same field.
+
+        `Priority` is an `IntEnum`, so typing the wire field as `Priority | None` had FastAPI
+        publish `{"enum": [0, 1, 2, 3], "type": "integer"}` -- while every one of those four
+        integers was refused. A generated client did exactly what the document told it to and
+        got a 422 it could not read its way out of, which is worse than no document. The wire
+        type is the band *names*, and the schema says so.
+        """
+        schema = client.get("/openapi.json").json()
+        field = schema["components"]["schemas"]["StreamRequest"]["properties"]["priority"]
+        offered = [option for option in field["anyOf"] if option.get("type") != "null"]
+
+        assert offered == [
+            {"enum": ["tracking_critical", "high", "normal", "background"], "type": "string"}
+        ], field
+
+    def test_the_offered_names_are_every_band_and_only_bands(self) -> None:
+        """The schema is derived from `Priority`, so a fifth band cannot be silently unposted.
+
+        Spelled-out strings would have to be edited a second time, and the failure of not
+        doing so is invisible: the new lane simply cannot be asked for over HTTP.
+        """
+        assert tuple(band.name.lower() for band in Priority) == BAND_NAMES
+        assert get_args(BandName) == BAND_NAMES
 
     def test_a_finite_video_can_be_asked_to_stop_at_its_end(self, client, cameras) -> None:
         """`loop: false` is `--no-loop` over HTTP, and it has to reach the spec to mean it.
