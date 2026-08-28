@@ -73,7 +73,8 @@ class TrackingSettings(BaseModel):
     shards it **by camera**, and that sharding is a correctness constraint rather than a
     scaling one: a tracker's Kalman state, its track ids and its ageing are per camera, so
     two cameras sharing an instance associate one camera's objects with the other's.
-    :class:`~shipinfer.pipeline.graph.tracking.TrackerShard` is what honours it.
+    :class:`~shipinfer.topology.elements.track.TrackerShard` is what honours it, for the
+    chain's ``track`` element and for this pipeline's stage alike.
 
     **Off by default, and that default is load-bearing.** Tracking adds a stateful,
     per-camera-serialised step to a pipeline whose whole design is stateless fan-out, so

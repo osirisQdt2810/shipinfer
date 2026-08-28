@@ -86,8 +86,17 @@ def test_needs_model_predicts_whether_open_demands_a_pool(kind: ElementKind, imp
     ``True`` means ``open()`` must refuse an :class:`ElementContext` with no ``models=``, and
     refuse it *there* rather than on the first frame -- a chain that starts and then fails
     per-frame is the failure the eager resolve in ``elements/pool.py`` exists to convert into
-    a start-up refusal. ``False`` means it must open without one, because ``shipinfer run``
-    builds no pool for a chain whose elements all answer ``False``.
+    a start-up refusal. ``False`` means it must **never refuse for want of a pool** -- because
+    ``shipinfer run`` builds none for a chain whose elements all answer ``False``.
+
+    "Never for want of a pool" and not "always opens", and the difference is the whole reason
+    this branch is written the way it is. An element may legitimately refuse an empty context
+    for a reason of its own: ``track: {impl: shipvision}`` needs ``3rdparty/shipvision``, which
+    CI deliberately does not check out, and ``elements/__init__.py`` states that a host lacking
+    an element's runtime should still *list* the implementation and fail at ``open()`` naming
+    the package to install. Asserting ``is_open`` unconditionally would make this file demand
+    the opposite of that -- and would go red on the one checkout the offline tier exists to
+    protect. So the refusal is allowed and then *read*: it must not be the pool's.
     """
     declared = ELEMENTS[kind].get(impl).needs_model
     element = None
@@ -96,7 +105,14 @@ def test_needs_model_predicts_whether_open_demands_a_pool(kind: ElementKind, imp
             with pytest.raises(ConfigurationError, match="needs a model pool"):
                 _open_with_no_pool(kind, impl)
             return
-        element = _open_with_no_pool(kind, impl)
+        try:
+            element = _open_with_no_pool(kind, impl)
+        except ConfigurationError as exc:
+            assert "model pool" not in str(exc), (
+                f"{kind.value}:{impl} declares needs_model=False and refused an empty "
+                f"context for want of one: {exc}"
+            )
+            return
         assert element.is_open, f"{kind.value}:{impl} declares needs_model=False"
     finally:
         if element is not None and element.is_open:
