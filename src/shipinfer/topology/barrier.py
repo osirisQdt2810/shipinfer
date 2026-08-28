@@ -363,8 +363,9 @@ class InstantBarrier:
     the live set, the waiter count and the counters. It is held across the association
     callback, which is deliberate and is the *only* lock this codebase takes around a
     cross-camera tracker call (``docs/arch.md`` §7). Every wait is bounded by the bucket's own
-    deadline, so no caller can be parked here for longer than one window even if the callback
-    never runs.
+    deadline *on the clock this barrier was given*, so no caller is parked here for longer than
+    one window even if the callback never runs — and a test driving that clock holds its own
+    waiters by choice.
 
     Args:
         sync_window_s: how wide an instant is — the largest capture spread one instant may
@@ -391,6 +392,10 @@ class InstantBarrier:
             reported here — the caller reads those off its own :class:`InstantOutcome`,
             because one closed instant resolves many frames and counting instants per frame
             would report the wrong number.
+        clock: where "now" comes from. The real monotonic clock, and the deployment passes
+            nothing else. It is a seam because expiry is this class's only dependence on wall
+            time, so a test that cannot control it is a test whose verdict is partly the
+            host's. Read on every deadline decision, always under the lock.
 
     Raises:
         ConfigurationError: a non-positive window, or fewer than one worker.
@@ -400,6 +405,7 @@ class InstantBarrier:
         "_announced",
         "_buckets",
         "_budget",
+        "_clock",
         "_closed",
         "_cond",
         "_frame_counts",
@@ -425,6 +431,7 @@ class InstantBarrier:
         budget: WaiterBudget | None = None,
         max_instants: int = DEFAULT_MAX_INSTANTS,
         on_event: Callable[[str], None] | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if sync_window_s <= 0.0:
             raise ConfigurationError(
@@ -447,6 +454,7 @@ class InstantBarrier:
         self._budget = WaiterBudget(self._workers - 1) if budget is None else budget
         self._max_instants = int(max_instants)
         self._on_event = on_event
+        self._clock = clock
         self._cond = threading.Condition(threading.Lock())
         #: Open instants, keyed by instant id. Insertion-ordered, so the first key is always
         #: the instant that has been open longest -- and, since every deadline is set one
@@ -628,7 +636,7 @@ class InstantBarrier:
         with self._cond:
             if self._closed:
                 return self._missed(DROPPED_SHUTDOWN, 0)
-            now = time.monotonic()
+            now = self._clock()
             self._retire(now)
             if camera_id not in self._seen:
                 self._seen.add(camera_id)
@@ -664,10 +672,16 @@ class InstantBarrier:
             self._waiters += 1
             bucket.waiters += 1
             try:
-                self._cond.wait_for(
-                    lambda: bucket.done or bucket.ready,
-                    timeout=max(0.0, bucket.deadline - time.monotonic()),
-                )
+                # Bounded by this bucket's deadline, re-derived from `clock` on every wake
+                # rather than computed once: a `notify_all` for a *different* bucket wakes
+                # every waiter here anyway, and re-deriving is what puts expiry on the
+                # injected clock. A single `wait_for(timeout=...)` would hand the decision
+                # back to real time whatever `clock` says.
+                while not (bucket.done or bucket.ready):
+                    remaining = bucket.deadline - self._clock()
+                    if remaining <= 0.0:
+                        break
+                    self._cond.wait(remaining)
             finally:
                 self._waiters -= 1
                 bucket.waiters -= 1
