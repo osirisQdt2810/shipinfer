@@ -681,9 +681,10 @@ it looks.
 **Decision.** When a shard's process exits, the fleet runner **reports** its cameras and
 places them nowhere. `Fleet.dead_indices()` names the exited shards by plan index (the
 runner never touches `ShardProcess`, so `subprocess` stays inside `launch/`);
-`FleetRunner._lost()` maps those to `{camera_id: shard_id}`; `_do_health` carries them under
-`lost` and excludes them from the per-shard `placed` lists, `_do_stats` carries the count,
-and `StreamInfo.lost` surfaces the flag on `GET /streams`. The placements are **kept** —
+`_lost_in()` maps those to `{camera_id: shard_id}` out of one snapshot of the placement map,
+the dead set and the reservations; `_do_health` carries them under `lost`, excludes them from
+the per-shard `placed` lists and marks each shard entry `exited`, `_do_stats` carries the
+count, and `StreamInfo.lost` surfaces the flag on `GET /streams`. The placements are **kept** —
 reported, never deleted — because the two absences would otherwise be one: a camera nobody
 ever placed and a camera whose shard died would read the same, and "I have never heard of
 it" is the wrong answer to "where did my camera go".
@@ -716,11 +717,24 @@ Three reasons, in the order they decide it:
 - `lost` and `unreachable` are different words for different facts and must stay that way. A
   wedged, paging or slow shard is *alive* and may answer the next probe; a dead one will not.
   Conflating them would report a camera terminally lost because its shard took two seconds
-  over a health probe.
-- The one recovery is the operator's, and it is two calls: `remove_camera` on a lost camera
-  drops the placement and answers `False` — the thread died with its process, so "clean"
-  would be a lie — and `add_camera` then places the id on a survivor, with a fresh tracker
-  the caller asked for rather than one the launcher invented.
+  over a health probe. The health entry therefore carries **`exited`** as well: a dead shard
+  that happened to hold no cameras reads `unreachable` with an empty `lost`, which is exactly
+  what a wedged one reads, and the flag is the only thing in the report that separates them.
+- `lost` excludes a camera whose `AddCamera` is still in flight. `pending` and `lost` are
+  exclusive: the `cameras` count has always subtracted the reservations, so counting one
+  against a shard that died inside the placement window reported more cameras dark than the
+  fleet admits to having.
+- The one recovery is two calls — `remove_camera` on a lost camera drops the placement and
+  answers `False` (the thread died with its process, so "clean" would be a lie), and
+  `add_camera` then places the id on a survivor with a fresh tracker the caller asked for
+  rather than one the launcher invented — **and under `shipinfer run` nobody is left to make
+  them.** `supervise()` is fail-stop: the poll that first sees the death stops the whole
+  fleet and raises `ShardExitedError`, so the lost cameras and the live ones go down
+  together, in the same poll, and the report they would be recovered from is the post-mortem
+  rather than a live view. The recovery belongs to an embedder that drives the fleet itself —
+  a loop of its own passed as `until=`, `stats()` between polls, `remove_camera` +
+  `add_camera` on what it finds — or to a supervision mode that is told to keep the survivors
+  up, which does not exist yet and is the same decision as the respawn below.
 - `add_camera` excludes dead shards from the placement order rather than discovering them
   over RPC, and a fleet whose shards are *all* dead answers `NoShardAvailableError` (503,
   retryable) naming each one.
@@ -728,6 +742,9 @@ Three reasons, in the order they decide it:
   the same GPUs and the same `shared_by`, so re-placing onto *it* breaks none of the three
   reasons above — only reason 1 remains, and it is a per-deployment trade (a reset tracker
   beats a dark camera for some operators and not for others). That makes it a *policy*, not
-  a branch: a `PlacementPolicy` in `scheduling/policies/` (seam 2), chosen by name, deciding
-  where a lost camera goes and whether it goes anywhere at all. This ADR is then superseded
-  by the one that adds it, not edited.
+  a branch: a registry-backed policy in the shape of seam 2, with its own registry, chosen by
+  name, deciding where a lost camera goes and whether it goes anywhere at all — and
+  subsuming `FleetRunner._by_load()`, the hard-coded fewest-cameras-then-lowest-index chooser
+  that decides today's placements. Not `PlacementPolicy` itself: that contract is typed for
+  `Placeable` instances and an `InferenceRequest`, and a shard is neither. This ADR is then
+  superseded by the one that adds it, not edited.

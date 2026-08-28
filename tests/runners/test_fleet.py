@@ -1065,11 +1065,16 @@ class TestWhenAShardDies:
         assert not {"quay-1", "quay-3"} & set(report["lost"])
 
     def test_a_live_fleet_reports_nothing_lost(self, runner, clients) -> None:
+        """Through the report, which is the only way anything reads loss: the launcher has no
+        loss method of its own, and a test that called one would be pinning a private helper
+        rather than the answer an operator gets."""
         runner.start()
         self._four_cameras(runner)
+        report = runner.health()
 
-        assert runner.health()["lost"] == {}
-        assert runner._lost() == {}
+        assert report["lost"] == {}
+        assert [entry["exited"] for entry in report["shards"].values()] == [False, False]
+        assert runner.stats()["lost"] == 0
 
     def test_an_unreachable_shard_is_not_a_lost_one(self, runner, clients) -> None:
         """A shard that is wedged, paging in an engine or slow is ALIVE and may answer again.
@@ -1089,6 +1094,72 @@ class TestWhenAShardDies:
         assert report["shards"]["0"]["state"] == "unreachable"
         assert report["lost"] == {}
         assert report["shards"]["0"]["placed"] == ["quay-1"]
+
+    def test_a_dead_shard_with_no_cameras_still_says_it_exited(self, runner, clients) -> None:
+        """`unreachable` with an empty `lost` is exactly what a wedged shard reads, so on its
+        own it cannot answer the one question an operator has: wait, or remove-and-re-add.
+        `exited` is the only field that separates them.
+
+        Both shards are made to raise from `health()` here because that is what a real
+        channel does on either side of the distinction - a dead process refuses the
+        connection, a wedged one runs out the deadline - and the fake would otherwise keep
+        answering cheerfully for a child that has been killed.
+        """
+        runner.start()
+
+        def explode(**_k: Any):
+            raise ServerStateError("no answer")
+
+        clients[0].health = explode  # type: ignore[method-assign]
+        clients[1].health = explode  # type: ignore[method-assign]
+        kill_shard(runner, 0)
+        report = runner.health()
+
+        assert report["lost"] == {}, "neither shard held a camera"
+        assert report["shards"]["0"]["state"] == report["shards"]["1"]["state"] == "unreachable"
+        assert report["shards"]["0"]["exited"] is True
+        assert report["shards"]["1"]["exited"] is False
+
+    def test_a_camera_being_placed_when_its_shard_dies_is_pending_not_lost(
+        self, runner, clients
+    ) -> None:
+        """`lost` is a subset of the placed cameras, and `cameras` has always subtracted the
+        reservations - so counting a camera whose `AddCamera` is still in flight would report
+        `cameras: 0, lost: 1`, one dark camera out of none placed.
+
+        The add is held inside the shard's RPC, which is where the launcher's lock is down by
+        design, and the shard is killed in that window. `add_camera`'s own commit resolves it
+        afterwards: this shard accepted, so the camera becomes a placement and *then* a
+        lost one.
+        """
+        import threading
+
+        runner.start()
+        started, release = threading.Event(), threading.Event()
+        accept = clients[0].add_camera
+
+        def block_then_accept(camera, **kwargs):
+            started.set()
+            release.wait(timeout=5.0)
+            return accept(camera, **kwargs)
+
+        clients[0].add_camera = block_then_accept  # type: ignore[method-assign]
+        placing = threading.Thread(
+            target=runner.add_camera, args=(CameraSpec(camera_id="quay-0", url="rtsp://h"),)
+        )
+        placing.start()
+        try:
+            assert started.wait(5.0), "the placement never reached the shard"
+            kill_shard(runner, 0)
+            mid_flight, stats = runner.health(), runner.stats()
+        finally:
+            release.set()
+            placing.join(timeout=5.0)
+
+        assert mid_flight["cameras"] == {"quay-0": {"shard": 0, "pending": True}}
+        assert mid_flight["lost"] == {}, "pending and lost are exclusive"
+        assert (stats["cameras"], stats["lost"]) == (0, 0)
+        assert runner.health()["lost"] == {"quay-0": 0}, "the commit resolved it into a loss"
 
     def test_stats_count_the_lost_as_a_subset_of_the_placed(self, runner, clients) -> None:
         runner.start()
@@ -1138,16 +1209,23 @@ class TestWhenAShardDies:
             runner.add_camera(CameraSpec(camera_id="quay-0", url="rtsp://host"))
 
     def test_a_new_camera_lands_on_a_survivor(self, runner, clients) -> None:
-        """Shard 0 is emptiest by every count that matters and is not offered the camera:
+        """Shard 0 is the one `_by_load` would choose and is not offered the camera at all:
         `AddCamera` against a corpse spends the whole deadline discovering what the process
-        table already said, and the placement loop does not catch an RPC that *raises*."""
+        table already said, and the placement loop does not catch an RPC that *raises*.
+
+        Nothing is placed first on purpose. The counts tie at `{0: 0, 1: 0}`, so the tie-break
+        on the shard index puts the DEAD shard 0 at the head of the order, and only the dead
+        filter moves the camera along: remove that filter and this test fails, which an
+        earlier version - which placed a camera on shard 1 before killing shard 0, and so had
+        already ordered shard 1 first - did not.
+        """
         runner.start()
-        runner.add_camera(CameraSpec(camera_id="quay-1", url="rtsp://host"))
         kill_shard(runner, 0)
 
-        runner.add_camera(CameraSpec(camera_id="quay-2", url="rtsp://host"))
+        runner.add_camera(CameraSpec(camera_id="quay-1", url="rtsp://host"))
 
-        assert clients[1].cameras == ["quay-2"]
+        assert clients[1].cameras == ["quay-1"]
+        assert clients[0].cameras == [], "a corpse was sent AddCamera"
 
     def test_every_shard_dead_is_a_capacity_refusal_that_names_them(
         self, runner, clients
