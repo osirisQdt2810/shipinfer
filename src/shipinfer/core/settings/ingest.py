@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from shipinfer.core.request.priority import Priority
 
-__all__ = ["CameraConfig", "Codec", "IngestSettings", "RtspTransport"]
+__all__ = ["CameraConfig", "Codec", "IngestSettings", "RtspTransport", "usable_camera_id"]
 
 #: ``auto`` builds a ``decodebin`` pipeline that negotiates the codec at connect time. It
 #: is the safe choice for a mixed fleet and the slightly slower one, because the decoder is
@@ -28,6 +28,40 @@ __all__ = ["CameraConfig", "Codec", "IngestSettings", "RtspTransport"]
 Codec = Literal["h264", "h265", "auto"]
 
 RtspTransport = Literal["tcp", "udp", "auto"]
+
+
+def usable_camera_id(value: str) -> str:
+    """The one rule for what may name a camera, so no layer has to guess it again.
+
+    Module-level rather than only a validator on :class:`CameraConfig` because it is checked
+    twice, three layers apart, and the two checks must not drift. ``CameraConfig`` is the
+    *last* thing to inspect an id -- by then a shard has already been chosen -- and
+    :class:`shipinfer.api.schemas.StreamRequest` is the first, at the HTTP door. Mirrored by
+    hand, the door and the record disagree the moment either is edited, and the way that
+    failure shows up is unpleasant: ``POST /streams {"camera_id": "quay 1"}`` was a 400 in
+    process (the router's ``ValueError`` net) and a **retryable 503** on a fleet, because
+    every shard refused separately and the launcher can only report that nobody took it.
+
+    Whitespace is the whole of the rule, and it is not cosmetic: a camera id becomes a metric
+    label, a log field, a fairness key and a URL path segment, and none of those survive a
+    space intact.
+
+    Returns:
+        The id as it should be stored -- which for an accepted id is the id unchanged, since
+        anything that would have been altered by stripping is refused instead.
+
+    Raises:
+        ValueError: the id is blank or carries whitespace. A plain ``ValueError`` and not a
+            :class:`~shipinfer.core.errors.ConfigurationError` because pydantic is what calls
+            this: a field validator raises ``ValueError`` and pydantic turns it into the
+            ``ValidationError`` that names the field.
+    """
+    stripped = value.strip()
+    if not stripped:
+        raise ValueError("camera_id must not be empty")
+    if stripped != value or any(c.isspace() for c in stripped):
+        raise ValueError(f"camera_id {value!r} must not contain whitespace")
+    return stripped
 
 
 class CameraConfig(BaseModel):
@@ -85,14 +119,8 @@ class CameraConfig(BaseModel):
     @field_validator("camera_id")
     @classmethod
     def _camera_id_is_usable(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("camera_id must not be empty")
-        # It becomes a metric label, a log field and a fairness key; whitespace in any of
-        # those is a debugging session nobody enjoys.
-        if stripped != value or any(c.isspace() for c in stripped):
-            raise ValueError(f"camera_id {value!r} must not contain whitespace")
-        return stripped
+        """:func:`usable_camera_id` is the rule; this is the last layer that applies it."""
+        return usable_camera_id(value)
 
     @field_validator("uri")
     @classmethod

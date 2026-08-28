@@ -43,6 +43,7 @@ from shipinfer.api.schemas import (
 from shipinfer.core.errors import (
     ConfigurationError,
     DuplicateCameraError,
+    ServerStateError,
     ShipInferError,
 )
 from shipinfer.core.logging import get_logger, log_context
@@ -97,7 +98,16 @@ class CameraController(Protocol):
 
     @property
     def manages_cameras(self) -> bool:
-        """Whether :meth:`add_camera`, :meth:`remove_camera` and :meth:`drain` do anything."""
+        """Whether :meth:`add_camera`, :meth:`remove_camera` and :meth:`drain` do anything.
+
+        A ``@property`` and not a plain ``manages_cameras: bool``, even though this router
+        only ever reads it, and the difference is not stylistic. A plain annotation declares a
+        *settable instance* variable, and mypy then rejects both of the shapes that actually
+        implement this protocol: every runner declares ``manages_cameras: ClassVar[bool]``
+        (``runners/base.py``) -- "expected instance variable, got class variable" -- and a
+        test double that computes it is a read-only attribute. Declared read-only here, all
+        three satisfy it: a ``ClassVar``, a ``property``, and a plain ``self.x = True``.
+        """
 
     def add_camera(self, camera: CameraSpec) -> None: ...
 
@@ -137,21 +147,44 @@ def build_streams_router(cameras: CameraController) -> Any:
                 "`shipinfer run --runner ...`)",
             )
 
-    def _health() -> Mapping[str, Any]:
-        """The controller's health report, or an honest stand-in.
+    def _health(*, needed: bool = False) -> Mapping[str, Any]:
+        """The controller's health report, or an honest stand-in — unless it is *needed*.
 
-        Never raises. Everything below reads the camera map out of this, and a listing that
-        500s because one shard is unreachable is a listing that is useless exactly when it is
-        needed — the fleet's own report already carries an ``unreachable`` entry per shard for
-        that case rather than omitting it (``runners/fleet.py``).
+        Lenient by default, and that is right for every read: a listing that 500s because one
+        shard is unreachable is a listing that is useless exactly when it is needed, and the
+        fleet's own report already carries an ``unreachable`` entry per shard for that case
+        rather than omitting it (``runners/fleet.py``).
+
+        ``needed=True`` is the one place the same failure is not cosmetic. :func:`_mint` reads
+        the taken ids *out of this report* and picks the lowest free one, so a stand-in with
+        no ``cameras`` key does not mean "no cameras are running" — it means nothing is known
+        — and minting from it hands out ``cam-000`` on a deployment that has been running
+        fifty cameras all morning. The caller then gets a **400 naming an id they never
+        supplied**, which reports a control-plane fault as their mistake and is terminal, so a
+        client that believes the status code stops retrying something that would work in a
+        minute. Raised, it is a ``ServerStateError`` -> 503 (``api/errors.py``), which says
+        what is actually true: the server could not find out, ask again.
+
+        The distinction is *which read*, not which route. ``add_stream``'s read **after** a
+        successful placement is deliberately lenient: the camera is placed by then, and a
+        failure there would earn a retry and a duplicate (:func:`_placed_from`).
+
+        Raises:
+            ServerStateError: only when ``needed`` and the controller could not report.
         """
         try:
             return cameras.health()
         except Exception as exc:  # a control-plane failure, reported rather than raised
             _LOG.warning("the camera controller could not report health: %s", exc)
+            if needed:
+                raise ServerStateError(
+                    "the camera controller could not report which ids are in use, so the "
+                    f"server cannot safely name this camera ({type(exc).__name__}: {exc}); "
+                    "retry, or POST a camera_id of your own"
+                ) from exc
             return {"state": "unknown", "detail": f"{type(exc).__name__}: {exc}"}
 
-    async def _report() -> Mapping[str, Any]:
+    async def _report(*, needed: bool = False) -> Mapping[str, Any]:
         """The same report, fetched off the event loop. For the ``async`` handler only.
 
         ``health()`` is blocking work on every runner and *serial* blocking work on a fleet --
@@ -164,10 +197,17 @@ def build_streams_router(cameras: CameraController) -> Any:
 
         ``abandon_on_cancel`` for :func:`add_stream`'s reason: without it the cancel scope
         waits for the very thread it is cancelling, and a wedged report would hold the socket
-        open past the deadline. Letting this one finish alone is safe -- :func:`_health` never
-        raises and changes nothing.
+        open past the deadline. Letting this one finish alone is safe -- :func:`_health`
+        changes nothing, whichever way it answers.
+
+        ``needed`` is passed straight through; see :func:`_health` for which read sets it.
+
+        Raises:
+            ServerStateError: ``needed`` and the controller could not report.
         """
-        return await anyio.to_thread.run_sync(_health, abandon_on_cancel=True)
+        return await anyio.to_thread.run_sync(
+            partial(_health, needed=needed), abandon_on_cancel=True
+        )
 
     # -- reading -------------------------------------------------------------------------
 
@@ -206,8 +246,20 @@ def build_streams_router(cameras: CameraController) -> Any:
     # -- writing -------------------------------------------------------------------------
 
     async def _named(body: StreamRequest) -> CameraSpec:
-        """The posted camera, named by the server when the caller did not name it."""
-        camera_id = body.camera_id or _mint(_camera_ids(await _report()))
+        """The posted camera, named by the server when the caller did not name it.
+
+        The report is read with ``needed=True`` because this is the read :func:`_mint` acts
+        on, and a stand-in report mints a name that is already taken (:func:`_health` says
+        what that costs the caller). It is only read when there is a name to mint: a POST that
+        supplied its own ``camera_id`` needs no report and is therefore still placed on a
+        deployment whose health is unreportable, which is the right answer -- nothing about
+        that request depends on what the controller could not say.
+
+        Raises:
+            ServerStateError: an id had to be minted and the controller could not report which
+                ones are in use.
+        """
+        camera_id = body.camera_id or _mint(_camera_ids(await _report(needed=True)))
         return CameraSpec(camera_id=camera_id, url=body.url, fps=body.fps, loop=body.loop)
 
     async def _hand_over(camera: CameraSpec) -> None:
@@ -257,7 +309,8 @@ def build_streams_router(cameras: CameraController) -> Any:
                 (``DuplicateCameraError``), any other configuration refusal, or a value the
                 schema did not constrain that a layer below rejected (a ``ValueError``, which
                 is what a pydantic ``ValidationError`` is); 503 for a runner that is not
-                running or a fleet with no room (``ServerStateError``, and
+                running, a fleet with no room, or a controller that could not report which ids
+                are taken when one had to be minted (all ``ServerStateError``, and
                 ``NoShardAvailableError`` is one — see ``api/errors.py``); 504 if the
                 placement outran ``_ADD_TIMEOUT_S``.
         """
@@ -296,10 +349,19 @@ def build_streams_router(cameras: CameraController) -> Any:
             # own `ValidationError` is a `ValueError` and is NOT a `ShipInferError`, so
             # `CameraConfig`'s refusal used to fall past the clause above into a 500 -- and
             # over gRPC into a refusal from every shard, which is a retryable 503 for a
-            # request that can never succeed. `StreamRequest` now rejects the two values a
+            # request that can never succeed. `StreamRequest` now rejects the three values a
             # client actually gets wrong before this handler runs; this is the net under
             # everything else the settings tree validates (a codec name, a decode size), and
             # it is a 400 because the caller sent it and a retry will send it again.
+            #
+            # The net is wider than that, and the trade is accepted knowingly: a genuine
+            # internal `ValueError` out of a runner -- a bug here, not a bad request -- is
+            # relabelled as the caller's mistake, and they will retry it once and stop. The
+            # alternative is to catch pydantic's `ValidationError` by name, which would put
+            # pydantic's exception type in an HTTP handler and *still* 500 on the settings
+            # tree's own plain `ValueError`s, which are about the posted values and are the
+            # common case. The message travels either way, and the traceback that says which
+            # it really was is in this process's log.
             raise HTTPException(400, str(exc)) from exc
         _LOG.info(
             "camera %s added over HTTP",

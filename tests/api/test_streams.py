@@ -33,6 +33,7 @@ from fastapi.testclient import TestClient
 
 from shipinfer.api import create_app
 from shipinfer.api import streams as streams_module
+from shipinfer.api.schemas import StreamRequest
 from shipinfer.api.streams import CameraController
 from shipinfer.core.errors import (
     ConfigurationError,
@@ -119,7 +120,13 @@ class FakeCameras:
         overwritten by this stand-in. What the mutation is for is minting: the *next* POST
         with no id must see this one as taken -- including when "the next POST" is this
         request's own retry after a refusal.
+
+        A controller whose `health()` raises has no report to put it in, so this is a no-op
+        there -- the same thing the real failure means, and what lets a test set that up and
+        still place a camera whose id the caller supplied.
         """
+        if isinstance(self._health, Exception):
+            return
         cameras = dict(self._health.get("cameras") or {})
         cameras.setdefault(camera_id, {"camera_id": camera_id, "state": "connecting"})
         self._health = {**self._health, "cameras": cameras}
@@ -336,6 +343,60 @@ class TestARequestTheSchemaCanRefuseOnItsOwn:
         assert "fps" in response.text
         assert cameras.attempts == []
 
+    def test_a_camera_id_with_a_space_in_it_is_refused_here_and_not_by_a_shard(
+        self, client, cameras
+    ) -> None:
+        """The third field, and the one this class's whole argument was written for.
+
+        `CameraConfig` rejects a whitespace-carrying id (`core/settings/ingest.py`), so before
+        the schema said so this body was a 400 in process -- the router's `ValueError` net --
+        and a **retryable 503** on a fleet, because every shard refused separately and
+        `NoShardAvailableError` is all a launcher can report about that. Neither runner is
+        involved now: FastAPI names the field.
+        """
+        response = client.post("/streams", json={"camera_id": "quay 1", "url": "x.mp4"})
+
+        assert response.status_code == 422, response.text
+        assert "camera_id" in response.text
+        assert "whitespace" in response.text
+        assert cameras.attempts == [], "an unusable id reached the controller"
+
+    def test_a_blank_camera_id_is_not_a_request_to_mint_one(self, client, cameras) -> None:
+        """`"   "` is truthy, so it was never minted over -- it was carried down and refused.
+
+        The distinction that matters: `""` asks the server for a name, `"   "` is a name the
+        server cannot use, and the two must not answer the same way.
+        """
+        response = client.post("/streams", json={"camera_id": "  ", "url": "x.mp4"})
+
+        assert response.status_code == 422, response.text
+        assert "camera_id" in response.text
+        assert cameras.attempts == []
+
+    def test_an_empty_camera_id_still_means_name_it_for_me(self, client, cameras) -> None:
+        """The one value the validator lets through, because it is not an id at all."""
+        response = client.post("/streams", json={"camera_id": "", "url": "x.mp4"})
+
+        assert response.status_code == 201, response.text
+        assert response.json()["camera_id"] == "cam-000"
+        assert [camera.camera_id for camera in cameras.added] == ["cam-000"]
+
+    def test_the_door_and_the_record_apply_one_rule_rather_than_two_copies(self) -> None:
+        """A drift guard, not a duplicate: it is `CameraConfig`'s own predicate under test.
+
+        The two checks are three layers apart -- an HTTP schema and a settings record -- and
+        a mirrored rule disagrees the moment either is edited. This asserts they are the same
+        function, which is why `usable_camera_id` was lifted out of the validator at all.
+        """
+        from shipinfer.core.settings.ingest import CameraConfig
+
+        for bad in ("quay 1", "  ", "\tcam", "cam-1 "):
+            with pytest.raises(ValueError):
+                CameraConfig(camera_id=bad, uri="x.mp4")
+            with pytest.raises(ValueError):
+                StreamRequest(camera_id=bad, url="x.mp4")
+        assert StreamRequest(camera_id="quay-1", url="x.mp4").camera_id == "quay-1"
+
     def test_a_value_the_schema_did_not_constrain_is_400_and_not_500(self) -> None:
         """The net under everything else the settings tree validates.
 
@@ -395,6 +456,44 @@ class TestWhyACameraIsRefused:
         assert response.status_code == 501
         assert "--runner" in response.json()["detail"]
         assert cameras.added == [], "the camera reached a runner that cannot read it"
+
+    def test_a_controller_that_cannot_say_which_ids_are_taken_is_503_not_a_minted_400(
+        self,
+    ) -> None:
+        """A control-plane fault must not be reported as the caller's mistake.
+
+        `_health` is lenient for every *read*, which is right: a listing that 500s because one
+        shard is unreachable is useless exactly when it is wanted. But `_mint` acts on that
+        report -- it hands out the lowest free `cam-<n>` -- and the lenient stand-in carries no
+        `cameras` key at all, which does not mean "none are running". So a deployment with
+        fifty cameras up and an unreachable control plane minted `cam-000`, the controller
+        refused the duplicate, and the caller got a **400 naming an id they never supplied**:
+        terminal, so a well-behaved client stops retrying something that would work in a
+        minute. 503 says what is true -- the server could not find out.
+        """
+        cameras = FakeCameras(refuse_ids=frozenset({"cam-000"}))
+        cameras._health = RuntimeError("the control channel is gone")  # type: ignore[assignment]
+        with client_over(cameras) as client:
+            response = client.post("/streams", json={"url": "rtsp://host"})
+
+        assert response.status_code == 503, response.text
+        assert "could not report which ids are in use" in response.json()["detail"]
+        assert cameras.attempts == [], "it placed a camera under a name it guessed"
+
+    def test_a_caller_who_names_the_camera_is_placed_even_so(self) -> None:
+        """The other half of the same decision: strictness is on the *mint*, not the route.
+
+        Nothing about this request depends on what the controller could not say, so refusing
+        it would be inventing a failure. This is what keeps the answer above from being a
+        blanket "health is down, nothing works".
+        """
+        cameras = FakeCameras()
+        cameras._health = RuntimeError("the control channel is gone")  # type: ignore[assignment]
+        with client_over(cameras) as client:
+            response = client.post("/streams", json={"camera_id": "quay-1", "url": "x"})
+
+        assert response.status_code == 201, response.text
+        assert [camera.camera_id for camera in cameras.added] == ["quay-1"]
 
     def test_a_placement_that_outruns_the_deadline_is_504_not_a_held_worker(
         self, monkeypatch: pytest.MonkeyPatch, cameras

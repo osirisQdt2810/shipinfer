@@ -14,6 +14,7 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from shipinfer.core.errors import ValidationError
+from shipinfer.core.settings.ingest import usable_camera_id
 from shipinfer.core.types import DataType, Tensor
 
 __all__ = [
@@ -167,9 +168,12 @@ class StreamRequest(BaseModel):
     expand answered **500** in process and, over gRPC, a refusal from every shard -> a
     ``NoShardAvailableError`` -> a **retryable 503** for a request that can never succeed.
     Declared here, FastAPI answers 422 naming the field before the handler is entered, so
-    both runners give the caller the same terminal answer. The constraints deliberately
-    mirror ``CameraConfig``'s own (``core/settings/ingest.py``): non-empty ``uri``,
-    ``fps >= 0``.
+    both runners give the caller the same terminal answer. The constraints are not a mirror
+    of ``CameraConfig``'s (``core/settings/ingest.py``) but the *same rule applied earlier*:
+    non-empty ``uri``, ``fps >= 0``, and -- through :func:`~shipinfer.core.settings.ingest.
+    usable_camera_id`, which both models call -- a ``camera_id`` with no whitespace in it.
+    A mirror would have drifted, and it did: ``camera_id`` was the field this argument was
+    written for and the field it was first missing.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -192,6 +196,25 @@ class StreamRequest(BaseModel):
     #: file gets it replayed forever with no way to ask otherwise. Ignored by a live source,
     #: which has no end to reach.
     loop: bool = True
+
+    @field_validator("camera_id")
+    @classmethod
+    def _camera_id_is_usable(cls, value: str) -> str:
+        """``""`` means "name it for me"; anything else must be an id a camera can carry.
+
+        The empty string is the one value this validator lets past, because it is not an id
+        at all -- it is the request to mint one, and :func:`shipinfer.api.streams._mint`
+        answers it with a name that is legal by construction. Everything else is checked by
+        :func:`~shipinfer.core.settings.ingest.usable_camera_id`, the same function
+        ``CameraConfig`` uses, so the door and the record cannot disagree.
+
+        Without this, ``{"camera_id": "quay 1"}`` reached the runner and was refused a layer
+        down -- a 400 in process, and on a fleet a **retryable 503** for a request that can
+        never succeed, because the launcher sees only that every shard said no. That is the
+        exact 400-vs-503 conflation ``url`` and ``fps`` were constrained to remove, on the
+        third field, which is why the rule is now shared code rather than a copy.
+        """
+        return value if not value else usable_camera_id(value)
 
     @field_validator("url")
     @classmethod
