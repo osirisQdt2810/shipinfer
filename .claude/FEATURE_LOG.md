@@ -23,7 +23,8 @@ the embed→track scatter-back before the demo chain runs."
 | `ImageOpsLike.crop_batch` | the second member of the protocol, added the way `topology/base.py` says one should: by the first element that calls it, with the test that needs it |
 | `track._embeddings` | the **empty** mapping is exempt from the coverage check |
 | `_CropMetrics` | `shipinfer_element_crops_per_frame` (object-count buckets) + `shipinfer_element_crops_total`, both labelled by element, both null-object when the runner offered no registry |
-| tests | `tests/topology/test_pool_embed_crops.py` (49), +1 in `test_track_element.py`; four existing tests updated where C8 changed their premise |
+| row selection, shared | `Detections.indices_of_any(classes)` + `Detections.boxes_at(indices)` + `parse_classes(declared, what)` in `topology/elements/detections.py`; `track` and every crop element now call one rule instead of carrying a copy each |
+| tests | `tests/topology/test_pool_embed_crops.py` (55), +17 in `test_detections.py` for the shared helpers, +1 in `test_track_element.py`; four existing tests updated where C8 changed their premise |
 
 **Why.** The chain's cardinality has to change somewhere — arch.md §5's "branch on class →
 crop batch → submit crops" — and the embedder is where. Everything here is the proven fan-out
@@ -62,6 +63,23 @@ that every row knows which detection it came from.
   it one crowded frame becomes a single oversized request and *every* crop in it is lost — the
   failure `objects.py::_chunks` exists because of. `max_batch_size: 0` is Triton's "batching
   off", so it means no bound, not batch one.
+- **The pixel scale is the slot's own, and it is pinned.** `crop.normalize` is resolved at
+  `open` from `params: {crop: {normalize: {mean, std, swap_rb}}}`, defaulting to
+  `Normalization()` — not read off the artefact, because a model repository `config.yaml` has
+  no normalisation section, and the proven path does the same (`CropStage.__init__`).
+  Crops normalised with the wrong mean and std are the right rows, in the right order, at the
+  right extent: the engine answers without an error and the only symptom is appearance
+  matching that degrades. So `TestThePixelScaleIsTheSlotsOwn` asserts the crop batch equals
+  `NumpyImageOps().crop_batch(pixels, boxes, size, <the declared Normalization>)` *and* that
+  the default would have produced other pixels — before it existed, replacing the resolved
+  normalisation with the default at the `crop_batch` call left the whole offline tier green.
+- **One row-selection rule, on the value that owns the labels.** `classes:` parsing and the
+  label match were a copy each in `pool.py` and `track.py`, differing only in the kind word
+  inside the message. They are now `parse_classes` and `Detections.indices_of_any`, with
+  `Detections.boxes_at` doing the contiguous gather the crop path had open-coded (and
+  `boxes_of` expressed in terms of it). Two copies of a row filter is two places for "a case
+  difference is not a match" to drift, and the drift has no symptom — the element covers no
+  rows, silently. C8b adds a third crop element, which is why this moved now.
 - **No L2 normalisation here.** Both embedders in the demo repository are already global-pooled
   and L2-normalised (their `config.yaml` says so) and the proven path normalised nothing in
   Python either. Re-normalising would be a silent divide-by-a-tiny-number on the row where the
@@ -80,11 +98,24 @@ that every row knows which detection it came from.
 **What allocates per frame** (CONVENTIONS 2.5): the crop batch itself, one `Tensor` wrapper,
 one `InferenceRequest` per chunk (one, except past `max_batch_size`), and the `{row: vector}`
 mapping whose values are numpy *views*. Selecting a subset adds an index tuple and one `(N, 4)`
-gather; selecting every row adds neither. A frame with nothing to crop allocates nothing.
+gather; selecting every row adds neither — `_selected` returns a `range` and `boxes_at` hands
+the array through. A frame with nothing to crop submits nothing and costs **one** `derive()`,
+for the empty mapping that records that this element ran; when a peer embedder has already
+filed a mapping there is nothing left to say and the item flows on unchanged. The metric handle
+is bound once at `open` rather than looked up off `self._metrics` per frame.
 
 **Not done here.** The demo chain (`topology/ship_person.yaml`) still names `gstreamer-gpu` and
 `kafka` and does not load; nothing in the chain sets `meta["class"]`, so every `when:` in that
 file is currently false for every frame — both are C8's remaining slices, not this one.
+
+**C8b must cross-check `classes:` against the detector's labels.** Now that the empty mapping
+is legal at `track`, a `classes:` value naming a label the detector never emits is a permanent,
+silent no-op: the element covers no row on any frame, and the only signal is
+`shipinfer_element_crops_per_frame` recording zeros. `Topology.from_spec` already sees both
+slots, so refusing a crop element whose `classes:` is absent from the upstream detect slot's
+`decode.class_labels` is CONVENTIONS 2.6 ("validate at start-up, not at first use") and costs
+nothing per frame. Same slice as replacing that file's four `when: class == …` guards with
+`params: {classes: [...]}`.
 
 ---
 
