@@ -1303,3 +1303,63 @@ class TestClassesAreCheckedAgainstWhatTheDetectorEmits:
                 self.LABELLED,
                 "track: {impl: shipvision, params: {classes: [vessel]}}",
             )
+
+
+class TestTheRunnableChainFile:
+    """``topology/ship_person_cpu.yaml``: the sibling that loads on this host today."""
+
+    PATH = REPO_ROOT / "topology" / "ship_person_cpu.yaml"
+
+    def test_it_loads_with_no_substitutions(self) -> None:
+        """The whole difference from ``ship_person.yaml``, which needs its impls mocked out.
+
+        Loading is not running — the ``pool`` slots still need a repository and the shipvision
+        slots still need the submodule — but every ``impl:`` in it resolves, which is what
+        makes it the file to point ``shipinfer run`` at.
+        """
+        chain = Topology.from_file(self.PATH)
+
+        assert chain.name == "ship_person_cpu"
+        assert [node.name for node in chain.nodes][:2] == ["decode", "detect"]
+        assert [node.name for node in chain.sinks] == ["output"]
+
+    def test_the_chain_leaves_the_pixels_behind_at_track(self) -> None:
+        """Host pixels to the tracker, metadata after it. The plane change, read off the file."""
+        chain = Topology.from_file(self.PATH)
+        caps = {(edge.producer, edge.consumer): str(edge.caps) for edge in chain.edges}
+
+        assert caps[("decode", "detect")] == "bgr@cpu"
+        assert caps[("embed_ship", "track")] == "bgr@cpu"
+        assert caps[("track", "mtmc")] == "meta@cpu"
+        assert caps[("mtmc", "output")] == "meta@cpu"
+
+    def test_both_branches_rejoin_at_the_tracker(self) -> None:
+        """``embed_person`` following ``detect`` and ``track`` following both is the wiring
+        ``ship_person.yaml``'s header argues for at length; this file has to agree with it."""
+        chain = Topology.from_file(self.PATH)
+
+        assert [node.name for node in chain.predecessors("embed_person")] == ["detect"]
+        assert sorted(node.name for node in chain.predecessors("track")) == [
+            "embed_person",
+            "embed_ship",
+        ]
+
+    def test_it_selects_rows_with_classes_and_guards_no_frame(self) -> None:
+        """No ``when:`` anywhere: this file is the answer to the question the guards asked."""
+        spec = ChainSpec.from_file(self.PATH)
+
+        assert [slot for slot, declared in spec.elements.items() if declared.when] == []
+        assert spec.elements["embed_ship"].params["classes"] == ["ship"]
+        assert spec.elements["embed_person"].params["classes"] == ["person"]
+
+    def test_the_declared_classes_agree_with_the_declared_detector(self) -> None:
+        """The cross-check running on the shipped file, which is the point of shipping it."""
+        chain = Topology.from_file(self.PATH)
+
+        assert chain.node("detect").element.detection_labels() == ("person", "ship")
+        assert chain.node("embed_ship").element.declared_classes() == ("ship",)
+
+    def test_it_names_no_recognize_slot_yet(self) -> None:
+        """Absent rather than commented in: a chain file is executable, and a half-wired
+        branch that loads is worse than one that is not there. The follow-up adds one line."""
+        assert "recognize" not in ChainSpec.from_file(self.PATH).elements

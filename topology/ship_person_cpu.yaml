@@ -1,0 +1,115 @@
+# topology/ship_person_cpu.yaml -- the runnable sibling of ship_person.yaml
+#
+# Every `impl:` below is registered TODAY, which is the whole difference from
+# `ship_person.yaml`: that file is the production chain and names `gstreamer-gpu` (phase D),
+# so it is a schema fixture that `Topology.from_spec` refuses. This one loads, and
+# `shipinfer run --topology topology/ship_person_cpu.yaml --inputs clip.mp4` walks frames
+# through it end to end.
+#
+# WHAT IT NEEDS TO RUN, as opposed to load.
+#   * `decode: replay` reads a video file through the `ingest` source of the same name -- no
+#     camera, no GStreamer, no GPU. `--inputs` names the files.
+#   * The four `pool` slots submit to this process's model pool, so `--repository` has to
+#     hold those four entries. `model_repository/` is `platform: tensorrt`; on a host with no
+#     accelerator, point it at a repository whose entries are `platform: mock` and the chain
+#     runs with invented outputs of the right shape, which is what makes the *wiring*
+#     checkable anywhere.
+#   * `track` and `mtmc` run `3rdparty/shipvision`. A checkout without the submodule loads
+#     this file and then fails at `open()` with the `git submodule update --init` that fixes
+#     it -- deliberately two different failures, because they have two different fixes.
+#   * `output: jsonlines` needs a writable path and nothing else. That is the point of it:
+#     the whole chain is observable with no broker.
+#
+# HOW ROWS ARE SELECTED, and why there is no `when:` here. Two mechanisms, and they do not
+# overlap:
+#   * `when:` guards ONE ELEMENT for a whole FRAME. A rejected item is not dropped -- it is
+#     handed unchanged to that element's successors ("skip and continue") -- and the
+#     condition reads `item.meta`, which holds a frame's metadata.
+#   * `params: {classes: [...]}` selects ROWS within a frame. A frame holds ships *and*
+#     people at once, so "run the ship embedder on the ship detections" is a row question,
+#     and `when: class == ship` cannot answer it: there is no single class for a frame to
+#     have. `Topology.from_spec` refuses that spelling on a `pool` element for exactly this
+#     reason, naming `classes:` as the fix.
+# A frame-level `when:` is still the right tool for a frame-level short circuit -- skipping
+# the ship branch entirely on a frame with no ships at all -- and one will land here when
+# there is a bench number behind it, not before.
+#
+# NO `recognize:` SLOT YET. The gallery element lands in its own slice; adding it here is one
+# line -- `recognize: {impl: shipvision, params: {classes: [ship]}, after: embed_ship}` --
+# plus `recognize` in `track`'s `after:`. It is absent rather than commented in, because a
+# chain file is executable and a half-wired branch that loads is worse than one that is not
+# there.
+name: ship_person_cpu
+elements:
+  # bgr@cpu, from a file. The head cap of the chain: every edge below is bgr@cpu until
+  # `track`, which is where the chain stops carrying pixels.
+  decode:
+    impl: replay
+
+  # The one element that letterboxes a whole frame, so it is the one that has to undo exactly
+  # that transform. `decode:` here is the *output* decode -- how the engine's rows become
+  # source-pixel boxes -- and has nothing to do with the video decoder above it.
+  detect:
+    impl: pool
+    model: ship_detector
+    params:
+      decode:
+        class_labels: {0: person, 8: ship}
+        score_threshold: 0.25
+        max_detections: 300
+
+  # Whole-frame today: a YOLO-seg engine emits detection rows and a bank of mask prototypes,
+  # and the fold that turns those into one area per object is not a per-row scatter-back. It
+  # carries no `classes:` because it does not select rows yet; when its crop half lands it
+  # gains `params: {classes: [ship]}` like the two embedders below.
+  segment:
+    impl: pool
+    model: ship_segmenter
+
+  # The fan-out. Both embedders crop from the *source* frame, one call for all N boxes, and
+  # file one vector per detection row under `meta["vectors"]` -- so the two of them cover
+  # disjoint rows of the same frame and never overwrite each other.
+  embed_ship:
+    impl: pool
+    model: ship_embedder
+    params:
+      classes: [ship]
+    after: segment
+
+  # `after: detect`, not the `embed_ship` declared above it: a person embedding is computed
+  # from the detector's crop, and the ship segmenter is not in its path.
+  embed_person:
+    impl: pool
+    model: person_embedder
+    params:
+      classes: [person]
+    after: detect
+
+  # BOTH branches, or `embed_person` would have no successor and the chain would be refused
+  # for a branch that reaches no output. This is where the payload is dropped and the item
+  # becomes `meta@cpu`.
+  track:
+    impl: shipvision
+    per: camera
+    params:
+      algorithm: bytetrack
+    after: [embed_ship, embed_person]
+
+  # One instance for the whole group, which is why `cameras:` is declared: a group split
+  # across two shards runs two identity spaces, so each half gives one object its own global
+  # id and nothing in the metrics disagrees. The runner refuses that placement at `open()`.
+  mtmc:
+    impl: shipvision
+    scope: global
+    params:
+      group: quay_north
+      cameras: [cam-01, cam-02, cam-03, cam-04]
+      sync_window_ms: 60
+
+  # One JSON object per line, schema v4. `path: "-"` writes to stdout, which is what a
+  # container with no volume wants.
+  output:
+    impl: jsonlines
+    params:
+      path: var/events.jsonl
+      flush_every: 64
