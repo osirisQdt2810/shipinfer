@@ -1238,10 +1238,12 @@ class TestAStartThatLostTheClaimUnwinding:
         finish_unwind = threading.Event()
         original_abandon = InferenceServer._abandon_start
 
-        def gated_abandon(self: InferenceServer, generation: int, mine: Any, sink: Any) -> None:
+        def gated_abandon(
+            self: InferenceServer, generation: int, mine: Any, sink: Any, mesh: Any
+        ) -> None:
             at_the_unwind.set()
             assert finish_unwind.wait(_TIMEOUT), "the test never released the unwind"
-            original_abandon(self, generation, mine, sink)
+            original_abandon(self, generation, mine, sink, mesh)
 
         monkeypatch.setattr(InferenceServer, "_abandon_start", gated_abandon)
 
@@ -1427,6 +1429,84 @@ class TestAStartThatLostTheClaimUnwinding:
         for name in ("a_first", "b_second", "c_third"):
             assert _live_workers(name) == []
 
+    def test_a_non_strict_start_stops_loading_too_when_a_later_run_claims_the_server(
+        self,
+        three_models: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The twin of the test above under ``strict_startup=false``, which is a fleet
+        setting and not a test one — a heterogeneous node runs non-strict all the time.
+
+        The non-strict skip asks the same question the models' abort asks, and it used to
+        ask it the other way: ``_is_stopping()`` rather than the run's own predicate. So a
+        losing start caught the abort, saw the flags the *next* run had just set, decided
+        nothing was stopping, and logged "failed to load model 'b_second'; continuing
+        (strict_startup=false)" with a full traceback for each remaining model — of a run
+        that is not continuing, about models that did not fail, on the log an operator is
+        watching during the restart. Behind each of those lines it also built a whole
+        ``Model``: a backend, a queue, and on a CUDA host a stream pool and a graph cache
+        per instance, on devices that belong to run 2.
+        """
+        server = InferenceServer(_startup_settings(three_models, strict=False))
+        attempted: list[str] = []
+        entered = threading.Event()
+        release = threading.Event()
+        original_start = ModelInstance.start
+
+        def gated_start(self: ModelInstance) -> None:
+            attempted.append(self.name)
+            if len(attempted) == 1:
+                entered.set()
+                assert release.wait(_TIMEOUT), "the test never released instance 1"
+            original_start(self)
+
+        monkeypatch.setattr(ModelInstance, "start", gated_start)
+
+        outcome = _Outcome()
+        starter = threading.Thread(target=outcome.run_start, args=(server,), name="starter")
+        with caplog.at_level(logging.DEBUG, logger="shipinfer.engine"):
+            starter.start()
+            assert entered.wait(_TIMEOUT), "the start never reached the first instance"
+
+            stopper = threading.Thread(target=server.stop, name="stopper")
+            stopper.start()
+            _await_stop_flags(server)
+            _await_torn_down(server)
+            stopper.join(_TIMEOUT)
+
+            before = len(attempted)
+            server.start()
+            assert server.is_ready
+            run2_attempts = len(attempted) - before
+
+            release.set()
+            starter.join(_TIMEOUT)
+            assert not starter.is_alive(), "the losing start never finished"
+            continuing = [
+                r.getMessage()
+                for r in caplog.records
+                if "continuing (strict_startup=false)" in r.getMessage()
+            ]
+
+        try:
+            assert continuing == [], continuing
+            # One instance for run 1 — the one it was already inside — and run 2's six.
+            assert run2_attempts == 6, attempted
+            assert len(attempted) == 1 + run2_attempts, attempted
+            assert isinstance(outcome.error, ServerStateError), f"got {outcome.error!r}"
+            # And the error names the reason that is true. "the server is stopping" was
+            # printed for this too, which sends an operator looking for a shutdown that
+            # finished before run 2 was allowed to claim anything.
+            assert "start aborted: a later run has claimed this server" in str(outcome.error)
+            assert sorted(server.models()) == ["a_first", "b_second", "c_third"]
+            for name in ("a_first", "b_second", "c_third"):
+                assert len(_live_workers(name)) == 2, f"{name}: {_live_workers(name)}"
+        finally:
+            server.stop()
+        for name in ("a_first", "b_second", "c_third"):
+            assert _live_workers(name) == []
+
     def test_it_does_not_assign_its_own_service_mesh_over_the_live_runs(
         self, repository: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1487,6 +1567,94 @@ class TestAStartThatLostTheClaimUnwinding:
             assert server.service_mesh is meshes[1], "the losing start overwrote _mesh"
             assert meshes[1].stopped == 0, "the losing start left run 2's tier"
             assert meshes[0].stopped == 1, "the losing start's own tier was stranded"
+            assert server.model("echo") is run2
+        finally:
+            server.stop()
+        assert meshes[1].stopped == 1, "the live run's tier outlived its stop()"
+        assert _live_workers("echo") == []
+
+    def test_the_mesh_it_joined_is_never_installed_on_a_server_it_has_lost(
+        self, repository: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The tier is published by the *claim*, not by the generation.
+
+        The two are not the same question: the generation still matches after a ``stop()``
+        for this same run has been and gone, because ``stop()`` reads the generation and
+        never bumps it. A start parked between joining its tier and finishing therefore used
+        to assign ``self._mesh`` over a server whose teardown had already run
+        ``_leave_service_tier`` and found nothing — so ``service_mesh`` answered with a live
+        mesh on a torn-down shard, and the restart that followed overwrote the field.
+        Nothing then closed or unlinked run 1's rings while its peers went on writing into
+        them, which is the one failure the tier's lifecycle exists to prevent.
+
+        Installed in ``_finish_start`` next to the sink, that window is not narrower, it is
+        gone: a start that lost the claim never writes the field at all, and stops the mesh
+        it built from its own local.
+        """
+
+        class _Mesh:
+            def __init__(self, label: str) -> None:
+                self.label = label
+                self.stopped = 0
+
+            def stop(self) -> None:
+                self.stopped += 1
+
+        meshes: list[_Mesh] = []
+
+        def fake_join(self: InferenceServer) -> Any:
+            meshes.append(_Mesh(f"run{len(meshes) + 1}"))
+            return meshes[-1]
+
+        monkeypatch.setattr(InferenceServer, "_join_service_tier", fake_join)
+
+        # The gate is the install itself, one-shot, so run 1 is held *after* it has joined a
+        # tier and before it has published anything. Run 2 goes through ungated.
+        entered = threading.Event()
+        release = threading.Event()
+        original_finish = InferenceServer._finish_start
+
+        def gated_finish(self: InferenceServer, generation: int, sink: Any, mesh: Any) -> bool:
+            if not entered.is_set():
+                entered.set()
+                assert release.wait(_TIMEOUT), "the test never released the start"
+            return original_finish(self, generation, sink, mesh)
+
+        monkeypatch.setattr(InferenceServer, "_finish_start", gated_finish)
+
+        server = InferenceServer(_startup_settings(repository))
+        outcome = _Outcome()
+        starter = threading.Thread(target=outcome.run_start, args=(server,), name="starter")
+        starter.start()
+        assert entered.wait(_TIMEOUT), "the start never reached the publish"
+
+        stopper = threading.Thread(target=server.stop, name="stopper")
+        stopper.start()
+        _await_stop_flags(server)
+        _await_torn_down(server)
+        stopper.join(_TIMEOUT)
+
+        # The assertion the old ordering failed: a stopped server holds no tier. Run 1 has
+        # joined one and is still holding it, but it has not been published.
+        assert server.service_mesh is None, "a torn-down server is holding a live mesh"
+        assert meshes[0].stopped == 0, (
+            "the teardown released run 1's mesh, which means run 1 had already published it "
+            "-- before it knew whether it still owned the server"
+        )
+
+        run2 = _run_two_over(server)
+        assert len(meshes) == 2, meshes
+        assert server.service_mesh is meshes[1], "run 2 did not publish its own tier"
+
+        release.set()
+        starter.join(_TIMEOUT)
+        assert not starter.is_alive(), "the losing start never finished"
+
+        try:
+            assert isinstance(outcome.error, ServerStateError), f"got {outcome.error!r}"
+            assert server.service_mesh is meshes[1], "the losing start overwrote _mesh"
+            assert meshes[0].stopped == 1, "run 1's rings were left for nobody to unlink"
+            assert meshes[1].stopped == 0, "the losing start left run 2's tier"
             assert server.model("echo") is run2
         finally:
             server.stop()
@@ -1830,6 +1998,41 @@ class TestAScrapeRacingTheTeardownsSwap:
         finally:
             resume.set()
             server.stop()
+        assert _live_workers("echo") == []
+
+
+class TestAScrapeMeetingASinkThatRaises:
+    """``TRACE_SINKS`` is a registry, so ``stats()`` is third-party code on the scrape path.
+
+    ``_release`` has guarded its own call since the beginning — a teardown must not lose the
+    model drain, the sink close and the memory pool to a sink that raises. The scrape's call
+    was bare, and it is the one reachable from the KServe stats route and the metrics
+    exporter, so a sink that raised there turned every monitoring poll into a 500 on a server
+    that was otherwise serving perfectly well.
+    """
+
+    def test_a_scrape_answers_instead_of_raising(
+        self, repository: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class _RaisingStatsSink(TraceSink):
+            name = "raising"
+
+            def _do_record(self, trace: RequestTrace) -> None:
+                pass
+
+            def stats(self) -> dict[str, Any]:
+                raise RuntimeError("this sink counts bytes on a disk that went away")
+
+        monkeypatch.setattr(pool, "build_trace_sink", lambda *a, **k: _RaisingStatsSink(rate=1))
+        server = InferenceServer(_startup_settings(repository)).start()
+        try:
+            stats = server.stats()
+        finally:
+            server.stop()
+
+        assert stats["tracing"]["sink"] == "raising"
+        assert "error" in stats["tracing"], stats["tracing"]
+        assert stats["ready"] is True, "the rest of the scrape is unaffected"
         assert _live_workers("echo") == []
 
 
