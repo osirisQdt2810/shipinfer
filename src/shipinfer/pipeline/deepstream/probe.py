@@ -36,8 +36,8 @@ from typing import Any
 
 import numpy as np
 
+from shipinfer.core.events import as_embedding
 from shipinfer.pipeline.graph.detections import UNKNOWN_LABEL
-from shipinfer.pipeline.graph.state import as_embedding
 from shipinfer.pipeline.schema import ObjectRecord, PerceptionEvent
 
 __all__ = [

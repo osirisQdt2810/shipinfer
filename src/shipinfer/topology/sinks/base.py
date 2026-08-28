@@ -25,12 +25,12 @@ from __future__ import annotations
 import abc
 from typing import Any, ClassVar
 
+from shipinfer.core.events.schema import PerceptionEvent
 from shipinfer.core.logging import get_logger
-from shipinfer.pipeline.schema import PerceptionEvent
 
 __all__ = ["ResultSink"]
 
-_LOG = get_logger("pipeline.sinks")
+_LOG = get_logger("topology.sinks")
 
 
 class ResultSink(abc.ABC):

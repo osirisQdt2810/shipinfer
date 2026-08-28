@@ -6,7 +6,7 @@ It owns a GStreamer pipeline, a ``GLib.MainLoop``, a bus watch and a pad probe. 
 own batching, placement, reassembly or a model table: inside the graph those are NVIDIA's, and
 that is exactly the trade this topology exists to measure. What it keeps from the rest of the
 project is the two ends — :class:`~shipinfer.repository.ModelRepository` decides what the GIEs
-run (see :mod:`.configs`) and :class:`~shipinfer.pipeline.sinks.ResultSink` decides where the
+run (see :mod:`.configs`) and :class:`~shipinfer.topology.sinks.ResultSink` decides where the
 results go — because a comparison between two architectures is only a comparison if both
 publish the same event to the same place.
 
@@ -17,7 +17,7 @@ the graph. An exception there does not propagate anywhere useful: the C caller s
 buffer is dropped, and the deployment loses frames with nothing in the log. So it catches
 everything, counts it against ``pipeline_build_failures_total``, and always returns
 ``PadProbeReturn.OK``. That is the same bug class as a result sink raising into a pipeline
-worker (`pipeline/sinks/base.py`), and it is answered the same way.
+worker (`topology/sinks/base.py`), and it is answered the same way.
 
 THE EMISSION DISCIPLINE IS THE RUNNER'S, DELIBERATELY COPIED
 ------------------------------------------------------------
@@ -54,9 +54,9 @@ from shipinfer.pipeline.deepstream.probe import (
 )
 from shipinfer.pipeline.metrics import PipelineMetrics
 from shipinfer.pipeline.schema import PerceptionEvent
-from shipinfer.pipeline.sinks import RESULT_SINKS, ResultSink
 from shipinfer.repository import ModelRepository
 from shipinfer.runtime.gstreamer import load_pyds
+from shipinfer.topology.sinks import RESULT_SINKS, ResultSink
 
 __all__ = ["PR1_MISSING_STAGES", "DeepStreamPipeline", "MetadataProbe"]
 

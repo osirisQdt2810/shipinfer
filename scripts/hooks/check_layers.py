@@ -73,6 +73,16 @@ FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
     # `tests/test_architecture.py::TestImportIsCheap`, which imports `shipinfer.topology` in
     # a subprocess and fails if `shipvision` came with it -- the same split this file already
     # describes for `runners -> ingest` below.
+    #
+    # `confluent_kafka` left this row in phase C, for the same reason and with the same
+    # enforcement. arch.md §9 sends `sinks/{kafka,jsonlines,null}` here as `output` element
+    # implementations, so the Kafka producer's one seam is now `topology/sinks/kafka.py` --
+    # and naming the client here would ban it outright, because this checker cannot see that
+    # `from confluent_kafka import Producer` sits inside `KafkaResultSink.__init__`. The
+    # runtime half is again `TestImportIsCheap`, which lists it beside `shipvision`: `import
+    # shipinfer.topology` must cost no broker client, so a chain still validates on a host
+    # that has never had librdkafka and a deployment that asks for the sink without
+    # installing it fails at start-up with the install command in the message.
     "topology": {
         "torch",
         "tensorrt",
@@ -81,7 +91,6 @@ FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
         "cv2",
         "fastapi",
         "uvicorn",
-        "confluent_kafka",
         "grpc",
         "google",
     },
@@ -107,8 +116,9 @@ FORBIDDEN_EXTERNAL: dict[str, set[str]] = {
     # their own tensors. It is the one layer whose row *omits* fastapi and uvicorn — every
     # other row below and above it names them, so a web framework can enter this codebase at
     # exactly one seam and `import shipinfer.<anything else>` never pays for one. It keeps
-    # `confluent_kafka` from the engine's row: publishing results is a `pipeline` sink's job,
-    # and an HTTP handler that reached for a broker would be doing dispatch.
+    # `confluent_kafka` from the engine's row: publishing results is a `topology` sink's job
+    # (it was `pipeline`'s until arch.md §9 moved the family), and an HTTP handler that
+    # reached for a broker would be doing dispatch.
     "api": {"confluent_kafka", "grpc", "google"},
     # `launch` is the only layer that bans **torch**, and it is not a purity argument. The
     # whole reason a shard is a subprocess is that `CUDA_VISIBLE_DEVICES` has to be in the

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from shipinfer.core.registry import Registry
-from shipinfer.pipeline.sinks.base import ResultSink
+from shipinfer.topology.sinks.base import ResultSink
 
 __all__ = ["RESULT_SINKS"]
 

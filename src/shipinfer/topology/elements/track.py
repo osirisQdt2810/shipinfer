@@ -68,7 +68,7 @@ __all__ = [
 ]
 
 #: The metadata key naming the stages a frame went through without. The chain's half of
-#: ``pipeline/schema.py``'s field of the same name, and the vocabulary an ``output`` element
+#: ``core/events/schema.py``'s field of the same name, and the vocabulary an ``output`` element
 #: serialises: a partial frame says so, and never reads as a complete one with nothing in it.
 MISSING_STAGES = "missing_stages"
 
