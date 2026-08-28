@@ -2040,6 +2040,23 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       Torch's own CUDA-IPC machinery (torch.multiprocessing) is the implementation base
       per ADR-003. Presentation style per V135: ai-làm-mấy-cái, flowcharts, ví dụ 2GPU/2cam.
 
+## V145 · the documentation cap, from advisory to armed
+
+`scripts/hooks/check_docs.py` reports and does not gate: on the tree at this commit it finds
+**1022** symbols and comment blocks over the caps (module 15 / class-function 10 / block 4),
+so arming it now would refuse every commit. The order is fixed — sweep, then arm.
+
+- [ ] **V145-W1 · trim wave 1** — `engine`, `runtime`, `ingest`, `launch`, `scheduling`, `api`,
+      `cli`, `core`, `backends`, `repository`. Built and verified (`docs/trim-wave-1`).
+- [ ] **V145-W2 · trim wave 2** — `topology/`, `runners/inprocess.py`, `pipeline/`, held until
+      C8m and C8b merge, because both rewrite those files.
+- [ ] **V145-W3 · trim wave 3** — `tests/`, and the Markdown the tool cannot see
+      (`FEATURE_LOG.md` entries ≤ 15 lines, ADRs ≤ 30 — forward-only, accepted ADRs stay).
+- [ ] **V145-ARM · wire `check_docs.py` into `.pre-commit-config.yaml`** once the waves have
+      taken the count to zero. Until this line is `[x]` the cap is a convention, not a gate —
+      and the waves must take symbols *under* their caps, not merely shorten them: wave 1
+      removes 357 lines of prose and moves the count only 1022 → 1002.
+
 ## Z · Final gate
 
 - [ ] **Z1 · Re-read `docs/qa/user.md` end to end** and check every request — verbatim sections

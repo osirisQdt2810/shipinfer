@@ -274,6 +274,9 @@ with a per-device breakdown is.
    (`fix/…`, `chore/…`, `docs/…`), implement there.
 2. Push and surface the PR URL; **do not merge into main yourself** unless told to — or
    unless the PR carries the `automerge` label and CI's own gate merges it.
+2b. **Rebase on `main` after every merge** (V145). A branch is cut from the current `main`
+   and rebased onto it whenever anything merges; the working checkout stays on `main`.
+   Stacked lanes rebase from the *recorded* old base sha, never from a merge-base.
 3. Small standalone edits (a `.gitignore` line, a `.claude/*` tweak) may go straight on main.
 4. **Co-author trailer:** add `Co-Authored-By: Claude …` only to large feature commits.
    Small incidental commits do not carry it.
@@ -386,7 +389,8 @@ an unexplained departure is a reinvention. Reference checkouts live outside the 
 (the scratchpad), never as a dependency.
 
 ## Coding Conventions
-Standards live in **`.claude/CONVENTIONS.md`** — read it in full before non-trivial work.
+**Write short.** Module docstring ≤ 15 lines, class/function ≤ 10, comment block ≤ 4
+(V145; `scripts/hooks/check_docs.py`). Standards live in **`.claude/CONVENTIONS.md`** — read it in full before non-trivial work.
 Part 1 = universal Python. Part 2 = project-specific (the layering rule, the *ponytail
 principle*, registries, threading, the two test tiers, native code). Part 3 = Agent Working
 Principles.
