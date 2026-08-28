@@ -246,9 +246,9 @@ or not it gets mentioned.
 Plus one operator command that produces the evidence a PR needs — the benchmark harness,
 inside the container, for at least the analysis's 10 s warm-up plus a steady window. It
 needs the host-built baseline binary first (`benchmarks/build/sim_pipeline_v2`, built with
-`python -c 'from benchmarks.harness import baseline; baseline.build_binary()'`): the script
-refuses to start without it, today even when `--systems shipinfer` names no baseline at all
-(ledger C48 relaxes that gate):
+`python -c 'from benchmarks.harness import baseline; baseline.build_binary()'`) — but only
+when the run names the baseline: `--systems shipinfer` starts without it (the gate parses
+`--systems`; C48, fixed with #27):
 
 ```bash
 deploy/rootless/bench.sh --systems shipinfer --seconds 40      # the system tier, per-device table
