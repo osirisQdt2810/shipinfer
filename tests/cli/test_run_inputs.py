@@ -27,7 +27,7 @@ from shipinfer.cli.commands.run import (
     run,
 )
 from shipinfer.core.errors import ConfigurationError, NoShardAvailableError
-from shipinfer.core.request import ResponseFuture
+from shipinfer.core.request import Priority, ResponseFuture
 from shipinfer.core.settings import ServerSettings
 from shipinfer.launch.control import CameraSpec
 from shipinfer.runners import RUNNERS
@@ -169,7 +169,59 @@ class TestTheConfiguredFleetIsPlacedTheSameWay:
         )
 
         assert cameras == [
-            CameraSpec(camera_id="cam-quay", url="rtsp://10.0.0.7/live", fps=20.0)
+            CameraSpec(
+                camera_id="cam-quay",
+                url="rtsp://10.0.0.7/live",
+                fps=20.0,
+                priority=Priority.NORMAL,
+            )
+        ]
+
+    def test_a_configured_band_travels_with_the_camera(self) -> None:
+        """``priority:`` used to reach no shard at all, and the failure was silent.
+
+        A fleet shard's ``ingest.cameras`` is cleared before its manager is built
+        (``runners/inprocess.py::_ingest``), so the shard has nothing to resolve a band
+        against and every camera it is given by RPC was admitted at ``normal``. This process
+        is the last one that still holds the operator's fleet config, so the band is read here
+        and carried.
+        """
+        cameras = cameras_from_settings(
+            settings_with(
+                {
+                    "camera_id": "cam-hot",
+                    "uri": "rtsp://a/live",
+                    "priority": Priority.TRACKING_CRITICAL,
+                },
+                {"camera_id": "cam-cold", "uri": "rtsp://b/live"},
+            )
+        )
+
+        assert [camera.priority for camera in cameras] == [
+            Priority.TRACKING_CRITICAL,
+            Priority.NORMAL,
+        ]
+
+    def test_the_configured_bands_reach_the_runner_through_place_cameras(self) -> None:
+        """End to end through the one door, because that is where a dropped field shows."""
+        runner = CountingRunner(chain())
+        tree = settings_with(
+            {
+                "camera_id": "cam-hot",
+                "uri": "rtsp://a/live",
+                "priority": Priority.TRACKING_CRITICAL,
+            },
+            {"camera_id": "cam-bg", "uri": "rtsp://b/live", "priority": Priority.BACKGROUND},
+        )
+
+        place_cameras(runner, cameras_to_place(tree, ["clip.mp4"]))
+
+        assert [camera.priority for camera in runner.added] == [
+            Priority.TRACKING_CRITICAL,
+            Priority.BACKGROUND,
+            # `--inputs` names no band: it is minted here and appears in no config, so the
+            # honest answer is "the deployment decides" rather than a lane invented by the CLI.
+            None,
         ]
 
     def test_a_disabled_camera_is_not_placed(self) -> None:
@@ -345,6 +397,28 @@ class TestTheCommandItself:
         out = capsys.readouterr().out
         assert "cameras: 1 configured (cam-quay ...)" in out
         assert "cameras: 1 from --inputs (cam-000 ...)" in out
+
+    def test_the_two_camera_counts_are_split_by_position_not_by_a_second_build(
+        self, chain_file: Path, capsys, monkeypatch
+    ) -> None:
+        """A disabled camera is dropped from the fleet, and the report must still add up.
+
+        The split is a slice: ``cameras_from_inputs`` mints one camera per input and
+        ``cameras_to_place`` puts them last, so the tail of the placed list *is* the inputs.
+        ``run`` used to build those specs a second time only to count them, which is two lists
+        that agree only while both are passed the same ``loop``.
+        """
+        monkeypatch.setenv(
+            "SHIPINFER_INGEST__CAMERAS",
+            '[{"camera_id": "cam-a", "uri": "rtsp://a/live"},'
+            ' {"camera_id": "cam-off", "uri": "rtsp://b/live", "enabled": false}]',
+        )
+
+        assert run(chain_file, runner="inprocess", inputs=["a.mp4", "b.mp4"], dry_run=True) == 0
+
+        out = capsys.readouterr().out
+        assert "cameras: 1 configured (cam-a ...)" in out
+        assert "cameras: 2 from --inputs (cam-000 ...)" in out
 
     def test_a_dry_run_refuses_inputs_on_a_runner_that_manages_no_cameras(
         self, chain_file: Path

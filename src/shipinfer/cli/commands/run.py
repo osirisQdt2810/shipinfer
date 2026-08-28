@@ -124,7 +124,6 @@ def run(
     from shipinfer.topology import ChainSpec, Topology
 
     out = console()
-    from_inputs = cameras_from_inputs(inputs, loop=loop)
     # The gate lives here as well as in the shell hook: a deny-list over command text cannot
     # be made sound, and this command loads engines and drives GPUs (`serve` says the same).
     # It comes BEFORE anything is resolved so that `_fill_in_gpus()` - the one thing here that
@@ -187,7 +186,13 @@ def run(
         from shipinfer.api import require_server_extra
 
         require_server_extra()
-    configured = len(cameras) - len(from_inputs)
+    # Split for the report by POSITION, not by building the input specs a second time.
+    # `cameras_from_inputs` mints exactly one camera per input, in order, and
+    # `cameras_to_place` appends them after the configured fleet — so the tail of that list
+    # *is* the inputs. A second build was two lists that had to be passed the same `loop` to
+    # agree, and only one of them was ever placed.
+    configured = len(cameras) - len(inputs or ())
+    from_inputs = cameras[configured:]
     if configured:
         out.print(f"cameras: {configured} configured ({cameras[0].camera_id} ...)")
     if from_inputs:
@@ -253,11 +258,18 @@ def cameras_from_settings(settings: ServerSettings) -> list[CameraSpec]:
     camera set a property of *whatever settings a process happened to load* — and a shard
     loads the operator's, so every shard read every camera (see :func:`run`).
 
-    Only the four fields a launcher decides travel. The rest of a camera's configuration is
+    Only the five fields a launcher decides travel. The rest of a camera's configuration is
     deployment settings and the process that runs it resolves them from its own tree, which
     is the split :class:`~shipinfer.launch.control.CameraSpec` exists to state: the shard
-    keeps the codec, the transport and the priority band from its settings, and is *told*
-    which camera to open.
+    keeps the codec, the transport and the decode size from its settings, and is *told* which
+    camera to open.
+
+    ``priority`` is the exception, and it is the one this function is read for. A band used to
+    be settings like the rest — until a fleet shard's ``ingest.cameras`` was stripped to stop
+    eight shards each opening all fifty cameras (``runners/inprocess.py::_ingest``), which
+    left the shard with no table to resolve a band from and put every RPC-placed camera in
+    ``normal``. **This process** still has the operator's fleet config, so the band is read
+    here, where it is true, and carried to whichever shard ends up holding the camera.
 
     The import is inside the function: ``shipinfer.ingest`` reaches a decode runtime through
     its source registry, and ``shipinfer repo ls`` must not pay for one.
@@ -269,7 +281,13 @@ def cameras_from_settings(settings: ServerSettings) -> list[CameraSpec]:
     from shipinfer.ingest import configured_cameras
 
     return [
-        CameraSpec(camera_id=camera.camera_id, url=camera.uri, fps=camera.fps, loop=camera.loop)
+        CameraSpec(
+            camera_id=camera.camera_id,
+            url=camera.uri,
+            fps=camera.fps,
+            loop=camera.loop,
+            priority=camera.priority,
+        )
         for camera in configured_cameras(settings.ingest)
     ]
 

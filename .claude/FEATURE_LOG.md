@@ -7,7 +7,7 @@ edits, typo fixes and pure docs.
 
 ## 2026-08-27 — a dead shard's cameras are reported lost, never re-placed (Phase B4)
 
-`Fleet.dead_indices()` names exited shards by plan index and `FleetRunner._lost()` maps them
+`Fleet.dead_indices()` names exited shards by plan index and `runners.fleet._lost_in()` maps them
 to their cameras, which `health()` (`lost`, excluded from the per-shard `placed` lists in the
 same snapshot), `stats()` and `StreamInfo.lost` now carry; `remove_camera` on a lost camera
 drops the placement and answers `False`, `add_camera` skips dead shards, and `drain()` keeps
@@ -105,6 +105,19 @@ given a fifty-first camera by anything but a restart.
   field a client that posted a finite video over HTTP got it replayed forever. `StreamInfo`
   deliberately does not echo it back — no runner's health carries it, so the answer would be
   `true` for every camera including the one that asked for `false`.
+- **A camera's priority band travels on its spec (B5).** New wire vocabulary: `CameraSpec.priority`
+  and `shard.proto`'s `CameraPriority` enum (`CAMERA_PRIORITY_UNSPECIFIED` = "the launcher said
+  nothing", never a lane), plus a `priority` field on `POST /streams` taking the band by
+  **name**, in any case — `Literal["tracking_critical", "high", "normal", "background"]` over a
+  before-validator that lower-cases a string, derived from
+  `core.request.Priority`, because an `IntEnum` on the wire would publish integers in
+  `/openapi.json` that the validator refuses and would let `{"priority": 0}` mean
+  `tracking_critical`. A fleet shard's `ingest.cameras` is stripped, so a band an operator
+  configured had nowhere to be resolved from once the camera crossed the process boundary;
+  `cli/commands/run.py` now reads it where it is still true. On the runner the launcher's band
+  and the configured table are two dicts with two lifetimes, so a removed camera's lane does
+  not outlive it (`runners/inprocess.py::_priority_for`) — and a placement that is *refused*
+  restores the band it recorded, so a 400 cannot re-lane a camera that is already running.
 - **The camera ids are minted by one helper.** `launch/control.py::mint_camera_id` is what
   `--inputs` uses and what a `POST` with no `camera_id` uses (lowest free index), because two
   spellings of "the next camera" collide on a deployment that uses both doors.
