@@ -152,6 +152,11 @@ BLOCKED_MODULES = frozenset({"pytest", "py.test"})
 #: bench runner however deeply the module path is nested, so the root is what is matched.
 BLOCKED_MODULE_ROOTS = frozenset({"benchmarks"})
 
+#: Modules that only READ the paths they are handed -- `python -m black model.py` formats
+#: the file, it never imports it, so a torch import inside is data, not execution. Kept
+#: deliberately short: pytest and pip EXECUTE what they are given and must never join it.
+READ_ONLY_TOOL_MODULES = frozenset({"black", "isort", "ruff"})
+
 
 #: Runners whose *offline* use is allowed on a host, per ADR-001. Their device tiers are not.
 _TEST_RUNNERS = frozenset({"pytest", "py.test"})
@@ -596,6 +601,11 @@ def verdict(command: str, cwd: str | None = None) -> str | None:
             module = _module_argument(args)
             if module is not None:
                 root = module.split(".")[0]
+                if root in READ_ONLY_TOOL_MODULES:
+                    # A formatter or linter inspects its arguments; nothing it is handed
+                    # runs. Without this, `python -m black engine/model.py` was refused
+                    # because the FILE imports torch (the false positive of 28 Aug).
+                    continue
                 if module in BLOCKED_MODULES and _selects_device_tier(args):
                     return f"`python -m {module} {_device_marker(args)}` runs the device tier."
                 if root in BLOCKED_MODULE_ROOTS:

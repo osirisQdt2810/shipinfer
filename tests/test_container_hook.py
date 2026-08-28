@@ -214,6 +214,30 @@ class TestAllows:
         assert refused(command) is None
 
 
+class TestReadOnlyToolsAreNotExecutionVectors:
+    """`python -m black|isort|ruff` reads its arguments; it executes nothing it is handed."""
+
+    @pytest.mark.parametrize("tool", ["black", "isort", "ruff"])
+    def test_a_formatter_over_a_device_importing_file_is_allowed(
+        self, tool: str, tmp_path: Path
+    ) -> None:
+        script = tmp_path / "model.py"
+        script.write_text("import torch\n")
+        assert refused(f"python -m {tool} --check {script}", cwd=tmp_path) is None
+
+    def test_a_device_named_path_is_still_only_data_to_a_formatter(self) -> None:
+        assert refused("python -m black --check src/shipinfer/runtime/ops/torch_ops.py") is None
+
+    def test_pytest_gains_nothing_from_the_carve_out(self) -> None:
+        assert refused("python -m pytest tests/ -m gpu") is not None
+
+    def test_a_following_segment_is_still_judged_on_its_own(self, tmp_path: Path) -> None:
+        script = tmp_path / "model.py"
+        script.write_text("import torch\n")
+        command = f"python -m black {script}; python -m pytest tests/ -m gpu"
+        assert refused(command, cwd=tmp_path) is not None
+
+
 class TestTheGuardCanFail:
     """Without this, a hook that always allowed would pass everything above."""
 
