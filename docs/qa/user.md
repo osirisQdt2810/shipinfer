@@ -875,6 +875,39 @@ tracker.track(). Hậu quả chấp nhận: convoy C1b còn đó; đường xử
 Hành động: dừng coder Phase-0 ở /tmp/sv0, xóa worktree/branch, nhả queue shipvision, sửa
 docs/arch.md §7/§10 ở PR tiếp theo.)
 
+### V143 · 28 Aug 2026, ~06:5x UTC — tiếp tục (sau khi tiến trình Claude Code khởi động lại)
+
+> tiếp tục
+
+Ba coder đang chạy dở (C3 r2, C4, C6 build) bị giết cùng tiến trình cũ; worktree còn diff chưa commit.
+Nối lại cả ba từ transcript, rồi tiếp tục hàng đợi C3 → C4 → C6.
+
+### V144 · 28 Aug 2026, ~07:0x UTC — arch.md đã ghi chưa, và có code theo arch đó không?
+
+> bạn đã ghi về arch.md mới của chúng ta chưa vậy? và thực sự bạn có nhớ là phải code tuân theo arch đó chưa vậy (tôi nhớ đã request rồi)
+
+Có: `docs/arch.md` trên main từ #52, Section 3 giữ dòng V140 ("design of record; top-down"), §7 đã theo V142;
+kế hoạch Phase C được đối chiếu từng mục với arch.md (lượt plan "mù" đầu tiên bị bỏ vì đọc nhầm checkout cũ),
+mỗi brief và mỗi PR body dẫn section nó thực hiện.
+
+### V145 · 28 Aug 2026, ~13:0x UTC — VIẾT NGẮN LẠI; một logger; envs.py kiểu omnia; checkout main + rebase
+
+> rule: hiện tại tôi thấy thực sự bạn đang viết documentation cực kì nhiều, code thì ít. Bạn có thể đặt 1 rule giới hạn lại lượng chữ documentation để bớt lại được không? Ngoài ra, review lại toàn bộ system để xem có filter lọc bớt được số lượng chữ quá dài trong documentation lại không? Hãy viết ngắn gọn và súc tích để người đọc xem là hiểu.
+> 1. tôi muốn tất cả đều chung 1 log, tại sao lại có nhiều logger _LOG khác nhau thế kia
+> 2. trong envs.py tôi chỉ đơn giản cần https://github.com/osirisQdt2810/omnia/blob/main/src/omnia/envs.py định nghĩa như này thôi, sau đó import dạng shipinfer_envs.ENVIRONMENT_VAR, không cần phải viết cao siêu như này, hoặc nếu được thì thêm doc vào cũng được, nma tôi không muốn dùng biến global kiểu như INGEST_BACKEND, INGEST_HWACCEL...
+> có thể làm kiểu như: "OMNIA_SMART_NOTES_IMPROVE_PROMPT_TEMPERATURE": lambda: EnvVar(...)?
+> => khi lấy envs. OMNIA_SMART_NOTES_IMPROVE_PROMPT_TEMPERATURE là có ngay được giá trị là bool, int, str, choices hay gì rồi mà không cần phải cast nữa?
+> 3. ngoài ra, tôi muốn bạn list lại cho tôi bạn đang làm cái gì, bạn có thể làm theo hướng: checkout về main mới nhất, sau đó là làm các feature dựa trên rebase từ main được không? hiện tại code vẫn đang khá cũ
+> 4. rule: Khi bạn dev 1 feature mới, 1 branch mới, nếu trước đó ta đã có đẩy PR và được merge lên main rồi thì hãy rebase các feature hiện tại đang làm trên main
+
+### V146 · 28 Aug 2026, ~13:1x UTC — shipvision/mtmc: `core` → `matchers`, và phải expose tracker
+
+> trong shipvision, 3rdparty/shipvision/csrc/shipvision/mtmc/core phải gọi là matchers mới đúng. Ngoài ra tại sao trong mtmc này lại không có tracker? hãy nhìn vào mtmc-service trong references/ đó, expose interface là tracker - implement các loại tracker chứ không phải là implemnet các loại matcher
+
+### V147 · 28 Aug 2026, ~13:2x UTC — vLLM dùng RPC gì? abstract transport của control plane
+
+> ngoài ra, về phần grpc giao tiếp giữa các processes, bạn hãy check lại trong vllm, hình như là họ hay dùng rpc gì đó để giao tiếp thì phải, nếu giao tiếp khác với src/shipinfer/launch/proto, tìm cách abstract oop nó xem có được không
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
@@ -1055,6 +1088,11 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 
 | Rule | Where |
 |---|---|
+| **Documentation is capped**: module docstring ≤ 15 lines, class/function ≤ 10, comment block ≤ 4; write short and dense | **V145** |
+| One logger for the whole process — not one `_LOG` per module | **V145** |
+| `envs.py` is a dict of `NAME: lambda` + `__getattr__`; `envs.NAME` is already typed; no module-global env objects | **V145** |
+| Rebase every in-flight branch on `main` after each merge; the working checkout stays on latest `main` | **V145** |
+| shipvision `mtmc` exposes **trackers** (like `references/mtmcservice`); the matcher directory is `matchers`, in C++ too | **V146** |
 | Everything runs in Docker — never on the host | R18, R42, V14 |
 | `no-fake, no-mock, verify-by-logging` — real data, real weights; delete every mock when done | R52, R54, V15 |
 | Delete whatever is redundant, invalid, or low-performance | R48, R53 |
