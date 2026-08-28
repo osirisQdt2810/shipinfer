@@ -229,6 +229,10 @@ class InprocessRunner(Runner):
     #: This runner owns an ingest manager, so the control plane's three per-camera RPCs do
     #: something here (``runners/base.py`` says what ``False`` buys the ones that do not).
     manages_cameras: ClassVar[bool] = True
+    #: The chain is walked here, so the ``pool`` elements in it resolve their models against
+    #: a pool this process owns; whoever builds this runner builds that pool and passes it as
+    #: ``models=``.
+    needs_model_pool: ClassVar[bool] = True
 
     def __init__(
         self,
