@@ -5,6 +5,82 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-28 — the `track` element: one tracker per camera, in-chain, with the camera lifecycle wired (Phase C4 + C5)
+
+**What.** The chain gains its first stateful element. `TrackerShard` / `_CameraShard` move out
+of `pipeline/graph/tracking.py` into `topology/elements/track.py`, and `ShipvisionTrack` sits
+on top of them: `meta["detections"]` in, `meta["tracks"]` out, `meta@cpu` and no payload.
+
+| Piece | Delivered |
+|---|---|
+| `topology/elements/track.py` | `TrackerShard` moved unchanged in behaviour — one tracker per camera, one lock per camera, one `frame_id` high-water mark. Its shipvision import is now `bridge.load_mot()`, called inside `__init__` |
+| … `update(regression_reset=, on_implicit_reset=)` | a `frame_id` regression past the threshold is a restarted stream nobody announced: forget the tracks and take the frame. Decided **under the camera's lock**, because read-decide-reset-update has to be one step for the same reason check-set-update is |
+| … `drop()` / `reset_if_present()` | what a lifecycle hook needs. `drop` takes the table lock and never a camera's; `reset_if_present` never *builds* a tracker for a camera that has none |
+| `ShipvisionTrack` | `accepts = ("meta@cpu", "bgr@cpu", "nv12@gpu")`, `produces = ("meta@cpu",)`. Catches `TrackingError`, counts it, emits the item with `track` in `meta["missing_stages"]`. Implements `camera_added` / `camera_removed` — the C2 hooks reaching a stateful element for the first time (C5, folded in) |
+| `pipeline/graph/tracking.py` | imports the shard back, so `TrackStage` and `shipinfer.pipeline.TrackerShard` are unchanged. `core/settings/pipeline.py`'s docstring reference repointed |
+| `tests/topology/test_track_element.py` | 53 tests, green **with and without** the submodule |
+
+**Why.** `arch.md` §5⑥ puts one stateful tracker per camera on the shard the camera lives on,
+and `arch.md` §4's invariant is that the tracker never migrates mid-stream. That object already
+existed and was proven; a second copy of an invariant with **no symptom when it breaks** — two
+cameras on one tracker report a real identity somewhere nothing happened — is how one of the
+two stops being correct. So it moved rather than being rewritten (the ponytail principle
+applied to our own code).
+
+**Decisions.**
+
+- **A tracking refusal is caught, counted and emitted — never raised.** The runner fails an
+  item's future on anything an element raises and stops the walk, so an out-of-order frame
+  raised would cost the frame its whole event: its boxes, its masks and its vectors are all
+  still good. It is emitted with `track` in `missing_stages` instead (`arch.md` §5⑤). What
+  *is* raised is a mis-wired chain — raw model outputs under `meta["detections"]`, vectors
+  that cannot be attributed to rows — because those are faults and a late frame is not.
+- **`meta["tracks"]` carries shipvision's own `Track` objects, not a pure record.** They are
+  exactly what the cross-camera tier consumes (`mtmc.CameraTracks(tag, tracks, h, w)`), so a
+  record here would be a shape `mtmc` converts straight back, losing the embedding, the state
+  and the tag on the way. Checked before deciding: `TrackPool` already returns
+  `dataclasses.replace` copies and rebinds `track.box` rather than writing into it, so an item
+  buffered past the camera's next frame does not change under its reader.
+- **A `frame_id` regression has two populations and one threshold, default 64.** A *reorder* is
+  bounded by the pipeline worker count (`arch.md` §5③ sizes it at ~32) and must be refused; a
+  *restart* is an ingest actor that minted a fresh `FrameCounter` with nobody calling
+  `remove_camera` + `add_camera`, and refusing that means refusing every frame of that camera
+  for the process's life — the state ADR-018 names remove+add as the recovery for, with
+  `shipinfer run` leaving nobody to make the two calls. `regression_reset: 0` restores the old
+  behaviour for a deployment that would rather the frames stopped than the identities
+  restarted.
+- **`camera_removed` takes the table lock and nothing else.** It runs holding the runner's
+  `_lifecycle`, so waiting for a worker inside `tracker.update` for that very camera would
+  stall every add, remove, drain and the `stop` that would end the wait. The entry is unlinked
+  and the in-flight frame finishes against a shard nobody can reach.
+- **No `backend:` param.** `TRACKERS.build(name, backend=None)` resolves the fastest backend
+  this host can build with a numpy floor. Naming `native` would make a chain that loads on the
+  build machine refuse on a machine without the extension, for a step whose cost is tens of
+  microseconds against a frame budget of milliseconds. It is also the shape the GIL law (V142)
+  wants: shipvision delivers algorithms, and shipinfer holds at most a lock around
+  `tracker.update`.
+- **Metrics: `shipinfer_track_frames_out_of_order_total{camera}`,
+  `shipinfer_track_frames_untracked_total{reason}`, `shipinfer_track_implicit_resets_total{camera}`,
+  `shipinfer_track_cameras{element}`.** The plan asked for a `no_shipvision` reason and it is
+  **not** there, deliberately: `open()` refuses without the submodule, so no frame can ever be
+  processed for that reason and a counter that cannot move reads as evidence that it did not
+  happen. The gauge carries `element` because two `track` slots in one chain keep two tables and
+  one gauge would report whichever wrote last; it is written only when the count changes, so the
+  per-frame cost is an int compare.
+- **`tests/topology/test_element_model_declarations.py` was amended.** It opened every
+  `needs_model=False` implementation with an empty context and asserted `is_open`.
+  `ShipvisionTrack` is the first element with a *runtime* of its own, and
+  `elements/__init__.py` says a host lacking one should still list the implementation and fail
+  at `open()` naming the fix. The assertion is now "must not refuse for want of a pool", which
+  is what the declaration under test actually claims.
+
+**Evidence.** `tests/topology tests/runners tests/pipeline tests/test_architecture.py`: 943
+passed with the submodule installed, 859 passed / 84 skipped with it masked out of
+`sys.modules` (the state CI runs in). Revert-checks: dropping the `TrackingError` catch reddens
+7 tests, dropping `payload=None` reddens 3, and a `camera_removed` that does not drop reddens 3.
+
+---
+
 ## 2026-08-28 — decoded detections: `PoolDetect` letterboxes and decodes, and the runner is handed image ops (Phase C3)
 
 **What.** The chain gains a real detector output. `pipeline/graph/detections.py` moves to
