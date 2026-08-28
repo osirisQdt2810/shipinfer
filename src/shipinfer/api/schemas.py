@@ -165,6 +165,10 @@ BAND_NAMES: Final[tuple[str, ...]] = tuple(band.name.lower() for band in Priorit
 #: Subscripted with the derived tuple and not with four spelled-out strings, so the document
 #: and the enum cannot drift apart; ``Literal[t]`` for a tuple ``t`` is the same type as
 #: ``Literal[*t]`` at runtime, which static tooling cannot see -- hence the ignore.
+#:
+#: Matched case-insensitively, by :meth:`StreamRequest._band_name_is_case_insensitive`
+#: normalising the input first; what is *published* is the lower-cased spelling, because a
+#: document has to offer one.
 BandName = Literal[BAND_NAMES]  # type: ignore[valid-type]
 
 
@@ -267,6 +271,27 @@ class StreamRequest(BaseModel):
         if not value.strip():
             raise ValueError("url must not be empty")
         return value
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def _band_name_is_case_insensitive(cls, value: object) -> object:
+        """``TRACKING_CRITICAL`` and ``tracking_critical`` name the same lane.
+
+        The band is a member *name*, and that name is written upper-case everywhere it comes
+        from -- :class:`~shipinfer.core.request.Priority` in Python, ``Priority.BACKGROUND``
+        in a gRPC client's generated enum -- while this schema publishes it lower-cased. A
+        client that sent the spelling its own stub gave it would otherwise get a 422 for
+        naming the right lane, which is a document disagreeing with itself rather than a
+        caller making a mistake. ``api/streams.py`` already looks the member up with
+        ``Priority[name.upper()]``, so the case was never what it was checking.
+
+        Only ``str`` is touched, and only its case. Everything the field refused before it
+        still refuses: ``{"priority": 0}`` is an ``int`` and passes through untouched to be
+        rejected by the :data:`BandName` literal (the falsy-zero trap this field exists for,
+        ADR-005), ``"tracking-critical"`` is not a member name in any case, and ``""`` is not
+        one either. This normalises a spelling; it does not widen the vocabulary.
+        """
+        return value.lower() if isinstance(value, str) else value
 
 
 class StreamInfo(BaseModel):

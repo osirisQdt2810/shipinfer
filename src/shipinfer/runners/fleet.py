@@ -506,6 +506,13 @@ class FleetRunner(Runner):
                 # Name the shards that were actually filtered out of the order, not `dead` as
                 # a whole: identical today, but the message must explain the refusal it is
                 # attached to if `dead_indices()` ever names a shard with no client.
+                #
+                # The list cannot come out empty. `_by_load` keys off `_clients`, and
+                # `_check_running` above -- the same acquisition of `_lock`, so nothing can
+                # have emptied the map since -- has already refused a fleet with no clients.
+                # So `by_load` is non-empty here, an empty `order` means every entry of it is
+                # in `dead`, and there is at least one line to say so. A refusal with no
+                # reasons in it would be the useless kind.
                 raise NoShardAvailableError(
                     camera.camera_id,
                     [

@@ -330,6 +330,24 @@ class TestAddingACamera:
 
         assert cameras.added[0].priority is None
 
+    @pytest.mark.parametrize("spelling", ["TRACKING_CRITICAL", "Tracking_Critical"])
+    def test_the_band_name_is_matched_whatever_case_it_arrives_in(self, spelling: str) -> None:
+        """The name is a *member* name, and it is upper-case everywhere it is written.
+
+        `Priority.TRACKING_CRITICAL` in Python, `TRACKING_CRITICAL` in a generated gRPC
+        stub's enum, `tracking_critical` in the published schema -- one lane spelled three
+        ways by the same deployment. Refusing the upper-cased one is a 422 for a client that
+        named the right lane, so the model lower-cases a string before matching it.
+        """
+        cameras = FakeCameras()
+        with client_over(cameras) as client:
+            response = client.post(
+                "/streams", json={"url": "rtsp://host", "priority": spelling}
+            )
+
+        assert response.status_code == 201, response.text
+        assert cameras.added[0].priority is Priority.TRACKING_CRITICAL
+
     @pytest.mark.parametrize("band", ["urgent", "TRACKING-CRITICAL", "", 0, 2])
     def test_a_band_the_server_does_not_know_is_422_rather_than_a_default(
         self, client, band: object
@@ -339,6 +357,10 @@ class TestAddingACamera:
         `Priority.TRACKING_CRITICAL` is 0, so `{"priority": 0}` is a client that meant "unset"
         asking for the highest lane on the deployment. Names only, so the question cannot be
         asked ambiguously.
+
+        Every one of these survives the case normalisation above, which is the point of
+        normalising only a `str` and only its case: `0` is an `int` and reaches the literal
+        untouched, and `tracking-critical` is not a member name in any case.
         """
         response = client.post("/streams", json={"url": "rtsp://host", "priority": band})
 

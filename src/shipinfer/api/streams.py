@@ -265,8 +265,9 @@ def build_streams_router(cameras: CameraController) -> Any:
         The band arrives as a *name* (:data:`~shipinfer.api.schemas.BandName`) and is turned
         into a :class:`~shipinfer.core.request.Priority` here, at the one place the wire
         vocabulary meets the launcher's. The lookup cannot fail: the schema already refused
-        every string that is not a member name, which is what makes this a 422 rather than a
-        500.
+        every string that is not a member name -- in any case, having lower-cased it first
+        (:meth:`~shipinfer.api.schemas.StreamRequest._band_name_is_case_insensitive`) -- which
+        is what makes this a 422 rather than a 500.
         """
         return CameraSpec(
             camera_id=camera_id,

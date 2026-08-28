@@ -108,7 +108,8 @@ given a fifty-first camera by anything but a restart.
 - **A camera's priority band travels on its spec (B5).** New wire vocabulary: `CameraSpec.priority`
   and `shard.proto`'s `CameraPriority` enum (`CAMERA_PRIORITY_UNSPECIFIED` = "the launcher said
   nothing", never a lane), plus a `priority` field on `POST /streams` taking the band by
-  **name** — `Literal["tracking_critical", "high", "normal", "background"]`, derived from
+  **name**, in any case — `Literal["tracking_critical", "high", "normal", "background"]` over a
+  before-validator that lower-cases a string, derived from
   `core.request.Priority`, because an `IntEnum` on the wire would publish integers in
   `/openapi.json` that the validator refuses and would let `{"priority": 0}` mean
   `tracking_critical`. A fleet shard's `ingest.cameras` is stripped, so a band an operator
