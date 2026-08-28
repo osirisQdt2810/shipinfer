@@ -500,11 +500,19 @@ class FleetRunner(Runner):
                     f"camera {camera.camera_id!r} is already on shard "
                     f"{self._placed[camera.camera_id]}; remove it before placing it again"
                 )
-            order = [shard_id for shard_id in self._by_load() if shard_id not in dead]
+            by_load = self._by_load()
+            order = [shard_id for shard_id in by_load if shard_id not in dead]
             if not order:
+                # Name the shards that were actually filtered out of the order, not `dead` as
+                # a whole: identical today, but the message must explain the refusal it is
+                # attached to if `dead_indices()` ever names a shard with no client.
                 raise NoShardAvailableError(
                     camera.camera_id,
-                    [f"shard {shard_id}: its process has exited" for shard_id in sorted(dead)],
+                    [
+                        f"shard {shard_id}: its process has exited"
+                        for shard_id in by_load
+                        if shard_id in dead
+                    ],
                 )
             self._placed[camera.camera_id] = order[0]
             self._pending.add(camera.camera_id)

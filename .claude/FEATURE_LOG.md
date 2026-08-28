@@ -7,7 +7,7 @@ edits, typo fixes and pure docs.
 
 ## 2026-08-27 — a dead shard's cameras are reported lost, never re-placed (Phase B4)
 
-`Fleet.dead_indices()` names exited shards by plan index and `FleetRunner._lost()` maps them
+`Fleet.dead_indices()` names exited shards by plan index and `runners.fleet._lost_in()` maps them
 to their cameras, which `health()` (`lost`, excluded from the per-shard `placed` lists in the
 same snapshot), `stats()` and `StreamInfo.lost` now carry; `remove_camera` on a lost camera
 drops the placement and answers `False`, `add_camera` skips dead shards, and `drain()` keeps
