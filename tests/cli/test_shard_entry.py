@@ -178,6 +178,17 @@ elements:
   output: {impl: mock}
 """
 
+#: The same chain with a `pool` detector in it — a chain that needs image pre-processing.
+#: `decode.dst_size` is named because nothing in this test has a model repository to read an
+#: input extent out of, which is the documented override for exactly that case.
+DETECT_CHAIN = """
+name: detect_chain
+elements:
+  decode: {impl: mock}
+  detect: {impl: pool, model: ship_detector, params: {decode: {dst_size: [640, 640]}}}
+  output: {impl: mock}
+"""
+
 
 class TestTheHopThatActuallyCarriesTheSharing:
     """``_ShardProcess.build`` — the RPC path, not the helper it calls.
@@ -268,6 +279,37 @@ class TestTheHopThatActuallyCarriesTheSharing:
         assert topology.name == "two_step"
         assert runner_settings is seen["engine_settings"]
         assert kwargs["shard_id"] == 1
+
+    def test_a_chain_that_pre_processes_gets_its_own_image_ops(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A shard resolves its own ops, because a launcher must hold no device binding.
+
+        Bound to device 0 and not to this shard's GPU number: the launcher execs the child
+        with ``CUDA_VISIBLE_DEVICES`` set to its own device, so inside this process the GPU it
+        owns *is* device 0. On this host `get_image_ops` degrades to numpy, which is what lets
+        the offline tier assert the wiring at all.
+        """
+        from shipinfer.runtime.ops import NumpyImageOps
+
+        process, seen = self._process(monkeypatch)
+
+        process.build(ChainSpec.from_yaml(DETECT_CHAIN), (2,), (1,))
+
+        _, _, _, kwargs = seen["runner"]
+        assert isinstance(kwargs["ops"], NumpyImageOps)
+
+    def test_a_chain_that_pre_processes_nothing_resolves_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Under a pinned provider `get_image_ops` builds a torch object bound to a device.
+        A chain with nothing to call it must not pay for one."""
+        process, seen = self._process(monkeypatch)
+
+        process.build(ChainSpec.from_yaml(CHAIN), (2,), (1,))
+
+        _, _, _, kwargs = seen["runner"]
+        assert kwargs["ops"] is None
 
     def test_nothing_said_leaves_the_settings_alone(
         self, monkeypatch: pytest.MonkeyPatch

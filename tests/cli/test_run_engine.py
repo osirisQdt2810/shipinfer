@@ -1,4 +1,4 @@
-"""``shipinfer run`` builds the model pool its chain needs, and only then.
+"""``shipinfer run`` builds the dependencies its chain needs, and only those.
 
 The defect this file pins: ``run`` built a runner with no ``models=``, so
 :class:`~shipinfer.topology.base.ElementContext` carried ``models=None`` and the first
@@ -11,9 +11,17 @@ pool has to be up before the chain opens against it, and it has to outlive the w
 are still submitting to it. So the double records rather than mocks, and the tests compare a
 whole sequence instead of counting calls.
 
+Two dependencies are gated the same way and asserted the same way: the model pool
+(``models=``) and, since C3, image pre-processing (``ops=``). A ``pool`` detector letterboxes
+its frame and cannot resolve an implementation itself — ``topology`` may not import
+``runtime`` — so this command resolves one, and only for a chain that declares
+:attr:`~shipinfer.topology.base.Element.needs_image_ops`. A chain of mocks must build neither.
+
 Everything is offline. The engine is a recording double in every test but the last, which
 starts a real ``InferenceServer`` over the mock backend and a two-model repository — the one
-that proves a ``pool`` element actually opens, rather than that a keyword was forwarded.
+that proves a ``pool`` element actually opens, rather than that a keyword was forwarded. The
+ops it is handed there resolve to ``NumpyImageOps``, because ``get_image_ops`` degrades to it
+on a host with no accelerator; that is the whole reason this tier can run the real element.
 """
 
 from __future__ import annotations
@@ -26,7 +34,7 @@ from typing import Any, ClassVar
 
 import pytest
 
-from shipinfer.cli.commands.run import model_pool_is_needed, run
+from shipinfer.cli.commands.run import image_ops_are_needed, model_pool_is_needed, run
 from shipinfer.core.errors import ConfigurationError, ServerStateError
 from shipinfer.core.request import ResponseFuture
 from shipinfer.core.settings import ServerSettings
@@ -44,11 +52,16 @@ run_module = importlib.import_module("shipinfer.cli.commands.run")
 
 #: A chain with a `pool` element: the shape of every real topology, and the one that used to
 #: fail at `open()`. `echo` is the model the offline repository fixture declares.
+#:
+#: `decode.dst_size` is named because `echo` is not a detector -- it declares `x[4]`, and a
+#: `pool` detector resolves its letterbox target from the model's declared input and refuses
+#: rather than guessing 640x640. Saying it on the slot is the documented override, and it is
+#: what a deployment whose engine declares a dynamic input does too.
 POOL_CHAIN = textwrap.dedent("""
     name: pool_chain
     elements:
       decode: {impl: mock}
-      detect: {impl: pool, model: echo}
+      detect: {impl: pool, model: echo, params: {decode: {dst_size: [8, 8]}}}
       output: {impl: mock}
     """)
 
@@ -334,6 +347,40 @@ class TestAChainThatNamesAModelItRunsElsewhere:
         assert built.models is None, "a chain whose model runs elsewhere was handed a pool"
 
 
+class TestWhoNeedsImageOps:
+    """The same shape one dependency over, and the same two declarations.
+
+    ``get_image_ops`` is not free: under a non-``AUTO`` provider it constructs a torch
+    implementation bound to a device. So a chain of mocks must resolve none, and a fleet
+    launcher must resolve none — its shards each resolve one bound to their own GPU, and one
+    resolved here would be bound to a device this process does not own.
+    """
+
+    def test_a_chain_with_a_pool_detector_on_a_runner_that_opens_it_here(self) -> None:
+        assert image_ops_are_needed("inprocess", topology_of(POOL_CHAIN)) is True
+
+    def test_a_chain_of_mocks_needs_none_although_its_kinds_are_the_same(self) -> None:
+        assert image_ops_are_needed("inprocess", topology_of(MOCK_CHAIN)) is False
+
+    def test_a_pool_chain_with_no_detector_in_it_needs_none(self) -> None:
+        """The half that would be lost by reusing ``needs_model``: an embedder submits a
+        tensor somebody else shaped, so it needs the pool and no pre-processing at all."""
+        embed_only = POOL_CHAIN.replace(
+            "detect: {impl: pool, model: echo, params: {decode: {dst_size: [8, 8]}}}",
+            "embed: {impl: pool, model: echo}",
+        ).replace("name: pool_chain", "name: embed_chain")
+
+        assert model_pool_is_needed("inprocess", topology_of(embed_only)) is True
+        assert image_ops_are_needed("inprocess", topology_of(embed_only)) is False
+
+    def test_the_fleet_needs_none_because_each_shard_resolves_its_own(self) -> None:
+        assert image_ops_are_needed("fleet", topology_of(POOL_CHAIN)) is False
+
+    def test_an_unknown_runner_is_refused_by_the_registry_that_would_build_it(self) -> None:
+        with pytest.raises(ConfigurationError, match="unknown runner"):
+            image_ops_are_needed("nope", topology_of(POOL_CHAIN))
+
+
 class TestThePoolIsUpBeforeTheChainOpensAndDownAfterItStops:
     def test_the_engine_brackets_the_runner(self, pool_chain_file: Path, monkeypatch) -> None:
         """The whole contract in one sequence.
@@ -381,6 +428,30 @@ class TestThePoolIsUpBeforeTheChainOpensAndDownAfterItStops:
         (built,) = RecordingRunner.instances
         assert built.element_context().models is RecordingEngine.instances[0]
 
+    def test_the_runner_is_handed_image_ops_and_puts_them_on_the_context(
+        self, pool_chain_file: Path, monkeypatch
+    ) -> None:
+        """`ops=` is the C3 half of the same fix, and it goes all the way to the element.
+
+        Asserting the *context* rather than only the constructor keyword, because that is what
+        `PoolDetect._do_open` reads; a runner that accepted the keyword and dropped it on the
+        floor would pass the constructor assertion and refuse every real chain at `open()`.
+
+        The concrete class is asserted too: on this host `get_image_ops` degrades to numpy,
+        and a run that silently produced something else would mean the offline tier had
+        touched a device.
+        """
+        from shipinfer.runtime.ops import NumpyImageOps
+
+        monkeypatch.setattr("shipinfer.engine.InferenceServer", RecordingEngine)
+
+        run(pool_chain_file, runner="recording-pool")
+
+        (built,) = RecordingRunner.instances
+        assert built.ops is not None, "a chain with a `pool` detector was handed no image ops"
+        assert isinstance(built.ops, NumpyImageOps)
+        assert built.element_context().ops is built.ops
+
 
 class TestWhenNoPoolIsNeededNoneIsBuilt:
     """Three runs that must touch no repository, no device and no engine.
@@ -400,6 +471,8 @@ class TestWhenNoPoolIsNeededNoneIsBuilt:
         assert EVENTS == ["runner.start", "wait", "runner.stop"]
         (built,) = RecordingRunner.instances
         assert built.models is None, "a mock chain was handed a model pool"
+        assert built.ops is None, "a mock chain was handed image ops"
+        assert built.element_context().ops is None
 
     def test_a_dry_run_builds_no_engine_even_for_a_pool_chain(
         self, pool_chain_file: Path, monkeypatch

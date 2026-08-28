@@ -33,6 +33,7 @@ __all__ = [
     "cameras_from_inputs",
     "cameras_from_settings",
     "cameras_to_place",
+    "image_ops_are_needed",
     "model_pool_is_needed",
     "place_cameras",
     "refuse_flags_that_would_be_ignored",
@@ -250,13 +251,26 @@ def run(
     # which only ever read two `ClassVar`s. What is left below is `build_runner`, and it is
     # below because `models=` is the keyword this engine is built to be.
     engine = None
+    ops = None
     try:
         if not dry_run and model_pool_is_needed(chosen, chain):
             from shipinfer.engine import InferenceServer
 
             engine = InferenceServer(settings)
+        if not dry_run and image_ops_are_needed(chosen, chain):
+            # The other dependency an element cannot resolve for itself, gated the same way and
+            # for the same reason: `topology` may not import `runtime`, so the composition root
+            # is where an ops implementation is chosen and handed over. `get_image_ops` picks
+            # the fused kernels, then torch, then numpy -- so this line resolves to
+            # `NumpyImageOps` on a host with no accelerator, which is what keeps the offline
+            # tier running the real element rather than a stubbed one.
+            from shipinfer.runtime.ops import get_image_ops
 
-        built = build_runner(chosen, chain, settings, chain_yaml=chain_yaml, models=engine)
+            ops = get_image_ops(settings.execution.provider)
+
+        built = build_runner(
+            chosen, chain, settings, chain_yaml=chain_yaml, models=engine, ops=ops
+        )
         if dry_run:
             # On the contract, not probed for: `Runner.describe_plan` has an in-process default
             # ("no plan: one process") and the fleet overrides it with the plan it would run.
@@ -354,6 +368,34 @@ def model_pool_is_needed(runner: str, chain: Topology) -> bool:
     if not RUNNERS.get(runner).needs_model_pool:
         return False
     return any(node.element.needs_model for node in chain)
+
+
+def image_ops_are_needed(runner: str, chain: Topology) -> bool:
+    """Whether this run has to resolve image ops and hand them to the runner as ``ops=``.
+
+    The same two questions :func:`model_pool_is_needed` asks, about the other dependency an
+    element is handed rather than imports:
+
+    * **does this runner open the chain here?** ``Runner.needs_model_pool``. The attribute is
+      named for the pool because that was the first dependency to need it, but what it
+      declares is "this runner calls ``open()`` on these elements in this process" — which is
+      exactly the condition for ``ops`` too. A ``fleet`` answers ``False``: its shards each
+      resolve their own, bound to their own GPU (``cli/shard.py``), and one resolved here
+      would be bound to a device this process does not own.
+    * **does anything in the chain need it?** ``Element.needs_image_ops``, declared by the
+      implementation. Only ``PoolDetect`` answers ``True`` today. Asking the *kind* instead
+      would resolve ops for a chain of mocks, and ``get_image_ops`` is not free — under a
+      non-``AUTO`` provider it constructs a torch implementation bound to a device.
+
+    Deliberately a second function rather than one that answers both, because the two
+    dependencies come apart: a chain of ``pool`` embedders needs a pool and no ops, and the
+    first element that crops without running a repository model will need ops and no pool.
+    """
+    from shipinfer.runners import RUNNERS
+
+    if not RUNNERS.get(runner).needs_model_pool:
+        return False
+    return any(node.element.needs_image_ops for node in chain)
 
 
 def cameras_from_inputs(inputs: Sequence[str] | None, *, loop: bool = True) -> list[CameraSpec]:

@@ -59,7 +59,13 @@ from shipinfer.core.request import ResponseFuture
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Device
 from shipinfer.launch.control import CameraSpec
-from shipinfer.topology import ChainItem, ElementContext, ModelResolver, Topology
+from shipinfer.topology import (
+    ChainItem,
+    ElementContext,
+    ImageOpsLike,
+    ModelResolver,
+    Topology,
+)
 
 __all__ = ["Runner"]
 
@@ -82,6 +88,14 @@ class Runner(abc.ABC):
         models: the model pool, for elements of kind ``pool``. A
             :class:`~shipinfer.topology.base.ModelResolver` — structural, so ``runners`` need
             not import the engine and a test satisfies it with a dict.
+        ops: batched image pre-processing bound to this runner's device, for the elements that
+            transform a frame before submitting it (``detect``, today). An
+            :class:`~shipinfer.topology.base.ImageOpsLike` — structural for the same reason
+            ``models`` is, and a stronger one: ``runtime`` is the accelerator seam, so a runner
+            that resolved its own would put torch behind ``import shipinfer.runners``. The
+            process that builds the runner resolves it (``cli/commands/run.py``,
+            ``cli/shard.py``) and only for a chain that declares
+            :attr:`~shipinfer.topology.base.Element.needs_image_ops`.
         chain_yaml: the text ``topology`` was loaded from, when the caller has it. Provenance
             for a runner that executes here; **required** by one that hands the chain to other
             processes, because the loader is the single door through which a chain becomes
@@ -126,6 +140,7 @@ class Runner(abc.ABC):
         shard_id: int = 0,
         device: Device | None = None,
         models: ModelResolver | None = None,
+        ops: ImageOpsLike | None = None,
         chain_yaml: str = "",
     ) -> None:
         self._topology = topology
@@ -134,6 +149,7 @@ class Runner(abc.ABC):
         self._shard_id = shard_id
         self._device = device
         self._models = models
+        self._ops = ops
         self._running = False
         # Only ever taken by `start` and `stop`, so that "idempotent" survives two threads
         # asking at once — a supervisor stopping a runner while a health probe restarts it is
@@ -178,6 +194,11 @@ class Runner(abc.ABC):
         return self._models
 
     @property
+    def ops(self) -> ImageOpsLike | None:
+        """The image ops this runner was handed, or ``None`` when nobody needed any."""
+        return self._ops
+
+    @property
     def is_running(self) -> bool:
         return self._running
 
@@ -196,14 +217,19 @@ class Runner(abc.ABC):
         ``params:`` over both, because a tensor name belongs to the model and not to the
         deployment.
 
-        ``metrics``, ``workers`` and ``ops`` are deliberately left unset here and filled in by
-        the subclass that has them. They are not settings but *facts about this process*: a
-        metrics registry an exporter is already scraping, the number of threads that will
-        really walk the chain, an image-ops implementation bound to this shard's device. A
-        base-class default would have to invent all three, and each invention is worse than
-        the ``None`` an element can refuse on — a private registry nobody scrapes reads as
-        evidence, and a worker count that is not the real one is what makes a barrier park the
-        only thread there is.
+        ``ops`` is carried the way ``models`` is: handed in at construction by the process
+        that built this runner, never resolved here. It is not a setting either, but it *is* a
+        decision that outlives one runner subclass — the same object serves every element in
+        the chain — so it belongs on the base rather than on the one runner that happens to
+        execute here.
+
+        ``metrics`` and ``workers`` are deliberately left unset here and filled in by the
+        subclass that has them. They are *facts about this process*: a metrics registry an
+        exporter is already scraping, and the number of threads that will really walk the
+        chain. A base-class default would have to invent both, and each invention is worse
+        than the ``None`` an element can refuse on — a private registry nobody scrapes reads
+        as evidence, and a worker count that is not the real one is what makes a barrier park
+        the only thread there is.
         """
         return ElementContext(
             shard_id=self._shard_id,
@@ -211,6 +237,7 @@ class Runner(abc.ABC):
             models=self._models,
             stage_timeout_s=self._settings.pipeline.stage_timeout_ms / 1000.0,
             input_name=self._settings.ingest.input_name,
+            ops=self._ops,
         )
 
     # -- lifecycle ---------------------------------------------------------------------
