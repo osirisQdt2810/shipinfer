@@ -27,11 +27,12 @@ inside ``_do_open`` — see that package's docstring for the rule.
 from __future__ import annotations
 
 from shipinfer.topology.base import (
-    MODEL_KINDS,
     ChainItem,
     Element,
     ElementContext,
     ElementKind,
+    ImageOpsLike,
+    LetterboxLike,
     ModelResolver,
 )
 from shipinfer.topology.caps import ANY, LOCATIONS, Caps, negotiate, parse_caps
@@ -62,7 +63,6 @@ __all__ = [
     "ANY",
     "ELEMENTS",
     "LOCATIONS",
-    "MODEL_KINDS",
     "Caps",
     "ChainItem",
     "ChainSpec",
@@ -74,6 +74,8 @@ __all__ = [
     "ElementNode",
     "ElementRegistry",
     "ElementSpec",
+    "ImageOpsLike",
+    "LetterboxLike",
     "ModelResolver",
     "Topology",
     "create_element",

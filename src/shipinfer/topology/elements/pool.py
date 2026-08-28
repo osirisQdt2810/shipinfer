@@ -96,8 +96,9 @@ class _PoolElement(Element):
         params: ``input`` (the model's input tensor name) and ``timeout_s``. Both override
             whatever the runner resolved from the settings — see the module docstring for the
             precedence.
-        model: the repository model to run. Required — the loader already refuses a model kind
-            that names none, so a missing one here is a programming error and says so.
+        model: the repository model to run. Required — the loader refuses an element whose
+            :attr:`~shipinfer.topology.base.Element.needs_model` is set and names none, so a
+            missing one here is a programming error and says so.
     """
 
     accepts: ClassVar[tuple[str, ...]] = ("nv12@gpu", "tensor@gpu", "bgr@cpu")

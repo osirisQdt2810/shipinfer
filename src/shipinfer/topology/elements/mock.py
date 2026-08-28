@@ -16,6 +16,12 @@ real element is how a chain ends up copying every frame to host memory to run a 
 
 Nothing here does any work. ``MockDetect`` invents one box; it does not pretend to detect.
 A mock that produced plausible numbers would eventually be trusted for something.
+
+**No mock declares ``needs_model``**, and that is the honest answer rather than an omission:
+``MockDetect`` invents a box and resolves nothing against a model pool, so a chain of these
+needs neither an ``InferenceServer`` behind it nor a ``model:`` in front of it. A test that
+needs an element which *does* register one declares it on a double of its own
+(``tests/runners/test_inprocess.py``), which is where a stand-in for a `pool` element belongs.
 """
 
 from __future__ import annotations
