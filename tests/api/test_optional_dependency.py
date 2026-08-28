@@ -18,7 +18,7 @@ import sys
 
 import pytest
 
-from shipinfer.api import create_app, serve_http
+from shipinfer.api import BackgroundHttpServer, create_app, serve_http
 from shipinfer.core.errors import ConfigurationError
 
 
@@ -56,3 +56,25 @@ class TestAMissingExtraIsATypedRefusal:
         """A message that says only "install the extra" sends the reader to the docs."""
         with pytest.raises(ConfigurationError, match="uvicorn"):
             serve_http(None)  # type: ignore[arg-type]
+
+    def test_the_camera_door_refuses_the_same_way(self, without_the_server_extra: None) -> None:
+        """`/streams` is the same package and pays the same rent.
+
+        `shipinfer run` without `--http` must work on a host that never installed the extra,
+        so the guard has to be inside `create_app` and not at module scope — and it has to run
+        before the controller is touched, or the reader gets a traceback from three frames
+        deeper instead of the name of a wheel.
+        """
+        with pytest.raises(ConfigurationError, match=r"shipinfer\[server\]"):
+            create_app(cameras=object())  # type: ignore[arg-type]
+
+    def test_the_background_server_names_uvicorn_before_it_binds_anything(
+        self, without_the_server_extra: None
+    ) -> None:
+        """`shipinfer run --http` on a host with FastAPI and no uvicorn is a typed refusal.
+
+        Constructed, not started: the import is checked when the object is built, so the
+        command fails before a runner has been started and cameras placed on it.
+        """
+        with pytest.raises(ConfigurationError, match="uvicorn"):
+            BackgroundHttpServer(object())

@@ -11,12 +11,14 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from shipinfer.core.errors import ValidationError
+from shipinfer.core.settings.ingest import usable_camera_id
 from shipinfer.core.types import DataType, Tensor
 
 __all__ = [
+    "DrainResult",
     "ErrorBody",
     "InferInputTensor",
     "InferOutputTensor",
@@ -24,6 +26,10 @@ __all__ = [
     "InferenceResponseBody",
     "ModelMetadata",
     "ServerMetadata",
+    "StreamInfo",
+    "StreamList",
+    "StreamRemoved",
+    "StreamRequest",
     "tensor_from_wire",
     "tensor_to_wire",
 ]
@@ -130,6 +136,167 @@ class ServerMetadata(BaseModel):
 
 class ErrorBody(BaseModel):
     error: str
+
+
+# -- the stream control plane (arch.md section 2) ------------------------------------------
+#
+# Not KServe. `POST /streams` is this project's own surface -- cameras and videos enter the
+# deployment here, and the tensor side-door above is for a caller who already has pixels.
+# They share a package because they share a process and an error mapping, and nothing else.
+
+
+class StreamRequest(BaseModel):
+    """One camera, as a client asks for it: ``{"url": "rtsp://..."}`` and little else.
+
+    Deliberately :class:`~shipinfer.launch.control.CameraSpec`'s three fields and not
+    :class:`~shipinfer.core.settings.ingest.CameraConfig`'s twenty. Codec, transport, decode
+    size and priority are *deployment* settings that the shard resolves from its own tree
+    (CONVENTIONS 2.6); what only the caller knows is which video it wants read.
+
+    ``extra="forbid"`` is the load-bearing line. A client that posts ``{"uri": ...}`` or
+    ``{"fps": 30, "priority": "high"}`` against a server that silently drops what it does not
+    recognise gets a 201 and a camera reading nothing, or a camera at the wrong rate -- and
+    finds out from a dashboard rather than from the response. A 422 naming the field is the
+    cheaper failure.
+
+    **The field constraints make the same argument about values, and they are not cosmetic.**
+    The next thing to inspect a ``url`` or an ``fps`` is
+    :class:`~shipinfer.core.settings.ingest.CameraConfig`, a layer below the router, and its
+    refusal is a *pydantic* ``ValidationError`` -- a ``ValueError``, and not a
+    :class:`~shipinfer.core.errors.ShipInferError`, so the handler's typed mapping does not
+    see it. Unconstrained here, ``{"url": ""}`` from a deploy script whose variable did not
+    expand answered **500** in process and, over gRPC, a refusal from every shard -> a
+    ``NoShardAvailableError`` -> a **retryable 503** for a request that can never succeed.
+    Declared here, FastAPI answers 422 naming the field before the handler is entered, so
+    both runners give the caller the same terminal answer. The constraints are not a mirror
+    of ``CameraConfig``'s (``core/settings/ingest.py``) but the *same rule applied earlier*:
+    non-empty ``uri``, ``fps >= 0``, and -- through :func:`~shipinfer.core.settings.ingest.
+    usable_camera_id`, which both models call -- a ``camera_id`` with no whitespace in it.
+    A mirror would have drifted, and it did: ``camera_id`` was the field this argument was
+    written for and the field it was first missing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Optional. Empty means "name it for me": the server mints the next free ``cam-<n>``
+    #: with :func:`~shipinfer.launch.control.mint_camera_id`, the same helper
+    #: ``shipinfer run --inputs`` uses, so ids minted by the two paths cannot collide.
+    camera_id: str = ""
+    #: ``rtsp://...`` for a camera, or a file path for a replayed video. Required, and never
+    #: blank: a camera with no source is a decoder thread that fails on its first open.
+    url: str = Field(min_length=1)
+    #: Target frame rate; ``0.0`` means "whatever the source delivers". Never negative --
+    #: a rate below zero has no meaning downstream and ``CameraConfig`` refuses it anyway,
+    #: one layer too late to be a 422.
+    fps: float = Field(default=0.0, ge=0.0)
+    #: ``replay`` sources only: restart the file at EOF. Exposed because it is the one field
+    #: of :class:`~shipinfer.launch.control.CameraSpec` that decides whether *this* camera
+    #: ever ends, and it is not a deployment default -- ``shipinfer run --inputs`` has
+    #: ``--no-loop`` for exactly this, and without it here a client that posts a finite video
+    #: file gets it replayed forever with no way to ask otherwise. Ignored by a live source,
+    #: which has no end to reach.
+    loop: bool = True
+
+    @field_validator("camera_id")
+    @classmethod
+    def _camera_id_is_usable(cls, value: str) -> str:
+        """``""`` means "name it for me"; anything else must be an id a camera can carry.
+
+        The empty string is the one value this validator lets past, because it is not an id
+        at all -- it is the request to mint one, and :func:`shipinfer.api.streams._mint`
+        answers it with a name that is legal by construction. Everything else is checked by
+        :func:`~shipinfer.core.settings.ingest.usable_camera_id`, the same function
+        ``CameraConfig`` uses, so the door and the record cannot disagree.
+
+        Without this, ``{"camera_id": "quay 1"}`` reached the runner and was refused a layer
+        down -- a 400 in process, and on a fleet a **retryable 503** for a request that can
+        never succeed, because the launcher sees only that every shard said no. That is the
+        exact 400-vs-503 conflation ``url`` and ``fps`` were constrained to remove, on the
+        third field, which is why the rule is now shared code rather than a copy.
+        """
+        return value if not value else usable_camera_id(value)
+
+    @field_validator("url")
+    @classmethod
+    def _url_is_not_blank(cls, value: str) -> str:
+        """``min_length`` catches ``""``; this catches ``"   "``, which is the same mistake.
+
+        A shell that renders an unset variable into a JSON body produces whitespace as
+        readily as it produces nothing, and a whitespace-only url is a source no decoder can
+        open. ``CameraConfig.uri`` rejects both with this same message a layer down; saying
+        it here is what makes it a 422 instead of a 500.
+        """
+        if not value.strip():
+            raise ValueError("url must not be empty")
+        return value
+
+
+class StreamInfo(BaseModel):
+    """One camera as the server sees it, assembled from a runner's health report.
+
+    Every field is optional-shaped on purpose, because two runners answer this question with
+    different amounts of knowledge and neither is lying: an in-process runner knows the
+    camera's ingest ``state`` and has no shard to report beyond its own, while a launcher
+    knows the ``shard`` and reads the state back out of that shard's report.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    camera_id: str
+    #: The source, when the runner's health carries one. Neither runner does today -- a
+    #: camera's URL is its shard's configuration, not the launcher's -- so this reads ``""``
+    #: for a camera this process did not just place. It is here rather than tracked in the
+    #: router because a router that remembered urls would answer from its own memory about
+    #: cameras added over gRPC, and be confidently wrong after a shard restart.
+    url: str = ""
+    #: Which shard holds it. ``None`` only when the runner reports no shard at all.
+    shard: int | None = None
+    #: Placed but not yet accepted -- the launcher's reservation window
+    #: (``runners/fleet.py``). A pending camera is not being read yet, and reporting it as
+    #: running is how an operator concludes a dark camera is fine.
+    pending: bool = False
+    #: The ingest state as the shard reports it (``connecting``, ``streaming``,
+    #: ``exhausted``, ...), or ``""`` when nothing has said yet.
+    state: str = ""
+
+    # `loop` is deliberately absent, for the reason `url` is optional-shaped: no runner's
+    # health report carries it, so a field here would answer `true` for every camera --
+    # including one posted with `loop: false` -- and be confidently wrong about the one
+    # thing that decides whether a video ever ends. `StreamRequest.loop` is where it is
+    # asked for; `state: "exhausted"` is how a listing shows a non-looping file finished.
+
+
+class StreamList(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    streams: list[StreamInfo]
+
+
+class StreamRemoved(BaseModel):
+    """The answer to ``DELETE /streams/{id}``: the placement is gone, was the thread?
+
+    ``clean=False`` is a **body signal and never a 5xx**: the camera *has* been removed and
+    the caller must not retry, but a decoder thread outlived its deadline and still holds
+    buffers. A 500 would say the removal failed, and a control plane that retried it would
+    get a 404 and conclude something worse.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    clean: bool
+
+
+class DrainResult(BaseModel):
+    """The answer to ``POST /streams/drain``: how many camera threads were abandoned.
+
+    ``0`` is the clean drain. Non-zero is a lifetime signal rather than a statistic -- one
+    deadline is charged to the whole camera set, so a thread still unfinished at it is
+    genuinely stuck and still references this process's buffers.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    abandoned: int
 
 
 def tensor_from_wire(spec: InferInputTensor) -> Tensor:

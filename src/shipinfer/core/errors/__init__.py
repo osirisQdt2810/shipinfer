@@ -20,6 +20,7 @@ from shipinfer.core.errors.chain import (
 )
 from shipinfer.core.errors.config import (
     ConfigurationError,
+    DuplicateCameraError,
     ModelControlError,
     ModelNotFoundError,
     ModelVersionNotFoundError,
@@ -41,6 +42,7 @@ from shipinfer.core.errors.ingest import (
     SourceUnavailableError,
 )
 from shipinfer.core.errors.launch import (
+    NoShardAvailableError,
     PeerLostError,
     RingClosedError,
     RingFullError,
@@ -64,12 +66,14 @@ __all__ = [
     "ConfigurationError",
     "DeviceError",
     "DeviceOutOfMemoryError",
+    "DuplicateCameraError",
     "FrameDecodeError",
     "InferenceError",
     "IngestError",
     "ModelControlError",
     "ModelNotFoundError",
     "ModelVersionNotFoundError",
+    "NoShardAvailableError",
     "PeerLostError",
     "QueueFullError",
     "RequestCancelledError",

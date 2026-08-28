@@ -21,6 +21,7 @@ import time
 from shipinfer.core.errors import (
     CameraUnavailableError,
     ConfigurationError,
+    DuplicateCameraError,
     ServerStateError,
 )
 from shipinfer.core.logging import get_logger, log_context
@@ -184,15 +185,18 @@ class IngestManager:
         and whose every later ``stop()`` misses it.
 
         Raises:
-            ConfigurationError: a camera with this id is already running. Silently replacing
-                it would leave two threads pulling one stream and two frame counters
-                producing duplicate tags.
+            DuplicateCameraError: a camera with this id is already running. Silently
+                replacing it would leave two threads pulling one stream and two frame
+                counters producing duplicate tags. A ``ConfigurationError`` subclass, so a
+                caller that wants "the add was refused" still catches the base -- and one
+                that has to tell a taken name from every other refusal (``api/streams.py``
+                mints ids, so it does) can name this one.
             ServerStateError: the fleet forgot this camera while it was starting — a
                 concurrent stop or removal landed between the insert and the start.
         """
         with self._lock:
             if config.camera_id in self._actors:
-                raise ConfigurationError(
+                raise DuplicateCameraError(
                     f"camera {config.camera_id!r} is already running; "
                     "remove it before adding it again"
                 )

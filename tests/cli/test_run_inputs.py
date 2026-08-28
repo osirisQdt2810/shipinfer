@@ -26,7 +26,7 @@ from shipinfer.cli.commands.run import (
     place_cameras,
     run,
 )
-from shipinfer.core.errors import ConfigurationError
+from shipinfer.core.errors import ConfigurationError, NoShardAvailableError
 from shipinfer.core.request import ResponseFuture
 from shipinfer.core.settings import ServerSettings
 from shipinfer.launch.control import CameraSpec
@@ -96,6 +96,15 @@ class CountingRunner(StillRunner):
         if camera.camera_id == self.refuse:
             raise ConfigurationError(f"camera {camera.camera_id!r} is already running")
         self.added.append(camera)
+
+
+class RefusingRunner(CountingRunner):
+    """A runner that answers the way a full fleet does: nowhere to put this camera."""
+
+    name: ClassVar[str] = "refusing"
+
+    def add_camera(self, camera: CameraSpec) -> None:
+        raise NoShardAvailableError(camera.camera_id, ["shard 0: draining"])
 
 
 class TestInputsBecomeCameraSpecs:
@@ -268,6 +277,23 @@ class TestPlacingThemOnARunner:
         assert "b.mp4" in str(caught.value)
         assert "cam-001" in str(caught.value)
         assert "already running" in str(caught.value)
+
+    def test_a_fleet_with_no_room_travels_untouched_and_stays_a_503(self) -> None:
+        """A capacity refusal is not a fact about the input, so it is not re-labelled.
+
+        `place_cameras` prefixes a `ConfigurationError` with the path the operator typed,
+        because the id in that message was minted here. `NoShardAvailableError` is the other
+        case: the camera is fine and the fleet has nowhere to put it, and wrapping it in a
+        `ConfigurationError` would turn a retryable 503 into a terminal 400 for the same
+        condition reached over `POST /streams` (`api/errors.py`).
+        """
+        runner = RefusingRunner(chain())
+
+        with pytest.raises(NoShardAvailableError) as caught:
+            place_cameras(runner, cameras_from_inputs(["a.mp4"]))
+
+        assert not isinstance(caught.value, ConfigurationError)
+        assert "cam-000" in str(caught.value)
 
     def test_it_stops_at_the_first_refusal_rather_than_placing_the_rest(self) -> None:
         """The reachable failures are configuration ones, and they apply to all of them.

@@ -140,15 +140,23 @@ ALLOWED_INTERNAL: dict[str, set[str]] = {
     "runtime": {"core"},
     "backends": {"core", "repository", "runtime"},
     "engine": {"core", "repository", "runtime", "backends", "scheduling"},
-    # `api` sits on the engine and on nothing else: `/v2/models/{name}` answers with an
-    # entry's versions, platform and tensor specs, but it reads them through the engine
-    # object (`server.repository`), not by importing `repository` — so the grant is exactly
-    # what the code does today. It may not import `scheduling`, `runtime` or `backends`: an
-    # HTTP handler that decided what to batch or where to run would be the dispatch layer
-    # wearing a router (arch.md §6). It grows `repository` if the metadata route ever
-    # annotates `RepositoryEntry` directly, and `launch` in phase B when `/streams` needs the
-    # shards — each as a diff with an argument, not a standing permission.
-    "api": {"core", "engine"},
+    # `api` sits on the engine, and — since B3 — on `launch`: `/v2/models/{name}` answers
+    # with an entry's versions, platform and tensor specs, but it reads them through the
+    # engine object (`server.repository`), not by importing `repository`. It may not import
+    # `scheduling`, `runtime` or `backends`: an HTTP handler that decided what to batch or
+    # where to run would be the dispatch layer wearing a router (arch.md §6). It grows
+    # `repository` if the metadata route ever annotates `RepositoryEntry` directly.
+    #
+    # `launch` is the B3 grant, and it is deliberately narrow: `api/streams.py` needs
+    # `CameraSpec` and `mint_camera_id` from `launch/control.py` — the launcher's vocabulary,
+    # which is what `add_camera` takes and what `shipinfer run --inputs` names its cameras
+    # with. What is NOT granted is `runners`, and that omission is the design: the thing
+    # behind `POST /streams` arrives as the structural `CameraController` protocol
+    # (`api/streams.py`), so an HTTP handler can drive a runner it was handed and cannot
+    # construct one, choose a placement or open a chain. The direction holds as everywhere
+    # else — `launch` may not import `api`, which is also why the proto stubs live under
+    # `launch/proto/` and not here (arch.md §9).
+    "api": {"core", "engine", "launch"},
     # `launch` spawns and supervises processes, so it sits on `core` (errors, logging, the
     # settings tree) and on `scheduling` for the `ShardPlan` that says which cameras and which
     # GPUs each process owns — a pure decision, made before anything is spawned. It reaches
