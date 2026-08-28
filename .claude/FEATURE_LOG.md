@@ -5,6 +5,93 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-28 — `PoolEmbed` crops per detection and files the vectors per row (Phase C8a)
+
+**What.** The embed→track scatter-back, the last missing link before the demo chain runs.
+`embed` submitted the *whole payload* — the frame — to a re-identification model whose input
+is `3x256x128`, and filed the raw `response.outputs` under `meta["vectors"]`. That is a
+`{name: Tensor}` dict, exactly the form `ShipvisionTrack._embeddings` refuses by name, so the
+chain could not reach `track` with appearance at all. C4's build report said so: "C8 will need
+the embed→track scatter-back before the demo chain runs."
+
+| Piece | Delivered |
+|---|---|
+| `_PoolCropElement` (`topology/elements/pool.py`) | the fan-out element: `needs_image_ops = True`; `_prepare` reads `meta["detections"]` + `meta["frame_hw"]`, selects rows, cuts them in **one** `ctx.ops.crop_batch(frame, boxes, size, normalize)`; `_submit_crops` chunks at the model's `max_batch_size` and rejoins; `_finish` scatters `{detection index: vector}` |
+| `PoolEmbed` | now a `_PoolCropElement`. `meta_key` and caps unchanged: payload untouched, `produces *@*` |
+| `params:` | `classes: [ship]` (row filter), `crop: {size, normalize}`, `output: embedding`. Every one of them resolved at `open` against the artefact first |
+| `_PoolElement` (lifted) | `_declared`, `_frame_of`, `_max_batch_rows` and `_submit` moved up out of `PoolDetect` — the two elements that read pixels now share one set of refusals |
+| `ImageOpsLike.crop_batch` | the second member of the protocol, added the way `topology/base.py` says one should: by the first element that calls it, with the test that needs it |
+| `track._embeddings` | the **empty** mapping is exempt from the coverage check |
+| `_CropMetrics` | `shipinfer_element_crops_per_frame` (object-count buckets) + `shipinfer_element_crops_total`, both labelled by element, both null-object when the runner offered no registry |
+| tests | `tests/topology/test_pool_embed_crops.py` (49), +1 in `test_track_element.py`; four existing tests updated where C8 changed their premise |
+
+**Why.** The chain's cardinality has to change somewhere — arch.md §5's "branch on class →
+crop batch → submit crops" — and the embedder is where. Everything here is the proven fan-out
+of `pipeline/graph/crop.py` + `objects.py` moved onto the chain, not a second implementation
+of it (ponytail principle): one batched crop call, chunking at `max_batch_size`, and the rule
+that every row knows which detection it came from.
+
+**Decisions.**
+
+- **The row filter is `params: classes:`, not the chain's `when:`.** A `when:` guard is
+  evaluated once per *item* against `item.meta` (`ElementNode.admits`), and an item is a whole
+  frame — so `when: class == ship` can only decide whether the element runs on this frame at
+  all, and it reads `meta["class"]`, a key nothing in the chain sets today. A frame holds ships
+  *and* people; the question is per row. The two mechanisms compose without overlapping:
+  `when:` skips frames, `classes:` selects rows.
+- **The mapping form, not a NaN-padded per-row array.** The sizing runs two embedders side by
+  side (`ship_embedder` on the ship rows, `person_embedder` on the person rows), so partial
+  coverage is the *normal* case. The mapping says exactly which rows were covered; a NaN row
+  would have to be recognised as absence by every consumer, and the first one that forgot would
+  match a track against a vector of NaNs and never say so.
+- **The scatter is additive.** `ChainItem.derive` merges metadata by key, so two embedders both
+  writing `meta["vectors"]` would have the second replacing the first wholesale — every ship
+  reaching `track` with no appearance, on a chain whose per-element counters both say they ran.
+  `_scatter` merges, and refuses a non-mapping already filed under the key rather than
+  overwriting the producer that needs fixing.
+- **An empty mapping is coverage of no rows, not an off-by-N.** `track._embeddings` refused a
+  mapping "whose keys name no row at all". With a crop element in the chain that is the ordinary
+  frame — `embed_person` sees three ships and covers none — so the empty mapping is now exempt.
+  Keys `{100, 101, 102}` on a three-row frame is still arithmetic that went wrong; zero keys
+  index nothing because there was nothing to index.
+- **Zero rows means zero requests.** An empty crop batch handed to a model costs a queue slot,
+  an instance slot and a round trip to be told nothing; 50 cameras of empty water at 20 fps is a
+  thousand of those a second. `_do_process` is overridden for that one line.
+- **Chunking at `max_batch_size`, read off the artefact.** A frame holds however many objects
+  the detector found (25 was observed) and an engine's plan is built at a fixed batch. Without
+  it one crowded frame becomes a single oversized request and *every* crop in it is lost — the
+  failure `objects.py::_chunks` exists because of. `max_batch_size: 0` is Triton's "batching
+  off", so it means no bound, not batch one.
+- **No L2 normalisation here.** Both embedders in the demo repository are already global-pooled
+  and L2-normalised (their `config.yaml` says so) and the proven path normalised nothing in
+  Python either. Re-normalising would be a silent divide-by-a-tiny-number on the row where the
+  engine answered with zeros.
+- **`PoolSegment` stays the forwarding element.** Its crop half is one line away — the demo
+  repository does feed it 640x640 ship crops — but its `_finish` is a fold over *two* outputs
+  (rows × mask prototypes → one area, `pipeline/graph/masks.py::InstanceMaskArea`) that a
+  per-row scatter-back cannot express, and filing the raw rows would pin a `(32, 160, 160)`
+  prototype tensor per frame alive for the rest of the walk. Half a feature is worse than none.
+- **The caps are unchanged and the *frame* is refused instead.** `accepts` keeps
+  `nv12@gpu, tensor@gpu, bgr@cpu`: narrowing it would refuse the chain phase D makes work, and
+  staying silent would download six megabytes per frame. `_frame_of` refuses a device-resident
+  payload by name, with the phase that fixes it — the same refusal `PoolDetect` already made,
+  now shared.
+
+**What allocates per frame** (CONVENTIONS 2.5): the crop batch itself, one `Tensor` wrapper,
+one `InferenceRequest` per chunk (one, except past `max_batch_size`), and the `{row: vector}`
+mapping whose values are numpy *views*. Selecting a subset adds an index tuple and one `(N, 4)`
+gather; selecting every row adds neither. A frame with nothing to crop allocates nothing.
+
+**Not done here.** The demo chain (`topology/ship_person.yaml`) still names `gstreamer-gpu` and
+`kafka` and does not load; nothing in the chain sets `meta["class"]`, so every `when:` in that
+file is currently false for every frame — both are C8's remaining slices, not this one.
+
+---
+
+## 2026-08-28 — the `mtmc` element: instants across cameras, and a barrier that never takes the last worker (Phase C6)
+
+---
+
 ## 2026-08-28 — the `mtmc` element: anchored instants across cameras, and a barrier that never takes the last worker (Phase C6)
 
 **What.** The chain gains its cross-camera tier, in two modules and the split is the point.
