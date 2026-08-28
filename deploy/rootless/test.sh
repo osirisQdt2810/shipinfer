@@ -7,6 +7,9 @@
 #   SHIPINFER_TEST_GPUS=3,4 deploy/rootless/test.sh -m multigpu   # which physical GPUs a
 #                                              # multi-process test may take (default 0,1)
 #   deploy/rootless/test.sh tests/ingest -q    # any pytest arguments
+#   SHIPINFER_SYSTEM_VIDEO=references/.../clip.mp4 deploy/rootless/test.sh -m gpu tests/system
+#                                              # the real chain, decode to output, on real
+#                                              # footage; without it that tier skips itself
 #
 # WHY A CONTAINER IS NOT OPTIONAL HERE
 #
@@ -67,6 +70,19 @@ fi
 # missing, since the accelerator seam this tier exists to cover is the TensorRT path. The
 # host is jammy like the image, so its libraries load; same arrangement as bench.sh.
 TRT_DIR="${SHIPINFER_TENSORRT_DIR:-/usr/local/TensorRT}"
+# The system tier (`-m gpu tests/system`) runs the real chain on real footage, and footage is
+# not in the repository: `references/` is gitignored, and committing frames of real people to
+# make a test runnable is the wrong trade. So the operator points at a video or a frame
+# directory and it is mounted read-only; unset, the tier skips itself and says what is missing.
+video_mount=()
+if [ -n "${SHIPINFER_SYSTEM_VIDEO:-}" ]; then
+  if [ ! -e "$SHIPINFER_SYSTEM_VIDEO" ]; then
+    echo "SHIPINFER_SYSTEM_VIDEO=$SHIPINFER_SYSTEM_VIDEO does not exist" >&2
+    exit 1
+  fi
+  video_mount=(-v "$(cd "$(dirname "$SHIPINFER_SYSTEM_VIDEO")" && pwd)/$(basename "$SHIPINFER_SYSTEM_VIDEO"):/footage:ro")
+fi
+
 trt_mount=()
 trt_path=""
 if [ -d "$TRT_DIR/lib" ]; then
@@ -93,9 +109,10 @@ exec docker run --rm --pid=host --device nvidia.com/gpu=all \
   -e PYTHONDONTWRITEBYTECODE=1 \
   -e PYTHONPATH="/work/src${shipvision_path}" \
   -e SHIPINFER_TEST_GPUS \
+  -e SHIPINFER_SYSTEM_VIDEO="${SHIPINFER_SYSTEM_VIDEO:+/footage}" \
   -v "$REPO:/work:ro" \
   -v "$WHEELS:/wheels:ro" \
-  "${trt_mount[@]}" \
+  "${trt_mount[@]}" "${video_mount[@]}" \
   -w /work "$IMAGE" \
   bash -c '
     set -e
