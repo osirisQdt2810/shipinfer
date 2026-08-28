@@ -1,9 +1,9 @@
-"""One reader for ``meta["vectors"]``, so the key means one thing everywhere.
+"""The rule for reading ``meta["vectors"]``, written once so it can stop being written twice.
 
-``recognize`` queries a gallery per row and ``track`` attaches an appearance to a track;
-written twice, the two disagreed at the edges (one coerced ``{"3": v}``, the other refused
-it), which makes a chain file's ``vectors`` mean something different depending on which
-element is standing there. The rule lives here; callers own only what they do with the rows.
+``recognize`` queries a gallery per row and ``track`` attaches an appearance to a track, and
+written twice the two disagreed at the edges. ``recognize`` is the first caller and today the
+**only** one: ``track._embeddings`` keeps its own laxer copy (``{"3": v}`` coerced, an
+out-of-range key tolerated) until TRACK-VECTORS swaps it — stricter owes tests, in C8b's file.
 
 ``vectors`` is either a mapping ``{row index: vector}`` — what a *branch* embedder produces,
 since only the original index says which row a vector came from — or a per-row ``(N, d)``
@@ -11,8 +11,7 @@ array whose row *i* is detection *i*. Keys must be integral (``int``/numpy); ``b
 and strings are refused, which is also how the raw ``{tensor_name: Tensor}`` a ``pool``
 embedder files gets caught. A negative key is refused always. When the count is known every
 key must name a row — the looser rule silently drops the out-of-range half of a mis-scattered
-frame. An empty mapping is legal ("no rows selected here"); a *missing* key is the caller's
-business. Pure: numpy and ``core.errors``, nothing else.
+frame. An empty mapping is legal; a *missing* key is the caller's. Pure: numpy, ``core.errors``.
 """
 
 from __future__ import annotations

@@ -15,9 +15,9 @@ no pool — plus shipinfer's half of that gallery: the on-disk format it is load
 |---|---|
 | `topology/elements/recognize.py` | `GalleryRecognize`, `@registry_for(ElementKind.RECOGNIZE).register("shipvision")`. Caps copied verbatim from `_PoolElement` (`nv12@gpu, tensor@gpu, bgr@cpu` in, `*@*` out) and it stamps **no** cap on the item it derives. `requires_model_name = needs_model = False` — the divergence C2's split was built for. `_do_open` loads shipvision through `topology/bridge.py`, builds the gallery through `GALLERIES.build`, fills it from disk and refuses a width mismatch; `_do_process` queries once per selected row and files `meta["identities"]` |
 | `topology/gallery_store.py` | `<repository>/<entry>/<version>/gallery.npz` — `vectors (N,d) float`, `identities (N,) text`, optional `camera_ids (N,) text` — with `resolve_gallery_path` (newest version wins, Triton's rule) and `load_gallery_file` (shape, dtype, finite and non-zero validated, `allow_pickle=False`). numpy only; no shipvision, no `repository` import |
-| `topology/elements/_vectors.py` | `rows_by_index(vectors, detections, who=)` — the **one** reader of `meta["vectors"]`, extracted from `recognize` in review. numpy and `core.errors` only; no element, no gallery, no submodule |
+| `topology/elements/_vectors.py` | `rows_by_index(vectors, detections, who=)` — the rule for reading `meta["vectors"]`, extracted from `recognize` in review and called by `recognize` **only**; `track` still carries its own laxer copy (follow-up TRACK-VECTORS). numpy and `core.errors` only; no element, no gallery, no submodule |
 | `topology/elements/mock.py` | `MockRecognize` files the same mapping shape the real element does, so a chain of mocks exercises the *type* the fan-in will merge rather than a stand-in for it |
-| `tests/topology/test_recognize_element.py` + `tests/topology/test_vectors_rows.py` | 79 + 43 offline tests, green **with and without** the submodule |
+| `tests/topology/test_recognize_element.py` + `tests/topology/test_vectors_rows.py` | 87 + 45 offline tests, green **with and without** the submodule |
 
 **Why.** `pipeline/graph/graph.py` is the decision of record: there is no `ship_recognizer`
 model and there never was one worth training. Identity is a search over the ship embedding,
@@ -79,18 +79,26 @@ an identity network.
   detector found; a ship gallery asked about a person answers *something*. A row the filter
   excludes is not queried, not counted, and not in the mapping. `classes:` with no
   `meta["detections"]` to read is a refusal, not a silent pass-through.
-- **`meta["vectors"]` has one reader, not one per element.** The convention had two owners
-  that disagreed at the edges: `track` coerced `{"3": v}` and `{3.0: v}` where `recognize`
-  refused them, and `track` refused a mapping only when *no* key named a row where `recognize`
-  refused when *any* key did not — so one embedder could feed a chain whose `track` accepted a
-  frame and whose `recognize` refused it, over the same metadata key, and C8's scatter-back was
-  about to be the third opinion. `topology/elements/_vectors.py` is that rule written once:
-  integral keys (`int`/`np.integer`, never `bool`/`np.bool_`, never a float or a string), a
-  negative key refused **always** even when no detection count is knowable, any out-of-range key
-  refusing the frame, an empty mapping legal, and every refusal raised *before* the first pair
-  is yielded, because the callers query a gallery per pair and half a frame is not an answer.
-  `recognize` is repointed at it here; `track._embeddings` follows in the rebase over C8a,
-  which is already rewriting that method.
+- **The rule for `meta["vectors"]` is written once, and `recognize` is its first caller.** The
+  convention has two owners that disagree at the edges: `track` coerces `{"3": v}` and
+  `{3.0: v}` where `recognize` refuses them, and `track` refuses a mapping only when *no* key
+  names a row where `recognize` refuses when *any* key does not — so one embedder can feed a
+  chain whose `track` accepts a frame and whose `recognize` refuses it, over the same metadata
+  key, and C8's scatter-back was about to be the third opinion.
+  `topology/elements/_vectors.py` is that rule written once: integral keys (`int`/`np.integer`,
+  never `bool`/`np.bool_`, never a float or a string), a negative key refused **always** even
+  when no detection count is knowable, any out-of-range key refusing the frame, an empty mapping
+  legal, and every refusal raised *before* the first pair is yielded, because the callers query
+  a gallery per pair and half a frame is not an answer.
+  **`track` is deliberately not repointed in this slice**, and the first version of this entry
+  claimed otherwise while `track.py` was not in the diff at all. Two reasons it waits: swapping
+  the reader makes `track` *stricter*, which is a behaviour change owing its own red tests, and
+  `track.py` is the file the queued C8b branch is already editing, so doing it here buys a
+  rebase conflict against reviewed work. The gap is executable rather than asserted —
+  `TestTheReaderTrackStillDoesNotUse` in `tests/topology/test_vectors_rows.py` pins both edges
+  (`{"0": v}` coerced by `track` and refused by the shared reader; `{0: v, 7: v}` on three rows
+  half-dropped by `track` and refused by the shared reader) and is the follow-up's acceptance
+  criteria in advance. Follow-up: **TRACK-VECTORS**, after C8b merges.
 - **The gallery format is shipinfer's (ADR-006), and it is an entry in the model repository.**
   shipvision has no `save`/`load` by design. `.npz` because the payload is an `(N, d)` float32
   matrix; `allow_pickle=False` because a repository is a directory an operator syncs from

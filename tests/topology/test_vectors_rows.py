@@ -1,16 +1,15 @@
-"""The one reader of ``meta["vectors"]``: every shape it takes and every one it refuses.
+"""The rule for reading ``meta["vectors"]``: every shape it takes and every one it refuses.
 
-:func:`~shipinfer.topology.elements._vectors.rows_by_index` exists because the convention had
-two owners that disagreed at the edges — ``recognize`` refused ``{"3": v}`` and ``track``
-coerced it, ``recognize`` refused a mapping when *any* key was out of range and ``track`` only
-when *no* key was in range — and C8's scatter-back was about to be the third. A rule with one
-home needs one test file, and this is it: the element tests above check what an element *does*
-with the rows, this checks what a row *is*.
+:func:`~shipinfer.topology.elements._vectors.rows_by_index` exists because the convention has
+two owners that disagree at the edges — ``recognize`` refuses ``{"3": v}`` and ``track``
+coerces it, ``recognize`` refuses a mapping when *any* key is out of range and ``track`` only
+when *no* key is in range — and C8's scatter-back was about to be the third. ``recognize`` has
+moved onto the shared rule; ``track`` has not, and the last class here pins that gap open so
+the follow-up that closes it cannot be forgotten.
 
-No element, no gallery, no ``shipvision`` — the reader is numpy and
-:mod:`shipinfer.core.errors`, so every test here runs on any host, with or without the
-submodule. That is not an accident of this file; it is the layering rule the module was
-extracted to keep.
+The reader itself is numpy and :mod:`shipinfer.core.errors` — no gallery, no ``shipvision`` —
+so every test here runs on any host, with or without the submodule. That is not an accident
+of this file; it is the layering rule the module was extracted to keep.
 """
 
 from __future__ import annotations
@@ -21,7 +20,11 @@ import numpy as np
 import pytest
 
 from shipinfer.core.errors import ValidationError
+from shipinfer.core.request import RequestContext
+from shipinfer.topology.base import ChainItem
+from shipinfer.topology.caps import parse_caps
 from shipinfer.topology.elements._vectors import rows_by_index
+from shipinfer.topology.elements.track import ShipvisionTrack
 
 #: The prefix a caller passes so a refusal names the element and the frame. Every message
 #: this module raises has to start with it, which the last test in this file asserts over
@@ -341,3 +344,58 @@ class TestEveryRefusalNamesTheCaller:
             rows_by_index(vectors, detections, who=WHO)
 
         assert str(caught.value).startswith(WHO), str(caught.value)
+
+
+class TestTheReaderTrackStillDoesNotUse:
+    """``track._embeddings`` is a second, laxer copy of this rule — pinned, not fixed here.
+
+    The module docstring of :mod:`shipinfer.topology.elements._vectors` used to claim
+    ``track`` had been repointed at it. It has not: ``track.py`` is untouched by this slice.
+    Repointing it makes ``track`` **stricter**, which is a behaviour change owing its own red
+    tests, and ``track.py`` is the file a queued branch is already editing, so doing it here
+    buys a rebase conflict against work that is already reviewed.
+
+    What is not acceptable is a claim that outruns the tree, so the gap is written down as an
+    executable fact instead. These two tests are the follow-up's acceptance criteria in
+    advance: **TRACK-VECTORS** swaps the reader, and when it does both of them go red and are
+    rewritten as agreement rather than divergence.
+    """
+
+    @staticmethod
+    def _track_reads(vectors: Any, count: int) -> Any:
+        """What ``track`` makes of ``vectors`` on a frame of ``count`` detections.
+
+        The private method directly, because the point being pinned is the *reader*, and
+        going through ``process()`` would need a tracker and therefore the submodule.
+        """
+        element = ShipvisionTrack("track")
+        item = ChainItem(
+            context=RequestContext(camera_id="cam-A", frame_id=184102),
+            caps=parse_caps(("bgr@cpu",))[0],
+            payload=None,
+            meta={"vectors": vectors},
+        )
+        return element._embeddings(item, Sized(count))  # type: ignore[arg-type]
+
+    def test_a_string_key_is_refused_here_and_still_coerced_by_track(self) -> None:
+        """``{"0": v}`` — the JSON round-trip that turns every row index into text."""
+        vector = np.ones(4, dtype=np.float32)
+
+        with pytest.raises(ValidationError, match="not detection row indices"):
+            list(rows_by_index({"0": vector}, Sized(3), who=WHO))
+
+        assert self._track_reads({"0": vector}, 3)[0] is vector
+
+    def test_an_out_of_range_key_is_refused_here_and_still_dropped_by_track(self) -> None:
+        """``{0: v, 7: v}`` on three rows: one key lands, one names nothing.
+
+        ``track`` refuses only when *no* key is in range, so row 7 is discarded in silence —
+        the half-scattered frame the shared reader exists to make loud.
+        """
+        vector = np.ones(4, dtype=np.float32)
+        mapping = {0: vector, 7: vector}
+
+        with pytest.raises(ValidationError, match="names row 7"):
+            list(rows_by_index(mapping, Sized(3), who=WHO))
+
+        assert self._track_reads(mapping, 3) == [vector, None, None]
