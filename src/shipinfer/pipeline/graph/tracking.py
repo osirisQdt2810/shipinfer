@@ -51,6 +51,7 @@ from shipinfer.core.errors import ConfigurationError
 from shipinfer.pipeline.graph.objects import ObjectBatch
 from shipinfer.pipeline.graph.stage import Cardinality, PipelineStage
 from shipinfer.pipeline.graph.state import DETECTIONS, FRAME_INPUT
+from shipinfer.topology.bridge import shipvision_available
 from shipinfer.topology.elements.track import (  # noqa: F401  (re-export: see the docstring)
     TrackerShard,
     _CameraShard,
@@ -107,7 +108,7 @@ except ImportError as exc:  # pragma: no cover - exercised on a checkout without
 
 
 def tracking_available() -> bool:
-    """Whether ``shipvision.mot`` can be imported on this host.
+    """Whether ``shipvision`` can be imported on this host.
 
     Asked rather than assumed because ``3rdparty/shipvision`` is a submodule and CI
     deliberately does not check it out — that non-checkout is what keeps "every native
@@ -115,8 +116,17 @@ def tracking_available() -> bool:
     Tracking is the one part of the DAG with *no* counterpart here: reimplementing five
     trackers in this repository to hedge against a missing library is exactly the
     duplication the ponytail principle refuses. So it degrades to "off", loudly.
+
+    **Delegated to** :func:`~shipinfer.topology.bridge.shipvision_available` rather than
+    answered from the ``_TRACKERS`` binding below, so that "is the submodule here" is one
+    fact with one owner. The two could disagree, and did: the module-scope binding is decided
+    once at import and stays decided, while :class:`TrackerShard` — which this stage now
+    shares with the chain's ``track`` element — asks the bridge's loader on every call. Under
+    a test that arranges the absence *after* this module was imported, the stale binding said
+    "available" while the shard said "not", and the tests that should have skipped failed
+    instead. The bridge's answer is the live one and the one the code path actually obeys.
     """
-    return _TRACKERS is not None
+    return shipvision_available()
 
 
 def tracking_import_error() -> ImportError | None:

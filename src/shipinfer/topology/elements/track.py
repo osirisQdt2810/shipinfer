@@ -92,6 +92,16 @@ DEFAULT_ALGORITHM = "bytetrack"
 #: 64 is comfortably above the first and far below the second. ``0`` disables the recovery and
 #: refuses every regression, which is the old behaviour and what a deployment that would
 #: rather see the frames stop than see the ids restart should set.
+#:
+#: **The recovery has a window it does not cover, and it is this many frames wide.** A restart
+#: is only recognised once the new stream's id is this far *below* the old high-water mark, so
+#: a camera that ran to frame 39 and restarts at 0 has every one of its first 40 frames refused
+#: — the regression is real but too small to call — and the frame that finally passes 39 then
+#: continues the **old** tracker's identities straight across the discontinuity, with no reset
+#: counted (measured). A short-lived stream can therefore be refused wholesale and a long one
+#: can carry a dead stream's ids. Both are strictly better than refusing the camera for the
+#: process's life, and neither is as good as the announced ``remove_camera`` + ``add_camera``
+#: ADR-018 names: this is the floor under a deployment that never sends it, not a substitute.
 DEFAULT_REGRESSION_RESET = 64
 
 
@@ -322,6 +332,16 @@ class TrackerShard:
         behind this one camera's in-flight update; a shard dropped in the window is reset for
         nothing, which costs nothing.
 
+        **It can still wait, on one camera, for one frame.** That is the residual and it is
+        accepted deliberately: if a worker is inside ``tracker.update`` for *this* camera, the
+        reset queues behind that update (measured at 0.40 s against a tracker made artificially
+        slow; tens of microseconds in the ordinary case). :meth:`drop` has no such wait because
+        unlinking a table entry needs no agreement with the frame in flight — a **reset** does,
+        since resetting a tracker mid-update is the half-forgotten state the per-camera lock
+        exists to prevent. The wait is bounded by one update on one camera, and the caller
+        (``camera_added``) is holding the runner's ``_lifecycle`` while it happens, so the cost
+        is one lifecycle call delayed by one frame rather than a stall that can grow.
+
         Returns:
             Whether there was a tracker to reset.
         """
@@ -525,6 +545,10 @@ class ShipvisionTrack(Element):
         )
         self._shard: TrackerShard | None = None
         self._metrics = _TrackMetrics(None, name)
+        # Bound once, next to the other resolve-once handles: `self._metrics.implicit_reset`
+        # written at the call site mints a bound-method object on every frame, and this one is
+        # on the per-frame path at a thousand frames a second (CONVENTIONS §2.5).
+        self._on_implicit_reset: Callable[[str], None] = self._metrics.implicit_reset
         # What the gauge last reported, so the per-frame path is an int compare and the write
         # happens only when a camera appears or leaves.
         self._reported_cameras = -1
@@ -584,6 +608,7 @@ class ShipvisionTrack(Element):
         self._FrameTag = types.FrameTag
         self._shard = TrackerShard(self._algorithm, options=self._options, backend=None)
         self._metrics = _TrackMetrics(context.metrics, self.name)
+        self._on_implicit_reset = self._metrics.implicit_reset
         self._reported_cameras = -1
         self._note_cameras()
 
@@ -607,6 +632,12 @@ class ShipvisionTrack(Element):
         Never *builds* a tracker: this fires for every camera placed on the shard, and minting
         a Kalman filter for forty-nine cameras that are not on this element — on the thread
         holding the runner's lifecycle lock — is work for nothing.
+
+        Unlike :meth:`camera_removed`, this one **can wait** — for one in-flight frame on this
+        one camera, while holding the runner's ``_lifecycle``. See
+        :meth:`TrackerShard.reset_if_present` for why that residual is accepted rather than
+        engineered away: a reset has to agree with the update it interrupts, and a drop does
+        not.
         """
         if self._shard is not None:
             self._shard.reset_if_present(camera_id)
@@ -642,9 +673,10 @@ class ShipvisionTrack(Element):
             ValidationError: ``meta["detections"]`` is not a
                 :class:`~shipinfer.topology.elements.detections.Detections`, or
                 ``meta["vectors"]`` is present in a form that cannot be attributed to
-                detections. Both are a mis-wired chain rather than a late frame, and a
-                tracker that silently ran without the appearance vectors a deployment paid a
-                re-ID network for would be the empty-result-means-failure this codebase refuses.
+                detections, or the item carries no frame id. All three are a mis-wired chain
+                rather than a late frame, and a tracker that silently ran without the
+                appearance vectors a deployment paid a re-ID network for would be the
+                empty-result-means-failure this codebase refuses.
             ServerStateError: called before :meth:`Element.open`.
         """
         detections = item.meta.get("detections")
@@ -667,7 +699,7 @@ class ShipvisionTrack(Element):
             tracks = self._shard.update(
                 vision,
                 regression_reset=self._regression_reset,
-                on_implicit_reset=self._metrics.implicit_reset,
+                on_implicit_reset=self._on_implicit_reset,
             )
         except TrackingError:
             # Counted and emitted, never raised on: the runner fails an item's future on any
@@ -678,8 +710,18 @@ class ShipvisionTrack(Element):
         # `tracks` is handed on as shipvision's own `Track` objects, deliberately. They are
         # exactly what the cross-camera tier consumes (`mtmc.CameraTracks(tag, tracks, h, w)`),
         # so a pure record here would be a shape `mtmc` converts straight back — losing the
-        # embedding, the state and the tag on the way — and the pool already returns
-        # `dataclasses.replace` copies, so buffering one past the next frame is safe.
+        # embedding, the state and the tag on the way.
+        #
+        # Buffering them past the camera's next frame is safe on **both** pool backends, for
+        # two different reasons, and a reader who changes either one has to keep the property:
+        # the python pool (`TrackPool.output`) mutates its `Track` objects in place and hands
+        # back `dataclasses.replace` copies; the native pool — which is what `backend=None`
+        # resolves to on any host with `shipvision._C` built, so it is the path this element
+        # usually takes — hands back the live list uncopied, and is safe because
+        # `_NativePool.decode` mints fresh `Track`s off a freshly allocated array every frame,
+        # leaving nothing in flight to mutate. The property itself is pinned by
+        # `test_the_published_tracks_are_not_rewritten_by_the_next_frame`, on whichever backend
+        # this host built, rather than either mechanism.
         return item.derive(caps=self.output_caps[0], payload=None, tracks=tracks)
 
     def _untracked(self, item: ChainItem) -> ChainItem:
@@ -698,7 +740,24 @@ class ShipvisionTrack(Element):
         second box format in the system, and ``shipvision.types`` names the exact bug that
         causes — a converter that wrote width where height belonged tracks square objects
         perfectly and falls apart on a ship.
+
+        Raises:
+            ValidationError: the item carries no frame id, or ``meta["vectors"]`` cannot be
+                attributed to detection rows. The frame-id check is here rather than left to
+                ``FrameTag`` because ``FrameTag`` refuses it with
+                ``shipvision.errors.ConfigurationError`` — a foreign class, from the one
+                hand-over where this element speaks another library's vocabulary, and the
+                only place in the chain a caller could be handed somebody else's exception
+                type.
         """
+        frame_id = item.context.frame_id
+        if frame_id < 0:
+            raise ValidationError(
+                f"track element {self.name!r} was handed an item for camera "
+                f"{item.context.camera_id!r} with frame_id {frame_id}: tracking is ordered by "
+                "frame id, and a negative one is the RequestContext default, which means "
+                "nothing upstream ever tagged this frame"
+            )
         vectors = self._embeddings(item, detections)
         keep = self._selected(detections)
         boxes = detections.boxes
@@ -708,7 +767,7 @@ class ShipvisionTrack(Element):
         return self._Detections(
             tag=self._FrameTag(
                 camera_id=item.context.camera_id,
-                frame_id=item.context.frame_id,
+                frame_id=frame_id,
                 timestamp=item.context.captured_unix_ns / 1e9,
             ),
             items=[
@@ -749,8 +808,20 @@ class ShipvisionTrack(Element):
         where geometry alone is ambiguous, and a tracker that quietly ran without it is a
         measurable accuracy loss reported as a healthy chain.
 
+        The mapping form is checked for **coverage** as well as for key type. Partial coverage
+        is legitimate and stays legal — only the person rows are embedded when only a person
+        re-ID model ran — but a mapping whose keys name *no* row at all is an off-by-N
+        scatter-back, and without this it lands as ``embedding=None`` on every detection with
+        nothing said. That is the same silence the sequence form's length check already
+        refuses, arriving through the other door.
+
         Returns:
             Something indexable by detection row, or ``None`` when the chain filed no vectors.
+
+        Raises:
+            ValidationError: the vectors are not attributable to detection rows — wrong
+                container, wrong length, keys that are not indices, or keys that index nothing
+                in this frame.
         """
         vectors = item.meta.get("vectors")
         if vectors is None:
@@ -766,6 +837,16 @@ class ShipvisionTrack(Element):
                     "output tensors are not an attribution; scatter them back onto the rows "
                     "they came from first"
                 ) from exc
+            if count and not any(0 <= key < count for key in by_index):
+                raise ValidationError(
+                    f"track element {self.name!r}: meta['vectors'] is a mapping whose keys "
+                    f"{sorted(by_index)[:4]} name no detection in this frame, which has "
+                    f"{count} (indices 0..{count - 1}). Covering *some* rows is fine — only "
+                    "the person rows are embedded when only a person re-ID model ran — but "
+                    "covering none of them is an off-by-N scatter-back, and attaching no "
+                    "appearance at all is a measurable accuracy loss reported as a healthy "
+                    "chain"
+                )
             return [by_index.get(index) for index in range(count)]
         if isinstance(vectors, (np.ndarray, Sequence)):
             if len(vectors) != count:
