@@ -588,6 +588,59 @@ class TestTrackLifecycle:
         finally:
             built.close()
 
+    def test_one_frame_short_of_the_threshold_is_still_a_reorder(self, metrics) -> None:
+        """The low side of the boundary, at exactly ``regression_reset - 1``.
+
+        The band between "a regression of 2" and "a regression of 500" was free: `>=` could
+        become `>`, or the threshold could be scaled by any factor, and every other test
+        stayed green. Getting this line wrong is asymmetric — one frame too low and a single
+        reordered frame restarts every identity on the camera, which is the failure the
+        threshold exists to prevent — so the pin is *at* the boundary rather than near it.
+        """
+        built = opened(registry=metrics)
+        try:
+            built.process(item("cam-a", 100, detections=detections((0, 0, 40, 40))))
+
+            emitted = built.process(
+                item(
+                    "cam-a",
+                    100 - (DEFAULT_REGRESSION_RESET - 1),
+                    detections=detections((0, 0, 40, 40)),
+                )
+            )
+
+            assert emitted.meta["missing_stages"] == ("track",)
+            assert "tracks" not in emitted.meta
+            assert built._shard.stats()["out_of_order"] == 1
+            assert built._shard.stats()["implicit_resets"] == 0
+            assert value(metrics, "shipinfer_track_implicit_resets_total", camera="cam-a") == 0
+        finally:
+            built.close()
+
+    def test_a_regression_of_exactly_the_threshold_is_a_restart(self, metrics) -> None:
+        """The high side, at exactly ``regression_reset``: the comparison is ``>=``, so this
+        frame is the first one read as a restarted stream rather than as a reordering. It is
+        tracked, it is not counted as out of order, and the reset is counted once."""
+        built = opened(registry=metrics)
+        try:
+            built.process(item("cam-a", 100, detections=detections((0, 0, 40, 40))))
+
+            emitted = built.process(
+                item(
+                    "cam-a",
+                    100 - DEFAULT_REGRESSION_RESET,
+                    detections=detections((0, 0, 40, 40)),
+                )
+            )
+
+            assert "missing_stages" not in emitted.meta
+            assert len(emitted.meta["tracks"]) == 1
+            assert built._shard.stats()["implicit_resets"] == 1
+            assert built._shard.stats()["out_of_order"] == 0
+            assert value(metrics, "shipinfer_track_implicit_resets_total", camera="cam-a") == 1
+        finally:
+            built.close()
+
     def test_regression_reset_zero_refuses_every_regression(self, metrics) -> None:
         """The old behaviour, for a deployment that would rather see the frames stop than see
         every identity under a camera restart."""
@@ -604,6 +657,40 @@ class TestTrackLifecycle:
 
     def test_the_threshold_default_is_above_a_reorder_and_below_a_restart(self) -> None:
         assert DEFAULT_REGRESSION_RESET == 64
+
+    def test_a_stream_restarting_inside_the_window_is_refused_then_continues_old_ids(
+        self, element
+    ) -> None:
+        """The window :data:`DEFAULT_REGRESSION_RESET` names, pinned so the docstring's caveat
+        is a measurement and not a guess.
+
+        A camera that ran to frame 39 and restarts at 0 regresses by only 39 — real, but too
+        small to call a restart. So every frame of the new stream up to the old high-water mark
+        is refused, and the first frame past it continues the **old** identities across the
+        discontinuity with no reset counted. Strictly better than refusing the camera for the
+        process's life, and strictly worse than the announced remove + add.
+        """
+        long_lived = opened({"options": {"min_hits": 1, "max_age": 300}})
+        try:
+            for frame in range(40):
+                emitted = long_lived.process(
+                    item("cam-a", frame, detections=detections((0, 0, 40, 40)))
+                )
+            before = track_ids(emitted)
+
+            refused = [
+                long_lived.process(item("cam-a", frame, detections=detections((0, 0, 40, 40))))
+                for frame in range(40)
+            ]
+            after_the_cut = long_lived.process(
+                item("cam-a", 40, detections=detections((0, 0, 40, 40)))
+            )
+
+            assert all("tracks" not in e.meta for e in refused), "the whole restart is refused"
+            assert long_lived._shard.stats()["implicit_resets"] == 0
+            assert track_ids(after_the_cut) == before, "the old identity crossed the cut"
+        finally:
+            long_lived.close()
 
     def test_close_forgets_every_camera(self, element) -> None:
         """A reopened chain must not continue ids from before a gap it cannot see."""
@@ -690,6 +777,33 @@ class TestTrackPlane:
         assert str(emitted.caps) == "meta@cpu"
         assert emitted.payload is None
 
+    def test_the_published_tracks_are_not_rewritten_by_the_next_frame(self, element) -> None:
+        """A consumer may hold a frame's tracks past the camera's next frame — the
+        cross-camera tier buffers exactly this — and the pool mutates its own ``Track``
+        objects in place, so aliasing them would make a buffered run read as the last frame's
+        state on every entry.
+
+        Both pool backends make it safe and for different reasons (``TrackPool.output`` copies
+        with ``dataclasses.replace``; the native pool decodes fresh objects off a fresh array
+        every frame), so what is asserted here is the **property**, on whichever backend this
+        host actually built.
+        """
+        first = element.process(item(frame=0, detections=detections((0, 0, 40, 40))))
+        held = first.meta["tracks"]
+        assert held, "nothing was published, so nothing was pinned"
+        before = [
+            (t.track_id, np.asarray(t.box, dtype=np.float64).tolist(), t.time_since_update)
+            for t in held
+        ]
+
+        element.process(item(frame=1, detections=detections((7, 7, 47, 47))))
+
+        after = [
+            (t.track_id, np.asarray(t.box, dtype=np.float64).tolist(), t.time_since_update)
+            for t in held
+        ]
+        assert after == before, "the next frame rewrote a track a consumer was still holding"
+
     def test_frame_hw_rides_along(self, element) -> None:
         """The boxes are in the source frame's pixels and the payload that could have said how
         big that is has just been dropped. ``mtmc`` refuses a non-positive extent."""
@@ -746,6 +860,37 @@ class TestWhatItReadsOffTheItem:
 
         assert emitted.meta["tracks"][0].embedding is not None
 
+    def test_vectors_keyed_outside_the_detection_rows_are_refused(self, element) -> None:
+        """An off-by-N scatter-back. Without the coverage check every row silently gets
+        ``embedding=None`` and the chain reads as healthy, which is the same silence the
+        sequence form's length check already refuses, arriving through the other door."""
+        with pytest.raises(ValidationError, match="name no detection"):
+            element.process(
+                item(
+                    detections=detections((0, 0, 40, 40)),
+                    vectors={5: np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)},
+                )
+            )
+
+    def test_vectors_covering_only_some_rows_stay_legal(self, element) -> None:
+        """Partial coverage is what a chain with one re-ID model produces: only the person
+        rows are embedded. The uncovered rows track on motion alone, which is the documented
+        `embedding=None` path and not a refusal."""
+        emitted = element.process(
+            item(
+                detections=Detections(
+                    boxes=np.array([[0, 0, 40, 40], [200, 200, 260, 260]], dtype=np.float32),
+                    scores=np.array([0.9, 0.9], dtype=np.float32),
+                    class_ids=np.array([0, 1], dtype=np.int32),
+                    labels=("ship", "person"),
+                ),
+                vectors={1: np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)},
+            )
+        )
+
+        embeddings = [t.embedding is not None for t in emitted.meta["tracks"]]
+        assert sorted(embeddings) == [False, True]
+
     def test_vectors_that_cannot_be_attributed_to_rows_are_refused(self, element) -> None:
         """A re-ID model's raw output tensors under their own names are not an attribution.
         Ignoring them would be a measurable accuracy loss reported as a healthy chain."""
@@ -760,6 +905,24 @@ class TestWhatItReadsOffTheItem:
     def test_raw_model_outputs_under_detections_are_refused_by_type(self, element) -> None:
         with pytest.raises(ValidationError, match="detections"):
             element.process(item(detections={"output0": object()}))
+
+    def test_an_item_with_no_frame_id_is_refused_in_shipinfers_own_vocabulary(
+        self, element
+    ) -> None:
+        """``RequestContext``'s default ``frame_id`` is ``-1``, and ``FrameTag`` refuses a
+        negative one — with ``shipvision.errors.ConfigurationError``. This is the single
+        hand-over where the element speaks another library's vocabulary, so it is the one
+        place a caller could be handed somebody else's exception class; the check happens on
+        this side of the seam."""
+        untagged = ChainItem(
+            context=RequestContext(camera_id="cam-a"),
+            caps=Caps.parse("bgr@cpu"),
+            payload="frame-handle",
+            meta={"detections": detections((0, 0, 40, 40))},
+        )
+
+        with pytest.raises(ValidationError, match="frame_id -1"):
+            element.process(untagged)
 
     def test_the_frame_tag_reaches_the_tracker_intact(self, element) -> None:
         """``(camera_id, frame_id)`` rides untouched from ingest to the last element (ADR-002),
@@ -806,7 +969,14 @@ class TestUnderThreads:
 
         assert len(results) == 2
         tracked = [r for r in results if "tracks" in r.meta]
-        assert len(tracked) >= 1, "both frames of one camera were refused"
+        refused = [r for r in results if "tracks" not in r.meta]
+        # Which frame checked first is the race, so the count is read off the shard's own
+        # counter rather than asserted as a lower bound: `>= 1` cannot be false here, because
+        # only the frame that checks *second* can lose.
+        out_of_order = element._shard.stats()["out_of_order"]
+        assert out_of_order in (0, 1), "a frame was refused that did not lose a race"
+        assert len(tracked) == 2 - out_of_order
+        assert [r.key[1] for r in refused] == ([] if out_of_order == 0 else [1])
 
 
 # -- over the runner --------------------------------------------------------------------------
