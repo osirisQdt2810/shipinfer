@@ -266,6 +266,29 @@ class Element(abc.ABC):
     accepts: ClassVar[tuple[str, ...]] = ()
     #: Caps this element hands on. Empty means it is a sink.
     produces: ClassVar[tuple[str, ...]] = ()
+    #: Whether :meth:`open` resolves this element against :attr:`ElementContext.models` --
+    #: **the pool question, and only that one**. ``pool`` answers ``True``; ``mock`` answers
+    #: ``False`` because it invents a box.
+    #:
+    #: Two readers, and they ask it together rather than each inventing their own test: the
+    #: in-process runner's expiry gate (which elements submit and wait, and so can be late)
+    #: and ``run``'s pool predicate, which builds an
+    #: :class:`~shipinfer.engine.InferenceServer` only when
+    #: :attr:`~shipinfer.runners.base.Runner.needs_model_pool` is ``True`` as well
+    #: (``cli/commands/run.py``) -- a ``fleet`` launcher runs the same chain and builds none,
+    #: because its shards each build their own.
+    #:
+    #: **"Must this slot name a ``model:``?" is a different question and a different
+    #: ClassVar**, owned by the seam slice that replaces the kind-level check. The two are
+    #: not the same predicate and will visibly diverge: an ``nvinfer`` element names a
+    #: ``model:`` -- GStreamer needs the artefact -- and never touches this process's pool,
+    #: so it answers yes there and ``False`` here. Neither can be inferred from :attr:`kind`,
+    #: because a ``detect`` slot is a model kind whichever ``impl`` fills it.
+    #:
+    #: A class that answers ``True`` must raise from :meth:`_do_open` when the context carries
+    #: no pool, so that the declaration and the requirement cannot drift; ``tests/topology``
+    #: walks every registered implementation and checks exactly that.
+    needs_model: ClassVar[bool] = False
 
     def __init__(
         self,

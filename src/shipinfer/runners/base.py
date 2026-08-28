@@ -107,6 +107,17 @@ class Runner(abc.ABC):
     #: (``runners/service.py``).
     manages_cameras: ClassVar[bool] = False
 
+    #: Whether this runner opens the chain's elements in *this* process, and therefore wants
+    #: the caller to build a model pool and hand it in as ``models=``. ``False`` here, and the
+    #: default is the safe one: a runner that executes the chain somewhere else must not make
+    #: the process that built it load engines. ``fleet`` is exactly that case and leaves it
+    #: ``False`` -- each shard builds its own engine (``cli/shard.py``), and a launcher that
+    #: built one too would hold a CUDA context on every device it can see while doing no
+    #: inference at all, which is the one thing ``check_layers.py`` keeps ``launch`` clean of.
+    #: Read off the *class*, before a runner is built, because ``models=`` is a constructor
+    #: argument (``cli/commands/run.py``).
+    needs_model_pool: ClassVar[bool] = False
+
     def __init__(
         self,
         topology: Topology,
