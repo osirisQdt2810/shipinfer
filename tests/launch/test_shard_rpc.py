@@ -202,6 +202,41 @@ class TestALauncherTalksToAShard:
             client.remove_camera("cam-nope", timeout_s=0.5)
 
 
+class TestAServingShardIsNotMistakenForAStoppedOne:
+    """``main`` polls ``wait_for_termination`` and exits when it answers True.
+
+    grpc's method returns True on *timeout*, which is the opposite of "terminated", so
+    passing it through cost the fleet its shards: they bound, installed the chain, and were
+    gone before the launcher placed a camera. Nothing above notices — every other test here
+    drives RPCs against a server somebody else keeps alive.
+    """
+
+    def test_a_serving_shard_reports_that_it_has_not_terminated(
+        self, shard: tuple[ShardServer, RecordingRunner]
+    ) -> None:
+        server, _ = shard
+        assert server.wait_for_termination(0.2) is False
+
+    def test_the_poll_loop_a_shard_sits_in_does_not_exit_while_it_serves(
+        self, shard: tuple[ShardServer, RecordingRunner]
+    ) -> None:
+        """The consequence, in the shape ``cli/shard.py`` writes it."""
+        server, _ = shard
+        polls = 0
+        while not server.wait_for_termination(0.1):
+            polls += 1
+            if polls == 3:
+                break
+        assert polls == 3, "the shard's own loop fell out while the server was healthy"
+
+    def test_a_stopped_shard_reports_that_it_has_terminated(
+        self, shard: tuple[ShardServer, RecordingRunner]
+    ) -> None:
+        server, _ = shard
+        server.stop(grace_s=0.5)
+        assert server.wait_for_termination(2.0) is True
+
+
 class TestABoundPortIsRefusedBeforeAnyCamera:
     def test_a_second_shard_on_the_same_port_refuses_typed(
         self, shard: tuple[ShardServer, RecordingRunner]
