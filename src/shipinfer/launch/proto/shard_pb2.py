@@ -27,13 +27,15 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import struct_pb2 as google_dot_protobuf_dot_struct__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\"shipinfer/launch/proto/shard.proto\x12\x13shipinfer.launch.v1\x1a\x1cgoogle/protobuf/struct.proto\"D\n\rShardIdentity\x12\x10\n\x08shard_id\x18\x01 \x01(\x05\x12\x14\n\x0c\x63ontrol_port\x18\x02 \x01(\x05\x12\x0b\n\x03pid\x18\x03 \x01(\x05\"\x0e\n\x0cReadyRequest\"Q\n\nReadyReply\x12\x34\n\x08identity\x18\x01 \x01(\x0b\x32\".shipinfer.launch.v1.ShardIdentity\x12\r\n\x05state\x18\x02 \x01(\t\"L\n\x0fTopologyRequest\x12\x12\n\nchain_yaml\x18\x01 \x01(\t\x12\x11\n\tshared_by\x18\x02 \x03(\x05\x12\x12\n\nshare_rank\x18\x03 \x03(\x05\"C\n\rTopologyReply\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x0e\n\x06reason\x18\x02 \x01(\t\x12\x10\n\x08topology\x18\x03 \x01(\t\"U\n\nCameraSpec\x12\x11\n\tcamera_id\x18\x01 \x01(\t\x12\x0b\n\x03url\x18\x02 \x01(\t\x12\x0b\n\x03\x66ps\x18\x03 \x01(\x01\x12\x11\n\x04loop\x18\x04 \x01(\x08H\x00\x88\x01\x01\x42\x07\n\x05_loop\"C\n\x10\x41\x64\x64\x43\x61meraRequest\x12/\n\x06\x63\x61mera\x18\x01 \x01(\x0b\x32\x1f.shipinfer.launch.v1.CameraSpec\"2\n\x0e\x41\x64\x64\x43\x61meraReply\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x0e\n\x06reason\x18\x02 \x01(\t\";\n\x13RemoveCameraRequest\x12\x11\n\tcamera_id\x18\x01 \x01(\t\x12\x11\n\ttimeout_s\x18\x02 \x01(\x01\"C\n\x11RemoveCameraReply\x12\x0f\n\x07removed\x18\x01 \x01(\x08\x12\r\n\x05\x63lean\x18\x02 \x01(\x08\x12\x0e\n\x06reason\x18\x03 \x01(\t\"\x0f\n\rHealthRequest\"\xad\x01\n\x0bHealthReply\x12\r\n\x05state\x18\x01 \x01(\t\x12\'\n\x06\x65ngine\x18\x02 \x01(\x0b\x32\x17.google.protobuf.Struct\x12(\n\x07\x63\x61meras\x18\x03 \x01(\x0b\x32\x17.google.protobuf.Struct\x12,\n\x0bvram_budget\x18\x04 \x01(\x0b\x32\x17.google.protobuf.Struct\x12\x0e\n\x06\x64\x65tail\x18\x05 \x01(\t\"\x0e\n\x0cStatsRequest\"D\n\nStatsReply\x12&\n\x05stats\x18\x01 \x01(\x0b\x32\x17.google.protobuf.Struct\x12\x0e\n\x06\x64\x65tail\x18\x02 \x01(\t\"!\n\x0c\x44rainRequest\x12\x11\n\ttimeout_s\x18\x01 \x01(\x01\"/\n\nDrainReply\x12\x11\n\tabandoned\x18\x01 \x01(\x05\x12\x0e\n\x06\x64\x65tail\x18\x02 \x01(\t\" \n\x0bStopRequest\x12\x11\n\ttimeout_s\x18\x01 \x01(\x01\".\n\tStopReply\x12\x11\n\tabandoned\x18\x01 \x01(\x05\x12\x0e\n\x06\x64\x65tail\x18\x02 \x01(\t2\x9f\x05\n\x05Shard\x12K\n\x05Ready\x12!.shipinfer.launch.v1.ReadyRequest\x1a\x1f.shipinfer.launch.v1.ReadyReply\x12Z\n\x0eUpdateTopology\x12$.shipinfer.launch.v1.TopologyRequest\x1a\".shipinfer.launch.v1.TopologyReply\x12W\n\tAddCamera\x12%.shipinfer.launch.v1.AddCameraRequest\x1a#.shipinfer.launch.v1.AddCameraReply\x12`\n\x0cRemoveCamera\x12(.shipinfer.launch.v1.RemoveCameraRequest\x1a&.shipinfer.launch.v1.RemoveCameraReply\x12N\n\x06Health\x12\".shipinfer.launch.v1.HealthRequest\x1a .shipinfer.launch.v1.HealthReply\x12K\n\x05Stats\x12!.shipinfer.launch.v1.StatsRequest\x1a\x1f.shipinfer.launch.v1.StatsReply\x12K\n\x05\x44rain\x12!.shipinfer.launch.v1.DrainRequest\x1a\x1f.shipinfer.launch.v1.DrainReply\x12H\n\x04Stop\x12 .shipinfer.launch.v1.StopRequest\x1a\x1e.shipinfer.launch.v1.StopReplyb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\"shipinfer/launch/proto/shard.proto\x12\x13shipinfer.launch.v1\x1a\x1cgoogle/protobuf/struct.proto\"D\n\rShardIdentity\x12\x10\n\x08shard_id\x18\x01 \x01(\x05\x12\x14\n\x0c\x63ontrol_port\x18\x02 \x01(\x05\x12\x0b\n\x03pid\x18\x03 \x01(\x05\"\x0e\n\x0cReadyRequest\"Q\n\nReadyReply\x12\x34\n\x08identity\x18\x01 \x01(\x0b\x32\".shipinfer.launch.v1.ShardIdentity\x12\r\n\x05state\x18\x02 \x01(\t\"L\n\x0fTopologyRequest\x12\x12\n\nchain_yaml\x18\x01 \x01(\t\x12\x11\n\tshared_by\x18\x02 \x03(\x05\x12\x12\n\nshare_rank\x18\x03 \x03(\x05\"C\n\rTopologyReply\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x0e\n\x06reason\x18\x02 \x01(\t\x12\x10\n\x08topology\x18\x03 \x01(\t\"\x8c\x01\n\nCameraSpec\x12\x11\n\tcamera_id\x18\x01 \x01(\t\x12\x0b\n\x03url\x18\x02 \x01(\t\x12\x0b\n\x03\x66ps\x18\x03 \x01(\x01\x12\x11\n\x04loop\x18\x04 \x01(\x08H\x00\x88\x01\x01\x12\x35\n\x08priority\x18\x05 \x01(\x0e\x32#.shipinfer.launch.v1.CameraPriorityB\x07\n\x05_loop\"C\n\x10\x41\x64\x64\x43\x61meraRequest\x12/\n\x06\x63\x61mera\x18\x01 \x01(\x0b\x32\x1f.shipinfer.launch.v1.CameraSpec\"2\n\x0e\x41\x64\x64\x43\x61meraReply\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x0e\n\x06reason\x18\x02 \x01(\t\";\n\x13RemoveCameraRequest\x12\x11\n\tcamera_id\x18\x01 \x01(\t\x12\x11\n\ttimeout_s\x18\x02 \x01(\x01\"C\n\x11RemoveCameraReply\x12\x0f\n\x07removed\x18\x01 \x01(\x08\x12\r\n\x05\x63lean\x18\x02 \x01(\x08\x12\x0e\n\x06reason\x18\x03 \x01(\t\"\x0f\n\rHealthRequest\"\xad\x01\n\x0bHealthReply\x12\r\n\x05state\x18\x01 \x01(\t\x12\'\n\x06\x65ngine\x18\x02 \x01(\x0b\x32\x17.google.protobuf.Struct\x12(\n\x07\x63\x61meras\x18\x03 \x01(\x0b\x32\x17.google.protobuf.Struct\x12,\n\x0bvram_budget\x18\x04 \x01(\x0b\x32\x17.google.protobuf.Struct\x12\x0e\n\x06\x64\x65tail\x18\x05 \x01(\t\"\x0e\n\x0cStatsRequest\"D\n\nStatsReply\x12&\n\x05stats\x18\x01 \x01(\x0b\x32\x17.google.protobuf.Struct\x12\x0e\n\x06\x64\x65tail\x18\x02 \x01(\t\"!\n\x0c\x44rainRequest\x12\x11\n\ttimeout_s\x18\x01 \x01(\x01\"/\n\nDrainReply\x12\x11\n\tabandoned\x18\x01 \x01(\x05\x12\x0e\n\x06\x64\x65tail\x18\x02 \x01(\t\" \n\x0bStopRequest\x12\x11\n\ttimeout_s\x18\x01 \x01(\x01\".\n\tStopReply\x12\x11\n\tabandoned\x18\x01 \x01(\x05\x12\x0e\n\x06\x64\x65tail\x18\x02 \x01(\t*\xae\x01\n\x0e\x43\x61meraPriority\x12\x1f\n\x1b\x43\x41MERA_PRIORITY_UNSPECIFIED\x10\x00\x12%\n!CAMERA_PRIORITY_TRACKING_CRITICAL\x10\x01\x12\x18\n\x14\x43\x41MERA_PRIORITY_HIGH\x10\x02\x12\x1a\n\x16\x43\x41MERA_PRIORITY_NORMAL\x10\x03\x12\x1e\n\x1a\x43\x41MERA_PRIORITY_BACKGROUND\x10\x04\x32\x9f\x05\n\x05Shard\x12K\n\x05Ready\x12!.shipinfer.launch.v1.ReadyRequest\x1a\x1f.shipinfer.launch.v1.ReadyReply\x12Z\n\x0eUpdateTopology\x12$.shipinfer.launch.v1.TopologyRequest\x1a\".shipinfer.launch.v1.TopologyReply\x12W\n\tAddCamera\x12%.shipinfer.launch.v1.AddCameraRequest\x1a#.shipinfer.launch.v1.AddCameraReply\x12`\n\x0cRemoveCamera\x12(.shipinfer.launch.v1.RemoveCameraRequest\x1a&.shipinfer.launch.v1.RemoveCameraReply\x12N\n\x06Health\x12\".shipinfer.launch.v1.HealthRequest\x1a .shipinfer.launch.v1.HealthReply\x12K\n\x05Stats\x12!.shipinfer.launch.v1.StatsRequest\x1a\x1f.shipinfer.launch.v1.StatsReply\x12K\n\x05\x44rain\x12!.shipinfer.launch.v1.DrainRequest\x1a\x1f.shipinfer.launch.v1.DrainReply\x12H\n\x04Stop\x12 .shipinfer.launch.v1.StopRequest\x1a\x1e.shipinfer.launch.v1.StopReplyb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'shipinfer.launch.proto.shard_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
+  _globals['_CAMERAPRIORITY']._serialized_start=1245
+  _globals['_CAMERAPRIORITY']._serialized_end=1419
   _globals['_SHARDIDENTITY']._serialized_start=89
   _globals['_SHARDIDENTITY']._serialized_end=157
   _globals['_READYREQUEST']._serialized_start=159
@@ -44,32 +46,32 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_TOPOLOGYREQUEST']._serialized_end=334
   _globals['_TOPOLOGYREPLY']._serialized_start=336
   _globals['_TOPOLOGYREPLY']._serialized_end=403
-  _globals['_CAMERASPEC']._serialized_start=405
-  _globals['_CAMERASPEC']._serialized_end=490
-  _globals['_ADDCAMERAREQUEST']._serialized_start=492
-  _globals['_ADDCAMERAREQUEST']._serialized_end=559
-  _globals['_ADDCAMERAREPLY']._serialized_start=561
-  _globals['_ADDCAMERAREPLY']._serialized_end=611
-  _globals['_REMOVECAMERAREQUEST']._serialized_start=613
-  _globals['_REMOVECAMERAREQUEST']._serialized_end=672
-  _globals['_REMOVECAMERAREPLY']._serialized_start=674
-  _globals['_REMOVECAMERAREPLY']._serialized_end=741
-  _globals['_HEALTHREQUEST']._serialized_start=743
-  _globals['_HEALTHREQUEST']._serialized_end=758
-  _globals['_HEALTHREPLY']._serialized_start=761
-  _globals['_HEALTHREPLY']._serialized_end=934
-  _globals['_STATSREQUEST']._serialized_start=936
-  _globals['_STATSREQUEST']._serialized_end=950
-  _globals['_STATSREPLY']._serialized_start=952
-  _globals['_STATSREPLY']._serialized_end=1020
-  _globals['_DRAINREQUEST']._serialized_start=1022
-  _globals['_DRAINREQUEST']._serialized_end=1055
-  _globals['_DRAINREPLY']._serialized_start=1057
-  _globals['_DRAINREPLY']._serialized_end=1104
-  _globals['_STOPREQUEST']._serialized_start=1106
-  _globals['_STOPREQUEST']._serialized_end=1138
-  _globals['_STOPREPLY']._serialized_start=1140
-  _globals['_STOPREPLY']._serialized_end=1186
-  _globals['_SHARD']._serialized_start=1189
-  _globals['_SHARD']._serialized_end=1860
+  _globals['_CAMERASPEC']._serialized_start=406
+  _globals['_CAMERASPEC']._serialized_end=546
+  _globals['_ADDCAMERAREQUEST']._serialized_start=548
+  _globals['_ADDCAMERAREQUEST']._serialized_end=615
+  _globals['_ADDCAMERAREPLY']._serialized_start=617
+  _globals['_ADDCAMERAREPLY']._serialized_end=667
+  _globals['_REMOVECAMERAREQUEST']._serialized_start=669
+  _globals['_REMOVECAMERAREQUEST']._serialized_end=728
+  _globals['_REMOVECAMERAREPLY']._serialized_start=730
+  _globals['_REMOVECAMERAREPLY']._serialized_end=797
+  _globals['_HEALTHREQUEST']._serialized_start=799
+  _globals['_HEALTHREQUEST']._serialized_end=814
+  _globals['_HEALTHREPLY']._serialized_start=817
+  _globals['_HEALTHREPLY']._serialized_end=990
+  _globals['_STATSREQUEST']._serialized_start=992
+  _globals['_STATSREQUEST']._serialized_end=1006
+  _globals['_STATSREPLY']._serialized_start=1008
+  _globals['_STATSREPLY']._serialized_end=1076
+  _globals['_DRAINREQUEST']._serialized_start=1078
+  _globals['_DRAINREQUEST']._serialized_end=1111
+  _globals['_DRAINREPLY']._serialized_start=1113
+  _globals['_DRAINREPLY']._serialized_end=1160
+  _globals['_STOPREQUEST']._serialized_start=1162
+  _globals['_STOPREQUEST']._serialized_end=1194
+  _globals['_STOPREPLY']._serialized_start=1196
+  _globals['_STOPREPLY']._serialized_end=1242
+  _globals['_SHARD']._serialized_start=1422
+  _globals['_SHARD']._serialized_end=2093
 # @@protoc_insertion_point(module_scope)

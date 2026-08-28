@@ -28,6 +28,7 @@ import pytest
 pytest.importorskip("grpc", reason="the grpc extra is not installed")
 
 from shipinfer.core.errors import ConfigurationError
+from shipinfer.core.request import Priority
 from shipinfer.launch import CameraSpec, ShardClient, ShardState
 from shipinfer.runners.inprocess import InprocessRunner
 from shipinfer.runners.service import ShardServer, serve_shard
@@ -111,10 +112,20 @@ class TestALauncherTalksToAShard:
 
         # The in-process runner owns an ingest manager (phase B1), so the camera is taken and
         # the shard's state follows from the camera map rather than from a flag.
-        accepted = client.add_camera(CameraSpec("cam-1", "/nonexistent/clip.mp4", 20.0))
+        accepted = client.add_camera(
+            CameraSpec(
+                "cam-1", "/nonexistent/clip.mp4", 20.0, priority=Priority.TRACKING_CRITICAL
+            )
+        )
         assert accepted.accepted, accepted.reason
         assert client.health().state == ShardState.RUNNING
         assert set(client.health().cameras) == {"cam-1"}
+        # The band crossed a real socket into a shard with an EMPTY camera config -- which is
+        # the shape a fleet shard actually has (`runners/inprocess.py::_ingest`), and the one
+        # in which `tracking_critical` used to arrive as `normal`. `TRACKING_CRITICAL` is 0,
+        # so this also fails if the wire ever carries the band as a bare int.
+        assert not runner._settings.ingest.cameras
+        assert runner._priorities["cam-1"] is Priority.TRACKING_CRITICAL
 
         # A camera that is not running is a typed refusal reaching the launcher as data, and
         # the id it names is the one the launcher asked about.

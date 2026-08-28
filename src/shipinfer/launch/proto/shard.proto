@@ -107,6 +107,32 @@ message TopologyReply {
   string topology = 3;
 }
 
+// The scheduler band a camera's frames are admitted into, when the LAUNCHER decides it.
+//
+// An enum with an UNSPECIFIED zero rather than `optional int32`, and the choice is forced by
+// the vocabulary it carries: `core.request.Priority.TRACKING_CRITICAL` is **0**, so on an
+// int field the highest band in the system and "the client never set this" are the same
+// bytes. `optional` would buy the presence back, but only for a reader that remembers to ask
+// `HasField` - and the cost of forgetting is not a default, it is every unconfigured camera
+// on the fleet promoted into the critical lane, which is the exact inversion of the failure
+// ADR-005 exists to prevent. Here the zero has a name of its own and no band is 0, so a
+// reader that ignores presence entirely still cannot read silence as `tracking_critical`.
+//
+// The names mirror `Priority`'s members with a `CAMERA_PRIORITY_` prefix (protobuf enum
+// value names share their enclosing scope, hence the prefix), and `control.py` maps the two
+// BY NAME rather than by number - so a band added to one vocabulary and not the other fails
+// loudly instead of arriving as a neighbouring lane.
+enum CameraPriority {
+  // Not set: the shard resolves the band from its own `ingest.cameras` config, and falls
+  // back to `normal`. NOT a band, and deliberately not spelled `normal` either: "the
+  // deployment decides" and "the launcher decided normal" are different instructions.
+  CAMERA_PRIORITY_UNSPECIFIED = 0;
+  CAMERA_PRIORITY_TRACKING_CRITICAL = 1;
+  CAMERA_PRIORITY_HIGH = 2;
+  CAMERA_PRIORITY_NORMAL = 3;
+  CAMERA_PRIORITY_BACKGROUND = 4;
+}
+
 message CameraSpec {
   string camera_id = 1;
   // `rtsp://...` for a camera, or a file path for a replayed video.
@@ -122,6 +148,15 @@ message CameraSpec {
   // presence a client that never set the field would ask every shard to stop each camera at
   // EOF. Unset therefore reads as `true`, which is what CameraConfig.loop defaults to.
   optional bool loop = 4;
+
+  // Which lane this camera's frames are admitted into, when the launcher knows and the shard
+  // does not. Carried per camera because a FLEET SHARD'S INGEST CONFIG IS STRIPPED (#71): a
+  // shard is built from an env-only settings tree with `cameras` and `camera_db` cleared, so
+  // `priority: tracking_critical` written against a camera in the operator's fleet reached
+  // no shard at all and every camera placed by RPC landed in `normal`. Unset leaves the band
+  // to the shard, which is right for a single-process deployment that can still read its own
+  // config.
+  CameraPriority priority = 5;
 }
 
 message AddCameraRequest {

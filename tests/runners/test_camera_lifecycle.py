@@ -548,10 +548,10 @@ class TestThePriorityBandComesFromTheCameraConfig:
         )
         runner.start()
         try:
-            # Placed, not self-started -- and the band still comes off the settings tree. A
-            # `CameraSpec` carries no priority on purpose (it is deployment configuration, not
-            # a launcher decision), so this is also the assertion that the runner keeps reading
-            # the configured bands for cameras it is *told* about.
+            # Placed, not self-started -- and with no band on either spec, so the band comes
+            # off this process's own settings tree. That is the single-process deployment,
+            # where the config the runner loaded IS the operator's; a fleet shard's is
+            # stripped, which is what the spec-carried band below exists for.
             runner.add_camera(CameraSpec("cam-hot", "injected://hot"))
             runner.add_camera(CameraSpec("cam-cold", "injected://cold"))
             assert until(lambda: len(sink(chain).emitted) == 4), sink(chain).emitted
@@ -578,6 +578,107 @@ class TestThePriorityBandComesFromTheCameraConfig:
             runner.stop(timeout_s=5.0)
 
         assert queue.band_of("cam-new") == {Priority.NORMAL}
+
+    def test_a_band_on_the_spec_reaches_a_shard_whose_config_is_empty(self) -> None:
+        """The fleet shard's shape: an EMPTY configured table, and a band that still lands.
+
+        A shard is an ``InprocessRunner`` built from an env-only settings tree, and
+        ``_ingest`` clears ``ingest.cameras`` before it builds the manager so that eight
+        shards do not each open all fifty cameras. The cost was that ``configured_cameras``
+        on a shard yields nothing: ``priority: tracking_critical`` written by an operator was
+        resolved in the launching process and nowhere else, so every camera placed by RPC was
+        admitted at ``normal`` -- the ADR-005 customisation, configured and then dropped at
+        the process boundary.
+
+        Observed on the injected queue, so the assertion is the band the item was admitted
+        into rather than an inference from the order things came out.
+        """
+        chain = load()
+        queue = RecordingQueue("recording", 64)
+        # No `ingest.cameras` at all: this is a shard, and it has no table to look in.
+        runner = InprocessRunner(
+            chain, settings=settings(), queue=queue, source_factory=scripted(frames=2)
+        )
+        runner.start()
+        try:
+            runner.add_camera(
+                CameraSpec("cam-hot", "injected://hot", priority=Priority.TRACKING_CRITICAL)
+            )
+            runner.add_camera(CameraSpec("cam-cold", "injected://cold"))
+            assert until(lambda: len(sink(chain).emitted) == 4), sink(chain).emitted
+        finally:
+            runner.stop(timeout_s=5.0)
+
+        assert queue.band_of("cam-hot") == {Priority.TRACKING_CRITICAL}
+        assert queue.band_of("cam-cold") == {Priority.NORMAL}
+
+    def test_a_spec_with_no_band_leaves_the_configured_table_in_charge(self) -> None:
+        """``None`` on the spec is "the shard decides", not "put it in normal".
+
+        The launcher sends no band for a camera it minted itself (``--inputs``, ``POST
+        /streams`` without one), and a runner that read that as a *decision* would overwrite
+        the band an operator configured for the same camera id.
+        """
+        chain = load()
+        queue = RecordingQueue("recording", 64)
+        tree = settings(
+            ingest={
+                "cameras": [
+                    {
+                        "camera_id": "cam-hot",
+                        "uri": "injected://hot",
+                        "priority": Priority.TRACKING_CRITICAL,
+                    }
+                ]
+            }
+        )
+        runner = InprocessRunner(
+            chain, settings=tree, queue=queue, source_factory=scripted(frames=2)
+        )
+        runner.start()
+        try:
+            runner.add_camera(CameraSpec("cam-hot", "injected://hot", priority=None))
+            assert until(lambda: queue.bands)
+        finally:
+            runner.stop(timeout_s=5.0)
+
+        assert queue.band_of("cam-hot") == {Priority.TRACKING_CRITICAL}
+
+    def test_the_spec_outranks_a_configured_table_that_disagrees(self) -> None:
+        """Both doors named a band; the launcher's wins, and the order of writes says so.
+
+        ``_ingest`` loads the configured table with ``dict.update`` the first time a camera is
+        added, so a spec folded in before it would be silently overwritten by the very table
+        it is meant to outrank. The launcher wins because it is the process that can still
+        read the fleet config -- on a shard, the table is whatever the environment happened to
+        carry.
+        """
+        chain = load()
+        queue = RecordingQueue("recording", 64)
+        tree = settings(
+            ingest={
+                "cameras": [
+                    {
+                        "camera_id": "cam-x",
+                        "uri": "injected://x",
+                        "priority": Priority.BACKGROUND,
+                    }
+                ]
+            }
+        )
+        runner = InprocessRunner(
+            chain, settings=tree, queue=queue, source_factory=scripted(frames=1)
+        )
+        runner.start()
+        try:
+            runner.add_camera(
+                CameraSpec("cam-x", "injected://x", priority=Priority.TRACKING_CRITICAL)
+            )
+            assert until(lambda: queue.bands)
+        finally:
+            runner.stop(timeout_s=5.0)
+
+        assert queue.band_of("cam-x") == {Priority.TRACKING_CRITICAL}
 
     def test_the_critical_band_survives_the_falsy_zero(self) -> None:
         """``Priority.TRACKING_CRITICAL`` is ``0``, so ``get(...) or default`` demotes it.
