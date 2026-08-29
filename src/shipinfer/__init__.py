@@ -13,7 +13,7 @@ Layering, one-way, enforced by ``tests/test_architecture.py``::
       ^
     runtime/      devices, streams, memory pools, CUDA graphs, image ops [the CUDA seam]
       ^
-    backends/     TensorRT / ONNX Runtime / TorchScript / mock
+    backends/     TensorRT / ONNX Runtime / TorchScript
       ^
     engine/       the model pool: instances, models, ensembles, cache, health (arch.md §6)
       ^

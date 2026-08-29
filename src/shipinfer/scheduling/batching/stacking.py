@@ -108,7 +108,7 @@ class StackingBatcher(Batcher):
     def zeros_like_outputs(self, batch_size: int) -> dict[str, Tensor]:
         """A zero-filled response matching the declared outputs.
 
-        Used by the mock backend and by warm-up, so neither needs to know the shapes.
+        Used by warm-up, so it needs no knowledge of the declared shapes.
         """
         out: dict[str, Tensor] = {}
         for spec in self._output_specs:

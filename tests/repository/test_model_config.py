@@ -12,7 +12,7 @@ from shipinfer.repository import InstanceGroup, InstanceKind, ModelConfig, load_
 
 BASE = {
     "name": "m",
-    "platform": "mock",
+    "platform": "pytorch",
     "max_batch_size": 8,
     "inputs": [{"name": "x", "data_type": "FP32", "dims": [4]}],
     "outputs": [{"name": "y", "data_type": "FP32", "dims": [2]}],
@@ -144,7 +144,7 @@ class TestLoadingFromDisk:
     def test_load_attaches_the_path_to_an_error(self, tmp_path: Path) -> None:
         """A validation error with no path is nearly useless in a thirty-model repository."""
         bad = tmp_path / "config.yaml"
-        bad.write_text("name: broken\nplatform: mock\nmax_batch_size: -1\n")
+        bad.write_text("name: broken\nplatform: pytorch\nmax_batch_size: -1\n")
         with pytest.raises(ConfigurationError, match=str(bad)):
             load_model_config(bad)
 
@@ -153,7 +153,7 @@ class TestLoadingFromDisk:
         directory.mkdir()
         path = directory / "config.yaml"
         path.write_text(
-            "platform: mock\nmax_batch_size: 1\n"
+            "platform: pytorch\nmax_batch_size: 1\n"
             "inputs: [{name: x, data_type: FP32, dims: [1]}]\n"
             "outputs: [{name: y, data_type: FP32, dims: [1]}]\n"
             "dynamic_batching: {enabled: false}\n"

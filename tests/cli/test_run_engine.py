@@ -18,7 +18,7 @@ its frame and cannot resolve an implementation itself — ``topology`` may not i
 :attr:`~shipinfer.topology.base.Element.needs_image_ops`. A chain of mocks must build neither.
 
 Everything is offline. The engine is a recording double in every test but the last, which
-starts a real ``InferenceServer`` over the mock backend and a detector-shaped repository — the
+starts a real ``InferenceServer`` over real TorchScript fixtures and a detector-shaped repository — the
 one that proves a ``pool`` element actually opens, rather than that a keyword was forwarded. The
 ops it is handed there resolve to ``NumpyImageOps``, because ``get_image_ops`` degrades to it
 on a host with no accelerator; that is the whole reason this tier can run the real element.
@@ -51,6 +51,7 @@ from shipinfer.topology import ChainItem, ChainSpec, ElementKind, Topology
 from shipinfer.topology.base import ElementContext
 from shipinfer.topology.elements.mock import MockDetect
 from shipinfer.topology.registry import registry_for
+from tests.support.models import materialise
 
 #: The module object, not the ``run`` function ``shipinfer.cli.commands`` re-exports under the
 #: same name -- ``monkeypatch.setattr("shipinfer.cli.commands.run._wait", ...)`` resolves the
@@ -336,7 +337,7 @@ def detector_repository(tmp_path: Path) -> Path:
     ``echo`` declares ``x[4]`` because the engine tests submit ``(1, 4)`` tensors to it. Both
     are right for what they are; neither is a detector.
 
-    ``platform: mock`` on a ``KIND_CPU`` group, so :class:`~shipinfer.engine.InferenceServer`
+    ``platform: pytorch`` on a ``KIND_CPU`` group, so :class:`~shipinfer.engine.InferenceServer`
     starts it with no accelerator. The dims are the artefact's statement of its own geometry --
     ``PoolDetect`` resolves its letterbox target from them, which is what a real deployment
     does -- and ``8x8`` only to keep the fixture small.
@@ -345,7 +346,7 @@ def detector_repository(tmp_path: Path) -> Path:
     (root / "detector" / "1").mkdir(parents=True)
     (root / "detector" / "config.yaml").write_text(textwrap.dedent("""
         name: detector
-        platform: mock
+        platform: pytorch
         max_batch_size: 4
         inputs:
           - {name: images, data_type: FP32, dims: [3, 8, 8]}
@@ -354,6 +355,7 @@ def detector_repository(tmp_path: Path) -> Path:
         instance_groups:
           - {kind: KIND_CPU, count: 1}
         """).lstrip())
+    materialise(root)
     return root
 
 
@@ -981,12 +983,12 @@ class TestOverARealEngine:
     """The ledger item, closed: a `pool` element opens against a pool this command built.
 
     Everything above this class would pass over a double that forwarded a keyword. This one
-    starts a real :class:`~shipinfer.engine.InferenceServer` on the mock backend, runs a real
+    starts a real :class:`~shipinfer.engine.InferenceServer` on real TorchScript fixtures, runs a real
     :class:`~shipinfer.runners.inprocess.InprocessRunner` over a chain with a `pool` element
     in it, and looks at the element while the chain is open -- which is the thing that used to
     raise ``ConfigurationError`` before the first frame.
 
-    Offline: :func:`detector_repository` declares one ``platform: mock`` model on a
+    Offline: :func:`detector_repository` declares one ``platform: pytorch`` model on a
     ``KIND_CPU`` instance group, so no accelerator is touched.
     """
 

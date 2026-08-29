@@ -22,11 +22,14 @@ from shipinfer.core.request import InferenceRequest, RequestContext
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Tensor
 from shipinfer.engine import InferenceServer
+from tests.support.models import expected_output, materialise
 
-# `fail_every` is not used here, but `seed` is: the mock's has_ship flag decides which
-# branch runs, and a test that asserts on a branch needs to know which one it got.
+# `always:` decides which branch runs: it lifts the router's flag output above the threshold
+# the ensemble condition tests, so `always=1` exercises the branch-TAKEN path and `always=0`
+# the skipped one. Without it the flag is the untrained bias (+0.1045), which truncates to 0
+# on the INT32 cast every run -- the branch-taken path was covered nowhere.
 _ROUTER = """
-platform: mock
+platform: pytorch
 max_batch_size: 4
 inputs: [{{name: images, data_type: FP32, dims: [4]}}]
 outputs:
@@ -38,7 +41,7 @@ parameters: {{latency_ms: 0.05, always: {always}}}
 """
 
 _BRANCH = """
-platform: mock
+platform: pytorch
 max_batch_size: 4
 inputs: [{name: crops, data_type: FP32, dims: [2]}]
 outputs: [{name: embedding, data_type: FP32, dims: [3]}]
@@ -48,7 +51,7 @@ parameters: {latency_ms: 0.05}
 """
 
 _HEAD = """
-platform: mock
+platform: pytorch
 max_batch_size: 4
 inputs: [{name: embedding, data_type: FP32, dims: [3]}]
 outputs: [{name: score, data_type: FP32, dims: [1]}]
@@ -59,6 +62,11 @@ parameters: {latency_ms: 0.05}
 
 
 def _write(root: Path, name: str, body: str, *, versioned: bool = True) -> None:
+    """Write one config. The caller materialises the repository ONCE, when it is complete.
+
+    Materialising here rebuilt every model written so far on each call -- a QR, a script, a
+    trace and a save per model per call, so four models cost fourteen builds.
+    """
     directory = root / name
     (directory / "1").mkdir(parents=True) if versioned else directory.mkdir(parents=True)
     (directory / "config.yaml").write_text(body.lstrip())
@@ -92,6 +100,7 @@ ensemble:
 """,
         versioned=False,
     )
+    materialise(root)
     return root
 
 
@@ -131,10 +140,9 @@ class TestConditionalBranches:
 
     def test_a_skipped_branch_is_distinguishable_from_a_failure(self, tmp_path: Path) -> None:
         """Zero rows says "no things in this frame"; a missing key said nothing at all."""
+        # `_repo` builds the router with `always=0`, so its flag truncates to 0 and the
+        # branch skips on every frame -- which is this test's premise, not a coincidence.
         root = _repo(tmp_path)
-        # Force the router's flag to zero so the branch always skips.
-        config = (root / "router" / "config.yaml").read_text().replace("seed: 0", "seed: 0")
-        (root / "router" / "config.yaml").write_text(config)
 
         with _server(root) as server:
             for _ in range(6):
@@ -194,6 +202,7 @@ ensemble:
 """,
             versioned=False,
         )
+        materialise(root)
 
         with pytest.raises(ConfigurationError, match="only exists when an earlier conditional"):
             _server(root).start()
@@ -218,6 +227,7 @@ ensemble:
 """,
             versioned=False,
         )
+        materialise(root)
 
         with pytest.raises(ConfigurationError, match="no step produces"):
             _server(root).start()
@@ -272,7 +282,7 @@ class TestPoolLifecycle:
 # the repository refuses an input and an output sharing a name — while the ensemble step maps
 # both onto the same namespace entry, which is what "refine in place" means at this level.
 _REFINE = """
-platform: mock
+platform: pytorch
 max_batch_size: 4
 inputs: [{name: crops_in, data_type: FP32, dims: [2]}]
 outputs: [{name: crops_out, data_type: FP32, dims: [2]}]
@@ -282,7 +292,7 @@ parameters: {latency_ms: 0.05}
 """
 
 _SLOW = """
-platform: mock
+platform: pytorch
 max_batch_size: 4
 inputs: [{name: images, data_type: FP32, dims: [4]}]
 outputs: [{name: crops, data_type: FP32, dims: [2]}]
@@ -292,7 +302,7 @@ parameters: {latency_ms: 60.0, seed: 11}
 """
 
 _FAST = """
-platform: mock
+platform: pytorch
 max_batch_size: 4
 inputs: [{name: images, data_type: FP32, dims: [4]}]
 outputs: [{name: crops, data_type: FP32, dims: [2]}]
@@ -302,15 +312,21 @@ parameters: {latency_ms: 0.05, seed: 22}
 """
 
 
-def _mock_first_draw(seed: int, rows: int = 1, width: int = 2) -> np.ndarray:
-    """What `MockBackend` emits on its first execution for a given seed.
+def _first_answer(seed: int, rows: int = 1, width: int = 2) -> np.ndarray:
+    """What the fixture with this seed answers for the request's input.
 
-    Mirrors `backends/mock.py`: a seeded `default_rng`, `random((batch, *shape))` in float32.
-    Reproducing it here rather than reading it back from the model is what makes the write
-    race *observable* — two steps writing the same name are otherwise indistinguishable, and
-    a test that cannot tell them apart passes whichever one wins.
+    Built from the same helper the repository is built with, so the prediction is the model
+    itself rather than a re-implementation of a fake backend's random draw. Predicting rather
+    than reading it back is what makes the write race *observable* — two steps writing the
+    same name are otherwise indistinguishable, and a test that cannot tell them apart passes
+    whichever one wins.
     """
-    return np.random.default_rng(seed).random((rows, width), dtype=np.float32)
+    return expected_output(
+        in_features=[4],
+        out_features=[width],
+        inputs=[np.zeros((rows, 4), dtype=np.float32)],
+        seed=seed,
+    )[0]
 
 
 class TestAStepMayReadANameALaterStepWrites:
@@ -326,6 +342,22 @@ class TestAStepMayReadANameALaterStepWrites:
     Not an exotic shape: a second pass that improves what the first pass produced is the
     obvious way to write one, and the sequential walk this replaced ran it happily.
     """
+
+    def test_the_flag_this_class_depends_on_really_clears_the_threshold(self) -> None:
+        """This class asserts on a branch that RUNS, so the premise deserves its own test.
+
+        With ``always: 0`` the router's flag is the untrained bias and truncates to 0 on the
+        INT32 cast — every assertion below would then be about a branch that silently never
+        executed, which is how the branch-taken path came to be covered nowhere.
+        """
+        sample = [np.zeros((1, 4), dtype=np.float32)]
+        taken = expected_output(
+            in_features=[4], out_features=[2, 1], inputs=sample, flag_offset=2.0
+        )
+        skipped = expected_output(in_features=[4], out_features=[2, 1], inputs=sample)
+
+        assert int(np.asarray(taken[-1]).ravel()[0]) >= 1, "always: 1 must run the branch"
+        assert int(np.asarray(skipped[-1]).ravel()[0]) == 0, "and always: 0 must not"
 
     def _repo(self, tmp_path: Path) -> Path:
         root = tmp_path / "repo"
@@ -351,6 +383,7 @@ ensemble:
 """,
             versioned=False,
         )
+        materialise(root)
         return root
 
     def test_refine_in_place_completes_instead_of_hanging(self, tmp_path: Path) -> None:
@@ -422,6 +455,7 @@ ensemble:
 """,
             versioned=False,
         )
+        materialise(root)
         return root
 
     def test_the_later_declared_step_wins_however_the_two_finish(self, tmp_path: Path) -> None:
@@ -433,8 +467,8 @@ ensemble:
             server.stop()
 
         got = response.outputs["crops"].numpy()
-        slow_value = _mock_first_draw(11)
-        fast_value = _mock_first_draw(22)
+        slow_value = _first_answer(11)
+        fast_value = _first_answer(22)
 
         # `fast` is declared second, so the sequential walk's answer is `fast`'s value —
         # even though `slow` (60 ms) finishes long after it (0.05 ms) and a scheduler that
@@ -499,6 +533,7 @@ ensemble:
 """,
             versioned=False,
         )
+        materialise(root)
         return root
 
     def test_the_ambiguous_graph_is_refused_at_start_up(self, tmp_path: Path) -> None:
@@ -550,6 +585,7 @@ ensemble:
 """,
             versioned=False,
         )
+        materialise(root)
         server = _server(root)
         server.start()
         try:

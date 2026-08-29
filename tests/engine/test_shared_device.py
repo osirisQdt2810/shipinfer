@@ -15,10 +15,11 @@ import pytest
 from shipinfer.core.settings import DeviceSettings, ServerSettings
 from shipinfer.engine import InferenceServer
 from shipinfer.runtime.platform import device_count
+from tests.support.models import materialise
 
 _CONFIG = """
 name: echo
-platform: mock
+platform: pytorch
 max_batch_size: 8
 inputs:
   - {name: x, data_type: FP32, dims: [4]}
@@ -37,6 +38,7 @@ def _repository(tmp_path: Path) -> Path:
     root = tmp_path / "model_repository"
     (root / "echo" / "1").mkdir(parents=True)
     (root / "echo" / "config.yaml").write_text(_CONFIG.lstrip())
+    materialise(root)
     return root
 
 

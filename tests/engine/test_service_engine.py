@@ -1,7 +1,7 @@
 """Two `InferenceServer`s in one process, configured as shards 0 and 1 of one `service` run.
 
 The engine's own path — settings → `_join_service_tier` → `ServiceMesh` → `Model.attach_remote`
-— over real rings and the mock backend, with no launcher and no device: what the two-process
+— over real rings and real TorchScript fixtures, with no launcher and no device: what the two-process
 multigpu test does, minus the processes. `start()` blocks in `connect()` until the peer's rings
 exist, so the two servers start on two threads.
 """

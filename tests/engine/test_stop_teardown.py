@@ -69,7 +69,7 @@ thread that holds models, worker threads and a sink, running free after the clai
   sink — an open file descriptor, with ``JsonLinesTraceSink`` — on a torn-down server, and
   ``stats()`` reported that orphan instead of the totals.
 
-Offline throughout — the mock backend, ``KIND_CPU`` instances and real worker threads,
+Offline throughout — real TorchScript fixtures, ``KIND_CPU`` instances and real worker threads,
 because the evidence for the first one is ``threading.enumerate()``.
 """
 
@@ -93,9 +93,10 @@ from shipinfer.core.types import Tensor
 from shipinfer.engine import InferenceServer, pool
 from shipinfer.engine.instance import ModelInstance
 from shipinfer.engine.model import Model
+from tests.support.models import materialise
 
 _MODEL = """
-platform: mock
+platform: pytorch
 max_batch_size: 4
 inputs: [{name: x, data_type: FP32, dims: [2]}]
 outputs: [{name: y, data_type: FP32, dims: [2]}]
@@ -114,6 +115,7 @@ def repository(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
     (root / "echo" / "1").mkdir(parents=True)
     (root / "echo" / "config.yaml").write_text(_MODEL.lstrip())
+    materialise(root)
     return root
 
 
@@ -917,6 +919,7 @@ def three_models(tmp_path: Path) -> Path:
     for name in ("a_first", "b_second", "c_third"):
         (root / name / "1").mkdir(parents=True)
         (root / name / "config.yaml").write_text(_MODEL.lstrip())
+    materialise(root)
     return root
 
 
@@ -1181,8 +1184,11 @@ class TestANonStrictStartRacingAStop:
         root = tmp_path / "mixed"
         for name, config in (("a_first", _MODEL), ("b_second", _MODEL), ("c_third", _MODEL)):
             (root / name / "1").mkdir(parents=True)
-            text = config if name != "b_second" else config.replace("mock", "no_such_runtime")
+            text = (
+                config if name != "b_second" else config.replace("pytorch", "no_such_runtime")
+            )
             (root / name / "config.yaml").write_text(text.lstrip())
+        materialise(root)
 
         server = InferenceServer(_startup_settings(root, strict=False))
         with server:

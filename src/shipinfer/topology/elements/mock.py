@@ -1,4 +1,4 @@
-"""Hardware-free elements, one per kind — the default in tests, like ``backends/mock.py``.
+"""Hardware-free elements, one per kind — what chain tests load where no model is needed.
 
 These exist so that the *chain* can be tested without a chain of real things. A mock element
 declares the caps its real counterpart declares (``nv12@gpu`` on the device path,

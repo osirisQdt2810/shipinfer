@@ -130,7 +130,7 @@ class TestTwoShardsOnOneGpuDoNotDoubleLoad:
     def _config(count: int) -> ModelConfig:
         return ModelConfig(
             name="ship_detector",
-            platform="mock",
+            platform="pytorch",
             max_batch_size=8,
             inputs=[{"name": "images", "data_type": "FP32", "dims": [3, 640, 640]}],
             outputs=[{"name": "boxes", "data_type": "FP32", "dims": [300, 6]}],
