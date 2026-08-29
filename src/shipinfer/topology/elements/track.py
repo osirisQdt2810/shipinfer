@@ -53,7 +53,13 @@ import numpy as np
 from shipinfer.core.errors import ConfigurationError, TrackingError, ValidationError
 from shipinfer.topology.base import ChainItem, Element, ElementContext, ElementKind
 from shipinfer.topology.bridge import load_mot, load_types
-from shipinfer.topology.elements.detections import Detections, parse_classes
+from shipinfer.topology.elements.detections import (
+    MISSING_STAGES,
+    TRACK_ROWS,
+    Detections,
+    parse_classes,
+    per_row,
+)
 from shipinfer.topology.registry import registry_for
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -61,16 +67,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 __all__ = [
     "DEFAULT_ALGORITHM",
+    "DEFAULT_ATTRIBUTION_IOU",
     "DEFAULT_REGRESSION_RESET",
     "MISSING_STAGES",
+    "TRACK_ROWS",
     "ShipvisionTrack",
     "TrackerShard",
 ]
-
-#: The metadata key naming the stages a frame went through without. The chain's half of
-#: ``core/events/schema.py``'s field of the same name, and the vocabulary an ``output`` element
-#: serialises: a partial frame says so, and never reads as a complete one with nothing in it.
-MISSING_STAGES = "missing_stages"
 
 #: The tracker a slot gets when it does not say. ByteTrack, mirroring
 #: ``pipeline.tracking.algorithm`` — a literal in a pure layer because ``topology`` may not
@@ -103,6 +106,14 @@ DEFAULT_ALGORITHM = "bytetrack"
 #: process's life, and neither is as good as the announced ``remove_camera`` + ``add_camera``
 #: ADR-018 names: this is the floor under a deployment that never sends it, not a substitute.
 DEFAULT_REGRESSION_RESET = 64
+
+#: Minimum IoU between a published track's box and a detection's before the two are called the
+#: same object. Mirrors ``pipeline.tracking.attribution_iou``, whose default is the same 0.3
+#: and whose docstring makes the argument: the only competitors are the frame's *other*
+#: objects, so this exists to refuse an answer rather than to tune one. A track that matches
+#: nothing above it gets no row, which serialises as a ``null`` track id rather than as a wrong
+#: one.
+DEFAULT_ATTRIBUTION_IOU = 0.3
 
 
 class _CameraShard:
@@ -477,7 +488,9 @@ class ShipvisionTrack(Element):
 
     Reads ``meta["detections"]`` — the decoded, source-pixel
     :class:`~shipinfer.topology.elements.detections.Detections` a ``pool`` detector files —
-    and optionally ``meta["vectors"]``, and writes ``meta["tracks"]``.
+    and optionally ``meta["vectors"]``, and writes ``meta["tracks"]`` plus
+    ``meta["track_rows"]`` — the detection row each of those tracks came from, which is what
+    lets an ``output`` element put a track id on the object it belongs to.
 
     **The caps.** ``accepts`` lists ``meta@cpu`` first because a tracker wants boxes and not
     pixels: fed by another metadata element it never touches a frame at all. ``bgr@cpu`` and
@@ -518,6 +531,10 @@ class ShipvisionTrack(Element):
     #: change in both.
     accepts: ClassVar[tuple[str, ...]] = ("meta@cpu", "bgr@cpu", "nv12@gpu")
     produces: ClassVar[tuple[str, ...]] = ("meta@cpu",)
+    #: It picks the rows it tracks with ``params: classes:``, exactly as a crop element picks
+    #: the rows it embeds, so the loader refuses a ``when: class == …`` on this slot too and
+    #: names the key that does the job.
+    selects_rows: ClassVar[bool] = True
     # `requires_model_name`, `needs_model` and `needs_image_ops` all keep the ABC's `False`,
     # and each one is an answer rather than an omission: a MOT algorithm is not a repository
     # model (so no `model:` in the chain and no `InferenceServer` behind the runner), and it
@@ -545,6 +562,9 @@ class ShipvisionTrack(Element):
         self._regression_reset = self._parse_regression_reset(
             self.params.get("regression_reset", DEFAULT_REGRESSION_RESET)
         )
+        self._max_attribution_cost = 1.0 - self._parse_attribution_iou(
+            self.params.get("attribution_iou", DEFAULT_ATTRIBUTION_IOU)
+        )
         self._shard: TrackerShard | None = None
         self._metrics = _TrackMetrics(None, name)
         # Bound once, next to the other resolve-once handles: `self._metrics.implicit_reset`
@@ -560,6 +580,32 @@ class ShipvisionTrack(Element):
         self._Detection: Any = None
         self._Detections: Any = None
         self._FrameTag: Any = None
+        # The two halves of the row attribution below, resolved at open for the same reason
+        # the three above are: `_attribute` runs once per frame with tracks on it.
+        self._iou_matrix: Any = None
+        self._associate: Any = None
+
+    def _parse_attribution_iou(self, declared: Any) -> float:
+        """The overlap below which a track is not attributed to a detection row.
+
+        Raises:
+            ConfigurationError: not a number, or outside ``(0, 1]``. ``0`` would attribute
+                every track to whatever box it overlapped least badly, which is the guess this
+                threshold exists to refuse.
+        """
+        try:
+            value = float(declared)
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(
+                f"track element {self.name!r}: `params: attribution_iou:` must be a number "
+                f"in (0, 1], got {declared!r}"
+            ) from exc
+        if not 0.0 < value <= 1.0:
+            raise ConfigurationError(
+                f"track element {self.name!r}: `params: attribution_iou:` must be in (0, 1], "
+                f"got {value}"
+            )
+        return value
 
     def _parse_regression_reset(self, declared: Any) -> int:
         try:
@@ -592,6 +638,8 @@ class ShipvisionTrack(Element):
         self._Detection = types.Detection
         self._Detections = types.Detections
         self._FrameTag = types.FrameTag
+        self._iou_matrix = types.iou_matrix
+        self._associate = load_mot().association.associate
         self._shard = TrackerShard(self._algorithm, options=self._options, backend=None)
         self._metrics = _TrackMetrics(context.metrics, self.name)
         self._on_implicit_reset = self._metrics.implicit_reset
@@ -606,6 +654,8 @@ class ShipvisionTrack(Element):
         self._Detection = None
         self._Detections = None
         self._FrameTag = None
+        self._iou_matrix = None
+        self._associate = None
 
     def camera_added(self, camera_id: str) -> None:
         """Restart this camera's tracker if it already had one.
@@ -645,9 +695,10 @@ class ShipvisionTrack(Element):
 
         Returns:
             The successor item: same tag, ``caps`` = ``meta@cpu``, ``payload`` cleared, and
-            ``meta["tracks"]`` holding this frame's publishable tracks. ``meta["frame_hw"]``
-            rides along from the detector, because the boxes are in that extent's pixels and
-            the payload that could have said so is gone.
+            ``meta["tracks"]`` holding this frame's publishable tracks and
+            ``meta["track_rows"]`` holding the detection row each one came from.
+            ``meta["frame_hw"]`` rides along from the detector, because the boxes are in that
+            extent's pixels and the payload that could have said so is gone.
 
             A frame the detector never answered for, and a frame that lost the ordering race,
             come back with the same shape and ``track`` in ``meta["missing_stages"]`` — never
@@ -680,7 +731,8 @@ class ShipvisionTrack(Element):
 
         assert self._shard is not None  # `process` refuses before `open`
         camera_id = item.context.camera_id
-        vision = self._as_vision_detections(item, detections)
+        keep = self._selected(detections)
+        vision = self._as_vision_detections(item, detections, keep)
         try:
             tracks = self._shard.update(
                 vision,
@@ -708,7 +760,61 @@ class ShipvisionTrack(Element):
         # leaving nothing in flight to mutate. The property itself is pinned by
         # `test_the_published_tracks_are_not_rewritten_by_the_next_frame`, on whichever backend
         # this host built, rather than either mechanism.
-        return item.derive(caps=self.output_caps[0], payload=None, tracks=tracks)
+        return item.derive(
+            caps=self.output_caps[0],
+            payload=None,
+            tracks=tracks,
+            **{TRACK_ROWS: self._attribute(detections, keep, tracks)},
+        )
+
+    def _attribute(
+        self,
+        detections: Detections,
+        keep: range | tuple[int, ...],
+        tracks: Sequence[Any],
+    ) -> tuple[int, ...]:
+        """Which detection row each published track came from. Aligned with ``tracks``.
+
+        The library returns tracks, not row indices, and it is right not to: a track's box is
+        the *filtered* estimate, and which detection fed it is the tracker's business rather
+        than its output. But an emitted event is per detection — ``det_id``, ``bbox``,
+        ``embedding`` and the identity fields are all one row — so the mapping has to be
+        recovered, and a published track is by construction the corrected state of one of this
+        frame's detections, which makes the recovery an assignment over IoU rather than a
+        guess.
+
+        One-to-one and globally optimal, through the same solver the trackers themselves use
+        (``shipvision.mot.association.associate``) — this is
+        ``pipeline/graph/tracking.py::_attribute``'s algorithm, in the chain's vocabulary.
+        Greedy per-track argmax is the obvious alternative and is wrong in exactly the case
+        that matters: two people walking close together each overlap the other's box, and a
+        greedy pass can give both track ids to one detection and none to the other, which
+        reads downstream as one person who teleported and one who never existed.
+
+        A track that matches nothing above the threshold gets ``-1``. Dropped rather than
+        forced onto its nearest box: the threshold exists to refuse an answer, not to tune one,
+        and a ``null`` track id in the event is the honest form of "we could not say".
+
+        Args:
+            keep: the rows that were fed to the tracker, so a slot with ``classes:`` maps its
+                tracks back to the frame's own row numbering rather than to the subset's.
+        """
+        rows = [-1] * len(tracks)
+        if not tracks or not len(detections):
+            return tuple(rows)
+        candidates = detections.boxes_at(keep)
+        if not candidates.shape[0]:
+            return tuple(rows)
+        # Both, not one: `_do_open` sets them on adjacent lines, so an assert on half of
+        # that pair documents half a precondition.
+        assert self._iou_matrix is not None and self._associate is not None  # `process` refuses
+        cost = 1.0 - self._iou_matrix(np.stack([t.box for t in tracks]), candidates)
+        matches, _, _ = self._associate(cost, self._max_attribution_cost)
+        # `keep` indexes directly whether it is a `range` or a `tuple`; materialising it
+        # allocated the whole selection once per frame on the attribution path.
+        for track_index, column in matches:
+            rows[int(track_index)] = int(keep[int(column)])
+        return tuple(rows)
 
     def _untracked(self, item: ChainItem) -> ChainItem:
         """The successor for a frame this element could not track: same plane, no tracks."""
@@ -718,7 +824,9 @@ class ShipvisionTrack(Element):
             **{MISSING_STAGES: (*item.meta.get(MISSING_STAGES, ()), "track")},
         )
 
-    def _as_vision_detections(self, item: ChainItem, detections: Detections) -> Any:
+    def _as_vision_detections(
+        self, item: ChainItem, detections: Detections, keep: range | tuple[int, ...]
+    ) -> Any:
         """This frame's detections in the tracking library's vocabulary, embeddings attached.
 
         The conversion is per object and this is a hot path, but it is bounded by
@@ -745,7 +853,6 @@ class ShipvisionTrack(Element):
                 "nothing upstream ever tagged this frame"
             )
         vectors = self._embeddings(item, detections)
-        keep = self._selected(detections)
         boxes = detections.boxes
         scores = detections.scores
         class_ids = detections.class_ids
@@ -773,6 +880,10 @@ class ShipvisionTrack(Element):
             width=int(width),
         )
 
+    def declared_classes(self) -> tuple[str, ...] | None:
+        """See :meth:`~shipinfer.topology.base.Element.declared_classes`."""
+        return self._classes
+
     def _selected(self, detections: Detections) -> range | tuple[int, ...]:
         """Which detection rows this element tracks — every one, or the declared classes.
 
@@ -789,73 +900,28 @@ class ShipvisionTrack(Element):
     def _embeddings(self, item: ChainItem, detections: Detections) -> Any:
         """``meta["vectors"]`` as one appearance vector per detection row, or ``None``.
 
-        Two forms are accepted and both are unambiguous: a mapping of detection index to
-        vector, and a sequence or array with exactly one row per detection. Anything else —
-        a re-ID model's raw output tensors under their own names, most likely — is refused
-        rather than ignored, because appearance is what carries an identity through the frames
-        where geometry alone is ambiguous, and a tracker that quietly ran without it is a
+        The attribution rule itself is
+        :func:`~shipinfer.topology.elements.detections.per_row`, because the ``output``
+        element reads the same key under the same rule and two copies of it would be two
+        places for "a mapping that covers no row is an off-by-N" to drift — a drift with no
+        symptom, since both readers fail by quietly attaching nothing.
+
+        What is local to *this* element is why the refusal matters here: appearance is what
+        carries an identity through the frames where geometry alone is ambiguous, so a tracker
+        that quietly ran without the vectors a deployment paid a re-ID network for is a
         measurable accuracy loss reported as a healthy chain.
-
-        The mapping form is checked for **coverage** as well as for key type. Partial coverage
-        is legitimate and stays legal — only the person rows are embedded when only a person
-        re-ID model ran — but a mapping whose keys name *no* row at all is an off-by-N
-        scatter-back, and without this it lands as ``embedding=None`` on every detection with
-        nothing said. That is the same silence the sequence form's length check already
-        refuses, arriving through the other door.
-
-        The **empty** mapping is exempt from that check, and the distinction is the point: a
-        mapping with keys ``{100, 101, 102}`` on a three-row frame is arithmetic that went
-        wrong, while a mapping with no keys is an embedder that correctly had nothing to
-        embed. The latter is the ordinary frame once a crop element is in the chain —
-        ``embed_person`` sees a frame of three ships and covers none of them
-        (:class:`~shipinfer.topology.elements.pool._PoolCropElement`) — and refusing it would
-        fail a frame for being unremarkable. Zero keys index nothing because there was nothing
-        to index, which is not the same as keys that index nothing.
 
         Returns:
             Something indexable by detection row, or ``None`` when the chain filed no vectors.
 
         Raises:
-            ValidationError: the vectors are not attributable to detection rows — wrong
-                container, wrong length, keys that are not indices, or keys that index nothing
-                in this frame.
+            ValidationError: the vectors are not attributable to detection rows.
         """
-        vectors = item.meta.get("vectors")
-        if vectors is None:
-            return None
-        count = len(detections)
-        if isinstance(vectors, Mapping):
-            try:
-                by_index = {int(key): value for key, value in vectors.items()}
-            except (TypeError, ValueError) as exc:
-                raise ValidationError(
-                    f"track element {self.name!r}: meta['vectors'] is a mapping whose keys are "
-                    f"not detection indices ({sorted(vectors)[:4]}...). An embedder's raw "
-                    "output tensors are not an attribution; scatter them back onto the rows "
-                    "they came from first"
-                ) from exc
-            if by_index and count and not any(0 <= key < count for key in by_index):
-                raise ValidationError(
-                    f"track element {self.name!r}: meta['vectors'] is a mapping whose keys "
-                    f"{sorted(by_index)[:4]} name no detection in this frame, which has "
-                    f"{count} (indices 0..{count - 1}). Covering *some* rows is fine — only "
-                    "the person rows are embedded when only a person re-ID model ran — but "
-                    "covering none of them is an off-by-N scatter-back, and attaching no "
-                    "appearance at all is a measurable accuracy loss reported as a healthy "
-                    "chain"
-                )
-            return [by_index.get(index) for index in range(count)]
-        if isinstance(vectors, (np.ndarray, Sequence)):
-            if len(vectors) != count:
-                raise ValidationError(
-                    f"track element {self.name!r}: meta['vectors'] has {len(vectors)} rows for "
-                    f"{count} detections. One row per detection, in the detector's own order, "
-                    "or a mapping of detection index to vector"
-                )
-            return vectors
-        raise ValidationError(
-            f"track element {self.name!r}: meta['vectors'] is a {type(vectors).__name__} and "
-            "must be one row per detection or a mapping of detection index to vector"
+        return per_row(
+            item.meta.get("vectors"),
+            len(detections),
+            what=f"track element {self.name!r}",
+            key="vectors",
         )
 
     # -- metrics -----------------------------------------------------------------------

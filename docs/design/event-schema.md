@@ -26,3 +26,26 @@ that reads them can stop doing its own association.
 
 The module itself (`src/shipinfer/core/events/schema.py`) is stdlib-only so a consumer may
 copy it out wholesale; `TestTheSchemaIsPortable` enforces that.
+
+## Which chain element fills which field
+
+The `output` element (`topology/elements/output.py`) reads only `item.meta`, so this table is
+its whole contract with the six elements ahead of it. A key nobody filed becomes a `None`
+field — never a zero and never an omission, because a frame with no ships and a frame whose
+embedder timed out have to be different events, which is what `missing_stages` is for.
+
+| `meta` key | filed by | becomes |
+|---|---|---|
+| `detections` | `detect` (`elements/pool.py`) | one `ObjectRecord` each |
+| `frame_hw` | `detect` | `img_width` / `img_height` |
+| `fps` | the runner (`runners/frames.py`) | `img_fps` |
+| `vectors` | `embed_*` (`elements/pool.py`) | `embedding` |
+| `identities` | `recognize` (`elements/recognize.py`) | `ship_id` / `similarity` |
+| `tracks` | `track` (`elements/track.py`) | `track_id` / `track_state` |
+| `track_rows` | `track` | which detection row each track came from |
+| `global_ids` | `mtmc` (`elements/mtmc.py`) | `global_id` |
+| `missing_stages` | whichever stage had a gap | `missing_stages` |
+
+The event's rows are the frame's *detections*: `det_id`, `bbox`, `score`, the embedding and
+the identity fields are one row in the v1 payload `motservice` consumes, and every later
+version added parallel arrays beside them rather than a second shape.

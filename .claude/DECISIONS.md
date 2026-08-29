@@ -663,6 +663,48 @@ one attribute would have forced it to choose between refusing a correct chain an
 `shipinfer run` build an `InferenceServer` nothing submits to. A surplus `model:` on an element
 that needs none stays accepted and ignored, as it always was.
 
+**Amended 2026-08-28 (phase C8).** §4 gains a rule the loader now enforces: **`when:` guards
+one element for a whole FRAME; `params: classes:` selects ROWS within a frame, and a
+row-selecting element carrying `when: class == …` is refused at load.** The two were used
+interchangeably in the design's own example, which is where the confusion came from.
+
+*Why they are not the same question.* `ElementNode.admits` evaluates a `when:` against
+`item.meta`, and an item is a frame. A frame at this sizing holds one ship and fifteen people
+at once, so there is no frame-level `class` for the expression to read — nothing in the chain
+writes `meta["class"]` — and the condition is false on every frame. The element is then
+skipped forever: the ship embedder never runs, every ship's `embedding` is empty, and no
+counter says anything is wrong, because skip-and-continue is the *correct* behaviour for a
+guard that answered no. Even given a frame-level key, the semantics would still be wrong in
+the other direction: a frame containing one person would run the entire ship branch. The
+question a crop element is actually asking — "which of this frame's rows do I pay a GPU for" —
+is answered per row, by `params: classes:`, which those elements already read.
+
+*Evidence.* C8a gave row selection one home (`Detections.indices_of_any` / `boxes_at` /
+`parse_classes`) and recorded the same finding in its own words while wiring the embed fan-out:
+"`when:` skips frames, `classes:` selects rows." C8b turned it into a start-up refusal —
+`_check_row_selection` in `topology/chain.py` raises `ChainStructureError` naming the slot, the
+impl, `FRAME` in caps and the exact `params: {classes: [ship]}` to write, and a test then loads
+that spelling. The refusal reads a declaration on the implementation
+(`Element.selects_rows`, alongside `declared_classes()` and `detection_labels()`), never a list
+of impl names in the loader, so it is the same seam shape as `camera_group()` and a future
+row-selecting element inherits it in two lines. A second refusal in the same pass rejects a
+`classes:` label the detect slot's `class_labels` will never emit, for the same reason: a dead
+branch that reports nothing wrong.
+
+*What this changes.* `docs/arch.md` §1's canonical chain is rewritten to
+`params: {classes: [ship]}` on the three crop slots — it had taught the refused spelling and
+explained why to repeat it — and the design of record now states the split. `segment` carries no
+guard there: `PoolSegment` submits the whole frame and declares no `selects_rows`, so a
+frame-level short circuit is exactly what `when:` would be good for — but the chain has to guard
+on a fact something writes, and no element writes one today (the runner's `meta["fps"]` is the
+only frame-level key a condition can read). Teaching `when: has_ship == true` would have been
+the same silent skip on a different key. Nothing narrows `when:` otherwise; only `class` is
+refused, and only on a row-selecting element.
+`topology/ship_person.yaml` still carries the old spelling and is not loadable until phase D
+registers a real `decode`, which is disclosed in its header and self-detecting on that slice's
+first run; `topology/ship_person_cpu.yaml` is the runnable chain and is written the new way.
+
+
 **Consequences.**
 
 - A runner (phase A2) receives a `Topology` it can trust: ordered nodes, edges carrying a

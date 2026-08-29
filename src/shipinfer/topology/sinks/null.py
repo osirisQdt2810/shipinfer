@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from typing import Any, ClassVar
 
+from shipinfer.core.errors import ConfigurationError
 from shipinfer.core.events.schema import PerceptionEvent
 from shipinfer.topology.sinks.base import ResultSink
 from shipinfer.topology.sinks.registry import RESULT_SINKS
@@ -31,7 +32,10 @@ class NullResultSink(ResultSink):
     def __init__(self, *, keep_last: int = 0) -> None:
         super().__init__()
         if keep_last < 0:
-            raise ValueError("keep_last must be >= 0")
+            raise ConfigurationError(
+                f"null sink: `keep_last: {keep_last}` is negative; it is a count of the events "
+                "to keep for inspection, and 0 keeps none"
+            )
         self.keep_last = keep_last
         self._events: deque[PerceptionEvent] = deque(maxlen=keep_last or 1)
 
