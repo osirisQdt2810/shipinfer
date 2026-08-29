@@ -372,3 +372,25 @@ class TestTheReadersAgree:
             )
         with pytest.raises(ValidationError, match="names row 7"):
             per_row(vectors, 3, what="output element 'o'", key="vectors")
+
+
+class TestNumpyKeysWithoutAFrameToRangeOver:
+    """`recognize` reads `meta["detections"]` and it is legitimately absent (a fixed-crop
+    source, a test). The key rule still applies; the *range* rule cannot, because there is
+    no frame to range over — and the count estimated for it must not quietly exclude the
+    numpy keys this module documents as legal.
+    """
+
+    def test_a_numpy_key_is_accepted_when_the_frame_is_unknown(self) -> None:
+        rows = rows_by_index(
+            {np.int64(0): np.zeros(4, dtype=np.float32)}, None, who="recognize"
+        )
+
+        assert [index for index, _ in rows] == [0]
+
+    def test_mixed_python_and_numpy_keys_keep_every_row(self) -> None:
+        vector = np.zeros(4, dtype=np.float32)
+
+        rows = rows_by_index({0: vector, np.int64(5): vector}, None, who="recognize")
+
+        assert [index for index, _ in rows] == [0, 5], "a numpy key must not shrink the count"

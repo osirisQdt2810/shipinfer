@@ -1255,17 +1255,17 @@ class TestRowSelectionIsNotAFrameCondition:
     def test_a_frame_level_condition_is_untouched(self) -> None:
         """Only ``class`` is refused. ``when:`` keeps the job it is genuinely good at.
 
-        A short circuit on a fact about the *whole frame* — no ships in it at all — is exactly
-        what a frame condition is for, and narrowing ``when:`` any further would delete the
-        mechanism instead of aiming it.
+        The guard here is on ``fps`` because the runner actually files it
+        (``runners/frames.py:144``): a spelling this suite blesses should be one that fires,
+        not one that is false on every frame the way ``class`` is.
         """
         chain = self.chain(
             "detect: {impl: pool, model: d}",
-            "embed:  {impl: pool, model: e, when: has_ship == true}",
+            "embed:  {impl: pool, model: e, when: fps == 20}",
             "output: {impl: none}",
         )
 
-        assert str(chain.node("embed").condition) == "has_ship == true"
+        assert str(chain.node("embed").condition) == "fps == 20"
 
     def test_an_element_that_selects_no_rows_may_still_be_guarded_by_class(self) -> None:
         """The refusal is a declaration on the implementation, not a ban on a word.

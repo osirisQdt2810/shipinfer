@@ -1556,16 +1556,15 @@ class _PoolCropElement(_PoolElement):
         **Two of them meet in one of two ways, and this method is one half of one rule.**
         In *series* -- both on one branch, the second declared ``after:`` the first -- the
         second one finds the first one's mapping in ``item.meta`` and merges into it here. In
-        *parallel* -- the shape C8b gives ``topology/ship_person.yaml``: both slots declared
+        *parallel* -- the shape ``topology/ship_person_cpu.yaml`` declares: both slots on
         ``after: detect`` with ``params: classes:`` picking their rows, rejoining at ``track``
         -- neither ever sees the other's item, and the union is taken at the rejoin instead
         (:meth:`~shipinfer.runners.inprocess.InprocessRunner._merge_meta`). Both compositions
         are legal today and neither may lose half the frame. What the *shipped* file declares
-        is neither of them yet: both embedders carry ``when: class == ...`` and no
-        ``classes:``, and :meth:`~shipinfer.topology.chain.Condition.matches` is ``False`` on
-        a field nothing in the chain sets, so on it neither embedder runs at all. C8b is what
-        turns those ``when:`` guards into the row filter this element reads; until it lands,
-        the wiring under test is ``tests/topology/test_pool_embed_crops.py``'s.
+        is neither of them yet: ``topology/ship_person.yaml``'s embedders still carry
+        ``when: class == ...`` and no ``classes:``, which the loader now refuses outright --
+        that file waits on phase D's decoder and is converted with it (ledger
+        SHIP-PERSON-ROW-GUARDS). The runnable sibling is ``ship_person_cpu.yaml``.
 
         **What is filed is a** :class:`~shipinfer.topology.base.RowIndexed`, and that is not
         decoration: it is what tells the fan-in that this value is keyed by detection row and

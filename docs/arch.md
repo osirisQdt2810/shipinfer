@@ -35,7 +35,7 @@ which branch conditions. It is data (a YAML file), not code:
 elements:
   decode:       {impl: gstreamer-gpu}               # NV12 → VRAM, the default
   detect:       {impl: pool, model: ship_detector}
-  segment:      {impl: pool, model: ship_segmenter,  when: has_ship == true}
+  segment:      {impl: pool, model: ship_segmenter}
   embed_ship:   {impl: pool, model: ship_embedder,   after: segment, params: {classes: [ship]}}
   embed_person: {impl: pool, model: person_embedder, after: detect,  params: {classes: [person]}}
   recognize:    {impl: shipvision, after: embed_ship, params: {classes: [ship]}}   # gallery query
@@ -62,9 +62,13 @@ frame" nor "a person frame". Writing `when: class == ship` on such an element as
 per-frame question about a per-row fact, and the loader refuses it at start-up
 (`ChainStructureError`, naming the `params: {classes: [ship]}` to write instead): the
 condition would skip the *entire* element for any frame the expression rejected, taking the
-ships with it. `segment` keeps a `when:` above because it submits the whole frame and selects
-no rows -- but on a genuinely frame-level fact (`has_ship`, filed by the detector), not on
-`class`, which no stage writes per frame. See ADR-017 (amended 2026-08-28).
+ships with it. `segment` carries no guard above, and that is the honest state: `when:` is the
+right tool for a frame-level short circuit -- skipping the ship branch on a frame with no ships
+-- but the chain must guard on a fact something files, and no element files one today. The
+runner files `meta["fps"]` (`runners/frames.py:144`) and that is the only frame-level key a
+`when:` can read right now. `topology/ship_person_cpu.yaml:33-35` says the same thing: a
+frame-level guard lands here when there is a bench number behind it, not before.
+See ADR-017 (amended 2026-08-28).
 
 **`recognize` is a gallery query, not a pool submission.** Identity is `impl: shipvision`: the
 element embeds each selected row and asks a gallery who it is, filing one `(id, score)` per

@@ -907,8 +907,10 @@ def _check_row_selection(nodes: Sequence[ElementNode]) -> None:
 
        Only ``class`` is refused, and only on an element that declares
        :attr:`~shipinfer.topology.base.Element.selects_rows`. ``when:`` keeps every other use:
-       a genuine frame-level short circuit -- ``when: has_ship == true`` filed by the detector
-       -- is exactly what it is good for, and nothing here narrows its semantics.
+       a genuine frame-level short circuit on a fact something files -- ``meta["fps"]``, from
+       ``runners/frames.py`` -- is exactly what it is good for, and nothing here narrows its
+       semantics. Guarding on a key no element writes is false on every frame, which is the
+       same silence this refusal exists against; it is simply not something the loader can see.
 
     2. **A ``classes:`` label the detector will never emit.** ``classes: [vessel]`` in front of
        a detector whose table says ``ship`` matches no row, crops nothing, submits nothing and
@@ -965,16 +967,10 @@ def _check_row_selection(nodes: Sequence[ElementNode]) -> None:
 def _check_row_indexed_meta(nodes: Sequence[ElementNode]) -> None:
     """A key read per detection row, filed by a slot that files the model's response verbatim.
 
-    ``recognize: {impl: pool}`` submits whole frames and files ``meta["identities"]`` as
-    ``{output name: Tensor}``. ``output`` reads that key one entry per row, so the pairing
-    fails on the *first* frame and on every frame after it -- the chain loads, the runner
-    fails every item, and nothing is ever published. A chain that cannot publish must not
-    start, so this is a load-time refusal like the two above it.
-
-    The two halves are declarations, not a hard-coded pair: an element says what it reads per
-    row (:attr:`~shipinfer.topology.base.Element.reads_per_row`) and a producer says its key
-    holds a raw response (:attr:`~shipinfer.topology.base.Element.files_raw_response`).
-    ``segment: {impl: pool}`` keeps working because nothing reads ``masks`` per row.
+    ``recognize: {impl: pool}`` files ``meta["identities"]`` as ``{output name: Tensor}`` and
+    ``output`` reads that key per row, so the pair fails on every frame: the chain loads and
+    publishes nothing. Both halves are declarations (``reads_per_row``, ``files_raw_response``),
+    so ``segment: {impl: pool}`` still loads -- nothing reads ``masks`` per row.
 
     Raises:
         ChainStructureError: naming the slot, the key, and the implementation that works.

@@ -805,12 +805,15 @@ class ShipvisionTrack(Element):
         candidates = detections.boxes_at(keep)
         if not candidates.shape[0]:
             return tuple(rows)
-        assert self._iou_matrix is not None  # `process` refuses before `open`
+        # Both, not one: `_do_open` sets them on adjacent lines, so an assert on half of
+        # that pair documents half a precondition.
+        assert self._iou_matrix is not None and self._associate is not None  # `process` refuses
         cost = 1.0 - self._iou_matrix(np.stack([t.box for t in tracks]), candidates)
         matches, _, _ = self._associate(cost, self._max_attribution_cost)
-        selected = tuple(keep)
+        # `keep` indexes directly whether it is a `range` or a `tuple`; materialising it
+        # allocated the whole selection once per frame on the attribution path.
         for track_index, column in matches:
-            rows[int(track_index)] = int(selected[int(column)])
+            rows[int(track_index)] = int(keep[int(column)])
         return tuple(rows)
 
     def _untracked(self, item: ChainItem) -> ChainItem:

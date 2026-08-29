@@ -693,10 +693,13 @@ branch that reports nothing wrong.
 
 *What this changes.* `docs/arch.md` §1's canonical chain is rewritten to
 `params: {classes: [ship]}` on the three crop slots — it had taught the refused spelling and
-explained why to repeat it — and the design of record now states the split. `segment` keeps its
-`when:` and should: `PoolSegment` submits the whole frame, declares no `selects_rows`, and a
-frame-level short circuit is exactly what `when:` is good for. Nothing narrows `when:`
-otherwise; only `class` is refused, and only on a row-selecting element.
+explained why to repeat it — and the design of record now states the split. `segment` carries no
+guard there: `PoolSegment` submits the whole frame and declares no `selects_rows`, so a
+frame-level short circuit is exactly what `when:` would be good for — but the chain has to guard
+on a fact something writes, and no element writes one today (the runner's `meta["fps"]` is the
+only frame-level key a condition can read). Teaching `when: has_ship == true` would have been
+the same silent skip on a different key. Nothing narrows `when:` otherwise; only `class` is
+refused, and only on a row-selecting element.
 `topology/ship_person.yaml` still carries the old spelling and is not loadable until phase D
 registers a real `decode`, which is disclosed in its header and self-detecting on that slice's
 first run; `topology/ship_person_cpu.yaml` is the runnable chain and is written the new way.

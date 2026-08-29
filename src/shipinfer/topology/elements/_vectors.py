@@ -22,7 +22,7 @@ from typing import Any
 import numpy as np
 
 from shipinfer.core.errors import ValidationError
-from shipinfer.topology.elements.detections import per_row
+from shipinfer.topology.elements.detections import is_row_index, per_row
 
 __all__ = ["rows_by_index"]
 
@@ -110,21 +110,8 @@ def _from_mapping(
 def _max_row(vectors: Mapping[Any, Any]) -> int:
     """A row count when `detections` is absent: large enough that no key is out of range —
     the key-TYPE rule still applies, the range rule cannot without a frame to range over."""
-    numeric = [int(k) for k in vectors if not isinstance(k, bool) and isinstance(k, int)]
+    numeric = [int(k) for k in vectors if is_row_index(k)]
     return max(numeric, default=-1) + 1
-
-
-def _is_row_index(key: Any) -> bool:
-    """Whether one mapping key is an integral detection row index.
-
-    ``bool`` and ``np.bool_`` are excluded explicitly rather than left to the isinstance
-    chain: ``True`` really is an ``int`` in Python, and ``np.bool_`` is not integral in
-    numpy 2 but was closer to it in numpy 1 — an exclusion that depends on which numpy is
-    installed is not a rule.
-    """
-    if isinstance(key, (bool, np.bool_)):
-        return False
-    return isinstance(key, (int, np.integer))
 
 
 def _row_count(detections: Any) -> int | None:

@@ -1,50 +1,16 @@
 """The chain's last element: one frame's metadata becomes one published event.
 
-An ``output`` element is where the walk stops and the perception result leaves the process.
-It does two things and neither is a transport: it **assembles** a
-:class:`~shipinfer.core.events.PerceptionEvent` from what the chain filed on the item, and it
-hands that event to a :class:`~shipinfer.topology.sinks.base.ResultSink`. Where the event
-goes — a file, a broker, nowhere — is the sink's business, and the sinks are the ones
-``pipeline/`` has been publishing through since v1 (arch.md §9 moved them under
-``topology/sinks/`` for exactly this reason; nothing here reimplements one).
+It assembles a :class:`~shipinfer.core.events.PerceptionEvent` from what the chain filed and
+hands it to a :class:`~shipinfer.topology.sinks.base.ResultSink`. Which element fills which
+field is one table, in ``docs/design/event-schema.md``.
 
-**The event's rows are the frame's detections**, and that is the contract rather than a
-choice: ``det_id``, ``bbox``, ``score``, the embedding and the identity fields are all one
-row in the v1 payload ``motservice`` consumes, and every later version added parallel arrays
-beside them rather than a second shape. So this element reads
-``meta["detections"]`` — the decoded, source-pixel
-:class:`~shipinfer.topology.elements.detections.Detections` a ``pool`` detector files — and
-fills each row from the keys the stages behind it filed:
-
-===================== ============================================ =========================
-``meta`` key          filed by                                     becomes
-===================== ============================================ =========================
-``detections``        ``detect`` (``elements/pool.py``)             one ``ObjectRecord`` each
-``frame_hw``          ``detect``                                   ``img_width/img_height``
-``vectors``           ``embed_*`` (``elements/pool.py``)            ``embedding``
-``identities``        ``recognize``                                 ``ship_id``/``similarity``
-``tracks``            ``track`` (``elements/track.py``)             ``track_id``/``track_state``
-``track_rows``        ``track``                                    which row each track is
-``global_ids``        ``mtmc`` (``elements/mtmc.py``)               ``global_id``
-``missing_stages``    whichever stage had a gap                    ``missing_stages``
-===================== ============================================ =========================
-
-**A key nobody filed is a ``None`` field, never a zero and never an omission.** A frame with
-no ships and a frame whose embedder timed out have to be different events — that is the whole
-reason ``missing_stages`` exists — and a chain that runs without an ``mtmc`` slot publishes
-``global_id: null``, which is a fact rather than a failure.
-
-**A sink that refuses is counted, not raised.** The runner fails an item's future on any
-exception, so an element that raised when a broker went away would turn a publish outage into
-a walk that stops — and this frame's boxes, vectors and ids were all good. A ``ResultSink``
-already promises never to raise into the pipeline and to answer with a ``bool``
-(``topology/sinks/base.py``); this element charges that ``bool`` to a counter an operator can
-alert on, which is the only thing left to do with it.
-
-**Which rows a slot publishes is the frame's, not the element's.** There is deliberately no
-``classes:`` here: a crop element selects rows because it pays a GPU per row, while an event
-that published only the ships would leave the people out of the one message that says what
-was in the frame.
+* **A key nobody filed is a ``None`` field**, never a zero and never an omission.
+* **A sink that refuses is counted, not raised**: the runner fails an item's future on any
+  exception, so raising when a broker went away would stop the walk over a frame whose boxes,
+  vectors and ids were all good.
+* **No ``classes:`` here**: a crop element selects rows because it pays a GPU per row; an
+  event that published only the ships would leave the people out of the one message that
+  says what was in the frame.
 """
 
 from __future__ import annotations
@@ -122,21 +88,14 @@ class _OutputMetrics:
 
 
 class SinkOutput(Element):
-    """Assemble the event, hand it to one named sink. The base of every ``output`` impl.
+    """Assemble the event and hand it to one sink, for one chain, in one process.
 
-    Subclasses declare :attr:`sink_name` and nothing else: the assembly is identical whatever
-    the transport is, and an implementation that overrode it would be publishing a second
-    schema under the same version number.
+    One element per node (``Topology.from_spec``), so a chain with two ``output`` slots gets
+    two sinks and neither is shared. The sink itself is built at ``open`` and closed at
+    ``close``: a broker connection is a resource with a lifetime, not a module global.
 
-    Params:
-        source_id: v1's ``sub_id`` — which perception process produced this event. Defaults to
-            ``shard-<shard_id>`` from the runner's :class:`ElementContext`, because that is the
-            one identifier the element is *told* rather than made to guess.
-        (everything else): handed to the sink's constructor. ``path`` and ``flush_every`` for
-            ``jsonlines``, ``topic`` and ``brokers`` for ``kafka`` — see
-            ``topology/sinks/``. Forwarded rather than enumerated so a sink can grow an option
-            without this module learning about it, and refused at ``open()`` with the sink's
-            own accepted keyword names when one is misspelled.
+    ``source_id`` defaults to ``shard-<n>`` so two shards publishing the same camera are
+    distinguishable at the consumer without either being told who it is.
     """
 
     kind: ClassVar[ElementKind] = ElementKind.OUTPUT
@@ -205,6 +164,7 @@ class SinkOutput(Element):
             sink.close()
 
     # -- one frame ---------------------------------------------------------------------
+    # doc: long the two-key precedence and the None-vs-zero rule are the reasons this
 
     def _do_process(self, item: ChainItem) -> ChainItem | None:
         """Publish one frame's event, and consume the item.
@@ -225,6 +185,7 @@ class SinkOutput(Element):
             self._metrics.event_emitted(event.camera_id)
         else:
             self._metrics.event_dropped(event.camera_id)
+        # doc: long the after-accept path charges a loss to a different camera than this send
         # Refusals the transport reported *after* it accepted the message, for the frames they
         # belong to rather than for this one. `emit` cannot carry them: a broker answers for
         # frame n while frame n+k is being produced, so folding them into this call's bool
@@ -303,6 +264,8 @@ class SinkOutput(Element):
             for index in range(count)
         )
 
+    # doc: long three keys read as one answer in step; the refusal depends on the pairing
+
     def _tracks_by_row(
         self, item: ChainItem, count: int
     ) -> list[tuple[int | None, str | None, int | None]]:
@@ -361,6 +324,9 @@ class SinkOutput(Element):
                 None if global_ids is None else _as_int(global_ids[position]),
             )
         return placed
+
+
+# doc: long the coercion accepts four shapes and each has a caller that produces it
 
 
 def _embedding(vector: Any) -> tuple[float, ...]:
@@ -428,6 +394,9 @@ class JsonLinesOutput(SinkOutput):
     sink_name: ClassVar[str] = "jsonlines"
 
 
+# doc: long the none/null alias inversion has a YAML argument behind it
+
+
 #: ``none`` is the canonical name and ``null`` is the alias, which is the opposite of the
 #: sink's own registration and is not an inconsistency worth removing: YAML reads a bare
 #: ``impl: null`` as the *null literal*, so a chain file that spelled it that way is refused
@@ -445,6 +414,8 @@ class NullOutput(SinkOutput):
 
     sink_name: ClassVar[str] = "null"
 
+
+# doc: long the lazy registration is the layering promise this module makes
 
 # `kafka` is registered LAZILY, and it is the one implementation here that has to be. Its
 # module builds a sink whose constructor imports `confluent_kafka` -- the one heavy dependency
