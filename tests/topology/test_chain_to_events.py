@@ -61,9 +61,10 @@ BOXES = np.array([[10.0, 10.0, 110.0, 210.0], [300.0, 300.0, 340.0, 380.0]], dty
 class EventsDetect(Element):
     """A detector that files what an ``output`` element reads: rows *and* the frame extent.
 
-    ``mock`` files a one-row ``Detections`` with a ``frame_hw`` of ``(100, 100)`` that no
-    source ever produced. This one files two rows of two classes at the source's real size,
-    which is what makes the ship/person split in the emitted event mean something.
+    A one-row ``Detections`` at a frame size no source ever produced would pass every
+    element below it and mean nothing. This one files two rows of two classes at the source's
+    real size, which is what makes the ship/person split in the emitted event mean
+    something.
     """
 
     kind: ClassVar[ElementKind] = ElementKind.DETECT

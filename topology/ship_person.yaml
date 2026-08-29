@@ -19,17 +19,23 @@
 #   * `track` needs BOTH branches as predecessors. With the default rule it would follow
 #     only `recognize`, leaving `embed_person` with no successor -- a branch whose vectors
 #     nothing consumes, which is `ChainStructureError: ['embed_person'] reach no output`.
-# `tests/topology/test_chain.py` loads exactly this wiring with the `mock` implementations
+# `tests/topology/test_chain.py` loads exactly this wiring with only the phase-D decoder
 # substituted, so the file and the tests cannot drift apart again.
 #
-# HOW A CONDITION IS SCOPED. A `when:` guards exactly ONE element -- the one it is written
-# on. A rejected item is not dropped and the walk does not stop: it is handed unchanged to
-# that element's successors (`ElementNode.admits`, "skip and continue"). So a condition does
-# NOT extend down the branch, and every element on a class-specific branch must declare its
-# own `when:` -- which is why `embed_ship` and `recognize` repeat `class == ship` below.
-# Without it, a person detection would be skipped past `segment` and then run through the
-# ship embedder and the ship recogniser, which is ~15 000 crops/s of wasted GPU at the
-# sizing in CLAUDE.md and, worse, emits a ship identity for a person.
+# HOW A CONDITION IS SCOPED, AND WHY THIS FILE USES `classes:` INSTEAD. A `when:` guards
+# exactly ONE element -- the one it is written on. A rejected item is not dropped and the
+# walk does not stop: it is handed unchanged to that element's successors
+# (`ElementNode.admits`, "skip and continue"). So a condition does NOT extend down a branch,
+# and every element on a class-specific branch has to state its own selection -- which is why
+# `embed_ship` and `recognize` each carry `params: {classes: [ship]}` below. Without that,
+# a person detection would be skipped past `segment` and then run through the ship embedder
+# and the ship recogniser: ~15 000 crops/s of wasted GPU at the sizing in CLAUDE.md and,
+# worse, a ship identity emitted for a person.
+#
+# The selection is `classes:` and not `when:` because these elements select detection ROWS
+# while `when:` asks a question about the whole FRAME, which holds ships and people at once
+# (ADR-017, amended). `Topology.from_spec` refuses `when: class == ...` on a row-selecting
+# element and names `params: {classes: [...]}` as the fix.
 #
 # ...AND WHY THOSE FOUR GUARDS ARE NOT HOW THIS FILE WILL SPELL IT. A `when:` reads
 # `item.meta` and an item is a FRAME, so `class == ship` asks a frame to have one class --
@@ -37,30 +43,29 @@
 # so as written these four conditions are false on every frame, and even if something wrote
 # one, a frame containing a single person would still run the entire ship branch. Selecting
 # ROWS is `params: {classes: [ship]}`, which is what the `pool` crop elements actually read
-# (`topology/elements/pool.py`), and `Topology.from_spec` now refuses `when: class == ...`
-# on a slot that selects rows -- naming `classes:` as the fix. The guards below survive only
-# because this file stops at `gstreamer-gpu` before the loader ever reaches them; they are
-# rewritten in the same slice that registers a `decode` implementation for phase D. The
-# runnable sibling `topology/ship_person_cpu.yaml` already spells it the new way, and is
-# the file to copy from.
+# (`topology/elements/pool.py`), and `Topology.from_spec` refuses `when: class == ...` on a
+# slot that selects rows -- naming `classes:` as the fix. The four guards are now converted;
+# `segment` selects no rows and carries no guard either, because a frame-level `when:` has to
+# name a fact something files and no element files one today (`docs/arch.md` §1).
+# `recognize:` is `impl: shipvision`: identity is a gallery query, and `impl: pool` would file
+# the model's raw response under a key `output` reads per detection row -- also a refusal.
 #
-# WHAT DOES NOT LOAD YET. Every `impl:` below is a name that lands in a later phase of the
-# migration plan (arch.md §10), so this file is a schema fixture today, not a runnable
-# chain -- `Topology.from_spec` refuses it with UnknownElementImplError naming
-# `gstreamer-gpu`, and a test asserts exactly that:
-#   * decode `gstreamer-gpu`         -> phase D (DataPool: NV12 decoded straight into VRAM)
-#   * detect/segment/embed/recognize `pool` -> phase A (the engine split out of server/)
-#   * track/mtmc `shipvision`        -> phase C (the MOT and MTMC elements in-chain)
-#   * output `kafka`                 -> phase C, with the event schema
-# The hardware-free `mock` implementations of every kind are registered today; they are what
-# the offline tier loads chains with.
+# WHAT DOES NOT LOAD YET, and it is now exactly one name: `decode: gstreamer-gpu`, which
+# lands in phase D (DataPool: NV12 decoded straight into VRAM). `Topology.from_spec` refuses
+# this file with UnknownElementImplError naming that decoder, and a test asserts exactly
+# that. Every other `impl:` here is REGISTERED today -- `pool` (detect/segment/embed),
+# `shipvision` (recognize/track/mtmc) and `kafka` (lazily, `topology/elements/output.py`) --
+# which `TestTheProductionChainFile.substituted()` demonstrates: it stands in for the decode
+# alone and the rest of the chain builds. Registered is not the same as proven end to end,
+# and this file has no run behind it yet; `topology/ship_person_cpu.yaml` is the sibling that
+# does (`tests/system/test_real_chain.py`, on real footage and a real engine).
 elements:
   decode:       {impl: gstreamer-gpu}               # NV12 -> VRAM, the default
   detect:       {impl: pool, model: ship_detector}
-  segment:      {impl: pool, model: ship_segmenter,  when: class == ship}
-  embed_ship:   {impl: pool, model: ship_embedder,   when: class == ship,   after: segment}
-  embed_person: {impl: pool, model: person_embedder, when: class == person, after: detect}
-  recognize:    {impl: pool, model: ship_recognizer, when: class == ship,   after: embed_ship}
+  segment:      {impl: pool, model: ship_segmenter}
+  embed_ship:   {impl: pool, model: ship_embedder,   params: {classes: [ship]},   after: segment}
+  embed_person: {impl: pool, model: person_embedder, params: {classes: [person]}, after: detect}
+  recognize:    {impl: shipvision, params: {classes: [ship]}, after: embed_ship}
   track:        {impl: shipvision, per: camera, after: [recognize, embed_person]}
   mtmc:         {impl: shipvision, scope: global}
   output:       {impl: kafka}

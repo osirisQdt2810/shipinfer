@@ -207,44 +207,33 @@ class TestTheShapeContract:
         assert len(decode_detections(np.zeros((0, 6), dtype=np.float32), params=params())) == 0
 
 
-class TestTheMockDetectorAgreesWithTheDecode:
-    """``invented_detections`` files a class id its own label maps to.
+class TestTheLabelIsTheIdReadThroughTheTable:
+    """A row's label is its id looked up in the chain file's own table, and nothing else.
 
-    The mocks exist so the elements behind a detector can be tested offline against the type a
-    real one produces, and an id that contradicts its label is a type no decode could ever
-    emit: it filed ``class_ids=[0]`` under ``"ship"`` while the shipped table maps 0 to
-    ``person`` and 8 to ``ship``. The first thing a tracker test does is copy it, and a
-    class-conditional chain step (``when: class == ship``) reads the id.
+    A caller that carries a label beside an id — a chain step reading ``when: class == ship``,
+    a test staging detections for a tracker — has two things that can disagree, and only one
+    of them the decode ever produced. So the invariant is pinned on the table itself: whatever
+    the deployment declared, decoding an id yields the label declared *for that id*, and an id
+    nobody declared yields :data:`UNKNOWN_LABEL` rather than borrowing a real class's number.
     """
 
-    def test_the_ship_mock_files_the_ship_id(self) -> None:
-        from shipinfer.topology.elements.mock import invented_detections
+    def test_every_declared_id_decodes_to_its_own_label(self) -> None:
+        assert DecodeParams().class_labels == LABELS, "the fixture is the shipped table"
 
-        invented = invented_detections("ship")
-
-        assert invented.labels == ("ship",)
-        assert invented.class_ids.tolist() == [8]
-
-    def test_the_id_it_files_decodes_back_to_the_label_it_claims(self) -> None:
-        """The property, rather than the number: run the id through the real decode."""
-        from shipinfer.topology.elements.mock import invented_detections
-
-        for label in ("ship", "person"):
-            invented = invented_detections(label)
-            rows = np.array(
-                [row(0, 0, 10, 10, 0.9, int(invented.class_ids[0]))], dtype=np.float32
-            )
+        for class_id, label in LABELS.items():
+            rows = np.array([row(0, 0, 10, 10, 0.9, class_id)], dtype=np.float32)
 
             assert decode_detections(rows, params=params()).labels == (label,)
 
-    def test_a_label_the_table_has_no_id_for_is_not_filed_as_person(self) -> None:
-        """``0`` is a real class, so an invented one must not borrow its number."""
-        from shipinfer.topology.elements.mock import invented_detections
+    def test_an_id_the_table_has_no_entry_for_is_not_given_a_real_class_name(self) -> None:
+        """``0`` is a real class, so an unknown id must not be resolved to one."""
+        absent = max(LABELS) + 1
 
-        invented = invented_detections("dinghy")
+        rows = np.array([row(0, 0, 10, 10, 0.9, absent)], dtype=np.float32)
+        decoded = decode_detections(rows, params=params())
 
-        assert invented.class_ids.tolist() == [-1]
-        assert invented.labels == ("dinghy",)
+        assert decoded.labels == (UNKNOWN_LABEL,)
+        assert decoded.labels[0] not in LABELS.values()
 
 
 class TestTheOldImportPathStillResolves:

@@ -38,15 +38,15 @@ class TestTheNewFieldsDefaultToNotTold:
     ) -> None:
         """``None`` means "the runner did not say", and every element must handle it.
 
-        Every field is optional so a chain can be loaded, validated and walked with mock
-        elements before a runner, an engine or a device exists — which is what the offline
-        tier does on every one of these tests. The three added in phase C keep that property.
+        Every field is optional so a chain can be loaded, validated and walked before a
+        runner, an engine or a device exists — which is what the offline tier does on every
+        one of these tests. The three added in phase C keep that property.
 
         ``ops`` is resolved and handed over by the process that builds the runner
         (``cli/commands/run.py``, ``cli/shard.py``), in the shape ``models=`` already has —
         and only for a chain that declares it needs one, so ``None`` stays the normal answer
-        for a chain of mocks. Pinning the default is what makes "an element must raise rather
-        than guess" a rule with something behind it.
+        for a chain that reads no pixels. Pinning the default is what makes "an element must
+        raise rather than guess" a rule with something behind it.
         """
         assert getattr(ElementContext(), field) is None
 

@@ -1033,13 +1033,12 @@ class TestTheFanOutIsCounted:
 
 # -- the two branches, rejoining -----------------------------------------------------------------
 
-#: The shape C8b gives ``topology/ship_person.yaml``, with the hardware implementations
-#: swapped out: two embedders forked off ``detect`` (``embed_person`` carries ``after: detect``
-#: in the shipped file too, precisely so it does *not* follow ``embed_ship``) and rejoined at
-#: ``track``, each picking its rows with ``params: classes:``. The shipped file guards the two
-#: with ``when: class == ...`` instead, against a field nothing in the chain sets, so on it
-#: neither embedder runs and there is no rejoin to merge; converting those guards into the row
-#: filter is C8b's job, and this fixture is what that conversion has to arrive at.
+#: The shape ``topology/ship_person.yaml`` now has: two embedders forked off ``detect``
+#: (``embed_person`` carries ``after: detect`` in the shipped file too, precisely so it does
+#: *not* follow ``embed_ship``) and rejoined at ``track``, each picking its rows with
+#: ``params: classes:``. The shipped file used to guard the two with ``when: class == ...``
+#: against a field nothing in the chain sets, so neither embedder ran and there was no rejoin
+#: to merge; V148 part 1 converted it, and this fixture is what it arrived at.
 #:
 #: Written as a chain file rather than as two hand-built elements because the wiring is the
 #: thing under test: the two branches never see each other's item, so ``_scatter``'s merge
@@ -1047,8 +1046,8 @@ class TestTheFanOutIsCounted:
 TWO_BRANCHES = """
 name: two_embedders
 elements:
-  decode: {impl: mock}
-  detect: {impl: mock, model: ship_detector}
+  decode: {impl: replay}
+  detect: {impl: pool, model: ship_detector}
   embed_ship:
     impl: pool
     model: ship_embedder
@@ -1059,8 +1058,8 @@ elements:
     model: person_embedder
     after: detect
     params: {input: images, output: embedding, crop: {size: [16, 8]}, classes: [person]}
-  track:  {impl: mock, kind: track, after: [embed_ship, embed_person]}
-  output: {impl: mock}
+  track:  {impl: shipvision, kind: track, after: [embed_ship, embed_person]}
+  output: {impl: none}
 """
 
 
