@@ -18,7 +18,7 @@ Typical use::
 This package imports ``core``, ``topology`` and ``scheduling`` — all pure — and reaches the
 model pool only through the :class:`~shipinfer.topology.base.ModelResolver` it is *given*.
 So ``import shipinfer.runners`` costs no torch, no TensorRT and no engine, and a chain can be
-started with mock elements on a host with no driver. A runner that genuinely needs a heavy
+started on a host with no driver. A runner that genuinely needs a heavy
 import (the DeepStream compiler) registers lazily, as the element registries do.
 """
 

@@ -225,7 +225,7 @@ class InprocessRunner(Runner):
     a ``per: camera`` element at the same time, and that element's per-camera ordering can
     invert — frame 8 finishing before frame 7 because a different worker got to it first. A
     ``scope: global`` element is likewise just an ordinary element here. Nothing stateful ships
-    today (the mocks hold no state and a ``pool`` element holds only a model handle), so this
+    today (a ``pool`` element holds only a model handle), so this
     is a promise not yet kept rather than a live defect; it is resolved in phase C, either with
     a per-camera element instance or with a camera-keyed lock around a ``per: camera`` element.
     Until then, a chain with a stateful element runs it correctly at ``workers=1``.
@@ -330,8 +330,8 @@ class InprocessRunner(Runner):
         #: ingest plane -- and with it a decode runtime, and ``shipinfer.runtime`` behind that
         #: -- which ``import shipinfer.runners`` must not pay for
         #: (``tests/test_architecture.py``). First use is :meth:`add_camera`, the one door a
-        #: camera arrives through, so a runner nobody has placed a camera on -- a chain of
-        #: mock elements, and every shard until its launcher calls ``AddCamera`` -- starts
+        #: camera arrives through, so a runner nobody has placed a camera on -- a chain built
+        #: but never fed, and every shard until its launcher calls ``AddCamera`` -- starts
         #: without ever touching the ingest plane at all. Rebuilt per start cycle for the
         #: reason the queue and the stop signal
         #: are: a manager stopped at a shutdown deadline may still hold an abandoned decoder
@@ -780,11 +780,11 @@ class InprocessRunner(Runner):
             # `getattr`, and the contract it is reading is named rather than duck-typed:
             # `topology/elements/decode.py` documents `source` as the class attribute every
             # decode element in that family carries, defaulting to `""` for "the chain did not
-            # say". A decode element from outside it -- `MockDecode`, which invents a frame
-            # handle instead of naming a decoder -- carries no such attribute, and `""` is the
-            # right reading of that too. An `isinstance` against `_IngestDecode` would import
-            # a private class to ask a question a documented attribute already answers, and
-            # would refuse the mock chains this runner is tested on.
+            # say". A decode element from outside that family -- a test's own probe, which
+            # invents a frame handle instead of naming a decoder -- carries no such attribute,
+            # and `""` is the right reading of that too. An `isinstance` against
+            # `_IngestDecode` would import a private class to ask a question a documented
+            # attribute already answers, and would refuse those chains outright.
             inherent = getattr(root.element, "source", "")
             sources[root.name] = str(declared) if declared else (str(inherent) or None)
         if not caps:
@@ -926,7 +926,7 @@ class InprocessRunner(Runner):
         torch on any host where a device source is importable -- behind ``import
         shipinfer.runners``, which ``tests/test_architecture.py`` refuses, because it is what
         lets a chain be
-        started with mock elements on a host with no driver and what lets ``tests/runners/``
+        started on a host with no driver and what lets ``tests/runners/``
         run in the offline tier at all. The layering hook allows the edge; this method is the
         half that keeps it free.
 

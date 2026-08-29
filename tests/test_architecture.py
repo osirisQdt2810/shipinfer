@@ -234,6 +234,59 @@ class TestEnforcementAgrees:
         assert not importers, f"layers allowed to import the CLI: {importers}"
 
 
+#: Files whose spawns deliberately build their own environment because the environment IS the
+#: subject: the container hook's tests set `SHIPINFER_IN_CONTAINER` and import no `shipinfer`.
+_ENV_EXEMPT = frozenset({"test_container_hook.py"})
+
+
+class TestEveryProbeSubprocessTestsThisCheckout:
+    """A spawned interpreter inherits none of pytest's `sys.path`.
+
+    So `subprocess.run([sys.executable, ...])` resolves `shipinfer` through whatever is
+    *installed* — in a git worktree, the primary checkout, at whatever commit it is on. That
+    produced a false red four times (`available: ['mock', 'mock-cpu']`, from a tree two merges
+    behind) and could as easily produce a false green. `checkout_env()` puts this checkout's
+    `src` first. Known gap: a `from subprocess import run` then a bare `run(...)` slips past,
+    and nothing spells it that way; widening to every `run(` would catch unrelated helpers.
+    """
+
+    def test_no_probe_spawns_an_interpreter_without_the_checkout_env(self) -> None:
+        offenders: list[str] = []
+        tests_root = Path(__file__).resolve().parent
+        for path in sorted(tests_root.rglob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            # `ast`, not a line scan: the prose above mentions the call, and a docstring that
+            # explains a rule should not be able to violate it.
+            for node in ast.walk(ast.parse(text)):
+                if not isinstance(node, ast.Call) or "subprocess" not in ast.dump(node.func):
+                    continue
+                first = node.args[0] if node.args else None
+                spawns = isinstance(first, ast.List) and any(
+                    isinstance(part, ast.Attribute) and part.attr == "executable"
+                    for part in ast.walk(first)
+                )
+                if not spawns:
+                    continue
+                env = next((kw.value for kw in node.keywords if kw.arg == "env"), None)
+                # The VALUE, not merely the presence of the keyword: a probe copied from
+                # `test_container_hook.py` would carry `env={**os.environ, ...}`, satisfy a
+                # presence check, and put nothing of this checkout on `PYTHONPATH` -- the
+                # false red this guard exists against, reintroduced with the test still green.
+                from_checkout = (
+                    isinstance(env, ast.Call)
+                    and isinstance(env.func, ast.Name)
+                    and env.func.id == "checkout_env"
+                )
+                if not from_checkout and path.name not in _ENV_EXEMPT:
+                    offenders.append(f"{path.relative_to(tests_root.parent)}:{node.lineno}")
+
+        assert not offenders, (
+            "these spawn an interpreter that will resolve `shipinfer` from whatever is "
+            f"installed rather than from this checkout: {offenders}. Pass "
+            "`env=checkout_env()` (tests/support/subprocess_env.py)."
+        )
+
+
 class TestImportIsCheap:
     """import shipinfer must not drag in a backend, so the CLI stays usable on a bare host."""
 

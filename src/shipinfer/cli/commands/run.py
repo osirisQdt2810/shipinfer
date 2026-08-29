@@ -233,8 +233,9 @@ def run(
     # running runner; the two halves of the check sit either side of it deliberately.
     refuse_if_it_manages_no_cameras(RUNNERS.get(chosen), cameras)
 
-    # The model pool this run owns, or `None` when nothing here would ask for one: a chain of
-    # mocks, a `--dry-run` that spawns nothing, or a `fleet` whose shards each build their own
+    # The model pool this run owns, or `None` when nothing here would ask for one: a chain
+    # whose elements name no model, a `--dry-run` that spawns nothing, or a `fleet` whose
+    # shards each build their own
     # (`cli/shard.py`). Without it a real chain could not run in this process at all -- a
     # `pool` element is opened with `ElementContext.models` and refuses when it is `None`, so
     # `--runner inprocess` over any topology with a model in it failed at `start()`.
@@ -405,8 +406,8 @@ def dependency_is_needed(keyword: str, runner: str, chain: Topology) -> bool:
     * **does anything in the chain ask for it?** The element attribute from
       :data:`_HANDED_IN`, declared by the implementation. Asking ``node.kind in MODEL_KINDS``
       instead is the version of this that looks right and is not: every ``detect`` element is
-      a model kind and must name a ``model:``, so a chain of mocks would load the whole
-      repository to run elements that invent a box.
+      a model kind and must name a ``model:``, so a chain whose ``detect`` slot resolves an
+      implementation that needs no pool would still load the whole repository.
 
     The two dependencies are asked separately and not folded into one answer, because they
     come apart in both directions: a chain of ``pool`` embedders needs a pool and no ops

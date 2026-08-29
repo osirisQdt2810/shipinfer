@@ -27,8 +27,9 @@ device path is the default end to end (§8), then ``tensor@gpu`` for a producer 
 cropped, then ``bgr@cpu`` for the host fallback. It *produces* ``*@*``, which is not vagueness
 but the precise claim: this element reads the payload, adds a metadata key and hands the
 payload on **unchanged**, so its outbound cap is its negotiated inbound cap and the loader
-resolves it as such (:func:`~shipinfer.topology.chain._resolve_produced`, exactly as
-``MockPassthrough`` does).
+resolves it as such (:func:`~shipinfer.topology.chain._resolve_produced`; the wildcard's
+refusal half is pinned by
+``test_chain.py::TestRefusals::test_a_wildcard_element_cannot_launder_a_device_frame_to_a_host_sink``).
 
 Declaring a concrete ``produces: nv12@gpu`` instead — which this file did until the wildcard
 went in — is a **relabelling**: fed ``bgr@cpu`` it told the loader host memory was device

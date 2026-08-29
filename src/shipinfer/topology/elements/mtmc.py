@@ -269,7 +269,7 @@ class ShipvisionMtmc(Element):
     files — and ``meta["frame_hw"]``, and writes ``meta["global_ids"]``.
 
     **``meta["global_ids"]`` is a list, aligned with this item's ``meta["tracks"]``**, one
-    entry per track, ``int`` or ``None``. That is the shape ``elements/mock.py`` publishes and
+    entry per track, ``int`` or ``None``. That is the shape ``meta['tracks']`` has and
     the shape an ``output`` element serialises beside the track ids it already carries. It is
     *built* from a mapping keyed on ``(camera_id, track_id)`` — the association answers for a
     whole group in one flattened list, and reading a camera's own ids out of it by position is
