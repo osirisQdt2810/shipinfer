@@ -27,8 +27,8 @@ CHAIN = """
 name: decoded
 elements:
   decode: {impl: __IMPL__}
-  detect: {impl: mock, model: ship_detector}
-  output: {impl: mock}
+  detect: {impl: pool, model: ship_detector}
+  output: {impl: none}
 """
 
 

@@ -44,10 +44,9 @@ from shipinfer.launch.control import CameraSpec
 from shipinfer.runners.inprocess import InprocessRunner
 from shipinfer.topology import ChainSpec, Topology
 from shipinfer.topology import bridge as bridge_module
-from shipinfer.topology.base import ChainItem, ElementContext, ElementKind
+from shipinfer.topology.base import ChainItem, Element, ElementContext, ElementKind
 from shipinfer.topology.caps import Caps
 from shipinfer.topology.elements.detections import Detections
-from shipinfer.topology.elements.mock import MockOutput
 from shipinfer.topology.elements.track import (
     DEFAULT_ALGORITHM,
     DEFAULT_REGRESSION_RESET,
@@ -70,22 +69,47 @@ needs_shipvision = pytest.mark.skipif(
 #: for ``min_hits``, and a disappearance has to be observable inside a test's patience.
 FAST: dict[str, Any] = {"min_hits": 1, "max_age": 3}
 
-#: The chain the negotiation tests load. ``mock-cpu`` is the host-memory detector, so the edge
-#: into ``track`` is ``bgr@cpu`` — today's chain end to end — and the edge out of it is
-#: ``meta@cpu``, which is the plane change this element exists to be.
+#: The chain the negotiation tests load. ``staged-detect`` is a host-memory detector, so the
+#: edge into ``track`` is ``bgr@cpu`` — today's chain end to end — and the edge out of it is
+#: ``meta@cpu``, which is the plane change this element exists to be. ``output: none`` is the
+#: real sink that counts and publishes nowhere; ``keep_last`` is what lets a test read back
+#: what it was handed.
 CHAIN = """
 name: tracked
 elements:
   decode: {impl: replay}
-  detect: {impl: mock-cpu}
+  detect: {impl: staged-detect}
   track:  {impl: shipvision, params: {algorithm: bytetrack, options: {min_hits: 1, max_age: 3}}}
-  output: {impl: mock}
+  output: {impl: none, params: {keep_last: 16}}
 """
 
 HEIGHT, WIDTH = 4, 6
 
 
 # -- doubles ---------------------------------------------------------------------------------
+
+
+@registry_for(ElementKind.DETECT).register("staged-detect")
+class StagedDetect(Element):
+    """One known box per frame, so the tracker's answer is a function of the test's input.
+
+    A real ``pool`` detector cannot stand here: its boxes are whatever the engine decoded, and
+    every assertion below — one id across ten frames, a gap past ``max_age`` — is stated in
+    terms of *where the box is*. So the detections are staged, and they are staged in this
+    file rather than shipped: the element under test is ``track``.
+    """
+
+    kind: ClassVar[ElementKind] = ElementKind.DETECT
+    accepts: ClassVar[tuple[str, ...]] = ("bgr@cpu",)
+    produces: ClassVar[tuple[str, ...]] = ("bgr@cpu",)
+
+    def _do_open(self, context: ElementContext) -> None:
+        return None
+
+    def _do_process(self, item: ChainItem) -> ChainItem:
+        return item.derive(
+            detections=detections((10.0, 10.0, 110.0, 110.0)), frame_hw=(HEIGHT, WIDTH)
+        )
 
 
 class ScriptedSource(FrameSource):
@@ -1123,17 +1147,16 @@ class TestTrackOverTheRunner:
         )
         started.add_camera(CameraSpec("cam-a", "injected://a", 0.0))
 
-        sink = chain.node("output").element
-        assert isinstance(sink, MockOutput)
-        assert until(lambda: len(sink.emitted) == 4), sink.emitted
+        published = chain.node("output").element._sink
+        assert until(lambda: published.emitted == 4), published.stats()
 
-        assert [emitted.key for emitted in sink.emitted] == [
+        events = published.events()
+        assert [(event.camera_id, event.frame_id) for event in events] == [
             ("cam-a", frame) for frame in range(4)
         ]
-        for emitted in sink.emitted:
-            assert str(emitted.caps) == "meta@cpu"
-            assert emitted.payload is None
-            assert "tracks" in emitted.meta
+        ids = {record.track_id for event in events for record in event.objects}
+        assert None not in ids, "every published object carries the tracker's answer"
+        assert len(ids) == 1, "one stationary box across four frames is one identity"
 
     def test_the_element_counts_on_the_runners_own_registry(self, runner) -> None:
         """A metric on a registry no exporter reads is worse than an absent one, because it
@@ -1149,8 +1172,8 @@ class TestTrackOverTheRunner:
         )
         started.add_camera(CameraSpec("cam-a", "injected://a", 0.0))
 
-        sink = chain.node("output").element
-        assert until(lambda: len(sink.emitted) == 2)
+        published = chain.node("output").element._sink
+        assert until(lambda: published.emitted == 2)
 
         assert value(started.metrics.registry, "shipinfer_track_cameras", element="track") == 1
 
@@ -1166,8 +1189,8 @@ class TestTrackOverTheRunner:
             source_factory=scripted(frames=2),
         )
         started.add_camera(CameraSpec("cam-a", "injected://a", 0.0))
-        sink = chain.node("output").element
-        assert until(lambda: len(sink.emitted) == 2)
+        published = chain.node("output").element._sink
+        assert until(lambda: published.emitted == 2)
         element = chain.node("track").element
         assert element._shard.cameras == ("cam-a",)
 

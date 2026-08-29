@@ -26,8 +26,8 @@ from shipinfer.topology import ChainItem, ChainSpec, Topology
 CHAIN = """
 name: two_step
 elements:
-  decode: {impl: mock}
-  output: {impl: mock}
+  decode: {impl: replay}
+  output: {impl: none}
 """
 
 

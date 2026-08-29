@@ -59,13 +59,13 @@ from shipinfer.topology import (
     Caps,
     ChainItem,
     ChainSpec,
+    Element,
     ElementContext,
     ElementKind,
     Topology,
     create_element,
     registry_for,
 )
-from shipinfer.topology.elements.mock import MockDecode
 from shipinfer.topology.elements.pool import (
     _DEFAULT_INPUT,
     _DEFAULT_TIMEOUT_S,
@@ -436,46 +436,70 @@ class TestTheLifecycle:
 # still loads.
 
 
-@registry_for(ElementKind.DECODE).register("pool-test-cpu")
-class CpuDecode(MockDecode):
-    """A decoder that hands out host memory. The producer §8 refuses to see downloaded from."""
+@registry_for(ElementKind.DECODE).register("pool-test-gpu")
+class DeviceDecode(Element):
+    """A decoder that leaves the frame in VRAM — phase D's ``gstreamer-gpu``, in advance.
 
-    produces: ClassVar[tuple[str, ...]] = ("bgr@cpu",)
+    Declared here because every shipped decode implementation delivers ``bgr@cpu`` today
+    (``elements/decode.py``), so there is nothing in the registry to put a device cap on the
+    head of a chain, and the propagation this section is about has two halves.
+    """
+
+    kind: ClassVar[ElementKind] = ElementKind.DECODE
+    produces: ClassVar[tuple[str, ...]] = ("nv12@gpu",)
+
+    def _do_open(self, context: ElementContext) -> None:
+        return None
+
+    def _do_process(self, item: ChainItem) -> ChainItem | None:
+        return item.derive(caps=self.output_caps[0])
 
 
-#: ``decode -> segment{impl: pool} -> track -> output``. The tracker takes ``nv12@gpu`` or
-#: ``meta@cpu`` and nothing else, so what the segmenter hands on decides whether this chain
-#: loads at all.
+#: ``decode -> segment{impl: pool} -> track -> output``. The segmenter's outbound cap is
+#: whatever it was handed, and the tracker takes every plane, so this chain loads either way
+#: and is where the *propagation* is read off the edges.
 CHAIN = """
 name: pool_caps
 elements:
   decode:  {impl: __DECODE__}
   segment: {impl: pool, model: ship_segmenter}
-  track:   {impl: mock}
-  output:  {impl: mock}
+  track:   {impl: shipvision}
+  output:  {impl: none}
+"""
+
+#: The same chain with the tracker taken out, so the segmenter hands straight to the sink. A
+#: sink serialises, so it accepts ``meta@cpu`` and ``bgr@cpu`` and nothing device-resident —
+#: which makes this the wiring where a relabelled cap is caught.
+DIRECT = """
+name: pool_caps_direct
+elements:
+  decode:  {impl: __DECODE__}
+  segment: {impl: pool, model: ship_segmenter}
+  output:  {impl: none}
 """
 
 
-def chain(decode: str) -> Topology:
-    text = textwrap.dedent(CHAIN).replace("__DECODE__", decode)
-    return Topology.from_spec(ChainSpec.from_yaml(text))
+def chain(decode: str, text: str = CHAIN) -> Topology:
+    return Topology.from_spec(
+        ChainSpec.from_yaml(textwrap.dedent(text).replace("__DECODE__", decode))
+    )
 
 
 class TestWhatTheLoaderResolvesForAPoolElement:
-    def test_a_host_memory_producer_behind_it_is_refused_at_load(self) -> None:
+    def test_a_device_frame_handed_to_a_serialising_sink_is_refused_at_load(self) -> None:
         """The relabelling this element used to do, caught where it has to be caught.
 
-        ``bgr@cpu`` reaches the segmenter, which accepts it — and hands it on as ``bgr@cpu``,
-        which the tracker cannot take. Refused at start-up, naming both sides. With a
-        concrete ``produces: nv12@gpu`` on the element this chain *loaded*: the segmenter
-        told the loader it had turned host memory into device memory, and the download
-        arch.md §8 exists to refuse would have shown up as a mysteriously slow tracker.
+        ``nv12@gpu`` reaches the segmenter, which accepts it — and hands it on as
+        ``nv12@gpu``, which a sink cannot take. Refused at start-up, naming both sides. With
+        a concrete ``produces: bgr@cpu`` on the element this chain *loaded*: the segmenter
+        told the loader it had brought the frame back to host memory, and the per-frame
+        download arch.md §8 exists to refuse would have shown up as a mysteriously slow sink.
         """
         with pytest.raises(CapsMismatchError) as caught:
-            chain("pool-test-cpu")
+            chain("pool-test-gpu", DIRECT)
 
         assert "segment" in str(caught.value)
-        assert "track" in str(caught.value)
+        assert "output" in str(caught.value)
 
     def test_a_device_producer_behind_it_loads_with_the_device_cap_on_both_edges(
         self,
@@ -486,7 +510,7 @@ class TestWhatTheLoaderResolvesForAPoolElement:
         reaches an ``Edge`` — a chain whose edges read ``*@*`` would be a chain nobody
         checked.
         """
-        loaded = chain("mock")
+        loaded = chain("pool-test-gpu")
 
         negotiated = {(edge.producer, edge.consumer): str(edge.caps) for edge in loaded.edges}
         assert negotiated[("decode", "segment")] == "nv12@gpu"

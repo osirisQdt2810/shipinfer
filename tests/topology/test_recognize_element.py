@@ -324,9 +324,9 @@ class TestTheDeclarations:
         chain = Topology.from_spec(ChainSpec.from_yaml("""
                 name: gallery
                 elements:
-                  decode:    {impl: mock}
+                  decode:    {impl: replay}
                   recognize: {impl: shipvision}
-                  output:    {impl: mock}
+                  output:    {impl: none}
                 """))
 
         assert isinstance(chain.node("recognize").element, GalleryRecognize)
@@ -335,9 +335,9 @@ class TestTheDeclarations:
         with pytest.raises(ConfigurationError, match="must name a `model:"):
             Topology.from_spec(ChainSpec.from_yaml("""
                     elements:
-                      decode:    {impl: mock}
+                      decode:    {impl: replay}
                       recognize: {impl: pool}
-                      output:    {impl: mock}
+                      output:    {impl: none}
                     """))
 
     def test_a_typo_in_params_is_refused_at_load_not_ignored(self) -> None:
@@ -440,9 +440,9 @@ class TestWithoutTheSubmodule:
         """
         chain = Topology.from_spec(ChainSpec.from_yaml("""
                 elements:
-                  decode:    {impl: mock}
+                  decode:    {impl: replay}
                   recognize: {impl: shipvision}
-                  output:    {impl: mock}
+                  output:    {impl: none}
                 """))
 
         assert isinstance(chain.node("recognize").element, GalleryRecognize)
@@ -1802,26 +1802,26 @@ class TestInAChain:
         return Topology.from_spec(ChainSpec.from_yaml("""
                 name: ship_recognition
                 elements:
-                  decode:     {impl: mock}
-                  detect:     {impl: mock}
-                  embed_ship: {impl: mock, params: {classes: [ship]}}
+                  decode:     {impl: replay}
+                  detect:     {impl: pool, model: ship_detector}
+                  embed_ship: {impl: pool, model: ship_embedder, params: {classes: [ship]}}
                   recognize:  {impl: shipvision, params: {classes: [ship]}, after: embed_ship}
-                  output:     {impl: mock}
+                  output:     {impl: none}
                 """))
 
     def test_detect_to_embed_to_recognize_negotiates_on_the_inbound_cap(self) -> None:
         """``*@*`` is resolved from what arrives, which is the whole property.
 
-        The mock chain is ``nv12@gpu`` end to end, so every edge through this element is
-        ``nv12@gpu`` — including the one *out* of it, which is the wildcard being resolved
-        rather than stamped. In phase D the same chain is still legal with an ``nv12@gpu``
-        decoder in front, and a ``bgr@cpu`` chain resolves the same wildcard the other way.
+        The chain is ``bgr@cpu`` end to end behind a ``replay`` decoder, so every edge through
+        this element is ``bgr@cpu`` — including the one *out* of it, which is the wildcard
+        being resolved rather than stamped. In phase D the same chain is still legal with an
+        ``nv12@gpu`` decoder in front, and resolves the same wildcard the other way.
         """
         caps = {(edge.producer, edge.consumer): str(edge.caps) for edge in self.chain().edges}
 
-        assert caps[("detect", "embed_ship")] == "nv12@gpu"
-        assert caps[("embed_ship", "recognize")] == "nv12@gpu"
-        assert caps[("recognize", "output")] == "nv12@gpu"
+        assert caps[("detect", "embed_ship")] == "bgr@cpu"
+        assert caps[("embed_ship", "recognize")] == "bgr@cpu"
+        assert caps[("recognize", "output")] == "bgr@cpu"
 
     def test_the_wildcard_makes_the_when_bypass_carry_exactly_what_the_element_would(
         self,

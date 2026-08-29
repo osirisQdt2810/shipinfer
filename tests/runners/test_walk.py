@@ -25,22 +25,22 @@ from shipinfer.runners.inprocess import InprocessRunner
 from shipinfer.topology import Caps, ChainItem, ChainSpec, RowIndexed, Topology
 
 #: A branch that splits and rejoins, with the two inbound edges carrying **different** caps:
-#: ``detect`` hands ``join`` a frame (``nv12@gpu``) and ``tap`` hands it metadata
-#: (``meta@cpu``). ``after: [tap, detect]`` puts the metadata predecessor *first* in
-#: declaration order on purpose — the donor rule is about the negotiated cap, not about
-#: arrival or declaration order, and with the two aligned the test would not know which one
-#: it proved.
+#: ``detect`` hands ``join`` the frame (``bgr@cpu``) and ``tap`` hands it metadata
+#: (``meta@cpu``). ``after: [detect, tap]`` puts the *frame* predecessor first in declaration
+#: order on purpose, because ``ShipvisionTrack`` lists ``meta@cpu`` first in its ``accepts``
+#: and the loader nominates the donor in that order: declaration says ``detect``, preference
+#: says ``tap``, and with the two aligned the test would not know which one it proved.
 FAN_IN = """
 name: fan_in
 elements:
-  decode: {impl: mock}
-  detect: {impl: mock, model: ship_detector}
-  tap:    {impl: mock, kind: track, after: detect}
-  join:   {impl: mock, kind: track, after: [tap, detect]}
-  output: {impl: mock}
+  decode: {impl: replay}
+  detect: {impl: pool, model: ship_detector}
+  tap:    {impl: shipvision, kind: track, after: detect}
+  join:   {impl: shipvision, kind: track, after: [detect, tap]}
+  output: {impl: none}
 """
 
-#: The two-embedder rejoin, with the implementations swapped for hardware-free ones: two
+#: The two-embedder rejoin: two
 #: embedders forked off ``detect`` (``embed_person`` carries ``after: detect`` precisely so it
 #: does *not* follow ``embed_ship``) and rejoined at ``track``. Each covers its own classes
 #: and files a partial ``meta["vectors"]``, so this is the wiring on which "the metadata is
@@ -52,12 +52,12 @@ elements:
 TWO_EMBEDDERS = """
 name: two_embedders
 elements:
-  decode:       {impl: mock}
-  detect:       {impl: mock, model: ship_detector}
-  embed_ship:   {impl: mock, kind: embed, model: ship_embedder,   after: detect}
-  embed_person: {impl: mock, kind: embed, model: person_embedder, after: detect}
-  track:        {impl: mock, kind: track, after: [embed_ship, embed_person]}
-  output:       {impl: mock}
+  decode:       {impl: replay}
+  detect:       {impl: pool, model: ship_detector}
+  embed_ship:   {impl: pool, kind: embed, model: ship_embedder,   after: detect}
+  embed_person: {impl: pool, kind: embed, model: person_embedder, after: detect}
+  track:        {impl: shipvision, kind: track, after: [embed_ship, embed_person]}
+  output:       {impl: none}
 """
 
 #: The same rejoin with a *third* branch, for the refusal's re-scan. Three contributors is
@@ -67,13 +67,13 @@ elements:
 THREE_EMBEDDERS = """
 name: three_embedders
 elements:
-  decode:        {impl: mock}
-  detect:        {impl: mock, model: ship_detector}
-  embed_ship:    {impl: mock, kind: embed, model: ship_embedder,    after: detect}
-  embed_person:  {impl: mock, kind: embed, model: person_embedder,  after: detect}
-  embed_vehicle: {impl: mock, kind: embed, model: vehicle_embedder, after: detect}
-  track:         {impl: mock, kind: track, after: [embed_ship, embed_person, embed_vehicle]}
-  output:        {impl: mock}
+  decode:        {impl: replay}
+  detect:        {impl: pool, model: ship_detector}
+  embed_ship:    {impl: pool, kind: embed, model: ship_embedder,    after: detect}
+  embed_person:  {impl: pool, kind: embed, model: person_embedder,  after: detect}
+  embed_vehicle: {impl: pool, kind: embed, model: vehicle_embedder, after: detect}
+  track:         {impl: shipvision, kind: track, after: [embed_ship, embed_person, embed_vehicle]}
+  output:        {impl: none}
 """
 
 #: Two ``segment`` slots on the same rejoining branches. ``PoolSegment`` keeps
@@ -83,12 +83,12 @@ elements:
 TWO_SEGMENTERS = """
 name: two_segmenters
 elements:
-  decode:     {impl: mock}
-  detect:     {impl: mock, model: ship_detector}
-  seg_ship:   {impl: mock, kind: segment, model: ship_segmenter,   after: detect}
-  seg_person: {impl: mock, kind: segment, model: person_segmenter, after: detect}
-  track:      {impl: mock, kind: track, after: [seg_ship, seg_person]}
-  output:     {impl: mock}
+  decode:     {impl: replay}
+  detect:     {impl: pool, model: ship_detector}
+  seg_ship:   {impl: pool, kind: segment, model: ship_segmenter,   after: detect}
+  seg_person: {impl: pool, kind: segment, model: person_segmenter, after: detect}
+  track:      {impl: shipvision, kind: track, after: [seg_ship, seg_person]}
+  output:     {impl: none}
 """
 
 
@@ -96,7 +96,7 @@ def load(text: str) -> Topology:
     return Topology.from_spec(ChainSpec.from_yaml(textwrap.dedent(text)))
 
 
-def item(caps: str = "nv12@gpu", payload: object = None, **meta: object) -> ChainItem:
+def item(caps: str = "bgr@cpu", payload: object = None, **meta: object) -> ChainItem:
     """One item, tagged like every other item in the system."""
     return ChainItem(
         RequestContext(camera_id="cam-1", frame_id=7),
@@ -164,37 +164,37 @@ class TestTheFanInMerge:
         )
 
         assert merged is not None
-        assert node.inputs == ("tap", "detect"), "the fixture's declaration order"
-        assert merged.meta["class"] == "person", "the first declared predecessor wins"
+        assert node.inputs == ("detect", "tap"), "the fixture's declaration order"
+        assert merged.meta["class"] == "ship", "the first declared predecessor wins"
 
     def test_the_payload_comes_from_the_predecessor_with_the_preferred_cap(
         self, runner: InprocessRunner
     ) -> None:
         """Half a frame handle plus half a metadata dict is not a payload.
 
-        ``join``'s donor is ``detect`` (the loader's answer — it accepts ``nv12@gpu`` before
-        ``meta@cpu``), and this is the runner honouring it: the payload and the caps come
-        from that one predecessor even though the metadata branch is declared first.
+        ``join``'s donor is ``tap`` (the loader's answer — ``ShipvisionTrack`` accepts
+        ``meta@cpu`` before ``bgr@cpu``), and this is the runner honouring it: the payload and
+        the caps come from that one predecessor even though ``detect`` is declared first.
         """
         node = runner.topology.node("join")
         frame = item(payload="frame:cam-1:7")
-        meta_only = item(caps="meta@cpu", payload=None, tracks=[1])
+        meta_only = item(caps="meta@cpu", payload="tracks:cam-1:7", tracks=[1])
 
-        merged = runner._inbound(node, {"tap": meta_only, "detect": frame})
+        merged = runner._inbound(node, {"detect": frame, "tap": meta_only})
 
         assert merged is not None
-        assert merged.payload == "frame:cam-1:7"
-        assert merged.caps == Caps.parse("nv12@gpu")
+        assert merged.payload == "tracks:cam-1:7"
+        assert merged.caps == Caps.parse("meta@cpu")
 
     def test_the_tag_survives_the_merge(self, runner: InprocessRunner) -> None:
         """ADR-002: the ``(camera_id, frame_id)`` tag rides untouched, merge or no merge."""
         node = runner.topology.node("join")
-        frame = item(payload="frame")
+        donated = item(caps="meta@cpu", payload="tracks")
 
-        merged = runner._inbound(node, {"tap": item(caps="meta@cpu"), "detect": frame})
+        merged = runner._inbound(node, {"detect": item(payload="frame"), "tap": donated})
 
         assert merged is not None
-        assert merged.context is frame.context, "the tag is carried, never rebuilt"
+        assert merged.context is donated.context, "the tag is carried, never rebuilt"
 
 
 class TestWhatTheMergeDoesNotDo:
@@ -216,11 +216,11 @@ class TestWhatTheMergeDoesNotDo:
     ) -> None:
         """``None`` from an element means *consumed*, so its successors receive nothing from it."""
         node = runner.topology.node("join")
-        frame = item(payload="frame")
+        tracks = item(caps="meta@cpu", payload="tracks")
 
-        merged = runner._inbound(node, {"tap": None, "detect": frame})
+        merged = runner._inbound(node, {"detect": None, "tap": tracks})
 
-        assert merged is frame
+        assert merged is tracks
 
     def test_no_contributor_at_all_means_this_element_does_not_run(
         self, runner: InprocessRunner
@@ -246,11 +246,12 @@ class TestASkippedPredecessor:
         reach the tracker because the segmenter did not run on them.
         """
         node = runner.topology.node("join")
-        # `tap` was skipped, so what stands in for its output is what *it* was handed.
+        # `detect` was skipped, so what stands in for its output is what *it* was handed.
         skipped_inbound = item(boxes=[(0, 0, 1, 1)], **{"class": "person"})
 
         merged = runner._inbound(
-            node, {"tap": skipped_inbound, "detect": item(payload="frame", tracks=[1])}
+            node,
+            {"detect": skipped_inbound, "tap": item(caps="meta@cpu", tracks=[1])},
         )
 
         assert merged is not None

@@ -9,10 +9,11 @@ worth keeping apart because only one of them is about phase C.
   loads itself. One rule over the kind can only be right for one of them, and the one it was
   right for is not the one phase C ships — the gallery chain was refused at load with
   "recognize needs `model:`" and there was no spelling that got past it.
-* ``impl: mock`` is not a model element at all. It invents a box and resolves nothing, which
-  is what :attr:`~shipinfer.topology.base.Element.needs_model` already had to mean for
-  ``shipinfer run`` to leave a chain of mocks without an ``InferenceServer`` behind it.
-  Requiring a ``model:`` of one was the kind rule insisting on a name nobody ever reads.
+* ``impl: shipvision`` is not a model element at all. It loads its own gallery and resolves
+  nothing against the repository, which is what
+  :attr:`~shipinfer.topology.base.Element.needs_model` already had to mean for ``shipinfer
+  run`` to leave such a chain without an ``InferenceServer`` behind it. Requiring a ``model:``
+  of one was the kind rule insisting on a name nobody ever reads.
 
 So the requirement is :attr:`~shipinfer.topology.base.Element.requires_model_name`, a
 ``ClassVar`` the loader reads off the built element: "this slot must name a ``model:``".
@@ -44,12 +45,29 @@ import pytest
 from shipinfer.core.errors import ChainStructureError, ConfigurationError
 from shipinfer.topology import ChainItem, ChainSpec, ElementKind, Topology
 from shipinfer.topology.base import Element, ElementContext
-from shipinfer.topology.elements.mock import MockRecognize
 from shipinfer.topology.registry import create_element, registry_for
 
 
+class _Recognize(Element):
+    """The caps and the do-nothing lifecycle the two locals below share.
+
+    Declared here so each of them is only its two ``ClassVar``\\ s, which are what is under
+    test; the caps are :class:`~shipinfer.topology.elements.recognize.GalleryRecognize`'s.
+    """
+
+    kind: ClassVar[ElementKind] = ElementKind.RECOGNIZE
+    accepts: ClassVar[tuple[str, ...]] = ("nv12@gpu", "tensor@gpu", "bgr@cpu")
+    produces: ClassVar[tuple[str, ...]] = ("*@*",)
+
+    def _do_open(self, context: ElementContext) -> None:
+        return None
+
+    def _do_process(self, item: ChainItem) -> ChainItem | None:
+        return item.derive()
+
+
 @registry_for(ElementKind.RECOGNIZE).register("gallery-shaped")
-class GalleryShapedRecognize(MockRecognize):
+class GalleryShapedRecognize(_Recognize):
     """A ``recognize`` element that resolves no repository model — phase C's real case.
 
     Shaped like the element C7 will ship: it is told nothing by the chain but its ``params:``,
@@ -85,7 +103,7 @@ class ModelHungryOutput(Element):
 
 
 @registry_for(ElementKind.RECOGNIZE).register("names-it-elsewhere")
-class NamesItButRunsItElsewhere(MockRecognize):
+class NamesItButRunsItElsewhere(_Recognize):
     """The divergence, in the only shape it has: names a ``model:``, never touches the pool.
 
     A stand-in for the ``nvinfer`` element the deepstream runner will register. Its ``model:``
@@ -110,9 +128,9 @@ def load(recognize: str, *, model: str = "") -> Topology:
     return Topology.from_spec(ChainSpec.from_yaml(f"""
             name: gallery
             elements:
-              decode:    {{impl: mock}}
+              decode:    {{impl: replay}}
               recognize: {{impl: {recognize}{named}}}
-              output:    {{impl: mock}}
+              output:    {{impl: none}}
             """))
 
 
@@ -150,10 +168,21 @@ class TestTheImplementationDecides:
             "element 'recognize' (impl 'pool') must name a `model: <repository model name>`"
         )
 
-    def test_the_pool_implementation_loads_once_it_is_given_one(self) -> None:
-        chain = load("pool", model="ship_recognizer")
+    def test_the_pool_implementation_takes_the_model_it_is_given(self) -> None:
+        """Built directly, because a chain holding it can no longer load.
 
-        assert chain.node("recognize").element.model == "ship_recognizer"
+        ``recognize: {impl: pool}`` files ``meta["identities"]`` as the model's raw response
+        and every chain ends in an ``output``, which reads that key per detection row — so
+        C8b's loader refuses the pair (``TestAKeyReadPerRowMayNotBeFiledRaw`` in
+        ``test_chain.py``). The claim under test here is the *implementation's*, not the
+        chain's: this shape wants a ``model:`` and is handed the one the file named.
+        """
+        element = create_element(
+            ElementKind.RECOGNIZE, "pool", "recognize", model="ship_recognizer"
+        )
+
+        assert element.model == "ship_recognizer"
+        assert element.requires_model_name is True
 
     def test_the_requirement_is_read_off_any_element_not_only_the_model_kinds(self) -> None:
         """An ``output`` that declares ``requires_model_name`` is refused for want of a model.
@@ -165,7 +194,7 @@ class TestTheImplementationDecides:
         with pytest.raises(ChainStructureError, match="must name"):
             Topology.from_spec(ChainSpec.from_yaml("""
                     elements:
-                      decode: {impl: mock}
+                      decode: {impl: replay}
                       output: {impl: needs-a-model}
                     """))
 
@@ -230,7 +259,7 @@ class TestASurplusModelIsCarriedNotRefused:
         """Unchanged behaviour, pinned so that changing it is a decision rather than a slip.
 
         ``ElementSpec.model`` has always been "meaningless for the rest": ``describe()`` prints
-        it, and every mock model element in this suite carries a name it never resolves. C2
+        it, and a chain may carry a leftover name nothing ever resolves. C2
         moved the *requirement* onto the implementation and deliberately left the surplus
         alone — refusing it would fail a chain whose only fault is a leftover line, and it
         would fail most of the fixtures in ``tests/`` on the way.
@@ -272,23 +301,24 @@ class TestWhatTheDefaultIs:
         assert registry_for(kind).get("pool").needs_model is True
 
     @pytest.mark.parametrize(
-        "kind",
+        ("kind", "impl"),
         [
-            ElementKind.DETECT,
-            ElementKind.SEGMENT,
-            ElementKind.EMBED,
-            ElementKind.RECOGNIZE,
+            (ElementKind.DECODE, "replay"),
+            (ElementKind.RECOGNIZE, "shipvision"),
+            (ElementKind.TRACK, "shipvision"),
+            (ElementKind.MTMC, "shipvision"),
         ],
     )
-    def test_no_shipped_mock_claims_either(self, kind: Any) -> None:
-        """The two declarations a chain of mocks must not make.
+    def test_an_implementation_that_runs_its_own_code_claims_neither(
+        self, kind: Any, impl: str
+    ) -> None:
+        """The two declarations an element that resolves nothing must not make.
 
         ``shipinfer run`` builds an ``InferenceServer`` when any element in the chain declares
-        ``needs_model``, so a ``MockDetect`` answering ``True`` would load the whole model
-        repository to run an element that invents a box; and a ``MockDetect`` declaring
-        ``requires_model_name`` would refuse every mock chain in this suite for want of a name
-        nobody reads. A test that needs an element which *does* declare one registers its own
-        double (``tests/runners/test_inprocess.py::_Pooled``, and the two above).
+        ``needs_model``, so a ``shipvision`` tracker answering ``True`` would load the whole
+        model repository to run an algorithm that never asks it anything; and one declaring
+        ``requires_model_name`` would refuse a correct chain for want of a name nobody reads.
+        These four are every shipped implementation with no repository model behind it.
         """
-        assert registry_for(kind).get("mock").requires_model_name is False
-        assert registry_for(kind).get("mock").needs_model is False
+        assert registry_for(kind).get(impl).requires_model_name is False
+        assert registry_for(kind).get(impl).needs_model is False

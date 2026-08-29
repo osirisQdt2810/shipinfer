@@ -56,7 +56,6 @@ from shipinfer.topology.base import (
 )
 from shipinfer.topology.caps import Caps
 from shipinfer.topology.elements.detections import Detections
-from shipinfer.topology.elements.mock import MockOutput
 from shipinfer.topology.elements.mtmc import (
     DEFAULT_ALGORITHM,
     DEFAULT_CLUSTERER,
@@ -100,7 +99,7 @@ elements:
   detect: {impl: framed-detect}
   track:  {impl: shipvision, params: {algorithm: bytetrack, options: {min_hits: 1, max_age: 3}}}
   mtmc:   {impl: shipvision, params: {group: quay, cameras: [cam-a, cam-b], options: {min_hits: 1}}}
-  output: {impl: mock}
+  output: {impl: none, params: {keep_last: 16}}
 """
 
 
@@ -111,11 +110,11 @@ elements:
 class FramedDetect(Element):
     """A detector that files what the stateful tier actually reads: boxes **and frame size**.
 
-    ``mock-cpu`` files ``meta["detections"]`` and no ``meta["frame_hw"]``, which is fine for
-    ``track`` (it passes 0x0 through to a tracker that does not use it) and is not fine here:
-    ``CameraTracks`` refuses a zero frame size on purpose, because the height gate, the
-    truncated-box test and the homography's domain would all be silently wrong. A real ``pool``
-    detector files both (``elements/pool.py``). This is that shape, invented.
+    A detector that filed ``meta["detections"]`` and no ``meta["frame_hw"]`` would be fine
+    for ``track`` (it passes 0x0 through to a tracker that does not use it) and is not fine
+    here: ``CameraTracks`` refuses a zero frame size on purpose, because the height gate, the
+    truncated-box test and the homography's domain would all be silently wrong. A real
+    ``pool`` detector files both (``elements/pool.py``). This is that shape, invented.
     """
 
     kind: ClassVar[ElementKind] = ElementKind.DETECT
@@ -441,7 +440,9 @@ class TestTheGroupIsDeclaredToTheRunnerAndNotParsedTwice:
 
     def test_an_ordinary_element_declares_no_group(self) -> None:
         """The ABC's default, which is what makes the runner's walk kind-free."""
-        assert create_element(ElementKind.TRACK, "mock", "track", {}).camera_group() is None
+        assert (
+            create_element(ElementKind.TRACK, "shipvision", "track", {}).camera_group() is None
+        )
         assert FramedDetect("detect").camera_group() is None
 
 
@@ -601,7 +602,7 @@ class TestOneObjectAcrossTwoCameras:
         assert None not in ids
 
     def test_global_ids_are_a_list_aligned_with_this_items_tracks(self, element) -> None:
-        """The shape ``elements/mock.py`` publishes and an ``output`` element serialises."""
+        """The shape a ``track`` element publishes and an ``output`` element serialises."""
         tracks = [track(1, "cam-a", 0, TALL, SAME_A), track(2, "cam-a", 0, BESIDE, OTHER)]
         emitted = element.process(item("cam-a", 0, tracks=tracks))
 
@@ -1151,17 +1152,16 @@ class TestMtmcOverTheRunner:
         started.add_camera(CameraSpec("cam-a", "injected://a", 0.0))
         started.add_camera(CameraSpec("cam-b", "injected://b", 0.0))
 
-        sink = chain.node("output").element
-        assert isinstance(sink, MockOutput)
-        assert until(lambda: len(sink.emitted) == 6), sink.emitted
+        published = chain.node("output").element._sink
+        assert until(lambda: published.emitted == 6), published.stats()
 
-        assert {emitted.key for emitted in sink.emitted} == {
+        events = published.events()
+        assert {(event.camera_id, event.frame_id) for event in events} == {
             (camera, frame) for camera in ("cam-a", "cam-b") for frame in range(3)
         }
-        for emitted in sink.emitted:
-            assert str(emitted.caps) == "meta@cpu"
-            has_ids = "global_ids" in emitted.meta
-            gapped = "mtmc" in emitted.meta.get("missing_stages", ())
+        for event in events:
+            has_ids = any(record.global_id is not None for record in event.objects)
+            gapped = "mtmc" in event.missing_stages
             assert has_ids != gapped, "a frame must carry ids or say it has none"
 
     def test_the_element_learns_its_cameras_from_the_runners_lifecycle(self, runner) -> None:
@@ -1175,7 +1175,7 @@ class TestMtmcOverTheRunner:
 
         assert node.barrier.live == frozenset({"cam-a", "cam-b"})
 
-        assert until(lambda: len(chain.node("output").element.emitted) == 4)
+        assert until(lambda: chain.node("output").element._sink.emitted == 4)
         started.remove_camera("cam-b")
 
         assert node.barrier.live == frozenset({"cam-a"})
@@ -1188,7 +1188,7 @@ class TestMtmcOverTheRunner:
         started.add_camera(CameraSpec("cam-a", "injected://a", 0.0))
         started.add_camera(CameraSpec("cam-b", "injected://b", 0.0))
 
-        assert until(lambda: len(chain.node("output").element.emitted) == 4)
+        assert until(lambda: chain.node("output").element._sink.emitted == 4)
 
         assert value(started.metrics.registry, "shipinfer_mtmc_cameras", element="mtmc") == 2
 
@@ -1201,7 +1201,7 @@ class TestMtmcOverTheRunner:
         )
         started.add_camera(CameraSpec("cam-a", "injected://a", 0.0))
         started.add_camera(CameraSpec("cam-b", "injected://b", 0.0))
-        assert until(lambda: len(chain.node("output").element.emitted) >= 2)
+        assert until(lambda: chain.node("output").element._sink.emitted >= 2)
 
         began = time.monotonic()
         started.stop(timeout_s=5.0)

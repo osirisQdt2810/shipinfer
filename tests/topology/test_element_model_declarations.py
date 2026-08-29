@@ -5,7 +5,7 @@ whether :meth:`~shipinfer.topology.base.Element.open` resolves it against
 ``ElementContext.models``. Two readers trust it without asking the element again — the
 in-process runner's expiry gate, and ``shipinfer run``, which builds an
 :class:`~shipinfer.engine.InferenceServer` for a chain that carries one and none for a chain
-of mocks.
+whose elements all run their own code.
 
 A declaration with readers and no test is a declaration that drifts. The failure it drifts
 into is not loud: an element that answers ``False`` and then reaches for
@@ -127,7 +127,7 @@ def test_needs_model_predicts_whether_open_demands_a_pool(kind: ElementKind, imp
             element.close()
 
 
-def test_the_walk_covers_the_pool_implementations_and_the_mocks() -> None:
+def test_the_walk_covers_the_pool_implementations_and_the_rest() -> None:
     """A guard on the guard: an empty or lopsided parametrisation would pass silently.
 
     The registries are populated by import side effect, so a refactor that moved
