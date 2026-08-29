@@ -20,11 +20,8 @@ import numpy as np
 import pytest
 
 from shipinfer.core.errors import ValidationError
-from shipinfer.core.request import RequestContext
-from shipinfer.topology.base import ChainItem
-from shipinfer.topology.caps import parse_caps
 from shipinfer.topology.elements._vectors import rows_by_index
-from shipinfer.topology.elements.track import ShipvisionTrack
+from shipinfer.topology.elements.detections import per_row
 
 #: The prefix a caller passes so a refusal names the element and the frame. Every message
 #: this module raises has to start with it, which the last test in this file asserts over
@@ -346,56 +343,54 @@ class TestEveryRefusalNamesTheCaller:
         assert str(caught.value).startswith(WHO), str(caught.value)
 
 
-class TestTheReaderTrackStillDoesNotUse:
-    """``track._embeddings`` is a second, laxer copy of this rule — pinned, not fixed here.
-
-    The module docstring of :mod:`shipinfer.topology.elements._vectors` used to claim
-    ``track`` had been repointed at it. It has not: ``track.py`` is untouched by this slice.
-    Repointing it makes ``track`` **stricter**, which is a behaviour change owing its own red
-    tests, and ``track.py`` is the file a queued branch is already editing, so doing it here
-    buys a rebase conflict against work that is already reviewed.
-
-    What is not acceptable is a claim that outruns the tree, so the gap is written down as an
-    executable fact instead. These two tests are the follow-up's acceptance criteria in
-    advance: **TRACK-VECTORS** swaps the reader, and when it does both of them go red and are
-    rewritten as agreement rather than divergence.
+class TestTheReadersAgree:
+    """TRACK-VECTORS is closed: `per_row` carries this module's key rule, so every reader
+    of per-object metadata — `recognize` through `rows_by_index`, `track` and `output`
+    through `per_row` — refuses the same inputs for the same reasons. These are the
+    acceptance tests the divergence tests (this class's previous shape) were written to
+    become: the same values that were "refused here and still coerced by track" are now
+    refused by both, and a scatter-back defect cannot pass one reader and fail another.
     """
 
-    @staticmethod
-    def _track_reads(vectors: Any, count: int) -> Any:
-        """What ``track`` makes of ``vectors`` on a frame of ``count`` detections.
-
-        The private method directly, because the point being pinned is the *reader*, and
-        going through ``process()`` would need a tracker and therefore the submodule.
-        """
-        element = ShipvisionTrack("track")
-        item = ChainItem(
-            context=RequestContext(camera_id="cam-A", frame_id=184102),
-            caps=parse_caps(("bgr@cpu",))[0],
-            payload=None,
-            meta={"vectors": vectors},
-        )
-        return element._embeddings(item, Sized(count))  # type: ignore[arg-type]
-
-    def test_a_string_key_is_refused_here_and_still_coerced_by_track(self) -> None:
-        """``{"0": v}`` — the JSON round-trip that turns every row index into text."""
-        vector = np.ones(4, dtype=np.float32)
-
+    def test_a_string_key_is_refused_by_both_readers(self) -> None:
+        vectors = {"0": np.array([1.0, 0.0], dtype=np.float32)}
         with pytest.raises(ValidationError, match="not detection row indices"):
-            list(rows_by_index({"0": vector}, Sized(3), who=WHO))
+            list(rows_by_index(vectors, [object()], who="recognize element 'r'"))
+        with pytest.raises(ValidationError, match="not detection row indices"):
+            per_row(vectors, 1, what="track element 't'", key="vectors")
 
-        assert self._track_reads({"0": vector}, 3)[0] is vector
-
-    def test_an_out_of_range_key_is_refused_here_and_still_dropped_by_track(self) -> None:
-        """``{0: v, 7: v}`` on three rows: one key lands, one names nothing.
-
-        ``track`` refuses only when *no* key is in range, so row 7 is discarded in silence —
-        the half-scattered frame the shared reader exists to make loud.
-        """
-        vector = np.ones(4, dtype=np.float32)
-        mapping = {0: vector, 7: vector}
-
+    def test_an_out_of_range_key_is_refused_by_both_readers(self) -> None:
+        vectors = {
+            0: np.array([1.0, 0.0], dtype=np.float32),
+            7: np.array([0.0, 1.0], dtype=np.float32),
+        }
         with pytest.raises(ValidationError, match="names row 7"):
-            list(rows_by_index(mapping, Sized(3), who=WHO))
+            list(
+                rows_by_index(
+                    vectors, [object(), object(), object()], who="recognize element 'r'"
+                )
+            )
+        with pytest.raises(ValidationError, match="names row 7"):
+            per_row(vectors, 3, what="output element 'o'", key="vectors")
 
-        assert self._track_reads(mapping, 3) == [vector, None, None]
+
+class TestNumpyKeysWithoutAFrameToRangeOver:
+    """`recognize` reads `meta["detections"]` and it is legitimately absent (a fixed-crop
+    source, a test). The key rule still applies; the *range* rule cannot, because there is
+    no frame to range over — and the count estimated for it must not quietly exclude the
+    numpy keys this module documents as legal.
+    """
+
+    def test_a_numpy_key_is_accepted_when_the_frame_is_unknown(self) -> None:
+        rows = rows_by_index(
+            {np.int64(0): np.zeros(4, dtype=np.float32)}, None, who="recognize"
+        )
+
+        assert [index for index, _ in rows] == [0]
+
+    def test_mixed_python_and_numpy_keys_keep_every_row(self) -> None:
+        vector = np.zeros(4, dtype=np.float32)
+
+        rows = rows_by_index({0: vector, np.int64(5): vector}, None, who="recognize")
+
+        assert [index for index, _ in rows] == [0, 5], "a numpy key must not shrink the count"

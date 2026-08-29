@@ -31,6 +31,19 @@
 # ship embedder and the ship recogniser, which is ~15 000 crops/s of wasted GPU at the
 # sizing in CLAUDE.md and, worse, emits a ship identity for a person.
 #
+# ...AND WHY THOSE FOUR GUARDS ARE NOT HOW THIS FILE WILL SPELL IT. A `when:` reads
+# `item.meta` and an item is a FRAME, so `class == ship` asks a frame to have one class --
+# and a frame holds ships and people at once. Nothing writes a frame-level `meta["class"]`,
+# so as written these four conditions are false on every frame, and even if something wrote
+# one, a frame containing a single person would still run the entire ship branch. Selecting
+# ROWS is `params: {classes: [ship]}`, which is what the `pool` crop elements actually read
+# (`topology/elements/pool.py`), and `Topology.from_spec` now refuses `when: class == ...`
+# on a slot that selects rows -- naming `classes:` as the fix. The guards below survive only
+# because this file stops at `gstreamer-gpu` before the loader ever reaches them; they are
+# rewritten in the same slice that registers a `decode` implementation for phase D. The
+# runnable sibling `topology/ship_person_cpu.yaml` already spells it the new way, and is
+# the file to copy from.
+#
 # WHAT DOES NOT LOAD YET. Every `impl:` below is a name that lands in a later phase of the
 # migration plan (arch.md §10), so this file is a schema fixture today, not a runnable
 # chain -- `Topology.from_spec` refuses it with UnknownElementImplError naming

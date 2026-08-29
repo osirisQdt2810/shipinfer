@@ -3,7 +3,7 @@
 One value type, kept in ``core`` for the reason every other value type is: the two layers
 that build a :class:`~shipinfer.core.events.schema.PerceptionEvent` sit on opposite sides of
 the accelerator seam. ``pipeline/`` — the previous generation's DAG — builds one per frame,
-and so will the ``output`` element under ``topology/``, which may import ``core`` and
+and so does the ``output`` element under ``topology/``, which may import ``core`` and
 nothing else (``scripts/hooks/check_layers.py``). A shared value that lived in either of
 them would make the other import a layer it must not.
 

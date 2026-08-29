@@ -29,7 +29,7 @@ from __future__ import annotations
 import pytest
 
 import shipinfer.topology.elements  # noqa: F401  -- imported for its registrations
-from shipinfer.core.errors import ConfigurationError
+from shipinfer.core.errors import BackendUnavailableError, ConfigurationError
 from shipinfer.topology.base import Element, ElementContext, ElementKind
 from shipinfer.topology.registry import ELEMENTS, create_element
 
@@ -97,6 +97,12 @@ def test_needs_model_predicts_whether_open_demands_a_pool(kind: ElementKind, imp
     the package to install. Asserting ``is_open`` unconditionally would make this file demand
     the opposite of that -- and would go red on the one checkout the offline tier exists to
     protect. So the refusal is allowed and then *read*: it must not be the pool's.
+
+    :class:`~shipinfer.core.errors.BackendUnavailableError` is allowed for the same reason and
+    read the same way. It is the typed refusal for "the runtime is not installed on this host"
+    (``output: {impl: kafka}`` without ``confluent_kafka`` is the one that raises it today),
+    and by construction it is never about a model pool -- which is the only thing this test
+    is entitled to have an opinion about.
     """
     declared = ELEMENTS[kind].get(impl).needs_model
     element = None
@@ -107,6 +113,8 @@ def test_needs_model_predicts_whether_open_demands_a_pool(kind: ElementKind, imp
             return
         try:
             element = _open_with_no_pool(kind, impl)
+        except BackendUnavailableError:
+            return
         except ConfigurationError as exc:
             assert "model pool" not in str(exc), (
                 f"{kind.value}:{impl} declares needs_model=False and refused an empty "

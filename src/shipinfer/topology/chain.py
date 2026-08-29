@@ -406,6 +406,9 @@ class Topology:
                 decode element, does not say what it produces or carries a ``when:``, no
                 output element, an output element with a successor, a branch that reaches no
                 output, or a wildcard ``produces`` whose inbound edges disagree.
+                It also covers the two row-selection refusals: a row-selecting element
+                guarded with ``when: class == …`` instead of ``params: classes:``, and a
+                ``classes:`` naming a label the chain's detector will never emit.
             UnknownElementImplError: an ``impl:`` nobody registered.
             ConfigurationError: a registered class whose kind is not its registry's.
             UnknownElementError: an ``after:`` naming an element that is not declared.
@@ -491,6 +494,8 @@ class Topology:
             for slot in order
         ]
         _check_structure(nodes)
+        _check_row_selection(nodes)
+        _check_row_indexed_meta(nodes)
         edges = _negotiate_edges(nodes)
         return cls(spec.name, nodes, edges)
 
@@ -883,6 +888,108 @@ def _resolve_produced(node: ElementNode, arrivals: Sequence[_Arrival]) -> tuple[
     # Two declared caps can resolve to the same thing (`*@gpu, nv12@*` behind an nv12@gpu
     # producer). Dedupe, preserving preference order, so the error messages stay readable.
     return tuple(dict.fromkeys(resolved))
+
+
+def _check_row_selection(nodes: Sequence[ElementNode]) -> None:
+    """The two ways of asking for "only the ships" that a chain file must not confuse.
+
+    Both are silent failures, which is why they are start-up refusals rather than warnings.
+
+    1. **``when: class == ship`` on a row-selecting element.** ``when:`` guards one element for
+       a whole *frame* -- :meth:`Condition.matches` reads ``item.meta`` and an item is a frame
+       -- and a frame holds ships and people at once. Nothing in the chain writes a frame-level
+       ``meta["class"]``, so the condition is false on every frame and the element is skipped
+       forever: the ship embedder never runs, every ship's ``embedding`` is empty, and no
+       counter says anything is wrong. Even if something *did* write one, a frame containing
+       one person would still run the entire ship branch, which is the wasted GPU the
+       production chain's own header warns about. ``params: classes:`` is the mechanism that
+       answers the question actually being asked, and it is what the element already reads.
+
+       Only ``class`` is refused, and only on an element that declares
+       :attr:`~shipinfer.topology.base.Element.selects_rows`. ``when:`` keeps every other use:
+       a genuine frame-level short circuit on a fact something files -- ``meta["fps"]``, from
+       ``runners/frames.py`` -- is exactly what it is good for, and nothing here narrows its
+       semantics. Guarding on a key no element writes is false on every frame, which is the
+       same silence this refusal exists against; it is simply not something the loader can see.
+
+    2. **A ``classes:`` label the detector will never emit.** ``classes: [vessel]`` in front of
+       a detector whose table says ``ship`` matches no row, crops nothing, submits nothing and
+       reports nothing: the branch is dead and the event is quietly missing a field. The labels
+       are compared only when *both* sides declared theirs -- a detector that names no
+       ``decode.class_labels`` is using a default table, which is a fallback rather than a
+       statement about this deployment's model, and refusing against it would be inventing a
+       rule the chain never agreed to.
+
+    Raises:
+        ChainStructureError: naming the slot and the key that fixes it. Both are one
+            element's place in the chain being wrong in a way that produces no error at run
+            time, which is exactly what that type is for.
+    """
+    for node in nodes:
+        condition = node.condition
+        if node.element.selects_rows and condition is not None and condition.field == "class":
+            raise ChainStructureError(
+                f"element {node.name!r} (impl {node.element.impl!r}) carries "
+                f"`when: {condition}`, but `when:` guards a whole FRAME and a frame "
+                "holds several classes at once -- nothing writes a frame-level "
+                "meta['class'], so this element would be skipped on every frame. This "
+                "element selects detection ROWS: write "
+                + (
+                    f"`params: {{classes: [{condition.value}]}}`"
+                    if condition.op == "=="
+                    else f"`params: {{classes: [...]}}` naming the labels this slot wants "
+                    f"(every label except {condition.value!r}, for this `!=`)"
+                )
+                + " instead"
+            )
+
+    emitters = {
+        node.name: labels
+        for node in nodes
+        if (labels := node.element.detection_labels()) is not None
+    }
+    if not emitters:
+        return
+    known = {label for labels in emitters.values() for label in labels}
+    for node in nodes:
+        unknown = [
+            label for label in node.element.declared_classes() or () if label not in known
+        ]
+        if unknown:
+            raise ChainStructureError(
+                f"element {node.name!r} declares `params: classes: {unknown}`, but "
+                f"{sorted(emitters)} emit(s) {sorted(known)} "
+                "(`params: {decode: {class_labels: ...}}`). A label nobody detects selects no "
+                "rows, so this element would run on nothing and report nothing wrong"
+            )
+
+
+def _check_row_indexed_meta(nodes: Sequence[ElementNode]) -> None:
+    """A key read per detection row, filed by a slot that files the model's response verbatim.
+
+    ``recognize: {impl: pool}`` files ``meta["identities"]`` as ``{output name: Tensor}`` and
+    ``output`` reads that key per row, so the pair fails on every frame: the chain loads and
+    publishes nothing. Both halves are declarations (``reads_per_row``, ``files_raw_response``),
+    so ``segment: {impl: pool}`` still loads -- nothing reads ``masks`` per row.
+
+    Raises:
+        ChainStructureError: naming the slot, the key, and the implementation that works.
+    """
+    wanted = {key for node in nodes for key in node.element.reads_per_row}
+    if not wanted:
+        return
+    readers = sorted(node.name for node in nodes if node.element.reads_per_row)
+    for node in nodes:
+        key = getattr(node.element, "meta_key", "")
+        if key in wanted and node.element.files_raw_response:
+            raise ChainStructureError(
+                f"element {node.name!r} (impl {node.element.impl!r}) files meta[{key!r}] as "
+                f"the model's raw response, and {readers} read(s) that key one entry per "
+                "detection ROW -- every frame would fail at run time and the chain would "
+                f"publish nothing. Use an implementation that scatters back onto the rows "
+                f"(`{node.kind.value}: {{impl: shipvision}}` for identity), or drop "
+                f"{readers[0]!r} from this chain"
+            )
 
 
 def _negotiate_edges(nodes: Sequence[ElementNode]) -> tuple[Edge, ...]:

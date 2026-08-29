@@ -1,7 +1,7 @@
 """Re-export of the result sinks, which now live under ``topology``.
 
-The family moved to :mod:`shipinfer.topology.sinks` ahead of the ``output`` element that
-will use them: arch.md §9 says ``sinks/{kafka,jsonlines,null}`` become ``output`` element
+The family moved to :mod:`shipinfer.topology.sinks` when the ``output`` element arrived:
+arch.md §9 says ``sinks/{kafka,jsonlines,null}`` become ``output`` element
 implementations, and ``topology`` may import ``core`` and nothing else, so an element could
 not have reached them here. This package stays because ``pipeline/`` remains the working application until the
 chain has replaced it (arch.md §9 again) and its runner, its DeepStream path and their tests

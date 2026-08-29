@@ -147,6 +147,16 @@ class CameraActor:
         with self._lock:
             return self._state
 
+    @property
+    def source_fps(self) -> float:
+        """The connected source's negotiated rate; 0.0 before the first connect.
+
+        Read without the lock: the attribute flips once per connect, and a reader that
+        catches the old value sees 0.0 — the same answer as "not connected yet".
+        """
+        source = self._source
+        return source.fps if source is not None else 0.0
+
     # -- lifecycle ---------------------------------------------------------------------
 
     def start(self) -> None:

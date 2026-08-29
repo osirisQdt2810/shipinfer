@@ -1797,3 +1797,57 @@ class TestTheChainDecidesTheHead:
 
         assert str(chain.edges[0].caps) == "bgr@cpu"
         assert str(head.caps) == str(chain.edges[0].caps) == str(decode.output_caps[0])
+
+
+class TestASourceThatNeverNegotiatesARateIsNotAskedForever:
+    """`_camera_fps` reaches `IngestManager.actor()`, which takes the manager's own lock —
+    the one `add_camera`/`remove_camera` hold. A source whose rate never resolves (RTSP
+    negotiation failed, a container with no fps metadata) would take that mutex once per
+    frame for the life of the process: 1000 acquisitions/s at the design sizing, on a
+    camera that is already degraded.
+    """
+
+    class _Silent:
+        """An actor that has no rate to give, and counts how often it is asked."""
+
+        def __init__(self) -> None:
+            self.asks = 0
+
+        @property
+        def source_fps(self) -> float:
+            self.asks += 1
+            return 0.0
+
+    def runner(self, actor: Any) -> InprocessRunner:
+        runner = InprocessRunner(load(), settings=settings())
+        runner._ingest_manager = type("M", (), {"actor": staticmethod(lambda _cam: actor)})()
+        return runner
+
+    def test_the_asking_stops_after_a_bounded_number_of_frames(self) -> None:
+        actor = self._Silent()
+        runner = self.runner(actor)
+
+        rates = [runner._camera_fps("cam0") for _ in range(200)]
+
+        assert rates == [0.0] * 200, "every frame still gets an answer"
+        assert (
+            actor.asks == InprocessRunner._FPS_ATTEMPTS
+        ), "and the shared lock is not taken 200 times"
+
+    def test_a_rate_that_arrives_late_is_still_picked_up_and_then_cached(self) -> None:
+        """The bound must not blind a source that negotiates on its third frame."""
+
+        class _Late(self._Silent):
+            @property
+            def source_fps(self) -> float:
+                self.asks += 1
+                return 25.0 if self.asks >= 3 else 0.0
+
+        actor = _Late()
+        runner = self.runner(actor)
+
+        rates = [runner._camera_fps("cam0") for _ in range(50)]
+
+        assert rates[:2] == [0.0, 0.0]
+        assert rates[2:] == [25.0] * 48, "once known, it is the answer"
+        assert actor.asks == 3, "and it is never asked again"

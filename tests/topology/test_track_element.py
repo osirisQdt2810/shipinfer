@@ -744,6 +744,98 @@ class TestEmptyFrame:
 
 
 @needs_shipvision
+class TestTracksAreAttributedToDetectionRows:
+    """``meta["track_rows"]``: which detection each published track came from.
+
+    The mapping an ``output`` element cannot recover for itself. A track's box is the filtered
+    estimate, so only the element that ran the tracker holds the detections, the tracks and the
+    solver at once; a sink that redid this would be a second, quieter tracker. Every way of
+    getting it wrong publishes a track id on the wrong object, which has no symptom downstream
+    beyond two cameras disagreeing about what they are looking at.
+    """
+
+    def test_one_row_index_per_published_track(self, element) -> None:
+        emitted = element.process(item(detections=detections((0, 0, 40, 40))))
+
+        rows = emitted.meta["track_rows"]
+        assert len(rows) == len(emitted.meta["tracks"])
+        assert rows == (0,)
+
+    def test_a_track_is_attributed_to_the_box_it_actually_overlaps(self, element) -> None:
+        """Two objects far apart, so there is one right answer and the test can name it."""
+        emitted = element.process(
+            item(detections=detections((0, 0, 40, 40), (300, 300, 340, 340)))
+        )
+
+        tracks = emitted.meta["tracks"]
+        rows = emitted.meta["track_rows"]
+        by_row = dict(zip(rows, tracks, strict=True))
+        assert set(rows) == {0, 1}
+        assert by_row[0].box[0] < 100
+        assert by_row[1].box[0] > 200
+
+    def test_a_classes_slot_maps_back_to_the_frames_own_row_numbering(self) -> None:
+        """A slot that tracks only ships must not report the *subset's* index.
+
+        The bug this pins is off by however many rows the slot skipped: the tracker sees rows
+        [1] of a two-row frame as its row 0, and an event built on that number puts the ship's
+        identity on the person.
+        """
+        built = opened({"classes": ["ship"]})
+        try:
+            emitted = built.process(
+                item(
+                    detections=Detections(
+                        boxes=np.array(
+                            [[300, 300, 340, 340], [0, 0, 40, 40]], dtype=np.float32
+                        ),
+                        scores=np.full(2, 0.9, dtype=np.float32),
+                        class_ids=np.array([0, 8], dtype=np.int32),
+                        labels=("person", "ship"),
+                    )
+                )
+            )
+        finally:
+            built.close()
+
+        assert emitted.meta["track_rows"] == (1,), "the ship is row 1 of the frame"
+
+    def test_a_frame_with_no_detections_attributes_nothing(self, element) -> None:
+        emitted = element.process(item(detections=Detections.empty()))
+
+        assert emitted.meta["track_rows"] == ()
+
+    def test_an_untracked_frame_files_no_attribution(self, element) -> None:
+        """No tracks, no rows: the two keys are one answer and never half of one."""
+        emitted = element.process(item())
+
+        assert "track_rows" not in emitted.meta
+        assert emitted.meta["missing_stages"] == ("track",)
+
+    def test_the_threshold_refuses_an_answer_rather_than_tuning_one(self) -> None:
+        """``attribution_iou: 1.0`` demands a perfect overlap, so nothing is attributed.
+
+        Not a realistic setting — it is the knob turned to its refusing end, which is the only
+        way to assert that a track that matches nothing gets ``-1`` instead of its nearest box.
+        """
+        built = opened({"attribution_iou": 1.0})
+        try:
+            built.process(item(detections=detections((0, 0, 40, 40))))
+            emitted = built.process(item(frame=1, detections=detections((10, 10, 50, 50))))
+        finally:
+            built.close()
+
+        assert set(emitted.meta["track_rows"]) <= {-1}
+
+    @pytest.mark.parametrize("declared", ["not-a-number", 0, 1.5, -0.2])
+    def test_an_impossible_threshold_is_refused_at_load(self, declared: Any) -> None:
+        with pytest.raises(ConfigurationError, match="attribution_iou"):
+            create_element(
+                ElementKind.TRACK, "shipvision", "track", {"attribution_iou": declared}
+            )
+
+
+@needs_shipvision
 class TestTrackPlane:
     """The plane change: this is where the chain stops carrying pixels."""
 
@@ -864,7 +956,7 @@ class TestWhatItReadsOffTheItem:
         """An off-by-N scatter-back. Without the coverage check every row silently gets
         ``embedding=None`` and the chain reads as healthy, which is the same silence the
         sequence form's length check already refuses, arriving through the other door."""
-        with pytest.raises(ValidationError, match="name no detection"):
+        with pytest.raises(ValidationError, match="names row 5 and the frame has 1"):
             element.process(
                 item(
                     detections=detections((0, 0, 40, 40)),
@@ -1082,3 +1174,109 @@ class TestTrackOverTheRunner:
         started.remove_camera("cam-a")
 
         assert element._shard.cameras == ()
+
+
+class TestTheAttributionArithmeticWithoutASolver:
+    """The ``keep``-remap, pinned on a checkout with no submodule.
+
+    Everything else in this file that touches ``track_rows`` drives a **real** tracker and
+    therefore skips under the mask — which left the arithmetic that turns a solver's column
+    number back into the frame's own row number with no offline coverage at all, and that
+    arithmetic is exactly the off-by-N this family keeps catching. The solver is not what
+    needs pinning here (it is ``shipvision``'s, and it is tested there); what needs pinning is
+    what this element does with its answer.
+
+    So the two handles ``open()`` resolves are injected instead: a fake ``iou_matrix`` and a
+    fake ``associate`` that returns the matches the test names. No ``open()``, no submodule,
+    no tracker — and a wrong remap fails here rather than only on a developer's machine.
+    """
+
+    class Track:
+        """The one attribute ``_attribute`` reads off a published track."""
+
+        def __init__(self, box: tuple[float, float, float, float]) -> None:
+            self.box = np.array(box, dtype=np.float32)
+
+    def build(self, matches, **params) -> tuple[Any, dict[str, Any]]:
+        """A ``track`` element with both solver handles faked, and the call it recorded."""
+        element = ShipvisionTrack("track", dict(params))
+        seen: dict[str, Any] = {}
+
+        def iou_matrix(tracks: np.ndarray, candidates: np.ndarray) -> np.ndarray:
+            seen["tracks"] = tracks
+            seen["candidates"] = candidates
+            return np.zeros((tracks.shape[0], candidates.shape[0]), dtype=np.float64)
+
+        def associate(cost: np.ndarray, max_cost: float):
+            seen["cost"] = cost
+            seen["max_cost"] = max_cost
+            return matches, (), ()
+
+        element._iou_matrix = iou_matrix
+        element._associate = associate
+        return element, seen
+
+    def test_a_column_of_a_full_frame_is_that_frames_row(self) -> None:
+        element, _ = self.build([(0, 1), (1, 0)])
+
+        rows = element._attribute(
+            detections((0, 0, 10, 10), (100, 100, 110, 110)),
+            range(2),
+            [self.Track((0, 0, 10, 10)), self.Track((100, 100, 110, 110))],
+        )
+
+        assert rows == (1, 0)
+
+    def test_a_column_of_a_filtered_subset_is_remapped_to_the_frames_row(self) -> None:
+        """The bug: a slot with ``classes:`` tracks rows [1, 3] and the solver calls them 0
+        and 1. Publishing those numbers puts one object's identity on another's box, and it
+        has no symptom until two cameras disagree about what they are looking at."""
+        element, _ = self.build([(0, 0), (1, 1)], classes=["ship"])
+
+        rows = element._attribute(
+            detections((0, 0, 10, 10), (20, 20, 30, 30), (40, 40, 50, 50), (60, 60, 70, 70)),
+            (1, 3),
+            [self.Track((20, 20, 30, 30)), self.Track((60, 60, 70, 70))],
+        )
+
+        assert rows == (1, 3)
+
+    def test_only_the_kept_rows_are_offered_to_the_solver(self) -> None:
+        """A filtered slot must not be able to attribute a track to a row it never saw."""
+        element, seen = self.build([], classes=["ship"])
+
+        element._attribute(
+            detections((0, 0, 10, 10), (20, 20, 30, 30), (40, 40, 50, 50), (60, 60, 70, 70)),
+            (1, 3),
+            [self.Track((20, 20, 30, 30))],
+        )
+
+        assert seen["candidates"].tolist() == [[20, 20, 30, 30], [60, 60, 70, 70]]
+
+    def test_a_track_the_solver_matched_to_nothing_stays_minus_one(self) -> None:
+        """``-1`` is ordinary — a coasting track is not a detection and has no row to ride."""
+        element, _ = self.build([(1, 0)])
+
+        rows = element._attribute(
+            detections((0, 0, 10, 10)),
+            range(1),
+            [self.Track((500, 500, 510, 510)), self.Track((0, 0, 10, 10))],
+        )
+
+        assert rows == (-1, 0)
+
+    def test_the_answer_is_one_entry_per_track_always(self) -> None:
+        """``output`` reads ``tracks`` and ``track_rows`` in step and refuses a length gap."""
+        element, _ = self.build([])
+
+        assert element._attribute(detections(), range(0), [self.Track((0, 0, 1, 1))]) == (-1,)
+        assert element._attribute(detections((0, 0, 1, 1)), range(1), []) == ()
+
+    def test_the_solver_is_given_a_cost_and_the_configured_threshold(self) -> None:
+        """``1 - IoU``, capped at ``1 - attribution_iou``: the element converts once, here."""
+        element, seen = self.build([], attribution_iou=0.4)
+
+        element._attribute(detections((0, 0, 10, 10)), range(1), [self.Track((0, 0, 10, 10))])
+
+        assert seen["cost"].tolist() == [[1.0]]
+        assert seen["max_cost"] == pytest.approx(0.6)

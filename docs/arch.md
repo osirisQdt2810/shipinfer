@@ -35,10 +35,10 @@ which branch conditions. It is data (a YAML file), not code:
 elements:
   decode:       {impl: gstreamer-gpu}               # NV12 → VRAM, the default
   detect:       {impl: pool, model: ship_detector}
-  segment:      {impl: pool, model: ship_segmenter,  when: class == ship}
-  embed_ship:   {impl: pool, model: ship_embedder,   when: class == ship,   after: segment}
-  embed_person: {impl: pool, model: person_embedder, when: class == person, after: detect}
-  recognize:    {impl: pool, model: ship_recognizer, when: class == ship,   after: embed_ship}
+  segment:      {impl: pool, model: ship_segmenter}
+  embed_ship:   {impl: pool, model: ship_embedder,   after: segment, params: {classes: [ship]}}
+  embed_person: {impl: pool, model: person_embedder, after: detect,  params: {classes: [person]}}
+  recognize:    {impl: shipvision, after: embed_ship, params: {classes: [ship]}}   # gallery query
   track:        {impl: shipvision, per: camera, after: [recognize, embed_person]}  # stateful — home shard
   mtmc:         {impl: shipvision, scope: global}
   output:       {impl: kafka}
@@ -47,12 +47,39 @@ elements:
 Three rules make this file unambiguous: an element's predecessor is the **previously declared
 slot** unless `after:` says otherwise, every element must reach `output`, and a `when:`
 guards **only the element it is written on** — a rejected item is skipped past that element
-and handed to its successors, so every element of a class-specific branch must carry the
-condition itself, which is why `embed_ship` and `recognize` repeat `when: class == ship`.
-The two `after:` lines on `embed_person` and `track` are the fork and the rejoin — without
-them the person branch would end in `embed_person` and the loader refuses the chain
-(`ChainStructureError`). `topology/ship_person.yaml` in the repository is this file, and a
-test loads its exact wiring.
+and handed to its successors, so a class-specific *branch* carries its condition on every
+element in it. The two `after:` lines on `embed_person` and `track` are the fork and the
+rejoin — without them the person branch would end in `embed_person` and the loader refuses
+the chain (`ChainStructureError`).
+
+**`when:` guards a frame; `classes:` selects rows.** These are two different questions and
+the file says which is which. `when:` is evaluated **once per frame** and its answer is
+skip-or-run for that whole element: a rejected frame is handed to the element's successors
+untouched. `params: {classes: [...]}` is evaluated **per detection row** and decides which of
+the frame's objects this element pays for — which is what a crop element like `embed_ship`
+actually wants, because a frame containing one ship and fourteen people is neither "a ship
+frame" nor "a person frame". Writing `when: class == ship` on such an element asks a
+per-frame question about a per-row fact, and the loader refuses it at start-up
+(`ChainStructureError`, naming the `params: {classes: [ship]}` to write instead): the
+condition would skip the *entire* element for any frame the expression rejected, taking the
+ships with it. `segment` carries no guard above, and that is the honest state: `when:` is the
+right tool for a frame-level short circuit -- skipping the ship branch on a frame with no ships
+-- but the chain must guard on a fact something files, and no element files one today. The
+runner files `meta["fps"]` (`runners/frames.py:144`) and that is the only frame-level key a
+`when:` can read right now. `topology/ship_person_cpu.yaml:33-35` says the same thing: a
+frame-level guard lands here when there is a bench number behind it, not before.
+See ADR-017 (amended 2026-08-28).
+
+**`recognize` is a gallery query, not a pool submission.** Identity is `impl: shipvision`: the
+element embeds each selected row and asks a gallery who it is, filing one `(id, score)` per
+detection row. `impl: pool` files the model's response verbatim under that same key, which
+`output` reads per row, so the loader refuses the pairing at start-up rather than failing every
+frame (`ChainStructureError`) -- the chain above is the runnable spelling.
+
+`topology/ship_person.yaml` in the repository is this file. It still carries the older
+`when: class == …` spelling on its crop slots and is not loadable until phase D registers a
+real `decode`; `topology/ship_person_cpu.yaml` is the runnable sibling and is written the way
+this snippet is.
 
 **Runner** — *how* a topology executes. Three runners, one chain definition:
 
@@ -435,7 +462,9 @@ engine, a topology and a runner, which is exactly what `launch` and `runners` ma
 previous generation of everything above, and each one lands somewhere named: `graph/` is
 superseded by the chain loader and the runners (phase C); `reassembly/` becomes §5⑤ inside a
 shard, under `runners/`; `sinks/{kafka,jsonlines,null}` become `output` element
-implementations under `topology/elements/`; `deepstream/` becomes the phase-E chain compiler
+implementations under `topology/elements/`, over the transports themselves which moved to
+`topology/sinks/` — the element assembles the event, the sink carries it, and the split is
+what keeps a broker client out of the element registry; `deepstream/` becomes the phase-E chain compiler
 under `runners/deepstream/`; `runner.py` is the in-process runner's precedent and is
 superseded by it. Until phase C and phase E have landed those, `pipeline/` remains the
 working application and `csrc/shipinfer/pipeline/` follows it, module for module.

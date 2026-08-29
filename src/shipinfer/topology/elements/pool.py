@@ -182,6 +182,11 @@ class _PoolElement(Element):
     #: Where this kind's results are filed in :attr:`ChainItem.meta`. The one thing a
     #: subclass must declare, and the vocabulary the downstream elements read: ``track`` wants
     #: ``detections``, ``mtmc`` wants ``vectors``.
+    #: The default ``_finish`` files the response verbatim, so a consumer that reads this
+    #: element's key per detection row cannot be satisfied by it -- the loader refuses that
+    #: pairing rather than letting it fail on frame 1.
+    files_raw_response: ClassVar[bool] = True
+
     meta_key: ClassVar[str] = ""
 
     #: What this element does with the frame's pixels, for :meth:`_frame_of`'s refusals: a
@@ -567,12 +572,29 @@ class PoolDetect(_PoolElement):
     kind: ClassVar[ElementKind] = ElementKind.DETECT
     #: The decoded, source-pixel :class:`~shipinfer.topology.elements.detections.Detections`
     #: — the key ``track`` reads. Not the raw rows: see the class docstring.
+    #: Decoded and filed as this frame's detections, not as the raw response.
+    files_raw_response: ClassVar[bool] = False
+
     meta_key: ClassVar[str] = "detections"
     #: This element letterboxes, so it is opened with :attr:`ElementContext.ops` and refuses
     #: without one. The declaration is what makes ``shipinfer run`` resolve an implementation
     #: out of ``runtime.ops`` for a chain that contains one, and only for such a chain.
     needs_image_ops: ClassVar[bool] = True
     _frame_verb: ClassVar[str] = "letterbox"
+
+    def detection_labels(self) -> tuple[str, ...] | None:
+        """The label vocabulary this detector was configured with, or ``None`` if it said none.
+
+        Answered from ``params:`` alone and before ``open()``, because the loader asks it while
+        validating a chain on a host with no pool — which is also why a malformed table is
+        ``None`` here rather than a refusal: :meth:`_resolve_decode_params` raises for that at
+        ``open()``, with the message that names the key, and two refusals for one typo is one
+        too many.
+        """
+        labels = self._decode_params.get("class_labels")
+        if not isinstance(labels, Mapping):
+            return None
+        return tuple(str(value) for value in labels.values())
 
     def __init__(
         self,
@@ -1096,9 +1118,17 @@ class _PoolCropElement(_PoolElement):
     peer's mapping is already there and not even that (:meth:`_scatter`).
     """
 
+    #: A crop element scatters its response back onto the rows it cropped, so its key is
+    #: row-indexed and readable by ``output`` -- the opposite of the base's default.
+    files_raw_response: ClassVar[bool] = False
+
     #: This element crops, so it is opened with :attr:`ElementContext.ops` and refuses without
     #: one -- the same declaration, and the same refusal, as :class:`PoolDetect`.
     needs_image_ops: ClassVar[bool] = True
+    #: It selects which rows to crop with ``params: classes:``, so the loader refuses a
+    #: ``when: class == …`` on this slot and names the key that does the job -- see
+    #: :attr:`~shipinfer.topology.base.Element.selects_rows`.
+    selects_rows: ClassVar[bool] = True
     _frame_verb: ClassVar[str] = "crop"
 
     def __init__(
@@ -1356,6 +1386,10 @@ class _PoolCropElement(_PoolElement):
         crops = self._ops.crop_batch(image, boxes, self._crop_size, self._normalize)
         return Tensor.from_numpy(crops), rows
 
+    def declared_classes(self) -> tuple[str, ...] | None:
+        """See :meth:`~shipinfer.topology.base.Element.declared_classes`."""
+        return self._classes
+
     def _selected(self, detections: Detections) -> range | tuple[int, ...]:
         """The detection rows this slot embeds -- every one, or the declared classes.
 
@@ -1522,16 +1556,15 @@ class _PoolCropElement(_PoolElement):
         **Two of them meet in one of two ways, and this method is one half of one rule.**
         In *series* -- both on one branch, the second declared ``after:`` the first -- the
         second one finds the first one's mapping in ``item.meta`` and merges into it here. In
-        *parallel* -- the shape C8b gives ``topology/ship_person.yaml``: both slots declared
+        *parallel* -- the shape ``topology/ship_person_cpu.yaml`` declares: both slots on
         ``after: detect`` with ``params: classes:`` picking their rows, rejoining at ``track``
         -- neither ever sees the other's item, and the union is taken at the rejoin instead
         (:meth:`~shipinfer.runners.inprocess.InprocessRunner._merge_meta`). Both compositions
         are legal today and neither may lose half the frame. What the *shipped* file declares
-        is neither of them yet: both embedders carry ``when: class == ...`` and no
-        ``classes:``, and :meth:`~shipinfer.topology.chain.Condition.matches` is ``False`` on
-        a field nothing in the chain sets, so on it neither embedder runs at all. C8b is what
-        turns those ``when:`` guards into the row filter this element reads; until it lands,
-        the wiring under test is ``tests/topology/test_pool_embed_crops.py``'s.
+        is neither of them yet: ``topology/ship_person.yaml``'s embedders still carry
+        ``when: class == ...`` and no ``classes:``, which the loader now refuses outright --
+        that file waits on phase D's decoder and is converted with it (ledger
+        SHIP-PERSON-ROW-GUARDS). The runnable sibling is ``ship_person_cpu.yaml``.
 
         **What is filed is a** :class:`~shipinfer.topology.base.RowIndexed`, and that is not
         decoration: it is what tells the fan-in that this value is keyed by detection row and

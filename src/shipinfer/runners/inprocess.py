@@ -339,6 +339,10 @@ class InprocessRunner(Runner):
         #: live producer into the new cycle's queue.
         self._ingest_manager: IngestManager | None = None
         self._source_factory = source_factory
+        #: negotiated-rate cache for `_camera_fps`; dropped on re-add (the rate may change).
+        self._fps_cache: dict[str, float] = {}
+        #: consecutive frames that asked and got nothing; caps the retries above.
+        self._fps_misses: dict[str, int] = {}
         #: ``camera_id -> priority`` for the cameras **this process's own configuration**
         #: names, plus the default learned once for a camera it does not
         #: (:meth:`_learn_priority`). Filled from ``ingest.cameras`` when the ingest manager
@@ -472,6 +476,38 @@ class InprocessRunner(Runner):
     # concurrent stop rather than racing it, and ``IngestManager.add_camera`` returns as soon
     # as the actor thread is started, without waiting on the RTSP open.
 
+    #: How many frames may ask a camera for a rate it has not negotiated. `actor()` takes
+    #: `IngestManager._lock` -- the one `add_camera`/`remove_camera` hold -- so a source whose
+    #: rate never resolves (RTSP negotiation failed, a container with no metadata) would
+    #: otherwise take that mutex once per frame forever: 1000 acquisitions/s at the design
+    #: sizing, serialising ingest on a camera that is already degraded.
+    _FPS_ATTEMPTS = 8
+
+    def _camera_fps(self, camera_id: str) -> float:
+        """The camera's negotiated rate, cached once non-zero (constant per connect).
+
+        A rate of zero is cached too, after :attr:`_FPS_ATTEMPTS` frames: it is the answer for
+        a source that does not know its own rate, and re-asking costs a shared lock per frame.
+        """
+        cached = self._fps_cache.get(camera_id, 0.0)
+        if cached:
+            return cached
+        if self._fps_misses.get(camera_id, 0) >= self._FPS_ATTEMPTS:
+            return 0.0
+        manager = self._ingest_manager
+        if manager is None:
+            return 0.0
+        try:
+            fps = manager.actor(camera_id).source_fps
+        except ConfigurationError:
+            return 0.0
+        if fps:
+            self._fps_cache[camera_id] = fps
+            self._fps_misses.pop(camera_id, None)
+        else:
+            self._fps_misses[camera_id] = self._fps_misses.get(camera_id, 0) + 1
+        return fps
+
     def add_camera(self, camera: CameraSpec) -> None:
         """Start one camera on this runner.
 
@@ -528,6 +564,8 @@ class InprocessRunner(Runner):
             previous = self._placed_band(camera.camera_id)
             self._admit_at(camera)
             try:
+                self._fps_cache.pop(camera.camera_id, None)
+                self._fps_misses.pop(camera.camera_id, None)
                 manager.add_camera(self._camera_config(camera))
             except BaseException:
                 self._restore_band(camera.camera_id, previous)
@@ -909,7 +947,7 @@ class InprocessRunner(Runner):
         # reads as a bug, backs off from and logs a traceback for. The queue is still open at
         # that moment; once it is closed the actor gets the `RequestCancelledError` the
         # contract does name, which is what tells it to finish.
-        sink = ChainFrameSink(self._do_submit, self._head().caps)
+        sink = ChainFrameSink(self._do_submit, self._head().caps, fps_of=self._camera_fps)
         ingest = self._settings.ingest
         manager = IngestManager(
             sink,
