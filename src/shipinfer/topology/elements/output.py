@@ -268,14 +268,23 @@ class SinkOutput(Element):
         frame_id = item.context.frame_id
         boxes = detections.boxes
         scores = detections.scores
+        # One conversion for the frame rather than four numpy calls per detection. This is
+        # the emission path -- ~15 000 objects a second at the documented sizing -- and it is
+        # the same argument `as_embedding` makes, applied to the box it sits next to.
+        box_rows = (
+            np.asarray(boxes, dtype=float).reshape(count, -1)[:, :4].tolist() if count else []
+        )
         return tuple(
             ObjectRecord(
                 det_id=f"{camera_id}_{frame_id}_{index}",
                 class_name=detections.labels[index],
                 score=float(scores[index]),
-                # `tolist()` for the same reason `as_embedding` uses it: four `float()`
-                # calls per object is a Python loop numpy already does in one C call.
-                bbox=_bbox(boxes[index]),
+                bbox=(
+                    box_rows[index][0],
+                    box_rows[index][1],
+                    box_rows[index][2],
+                    box_rows[index][3],
+                ),
                 embedding=_embedding(None if vectors is None else vectors[index]),
                 ship_id=_identity(None if identities is None else identities[index]),
                 similarity=_similarity(None if identities is None else identities[index]),
@@ -344,12 +353,6 @@ class SinkOutput(Element):
                 None if global_ids is None else _as_int(global_ids[position]),
             )
         return placed
-
-
-def _bbox(row: Any) -> tuple[float, float, float, float]:
-    """One detection box as ``(x1, y1, x2, y2)`` plain floats, in source pixels."""
-    x1, y1, x2, y2 = np.asarray(row, dtype=float).reshape(-1)[:4].tolist()
-    return (x1, y1, x2, y2)
 
 
 def _embedding(vector: Any) -> tuple[float, ...]:
