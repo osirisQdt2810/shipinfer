@@ -24,8 +24,10 @@ from shipinfer.core.types import Tensor
 from shipinfer.engine import InferenceServer
 from tests.support.models import expected_output, materialise
 
-# `fail_every` is not used here, but `seed` is: the mock's has_ship flag decides which
-# branch runs, and a test that asserts on a branch needs to know which one it got.
+# `always:` decides which branch runs: it lifts the router's flag output above the threshold
+# the ensemble condition tests, so `always=1` exercises the branch-TAKEN path and `always=0`
+# the skipped one. Without it the flag is the untrained bias (+0.1045), which truncates to 0
+# on the INT32 cast every run -- the branch-taken path was covered nowhere.
 _ROUTER = """
 platform: pytorch
 max_batch_size: 4
@@ -134,10 +136,9 @@ class TestConditionalBranches:
 
     def test_a_skipped_branch_is_distinguishable_from_a_failure(self, tmp_path: Path) -> None:
         """Zero rows says "no things in this frame"; a missing key said nothing at all."""
+        # `_repo` builds the router with `always=0`, so its flag truncates to 0 and the
+        # branch skips on every frame -- which is this test's premise, not a coincidence.
         root = _repo(tmp_path)
-        # Force the router's flag to zero so the branch always skips.
-        config = (root / "router" / "config.yaml").read_text().replace("seed: 0", "seed: 0")
-        (root / "router" / "config.yaml").write_text(config)
 
         with _server(root) as server:
             for _ in range(6):
@@ -335,6 +336,22 @@ class TestAStepMayReadANameALaterStepWrites:
     Not an exotic shape: a second pass that improves what the first pass produced is the
     obvious way to write one, and the sequential walk this replaced ran it happily.
     """
+
+    def test_the_flag_this_class_depends_on_really_clears_the_threshold(self) -> None:
+        """This class asserts on a branch that RUNS, so the premise deserves its own test.
+
+        With ``always: 0`` the router's flag is the untrained bias and truncates to 0 on the
+        INT32 cast — every assertion below would then be about a branch that silently never
+        executed, which is how the branch-taken path came to be covered nowhere.
+        """
+        sample = [np.zeros((1, 4), dtype=np.float32)]
+        taken = expected_output(
+            in_features=[4], out_features=[2, 1], inputs=sample, flag_offset=2.0
+        )
+        skipped = expected_output(in_features=[4], out_features=[2, 1], inputs=sample)
+
+        assert int(np.asarray(taken[-1]).ravel()[0]) >= 1, "always: 1 must run the branch"
+        assert int(np.asarray(skipped[-1]).ravel()[0]) == 0, "and always: 0 must not"
 
     def _repo(self, tmp_path: Path) -> Path:
         root = tmp_path / "repo"

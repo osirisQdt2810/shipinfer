@@ -333,7 +333,10 @@ class TensorRTBackend(ModelBackend):
         return captured
 
     def stats(self) -> dict[str, Any]:
+        # `super()` first: `warmup_executions` is the base's, and a fresh dict here is how
+        # "a stat only some backends report" happened in the first place.
         stats: dict[str, Any] = {
+            **super().stats(),
             "enqueues": self._enqueues,
             "graph_replays": self._graph_replays,
         }

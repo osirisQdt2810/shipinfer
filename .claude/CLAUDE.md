@@ -119,8 +119,9 @@ src/shipinfer/
 │   └── native.py          # loads shipinfer._C
 │
 ├── backends/              # one execution runtime per module   <- @BACKENDS.register
-│   ├── mock.py            # deterministic, hardware-free — the default in tests
 │   ├── tensorrt/          # the production path (engine, bindings, logger, backend)
+│   │                      #   (there is no mock backend: the offline tier runs real
+│   │                      #    TorchScript models built by tests/support/models.py)
 │   ├── onnx.py            # portable fallback
 │   └── torch_backend.py   # TorchScript, for prototyping and numeric parity
 │

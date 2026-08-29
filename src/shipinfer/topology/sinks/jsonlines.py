@@ -1,7 +1,7 @@
 """One JSON object per line, to a file or to stdout.
 
 The sink that makes the whole pipeline testable end to end with no broker: a test runs the
-replay source into the mock backend into this, then reads the file back and asserts that N
+replay source into a real model into this, then reads the file back and asserts that N
 frames in produced N events out with every tag accounted for. It is also the right sink for
 an offline evaluation run, where the consumer is a notebook rather than a service.
 

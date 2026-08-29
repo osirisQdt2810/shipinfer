@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.subprocess_env import checkout_env
+
 SRC = Path(__file__).resolve().parents[1] / "src" / "shipinfer"
 
 PURE_LAYERS = ("core", "scheduling", "repository", "topology")
@@ -134,7 +136,9 @@ class TestEnforcementAgrees:
     def test_layer_check_hook_passes(self) -> None:
         """The pre-commit hook and this test must agree; run the hook itself."""
         hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "check_layers.py"
-        result = subprocess.run([sys.executable, str(hook)], capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, str(hook)], capture_output=True, text=True, env=checkout_env()
+        )
         assert result.returncode == 0, result.stderr
 
     def test_every_package_on_disk_has_a_forbidden_externals_row(self) -> None:
@@ -247,7 +251,9 @@ class TestImportIsCheap:
             "assert 'tensorrt' not in sys.modules; "
             "assert 'shipinfer.engine' not in sys.modules, sorted(m for m in sys.modules if m.startswith('shipinfer'))"
         )
-        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, env=checkout_env()
+        )
         assert result.returncode == 0, result.stdout + result.stderr
 
     def test_importing_runners_pulls_in_neither_the_engine_nor_torch(self) -> None:
@@ -280,7 +286,9 @@ class TestImportIsCheap:
             "'shipinfer.runtime', 'shipinfer.backends', 'shipinfer.ingest') if m in sys.modules]; "
             "assert not heavy, heavy"
         )
-        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, env=checkout_env()
+        )
         assert result.returncode == 0, result.stdout + result.stderr
 
     def test_importing_topology_pulls_in_no_accelerator(self) -> None:
@@ -321,7 +329,9 @@ class TestImportIsCheap:
             "'shipinfer.scheduling') if m in sys.modules]; "
             "assert not heavy, heavy"
         )
-        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, env=checkout_env()
+        )
         assert result.returncode == 0, result.stdout + result.stderr
 
     def test_no_module_scope_kafka_import_even_guarded(self) -> None:
@@ -379,7 +389,9 @@ class TestTheWebFrameworkEntersAtOneSeam:
             "assert 'starlette' not in sys.modules; "
             "assert 'uvicorn' not in sys.modules"
         )
-        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, env=checkout_env()
+        )
         assert result.returncode == 0, result.stdout + result.stderr
 
     def test_importing_the_api_does_not_import_fastapi_either(self) -> None:
@@ -398,7 +410,9 @@ class TestTheWebFrameworkEntersAtOneSeam:
             "eager = [m for m in ('fastapi', 'starlette', 'uvicorn') if m in sys.modules]; "
             "assert not eager, eager"
         )
-        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, env=checkout_env()
+        )
         assert result.returncode == 0, result.stdout + result.stderr
 
 
@@ -446,7 +460,9 @@ class TestTheCameraDoorCannotBuildARunner:
             "'shipinfer.runners', 'shipinfer.ingest') if m in sys.modules]; "
             "assert not heavy, heavy"
         )
-        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, env=checkout_env()
+        )
         assert result.returncode == 0, result.stdout + result.stderr
 
 
@@ -483,7 +499,9 @@ class TestTheLauncherNeedsNoDeviceAndNoEngine:
             "'shipinfer.backends') if m in sys.modules]; "
             "assert not heavy, heavy"
         )
-        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, env=checkout_env()
+        )
         assert result.returncode == 0, result.stdout + result.stderr
 
 
@@ -514,7 +532,9 @@ class TestTheControlPlaneEntersAtTwoSeams:
             "or m.startswith('shipinfer.launch.proto.')]; "
             "assert not eager, eager"
         )
-        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, env=checkout_env()
+        )
         assert result.returncode == 0, result.stdout + result.stderr
 
     def test_importing_runners_loads_no_grpc_and_no_protobuf(self) -> None:
@@ -527,7 +547,9 @@ class TestTheControlPlaneEntersAtTwoSeams:
             "or m.startswith('shipinfer.launch.proto.')]; "
             "assert not eager, eager"
         )
-        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, env=checkout_env()
+        )
         assert result.returncode == 0, result.stdout + result.stderr
 
     def test_the_layer_rows_say_where_the_control_plane_may_be_named(self) -> None:
