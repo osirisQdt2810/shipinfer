@@ -1,14 +1,19 @@
 """Compose crowd frames: an N x N mosaic of the single-person bench JPEGs.
 
-The stock ``person`` set yields ~1 detection per frame, so every topology measures the
-same trickle of crops and C's win case (10-20 crops/frame at 50 x 20 fps) never appears
-on the bench. A mosaic of K = grid^2 real photos makes the detector emit ~K boxes per
+**Measured before you reach for this** (`benchmarks/tests/test_crowd_yield.py`, real engine):
+a single stock ``person`` photo already yields **13-18** detections, which is the 10-20 the
+sizing assumes; a 2x2 mosaic gives 18-20; and a **4x4 gives 3-6**, because the detector's input
+is a fixed 640x640 and sixteen photos land in ~160px cells whose people fall under the model's
+minimum size. Composing more people into a frame does not compose more *detectable* ones. A mosaic of K = grid^2 real photos makes the detector emit ~K boxes per
 frame — generated from real data, deterministically, which is what the no-fake rule
 permits (generated is fine; random is not). Point the bench at the output with
 ``--person-frames``; nothing in the harness config changes.
 
-    python -m benchmarks.harness.crowd --src benchmarks/baseline/data/person \\
+    python scripts/compose_crowd_frames.py --src benchmarks/baseline/data/person \\
         --out .artifacts/person_crowd --grid 4 --frames 10
+
+(The entry point is under ``scripts/`` because the container hook refuses ``python -m
+benchmarks.*``; this module is the library half and is imported, not run.)
 """
 
 from __future__ import annotations
@@ -85,7 +90,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--src", type=Path, required=True, help="directory of source photos")
     p.add_argument("--out", type=Path, required=True, help="directory to write mosaics into")
-    p.add_argument("--grid", type=int, default=4, help="cells per side (default 4 -> 16/frame)")
+    p.add_argument(
+        "--grid",
+        type=int,
+        default=2,
+        help="cells per side (default 2 -> 4 photos/frame; see the module docstring's "
+        "measurement -- 4 puts each photo in a ~160px cell and yields FEWER detections)",
+    )
     p.add_argument("--frames", type=int, default=10, help="mosaics to write (default 10)")
     p.add_argument(
         "--size",
