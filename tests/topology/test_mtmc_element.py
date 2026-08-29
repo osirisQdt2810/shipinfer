@@ -1152,7 +1152,7 @@ class TestMtmcOverTheRunner:
         started.add_camera(CameraSpec("cam-a", "injected://a", 0.0))
         started.add_camera(CameraSpec("cam-b", "injected://b", 0.0))
 
-        published = chain.node("output").element._sink
+        published = chain.node("output").element.sink
         assert until(lambda: published.emitted == 6), published.stats()
 
         events = published.events()
@@ -1175,7 +1175,7 @@ class TestMtmcOverTheRunner:
 
         assert node.barrier.live == frozenset({"cam-a", "cam-b"})
 
-        assert until(lambda: chain.node("output").element._sink.emitted == 4)
+        assert until(lambda: chain.node("output").element.sink.emitted == 4)
         started.remove_camera("cam-b")
 
         assert node.barrier.live == frozenset({"cam-a"})
@@ -1188,7 +1188,7 @@ class TestMtmcOverTheRunner:
         started.add_camera(CameraSpec("cam-a", "injected://a", 0.0))
         started.add_camera(CameraSpec("cam-b", "injected://b", 0.0))
 
-        assert until(lambda: chain.node("output").element._sink.emitted == 4)
+        assert until(lambda: chain.node("output").element.sink.emitted == 4)
 
         assert value(started.metrics.registry, "shipinfer_mtmc_cameras", element="mtmc") == 2
 
@@ -1201,7 +1201,7 @@ class TestMtmcOverTheRunner:
         )
         started.add_camera(CameraSpec("cam-a", "injected://a", 0.0))
         started.add_camera(CameraSpec("cam-b", "injected://b", 0.0))
-        assert until(lambda: chain.node("output").element._sink.emitted >= 2)
+        assert until(lambda: chain.node("output").element.sink.emitted >= 2)
 
         began = time.monotonic()
         started.stop(timeout_s=5.0)

@@ -40,9 +40,9 @@ from shipinfer.topology import ChainItem, ChainSpec, Topology
 CHAIN = """
 name: linear
 elements:
-  decode: {impl: mock}
-  detect: {impl: mock, model: ship_detector}
-  output: {impl: mock}
+  decode: {impl: replay}
+  detect: {impl: pool, model: ship_detector}
+  output: {impl: none}
 """
 
 
@@ -1277,8 +1277,7 @@ class TestOverARealInprocessRunner:
         name: replayed
         elements:
           decode: {impl: replay}
-          detect: {impl: mock, model: ship_detector}
-          output: {impl: mock}
+          output: {impl: none}
         """)
 
     def _runner(self, cameras: list[dict[str, Any]] | None = None) -> Any:

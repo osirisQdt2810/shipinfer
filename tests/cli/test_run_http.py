@@ -50,12 +50,14 @@ from shipinfer.core.request import ResponseFuture
 from shipinfer.runners.base import Runner
 from shipinfer.topology import ChainItem, ChainSpec, Topology
 
+#: A file source and a sink that counts, and nothing between them: what is under test is the
+#: web server in front of a runner, and a model slot would make every case here build an
+#: engine out of the demo repository.
 CHAIN = """
-name: mock_chain
+name: http_chain
 elements:
-  decode: {impl: mock}
-  detect: {impl: mock, model: ship_detector}
-  output: {impl: mock}
+  decode: {impl: replay}
+  output: {impl: none}
 """
 
 

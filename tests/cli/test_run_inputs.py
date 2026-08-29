@@ -38,8 +38,8 @@ CHAIN = textwrap.dedent("""
     name: mock_chain
     elements:
       decode: {impl: replay}
-      detect: {impl: mock, model: ship_detector}
-      output: {impl: mock}
+      detect: {impl: pool, model: ship_detector}
+      output: {impl: none}
     """)
 
 

@@ -1126,7 +1126,7 @@ class TestWalkingAChain:
                 current = result
                 assert current.key == start_key, f"{node.name} rewrote the tag"
 
-            published = chain.node("output").element._sink
+            published = chain.node("output").element.sink
             assert seen == ["decode", "segment", "output"]
             assert published.emitted == 1
             event = published.events()[0]
@@ -1164,7 +1164,7 @@ class TestWalkingAChain:
         sink.open()
         try:
             assert sink.process(self.frame()) is None
-            assert sink._sink.emitted == 1
+            assert sink.sink.emitted == 1
         finally:
             sink.close()
 

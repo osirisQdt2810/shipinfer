@@ -48,8 +48,7 @@ from shipinfer.core.settings import ServerSettings
 from shipinfer.runners import RUNNERS
 from shipinfer.runners.base import Runner
 from shipinfer.topology import ChainItem, ChainSpec, ElementKind, Topology
-from shipinfer.topology.base import ElementContext
-from shipinfer.topology.elements.mock import MockDetect
+from shipinfer.topology.base import Element, ElementContext
 from shipinfer.topology.registry import registry_for
 from tests.support.models import materialise
 
@@ -73,16 +72,21 @@ run_module = importlib.import_module("shipinfer.cli.commands.run")
 POOL_CHAIN = textwrap.dedent("""
     name: pool_chain
     elements:
-      decode: {impl: mock}
+      decode: {impl: replay}
       detect: {impl: pool, model: detector, params: {input: images}}
-      output: {impl: mock}
+      output: {impl: none}
     """)
 
-#: The same chain with the mock detector: a model *kind*, naming a model, needing no pool.
-#: Asking `node.kind in MODEL_KINDS` instead of the element would load a repository for this.
-MOCK_CHAIN = POOL_CHAIN.replace("{impl: pool", "{impl: mock").replace(
-    "name: pool_chain", "name: mock_chain"
-)
+#: A chain whose middle slot is a model *kind* that resolves no repository model: the shipped
+#: gallery recogniser, which loads its own index. Asking `node.kind in MODEL_KINDS` instead of
+#: the element would load a repository for this one.
+GALLERY_CHAIN = textwrap.dedent("""
+    name: gallery_chain
+    elements:
+      decode:    {impl: replay}
+      recognize: {impl: shipvision}
+      output:    {impl: none}
+    """)
 
 #: The same chain again with an `nvinfer`-shaped detector (:class:`DetectElsewhere` below):
 #: it *names* `model: echo` and runs it outside this process. The chain the split exists for
@@ -177,8 +181,26 @@ class RefusingEngine:
         raise AssertionError("an engine was built for a run that needs none")
 
 
+class _Detect(Element):
+    """The caps and the do-nothing lifecycle the three doubles below share.
+
+    Each of them is then only the two or three ``ClassVar``\\ s under test, which is what makes
+    the trio a measurement of ``run.py``'s readers rather than three copies of an element.
+    """
+
+    kind: ClassVar[ElementKind] = ElementKind.DETECT
+    accepts: ClassVar[tuple[str, ...]] = ("bgr@cpu", "nv12@gpu")
+    produces: ClassVar[tuple[str, ...]] = ("*@*",)
+
+    def _do_open(self, context: ElementContext) -> None:
+        return None
+
+    def _do_process(self, item: ChainItem) -> ChainItem | None:
+        return item.derive()
+
+
 @registry_for(ElementKind.DETECT).register("run-engine-elsewhere")
-class DetectElsewhere(MockDetect):
+class DetectElsewhere(_Detect):
     """A detect that names a ``model:`` and resolves it somewhere that is not this process.
 
     The shape of the ``nvinfer`` element the deepstream runner will register: the graph
@@ -223,7 +245,7 @@ class DetectHere(DetectElsewhere):
 
 
 @registry_for(ElementKind.DETECT).register("run-engine-ops-only")
-class DetectWithOpsAndNoPool(MockDetect):
+class DetectWithOpsAndNoPool(_Detect):
     """An element that pre-processes and runs no model in this process.
 
     The one combination no shipped element makes today, and the one the comment in
@@ -360,8 +382,8 @@ def detector_repository(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
-def mock_chain_file(tmp_path: Path) -> Path:
-    return write_chain(tmp_path, MOCK_CHAIN)
+def gallery_chain_file(tmp_path: Path) -> Path:
+    return write_chain(tmp_path, GALLERY_CHAIN)
 
 
 @pytest.fixture()
@@ -383,9 +405,9 @@ class TestWhoNeedsAPool:
     def test_a_chain_with_a_pool_element_on_a_runner_that_opens_it_here(self) -> None:
         assert model_pool_is_needed("inprocess", topology_of(POOL_CHAIN)) is True
 
-    def test_a_chain_of_mocks_needs_none_although_its_kinds_name_models(self) -> None:
-        """`detect` is a model kind and names `model: echo`; `impl: mock` still runs none."""
-        assert model_pool_is_needed("inprocess", topology_of(MOCK_CHAIN)) is False
+    def test_a_model_kind_that_resolves_nothing_needs_none(self) -> None:
+        """`recognize` is a model kind; `impl: shipvision` queries a gallery it loads itself."""
+        assert model_pool_is_needed("inprocess", topology_of(GALLERY_CHAIN)) is False
 
     def test_the_fleet_needs_none_because_each_shard_builds_its_own(self) -> None:
         assert model_pool_is_needed("fleet", topology_of(POOL_CHAIN)) is False
@@ -452,8 +474,8 @@ class TestWhoNeedsImageOps:
     def test_a_chain_with_a_pool_detector_on_a_runner_that_opens_it_here(self) -> None:
         assert image_ops_are_needed("inprocess", topology_of(POOL_CHAIN)) is True
 
-    def test_a_chain_of_mocks_needs_none_although_its_kinds_are_the_same(self) -> None:
-        assert image_ops_are_needed("inprocess", topology_of(MOCK_CHAIN)) is False
+    def test_a_model_kind_that_reads_no_pixels_needs_none(self) -> None:
+        assert image_ops_are_needed("inprocess", topology_of(GALLERY_CHAIN)) is False
 
     def test_a_pool_chain_that_reads_no_pixels_needs_none(self) -> None:
         """The half that would be lost by reusing ``needs_model``: a ``pool`` element that
@@ -712,21 +734,21 @@ class TestWhenNoPoolIsNeededNoneIsBuilt:
     """Three runs that must touch no repository, no device and no engine.
 
     Costly in the wrong direction if this regresses: an `InferenceServer` resolves the device
-    list at construction and loads every selected model at `start()`, so a chain of mocks that
-    quietly built one turns a laptop test run into an engine load.
+    list at construction and loads every selected model at `start()`, so a chain that resolves
+    no model and quietly built one turns a laptop test run into an engine load.
     """
 
-    def test_a_chain_of_mocks_builds_no_engine(
-        self, mock_chain_file: Path, monkeypatch
+    def test_a_chain_that_resolves_no_model_builds_no_engine(
+        self, gallery_chain_file: Path, monkeypatch
     ) -> None:
         monkeypatch.setattr("shipinfer.engine.InferenceServer", RefusingEngine)
 
-        assert run(mock_chain_file, runner="recording-pool") == 0
+        assert run(gallery_chain_file, runner="recording-pool") == 0
 
         assert EVENTS == ["runner.start", "wait", "runner.stop"]
         (built,) = RecordingRunner.instances
-        assert built.models is None, "a mock chain was handed a model pool"
-        assert built.ops is None, "a mock chain was handed image ops"
+        assert built.models is None, "a pool-free chain was handed a model pool"
+        assert built.ops is None, "a pool-free chain was handed image ops"
         assert built.element_context().ops is None
 
     def test_a_dry_run_builds_no_engine_even_for_a_pool_chain(

@@ -1147,7 +1147,7 @@ class TestTrackOverTheRunner:
         )
         started.add_camera(CameraSpec("cam-a", "injected://a", 0.0))
 
-        published = chain.node("output").element._sink
+        published = chain.node("output").element.sink
         assert until(lambda: published.emitted == 4), published.stats()
 
         events = published.events()
@@ -1172,7 +1172,7 @@ class TestTrackOverTheRunner:
         )
         started.add_camera(CameraSpec("cam-a", "injected://a", 0.0))
 
-        published = chain.node("output").element._sink
+        published = chain.node("output").element.sink
         assert until(lambda: published.emitted == 2)
 
         assert value(started.metrics.registry, "shipinfer_track_cameras", element="track") == 1
@@ -1189,7 +1189,7 @@ class TestTrackOverTheRunner:
             source_factory=scripted(frames=2),
         )
         started.add_camera(CameraSpec("cam-a", "injected://a", 0.0))
-        published = chain.node("output").element._sink
+        published = chain.node("output").element.sink
         assert until(lambda: published.emitted == 2)
         element = chain.node("track").element
         assert element._shard.cameras == ("cam-a",)

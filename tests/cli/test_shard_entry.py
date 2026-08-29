@@ -176,8 +176,8 @@ class TestTwoShardsOnOneGpuDoNotDoubleLoad:
 CHAIN = """
 name: two_step
 elements:
-  decode: {impl: mock}
-  output: {impl: mock}
+  decode: {impl: replay}
+  output: {impl: none}
 """
 
 #: The same chain with a `pool` detector in it — a chain that needs image pre-processing.
@@ -186,9 +186,9 @@ elements:
 DETECT_CHAIN = """
 name: detect_chain
 elements:
-  decode: {impl: mock}
+  decode: {impl: replay}
   detect: {impl: pool, model: ship_detector, params: {decode: {dst_size: [640, 640]}}}
-  output: {impl: mock}
+  output: {impl: none}
 """
 
 
