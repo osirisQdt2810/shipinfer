@@ -31,13 +31,29 @@ __all__ = [
     "write_model",
 ]
 
-#: Width of the square matmul that is one unit of work. Big enough that one step is
-#: measurable, small enough that a 5 ms fixture is not a memory event.
-HIDDEN = 96
+# doc: long the width is set by a worker-thread cliff, which is not guessable from the value
+#: Width of the square matmul that is one unit of work, and it is chosen by a measurement
+#: rather than by taste. TorchScript profiles a loop the first time a THREAD runs it, and the
+#: overhead is per iteration -- so at width 96 (~0.015 ms each) a `latency_ms: 200` model needs
+#: ~8000 iterations and takes **over a minute** the first time an instance's worker thread
+#: executes it, against 200 ms on the main thread. Every model instance has its own thread, so
+#: that is every model. At 256 the same 200 ms is ~790 iterations and the worker's first
+#: execution is 245 ms. Wider still would cost granularity: one unit is 0.25 ms here, which
+#: keeps a `latency_ms: 2` fixture honest.
+HIDDEN = 256
 
 #: Calibration: enough iterations that fixed call overhead is a small share of the sample,
 #: averaged over several runs so one scheduling hiccup cannot set every fixture's cost.
 _CALIBRATION_WORK, _CALIBRATION_RUNS = 128, 5
+
+# doc: long the thread setting is a correctness decision and needs its argument
+# ONE intra-op thread for every fixture, and it is a correctness setting rather than a
+# performance one. These modules exist to make a worker *occupy* its thread for a declared
+# time; letting torch fan one matmul across every core means four instance threads contend
+# for the same pool, so the latency a test declared is not the latency it gets -- and the
+# deleted mock backend's own docstring warned that a spin "would make the scheduler look
+# better than it is by keeping a core hot". Set once, at import, before any fixture is built.
+torch.set_num_threads(1)
 
 
 class _Fixture(torch.nn.Module):
@@ -46,6 +62,10 @@ class _Fixture(torch.nn.Module):
     Arity matters: a model that declares two outputs must return two tensors, or the backend
     refuses it — which is the contract a real engine is held to as well.
     """
+
+    #: Class-body annotation in TorchScript's own spelling: it cannot read `list[list[int]]`
+    #: here (PEP 585 generics are not in its type system), and without any annotation it warns
+    #: on every build that it will not infer the type of a list assigned in `__init__`.
 
     @staticmethod
     def _rng(seed: int) -> torch.Generator:
@@ -62,10 +82,21 @@ class _Fixture(torch.nn.Module):
         flag_offset: float = 0.0,
     ) -> None:
         super().__init__()
-        torch.manual_seed(seed)
-        self.projections = torch.nn.ModuleList(
-            [torch.nn.Linear(sum(in_features), width) for width in out_features]
-        )
+        # doc: long two separate traps live here — the global RNG and fork_rng's CUDA default
+        # `fork_rng`, not `manual_seed`: `Linear` draws from torch's PROCESS-GLOBAL generator,
+        # and this runs dozens of times per session across 17 files. Reseeding it globally
+        # would make any future test that draws from torch depend on how many fixtures were
+        # built before it.
+        # `devices=[]` is NOT optional: with no argument `fork_rng` initialises EVERY CUDA
+        # device "for safety", which on this 8-GPU box means eight CUDA contexts created from
+        # the OFFLINE tier -- a tier whose whole promise (ADR-001) is that it needs no driver,
+        # and ~220-480 MiB of VRAM each. These fixtures are CPU-only by construction.
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(seed)
+            self.projections = torch.nn.ModuleList(
+                [torch.nn.Linear(sum(in_features), width) for width in out_features]
+            )
+        # doc: long why the global RNG must not be reseeded, across 17 files
         # ORTHOGONAL, and that is the whole trick: `spin @ hidden` repeated thousands of
         # times must neither blow up nor decay. A contraction (the old `eye * 0.5`) drives
         # every entry subnormal within ~100 iterations, and subnormal matmul is an order of
@@ -90,6 +121,7 @@ class _Fixture(torch.nn.Module):
     def forward(self, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         flat = torch.cat([x.flatten(1) if x.dim() > 2 else x for x in inputs], dim=1)
         if self.work > 0:
+            # doc: long the declared-dims reshape prevents a failure that mimics a deliberate one
             # Seeded from the INPUT and folded back into the output, both deliberately.
             # `TorchScriptBackend` runs `torch.jit.optimize_for_inference`, which freezes the
             # module: work that starts from a buffer is constant, and a result multiplied by
@@ -105,13 +137,30 @@ class _Fixture(torch.nn.Module):
 class _Wrapper(torch.nn.Module):
     """The positional call the backend makes, over the fixture underneath."""
 
-    def __init__(self, fixture: torch.jit.ScriptModule, single_output: bool) -> None:
+    def __init__(
+        self,
+        fixture: torch.jit.ScriptModule,
+        single_output: bool,
+        out_shapes: list[list[int]] | None = None,
+    ) -> None:
         super().__init__()
         self.fixture = fixture
         self.single_output = single_output
+        self.shapes = out_shapes
 
+    # doc: long why the declared dims are applied here rather than in the scripted half
+    # A config saying `dims: [300, 6]` must get a (N, 300, 6) tensor: flattened to (N, 1800)
+    # it is refused by `Tensor.validate_against` on the first real request, with an error
+    # indistinguishable from `disagrees_with_its_config`'s deliberate one. It happens in the
+    # TRACED half because the dims bake in as constants there; TorchScript's type system has
+    # no annotation for a nested-list attribute, so the scripted half cannot hold them.
     def forward(self, *inputs: torch.Tensor):
         outputs = self.fixture(list(inputs))
+        if self.shapes is not None:
+            outputs = [
+                value.reshape([value.shape[0], *shape]) if len(shape) > 1 else value
+                for value, shape in zip(outputs, self.shapes, strict=True)
+            ]
         return outputs[0] if self.single_output else tuple(outputs)
 
 
@@ -122,6 +171,7 @@ def build_model(
     seed: int = 20260828,
     in_shapes: Sequence[Sequence[int]] | None = None,
     flag_offset: float = 0.0,
+    out_shapes: Sequence[Sequence[int]] | None = None,
 ) -> torch.jit.ScriptModule:
     """A traced module with the arity the config declares.
 
@@ -130,13 +180,18 @@ def build_model(
     ``torch.jit.script`` to read. Tracing records the real operations either way.
     """
     fixture = _Fixture(list(in_features), list(out_features), work, seed, flag_offset)
+    # doc: long the three optimiser/denormal causes this loop was rebuilt around
     # The fixture is SCRIPTED, then wrapped and traced. Tracing alone unrolls the work loop
     # into one node per iteration, so a 60 ms model became a 4000-node graph that took longer
     # to freeze than to run and whose per-iteration cost grew tenfold with the count -- the
     # calibration could not be linear because the thing being calibrated was not. Scripting
     # keeps the loop a loop; the wrapper is still traced, because its arity comes from the
     # config and is not known when this file is written.
-    wrapper = _Wrapper(torch.jit.script(fixture), single_output=len(out_features) == 1).eval()
+    wrapper = _Wrapper(
+        torch.jit.script(fixture),
+        single_output=len(out_features) == 1,
+        out_shapes=[list(shape) for shape in out_shapes] if out_shapes is not None else None,
+    ).eval()
     # Traced with the shape the config declares, not a flattened stand-in: tracing freezes
     # the path it saw, so a 2-D example would bake out the flatten a 4-D input needs.
     shapes = list(in_shapes) if in_shapes is not None else [[width] for width in in_features]
@@ -180,6 +235,7 @@ def write_model(
     unit_ms: float | None = None,
     seed: int = 20260828,
     flag_offset: float = 0.0,
+    out_shapes: Sequence[Sequence[int]] | None = None,
     broken: bool = False,
     in_shapes: Sequence[Sequence[int]] | None = None,
 ) -> Path:
@@ -208,6 +264,7 @@ def write_model(
         seed,
         in_shapes=shapes,
         flag_offset=flag_offset,
+        out_shapes=out_shapes,
     )
     torch.jit.save(module, str(path))
     return path
@@ -246,6 +303,7 @@ def materialise(root: Path, *, latency_ms: float | Mapping[str, float] = 0.0) ->
                     in_features=_features(spec.get("inputs")),
                     out_features=_features(spec.get("outputs")),
                     in_shapes=_shapes(spec.get("inputs")),
+                    out_shapes=_shapes(spec.get("outputs")),
                     latency_ms=cost,
                     seed=seed,
                     flag_offset=flag_offset,
@@ -269,13 +327,21 @@ def expected_output(
     inputs: Sequence[Any],
     seed: int = 20260828,
     flag_offset: float = 0.0,
+    out_shapes: Sequence[Sequence[int]] | None = None,
 ) -> list[Any]:
     """What the fixture with these weights answers — the honest replacement for a fake's RNG.
 
     A test that has to predict a model's output now predicts it by *building the same model*
     and asking, rather than by re-implementing a fake backend's random draw.
     """
-    module = build_model(in_features, out_features, work=0, seed=seed, flag_offset=flag_offset)
+    module = build_model(
+        in_features,
+        out_features,
+        work=0,
+        seed=seed,
+        flag_offset=flag_offset,
+        out_shapes=out_shapes,
+    )
     with torch.no_grad():
         result = module(*[torch.as_tensor(value, dtype=torch.float32) for value in inputs])
     values = result if isinstance(result, (tuple, list)) else (result,)

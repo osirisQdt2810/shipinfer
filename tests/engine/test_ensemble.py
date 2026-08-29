@@ -62,10 +62,14 @@ parameters: {latency_ms: 0.05}
 
 
 def _write(root: Path, name: str, body: str, *, versioned: bool = True) -> None:
+    """Write one config. The caller materialises the repository ONCE, when it is complete.
+
+    Materialising here rebuilt every model written so far on each call -- a QR, a script, a
+    trace and a save per model per call, so four models cost fourteen builds.
+    """
     directory = root / name
     (directory / "1").mkdir(parents=True) if versioned else directory.mkdir(parents=True)
     (directory / "config.yaml").write_text(body.lstrip())
-    materialise(root)
 
 
 def _repo(tmp_path: Path, *, branch_condition: str | None = "has_thing") -> Path:
@@ -198,6 +202,7 @@ ensemble:
 """,
             versioned=False,
         )
+        materialise(root)
 
         with pytest.raises(ConfigurationError, match="only exists when an earlier conditional"):
             _server(root).start()
@@ -222,6 +227,7 @@ ensemble:
 """,
             versioned=False,
         )
+        materialise(root)
 
         with pytest.raises(ConfigurationError, match="no step produces"):
             _server(root).start()
@@ -579,6 +585,7 @@ ensemble:
 """,
             versioned=False,
         )
+        materialise(root)
         server = _server(root)
         server.start()
         try:

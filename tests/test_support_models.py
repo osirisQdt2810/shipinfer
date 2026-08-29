@@ -91,3 +91,86 @@ class TestTheWorkSurvivesTheBackendsOwnOptimiser:
         assert (
             target_ms / 3 < measured < target_ms * 3
         ), f"asked {target_ms}, got {measured:.3f}"
+
+
+class TestTheFixtureMatchesTheShapeItsConfigDeclares:
+    """A landmine under shared infrastructure: the output side had no shape at all.
+
+    `_shapes()` carried the *input* dims into the trace from the start; outputs went through
+    `math.prod`, so a config declaring `dims: [300, 6]` got a module returning `(N, 1800)`.
+    The first real request would hit `Tensor.validate_against` and be refused — with an error
+    indistinguishable from `disagrees_with_its_config`'s deliberate one, which is what makes
+    it worth a test rather than a fix alone.
+    """
+
+    def _repository(self, root: Path, dims: str) -> Path:
+        (root / "det" / "1").mkdir(parents=True)
+        (root / "det" / "config.yaml").write_text(
+            "platform: pytorch\n"
+            "max_batch_size: 8\n"
+            "inputs: [{name: images, data_type: FP32, dims: [3, 64, 64]}]\n"
+            f"outputs: [{{name: output0, data_type: FP32, dims: {dims}}}]\n"
+            "instance_groups: [{kind: KIND_CPU, count: 1}]\n"
+            "dynamic_batching: {enabled: false}\n"
+        )
+        return root
+
+    def test_a_multi_dimensional_output_keeps_its_declared_dims(self, tmp_path: Path) -> None:
+        """The detector's own shape, which `tests/cli/test_run_engine.py` already declares."""
+        from tests.support.models import materialise
+
+        root = self._repository(tmp_path / "repo", "[300, 6]")
+        materialise(root)
+
+        module = torch.jit.load(str(root / "det" / "1" / "model.pt"))
+        output = module(torch.zeros(1, 3, 64, 64))
+
+        assert tuple(output.shape) == (1, 300, 6), "flattened to (N, 1800) before this"
+
+    def test_a_one_dimensional_output_is_unchanged(self, tmp_path: Path) -> None:
+        """The common case must not grow a spurious axis."""
+        from tests.support.models import materialise
+
+        root = self._repository(tmp_path / "repo", "[16]")
+        materialise(root)
+
+        module = torch.jit.load(str(root / "det" / "1" / "model.pt"))
+
+        assert tuple(module(torch.zeros(1, 3, 64, 64)).shape) == (1, 16)
+
+
+class TestTheCostHoldsOnAWorkerThreadToo:
+    """Every model instance runs on its own thread, so main-thread timing proves nothing.
+
+    TorchScript profiles a loop the first time a *thread* executes it, and that overhead is
+    per iteration. With a fine-grained unit of work a `latency_ms: 200` fixture needed ~8000
+    iterations and took **over a minute** on an instance's worker thread while taking 200 ms
+    on the main one — every request through it timed out, and the offline tier hung rather
+    than failed. This is the shape of that regression.
+    """
+
+    def test_a_slow_model_costs_the_same_on_a_fresh_thread(self, tmp_path: Path) -> None:
+        import threading
+
+        module = _through_the_backend(
+            build_model([2], [2], iterations_for(50.0, unit_cost_ms())), tmp_path / "slow"
+        )
+        sample = torch.zeros(1, 2)
+        module(sample)
+
+        elapsed: dict[str, float] = {}
+
+        def on_worker() -> None:
+            start = time.perf_counter()
+            module(sample)
+            elapsed["first"] = (time.perf_counter() - start) * 1000.0
+
+        worker = threading.Thread(target=on_worker)
+        worker.start()
+        worker.join(timeout=30.0)
+
+        assert not worker.is_alive(), "a fresh thread's first execution never finished"
+        assert elapsed["first"] < 5000, (
+            f"50 ms of declared work took {elapsed['first']:.0f} ms on a worker thread; the "
+            "unit of work is too fine and TorchScript's per-thread profiling dominates"
+        )

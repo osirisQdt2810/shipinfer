@@ -31,7 +31,7 @@ from shipinfer.repository import ModelConfig, build_warmup_batches
 def _config(**overrides) -> ModelConfig:
     base = {
         "name": "m",
-        "platform": "mock",
+        "platform": "pytorch",
         "max_batch_size": 4,
         "inputs": [{"name": "x", "data_type": "FP32", "dims": [2, 3]}],
         "outputs": [{"name": "y", "data_type": "FP32", "dims": [2]}],

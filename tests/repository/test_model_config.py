@@ -12,7 +12,7 @@ from shipinfer.repository import InstanceGroup, InstanceKind, ModelConfig, load_
 
 BASE = {
     "name": "m",
-    "platform": "mock",
+    "platform": "pytorch",
     "max_batch_size": 8,
     "inputs": [{"name": "x", "data_type": "FP32", "dims": [4]}],
     "outputs": [{"name": "y", "data_type": "FP32", "dims": [2]}],
