@@ -39,18 +39,17 @@ from shipinfer.runners.inprocess import InprocessRunner
 from shipinfer.runners.service import ShardServer, serve_shard
 from shipinfer.topology import ChainSpec, Topology
 
-#: A straight line of mock elements behind a real decode element: the smallest chain a real
-#: runner will start, and enough to prove the shard is executing something rather than
-#: answering from an empty object. The head is ``replay`` rather than ``mock`` so that
-#: ``AddCamera`` reaches a real ingest source — a path that does not exist, which the replay
-#: source refuses before it imports a codec, so the actor retries on its own thread and this
-#: file needs no OpenCV and no network.
+#: The smallest chain a real runner will start, and enough to prove the shard is executing
+#: something rather than answering from an empty object. ``replay`` means ``AddCamera``
+#: reaches a real ingest source — at a path that does not exist, which the replay source
+#: refuses before it imports a codec, so the actor retries on its own thread and this file
+#: needs no OpenCV and no network. No model slot in between: a shard's RPCs are the subject
+#: here, and one would only add a model repository nothing reads.
 CHAIN = """
 name: rpc_linear
 elements:
   decode: {impl: replay}
-  detect: {impl: mock, model: ship_detector}
-  output: {impl: mock}
+  output: {impl: none}
 """
 
 

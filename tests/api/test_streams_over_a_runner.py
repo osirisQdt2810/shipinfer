@@ -35,14 +35,15 @@ from shipinfer.ingest.base import FrameSource
 from shipinfer.ingest.frame import FrameCounter
 from shipinfer.runners.inprocess import InprocessRunner
 from shipinfer.topology import ChainSpec, Topology
-from shipinfer.topology.elements.mock import MockOutput
 
+#: The shortest chain that is a chain: a file source and a sink that counts. What is under
+#: test here is the HTTP surface in front of a runner, and every model slot in between would
+#: be a model repository this file has no use for.
 CHAIN = """
 name: streamed
 elements:
   decode: {impl: replay}
-  detect: {impl: mock, model: ship_detector}
-  output: {impl: mock}
+  output: {impl: none, params: {keep_last: 64}}
 """
 
 HEIGHT, WIDTH = 4, 6
@@ -133,10 +134,9 @@ class Deployment(NamedTuple):
     chain: Topology
     client: TestClient
 
-    def sink(self) -> MockOutput:
-        element = self.chain.node("output").element
-        assert isinstance(element, MockOutput)
-        return element
+    def sink(self):
+        """The ``null`` sink behind the chain's ``output`` element, holding what it published."""
+        return self.chain.node("output").element.sink
 
 
 @pytest.fixture()
@@ -179,9 +179,9 @@ class TestAPostedUrlIsRead:
             )
 
             assert response.status_code == 201, response.text
-            assert until(lambda: len(streamed.sink().emitted) == 4), streamed.sink().emitted
+            assert until(lambda: streamed.sink().emitted == 4), streamed.sink().stats()
 
-        assert [item.key for item in streamed.sink().emitted] == [
+        assert [(e.camera_id, e.frame_id) for e in streamed.sink().events()] == [
             ("quay-1", 0),
             ("quay-1", 1),
             ("quay-1", 2),
@@ -197,9 +197,9 @@ class TestAPostedUrlIsRead:
             body = client.post("/streams", json={"url": "injected://a"}).json()
 
             assert body["camera_id"] == "cam-000"
-            assert until(lambda: len(streamed.sink().emitted) == 2)
+            assert until(lambda: streamed.sink().emitted == 2)
 
-        assert {item.key[0] for item in streamed.sink().emitted} == {"cam-000"}
+        assert {e.camera_id for e in streamed.sink().events()} == {"cam-000"}
 
     def test_the_listing_shows_the_camera_the_runner_is_reading(self, deployment) -> None:
         """`GET /streams` reads the runner's own health, so it reports ingest reality.
@@ -341,13 +341,13 @@ class TestDeletingAStream:
         streamed = deployment(frames=200, pause_s=0.002)
         with streamed.client as client:
             client.post("/streams", json={"camera_id": "quay-1", "url": "injected://q"})
-            assert until(lambda: streamed.sink().emitted)
+            assert until(lambda: streamed.sink().emitted > 0)
 
             response = client.delete("/streams/quay-1")
             assert response.status_code == 200
             assert response.json() == {"clean": True}
 
-            settled = len(streamed.sink().emitted)
+            settled = streamed.sink().emitted
             # The sleep is not what makes this deterministic, and it should not be read as
             # one: `clean=True` above is the ingest manager saying it *joined* the actor
             # thread, so nothing can publish after it and the assertion holds with no pause at
@@ -355,7 +355,7 @@ class TestDeletingAStream:
             # signalled the decoder and returned without waiting would need somewhere to be
             # caught, and a check taken in the same breath as the DELETE would not catch it.
             time.sleep(0.05)
-            assert len(streamed.sink().emitted) == settled, "the decoder is still publishing"
+            assert streamed.sink().emitted == settled, "the decoder is still publishing"
             assert client.get("/streams").json() == {"streams": []}
         assert streamed.runner.cameras == ()
 
