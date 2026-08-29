@@ -465,7 +465,7 @@ class TestPerRow:
             per_row([1, 2], 3, what="e", key="vectors")
 
     def test_a_mapping_covering_no_row_is_an_off_by_n(self) -> None:
-        with pytest.raises(ValidationError, match="name no detection"):
+        with pytest.raises(ValidationError, match="names row 7 and the frame has 3"):
             per_row({7: "x"}, 3, what="e", key="vectors")
 
     def test_a_mapping_covering_some_rows_stays_legal(self) -> None:
@@ -476,12 +476,46 @@ class TestPerRow:
         """Zero keys index nothing because there was nothing to index — not the same thing."""
         assert per_row({}, 2, what="e", key="vectors") == [None, None]
 
+    def test_one_stray_key_refuses_the_frame_even_beside_valid_ones(self) -> None:
+        """The reviewer's scenario: {0: a, 5: b} on a 3-row frame. The old rule tolerated
+        it when ANY key was in range, silently dropping row 5's value — half-attributed
+        metadata reported as a healthy chain."""
+        with pytest.raises(ValidationError, match="names row 5 and the frame has 3"):
+            per_row({0: "a", 5: "b"}, 3, what="e", key="vectors")
+
+    def test_coercible_keys_are_still_not_indices(self) -> None:
+        """`"3"`, `3.0` and `True` all survive int() — a coerced key is a guessed
+        attribution, so each is refused by type, not converted."""
+        for bad in ("3", 3.0, True):
+            with pytest.raises(ValidationError, match="not detection row indices"):
+                per_row({bad: "v"}, 4, what="e", key="vectors")
+
+    def test_a_negative_key_is_refused_not_wrapped(self) -> None:
+        with pytest.raises(ValidationError, match="never negative"):
+            per_row({-1: "v"}, 4, what="e", key="vectors")
+
     def test_keys_that_are_not_indices_are_refused(self) -> None:
         """A model's raw ``{output_name: Tensor}`` is not an attribution."""
-        with pytest.raises(ValidationError, match="not detection indices"):
+        with pytest.raises(ValidationError, match="not detection row indices"):
             per_row({"embedding": [1.0]}, 2, what="e", key="vectors")
 
     def test_the_refusal_names_the_key_that_carries_it(self) -> None:
         """The message has to point at the wiring, not at the rule."""
         with pytest.raises(ValidationError, match="identities"):
             per_row(object(), 2, what="output element 'output'", key="identities")
+
+
+class TestAStringIsNotOneEntryPerRow:
+    """``len("abc") == 3`` makes a string pass the length check for a three-row frame.
+
+    It then lands one *character* per detection, which is a published field that is wrong
+    rather than absent — the failure this whole rule exists to make impossible.
+    """
+
+    def test_a_string_is_refused_rather_than_split_into_characters(self) -> None:
+        with pytest.raises(ValidationError, match="str"):
+            per_row("abc", 3, what="output element 'output'", key="identities")
+
+    def test_bytes_too(self) -> None:
+        with pytest.raises(ValidationError, match="bytes"):
+            per_row(b"abc", 3, what="output element 'output'", key="identities")

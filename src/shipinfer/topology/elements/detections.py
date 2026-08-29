@@ -30,6 +30,8 @@ import numpy as np
 from shipinfer.core.errors import ConfigurationError, ValidationError
 
 __all__ = [
+    "MISSING_STAGES",
+    "TRACK_ROWS",
     "UNKNOWN_LABEL",
     "DecodeParams",
     "Detection",
@@ -271,6 +273,24 @@ class Normalization:
             raise ValidationError(f"normalisation std must be non-zero, got {self.std}")
 
 
+#: The metadata key naming the stages a frame went through without. The chain's half of
+#: ``pipeline/schema.py``'s field of the same name, and the vocabulary an ``output`` element
+#: serialises: a partial frame says so, and never reads as a complete one with nothing in it.
+MISSING_STAGES = "missing_stages"
+
+#: The metadata key holding one **detection row index per published track**, aligned with
+#: ``meta["tracks"]`` and ``-1`` where a track matched no row.
+#:
+#: It exists because an emitted event is per *detection* — that is v1's shape and every
+#: consumer's — while a tracker answers in tracks, and the two are not the same list: a track's
+#: box is the filtered estimate, and which detection fed it is the tracker's own business. The
+#: mapping is recovered here rather than in the ``output`` element for one reason: recovering
+#: it needs the frame's detections, the tracker's answer *and* the association solver the
+#: trackers themselves use, and this is the only element that holds all three. An ``output``
+#: element that redid it would be a second, quieter tracker.
+TRACK_ROWS = "track_rows"
+
+
 def parse_classes(declared: Any, what: str) -> tuple[str, ...] | None:
     """A slot's ``params: classes:`` as a tuple of labels, or ``None`` for "every row".
 
@@ -302,6 +322,18 @@ def parse_classes(declared: Any, what: str) -> tuple[str, ...] | None:
     return tuple(str(entry) for entry in declared)
 
 
+def is_row_index(key: Any) -> bool:
+    """Whether one mapping key is an integral detection row index.
+
+    ``bool`` and ``np.bool_`` are excluded explicitly rather than left to the isinstance
+    chain: ``True`` really is an ``int`` in Python, and ``np.bool_``'s integrality depends
+    on which numpy is installed — a rule must not.
+    """
+    if isinstance(key, (bool, np.bool_)):
+        return False
+    return isinstance(key, (int, np.integer))
+
+
 def per_row(value: Any, count: int, *, what: str, key: str) -> list[Any] | None:
     """A per-object metadata value as one entry per detection row, or ``None`` if absent.
 
@@ -320,14 +352,12 @@ def per_row(value: Any, count: int, *, what: str, key: str) -> list[Any] | None:
     (which loses a whole field of the published event), and both failures look exactly like a
     healthy chain. One rule, one refusal, one place for it to be right.
 
-    The mapping form is checked for **coverage** as well as for key type. Partial coverage is
-    legitimate and stays legal, but a mapping whose keys name *no* row at all is an off-by-N
-    scatter-back, and without this it lands as ``None`` on every row with nothing said — the
-    same silence the sequence form's length check already refuses, arriving through the other
-    door. The **empty** mapping is exempt, and the distinction is the point: keys ``{100, 101}``
-    on a three-row frame is arithmetic that went wrong, while no keys at all is a stage that
-    correctly had nothing to contribute. Zero keys index nothing because there was nothing to
-    index, which is not the same as keys that index nothing.
+    The mapping form applies the row-key rule to **every** key before any row is read: real
+    integers only (no strings, floats or bools — a coerced key is a guessed attribution),
+    nothing negative, nothing beyond the frame. Partial coverage stays legal — only the ship
+    rows are embedded when only a ship embedder ran — and the empty mapping is a stage that
+    correctly had nothing to contribute. One stray key refuses the frame: half-attributed
+    metadata reported as a healthy chain is the exact silence this rule exists against.
 
     Args:
         value: what ``item.meta.get(key)`` returned.
@@ -347,25 +377,36 @@ def per_row(value: Any, count: int, *, what: str, key: str) -> list[Any] | None:
     if value is None:
         return None
     if isinstance(value, Mapping):
-        try:
-            by_index = {int(index): entry for index, entry in value.items()}
-        except (TypeError, ValueError) as exc:
+        keys = list(value)
+        if not all(is_row_index(k) for k in keys):
+            shown = ", ".join(sorted(repr(k) for k in keys)[:4])
             raise ValidationError(
-                f"{what}: meta[{key!r}] is a mapping whose keys are not detection indices "
-                f"({sorted(value)[:4]}...). A model's raw output tensors are not an "
-                "attribution; scatter them back onto the rows they came from first"
-            ) from exc
-        if by_index and count and not any(0 <= index < count for index in by_index):
-            raise ValidationError(
-                f"{what}: meta[{key!r}] is a mapping whose keys {sorted(by_index)[:4]} name "
-                f"no detection in this frame, which has {count} (indices 0..{count - 1}). "
-                "Covering *some* rows is fine — only the person rows are embedded when only a "
-                "person re-ID model ran — but covering none of them is an off-by-N "
-                "scatter-back, and attaching nothing at all is a measurable loss reported as "
-                "a healthy chain"
+                f"{what}: meta[{key!r}] is a mapping keyed by {shown}, which are not "
+                "detection row indices. That is a model response filed verbatim by a "
+                "`pool` element, and scattering its output rows back to the detections "
+                "that produced them is the element's job (phase C8). One entry per "
+                "detection row is what this needs"
             )
+        # keys clear the whole rule before any VALUE is read: a refused frame must not
+        # touch an embedder's arrays (the `Explodes` test in test_vectors_rows.py).
+        for index in sorted(int(k) for k in keys):
+            if index < 0:
+                raise ValidationError(
+                    f"{what}: meta[{key!r}] names row {index}, and a detection row index "
+                    "is never negative — a negative key attaches the value to the last row "
+                    "instead of refusing, which is the mis-attribution this rule makes loud"
+                )
+            if index >= count:
+                span = f" (rows 0..{count - 1})" if count else ""
+                raise ValidationError(
+                    f"{what}: meta[{key!r}] names row {index} and the frame has {count} "
+                    f"detection(s){span}. Covering *some* rows is fine — only the ship rows "
+                    "are embedded when only a ship embedder ran — but naming a row that "
+                    "does not exist is an off-by-N scatter-back"
+                )
+        by_index = {int(k): value[k] for k in keys}
         return [by_index.get(index) for index in range(count)]
-    if isinstance(value, (np.ndarray, Sequence)):
+    if isinstance(value, (np.ndarray, Sequence)) and not isinstance(value, (str, bytes)):
         if len(value) != count:
             raise ValidationError(
                 f"{what}: meta[{key!r}] has {len(value)} rows for {count} detections. One "

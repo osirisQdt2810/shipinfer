@@ -1,9 +1,9 @@
 """The rule for reading ``meta["vectors"]``, written once so it can stop being written twice.
 
 ``recognize`` queries a gallery per row and ``track`` attaches an appearance to a track, and
-written twice the two disagreed at the edges. ``recognize`` is the first caller and today the
-**only** one: ``track._embeddings`` keeps its own laxer copy (``{"3": v}`` coerced, an
-out-of-range key tolerated) until TRACK-VECTORS swaps it — stricter owes tests, in C8b's file.
+written twice the two disagreed at the edges. TRACK-VECTORS is closed: the key rule lives in
+:func:`~shipinfer.topology.elements.detections.per_row` (which the mapping path here delegates
+to), so ``track`` and ``output`` refuse the same inputs this reader refuses.
 
 ``vectors`` is either a mapping ``{row index: vector}`` — what a *branch* embedder produces,
 since only the original index says which row a vector came from — or a per-row ``(N, d)``
@@ -22,6 +22,7 @@ from typing import Any
 import numpy as np
 
 from shipinfer.core.errors import ValidationError
+from shipinfer.topology.elements.detections import per_row
 
 __all__ = ["rows_by_index"]
 
@@ -92,43 +93,25 @@ def rows_by_index(
 def _from_mapping(
     vectors: Mapping[Any, Any], count: int | None, *, who: str
 ) -> tuple[tuple[int, np.ndarray], ...]:
-    """The mapping shape, with the key rule applied to every key before any row is read.
+    """The mapping shape, through the one key rule (`detections.per_row`) plus this
+    reader's own vector coercion. Delegation, not a copy: TRACK-VECTORS closed on the
+    promise that no second reader can drift again."""
+    rows = per_row(
+        vectors, count if count is not None else _max_row(vectors), what=who, key="vectors"
+    )
+    assert rows is not None  # the caller only routes real mappings here
+    return tuple(
+        (index, _as_vector(value, who, index))
+        for index, value in enumerate(rows)
+        if value is not None
+    )
 
-    Key type first and the range second, deliberately: a raw ``{tensor_name: Tensor}``
-    response fails the type rule, and its message is the one that names the missing
-    scatter-back rather than one about a row index nobody wrote.
-    """
-    keys = list(vectors)
-    if not all(_is_row_index(key) for key in keys):
-        shown = ", ".join(sorted(repr(key) for key in keys)[:4])
-        raise ValidationError(
-            f"{who}: `vectors` is a mapping keyed by {shown}, which are not detection row "
-            "indices. That is a model response filed verbatim by a `pool` embedder, and "
-            "scattering its output rows back to the detections that produced them is the "
-            "embed element's job (phase C8). One vector per detection row is what this "
-            "needs: an (N, d) array, or a mapping keyed by row index"
-        )
 
-    # `(row, original key)` and not `(row, value)`: the value is read only after every key
-    # has cleared the rule, so a frame that is refused never touches an embedder's arrays.
-    pairs = sorted(((int(key), key) for key in keys), key=lambda pair: pair[0])
-    for index, _ in pairs:
-        if index < 0:
-            raise ValidationError(
-                f"{who}: `vectors` names row {index}, and a detection row index is never "
-                "negative. A negative key attaches the vector to the last row of the frame "
-                "instead of refusing, which is the mis-attribution this reader exists to "
-                "make loud"
-            )
-        if count is not None and index >= count:
-            span = f" (rows 0..{count - 1})" if count else ""
-            raise ValidationError(
-                f"{who}: `vectors` names row {index} and the frame has {count} "
-                f"detection(s){span}. Covering *some* rows is fine — only the ship rows "
-                "are embedded when only a ship embedder ran — but naming a row that does "
-                "not exist is an off-by-N scatter-back"
-            )
-    return tuple((index, _as_vector(vectors[key], who, index)) for index, key in pairs)
+def _max_row(vectors: Mapping[Any, Any]) -> int:
+    """A row count when `detections` is absent: large enough that no key is out of range —
+    the key-TYPE rule still applies, the range rule cannot without a frame to range over."""
+    numeric = [int(k) for k in vectors if not isinstance(k, bool) and isinstance(k, int)]
+    return max(numeric, default=-1) + 1
 
 
 def _is_row_index(key: Any) -> bool:

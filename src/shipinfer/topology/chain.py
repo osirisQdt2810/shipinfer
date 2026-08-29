@@ -495,6 +495,7 @@ class Topology:
         ]
         _check_structure(nodes)
         _check_row_selection(nodes)
+        _check_row_indexed_meta(nodes)
         edges = _negotiate_edges(nodes)
         return cls(spec.name, nodes, edges)
 
@@ -931,7 +932,13 @@ def _check_row_selection(nodes: Sequence[ElementNode]) -> None:
                 "holds several classes at once -- nothing writes a frame-level "
                 "meta['class'], so this element would be skipped on every frame. This "
                 "element selects detection ROWS: write "
-                f"`params: {{classes: [{condition.value}]}}` instead"
+                + (
+                    f"`params: {{classes: [{condition.value}]}}`"
+                    if condition.op == "=="
+                    else f"`params: {{classes: [...]}}` naming the labels this slot wants "
+                    f"(every label except {condition.value!r}, for this `!=`)"
+                )
+                + " instead"
             )
 
     emitters = {
@@ -952,6 +959,40 @@ def _check_row_selection(nodes: Sequence[ElementNode]) -> None:
                 f"{sorted(emitters)} emit(s) {sorted(known)} "
                 "(`params: {decode: {class_labels: ...}}`). A label nobody detects selects no "
                 "rows, so this element would run on nothing and report nothing wrong"
+            )
+
+
+def _check_row_indexed_meta(nodes: Sequence[ElementNode]) -> None:
+    """A key read per detection row, filed by a slot that files the model's response verbatim.
+
+    ``recognize: {impl: pool}`` submits whole frames and files ``meta["identities"]`` as
+    ``{output name: Tensor}``. ``output`` reads that key one entry per row, so the pairing
+    fails on the *first* frame and on every frame after it -- the chain loads, the runner
+    fails every item, and nothing is ever published. A chain that cannot publish must not
+    start, so this is a load-time refusal like the two above it.
+
+    The two halves are declarations, not a hard-coded pair: an element says what it reads per
+    row (:attr:`~shipinfer.topology.base.Element.reads_per_row`) and a producer says its key
+    holds a raw response (:attr:`~shipinfer.topology.base.Element.files_raw_response`).
+    ``segment: {impl: pool}`` keeps working because nothing reads ``masks`` per row.
+
+    Raises:
+        ChainStructureError: naming the slot, the key, and the implementation that works.
+    """
+    wanted = {key for node in nodes for key in node.element.reads_per_row}
+    if not wanted:
+        return
+    readers = sorted(node.name for node in nodes if node.element.reads_per_row)
+    for node in nodes:
+        key = getattr(node.element, "meta_key", "")
+        if key in wanted and node.element.files_raw_response:
+            raise ChainStructureError(
+                f"element {node.name!r} (impl {node.element.impl!r}) files meta[{key!r}] as "
+                f"the model's raw response, and {readers} read(s) that key one entry per "
+                "detection ROW -- every frame would fail at run time and the chain would "
+                f"publish nothing. Use an implementation that scatters back onto the rows "
+                f"(`{node.kind.value}: {{impl: shipvision}}` for identity), or drop "
+                f"{readers[0]!r} from this chain"
             )
 
 

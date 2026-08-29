@@ -489,6 +489,15 @@ class TestTheSinkIsBuiltAtOpen:
         with pytest.raises(ConfigurationError):
             built.open(ElementContext())
 
+    def test_the_null_sink_refuses_in_the_same_vocabulary_as_the_others(self) -> None:
+        """``keep_last: -1`` used to surface a bare ``ValueError`` while the ``jsonlines``
+        equivalent surfaced ``ConfigurationError`` — the same operator mistake, two error
+        types, and only one of them tells the operator which slot to edit."""
+        built = create_element("output", "null", "output", {"keep_last": -1})
+
+        with pytest.raises(ConfigurationError, match="keep_last"):
+            built.open(ElementContext())
+
     def test_processing_before_open_is_a_typed_refusal(self) -> None:
         from shipinfer.core.errors import ServerStateError
 

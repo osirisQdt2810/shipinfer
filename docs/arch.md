@@ -35,10 +35,10 @@ which branch conditions. It is data (a YAML file), not code:
 elements:
   decode:       {impl: gstreamer-gpu}               # NV12 → VRAM, the default
   detect:       {impl: pool, model: ship_detector}
-  segment:      {impl: pool, model: ship_segmenter,  when: class == ship}
+  segment:      {impl: pool, model: ship_segmenter,  when: has_ship == true}
   embed_ship:   {impl: pool, model: ship_embedder,   after: segment, params: {classes: [ship]}}
   embed_person: {impl: pool, model: person_embedder, after: detect,  params: {classes: [person]}}
-  recognize:    {impl: pool, model: ship_recognizer, after: embed_ship, params: {classes: [ship]}}
+  recognize:    {impl: shipvision, after: embed_ship, params: {classes: [ship]}}   # gallery query
   track:        {impl: shipvision, per: camera, after: [recognize, embed_person]}  # stateful — home shard
   mtmc:         {impl: shipvision, scope: global}
   output:       {impl: kafka}
@@ -62,8 +62,15 @@ frame" nor "a person frame". Writing `when: class == ship` on such an element as
 per-frame question about a per-row fact, and the loader refuses it at start-up
 (`ChainStructureError`, naming the `params: {classes: [ship]}` to write instead): the
 condition would skip the *entire* element for any frame the expression rejected, taking the
-ships with it. `segment` keeps its `when:` above because it submits the whole frame and
-selects no rows. See ADR-017 (amended 2026-08-28).
+ships with it. `segment` keeps a `when:` above because it submits the whole frame and selects
+no rows -- but on a genuinely frame-level fact (`has_ship`, filed by the detector), not on
+`class`, which no stage writes per frame. See ADR-017 (amended 2026-08-28).
+
+**`recognize` is a gallery query, not a pool submission.** Identity is `impl: shipvision`: the
+element embeds each selected row and asks a gallery who it is, filing one `(id, score)` per
+detection row. `impl: pool` files the model's response verbatim under that same key, which
+`output` reads per row, so the loader refuses the pairing at start-up rather than failing every
+frame (`ChainStructureError`) -- the chain above is the runnable spelling.
 
 `topology/ship_person.yaml` in the repository is this file. It still carries the older
 `when: class == …` spelling on its crop slots and is not loadable until phase D registers a

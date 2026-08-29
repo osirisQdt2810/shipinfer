@@ -53,7 +53,13 @@ import numpy as np
 from shipinfer.core.errors import ConfigurationError, TrackingError, ValidationError
 from shipinfer.topology.base import ChainItem, Element, ElementContext, ElementKind
 from shipinfer.topology.bridge import load_mot, load_types
-from shipinfer.topology.elements.detections import Detections, parse_classes, per_row
+from shipinfer.topology.elements.detections import (
+    MISSING_STAGES,
+    TRACK_ROWS,
+    Detections,
+    parse_classes,
+    per_row,
+)
 from shipinfer.topology.registry import registry_for
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -68,23 +74,6 @@ __all__ = [
     "ShipvisionTrack",
     "TrackerShard",
 ]
-
-#: The metadata key naming the stages a frame went through without. The chain's half of
-#: ``pipeline/schema.py``'s field of the same name, and the vocabulary an ``output`` element
-#: serialises: a partial frame says so, and never reads as a complete one with nothing in it.
-MISSING_STAGES = "missing_stages"
-
-#: The metadata key holding one **detection row index per published track**, aligned with
-#: ``meta["tracks"]`` and ``-1`` where a track matched no row.
-#:
-#: It exists because an emitted event is per *detection* — that is v1's shape and every
-#: consumer's — while a tracker answers in tracks, and the two are not the same list: a track's
-#: box is the filtered estimate, and which detection fed it is the tracker's own business. The
-#: mapping is recovered here rather than in the ``output`` element for one reason: recovering
-#: it needs the frame's detections, the tracker's answer *and* the association solver the
-#: trackers themselves use, and this is the only element that holds all three. An ``output``
-#: element that redid it would be a second, quieter tracker.
-TRACK_ROWS = "track_rows"
 
 #: The tracker a slot gets when it does not say. ByteTrack, mirroring
 #: ``pipeline.tracking.algorithm`` — a literal in a pure layer because ``topology`` may not

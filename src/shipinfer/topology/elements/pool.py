@@ -182,6 +182,11 @@ class _PoolElement(Element):
     #: Where this kind's results are filed in :attr:`ChainItem.meta`. The one thing a
     #: subclass must declare, and the vocabulary the downstream elements read: ``track`` wants
     #: ``detections``, ``mtmc`` wants ``vectors``.
+    #: The default ``_finish`` files the response verbatim, so a consumer that reads this
+    #: element's key per detection row cannot be satisfied by it -- the loader refuses that
+    #: pairing rather than letting it fail on frame 1.
+    files_raw_response: ClassVar[bool] = True
+
     meta_key: ClassVar[str] = ""
 
     #: What this element does with the frame's pixels, for :meth:`_frame_of`'s refusals: a
@@ -567,6 +572,9 @@ class PoolDetect(_PoolElement):
     kind: ClassVar[ElementKind] = ElementKind.DETECT
     #: The decoded, source-pixel :class:`~shipinfer.topology.elements.detections.Detections`
     #: — the key ``track`` reads. Not the raw rows: see the class docstring.
+    #: Decoded and filed as this frame's detections, not as the raw response.
+    files_raw_response: ClassVar[bool] = False
+
     meta_key: ClassVar[str] = "detections"
     #: This element letterboxes, so it is opened with :attr:`ElementContext.ops` and refuses
     #: without one. The declaration is what makes ``shipinfer run`` resolve an implementation
@@ -1109,6 +1117,10 @@ class _PoolCropElement(_PoolElement):
     this element ran; on a chain that puts a second embedder *in series* ahead of this one, a
     peer's mapping is already there and not even that (:meth:`_scatter`).
     """
+
+    #: A crop element scatters its response back onto the rows it cropped, so its key is
+    #: row-indexed and readable by ``output`` -- the opposite of the base's default.
+    files_raw_response: ClassVar[bool] = False
 
     #: This element crops, so it is opened with :attr:`ElementContext.ops` and refuses without
     #: one -- the same declaration, and the same refusal, as :class:`PoolDetect`.

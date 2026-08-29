@@ -559,6 +559,17 @@ class Element(abc.ABC):
     #: hook: the loader must not carry a list of implementation names that read a param.
     selects_rows: ClassVar[bool] = False
 
+    #: Meta keys this element reads **one entry per detection row**. The loader uses it to
+    #: refuse a chain whose producer of such a key files a model's raw response instead
+    #: (see :attr:`files_raw_response`): that mismatch is a per-frame failure at run time,
+    #: and a chain that cannot publish anything should not start.
+    reads_per_row: ClassVar[tuple[str, ...]] = ()
+
+    #: Whether what this element files under its meta key is the model's response verbatim
+    #: -- ``{output name: Tensor}`` -- rather than one entry per detection row. True for a
+    #: pool element that submits whole frames and never scatters back.
+    files_raw_response: ClassVar[bool] = False
+
     def __init__(
         self,
         name: str,

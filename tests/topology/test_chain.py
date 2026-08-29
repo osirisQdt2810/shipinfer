@@ -57,6 +57,8 @@ from shipinfer.topology import (
     registry_for,
 )
 from shipinfer.topology.elements.mock import MockDetect, MockOutput
+from shipinfer.topology.elements.output import SinkOutput
+from shipinfer.topology.elements.pool import PoolRecognize, PoolSegment
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -1212,6 +1214,34 @@ class TestRowSelectionIsNotAFrameCondition:
                 "output: {impl: none}",
             )
 
+    def test_the_same_holds_for_a_recognize_slot(self) -> None:
+        """The third reader of ``classes:``. ``ship_person.yaml`` carries exactly this
+        spelling, and without the declaration on ``GalleryRecognize`` the chain loads and
+        then publishes ``ship_id: null`` on every event for the life of the process."""
+        with pytest.raises(ChainStructureError, match=r"classes: \[ship\]") as caught:
+            self.chain(
+                "detect:    {impl: pool, model: d}",
+                "embed:     {impl: pool, model: e, params: {classes: [ship]}}",
+                "recognize: {impl: shipvision, when: class == ship}",
+                "output:    {impl: none}",
+            )
+
+        assert "recognize" in str(caught.value), "the message names the slot to edit"
+
+    def test_the_refusal_reads_correctly_for_an_inequality(self) -> None:
+        """``when: class != ship`` must not be told to write ``classes: [ship]`` — that is
+        the inverse of what was asked, and a fix a reader can paste is the whole point."""
+        with pytest.raises(ChainStructureError) as caught:
+            self.chain(
+                "detect: {impl: pool, model: d}",
+                "embed:  {impl: pool, model: e, when: class != ship}",
+                "output: {impl: none}",
+            )
+
+        message = str(caught.value)
+        assert "classes: [ship]" not in message, "that would select exactly what was excluded"
+        assert "every label except 'ship'" in message
+
     def test_the_fix_the_message_names_actually_loads(self) -> None:
         """A refusal that names a fix has to be checked against the fix, not only asserted."""
         chain = self.chain(
@@ -1253,6 +1283,64 @@ class TestRowSelectionIsNotAFrameCondition:
         assert str(chain.node("segment").condition) == "class == ship"
 
 
+class TestAKeyReadPerRowMayNotBeFiledRaw:
+    """``recognize: {impl: pool}`` in front of ``output`` publishes nothing, so it is refused.
+
+    A pool element that submits whole frames files ``{output name: Tensor}`` under its key.
+    ``output`` reads ``identities`` one entry per detection row, so the pair raises on the
+    first frame and on every frame after it: the chain loads, every item's future fails, and
+    the deployment's evidence that it works is a log nobody reads. The two halves are
+    declarations, so the refusal reaches any future pairing of the same shape.
+    """
+
+    HEAD = "name: raw\nelements:\n  decode: {impl: replay}\n"
+
+    def chain(self, *lines: str) -> Topology:
+        return load(self.HEAD + "".join(f"  {line}\n" for line in lines))
+
+    def test_a_pool_recognize_in_front_of_output_is_refused(self) -> None:
+        with pytest.raises(ChainStructureError) as caught:
+            self.chain(
+                "detect:    {impl: pool, model: d}",
+                "recognize: {impl: pool, model: r}",
+                "output:    {impl: none}",
+            )
+
+        message = str(caught.value)
+        assert "recognize" in message and "identities" in message
+        assert "impl: shipvision" in message, "the refusal names the implementation that works"
+
+    def test_the_implementation_the_message_names_loads(self) -> None:
+        """The fix is checked against the loader, not asserted in prose."""
+        chain = self.chain(
+            "detect:    {impl: pool, model: d}",
+            "recognize: {impl: shipvision}",
+            "output:    {impl: none}",
+        )
+
+        assert chain.node("recognize").element.files_raw_response is False
+
+    def test_a_pool_segment_is_untouched_because_nothing_reads_masks_per_row(self) -> None:
+        """The rule is the declared pair, not "pool elements are suspect": ``masks`` is in
+        no reader's ``reads_per_row``, so the chain the runner's own test drives still loads."""
+        chain = self.chain(
+            "detect:  {impl: pool, model: d}",
+            "segment: {impl: pool, model: s}",
+            "output:  {impl: none}",
+        )
+
+        assert chain.node("segment").element.files_raw_response is True
+
+    def test_the_refusal_needs_both_halves_declared(self) -> None:
+        """Not "pool elements are suspect": the reader's key and the producer's key have to be
+        the same one. ``output`` reads ``vectors`` and ``identities``, and the segment case
+        above loads precisely because ``masks`` is in nobody's ``reads_per_row``.
+        """
+        assert SinkOutput.reads_per_row == ("vectors", "identities")
+        assert PoolRecognize.meta_key in SinkOutput.reads_per_row
+        assert PoolSegment.meta_key not in SinkOutput.reads_per_row
+
+
 class TestClassesAreCheckedAgainstWhatTheDetectorEmits:
     """A branch that selects a label nobody detects is a dead branch that reports nothing."""
 
@@ -1275,6 +1363,16 @@ class TestClassesAreCheckedAgainstWhatTheDetectorEmits:
         message = str(caught.value)
         assert "embed" in message and "detect" in message
         assert "vessel" in message and "ship" in message
+
+    def test_a_recognize_slot_is_cross_checked_too(self) -> None:
+        """The same typo on the third reader of ``classes:``, refused the same way."""
+        with pytest.raises(ChainStructureError, match="vessel"):
+            load(
+                f"{self.HEAD}  {self.LABELLED}\n"
+                "  embed: {impl: pool, model: e, params: {classes: [ship]}}\n"
+                "  recognize: {impl: shipvision, params: {classes: [vessel]}}\n"
+                "  output: {impl: none}\n"
+            )
 
     def test_a_label_it_does_emit_loads(self) -> None:
         chain = self.chain(

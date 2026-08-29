@@ -57,8 +57,12 @@ import numpy as np
 from shipinfer.core.errors import ConfigurationError, ValidationError
 from shipinfer.core.events import ObjectRecord, PerceptionEvent, as_embedding
 from shipinfer.topology.base import ChainItem, Element, ElementContext, ElementKind
-from shipinfer.topology.elements.detections import Detections, per_row
-from shipinfer.topology.elements.track import MISSING_STAGES, TRACK_ROWS
+from shipinfer.topology.elements.detections import (
+    MISSING_STAGES,
+    TRACK_ROWS,
+    Detections,
+    per_row,
+)
 from shipinfer.topology.registry import registry_for
 from shipinfer.topology.sinks import RESULT_SINKS, ResultSink
 
@@ -136,6 +140,10 @@ class SinkOutput(Element):
     """
 
     kind: ClassVar[ElementKind] = ElementKind.OUTPUT
+
+    #: Read one entry per detection row (``_records``), so the loader refuses a chain whose
+    #: producer of either key files a model's raw response under it instead.
+    reads_per_row: ClassVar[tuple[str, ...]] = ("vectors", "identities")
     #: Metadata first, host pixels second. A sink serialises, so it can never read device
     #: memory — declaring ``nv12@gpu`` here is how a chain grows a silent per-frame download
     #: (arch.md §8), and ``MockCpuOutput`` exists to prove the loader refuses that pairing.
@@ -181,10 +189,10 @@ class SinkOutput(Element):
         self._source_id = self._declared_source_id or f"shard-{context.shard_id}"
         try:
             self._sink = RESULT_SINKS.create(self.sink_name, **self._sink_params)
-        except TypeError as exc:
+        except (TypeError, ValueError) as exc:
             raise ConfigurationError(
-                f"output element {self.name!r}: `params:` {sorted(self._sink_params)} do not "
-                f"fit the {self.sink_name!r} sink ({exc})"
+                f"output element {self.name!r}: `params:` {sorted(self._sink_params)} were "
+                f"refused by the {self.sink_name!r} sink ({exc})"
             ) from exc
         self._metrics = _OutputMetrics(context.metrics, self.name)
 

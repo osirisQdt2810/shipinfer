@@ -956,7 +956,7 @@ class TestWhatItReadsOffTheItem:
         """An off-by-N scatter-back. Without the coverage check every row silently gets
         ``embedding=None`` and the chain reads as healthy, which is the same silence the
         sequence form's length check already refuses, arriving through the other door."""
-        with pytest.raises(ValidationError, match="name no detection"):
+        with pytest.raises(ValidationError, match="names row 5 and the frame has 1"):
             element.process(
                 item(
                     detections=detections((0, 0, 40, 40)),

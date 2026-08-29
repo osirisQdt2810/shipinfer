@@ -204,6 +204,10 @@ class GalleryRecognize(Element):
     """
 
     kind: ClassVar[ElementKind] = ElementKind.RECOGNIZE
+    #: Row-selecting, so the loader's two refusals apply here too: `when: class == …` is
+    #: refused on this element, and a `classes:` label is cross-checked against the
+    #: detector's table — the ADR-017 amendment predicted this inheritance in two lines.
+    selects_rows: ClassVar[bool] = True
 
     #: Verbatim from :class:`~shipinfer.topology.elements.pool._PoolElement`, and the
     #: module docstring says why each half is what it is.
@@ -333,6 +337,10 @@ class GalleryRecognize(Element):
         return float(value)
 
     # -- lifecycle ----------------------------------------------------------------------
+
+    def declared_classes(self) -> tuple[str, ...] | None:
+        """See :meth:`~shipinfer.topology.base.Element.declared_classes`."""
+        return self._classes
 
     def _do_open(self, context: ElementContext) -> None:
         """Load shipvision, build the gallery, fill it from disk, and check the width.
