@@ -69,7 +69,7 @@ thread that holds models, worker threads and a sink, running free after the clai
   sink — an open file descriptor, with ``JsonLinesTraceSink`` — on a torn-down server, and
   ``stats()`` reported that orphan instead of the totals.
 
-Offline throughout — the mock backend, ``KIND_CPU`` instances and real worker threads,
+Offline throughout — real TorchScript fixtures, ``KIND_CPU`` instances and real worker threads,
 because the evidence for the first one is ``threading.enumerate()``.
 """
 

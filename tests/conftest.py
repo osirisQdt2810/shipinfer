@@ -97,6 +97,11 @@ def pytest_configure(config) -> None:
         return
     for variable in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"):
         os.environ[variable] = ""
+    # Same place, same reason: this is the offline tier, whose fixtures declare a latency and
+    # must be able to keep it. A device-tier run returned above and keeps torch's defaults.
+    from tests.support.models import pin_intra_op_threads
+
+    pin_intra_op_threads()
 
 
 @pytest.fixture(scope="session")

@@ -49,10 +49,11 @@ ensemble:
 
 
 def _write_model(root: Path, name: str, body: str = _MODEL, *, versioned: bool = True) -> None:
+    """Write one config. The caller materialises once, when the repository is complete —
+    doing it here rebuilt every model already written, three times over for two models."""
     directory = root / name
     (directory / "1").mkdir(parents=True) if versioned else directory.mkdir(parents=True)
     (directory / "config.yaml").write_text(body.lstrip())
-    materialise(root)
 
 
 @pytest.fixture()
@@ -161,6 +162,7 @@ class TestExplicitControl:
         an explicit request, which is not the polling mode — the operator asked at this
         moment, so a broken config fails their call rather than a timer's."""
         _write_model(repository, "arrived_late")
+        materialise(repository)  # the model must exist on disk before it can be loaded
 
         explicit.load_model("arrived_late")
 

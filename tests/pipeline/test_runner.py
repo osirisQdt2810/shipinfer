@@ -1,7 +1,7 @@
 """The runner: the whole flow, and the guarantee that no frame vanishes on the way through.
 
 The last class is the one that matters most — a real
-:class:`~shipinfer.engine.InferenceServer` on the mock backend, the ``replay`` ingest source
+:class:`~shipinfer.engine.InferenceServer` on real TorchScript fixtures, the ``replay`` ingest source
 reading PNGs off disk, and the ``jsonlines`` sink writing to a temporary file. No camera, no
 GPU, no broker, no build. That combination existing is what makes the 50-camera bench
 possible, so it is asserted rather than assumed.
@@ -721,7 +721,7 @@ class TestInjectedCollaboratorsAreTheOnesUsed:
 
 
 class TestEndToEndWithReplayAndJsonLines:
-    """A real server on the mock backend, the replay source, and a file sink.
+    """A real server on real TorchScript fixtures, the replay source, and a file sink.
 
     This is the combination that has to work for the offline tier to mean anything: it is the
     same wiring ``shipinfer bench`` drives at 50 cameras, minus the cameras.

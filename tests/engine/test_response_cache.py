@@ -5,7 +5,7 @@ stateless models. It was implemented, documented, wired into a model config — 
 written to: ``ResponseCache.put`` had no call site anywhere in ``src/``. Every request
 hashed all of its input bytes and then missed, forever.
 
-These tests use the mock backend's execution counter as the ground truth for "did the
+These tests use the instance's own execution counter as the ground truth for "did the
 model actually run", which is the only way to tell a hit from a fast miss.
 """
 

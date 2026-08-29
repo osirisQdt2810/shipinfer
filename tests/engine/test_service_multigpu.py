@@ -30,7 +30,7 @@ deep within the first few requests and the policy borrows shard 1's instance thr
 Shard 1's statistics say how much of shard 0's work it did — the number the topology exists for.
 
 Inside the container only (the suite's containment gate), on the devices `SHIPINFER_TEST_GPUS`
-names (default `0,1`; `deploy/rootless/test.sh` forwards it). The mock backend keeps the run to a
+names (default `0,1`; `deploy/rootless/test.sh` forwards it). A CPU-shaped fixture keeps the run to a
 CUDA context per shard, nothing else.
 """
 

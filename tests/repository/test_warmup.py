@@ -13,7 +13,7 @@ its first p99 is representative.
 
 This file covers the *machinery* — turning declared samples into batches, and refusing the
 ones that cannot work. Whether the server actually runs them is a claim about the server, and
-it is asserted in ``tests/server/test_warmup_wiring.py`` against the mock backend's own
+it is asserted in ``tests/engine/test_warmup_runs_on_the_server.py`` against the backend's own
 execution counter.
 """
 

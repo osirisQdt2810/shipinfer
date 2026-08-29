@@ -2,7 +2,7 @@
 
 The machinery — turning samples into batches, and refusing the ones that cannot work — is
 `tests/repository/test_warmup.py`. This is the other half of the claim, and it is a claim about
-the server: measured on the mock backend's own execution counter, so it counts executions that
+the server: measured on the backend's own execution counter, so it counts executions that
 happened rather than calls that were made.
 
 It lived in the repository test file until #8 was split by seam, where standing the core piece
@@ -34,7 +34,7 @@ parameters: {{latency_ms: 0.0}}
 
 
 class TestTheServerRunsTheSamples:
-    """The wiring, measured on the mock backend's own execution counter."""
+    """The wiring, measured on the backend's own execution counter."""
 
     def _server(self, tmp_path: Path, warmup: str, iterations: int = 0) -> InferenceServer:
         root = tmp_path / "repo"

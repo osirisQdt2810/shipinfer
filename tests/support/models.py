@@ -25,8 +25,10 @@ import yaml
 __all__ = [
     "HIDDEN",
     "build_model",
+    "expected_output",
     "iterations_for",
     "materialise",
+    "pin_intra_op_threads",
     "unit_cost_ms",
     "write_model",
 ]
@@ -46,14 +48,23 @@ HIDDEN = 256
 #: averaged over several runs so one scheduling hiccup cannot set every fixture's cost.
 _CALIBRATION_WORK, _CALIBRATION_RUNS = 128, 5
 
-# doc: long the thread setting is a correctness decision and needs its argument
-# ONE intra-op thread for every fixture, and it is a correctness setting rather than a
-# performance one. These modules exist to make a worker *occupy* its thread for a declared
-# time; letting torch fan one matmul across every core means four instance threads contend
-# for the same pool, so the latency a test declared is not the latency it gets -- and the
-# deleted mock backend's own docstring warned that a spin "would make the scheduler look
-# better than it is by keeping a core hot". Set once, at import, before any fixture is built.
-torch.set_num_threads(1)
+
+# doc: long the thread setting is a correctness decision, and its SCOPE is a second one
+def pin_intra_op_threads() -> None:
+    """One intra-op thread, which is a correctness setting rather than a performance one.
+
+    These modules exist to make a worker *occupy* its thread for a declared time; letting
+    torch fan one matmul across every core means four instance threads contend for the same
+    pool, so the latency a test declared is not the latency it gets. The deleted mock
+    backend's own docstring warned that a spin "would make the scheduler look better than it
+    is by keeping a core hot".
+
+    Called from ``tests/conftest.py`` for the OFFLINE tier only, not at import: collection
+    happens whatever ``-m`` selects, so an import-time call would pin the process for a
+    ``-m gpu`` run too -- including any CPU pre/post-processing that run measures, which is
+    not this fixture's business to decide.
+    """
+    torch.set_num_threads(1)
 
 
 class _Fixture(torch.nn.Module):
@@ -313,11 +324,27 @@ def materialise(root: Path, *, latency_ms: float | Mapping[str, float] = 0.0) ->
     return written
 
 
+#: A `Linear` this wide is ~4 GB of weights, traced and written to a tmp_path. Nothing
+#: materialises at that size today, but a detector-shaped config (`dims: [3, 640, 640]`) is
+#: 1.2M features and the next test to try one deserves a sentence rather than an OOM.
+_MAX_FEATURES = 1_000_000
+
+
 def _features(specs: Any) -> list[int]:
     """One flattened width per declared tensor, in declaration order."""
-    return [
+    widths = [
         int(math.prod(int(d) for d in (entry.get("dims") or [1]))) for entry in (specs or [{}])
     ]
+    for width in widths:
+        if width > _MAX_FEATURES:
+            raise ValueError(
+                f"a declared tensor flattens to {width:,} features, over this helper's "
+                f"{_MAX_FEATURES:,} bound: one dense projection that wide is gigabytes of "
+                "weights per model. A fixture for an image-shaped model wants a small "
+                "declared `dims:`, or a helper that does not project every input to every "
+                "output."
+            )
+    return widths
 
 
 def expected_output(

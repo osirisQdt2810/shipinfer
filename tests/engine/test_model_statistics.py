@@ -219,7 +219,7 @@ class TestServingRecordsStatistics:
         assert body["execution_count"] == 1
         assert body["last_inference"] > 0
         infer = body["inference_stats"]["compute_infer"]
-        # The mock backend sleeps 50 us per execution, so a zero here means the span was
+        # The fixture computes for its declared time, so a zero here means the span was
         # never measured rather than that the model is fast.
         assert infer["count"] == 1 and infer["ns"] > 0
         assert body["inference_stats"]["success"]["count"] == 1
@@ -338,7 +338,7 @@ class TestABatchedRequestIsNotChargedItsOwnWaitTwice:
     batch, and `observe` multiplies by the request count — so `queue` and `success` came out
     **exactly `batch_size` times too large**.
 
-    Measured by review against the mock backend at `max_batch_size: 8` with eight concurrent
+    Measured by review at `max_batch_size: 8` with eight concurrent
     requests forming one batch: reported queue 1335 us/request against an actual mean of 167,
     reported end-to-end 43 822 against 5 478. Both ratios exactly 8.0.
 

@@ -11,7 +11,7 @@ shared box that is the next person's job failing to fit, with nothing anywhere s
 ``_started`` is set only once *every* model is up — so the one state in which models were
 running and unreachable was the exact state ``stop()`` declined to handle.
 
-Offline throughout: the mock backend, ``KIND_CPU`` instances, and real worker threads —
+Offline throughout: real TorchScript fixtures, ``KIND_CPU`` instances, and real worker threads —
 which is the point, because the evidence here is ``threading.enumerate()``.
 """
 

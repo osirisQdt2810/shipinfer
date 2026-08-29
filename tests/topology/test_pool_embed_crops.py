@@ -1264,7 +1264,7 @@ class TestOverARealEngine:
     """The reviewer's `person_embedder` scenario on the real assembler, not a double.
 
     `FakeEmbedder` now enforces the engine's row bound, but that bound is still a fixture's
-    claim. This drives a real :class:`~shipinfer.engine.InferenceServer` (mock backend,
+    claim. This drives a real :class:`~shipinfer.engine.InferenceServer` (real TorchScript fixtures,
     `KIND_CPU`) over a config whose `max_batch_size:` line is absent — the omission that
     used to lose every crop of every multi-detection frame.
     """

@@ -18,7 +18,7 @@ its frame and cannot resolve an implementation itself — ``topology`` may not i
 :attr:`~shipinfer.topology.base.Element.needs_image_ops`. A chain of mocks must build neither.
 
 Everything is offline. The engine is a recording double in every test but the last, which
-starts a real ``InferenceServer`` over the mock backend and a detector-shaped repository — the
+starts a real ``InferenceServer`` over real TorchScript fixtures and a detector-shaped repository — the
 one that proves a ``pool`` element actually opens, rather than that a keyword was forwarded. The
 ops it is handed there resolve to ``NumpyImageOps``, because ``get_image_ops`` degrades to it
 on a host with no accelerator; that is the whole reason this tier can run the real element.
@@ -983,7 +983,7 @@ class TestOverARealEngine:
     """The ledger item, closed: a `pool` element opens against a pool this command built.
 
     Everything above this class would pass over a double that forwarded a keyword. This one
-    starts a real :class:`~shipinfer.engine.InferenceServer` on the mock backend, runs a real
+    starts a real :class:`~shipinfer.engine.InferenceServer` on real TorchScript fixtures, runs a real
     :class:`~shipinfer.runners.inprocess.InprocessRunner` over a chain with a `pool` element
     in it, and looks at the element while the chain is open -- which is the thing that used to
     raise ``ConfigurationError`` before the first frame.
