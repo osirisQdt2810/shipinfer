@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from shipinfer.api import create_app  # noqa: E402
 from shipinfer.core.settings import ServerSettings  # noqa: E402
 from shipinfer.engine import InferenceServer  # noqa: E402
+from tests.support.models import materialise  # noqa: E402
 
 
 @pytest.fixture()
@@ -32,7 +33,7 @@ def client(tmp_path: Path):
     root = tmp_path / "repo"
     (root / "echo" / "1").mkdir(parents=True)
     (root / "echo" / "config.yaml").write_text(
-        "platform: mock\n"
+        "platform: pytorch\n"
         "max_batch_size: 4\n"
         "inputs: [{name: x, data_type: FP32, dims: [2]}]\n"
         "outputs: [{name: y, data_type: FP32, dims: [2]}]\n"
@@ -40,6 +41,7 @@ def client(tmp_path: Path):
         "dynamic_batching: {enabled: false}\n"
         "parameters: {latency_ms: 0.05}\n"
     )
+    materialise(root)
     server = InferenceServer(
         ServerSettings(
             model_repository=root,

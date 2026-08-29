@@ -11,7 +11,7 @@ shared box that is the next person's job failing to fit, with nothing anywhere s
 ``_started`` is set only once *every* model is up — so the one state in which models were
 running and unreachable was the exact state ``stop()`` declined to handle.
 
-Offline throughout: the mock backend, ``KIND_CPU`` instances, and real worker threads —
+Offline throughout: real TorchScript fixtures, ``KIND_CPU`` instances, and real worker threads —
 which is the point, because the evidence here is ``threading.enumerate()``.
 """
 
@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from shipinfer.backends.mock import MockBackend
+from shipinfer.backends.torch_backend import TorchScriptBackend
 from shipinfer.core.errors import ServerStateError, ShipInferError
 from shipinfer.core.metrics import ServerMetrics
 from shipinfer.core.request import InferenceRequest, RequestContext
@@ -36,9 +36,10 @@ from shipinfer.engine.model import Model
 from shipinfer.repository import ModelRepository
 from shipinfer.runtime.device import DeviceManager
 from shipinfer.runtime.memory import MemoryPool
+from tests.support.models import materialise
 
 _OK = """
-platform: mock
+platform: pytorch
 max_batch_size: 4
 inputs: [{name: x, data_type: FP32, dims: [2]}]
 outputs: [{name: y, data_type: FP32, dims: [2]}]
@@ -59,7 +60,7 @@ _BROKEN_WARMUP = _OK + """model_warmup:
 #: constructed and never reaches ``Model.start``. This is the one a non-strict start skips,
 #: because it is an error in both modes (a warm-up that cannot run is only fatal under
 #: ``strict_startup`` — see ``Model.start``).
-_UNKNOWN_PLATFORM = _OK.replace("platform: mock", "platform: no_such_runtime")
+_UNKNOWN_PLATFORM = _OK.replace("platform: pytorch", "platform: no_such_runtime")
 
 #: One instance, so "nothing is ready" and "this one instance is not ready" are the same
 #: statement and the test cannot pass by accident on a second instance.
@@ -75,6 +76,7 @@ def _repository(root: Path, second: str) -> Path:
     for name, config in (("a_first", _OK), ("b_second", second), ("c_third", _OK)):
         (root / name / "1").mkdir(parents=True)
         (root / name / "config.yaml").write_text(config.lstrip())
+    materialise(root)
     return root
 
 
@@ -100,6 +102,7 @@ def _one_model(root: Path, name: str, config: str) -> ServerSettings:
     """A repository holding exactly ``name``, and the settings that read it."""
     (root / name / "1").mkdir(parents=True)
     (root / name / "config.yaml").write_text(config.lstrip())
+    materialise(root)
     return _settings(root, strict=False)
 
 
@@ -190,6 +193,7 @@ class TestAFailedStrictStartReleasesWhatItTook:
         with pytest.raises(ShipInferError):
             server.start()
         (root / "b_second" / "config.yaml").write_text(_OK.lstrip())
+        materialise(root)  # the fixed config names a real runtime, so give it a real model
 
         with server:
             assert server.models() == ["a_first", "b_second", "c_third"]
@@ -280,9 +284,14 @@ class TestAModelWithZeroReadyInstancesIsRefused:
         the instance comes up late and serves — the case a ``not any(is_ready)`` gate
         destroys."""
         may_finish = threading.Event()
-        monkeypatch.setattr(
-            MockBackend, "_do_initialize", lambda self: may_finish.wait(timeout=30.0)
-        )
+        initialize = TorchScriptBackend._do_initialize
+
+        def held_until_released(backend: TorchScriptBackend) -> None:
+            """Slow, not broken: it waits, then really loads, so it can serve afterwards."""
+            may_finish.wait(timeout=30.0)
+            initialize(backend)
+
+        monkeypatch.setattr(TorchScriptBackend, "_do_initialize", held_until_released)
         model = _model_alone(tmp_path / "repo", "slow", _ONE_INSTANCE)
 
         try:
@@ -307,16 +316,16 @@ class TestAModelWithZeroReadyInstancesIsRefused:
         model would be refused and the server would serve nothing at all."""
         started = itertools.count()
         lock = threading.Lock()
-        initialize = MockBackend._do_initialize
+        initialize = TorchScriptBackend._do_initialize
 
-        def only_the_first_fails(backend: MockBackend) -> None:
+        def only_the_first_fails(backend: TorchScriptBackend) -> None:
             with lock:
                 first = next(started) == 0
             if first:
                 raise RuntimeError("no device for this instance")
             initialize(backend)
 
-        monkeypatch.setattr(MockBackend, "_do_initialize", only_the_first_fails)
+        monkeypatch.setattr(TorchScriptBackend, "_do_initialize", only_the_first_fails)
         settings = _one_model(tmp_path / "repo", "half_up", _OK)  # two instances
 
         with InferenceServer(settings) as server:
@@ -334,9 +343,9 @@ class TestAModelWithZeroReadyInstancesIsRefused:
         may_finish = threading.Event()
         started = itertools.count()
         lock = threading.Lock()
-        initialize = MockBackend._do_initialize
+        initialize = TorchScriptBackend._do_initialize
 
-        def one_dies_one_loads_slowly(backend: MockBackend) -> None:
+        def one_dies_one_loads_slowly(backend: TorchScriptBackend) -> None:
             with lock:
                 first = next(started) == 0
             if first:
@@ -344,7 +353,7 @@ class TestAModelWithZeroReadyInstancesIsRefused:
             may_finish.wait(timeout=30.0)
             initialize(backend)
 
-        monkeypatch.setattr(MockBackend, "_do_initialize", one_dies_one_loads_slowly)
+        monkeypatch.setattr(TorchScriptBackend, "_do_initialize", one_dies_one_loads_slowly)
         model = _model_alone(tmp_path / "repo", "mixed", _OK)  # two instances
 
         try:

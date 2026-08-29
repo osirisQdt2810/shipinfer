@@ -53,7 +53,7 @@ def _io(names: Sequence[str]) -> list[dict[str, Any]]:
 def _config(name: str, inputs: Sequence[str], outputs: Sequence[str]) -> ModelConfig:
     return ModelConfig(
         name=name,
-        platform="mock",
+        platform="pytorch",
         max_batch_size=4,
         inputs=_io(inputs),
         outputs=_io(outputs),

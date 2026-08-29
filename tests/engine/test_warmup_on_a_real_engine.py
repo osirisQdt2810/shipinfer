@@ -1,7 +1,7 @@
 """Declared warm-up samples, executed by a real TensorRT engine — the GPU half of the claim.
 
 `tests/backends/test_warmup_wiring.py` proves the wiring against a stub; `tests/engine/
-test_warmup_runs_on_the_server.py` proves the server runs samples against the mock backend.
+test_warmup_runs_on_the_server.py` proves the server runs samples against a real TorchScript fixture.
 Neither drives `warmup()` through a real backend with `model_warmup` set, so without this file the
 first execution of a declared sample against a real engine would happen in production. Review of
 #10 said exactly that, and it is the house rule anyway: a claim about the data plane is checked on

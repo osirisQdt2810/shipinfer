@@ -35,7 +35,7 @@ def _repo_with_versions(tmp_path: Path, versions: list[int], latest: int = 1) ->
     for version in versions:
         (model / str(version)).mkdir(parents=True)
     (model / "config.yaml").write_text(
-        "platform: mock\nmax_batch_size: 1\n"
+        "platform: pytorch\nmax_batch_size: 1\n"
         "inputs: [{name: x, data_type: FP32, dims: [1]}]\n"
         "outputs: [{name: y, data_type: FP32, dims: [1]}]\n"
         "dynamic_batching: {enabled: false}\n"
@@ -179,7 +179,7 @@ class TestMalformedRepository:
         root = tmp_path / "repo"
         (root / "actual" / "1").mkdir(parents=True)
         (root / "actual" / "config.yaml").write_text(
-            "name: claimed\nplatform: mock\nmax_batch_size: 1\n"
+            "name: claimed\nplatform: pytorch\nmax_batch_size: 1\n"
             "inputs: [{name: x, data_type: FP32, dims: [1]}]\n"
             "outputs: [{name: y, data_type: FP32, dims: [1]}]\n"
             "dynamic_batching: {enabled: false}\n"
@@ -198,7 +198,7 @@ class TestMalformedRepository:
         root = tmp_path / "repo"
         (root / "m").mkdir(parents=True)
         (root / "m" / "config.yaml").write_text(
-            "platform: mock\nmax_batch_size: 1\n"
+            "platform: pytorch\nmax_batch_size: 1\n"
             "inputs: [{name: x, data_type: FP32, dims: [1]}]\n"
             "outputs: [{name: y, data_type: FP32, dims: [1]}]\n"
             "dynamic_batching: {enabled: false}\n"

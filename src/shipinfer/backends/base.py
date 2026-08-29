@@ -2,9 +2,9 @@
 
 A backend is given a batch of already-assembled input tensors and returns a batch of
 output tensors. It does **not** decide what to batch, where to run, or when: that is the
-scheduler's job. Keeping the contract that narrow is what lets TensorRT, ONNX Runtime,
-torch and a deterministic mock be genuinely interchangeable, and it is why adding a
-runtime is a new file plus a registration rather than an edit to the server.
+scheduler's job. Keeping the contract that narrow is what lets TensorRT, ONNX Runtime
+and TorchScript be genuinely interchangeable, and it is why adding a runtime is a new file
+plus a registration rather than an edit to the server.
 
 The contract is deliberately synchronous. Asynchrony in this system lives one level up, in
 the instance's worker thread and its stream pool: a backend that returned futures would
@@ -97,6 +97,9 @@ class ModelBackend(abc.ABC):
     def __init__(self, context: BackendContext) -> None:
         self._context = context
         self._initialized = False
+        #: Warm-up executions this backend has run. The one counter every backend can honestly
+        #: report, and the observable a test asking "did warm-up actually run?" needs.
+        self._warmup_executions = 0
         if self.requires_gpu and not context.device.is_cuda:
             raise ValueError(
                 f"backend {self.platform!r} requires a CUDA device, got {context.device}"
@@ -220,6 +223,7 @@ class ModelBackend(abc.ABC):
             return
         for _ in range(iterations):
             self.execute(batch, batch_size=1)
+            self._warmup_executions += 1
         _LOG.debug("warmed up %s with %d iteration(s)", self._context.instance_name, iterations)
 
     def _run_warmup_samples(self, samples: Sequence[WarmupBatch]) -> None:
@@ -239,6 +243,7 @@ class ModelBackend(abc.ABC):
             for _ in range(sample.count):
                 try:
                     self.execute(sample.inputs, batch_size=sample.batch_size)
+                    self._warmup_executions += 1
                 except ShipInferError as exc:
                     _annotate(
                         exc,
@@ -271,7 +276,7 @@ class ModelBackend(abc.ABC):
 
     def stats(self) -> dict[str, Any]:
         """Backend-specific counters, merged into the instance's stats."""
-        return {}
+        return {"warmup_executions": self._warmup_executions}
 
     def __repr__(self) -> str:
         return f"<{type(self).__name__} {self._context.instance_name}>"

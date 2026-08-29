@@ -279,6 +279,12 @@ disallow_untyped_defs = false
 # hardware to verify. Running it on real GPUs without testing it first would only make a
 # wrong number more convincing.
 testpaths = ["tests", "benchmarks/tests"]
+# The repo root, so `from tests.support.models import ...` resolves under a bare `pytest`
+# and not only under `python -m pytest` (which puts the cwd there itself) -- without it the
+# offline tier, the promise on the next line, aborts during collection. And `src`, so the
+# tree under test is THIS checkout's: in a git worktree an editable install still points at
+# the primary checkout, so a plain `pytest` would silently test another commit's code.
+pythonpath = [".", "src"]
 # `-m "not gpu"`: a plain `pytest` must pass on a machine with zero NVIDIA devices, so the
 # scheduler's invariants stay verifiable anywhere. `pytest -m gpu` opts into real hardware.
 # `not gpu and not multigpu`, not just `not gpu`: `multigpu` is its own marker and some
@@ -305,4 +311,6 @@ filterwarnings = [
 [tool.coverage.run]
 branch = true
 source = ["src/shipinfer"]
-omit = ["*/backends/tensorrt.py", "*/backends/torch_backend.py", "*/backends/onnx.py"]
+# `torch_backend.py` is NOT omitted: it is the workhorse of the whole offline tier now
+# that the mock backend is gone, so its coverage is real coverage.
+omit = ["*/backends/tensorrt.py", "*/backends/onnx.py"]

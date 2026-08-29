@@ -377,8 +377,8 @@ class ModelConfig(_Strict):
     """The complete description of one servable model."""
 
     name: str
-    #: Which backend executes it: ``tensorrt``, ``torch``, ``onnx``, ``python``, ``mock``
-    #: or ``ensemble``. Resolved through :mod:`shipinfer.backends.registry`.
+    #: Which backend executes it: ``tensorrt``, ``pytorch``, ``onnxruntime`` or
+    #: ``ensemble``. Resolved through :mod:`shipinfer.backends.registry`.
     platform: str
     #: 0 disables server-side batching entirely (the model handles its own batch dim).
     max_batch_size: int = Field(default=0, ge=0)

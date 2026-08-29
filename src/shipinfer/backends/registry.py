@@ -15,8 +15,8 @@ __all__ = ["BACKENDS", "build_backend"]
 
 BACKENDS: Registry[ModelBackend] = Registry("backend", ModelBackend)
 
-# Lazy registrations. The eager ones (mock) register themselves via the decorator in their
-# own module, which `shipinfer.backends.__init__` imports.
+# Lazy registrations: every backend here costs an import of a heavy runtime, so none is
+# paid for until a config names it.
 BACKENDS.register_lazy(
     "tensorrt",
     "shipinfer.backends.tensorrt:TensorRTBackend",

@@ -18,9 +18,10 @@ from shipinfer.core.settings import ServerSettings
 from shipinfer.core.tracing import TRACE_EVENTS, NullTraceSink
 from shipinfer.core.types import Tensor
 from shipinfer.engine import InferenceServer
+from tests.support.models import materialise
 
 _ECHO = """
-platform: mock
+platform: pytorch
 max_batch_size: 4
 inputs: [{name: x, data_type: FP32, dims: [2]}]
 outputs: [{name: y, data_type: FP32, dims: [2]}]
@@ -37,6 +38,7 @@ class TestTheServerWritesTraces:
         root = tmp_path / "repo"
         (root / "echo" / "1").mkdir(parents=True)
         (root / "echo" / "config.yaml").write_text(_ECHO.lstrip())
+        materialise(root)
         return InferenceServer(
             ServerSettings(
                 model_repository=root,
@@ -130,6 +132,7 @@ class TestSamplingReachesTheEnsemblePath:
         root = tmp_path / "repo"
         (root / "echo" / "1").mkdir(parents=True)
         (root / "echo" / "config.yaml").write_text(_ECHO.lstrip())
+        materialise(root)
         (root / "pipe").mkdir()
         (root / "pipe" / "config.yaml").write_text(_PIPE.lstrip())
         return InferenceServer(

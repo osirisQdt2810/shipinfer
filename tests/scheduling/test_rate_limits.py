@@ -172,7 +172,7 @@ class TestConfigSection:
     def _config(self, **rate_limiter) -> ModelConfig:
         return ModelConfig(
             name="m",
-            platform="mock",
+            platform="pytorch",
             max_batch_size=4,
             inputs=[{"name": "x", "data_type": "FP32", "dims": [2]}],
             outputs=[{"name": "y", "data_type": "FP32", "dims": [2]}],
@@ -182,7 +182,7 @@ class TestConfigSection:
     def test_it_is_off_by_default(self) -> None:
         config = ModelConfig(
             name="m",
-            platform="mock",
+            platform="pytorch",
             max_batch_size=4,
             inputs=[{"name": "x", "data_type": "FP32", "dims": [2]}],
             outputs=[{"name": "y", "data_type": "FP32", "dims": [2]}],

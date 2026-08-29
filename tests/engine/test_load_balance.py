@@ -13,13 +13,14 @@ from shipinfer.core.request import InferenceRequest, RequestContext
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Tensor
 from shipinfer.engine import InferenceServer
+from tests.support.models import materialise
 
 
 def _repo(tmp_path: Path, instances: int, latency_ms: float = 2.0) -> Path:
     root = tmp_path / "repo"
     (root / "m" / "1").mkdir(parents=True)
     (root / "m" / "config.yaml").write_text(f"""
-platform: mock
+platform: pytorch
 max_batch_size: 4
 inputs: [{{name: x, data_type: FP32, dims: [2]}}]
 outputs: [{{name: y, data_type: FP32, dims: [2]}}]
@@ -30,6 +31,7 @@ dynamic_batching:
 parameters:
   latency_ms: {latency_ms}
 """.lstrip())
+    materialise(root)
     return root
 
 

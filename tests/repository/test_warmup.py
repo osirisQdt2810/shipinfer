@@ -13,7 +13,7 @@ its first p99 is representative.
 
 This file covers the *machinery* — turning declared samples into batches, and refusing the
 ones that cannot work. Whether the server actually runs them is a claim about the server, and
-it is asserted in ``tests/server/test_warmup_wiring.py`` against the mock backend's own
+it is asserted in ``tests/engine/test_warmup_runs_on_the_server.py`` against the backend's own
 execution counter.
 """
 
@@ -31,7 +31,7 @@ from shipinfer.repository import ModelConfig, build_warmup_batches
 def _config(**overrides) -> ModelConfig:
     base = {
         "name": "m",
-        "platform": "mock",
+        "platform": "pytorch",
         "max_batch_size": 4,
         "inputs": [{"name": "x", "data_type": "FP32", "dims": [2, 3]}],
         "outputs": [{"name": "y", "data_type": "FP32", "dims": [2]}],

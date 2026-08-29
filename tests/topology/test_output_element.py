@@ -33,6 +33,7 @@ from shipinfer.topology.elements.detections import Detections
 from shipinfer.topology.elements.output import JsonLinesOutput, NullOutput, SinkOutput
 from shipinfer.topology.registry import create_element, registry_for
 from shipinfer.topology.sinks import NullResultSink
+from tests.support.subprocess_env import checkout_env
 
 pytestmark = [pytest.mark.timeout(60)]
 
@@ -187,7 +188,9 @@ class TestTheDeclaredContract:
             "assert cls.sink_name == 'kafka'; "
             "assert target in sys.modules, 'resolving the entry must import it'"
         )
-        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, env=checkout_env()
+        )
 
         assert result.returncode == 0, result.stdout + result.stderr
 
