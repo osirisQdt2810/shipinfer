@@ -2,9 +2,9 @@
 
 A backend is given a batch of already-assembled input tensors and returns a batch of
 output tensors. It does **not** decide what to batch, where to run, or when: that is the
-scheduler's job. Keeping the contract that narrow is what lets TensorRT, ONNX Runtime,
-torch and a deterministic mock be genuinely interchangeable, and it is why adding a
-runtime is a new file plus a registration rather than an edit to the server.
+scheduler's job. Keeping the contract that narrow is what lets TensorRT, ONNX Runtime
+and TorchScript be genuinely interchangeable, and it is why adding a runtime is a new file
+plus a registration rather than an edit to the server.
 
 The contract is deliberately synchronous. Asynchrony in this system lives one level up, in
 the instance's worker thread and its stream pool: a backend that returned futures would
