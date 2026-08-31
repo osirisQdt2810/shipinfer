@@ -9,6 +9,7 @@ to diagnose and a two-line test to prevent.
 from __future__ import annotations
 
 import ast
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
@@ -681,3 +682,28 @@ class TestTheLayerCheckerCoversSharedModules:
         other.write_text("import torch\n")
 
         assert checker.check(other) == []
+
+
+class TestTheTestTreeIsThisCheckouts:
+    """`tests` must resolve here, not to a same-named package on the interpreter's path.
+
+    `deploy/rootless/test.sh` puts `3rdparty/shipvision` on PYTHONPATH and shipvision ships
+    its own top-level `tests` package, which is enough to shadow this one. That took out the
+    whole offline tier inside the container -- not one test, the session -- so the invariant
+    is asserted rather than left to `tests/__init__.py` being noticed and kept.
+    """
+
+    def test_the_tests_package_resolves_inside_this_repository(self) -> None:
+        spec = importlib.util.find_spec("tests")
+
+        assert spec is not None and spec.origin is not None, "`tests` is not importable"
+        repo = Path(__file__).resolve().parents[1]
+        assert Path(spec.origin).resolve().is_relative_to(repo), (
+            f"`tests` resolved to {spec.origin}, outside {repo}: a same-named package is "
+            f"shadowing this checkout's test tree"
+        )
+
+    def test_tests_support_is_reachable_by_its_package_path(self) -> None:
+        """The import `tests/conftest.py` makes at configure time, which is where the
+        shadow surfaced: a session that dies there reports no failures at all."""
+        assert importlib.util.find_spec("tests.support.models") is not None
