@@ -914,6 +914,23 @@ mỗi brief và mỗi PR body dẫn section nó thực hiện.
 
 > input đơn giản dùng video, thay vì dùng camera url vì ta không hề có camera url hiện tại
 
+### V149 · 31 Aug 2026, ~15:0x UTC — main không đọc được: không map được vào architecture.md, quá nhiều docs, quá nhiều hàm thừa
+
+> thực sự nnhìn vào remote main hiện tại, tôi không biết đọc code thế nào để nó match được docs/qa/architecture.md mà chúng ta đã đặt ra như ban đầu. Bạn code quá khó hiểu, quá nhiều docs, quá nhiều hàm thừa mà tôi cảm giác nó không cần thiết. Nhìn code, tôi chẳng thể biết nên đọc từ tầng trên -> tầng dưới tở đâu trong code đó
+
+**Resolution (asked and answered, 31 Aug):** all three, **sequentially, one package per PR** —
+split the oversized file, cut the prose inside the files touched, delete the superfluous
+helpers there. Start with `runners/` (worst on both metrics). Slower, but every PR is
+reviewable and main stays green.
+
+Measured baseline at the time of the complaint (commit b450acc):
+`src/shipinfer` = 275 files, 52 202 lines, of which **20 572 are prose** (39%; 0.86 prose lines
+per code line). `runners/` 1.77, `topology/` 1.40, `api/` 1.38. `docs/` is only 2 768 lines, so
+the bloat is INSIDE the source. Nine files over 850 lines, worst `runners/inprocess.py` at
+2 121 with eight responsibilities in one class and the per-frame loop (`_walk`) at line 1487.
+94 single-use private helpers under 12 lines. NOTE: the doc the operator named as
+`docs/qa/architecture.md` is actually `docs/arch.md`.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken

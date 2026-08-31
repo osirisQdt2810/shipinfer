@@ -2446,6 +2446,29 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
 - [ ] **Z1 · Re-read `docs/qa/user.md` end to end** and check every request — verbatim sections
       included, not just the standing-rules index — against the repository. Result into
 
+- [~] **V149 · READABILITY: main cannot be read top-down against docs/arch.md. THE PRIORITY NOW; PR queue paused.**
+      Operator, 31 Aug: cannot map remote main onto the architecture doc; too many docs, too many
+      superfluous functions, no idea where to start reading top layer -> bottom layer. MEASURED, and the
+      complaint is correct on every count (baseline b450acc):
+        * src/shipinfer = 275 files / 52202 lines, **20572 of them prose (39%)** = 0.86 prose lines per
+          code line. runners/ 1.77, topology/ 1.40, api/ 1.38. docs/ is only 2768 lines across 7 files,
+          so the bloat is INSIDE the source -- trimming docs/ would fix nothing.
+        * No top-down entry: cli/commands/run.py is 694 lines (should be a thin composition root);
+          runners/inprocess.py is 2121 lines with EIGHT responsibilities in one class (queue build, camera
+          admission, priority learning, band bookkeeping, fps probing, ingest, stop-unwind, frame walk) and
+          the per-frame loop is `_walk` at line 1487. Nine files over 850 lines.
+        * 94 single-use private helpers <=12 lines.
+        * The doc the operator named, docs/qa/architecture.md, does not exist -- it is docs/arch.md.
+      V145 wave 1 is evidence that shortening docstrings is NOT the fix: 349 lines deleted moved the
+      violation count only 1031 -> 1012. The fix is fewer, smaller files with less prose in them.
+      **DECIDED (asked, 31 Aug): all three, SEQUENTIALLY, one package per PR** -- split the oversized file,
+      cut prose in the files touched, delete the superfluous helpers there. Order: runners/ first.
+- [ ] **V149-runners · split runners/inprocess.py (2121) + fleet.py (1060) + service.py (859), cut prose
+      (1.77 -> ~0.3), inline the one-use helpers there.** First PR of V149.
+- [ ] **V149-topology · same for topology/ (1.40; elements/pool.py 1697, chain.py 1077, recognize.py 1031,
+      track.py 945, barrier.py 900, base.py 852, mtmc.py 847).**
+- [ ] **V149-engine · same for engine/ (pool.py 1421, ensemble.py 828, spill/remote_instance.py 747).**
+- [ ] **V149-cli · cli/commands/run.py 694 -> a thin composition root.**
 - [!] **V124a · OPERATOR DECISION OWED (phase 2) before phase 3 can build — the crop-sampling convention.**
       Question for the operator: crops at box edges — adopt shipvision's frame-clamp convention (recommended: its
       oracle, parity suite AND native kernels all implement it) or keep shipinfer #30's patch-clamp (exists only in
