@@ -2163,7 +2163,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       data; ADR-014 puts data-driven config in Python — which argues for the resolved-list answer, but it is a design
       call for the operator.**
 
-- [~] **HOOK-FP · OPEN as PR #104** (2 commits, 2 files, +89/-1, rebased onto 9d315da). 82 hook tests; full
+- [x] **HOOK-FP · MERGED as PR #104 (31 Aug 13:54), VERDICT: APPROVE.** (was OPEN as PR #104) (2 commits, 2 files, +89/-1, rebased onto 9d315da). 82 hook tests; full
       tier 3232 passed; pre-commit all Passed; clean. BOTH revert-checks reproduced on this tip: formatter
       carve-out deleted -> 4 failed/78 passed; parity carve-out deleted -> 2 failed/80 passed; restored -> 82.
       ADVERSARIAL TABLE against the real `verdict()` (the risk of a carve-out is allowing too much, and the
@@ -2277,7 +2277,21 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       then BOTH become unreachable before the parent's first AddCamera (UNAVAILABLE/Connection refused, same second, no
       child traceback). Identical with --gpus 0,1 and with the repo env pinned; the same chain under inprocess yields
       72 events/221 detections. Production-path defect in launch/ or cli/shard.py teardown ordering.
-- [~] **FLEET-REPO-FLAG · RE-VERIFIED by me 29 Aug on the pushed 9468653 (fa's cited sha 016e1c4 is stale — the branch tip is 9468653; 2 files, +50). Reviewed the diff: `_child_environment()` rides `Fleet`'s existing `env` field (supervisor.py:151), so no new seam. Tests: tests/runners/test_fleet.py + tests/launch = 192 passed. Revert-check on the SHIPPED wiring: deleting `env=self._child_environment()` from the Fleet construction fails `TestTheShardIsToldWhereTheModelsAre::test_the_fleet_that_spawns_the_children_actually_carries_it` (1 failed / 79 passed; restored → 80) — so the vacuity fa caught in its own first draft really is gone. READY. (Original: fa, fix/fleet-repository-flag, PROPAGATE, not refuse — a shard is SENT its chain, so the parent's resolved repository rides `SHIPINFER_MODEL_REPOSITORY` in Fleet's existing env mapping (settings-configured repos propagate too, same reason). fa's own red-check caught a vacuous first test (asserting the helper's return while the helper was wired to nothing — 79 green with the wiring deleted; now asserts the runner's live fleet env and goes red). READY for a tail slot. Original:
+- [~] **FLEET-REPO-FLAG · OPEN as PR #105** (1 commit, 2 files, +50; rebased onto post-#104 main).
+      `FleetRunner._child_environment()` -> `{SHIPINFER_MODEL_REPOSITORY: settings.model_repository}`, passed
+      as `env=` to the Fleet construction, riding Fleet's EXISTING env field so there is no new seam.
+      VERIFIED END TO END, not from the variable's name: a real ServerSettings load with
+      SHIPINFER_MODEL_REPOSITORY=/tmp/probe-repo resolves model_repository=/tmp/probe-repo, with PYTHONPATH
+      pinned to the worktree's src and the resolved module path PRINTED -- an editable install would have
+      resolved the primary checkout and tested another commit. env_prefix="SHIPINFER_" at
+      core/settings/server.py:57, model_repository at :64.
+      REVERT-CHECK on the SHIPPED WIRING (not the helper): deleting `env=self._child_environment()` fails
+      exactly TestTheShardIsToldWhereTheModelsAre::test_the_fleet_that_spawns_the_children_actually_carries_it
+      (1 failed/191 passed); restored -> 192. The other two tests stay GREEN with the wiring gone, which is
+      why the third exists -- this bug's original shape was a helper nobody called.
+      Full tier 3235 passed; pre-commit all Passed incl. layer boundaries; clean. Body states what is NOT
+      covered (no child is really spawned; the two halves meet at Fleet.env, which tests/launch owns).
+      Original re-verification 29 Aug:  on the pushed 9468653 (fa's cited sha 016e1c4 is stale — the branch tip is 9468653; 2 files, +50). Reviewed the diff: `_child_environment()` rides `Fleet`'s existing `env` field (supervisor.py:151), so no new seam. Tests: tests/runners/test_fleet.py + tests/launch = 192 passed. Revert-check on the SHIPPED wiring: deleting `env=self._child_environment()` from the Fleet construction fails `TestTheShardIsToldWhereTheModelsAre::test_the_fleet_that_spawns_the_children_actually_carries_it` (1 failed / 79 passed; restored → 80) — so the vacuity fa caught in its own first draft really is gone. READY. (Original: fa, fix/fleet-repository-flag, PROPAGATE, not refuse — a shard is SENT its chain, so the parent's resolved repository rides `SHIPINFER_MODEL_REPOSITORY` in Fleet's existing env mapping (settings-configured repos propagate too, same reason). fa's own red-check caught a vacuous first test (asserting the helper's return while the helper was wired to nothing — 79 green with the wiring deleted; now asserts the runner's live fleet env and goes red). READY for a tail slot. Original:
       supervisor.py:211 passes only CUDA_VISIBLE_DEVICES to children; cli/shard.py takes only --shard-id/--control-port,
       so the shard resolves its own settings. Maybe by design (arch.md §2: the shard owns its deployment settings) —
       then the flag must REFUSE or WARN under fleet instead of quietly applying to nothing. Fix location pending the
