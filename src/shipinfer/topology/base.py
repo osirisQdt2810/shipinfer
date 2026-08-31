@@ -373,8 +373,8 @@ class ElementContext:
 
     Frozen: this is what the runner *decided*, and an element that could edit it would be
     choosing its own placement. Every field is optional so that a chain can be loaded,
-    validated and walked with mock elements before any of the three exist — which is what
-    the offline tier does.
+    validated and walked before any of the three exist — which is what the offline tier
+    does.
 
     Args:
         shard_id: which shard process this element belongs to (arch.md §2). Stateful
@@ -489,8 +489,8 @@ class Element(abc.ABC):
     #: question, and the only one it asks. Read off the built element by
     #: :meth:`~shipinfer.topology.chain.Topology.from_spec`, never inferred from :attr:`kind`:
     #: ``detect`` is a model *kind* and only some of its implementations run a repository
-    #: model, ``recognize: {impl: shipvision}`` is a gallery query with nothing to name, and
-    #: ``impl: mock`` invents a box and reads nothing.
+    #: model, while ``recognize: {impl: shipvision}`` is a gallery query with nothing to
+    #: name.
     #:
     #: Deliberately **not** the same declaration as :attr:`needs_model`, which asks whether
     #: ``open()`` will reach into this process's model pool. The two agree for every
@@ -513,8 +513,8 @@ class Element(abc.ABC):
     #:
     #: * the process that builds a runner, to decide whether to build an ``InferenceServer``
     #:   at all (``cli/commands/run.py``) -- asking the *kind* there would load engines for a
-    #:   chain of mocks, and asking :attr:`requires_model_name` would load them for a
-    #:   deepstream chain whose models run inside GStreamer;
+    #:   chain that resolves nothing, and asking :attr:`requires_model_name` would load them
+    #:   for a deepstream chain whose models run inside GStreamer;
     #: * the walk, to re-check a frame's deadline in front of the elements that can *wait*
     #:   (``runners/inprocess.py``) -- an element that submits to the pool and sleeps on the
     #:   answer is exactly the one a frame nobody can act on must not be given another GPU
@@ -526,8 +526,8 @@ class Element(abc.ABC):
     #: the same reason: the process that builds a runner has to know, *before* it builds one,
     #: whether to resolve an image-ops implementation out of ``shipinfer.runtime.ops``. That
     #: resolution is not free and it is not portable -- ``get_image_ops`` may construct a
-    #: torch context bound to this shard's device -- so a chain of mocks must not pay for it,
-    #: which is exactly the mistake ``node.kind in MODEL_KINDS`` was for the model pool.
+    #: torch context bound to this shard's device -- so a chain that reads no pixels must not
+    #: pay for it, which is exactly the mistake ``node.kind in MODEL_KINDS`` was for the pool.
     #:
     #: Separate from :attr:`needs_model` rather than folded into it, because the two come
     #: apart in both directions: ``PoolSegment`` submits a crop somebody else prepared

@@ -1,25 +1,17 @@
 """Cameras on the in-process runner: added, read, dropped fairly, removed and released.
 
-The file that says arch.md §5① and §5② meet: an ingest actor per camera, publishing through
-:class:`~shipinfer.runners.frames.ChainFrameSink` into the runner's bounded per-camera lane,
-out through the chain and into a sink a test can read. It runs **offline** — no GPU, no
-GStreamer, no camera — because every element is a mock and the frame source is injected.
+Where arch.md §5① and §5② meet: an ingest actor per camera, publishing through
+:class:`~shipinfer.runners.frames.ChainFrameSink` into the runner's bounded per-camera lane and
+out through the chain. Offline — the frame source is injected and the two slots between the
+real ``replay`` head and the sink are probes declared here.
 
-Two doubles carry it, and both are local on purpose:
+Probes rather than ``pool`` elements because half the properties are "a worker was parked
+*inside* an element when the camera was removed" or "the lifecycle hook raised and the removal
+survived it", which a real detector cannot be asked to do.
 
-* :class:`ScriptedSource` is a four-line cousin of ``tests/ingest/conftest.py``'s. The
-  ``tests/`` directories are not packages, so there is nothing to import it from without
-  inventing a shared test package; ``tests/runners/test_inprocess.py`` says the same about
-  its copy of the mock chain. This one carries only what a runner test needs — a finite
-  script and a shared cursor — and deliberately not the reconnect-scripting the ingest tier's
-  version exists for.
-* :class:`RecordingQueue` is the configured fair queue with one extra list, which is how a
-  per-camera priority *band* becomes an assertion rather than an inference from ordering.
-
-One test needs a real decoder, and it is the one that proves the ``decode: {impl: replay}``
-name resolves to a real ingest source rather than to a fake this file supplies. It writes
-PNGs and is skipped where OpenCV is not installed; everything else is green everywhere, which
-is the ratio the offline tier is for.
+:class:`ScriptedSource` carries only what a runner test needs; :class:`RecordingQueue` is the
+fair queue plus one list, turning a per-camera priority *band* into an assertion rather than an
+inference from ordering. One test needs a real decoder and skips without OpenCV.
 """
 
 from __future__ import annotations
@@ -52,31 +44,38 @@ from shipinfer.launch.control import CameraSpec
 from shipinfer.runners.inprocess import _NO_INGEST, InprocessRunner
 from shipinfer.scheduling.queues import FairPriorityQueue
 from shipinfer.scheduling.work import WorkItem
-from shipinfer.topology import ChainItem, ChainSpec, ElementKind, Topology
+from shipinfer.topology import (
+    ChainItem,
+    ChainSpec,
+    Element,
+    ElementContext,
+    ElementKind,
+    Topology,
+)
 from shipinfer.topology.elements.decode import ReplayDecode
-from shipinfer.topology.elements.mock import MockDetect, MockOutput
 from shipinfer.topology.registry import registry_for
+from tests.support.subprocess_env import checkout_env
 
 #: A straight line whose head is a real decode element, so the runner resolves a real ingest
-#: source name from it. ``mock`` detect accepts ``bgr@cpu`` as its second choice, which is
-#: what the host-memory head cap negotiates down to.
+#: source name from it. The probe detector accepts ``bgr@cpu``, which is what the host-memory
+#: head cap negotiates to.
 CHAIN = """
 name: replayed
 elements:
   decode: {impl: __DECODE__}
-  detect: {impl: __DETECT__, model: ship_detector}
+  detect: {impl: __DETECT__}
   output: {impl: __OUTPUT__}
 """
 
-#: Two decode roots that cannot agree on what enters the chain: one host-memory, one the
-#: mock's device handle. Every root sees the same submitted frame, so the runner refuses.
+#: Two decode roots that cannot agree on what enters the chain: one host-memory, one leaving
+#: the frame in VRAM. Every root sees the same submitted frame, so the runner refuses.
 TWO_HEADS = """
 name: two_heads
 elements:
   decode_a: {impl: replay}
-  decode_b: {impl: mock, after: []}
-  detect:   {impl: mock, model: ship_detector, after: [decode_a, decode_b]}
-  output:   {impl: mock}
+  decode_b: {impl: camera-device-decode, after: []}
+  detect:   {impl: camera-two-head-detect, after: [decode_a, decode_b]}
+  output:   {impl: camera-sink}
 """
 
 #: A chain brought all the way up and down in a fresh interpreter -- run by
@@ -94,8 +93,7 @@ CHAIN = (
     "name: no_cameras\n"
     "elements:\n"
     "  decode: {impl: replay}\n"
-    "  detect: {impl: mock, model: ship_detector}\n"
-    "  output: {impl: mock}\n"
+    "  output: {impl: none}\n"
 )
 
 runner = InprocessRunner(
@@ -183,8 +181,82 @@ def scripted(
     return factory
 
 
+@registry_for(ElementKind.DETECT).register("camera-detect")
+class ProbeDetect(Element):
+    """The middle of the chain: a host-memory element that hands the frame straight on.
+
+    Declared here because the properties below need an element a test can park a worker
+    inside or make raise from a lifecycle hook, and a `pool` detector can be asked to do
+    neither. It carries the shipped detector's caps so the head cap negotiates the same way.
+    """
+
+    kind: ClassVar[ElementKind] = ElementKind.DETECT
+    accepts: ClassVar[tuple[str, ...]] = ("nv12@gpu", "tensor@gpu", "bgr@cpu")
+    produces: ClassVar[tuple[str, ...]] = ("*@*",)
+
+    def _do_open(self, context: ElementContext) -> None:
+        return None
+
+    def _do_process(self, item: ChainItem) -> ChainItem | None:
+        return item.derive()
+
+
+@registry_for(ElementKind.DETECT).register("camera-two-head-detect")
+class TwoHeadDetect(ProbeDetect):
+    """The same probe with a **concrete** ``produces``, so a two-headed chain still loads.
+
+    A wildcard is resolved from what arrives, and two roots handing this element two planes
+    is a load-time refusal on its own (``tests/topology/test_chain.py``). That is not what
+    :class:`TestTheChainDecidesTheHead` is about: the chain there is legal and the *runner*
+    is what has to refuse it, because every root sees the same submitted frame and only one
+    of them can be right about what it is.
+    """
+
+    produces: ClassVar[tuple[str, ...]] = ("bgr@cpu",)
+
+
+@registry_for(ElementKind.OUTPUT).register("camera-sink")
+class RecordingSink(Element):
+    """A sink that keeps the *items* it was handed, not the events they became.
+
+    The shipped ``output`` elements assemble a
+    :class:`~shipinfer.core.events.PerceptionEvent` and drop the item, which is right for a
+    deployment and wrong for the questions here: half of them are about the frame that
+    arrived — its payload, its negotiated cap, its tag — and none of those survive into an
+    event. ``tests/topology/test_output_element.py`` is where the real sinks are tested.
+    """
+
+    kind: ClassVar[ElementKind] = ElementKind.OUTPUT
+    accepts: ClassVar[tuple[str, ...]] = ("*@*",)
+
+    def __init__(self, name: str, params: Any = None, *, model: str | None = None) -> None:
+        super().__init__(name, params, model=model)
+        self.emitted: list[ChainItem] = []
+
+    def _do_open(self, context: ElementContext) -> None:
+        return None
+
+    def _do_process(self, item: ChainItem) -> ChainItem | None:
+        self.emitted.append(item)
+        return None
+
+
+@registry_for(ElementKind.DECODE).register("camera-device-decode")
+class DeviceDecode(Element):
+    """A decode root that leaves the frame in VRAM. Phase D's ``gstreamer-gpu``, in advance."""
+
+    kind: ClassVar[ElementKind] = ElementKind.DECODE
+    produces: ClassVar[tuple[str, ...]] = ("nv12@gpu",)
+
+    def _do_open(self, context: ElementContext) -> None:
+        return None
+
+    def _do_process(self, item: ChainItem) -> ChainItem | None:
+        return item.derive(caps=self.output_caps[0])
+
+
 @registry_for(ElementKind.DETECT).register("camera-gate")
-class GateDetect(MockDetect):
+class GateDetect(ProbeDetect):
     """A detector that parks the only worker until the test releases it.
 
     Makes backpressure deterministic: with the worker held here and a lane of one, "the next
@@ -203,7 +275,7 @@ class GateDetect(MockDetect):
 
 
 @registry_for(ElementKind.OUTPUT).register("camera-gate-close")
-class GateCloseOutput(MockOutput):
+class GateCloseOutput(RecordingSink):
     """A sink whose ``close()`` parks the shutdown until the test lets it finish.
 
     Turns "a stop is in progress" into a fact a second thread can act on. Elements are closed
@@ -224,7 +296,7 @@ class GateCloseOutput(MockOutput):
 
 
 @registry_for(ElementKind.OUTPUT).register("camera-recording")
-class RecordingOutput(MockOutput):
+class RecordingOutput(RecordingSink):
     """A sink that writes down every per-camera announcement it is given, in order.
 
     ``probe`` is what turns the documented *order* into an assertion. The hooks are called at
@@ -254,7 +326,7 @@ class RecordingOutput(MockOutput):
 
 
 @registry_for(ElementKind.DETECT).register("camera-hostile")
-class HostileDetect(MockDetect):
+class HostileDetect(ProbeDetect):
     """An element whose lifecycle hooks always raise. The one a removal must survive.
 
     Sits in the *middle* of the chain on purpose: the elements after it are what prove the
@@ -270,7 +342,7 @@ class HostileDetect(MockDetect):
 
 
 @registry_for(ElementKind.DETECT).register("camera-blocking")
-class BlockingDetect(MockDetect):
+class BlockingDetect(ProbeDetect):
     """An element a worker can be *parked inside* while its lifecycle hooks are called.
 
     The double that turns :meth:`~shipinfer.topology.base.Element.camera_removed`'s threading
@@ -320,7 +392,7 @@ class TwoCapDecode(ReplayDecode):
 
 
 @registry_for(ElementKind.DETECT).register("camera-gray-only")
-class GrayOnlyDetect(MockDetect):
+class GrayOnlyDetect(ProbeDetect):
     """A detector that takes only the *second* thing :class:`TwoCapDecode` offers."""
 
     accepts: ClassVar[tuple[str, ...]] = ("gray@cpu",)
@@ -404,7 +476,9 @@ class RecordingSources:
 # -- helpers -------------------------------------------------------------------------------
 
 
-def load(*, decode: str = "replay", detect: str = "mock", output: str = "mock") -> Topology:
+def load(
+    *, decode: str = "replay", detect: str = "camera-detect", output: str = "camera-sink"
+) -> Topology:
     text = (
         textwrap.dedent(CHAIN)
         .replace("__DECODE__", decode)
@@ -430,9 +504,9 @@ def settings(**kwargs: Any) -> ServerSettings:
     return ServerSettings(pipeline=pipeline, ingest=ingest, **kwargs)
 
 
-def sink(chain: Topology) -> MockOutput:
+def sink(chain: Topology) -> RecordingSink:
     element = chain.node("output").element
-    assert isinstance(element, MockOutput)
+    assert isinstance(element, RecordingSink)
     return element
 
 
@@ -513,7 +587,7 @@ class TestAFrameTravelsFromACameraToTheSink:
     def test_the_head_cap_on_the_item_is_the_one_the_loader_negotiated(
         self, runner_over
     ) -> None:
-        """``bgr@cpu`` because that is what the *edge* carries, not what a mock stamps."""
+        """``bgr@cpu`` because that is what the *edge* carries, not what an element stamps."""
         chain = load()
         runner = runner_over(chain, settings=settings(), source_factory=scripted(frames=1))
         recorded: list[str] = []
@@ -1674,8 +1748,8 @@ class TestStopReleasesTheCameras:
         """A start must not pay for the ingest plane, and must not open what it was not given.
 
         Two facts in one program, because they are one line of code. ``_do_start`` used to
-        call ``self._ingest().start()``, so every start -- including a chain of mocks a laptop
-        runs with no driver -- imported ``shipinfer.ingest`` and, through its source registry,
+        call ``self._ingest().start()``, so every start -- including a chain a laptop runs
+        with no driver -- imported ``shipinfer.ingest`` and, through its source registry,
         ``shipinfer.runtime``; and every start of a process whose settings named cameras
         opened all of them, which on a shard is the operator's entire fleet arriving through
         an inherited environment variable. The manager is now built by ``add_camera`` and by
@@ -1686,7 +1760,9 @@ class TestStopReleasesTheCameras:
         for its own doubles.
         """
         program = NO_CAMERA_START.replace("__INGEST__", ingest)
-        result = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, "-c", program], capture_output=True, text=True, env=checkout_env()
+        )
 
         assert result.returncode == 0, result.stdout + result.stderr
 
@@ -1754,8 +1830,8 @@ class TestTheChainDecidesTheHead:
         text = (
             textwrap.dedent(CHAIN)
             .replace("{impl: __DECODE__}", "{impl: replay, params: {source: pyav}}")
-            .replace("__DETECT__", "mock")
-            .replace("__OUTPUT__", "mock")
+            .replace("__DETECT__", "camera-detect")
+            .replace("__OUTPUT__", "camera-sink")
         )
         chain = Topology.from_spec(ChainSpec.from_yaml(text))
         runner = InprocessRunner(chain, settings=settings())

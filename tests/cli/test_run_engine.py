@@ -3,19 +3,20 @@
 The defect this file pins: ``run`` built a runner with no ``models=``, so
 :class:`~shipinfer.topology.base.ElementContext` carried ``models=None`` and the first
 ``pool`` element refused at ``open()`` — ``--runner inprocess`` could not execute any real
-topology, only a chain of mocks. The fleet path had always been right: a shard builds an
+topology, only a chain of stand-ins. The fleet path had always been right: a shard builds an
 :class:`~shipinfer.engine.InferenceServer`, starts it, and passes it in (``cli/shard.py``).
 
 What is asserted here is the *order*, because that is where the remaining mistakes live: the
 pool has to be up before the chain opens against it, and it has to outlive the workers that
-are still submitting to it. So the double records rather than mocks, and the tests compare a
+are still submitting to it. So the double records rather than asserts on calls, and the tests compare a
 whole sequence instead of counting calls.
 
 Two dependencies are gated the same way and asserted the same way: the model pool
 (``models=``) and, since C3, image pre-processing (``ops=``). A ``pool`` detector letterboxes
 its frame and cannot resolve an implementation itself — ``topology`` may not import
 ``runtime`` — so this command resolves one, and only for a chain that declares
-:attr:`~shipinfer.topology.base.Element.needs_image_ops`. A chain of mocks must build neither.
+:attr:`~shipinfer.topology.base.Element.needs_image_ops`. A chain that declares neither must
+build neither.
 
 Everything is offline. The engine is a recording double in every test but the last, which
 starts a real ``InferenceServer`` over real TorchScript fixtures and a detector-shaped repository — the
@@ -466,7 +467,7 @@ class TestWhoNeedsImageOps:
     """The same shape one dependency over, and the same two declarations.
 
     ``get_image_ops`` is not free: under a non-``AUTO`` provider it constructs a torch
-    implementation bound to a device. So a chain of mocks must resolve none, and a fleet
+    implementation bound to a device. So a chain that needs no image ops must resolve none, and a fleet
     launcher must resolve none — its shards each resolve one bound to their own GPU, and one
     resolved here would be bound to a device this process does not own.
     """

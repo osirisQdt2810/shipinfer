@@ -22,6 +22,7 @@ import pytest
 
 from shipinfer.core.errors import ConfigurationError
 from shipinfer.topology import bridge
+from tests.support.subprocess_env import checkout_env
 
 #: Every loader, with the dotted name it must name in its refusal.
 LOADERS = [
@@ -176,5 +177,7 @@ class TestNothingIsImportedUntilItIsAsked:
             "or m.startswith('shipvision.')]; "
             "assert not eager, eager"
         )
-        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, env=checkout_env()
+        )
         assert result.returncode == 0, result.stdout + result.stderr

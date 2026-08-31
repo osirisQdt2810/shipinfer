@@ -14,7 +14,7 @@ on by a held thread or by a callback. A step that blocks on a :class:`threading.
 answers both without a timing assertion: if the scheduling is wrong the barrier is never
 reached by enough parties and the test fails outright instead of flaking.
 
-``tests/engine/test_ensemble.py`` keeps the end-to-end coverage over real mock-backed
+``tests/engine/test_ensemble.py`` keeps the end-to-end coverage over real TorchScript
 models, including the conditional-branch behaviour these tests must not regress.
 """
 

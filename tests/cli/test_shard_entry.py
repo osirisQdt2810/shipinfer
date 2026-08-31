@@ -33,6 +33,7 @@ from shipinfer.repository.model_config import (
 )
 from shipinfer.runtime.ops import NumpyImageOps
 from shipinfer.topology import ChainSpec
+from tests.support.subprocess_env import checkout_env
 
 
 class TestTheTwoFlags:
@@ -68,6 +69,7 @@ class TestTheTwoFlags:
             capture_output=True,
             text=True,
             timeout=120,
+            env=checkout_env(),
         )
 
         assert result.returncode == 0, result.stderr

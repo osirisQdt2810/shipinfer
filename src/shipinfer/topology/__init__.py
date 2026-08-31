@@ -19,7 +19,7 @@ Typical use::
     print(chain.describe())          # the resolved wiring, with negotiated caps
 
 ``shipinfer.topology.elements`` is imported here for its registration side effect: the
-registries must be populated before a chain file naming ``impl: mock`` can be loaded. That
+registries must be populated before a chain file naming ``impl: pool`` can be loaded. That
 import is safe to make unconditionally, because every element module loads its runtime
 inside ``_do_open`` — see that package's docstring for the rule.
 """
@@ -58,11 +58,11 @@ from shipinfer.topology.chain import (
     load_topology,
 )
 
-# Imported for the side effect only: this is what puts `mock` and `pool` in the registries.
-# Not re-exported. An implementation is reached through its registry, by the name a chain file
-# uses -- `create_element(ElementKind.DETECT, "mock", ...)` -- never by importing the class,
+# Imported for the side effect only: this is what puts `pool` in the registries. Not
+# re-exported. An implementation is reached through its registry, by the name a chain file
+# uses -- `create_element(ElementKind.DETECT, "pool", ...)` -- never by importing the class,
 # which is what keeps the registry the seam rather than a lookup table beside one.
-from shipinfer.topology.elements import mock, pool
+from shipinfer.topology.elements import pool
 from shipinfer.topology.registry import (
     ELEMENTS,
     ElementRegistry,

@@ -150,7 +150,8 @@ def create_element(
     **The one place every element is built**, which is why the kind check is repeated here
     rather than left to :meth:`ElementRegistry.register`. A lazy registration has no class
     to check at registration time, so without this a
-    ``register_lazy("kafka", "...:MockTrack")`` on the output registry would hand the chain
+    ``register_lazy("kafka", "shipinfer.topology.elements.track:ShipvisionTrack")`` on the
+    output registry would hand the chain
     loader a tracker labelled as an output sink — and the loader's structure rules, which
     read ``node.kind``, would agree that the chain ends properly. Checking at creation
     covers eager and lazy registrations with one rule.

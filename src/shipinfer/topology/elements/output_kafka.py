@@ -50,6 +50,6 @@ class KafkaOutput(SinkOutput):
     """
 
     #: Not registered by a decorator: `elements/output.py` registers this name lazily, so the
-    #: `impl` string is set by `create_element` at build time. `MockLazyOutput` walks the same
-    #: path in the test suite for exactly this reason.
+    #: `impl` string is set by `create_element` at build time. `test_chain.py`'s lazy-registration
+    #: tests (`TestRegistries`) walk the same path for exactly this reason.
     sink_name: ClassVar[str] = "kafka"
