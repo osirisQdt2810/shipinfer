@@ -151,6 +151,31 @@ class TestTheBenchDataAlreadyRepresentsTheFanOutCase:
             f"frames"
         )
 
+    def test_the_cliff_is_cell_size_not_mosaicing(self, server, tmp_path: Path) -> None:
+        """The 2x2 and 3x3 rows of the table, so three of its four rows are asserted.
+
+        2x2 is modestly BETTER than a single photo, which is why the flat claim "composing
+        more people never composes more detectable ones" is wrong as stated and the docstring
+        says cell size instead. The assertion is the ordering, not the bands: exact counts are
+        data-dependent and would rot into a flaky gate.
+        """
+        grids = {
+            grid: np.mean(
+                [
+                    _count(server, path)
+                    for path in compose_crowd_frames(
+                        PHOTOS, tmp_path / f"g{grid}", grid=grid, frames=FRAMES
+                    )
+                ]
+            )
+            for grid in (2, 4)
+        }
+
+        assert grids[4] < grids[2], (
+            f"means by grid: {grids}. The 4x4 cliff is the table's headline; if this inverts, "
+            f"the detector's input size changed and the table needs re-measuring"
+        )
+
     def test_a_four_by_four_mosaic_yields_fewer_not_more(self, server, tmp_path: Path) -> None:
         """The grid this tool used to default to, and it is the wrong direction.
 

@@ -51,13 +51,12 @@ class TestComposition:
         written = compose_crowd_frames(sources, tmp_path / "out", grid=2, frames=2)
         assert written[0].read_bytes() != written[1].read_bytes()
 
-    def test_every_cell_is_filled_never_distorted(self, sources: Path, tmp_path: Path):
-        """A 2:3 source in a wide cell keeps its aspect: gray pads the sides, no stretch."""
-        (written,) = compose_crowd_frames(
-            sources, tmp_path / "out", grid=1, frames=1, size=(90, 30)
-        )
-        frame = Image.open(written)
-        # b.jpg is not first in the cycle for frame 0; use a single tall source instead.
+    def test_every_cell_is_filled_never_distorted(self, tmp_path: Path):
+        """A 2:3 source in a wide cell keeps its aspect: gray pads the sides, no stretch.
+
+        A single tall source, so the assertion does not depend on which photo the cycle put
+        in cell 0 for frame 0.
+        """
         src2 = tmp_path / "tall"
         src2.mkdir()
         Image.new("RGB", (30, 90), (0, 255, 0)).save(src2 / "only.jpg")
@@ -67,7 +66,7 @@ class TestComposition:
         center = img.getpixel((45, 15))
         assert center[1] > 200 and center[0] < 130  # the green source, centred
         assert left == (114, 114, 114)  # the pad, not a stretched source
-        assert frame.size == (90, 30)
+        assert img.size == (90, 30)  # the asked frame size, not the source's
 
 
 class TestRefusals:
@@ -127,6 +126,21 @@ class TestItRefusesToMixRuns:
         empty = tmp_path / "empty"
         empty.mkdir()
         assert compose_crowd_frames(sources, empty, grid=1, frames=1)
+
+
+class TestBadPathsRefuseLikeEverythingElseHere:
+    """A message naming the flag, not a bare OSError naming a path."""
+
+    def test_a_missing_source_directory_says_which_flag(self, tmp_path: Path):
+        with pytest.raises(ValueError, match="--src"):
+            compose_crowd_frames(tmp_path / "nope", tmp_path / "out", grid=1, frames=1)
+
+    def test_an_output_path_that_is_a_file_says_which_flag(self, sources: Path, tmp_path: Path):
+        out = tmp_path / "afile"
+        out.write_text("not a directory")
+
+        with pytest.raises(ValueError, match="--out"):
+            compose_crowd_frames(sources, out, grid=1, frames=1)
 
 
 class TestTheSizeFlagFailsAsAFlag:

@@ -1,17 +1,22 @@
 # doc: long the container-hook reasoning is why this is a library and not a `-m` entry point
 """Compose crowd frames: an N x N mosaic of the single-person bench JPEGs.
 
-**Measured before you reach for this** (`benchmarks/tests/test_crowd_yield.py`, real engine):
-a single stock ``person`` photo already yields **13-18** detections, which is the 10-20 the
-sizing assumes; a 2x2 mosaic gives 18-20; and a **4x4 gives 3-6**, because the detector's input
-is a fixed 640x640 and sixteen photos land in ~160px cells whose people fall under the model's
-minimum size. Composing more people into a frame does not compose more *detectable* ones. A mosaic of K = grid^2 real photos makes the detector emit ~K boxes per
-frame — generated from real data, deterministically, which is what the no-fake rule
-permits (generated is fine; random is not). Point the bench at the output with
-``--person-frames``; nothing in the harness config changes.
+**Measured before you reach for this** — the numbers live in ONE place,
+``benchmarks/tests/test_crowd_yield.py``, which asserts them against a real engine; this is a
+pointer to that table, not a second copy of it. In short: a single stock ``person`` photo
+already yields 9-19 PEOPLE per frame (mean 15.2), which is the 10-20 the sizing assumes, so
+this tool is **not** the way to raise detections per frame. A 4x4 mosaic yields 4-6, three
+times *worse*, because the detector's input is a fixed 640x640 and sixteen photos land in
+~160px cells whose people fall under the model's minimum size. A 2x2 (15-23) is modestly
+better than a single photo, so the cliff is a function of cell size rather than of mosaicing
+as such -- which is why the CLI defaults to 2 and why 4 is a footgun.
+
+What it is genuinely for: deterministic variation in per-frame load, generated from real data,
+which is what the no-fake rule permits (generated is fine; random is not). Point the bench at
+the output with ``--person-frames``; nothing in the harness config changes.
 
     python scripts/compose_crowd_frames.py --src benchmarks/baseline/data/person \\
-        --out .artifacts/person_crowd --grid 4 --frames 10
+        --out .artifacts/person_crowd --grid 2 --frames 10
 
 (The entry point is under ``scripts/`` because the container hook refuses ``python -m
 benchmarks.*``; this module is the library half and is imported, not run.)
@@ -32,7 +37,14 @@ _JPEG_QUALITY = 95
 
 
 def _sources(src_dir: Path) -> list[Path]:
-    """Every image in ``src_dir``, sorted by name so composition is reproducible."""
+    """Every image in ``src_dir``, sorted by name so composition is reproducible.
+
+    Refuses with a message like this module's other refusals, rather than letting
+    ``iterdir()`` raise a bare ``FileNotFoundError``/``NotADirectoryError`` that names the
+    path without saying which flag was wrong.
+    """
+    if not src_dir.is_dir():
+        raise ValueError(f"--src {src_dir} is not a directory")
     found = sorted(p for p in src_dir.iterdir() if p.suffix.lower() in _SUFFIXES)
     if not found:
         raise ValueError(f"no {'/'.join(_SUFFIXES)} images in {src_dir}")
@@ -72,7 +84,9 @@ def compose_crowd_frames(
     # A tool sold on determinism must not hand back a mixed set: `--frames 20` then
     # `--frames 5` used to leave 15 files from the earlier run, and a bench pointed at the
     # directory consumes all of them. Refusing beats deleting someone else's data.
-    if out_dir.exists() and any(out_dir.iterdir()):
+    if out_dir.exists() and not out_dir.is_dir():
+        raise ValueError(f"--out {out_dir} exists and is not a directory")
+    if out_dir.is_dir() and any(out_dir.iterdir()):
         raise ValueError(
             f"{out_dir} is not empty; composing into it would mix these frames with "
             f"whatever is already there. Choose a fresh directory or empty this one."
