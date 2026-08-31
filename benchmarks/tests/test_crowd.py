@@ -67,7 +67,7 @@ class TestRefusals:
     def test_an_empty_source_directory_is_refused(self, tmp_path: Path):
         empty = tmp_path / "empty"
         empty.mkdir()
-        with pytest.raises(ValueError, match="no .*images"):
+        with pytest.raises(ValueError, match=r"no .*images"):
             compose_crowd_frames(empty, tmp_path / "out")
 
     def test_a_nonpositive_grid_or_count_is_refused(self, sources: Path, tmp_path: Path):

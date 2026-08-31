@@ -10,7 +10,7 @@ which is how the container rule was lost the first time; the same reasoning move
 golden emitter to ``scripts/emit_parity_golden.py``.
 
     python scripts/compose_crowd_frames.py --src benchmarks/baseline/data/person \\
-        --out .artifacts/person_crowd --grid 4 --frames 10
+        --out .artifacts/person_crowd --grid 2 --frames 10
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from benchmarks.harness.crowd import main  # noqa: E402
+from benchmarks.harness.crowd import main
 
 if __name__ == "__main__":
     raise SystemExit(main())

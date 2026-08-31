@@ -11,7 +11,7 @@ source                 detections/frame     note
 single photo           13-18 (score>=0.35)  already the 10-20 the sizing assumes
 mosaic 2x2 (4 photos)  18-20                marginally better
 mosaic 3x3 (9)         12-17                no better than a single photo
-mosaic 4x4 (16)        3-6                  **3x worse** -- the CLI's default grid
+mosaic 4x4 (16)        3-6                  **3x worse** -- was the CLI default; now 2
 mosaic 4x4 at 4K       3-7                  not an output-resolution problem
 ===================== ==================== =========================================
 
@@ -113,7 +113,7 @@ class TestTheBenchDataAlreadyRepresentsTheFanOutCase:
         )
 
     def test_a_four_by_four_mosaic_yields_fewer_not_more(self, server, tmp_path: Path) -> None:
-        """The tool's own default grid, and it is the wrong direction.
+        """The grid this tool used to default to, and it is the wrong direction.
 
         Not a bug in the composer — it does exactly what it says — but the detector's input
         is a fixed 640x640, so sixteen photos land in ~160px cells and their people fall under

@@ -54,7 +54,7 @@ def compose_crowd_frames(
     src_dir: Path,
     out_dir: Path,
     *,
-    grid: int = 4,
+    grid: int = 2,
     frames: int = 10,
     size: tuple[int, int] = (1920, 1080),
 ) -> list[Path]:
