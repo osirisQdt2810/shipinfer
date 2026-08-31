@@ -1316,6 +1316,22 @@ that exposes the four attributes a policy reads.
       with the request so the fair queue stays per-camera across processes. (d) A closed ring drops
       its proxy from the candidate set. Gate: same skew bench as T2, B against C, on a quiet box.
 - [!] **T3b · THE PREMISE IS FALSE — MEASURED ON THE REAL ENGINE 29 Aug, and it inverts the item.**
+      **OPEN as PR #106 (31 Aug), and the operator decision is the blocker on this line:** keep the composer
+      or drop it? Its stated purpose is gone, but it is still the only deterministic source of per-frame load
+      VARIATION in the bench. (1) keep it with the docstring saying plainly it does not raise
+      detections/frame -- what #106 ships; or (2) drop it and close T3b on the measurement alone. The
+      measurement merges either way: it is what stops a future bench run citing mosaics as the fan-out
+      source. If (2), the composer + test_crowd.py come out in a follow-up and test_crowd_yield.py's
+      single-photo half stays.
+      #106 evidence: 3 commits, 4 files, +378; tier 3242 passed; crowd 7 passed; gpu yield **2 passed** in
+      the container on the final tip; 9 pre-commit hooks Passed, tree clean. A third commit aligns grid=2
+      across the library signature, the usage example and the yield table, which all still said 4 after the
+      CLI had moved to 2 -- three places teaching the grid the file's own measurement refutes.
+      TWO LINT FAILURES the branch had been carrying despite being logged as verified: RUF043
+      (`match="no .*images"` non-raw) and RUF100 (an unnecessary `# noqa: E402`, fixed by the hook itself);
+      both amended in, pre-commit re-run on the COMMITTED tree, git status clean.
+      Data note: benchmarks/baseline/data/person{,_4K} are gitignored and live only in the primary checkout,
+      so they were copied into the worktree for the gpu run; nothing entered the diff.
       T3b was opened on "the dataset yields ~1 person crop per frame, so C's fan-out case never appears".
       On yolo26n in the container, 4 frames each, `benchmarks/baseline/data/person`:
         single photo      13-18 detections/frame @score>=0.35  <- ALREADY the 10-20 the sizing assumes
