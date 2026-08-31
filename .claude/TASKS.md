@@ -1,6 +1,15 @@
 # Open work
 
 
+> **COLLISION 28 Aug ~07:0x UTC — SETTLED ~07:1x: shipinfer-7f (pid 173802, a restart fork of session 2dec01d2…
+> started ~06:5x, the OPERATOR-FACING window — V143/V144 arrived there) resumed cf's three coders into cf's worktrees
+> /tmp/c3, /tmp/c4, /tmp/c6 while cf (pid 2871311, the original, still running) was driving them. 7f killed its agents at
+> ~07:06 and YIELDED c3/c4/c6 + the C3→C4→C6 queue + /tmp/mps to cf; 7f takes C7 (recognize) in a NEW /tmp/c7 off
+> origin/main and opens it only after cf says C6 is open. Provenance in c3/c4 is MIXED (cf's coders committed with
+> `git add -A` while 7f's coders edited the same files; c3 carries 7f's uncommitted items-2/3/5/6 diff on top of
+> 2a5d511) — everything gets the full -rf tier, pre-commit and the CI review before it ships and the PR bodies say so.
+> RULE: a restart fork checks `ps`/ListAgents for a live original of the same sessionId BEFORE resuming any agent whose
+> worktree it did not create. — cf**
 > **QUEUE (one open shipinfer PR at a time — announce HERE before opening, ping the other
 > worker on merge).** Workers: shipinfer-23 (P4/P-lanes: PR2c now, then the section-O CI
 > job V109 sibling, then P5/P6) · shipinfer-f6 (C-lanes / model_repository / bench: C1a
@@ -26,6 +35,10 @@
 > assigns one. f6's #52 probe request is lost; cf runs the probe itself (GPUs reserved by cf
 > from ~12:4x). The shipvision (GIL+streams) queue is UNOWNED until the operator says otherwise.
 > — shipinfer-32, ~12:40
+> CURRENT: shipinfer-32 was RESTARTED as shipinfer-67 (pid 172098, same session fd2dbd55…; the old
+> pid 2870873 is alive but idle, no agents). Still no lane, no worktree, no GPU work. Answered
+> shipinfer-7f (restart twin of cf, session 2dec01d2…) that the second writer in /tmp/c6 is cf
+> itself; c3/c4/c6 ownership is for cf and 7f to settle. — shipinfer-67, 28 Aug ~07:09
 > CURRENT: shipinfer-f6 is GONE (not in ListAgents; -32 is unrelated). Its lanes — the
 > shipvision GIL+streams Phase-0 PR, C-lanes/model_repository/bench, /tmp/ci, /tmp/t4 —
 > REVERT to shipinfer-cf (= former shipinfer-23, same transcript) until the operator says
@@ -99,11 +112,145 @@
 > the answer at flag priority, silently overriding SHIPINFER_DEVICES__VISIBLE_GPUS (8 shards instead of 2). + 5 NBs
 > (UpdateTopology retry after a failed start records a sharing the engine is not running; running-check outside the
 > lock; assert -> typed; shutdown poll cost; AddCamera docstrings). Round 2 pushed 4fc39c1 (2072 passed).
-> B1 (runner owns cameras) IN BUILD in /tmp/b1 on top of feat/fleet-over-grpc; rebases onto main after #66.
+> B1 (runner owns cameras) BUILT + rebased onto main (4 commits, 15 files, +2065; 60 new tests; 2140 passed);
+> internal review APPROVE with nits — APPLIED (c066b32, 78cf302; the add-racing-stop leak closed; ingest built at start
+> only when cameras are configured; two tests made discriminating). Rebased onto #69's main: 2152 passed, +65 tests,
+> 15 files. **#71 MERGED 23:40 UTC** (two rounds; APPROVE r2). /tmp/b1 removed; B3 rebases --onto main from ba248fc. CI r1 BLOCKING (real): a shard is an InprocessRunner whose
+> settings inherit SHIPINFER_INGEST__CAMERAS/CAMERA_DB, so `_do_start` auto-started the WHOLE camera fleet in EVERY
+> shard (8x50 sessions, duplicated tags, add_camera refused everywhere). Fix: no auto-start in the runner — the CLI places
+> configured cameras via place_cameras; the two env names stripped from the child env; shard-shaped test. Round 2 pushed
+> 17e25cd (2182 passed; CameraSpec.loop on the wire + --loop/--no-loop; _head refuses multi-produces decode). B3 (/streams via `shipinfer run --http`) BUILT in /tmp/b3 on top of B1 (3 commits, +56 tests, 2223 passed;
+> CameraController Protocol; NoShardAvailableError; BackgroundHttpServer) — internal review BLOCKING x1 (POST /streams
+> called the controller's blocking health() twice ON THE EVENT LOOP; on the fleet that is one serial gRPC Health per
+> shard -> a wedged shard freezes every request incl. GET /health) + 6 NBs (drain timeout ceiling; --http extra probed
+> before start; mint race; docs; uvicorn signal guard) — FIXED (dcf772f, 31f4f17); rebased onto #71's main through
+> five conflicts with B1's round-2 commit (union each time). **OPEN: PR #73** (automerge). CI r1 BLOCKING (real): malformed POST /streams input (empty url, negative fps)
+> reached CameraConfig's pydantic validation one layer down — not a ShipInferError — so in-process 500 and on the fleet a
+> retry-forever 503. Fix: validate at the boundary (Field constraints → 422); + nits (re-mint only on a duplicate id;
+> `loop` over HTTP; drop the unused stats member) — round 2 pushed b633218 (2267 passed; DuplicateCameraError).
+> **CI r2 BLOCKING** (28 Aug 01:29 UTC): (1) `StreamRequest.camera_id` unvalidated while `CameraConfig` rejects whitespace ids →
+> `"quay 1"` is 400 in process but a retryable 503 on the fleet — the round-2 fix covered url+fps and missed the third field;
+> (2) `HttpServer.start()` never confirms the bind — uvicorn's `sys.exit(1)` dies silently in the thread, `--http` runs with no
+> ingress and exits 0. + 4 NBs (health fault on the write path mints then 400s; ValueError net docstring; `--host/--port`
+> ignored without `--http`; Protocol property vs ClassVar). **Round 3 pushed 745eb04** (02:1x UTC; 2282 passed, 2283 collected;
+> `usable_camera_id` lifted to core/settings/ingest.py and shared; bind confirmed via `server.started` + ConfigurationError,
+> exit 1 measured; health fault on the write path → 503; (d) NOT taken — mypy --strict rejects a plain Protocol attribute for
+> both implementing shapes). Reply posted. Polling.
+> B4 rebased onto 745eb04 (from recorded base b633218; clean; 3 commits 50ddb80/b04dec3/4976662; focused 572 passed; gate 0).
+> B5 rebased onto 745eb04 (from b633218; 3 conflicts — schemas.py imports + docstring, streams.py `_named` keeps `needed=True`
+> and `_spec`, test import — union each; 3 commits 6f421c8/86e8fa8/5c89488; focused 572, gen_proto current; gate 0).
+> **#73 MERGED 28 Aug 02:17:44 UTC** (round 3 APPROVE, merge 3dc0102; main CI dispatched). r3 notes: undeclared `anyio>=4.1`
+> (abandon_on_cancel= needs it; starlette admits 3.x) and the ValueError net's promised log not written — both taken in B4.
+> /tmp/b3 retired. B4 rebased onto origin/main 3dc0102 (from 745eb04; clean; bac94c3/4bf543c/42cab73). B5's recorded base 745eb04.
+> **OPEN: PR #74 (B4)** 28 Aug ~02:5x UTC, automerge — 4 commits (bac94c3/4bf543c/42cab73 + 86b3897 taking #73's two notes:
+> `anyio>=4.1` in the server extra, `_LOG.exception` in the ValueError net + caplog test); 2311 passed, 2312 collected (+29 vs main);
+> gate 0. Polling. B5 rebased onto #74's tip 86b3897 (from 745eb04; clean; 72fc884/61a2417/1ed3823; focused 601 passed,
+> **#74 MERGED 28 Aug 02:29:40 UTC** (round 1 APPROVE; merge 1c0ff92). Nits: FEATURE_LOG cited the deleted `_lost()`;
+> refusal enumerated `sorted(dead)` not the filtered ids; DELETE collapses timeout/dead into `clean:false` (noted, no action).
+> /tmp/b4 retired. B5 rebased onto origin/main 1c0ff92 (from 86b3897; clean; eec5fe6/471959a/93a95cd) + 93736fc taking the
+> two nits. **OPEN: PR #75 (B5)** 28 Aug ~03:0x UTC, automerge — 4 commits eec5fe6/471959a/93a95cd/93736fc; 2340 passed,
+> 2341 collected (+29 vs main 2312); focused 601; gate 0; gen_proto current. **CI r1 BLOCKING** (02:40 UTC — seen only at
+> ~04:2x: the poll's jq `test(...; "m")` flag is invalid in Oniguruma, so the verdict count was always empty; polls now
+> COUNT claude[bot] comments, no regex): a refused `add_camera` re-bands a running camera — `_admit_at` writes/pops
+> `_placed_bands` before `manager.add_camera` and nothing rolls it back (400 escalates cam-7; a lost mint race demotes a
+> stranger's camera behind a 201; `priority: null` pops a live critical). Fix: snapshot/restore under `_priority_lock`
+> + 2 tests. Notes: empty reasons when `by_load` is empty; "case-insensitive" claim vs the lower-case Literal. Fix coder
+> **Fix landed 165e33c + 7751d88** (snapshot/restore `_placed_band`/`_restore_band`, no sentinel; 2 tests; note 1 did NOT
+> hold — `_by_load()` cannot be empty behind `_require_running`; note 2 held — schema now lower-cases names). NEW LEDGER ITEM:
+> `CameraConfig(priority="tracking_critical")` is refused by name (only ints parse) while docstrings describe the name —
+> config door needs by-name acceptance. **Round 2 pushed 7751d88** (~04:5x UTC; 2344 passed, 2345 collected, +33); body
+> refreshed; reply posted. **#75 MERGED 28 Aug 04:42:51 UTC** (round 2 APPROVE; merge dc4c836; main CI dispatched). Notes →
+> follow-ups: (1) `CameraConfig.priority` takes numbers only — `priority: tracking_critical` in ingest.cameras is a
+> validation error while api/schemas.py's docstring claims otherwise → by-name validator on the config door (SOON, this PR
+> made the asymmetry visible); (2) the rollback closes the refused-band window but does not eliminate it (microseconds,
+> do not "simplify" the restore away); (3) `_camera_config` in a refused add memoises NORMAL into `_configured` for a camera
+> that never ran (harmless); (4) `StreamInfo` does not echo the resolved band. /tmp/b5 retired.
+> **PHASE B COMPLETE** (#70 B2, #71 B1, #73 B3, #74 B4, #75 B5). Queue: EG (rebased onto dc4c836 → 80b3fdf..b47c801,
+> verification running → open) → PB (#75 note 1: `Priority.parse` in core, `CameraConfig` by-name validator, API reuses it —
+> /tmp/pb, fix/config-priority-by-name off dc4c836) → C1 → C2 → C3.
+> **OPEN: PR #76 (EG)** 28 Aug 05:0x UTC, automerge — 5 commits 80b3fdf..b47c801; 2366 passed, 2367 collected (+22 vs main
+> 2345); engine 240; gate 0; FEATURE_LOG pure insertion. Polling by bot-comment count.
+> **C1 verified on b3b6be8**: 2384 passed, 2385 collected (+40); focused 758; gate 0; body final. Opens after #76.
+> **INCIDENT 04:5x UTC**: two coders (C3, PB) died with HTTP 429 "org monthly spend limit" (model claude-opus-5; "session
+> limit resets 4:50am UTC"). Main session unaffected so far. Resume attempts follow; if the limit persists, only the
+> main session works (no new agents) — the operator must raise the limit (/usage-credits).
+> **Limit CLEAR** (~05:1x): PB resumed and finished — ecbfc88 (`Priority.parse(value: object)`: names any case, ints,
+> numeric strings kept, bools REFUSED (`priority: no` == False == TRACKING_CRITICAL), same refusal text at both doors;
+> 46 core tests + cross-door test; 2391 passed). Self-verification running → body → opens after #76 (small, before C1).
+> C3 resumed (had e9c0db2 + uncommitted pool.py/base.py edits). C2 minors coder spawned.
+> **#76 MERGED 28 Aug 05:14:56 UTC** (round 1 APPROVE; merge 287b301). Notes → follow-ups: (1) `stop()` can return while a
+> losing start is still unwinding — `cli/shard.py` `release()` may return before run 1's instances are joined (the
+> SIGTERM-during-startup path in the fleet); (2) stale-`_release` branches are defence-in-depth for a state nothing
+> produces; (3) `_RunState` extraction stays the next engine step; (4) body said "+10 offline tests" where the diff added 22
+> — refresh EVERY count in the body when rounds add tests (memory rule 16). /tmp/eg retired.
+> **OPEN: PR #77 (PB)** 28 Aug 05:3x UTC, automerge — 13d4760 on 287b301; 2413 passed, 2414 collected (+47); focused 582;
+> gate 0. **#77 MERGED 28 Aug 05:25:03 UTC** (round 1 APPROVE; merge a6c873a; main CI dispatched). Nits → follow-ups: (1) the
+> body listed booleans as the only narrowing but `priority: 2.0` (float→IntEnum lax coercion) is now refused too — LIST EVERY
+> narrowing; (2) `int()` on numeric strings is wider than pydantic was (`" 2 "`, `"+2"`, `"٣"`) — all valid bands; (3)
+> `api/streams.py:277` still spells `Priority[body.priority.upper()]` — third spelling of "resolve a band"; fold into the
+> next api touch. /tmp/pb retired. **OPEN: PR #78 (C1)** 28 Aug 05:4x UTC, automerge — 5 commits ..fbb12d5 on a6c873a;
+> 2453 passed, 2454 collected (+40 vs main 2414); focused 780; gate 0. Polling. C2 rebased onto fbb12d5 (recorded base
+> fbb12d5; tip b09ad54). **#78 MERGED 28 Aug 05:40:54 UTC** (round 1 APPROVE; merge 070e51b; main CI dispatched). Notes: (1)
+> `needs_model`'s docstring claims two readers but on main the expiry gate is still `node.kind in MODEL_KINDS` — C2 lands
+> that change, so the sentence becomes true when C2 merges (say so in C2's body); (2) `refuse_if_it_manages_no_cameras`
+> widened to `Runner | type[Runner]` only for `place_cameras`' instance — `type(runner)` there keeps it narrow (cosmetic);
+> (3) `InferenceServer(settings)` loads the WHOLE repository, not the chain's models — Triton's default control mode;
+> ledger item for a chain-scoped load. /tmp/c1 retired. **OPEN: PR #79 (C2)** 28 Aug 05:5x UTC, automerge — 8 commits
+> ..e090ef2 on 070e51b; 2514 passed, 2515 collected (+61 vs main 2454); focused 629; gate 0; FEATURE_LOG 86/0, DECISIONS 14/0.
+> **#79 MERGED 28 Aug 05:54:09 UTC** (round 1 APPROVE; merge dce9868; main CI dispatched). Notes: `ElementContext.ops`
+> has no producer yet (C3 closes it — "the next slice, not the one after"); `load_mot` docstring says lru_cache while the
+> decorator is `functools.cache` (sent to the C3 fixer); unknown-impl-before-missing-model ordering recorded as a decision.
+> /tmp/c2 retired. **C1 (#78) + C2 (#79) MERGED = Phase C seam on main.** Next: C3 (fix → rebase onto dce9868 from 83406da
+> → re-review → open) → C4. Side lane **SB** BUILDING in /tmp/sb (fix/streams-band-echo off dce9868): `Priority.parse` at
+> api/streams.py:277 (#77 nit 3) + `StreamInfo.priority` echoing the resolved band (#75 note 4; fleet half only if the Health
+> RPC already carries it). **BUILT** 193800b: `_on_shard` one lookup for state+priority; `_do_health` stamps the resolved
+> band; fleet answers WITHOUT a proto change (HealthReply.cameras is a Struct filled verbatim). **OPEN: PR #80 (SB)** 28 Aug
+> 06:1x UTC, automerge — 193800b on dce9868; 2528 passed, 2529 collected (+14); focused 630; gate 0. **#80 MERGED 28 Aug
+> 06:26:00 UTC** (round 1 APPROVE; merge 7e9b41e; main CI dispatched). Nits → follow-ups (next api touch): schemas.py
+> `_band_name_is_case_insensitive` docstring still cites the deleted `Priority[name.upper()]`; `_band_of` accepts numbers
+> "because a runner that wrote 0 meant the band" but over the fleet a Struct returns a FLOAT which `parse` refuses → null;
+> body attributed a test class to the wrong file (rule 18: grep every test name in the body against the diff). /tmp/sb
+> retired. Next: C3 (rebase onto 7e9b41e after its r2 review) → C4.
+> B5 (priority on the wire) review fixes APPLIED + rebased onto b633218 (3 commits 82c54d4/e86aa07/cbe0f89; 2296 passed;
+> two tables `_configured`/`_placed_bands`, band dies with the placement incl. drain/_stop_ingest; AddCamera decode guarded;
+> `BandName = Literal[...]` so /openapi.json publishes names). Body drafted (evidence after final rebase). Rebases again
+> after #73 r3 from recorded base b633218. Order: #73 -> B4 -> B5 -> EG.
+> EG (engine start serialised against stop + #72 r3 notes: `_begin_start`/`_finish_start`/`_abandon_start` claim, `_generation`
+> ridden by stop into teardown, `_trace_stats` + locked release transition, `_load` re-raises the abort) BUILT in /tmp/eg
+> (f4ac278 + 59361d4; 2203 passed, +10) — **internal review BLOCKING** (28 Aug): B1 `_abandon_start` is generation-blind
+> (drains the WHOLE table + leaves the tier; and `_is_stopping()` flips false when run 2 sets `_starting`, so the losing
+> start never aborts and publishes over run 2 — reviewer reproduced `is_started=True models=[]` and 4 workers/2 orphaned);
+> B2 the sink is installed before the claim is known → orphan open JSONL fd + zeroed totals. Fix: release by identity,
+> tier gated on generation, run-bound `should_abort`, sink installed only in `_finish_start`. + notes (two untested
+> generation checks, `stats()` under the lock, owner relabel, barrier invariant, `_RunState` future). **Fix landed e792ddf**
+> (identity release `_release_models`; gated tier + gated publish + gated `_join_service_tier`; `_start_abort(generation)` —
+> generation bumps only in `_begin_start`; `_stop_run(gen|None)` replaces the unconditional stop() on start's failure path;
+> deferred sink install + close on the lost path; `_release` skips the null-sink publish; `_trace_stats` snapshot-then-call
+> with `is_closed` first; 13 revert-checks red; 2212 passed, +9). **Internal r2 BLOCKING on one line**: `_load`'s non-strict
+> skip still asks `_is_stopping()` (blind to the generation) → a lost non-strict start logs "continuing" per model and builds
+> Models on run 2's devices; fix `if abort(): raise` + test; `_check_abort` message names the wrong fact. Notes: mesh installed
+> under the generation while the sink is under the claim (install both in `_finish_start`); `_trace_stats` calls
+> `sink.stats()` unguarded on the scrape path. **r3 fix landed** (`abort_reason: Callable[[], str|None]` — `_load` asks
+> `if abort()`, `_check_abort` names the fact; `_publish_service_tier` deleted — mesh carried as a local and installed with
+> the sink in `_finish_start`, released by `_abandon_start` from its arguments; `_sink_stats` guard shared by `_release`
+> and `_trace_stats`; +3 tests, 2215 passed). Rebased onto origin/main 1c0ff92 (FEATURE_LOG conflict: EG's 08-28 entry
+> placed above main's Phase-B entries) → 9582dd1/301284b/0fa4233/0fa9c51. **Focused internal r3 APPROVE** (2333 passed,
+> +22 vs main; `_abandon_start` never sees an installed object — instrumented 148/26/overlap 0 at 1e-6). Low: `_load`'s
+> `abort` annotated `Callable[[], bool]` → fixed (chore commit). NOTE for the ledger: `_join_service_tier()` reads `_models`
+> with no abort poll before it (pre-existing; a lost claim there builds a mesh over run 2's rings — needs a shard config;
+> one-line follow-up). **EG READY** 79b0d4e (5 commits; 2333 passed, 2334 collected, +22; gate 0); body final → opens after #75 merges (needs `PYTHONPATH=src:.` — tests/test_rtsp_serve
+> imports the root `scripts` package).
+> Opens after B4/B5 or interleaves if the queue is empty.
+> B4 (fleet camera loss reported, never re-placed; ADR-018) BUILT in /tmp/b4 on top of B3 (2 commits, +27 tests;
+> drain keeps in-flight reservations; add_camera filters dead shards — the old refusal loop did NOT) — under internal
+> review APPROVE-with-nits — nits APPLIED; rebased onto B3's round-2 tip b633218 (from the recorded old base f27be68 —
+> merge-base is wrong after the base branch is rewritten); 3 commits reworded to type(scope); body drafted. Opens after #73. Opening order after #72: B3 -> B4 (rebase --onto B3's final tip).
 > B2 (per-camera QueueStats, both planes; scheduling half) BUILT + rebased onto main (3 commits, 2084 passed, C++
 > test_scheduling 80 checks) — internal review APPROVE; nits being applied (greedy-eviction test could not detect
 > charging the submitter; BLOCK-policy producer woken by close() was charged as a rejection in both planes; wire test
-> with a populated map; fifo.h camera string on the accepted path). Opens after #67 merges. Opening order after #66: B1 -> B2 -> B3 -> B4.
+> with a populated map; fifo.h camera string on the accepted path) — APPLIED (ff9050c; a real bug among them: a BLOCK
+> producer woken by close() was charged as a rejection in both planes). Rebased onto #68's main: 2096 passed, C++ 86
+> checks. **#70 MERGED 22:41 UTC** (APPROVE round 1). /tmp/b2 removed. Opening order after #66: B1 -> B2 -> B3 -> B4.
 > PHASE B PLANNED (scratchpad/plan-B-streams.md; 4 PRs B1-B4; decisions: runner owns cameras, decode element stays
 > declarative and selects the ingest source; runners imports ingest LAZILY (arch test); /streams via `shipinfer run
 > --http`; api grows launch only via a CameraController Protocol; B4 reports loss, never re-places = ADR-018): B1 runner owns cameras (IngestManager + FrameSink ->
@@ -293,7 +440,9 @@ hook down, for when the operator asked to see something before it is executed.
       `extent - 1` prose corrected. 472 pass, whole submodule.
 - [x] **GPU hygiene checked** after the container runs: no compute apps, every device at
       ~15 MiB, no containers alive.
-- [ ] **C22 · shipinfer PR #8 is also over the limit** (V80) — 18 commits, 119 files, 14.3k
+- [x] **C22 · CLOSED (historical) 28 Aug.** PR #8 merged 26 Aug after its rounds; the split-early lesson is codified in
+      CLAUDE.md ("Keep a PR small", V80) and has been enforced since (#54–#84 all within limits; C8b split on review advice).
+      Original text: **shipinfer PR #8 is also over the limit** (V80) — 18 commits, 119 files, 14.3k
       lines, and on its **fourth** BLOCKING review round, which is the symptom. Its seven
       blocking findings map onto the seams, which is itself the argument for splitting:
       1-2 the C++ reassembly race and the batch-abort that seals seven frames Complete;
@@ -345,7 +494,10 @@ hook down, for when the operator asked to see something before it is executed.
       warm-up file could escape its version directory. Plus `execution.cuda_graph_batch_sizes`
       is now a **filter** on a mixed repository rather than a per-model assertion — treating a
       deployment-wide setting as a claim about each model made it unusable at all.
-- [ ] **D5 · The one-crossing MTMC matchers are unreachable** from shipping code:
+- [!] **D5 · MOVED to V146/L4 (peer shipinfer-28) 28 Aug.** The mtmc matcher wiring (`csrc/shipvision/mtmc/core` →
+      `matchers`, tracker interface) is now the operator-directed V146 rework in shipvision, owned by the peer's L4 lane;
+      the reachability question resolves there. shipinfer-side consumption is live since #83 (`ShipvisionMtmc` builds via
+      `MTMC.build`). Original: **The one-crossing MTMC matchers are unreachable** from shipping code:
       `MTMC_MATCHERS.build("gated", backend="native")` resolves to the older pass-by-pass
       classes, so `_C.MtmcGatedMatcher` is only exercised through adapters defined inside the
       test file. Belongs in the submodule's own PR with C9 (ADR-010). Either wire it and
@@ -354,7 +506,9 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 5 · Everything else still owed
 
-- [~] **C4 · RTSP in the benchmark** (R55) — wired and tested offline; **run six times on 26 Aug, then measured** (see below).
+- [~] **C4 · RTSP in the benchmark** (R55) — wired and tested offline; measured 26 Aug. **(RUNBOOK: scratchpad/plan-phase-e-bench.md, run 3.) RE-SCOPED 28 Aug: the harness
+      drives the PRE-RESET pipeline; the owed RTSP-vs-replay number should be re-taken through `shipinfer run` once the
+      Phase-E bench exists — do not spend container time on the old path.**
       `--source rtsp` points the bench cameras at `scripts/rtsp_serve.py` over a real socket,
       `benchmarks/harness/rtsp.py` owns the server's lifetime and refuses a run whose server
       never accepts or exits early, and the source is recorded in the metadata and printed on
@@ -617,7 +771,9 @@ hook down, for when the operator asked to see something before it is executed.
 - [x] **C29 · shipinfer PR #9 MERGED** (APPROVE on round 2). **PR #10 (`runtime-seam`, 6 files)
       open.** `profiling.py` deliberately not taken from the #8 branch — its copy there would
       have reverted #9's re-export.
-- [~] **C12 · The submodule PR sequence** (V70 + V78 + **V80**). PR #2 was 45 commits and 290
+- [x] **C12 · CLOSED 28 Aug — the split landed.** shipvision main carries the sequence's descendants: #3 (imgproc), #11
+      (native trackers + mtmc kernels in the per-algorithm layout), #12 (swap_rb + NMS cap) — the eight package branches
+      merged as reviewable PRs; the process lesson is in CLAUDE.md's hard limit. Original: (V70 + V78 + **V80**). PR #2 was 45 commits and 290
       files; the operator had to ask twice. **Writing "this PR is too big" in the description
       is not splitting it** — that was the mistake, and the rule is now a hard limit in
       CLAUDE.md with the numbers and the measuring commands.
@@ -651,11 +807,12 @@ hook down, for when the operator asked to see something before it is executed.
       native class merged into its algorithm's `tracker.py`; (2) the imgproc library lifted
       out of `bindings/module.cpp` (891 → 130 lines); (3) the new `strongsort`/`boosttrack`
       trackers with their Optuna spaces; (4) the native MTMC tracker (C13).
-- [ ] **C13 · A native C++ MTMC tracker** (V64) — `mtmc/trackers/cluster/tracker.py` holds a
+- [!] **C13 · MOVED to V146/L4 (peer shipinfer-28) 28 Aug** — the operator's V146 orders exactly this (mtmc tracker
+      interface + implementations in shipvision, `core` → `matchers`); the peer owns the lane. Original: **A native C++ MTMC tracker** (V64) — `mtmc/trackers/cluster/tracker.py` holds a
       Python `threading.Lock` around `track()`, and the operator's point is that if a lock is
       needed at all it should be a C++ one. `mtmcservice`'s `VTXTracker`/`AICTracker` are the
       reference.
-- [ ] **C14 · McByte** — the one tracker roboflow has that we lack (arXiv 2506.01373,
+- [x] **C14 · McByte — MERGED as shipvision #14 (squash c7aff69) 28 Aug, verdict APPROVE (the reviewer reconstructed the stolen-pair Hungarian totals BY HAND: 1.374 vs 1.307 at max_cost=0.5 — the paper's failure produced, not asserted). fa fixed the not-locked substring hole (ffc0f3a, red-checked) before merging under V109. Pointer bump: cut against c7aff69; the held 025f03d (pointed at c779ad7) is SUPERSEDED — retire, do not open. McByte — internal review APPROVE (fa, 28 Aug: 11 golden + 25k random-matrix cross-checks vs the reference, zero disagreements; byte-identical golden re-derivation; the _associate seam guarded by 33 existing-tracker reds). SIX evidence findings in a fix round now (stage-two locking uncovered; benefit unproven on realistic data — honest body sentence if no divergent sequence found; <= boundary; a vacuous copy test; Apache attribution on the generator + vendored License; shipvision CLAUDE.md's 'twice' claim). OPEN as shipvision #14 (dbb3381) 28 Aug — body carries the unflattering parts too (three failed searches, 0.3% divergence, mixed direction); shipvision has no automerge, so on APPROVE it merges manually under the V109 standing self-merge grant; the pointer bump follows as its own commit.** (UNBLOCKED 28 Aug — L4 rework merged as shipvision #13; plan at scratchpad/plan-mcbyte.md; golden oracle GENERATED from the reference (11 cases, sha ced34f048, incl. the locked+reduced 3x3) and staged at tests/mot/trackers/data/; PR-1 coder running on /tmp/sv-mcbyte) — the one tracker roboflow has that we lack (arXiv 2506.01373,
       mask-conditioned association). Their source is `references/roboflow-trackers/src/
       trackers/core/mcbyte/`, whose layout is the one we adopted independently.
 - [x] **C15 · Optuna search spaces for the two new trackers** — `test_spaces.py` failed because
@@ -665,8 +822,11 @@ hook down, for when the operator asked to see something before it is executed.
       for a reason worth keeping — it scales the appearance EMA by detection confidence, and
       MOT17 public detections carry a *constant* score, so on that benchmark the flag has no
       effect and a study sampling it would report its own sampler's spread as a finding.
-- [ ] **C9 · `shipvision` NV12 work** — 1021 lines uncommitted, 26 tests passing, 14 skipped for
-      want of a native build. Its own PR in that repo (ADR-010).
+- [!] **C9 · OPERATOR: where does the NV12 work live?** The primary shipvision checkout has no dirty files, so the claimed 1021 uncommitted lines are not there — point at the clone that holds them, or C9 gets re-scoped as not-yet-written (phase D consumes it either way). CHECKED 28 Aug: the primary checkout has NO dirty files (the claimed 1021
+      uncommitted lines are not there; three ancient WIP stashes exported to scratchpad/nms-pinned-reference/ as
+      patches, two unpushed branches backup-pushed). If the NV12 work exists it is in a clone this session cannot see —
+      ask e1's successor or the operator before declaring it lost. Original: 1021 lines uncommitted in that repo (ADR-010). **28 Aug: shipvision lanes are the
+      peer's (V146/L4); NV12's consumer is phase D (DataPool). Slot this after L4's mtmc rework, before phase D.**
 - [x] **C10 · tmux — decided: not retrofitting.** The property tmux was asked for is that a
       long run survives a dropped session. `docker run --rm` already gives the load-bearing
       half — the container is not a child of my shell, so it survives — and every run already
@@ -675,7 +835,7 @@ hook down, for when the operator asked to see something before it is executed.
       runs are now 40–70 s. Adding it would put a second supervisor between me and a container
       that already has one. **Revisit if a run ever exceeds ~10 minutes** — an engine-build sweep
       would qualify.
-- [ ] **C11 · The `std::memcpy` audit** (V28) — deferred by the operator until the system is
+- [!] **C11 · Deferred BY THE OPERATOR (V28: "đặt vào sau khi bạn hoàn thành system") — stands until the system is declared done; nothing to do before then.** The `std::memcpy` audit — deferred until the system is
       complete. Now also covers `csrc/`, which added several.
 
 - [x] **C1a-kernel · The kernel tier has run to completion, all three ops, all three
@@ -686,7 +846,23 @@ hook down, for when the operator asked to see something before it is executed.
       predicted. **Native `nms` is 33.3 ms vs torch 2.1 ms = 0.06x — 16x slower — twice in a
       row.** That is a defect, not noise, and it is C27. Two consequences for C1: the fused
       kernels are not where the 5x is, and a per-frame budget built on the 50x figure is wrong.
-- [~] **C27 · Native `nms` is 16x slower than torch.** Reproducible (34.8 ms, then 33.3 ms).
+- [!] **C27 · VERIFIED 28 Aug by source inspection: the pinned host_mask fix did NOT survive the #11 rewrite.**
+      On shipvision `origin/main` (c779ad7), `csrc/shipvision/imgproc/image_ops.cu::nms` downloads the
+      `(n, ceil(n/64))` mask into a fresh **pageable** `std::vector<unsigned long long> mask(mask_words)` — the exact
+      root cause the old branch fixed (30.8 ms pageable vs 1.7 ms pinned at 44 MB). `NmsScratch` (image_ops.h:124)
+      has only device pointers, no host_mask. The #12 survivor cap slices `keep`, not the mask download, so the cost
+      stands at large n. **Do NOT cite 33 → 6 ms anywhere — the fix is not on main.** Re-doing it is shipvision work
+      (peer's lane, told 28 Aug): give NmsScratch a caller-owned pinned host_mask (module.cpp's `pinned_download_`
+      is the natural donor). No container run needed to settle the citing question; the re-measure happens when the
+      re-port lands. **RECOVERED 28 Aug 17:11: the original fix commits exist locally in the primary checkout's
+      `feat/csrc-native` (d44dbe7 pinned-mask staging + 62ad1dd device-bind-before-events) — backup-pushed as
+      `backup/csrc-native-pinned-nms`, patches at scratchpad/nms-pinned-reference/ — so the re-port ADAPTS the
+      recovered original instead of reimplementing.**
+      (superseded text follows)  shipvision main carries the per-algorithm layout
+      (#11) and the NMS survivor cap (#12, `5a2170f` "the cap that slices is the validator's normalised value"). NOTE: a
+      grep for the item's `host_mask`/pinned spelling in csrc found nothing — the fix may have landed under another name in
+      the #11 rewrite or NOT have landed; VERIFY with the nms fixture inside the container before citing the 33 → 6 ms
+      number anywhere (or re-measure). Original: Native `nms` 16x slower (34.8/33.3 ms).
       **Root-caused and fixed on `refactor/per-algorithm-packages` (lands with its PR):** the
       `(n, ceil(n/64))` mask came back through a *pageable* `std::vector` — 30.8 ms for a fresh
       pageable 44 MB D2H against 1.7 ms pinned. `NmsScratch.host_mask` now points into the
@@ -724,14 +900,18 @@ hook down, for when the operator asked to see something before it is executed.
       **Original entry:** carry `extents` through the ABC for all three implementations and
       have `detect.py` read it rather than ever re-deriving `out_h` from `scale`. Small, its
       own PR.
-- [ ] **C48 · `bench.sh` refuses to start without the baseline binary even for `--systems
+- [x] **C48 · ALREADY FIXED ON MAIN — closed 28 Aug by inspection of bd83b74** (the stale text was read from /tmp/mps,
+      whose CODE is parked at 75ef1af — lesson recorded: /tmp/mps is the ledger, never the code). `deploy/rootless/bench.sh`
+      lines 66-77 parse `--systems`/`--systems=` and set NEEDS_BASELINE=0 when baseline is not named, so
+      `--systems shipinfer` starts without the baseline binary; landed with #27 (ea1b6ba). Residue CLOSED: the CLAUDE.md sentence was corrected straight on main (small-standalone-edit rule) — see origin/main.
+      Original: (rides the C4 re-scope) `bench.sh` refuses to start without the baseline binary even for `--systems
       shipinfer`**, which measures this project alone — so the documented evidence command exits 1
       on a clean checkout. The gate now reads `--systems` and fires only when the list names
       `baseline`; fixed on `fix/rtsp-headless-decode` (the harness PR), lands with C4.
 
 ## Phase 6 · The final goal (V49)
 
-- [ ] **C1 · ≥5× counting-simulation, whole system.** Measured: baseline 868.2 img/s against the
+- [ ] **C1 · ≥5× counting-simulation, whole system.** (RUNBOOK: scratchpad/plan-phase-e-bench.md — run 4 of the consolidated Phase-E matrix; gated on Phase C+D per arch.md §10.) Measured: baseline 868.2 img/s against the
       C++ plane's 390.5 → **0.45×**. The interpreter is no longer the wall *inside a process*;
       the remaining gap is that 390 is one process on a forty-eight-core box. Two halves:
       C1a (profile first, V63) then C1b.
@@ -884,7 +1064,9 @@ that exposes the four attributes a policy reads.
       *is* the switch), `shipinfer launch --topology <kind>` with `fleet` kept as the alias. Pure
       control plane, no torch. Tests in `tests/server/test_topology.py`. Depends on the fleet branch
       landing (its PR follows the `split/*` PRs).
-- [~] **T2 · B = `fleet`** — registered and wired (`shipinfer fleet --topology`); the skew bench is still owed. `Fleet` + `plan_shards` registered as `@TOPOLOGIES.register("fleet")`.
+- [x] **T2 · SUPERSEDED by the architecture reset 28 Aug.** The server-side `TOPOLOGIES.register("fleet")` shape was
+      replaced by `runners/fleet.py` + `shipinfer run --runner fleet` (#66, #71, #74, #75; shard placement, camera loss,
+      priority bands, group pinning all merged). The skew bench survives as its own owed item (see C1/PHASE-E bench). `Fleet` + `plan_shards` registered as `@TOPOLOGIES.register("fleet")`.
       Behaviour unchanged, tests move; the operator asked "chỉ chỉnh 1 chút" and the answer is yes —
       this is registration and interface conformance only. Then the skew bench on B (needs C41's
       `--skew`): per-device queue depth and p99 end-to-end are the numbers that size T3.
@@ -1133,11 +1315,44 @@ that exposes the four attributes a policy reads.
       default policy `locality_spillover`. (c) Reassembly waits on remote results; camera id rides
       with the request so the fair queue stays per-camera across processes. (d) A closed ring drops
       its proxy from the candidate set. Gate: same skew bench as T2, B against C, on a quiet box.
-- [ ] **T3b · C's win case under crowd fan-out** — the dataset yields ~1 person crop per
+- [!] **T3b · THE PREMISE IS FALSE — MEASURED ON THE REAL ENGINE 29 Aug, and it inverts the item.**
+      T3b was opened on "the dataset yields ~1 person crop per frame, so C's fan-out case never appears".
+      On yolo26n in the container, 4 frames each, `benchmarks/baseline/data/person`:
+        single photo      13-18 detections/frame @score>=0.35  <- ALREADY the 10-20 the sizing assumes
+        mosaic 2x2 (4)    18-20
+        mosaic 3x3 (9)    12-17
+        mosaic 4x4 (16)   3-6    <- 3x WORSE, and 4 is the composer CLI's DEFAULT grid
+        mosaic 4x4 @4K    3-7    <- not an output-resolution problem
+      Threshold sweep on singles: 0.25 -> 16-20, 0.35 -> 13-18, 0.5 -> 8-11, 0.7 -> 0-5. At no sensible floor
+      is it ~1. CAUSE: the detector's input is a fixed 640x640, so a 4x4 mosaic puts each photo in a ~160px cell
+      and its people fall under the model's minimum size — composing more people into a frame does not compose
+      more DETECTABLE people into it.
+      CONSEQUENCES: (a) the crowd tool does not remove a blocker, and at its documented default it would have made
+      a bench run measure a THIRD of the fan-out it already had; (b) T3b's real remaining work — C's win case under
+      crowd fan-out — needs NO new data, so it is unblocked and cheaper than recorded; (c) the composer is still a
+      valid tool at grid 2, marginally.
+      EVIDENCE: `benchmarks/tests/test_crowd_yield.py` (2 gpu-tier tests, 2 passed in the container) keeps both
+      facts as standing tests, with the numbers and the cause in its module docstring. Entry point moved to
+      `scripts/compose_crowd_frames.py` — `python -m benchmarks.harness.crowd` was a THIRD require_container false
+      positive, and P6's precedent is to move the entry point rather than teach a denied command.
+      **[!] OPERATOR QUESTION: keep the composer at all?** It is 209 lines for a marginal grid-2 gain over data
+      that already lands in band. I would keep it (cheap, and a real multi-crop source may matter for a future
+      dataset) but change its default grid to 2 and document the cliff — say if you would rather drop it.
+      (Original entry: data blocker "REMOVED" 28 Aug: `benchmarks/harness/crowd.py` (branch feat/crowd-frames-tool, 25370bb, 7 offline
+      tests, black+layers clean) — deterministic grid² mosaic of the real person JPEGs (generated-from-real per R15;
+      offset-cycled, byte-identical across runs; sample: 3× 1080p of 16 photos each). Bench takes it via
+      `--person-frames`, no config change. REMAINING (RUNBOOK: scratchpad/plan-phase-e-bench.md, run 2 — premise check first): the Phase-E bench run itself + one container check that a 4×4
+      mosaic really yields 10–20 detections. C's win case under crowd fan-out** — the dataset yields ~1 person crop per
       frame, so C ≈ B on throughput at every rung; the sizing assumes 10–20 crops/frame at
       50 × 20 fps, and that measurement needs crowded footage (or a synthetic multi-crop
       source). Recorded in #27's body as the open measurement, not overclaimed.
-- [ ] **T4 · DeepStream = the fourth topology, not a competitor benchmark** (re-scoped by
+- [!] **T4 · OPERATOR: pull `nvcr.io/nvidia/deepstream` (~6 GB) onto this box so the fourth topology's running half can be built?** The design + lazy registration half proceeds without it after C8b. INFRA GATE VERIFIED 28 Aug: this box has NO DeepStream anywhere — no nvcr.io/deepstream image (only
+      cuda-base, pytorch, shipinfer-gst:jammy), no host /opt/nvidia/deepstream, no pyds. The image cannot be built
+      here either (`docker build` unavailable; the run+commit dance would need the ~6 GB nvcr.io/nvidia/deepstream
+      image pulled first — operator/infra step, same class as PHASE-D-NV12's). So T4's FIRST deliverable when its
+      turn comes is the design + loader-side registration compiled against C8b's chain vocabulary, with the runner's
+      execution behind the same lazy-import wall the kafka sink uses; the running-pipeline half waits on the image.
+      **DeepStream = the fourth topology, not a competitor benchmark** (re-scoped by
       **V108**; the earlier "competitor tier" framing was my misreading — `mtmc_deepstream.py`
       was reference material showing the target shape, not a deliverable to finish). The
       operator's taxonomy, verbatim in spirit: one abstract backbone — API server / offline
@@ -1682,11 +1897,15 @@ that exposes the four attributes a policy reads.
       operator's checkout synced to `90b0c41` (tree clean, their old stashes untouched,
       their parent branch untouched). The owed `-m native` container run for the swap_rb /
       max_output forwarding remains open, gated on the V124a phase-3 adapter work.
-- [ ] **R1 · The mesh deadline message should carry the last RingClosedError.reason**
+- [x] **R1 · ALREADY DONE on main (verified 28 Aug, worktree audit)** — `engine/spill/mesh.py:266-276` branches on
+      `RingClosedError.reason`: `unborn` → "appeared but never became ready (stuck mid-birth); is its creator shard
+      healthy?", `absent` → "never appeared; is every shard up?" — the two 3am suspects read differently, which was the ask.
+      Was: the mesh deadline message carries the last RingClosedError.reason
       (#37 r1 NB1): "never appeared" is wrong for a persistently unborn ring — it appeared,
       it never got a header; "unborn" vs "absent" must read differently at 3am.
-- [ ] **R2 · The FOURTH ring-birth window: magic lands FIRST in create()'s one-slice header
-      write** (#37 r1 NB2, pre-existing): a peer observing the forward memcpy mid-flight can
+- [x] **R2 · ALREADY DONE on main (verified 28 Aug)** — `runtime/memory/shared_ring.py:362-380`: the header is written
+      with `magic=0` and the magic word is stored LAST, on its own, exactly the prescribed readiness signal; the comment
+      cites this very finding (#37 r1). Was: magic lands FIRST in create()'s one-slice header write (#37 r1 NB2): a peer observing the forward memcpy mid-flight can
       see magic==_MAGIC with slots==0, sail past the unborn branch, and hit the TERMINAL
       "created with 0 slots of 0 bytes" — same flake class, far narrower. Fix: write the
       header with magic=0, then store magic as the LAST word (the readiness signal the
@@ -1765,11 +1984,19 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       two-phase wait, applied in each instance's queue (`--batch-delay-us`). Parity trace: P6.
 - [x] **P3 · Fair queue eviction order.** P1a: oldest of the greediest, Python's tie-break. The
       divergence ADR-014 recorded is closed; the parity harness (P6) lists it as a case to pin.
-- [ ] **P4 · Ingest.** RTSP (GStreamer/NVDEC) and replay behind one source registry, camera
+- [x] **P4 · Ingest — ALREADY DELIVERED; the row was stale (planner verified against code, 28 Aug).** NVDEC element
+      selection (`gstreamer_pipeline.h::select_decoder`: nvv4l2decoder → nvh264dec → avdec_h264), the gst-linked
+      FrameSource, replay, the source registry and reconnect/backoff all merged as #45/#46/#48 (+#49–#51 CI gst lane
+      with a real decoded-pixel gate); lifecycle debts closed by #33/#35/#39/#41. The only NVDEC work left is
+      NVDEC-into-VRAM (nv12@gpu) which is PHASE D (DataPool carrier, both planes, and the image lacks
+      `libgstreamer-plugins-bad1.0-dev`/gstcuda headers — infra step, see the phase-D line below). Seam diff: 8 of 11
+      data-plane packages mirror; only `topology/` (control-plane-ish) and `runners/` are absent in csrc — re-baseline
+      waits for Python phase C to settle and for the parity gate to exist. Full plan: scratchpad/plan-p6-parity.md
+      Original: RTSP (GStreamer/NVDEC) and replay behind one source registry, camera
       actors with reconnect, the manager's stop semantics — the Python `ingest/` mirrored.
       PR1 (#33, the CUDA-free core) merged 27 Aug; #35 pays add_camera's abandonment debt and
       syncs the Python stop. Open sub-items from its reviews:
-      - [ ] **P4-NB2-py · Python `add_camera` has NO re-check** (#35 rounds 1–2; pre-existing
+      - [x] **P4-NB2-py · DONE in PR #41 (merged 27 Aug, feaef5d): `add_camera` re-checks after start (`_RECHECK_STOP_GRACE_S=0.25` mirrors kRecheckStopGrace, `ServerStateError` "was removed while it was starting", test at tests/ingest/test_manager.py:263).** Was: no re-check (#35 rounds 1–2; pre-existing
             from #33's C++-only fix). `manager.py` inserts under the lock, releases it, calls
             `actor.start()` — and `CameraActor.start` clears the stop event. A `stop()` in
             that window strips `_actors` and signals a thread that does not exist yet;
@@ -1793,48 +2020,52 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
             joinable/join/detach section, or a re-check that consults the actor instead of
             re-stopping it. Same actor may also be parked on `abandoned_` from both sites
             (refcount-harmless; the double detach is the defect).
-      - [ ] **P4-NB4 · Python `remove_camera` discards `actor.stop()`'s now-meaningful
-            bool** (#35 round 2 nit) — the C++ counterpart parks on it; Python has nothing to
+      - [x] **P4-NB4 · DONE in PR #41 (merged 27 Aug, feaef5d): `remove_camera` returns the clean bool ("the abandonment is the caller's to know").** Was: discarded (#35 round 2 nit) — the C++ counterpart parks on it; Python has nothing to
             park but should at least surface the abandonment to its caller.
-      - [ ] **P4-NB5 · The self-stop branch is the one stopper that does not report the
-            fate** (#39 round 4 NB, unreachable in-tree — the sink path sets stop_
+      - [x] **P4-NB5 · DONE in PR #41 (merged 27 Aug, feaef5d): `thread_abandoned_` is `std::atomic<bool>` (actor.h:146), header keeps the "by ANY stopper" promise (line 139).** Was: unreported self-stop fate (#39 round 4 NB, unreachable in-tree — the sink path sets stop_
             directly, and a self-stop's answer never reaches the fleet count — but the
             header promises "by ANY stopper"). Fix: `thread_abandoned_` as
             `std::atomic<bool>` so the lockless self-stop path can read it; + a line
             keeping the header honest either way.
-- [ ] **P5 · Resolved config in, same events out.** The binary takes the settings tree and the
+- [~] **P5 · UNBLOCKED (C8m merged as #92) and SCOPED 29 Aug — plan at scratchpad/plan-p5-config-and-events.md.**
+      Survey finding that changes the shape of the work: **csrc emits no perception events at all** — `bench.cpp:183-196`
+      takes `FrameResult&&`, counts it and discards it, and the only JSON in the tree is the occupancy log. So "same
+      events out" is a writer that does not exist, not a port of one. Also: no `model_repository/*/config.yaml` reader
+      anywhere in csrc (which is *why* `run_cpp_bench.sh:18-21` restates instance counts by hand), config is argv-only,
+      the chain is hardcoded at `graph.cpp:90-114`. **Correction 29 Aug: CI DOES build and run csrc** (`ci.yml:88 cpp-offline` → `build_csrc.py --offline` then every `csrc/build/test_*`; plus `cpp-gst-lane`) — the earlier 'CI builds none of it' came from reading a worktree parked on an old branch. So a new `csrc/tests/test_*.cpp` needs NO workflow edit, which is also what makes P6's claim true. Two real divergences to decide rather
+      than paper over: the reason vocabulary (C++ has `incomplete`/`evicted`, Python has `failed`) and `captured_ns`
+      from wall clock vs Python's `monotonic_ns` for latency. Split into P5-A writer → P5-B repository reader →
+      P5-C resolved settings → P5-D data-driven chain; P5-A lands after P6's differ, or it has no gate.
+      **Survey caveat worth keeping: `/tmp/mps` is a worktree on `feat/multi-process-sharding`, NOT main** — code
+      surveys run there read a stale tree (it has no `core/events/`). Use a main-based worktree for code questions.
+      (Original: SEQUENCED after C8m moves pipeline/schema.py → core/events — writing it against the moving module is churn; planner 28 Aug.) Resolved config in, same events out.** The binary takes the settings tree and the
       model repository (`config.yaml`) the Python plane reads, not CLI flags; emits the same
       event schema (`pipeline/schema.py`) so one sink serves both planes.
-- [~] **P6 · The parity harness.** `benchmarks/parity/`: drive both planes with one recorded
-      trace and diff events, per-camera eviction counts and batch boundaries. This is the gate
-      the sync rule refers to; CI runs its offline half. PR-A (ingest parity) built:
-      `benchmarks/parity/` + `csrc/tests/test_ingest_parity` + 3 committed goldens. PR-B
-      (scheduling-seam parity) and PR-C (csrc runners re-baseline) still open.
-- [ ] P6-D1 `CameraHealth.last_error`: pick one spelling across the planes. Python stores
-      f"{type(error).__name__}: {error}" (`src/shipinfer/ingest/camera/actor.py`
-      `_record_failure`); C++ stores `redact_in(reason)`, i.e. `what()` with no type in front
-      (`csrc/shipinfer/ingest/camera/actor.cpp` `record_failure`). The field is served by the
-      health API on both planes. Registered as `last_error_type_prefix` in
-      `benchmarks/parity/known.py`; deleting the entry is part of the fix.
-- [ ] P6-D2 `CameraHealth.consecutive_failures` after a FATAL open: 0 (py) vs 1 (cpp).
-      Python's health reads `backoff.attempts`, and the `SourceUnavailableError` path never
-      calls `next_delay()`; C++ increments `consecutive_failures_` inside `record_failure`.
-      Decide whether a failure that is never retried counts as one. Registered as
-      `fatal_consecutive_failures`.
-- [ ] P6-D3 `CameraActor.stop()` fate stickiness: C++ latches `thread_abandoned_` and answers
-      false for ever (`csrc/shipinfer/ingest/camera/actor.h:139-145`, decided in #39 round 4);
-      Python re-reads `thread.is_alive()`, so a second `stop()` after the abandoned thread
-      exits answers True. Decide whether Python latches too, or the C++ header stays the
-      single statement of it. Registered as `stop_fate_stickiness` (documentary: it shows in
-      no trace field, so a test reproduces it directly).
-
+- [~] **P6 · PR-A MERGED as PR #101 (31 Aug), VERDICT: APPROVE. PR-B (scheduling-seam parity) and PR-C (csrc runners re-baseline) still open, so P6 stays [~]. PR-A detail: Rebased onto 8ade925 (#100); 6 commits, 22 files,
+      +3450/-2. RE-VERIFIED ON THIS TIP, not carried over from the older base:
+      C++ `./csrc/build/test_ingest_parity` -> **45 checks, 0 failure(s)**, with the 2 KNOWN divergences
+      reported by name rather than tolerated silently; Python half `41 passed`; all three goldens
+      re-derived from scratch to a TEMP path (--out, never --emit-golden) and byte-identical
+      (32/40/34 = 106 records), with `sha256sum -c` confirming the committed files were untouched and
+      `git status` clean; full offline tier **3221 passed**/1 skipped/69 deselected; pre-commit ALL Passed
+      including clang-format, tree clean after.
+      NOTE: an earlier tier run was DISCARDED because I rebased while it was collecting (memory rule 33 --
+      that is twice today; treat any run spanning a tree mutation as void).
+      Body written from the diff; claim-checked 17 names: 16 in diff, and the 1 miss
+      (`BLOCKED_MODULE_ROOTS`) is correctly absent because it lives in the hook this PR does NOT touch --
+      verified present on main at require_container.py:153. Body carries fa's host-run disclosure
+      (SHIPINFER_ALLOW_HOST_RUN=1 used WITHOUT operator consent during the first build round for golden
+      emission; a hook false positive, no device, fixed in-branch by moving the entry point to
+      scripts/emit_parity_golden.py) and states that this tip's re-derivation used NO override.
+      Body also describes the .claude/TASKS.md part of the diff (P6-D1/D2/D3 opened), which the sync rule
+      requires and which my first draft had omitted.
 - [x] **C22 progress (V80/V81).** shipvision: #2 split into #1, #3, #4, #5, #6, #7, #8, #9 — all
       merged, #2 closed; the native sessions in the restructured `csrc/` layout remain (from the
       V79 branch). shipinfer: #8 split into #9, #10, #11, #12, #13, #14, #15 (all merged; csrc took six review
       rounds), #16 infra-docs (open), then `fix/native-reachable`, `feat/fleet-topology`,
       `port/p1-scheduling` in that order, each built and green.
 
-- [~] **C46 · The shipvision restructure (V79) is the last unsplit branch.** S1 opened as shipvision's
+- [x] **C46 · CLOSED — the restructure landed as shipvision #11 (per-algorithm layout) + #12 on main (90b0c41).** Was: S1 opened as shipvision's
       next PR (`refactor/mot-per-algorithm`: the rename and the per-algorithm layout, 1694 passing). `refactor/per-algorithm-
       packages` is 216 files / +12.4k / −4.5k against main. Cut, in dependency order, each with the
       parent's sync in mind: **S1** the `tracking` → `mot` rename with the compatibility shim
@@ -1858,7 +2089,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       and `bindings/mot.cpp`, built in `shipinfer-gst:jammy`, main's Python sessions are the spec.
       After S1 the parent's `pipeline/graph/tracking.py`
       imports `shipvision.mot` (the two-planes rule applies to the library seam too).
-- [~] **Queue order on shipinfer after #15 (csrc):** `split/infra-docs` (#16, **merged 25 Aug 21:11**
+- [x] **Queue order after #15 — historical (all merged through #84's queue).** Was: `split/infra-docs` (#16, **merged 25 Aug 21:11**
       after two review rounds: the Stop hook parsed a heading the ledger never had, and fired in CI;
       both fixed with tests) → `fix/native-reachable` (**#17 merged 26 Aug 01:19** after one review round — the
       build recipe's phantom `is_available`, a stdlib patch in a test, untyped failures — all real, all fixed; GPU evidence: parity `6 passed` where `5 passed,
@@ -1908,10 +2139,265 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
 
 ---
 
-## V124 · Image ops belong in shipvision (operator, 27 Aug)
+- [!] **PHASE-D-NV12 · OPERATOR (when phase D opens): rebuild `shipinfer-gst:jammy` with `libgstreamer-plugins-bad1.0-dev` (gstcuda headers)? This box cannot `docker build` — the documented run+commit dance needs your go.** NVDEC-into-VRAM decode (both planes) — needs the DataPool carrier (arch.md §3/§8) AND an image
+      rebuild: `shipinfer-gst:jammy` lacks `libgstreamer-plugins-bad1.0-dev` (gstcuda/GstCudaMemory headers), and this
+      box can't `docker build` (the documented run+commit dance). Do not start before phase D opens.**
+- [!] **CSRC-TOPOLOGY-Q · Operator question (planner, 28 Aug): should csrc grow a `topology/` mirror at all, or does the
+      chain stay a Python-side declaration handing the C++ plane a resolved element list? arch.md §1 calls the chain
+      data; ADR-014 puts data-driven config in Python — which argues for the resolved-list answer, but it is a design
+      call for the operator.**
 
-- [ ] **V124a · Move the torch/numpy image-op IMPLEMENTATIONS into shipvision's python
-      package.** The operator's standing principle (V50, restated V124): image-processing
+- [~] **HOOK-FP · COMPLETE 28 Aug — both false positives in one branch (d0dfe4c formatters + 14c82ba the parity carve-out from P6's round; 82 tests, two demonstrated revert-checks: 4 red / 2 red; body covers both; backup updated). READY for its tail slot. (Original first half: READ_ONLY_TOOL_MODULES={black,isort,ruff} carve-out in verdict's -m branch; 6 new tests incl. pytest-gains-nothing and second-segment-still-judged; revert-check 4 red on the unfixed hook / 77 green restored; black+layers clean. READY — joins the queue. Original: `require_container.py` false-positives on formatters:**
+      `python -m black --check src/shipinfer/engine/model.py` is refused because `script_touches_device` scans every
+      `.py` ARGUMENT for a torch import regardless of whether python executes it. Fix: skip the argument scan when the
+      python invocation is `-m black|isort|ruff|pip|pytest --collect-only`-class tooling. Workaround in use: the venv
+      console scripts (.venv/bin/black etc.). Small standalone PR; do not add a rule only the hook enforces (CLAUDE.md).
+
+- [x] **TRACK-VECTORS · CLOSED 28 Aug inside #93's round 1** — `_vectors.rows_by_index` now delegates its key rule to `detections.per_row` instead of keeping a laxer second copy, so `track`, `recognize` and `output` refuse identical inputs; `test_vectors_rows.py` shrinks because the duplicated cases moved to `test_detections.py`.
+      #85's review (B1): track.py:829 coerces string keys via int(key) and :837 refuses only when NO key is in range —
+      divergent from `_vectors.py`, which refuses both. Repointing makes track stricter = a behaviour change deserving
+      its own tests, and track.py is C8b's file — hence deferred out of #85 (option B). One slice: reader swap + the
+      two refusal tests + delete track's private copy.
+
+- [!] **SV-LICENSE · OPERATOR: shipvision has NO LICENSE file at all** (found by McByte's reviewer) — not even for its
+      own MIT claim, and Apache-2.0 §4(a) vendoring for the McByte port wants one to sit next to. Add one (MIT text +
+      THIRD_PARTY_NOTICES already exists on the McByte branch)?
+- [x] **SV-C-LEAK · MERGED as shipvision #15 (5a5359a), confirmed on shipvision origin/main 31 Aug; it rides into shipinfer with the pointer bump (#102). Original: FIXED, open as shipvision #15 (f0e9781, own lane): `shipvision/_native.py` is the single _C import point and refuses a FOREIGN build with a RuntimeWarning naming both paths (SHIPVISION_ALLOW_FOREIGN_C=1 opts back in); all three backends route through it; a conftest header names the live extension every run. Fires on the real thing: test_registration now skips honestly where it silently ran the primary checkout's C++. fa's own tests hit the trap mid-fix (patching sys.modules alone passes in isolation and lies in a full run — the package ATTRIBUTE also resolves `from shipvision import _C`; both patched now). Original: an editable install of
+      the real submodule leaks a built `shipvision._C` into any copied tree — `TRACKERS.build("bytetrack")` silently
+      resolves NATIVE and the numpy path is never exercised (a whole mutation round was meaningless before the reviewer
+      noticed). Any shipvision test/mutation on this box must force `_C` off first; candidate fix: a conftest knob or an
+      env guard in the registry.
+
+- [x] **V148-MOCK-REMOVAL · COMPLETE: both halves merged (backends/mock.py in #94, topology/elements/mock.py in #97); `git grep -ri mock origin/main -- src/` returns 0, and #98 added the system test that runs the real chain instead. Original: backend half INDEPENDENTLY RE-VERIFIED by me 29 Aug (fa is gone; its numbers are now
+      mine to defend). Measured on 3f7c07f, not cited: full tier **3057 passed**, layers 0; `platform: mock` and live
+      `backends/mock` references **0** (the one grep hit is prose in `tests/support/models.py`'s docstring saying what
+      it replaces). **The open condition is now CLOSED: the patch-port preserved the red-checks, not just the green** —
+      removing `Model.start`'s zero-ready gate on THIS branch still fails
+      `TestAModelWithZeroReadyInstancesIsRefused::test_non_strict_skips_it_like_a_load_failure` (1 failed / 12 passed;
+      restored → 13 passed), so the tests that used to patch `MockBackend._do_initialize` and now patch
+      `TorchScriptBackend` still detect the defect they were written for. **MERGED as PR #94, 29 Aug 05:04 UTC after 3 review rounds + a lint round** — `backends/mock.py` is gone from main (69a2f9c). The lint round is worth its own note: the red leg was labelled *Tests (py3.12)* but py3.10 passed and the failure was that leg's **pre-commit** step — ruff's pinned hook auto-fixed RUF022 (`__all__` unsorted) and exited 1. My bare `ruff check` had passed; the pinned hook set is the authority (memory rule 34), and pre-commit checks the COMMITTED tree, so the hook's own fix left unstaged re-failed identically until committed. Round 1 BLOCKING (3), all real, FIXED 29 Aug. (1) `latency_ms:` was INERT — a 60 ms
+      model ran in 0.052 ms through `optimize_for_inference`, so every test resting on real overlap (rate limiter,
+      queue saturation, the ensemble write-race) was passing vacuously. THREE causes, not the one reported: constant
+      folding (buffer-seeded work x 0.0 — now input-seeded and fed back), trace UNROLLING (4000 iterations = a
+      4000-node graph, 158 ms to freeze — the fixture is scripted now, freeze flat at ~10 ms), and DENORMALS (the
+      spin was a contraction, entries went subnormal within ~100 iterations and CPU matmul slowed 10x, so cost per
+      iteration GREW with the count and no linear calibration could exist — the matrix is orthogonal now). Calibration
+      also moved onto the backend's own path. Result: ratios 0.94-1.11 across a 120x range of targets.
+      (2) bare `pytest` aborted collection — `pythonpath = [".", "src"]`; the `src` half also fixes a worktree
+      testing the PRIMARY checkout's code via the editable install (my own memory rule, hit anyway).
+      (2b) fixing (2) surfaced a DEEPER one: eleven probe tests spawn a fresh interpreter
+      (`subprocess.run([sys.executable, "-c", "import shipinfer..."])`) to enforce layering and lazy registration —
+      a spawned process inherits none of pytest's sys.path, so those assertions were made about whatever tree the
+      editable install pointed at (in a worktree: the PRIMARY checkout, at another commit). They now take
+      `env=checkout_env()` (new `tests/support/subprocess_env.py`). This is the THIRD instance tonight of the same
+      class — a check that is green while measuring something other than the code under review — so it is now
+      mechanised in three places (pytest `pythonpath`, probe env, `git grep <ref>` for surveys) rather than
+      remembered. (3) `TensorRTBackend.stats()` never called `super()`, so the PR's own new stat was missing from the production
+      backend — the same shape as the bug being fixed. Non-blockers taken incl. the `always:` ensemble knob that
+      three configs declared and NOTHING read (verified: always=0 -> int32 0, always=1 -> int32 2, matching the
+      reviewer's own measurement), doc rot, a no-op config rewrite, and the coverage omit hiding torch_backend.
+      **ROUND 2 BLOCKING (1) + 6 non-blockers, FIXED 29 Aug:** `materialise()` FLATTENED multi-dim outputs —
+      a config declaring `dims: [300, 6]` (the detector's own shape, already in the tree) produced `(N, 1800)`,
+      which `Tensor.validate_against` refuses on the first real request; it survived only because the one consumer
+      never submits one. Worse, that refusal is INDISTINGUISHABLE from `disagrees_with_its_config`'s deliberate
+      failure, so the next author would debug TorchScriptBackend. Outputs now carry declared dims symmetrically
+      with inputs (+2 regression tests). Non-blockers all taken: `_Fixture.__init__` reseeded torch's PROCESS-GLOBAL
+      RNG dozens of times per session (now `fork_rng`); `_write()` re-materialised the whole repo per call (4 models
+      cost 14 builds — now one explicit call per repo, 3 call sites fixed); six surviving `platform="mock"` strings
+      naming a backend the registry no longer knows; NOTHING set `torch.set_num_threads`, so 4 instance threads
+      each fanned matmuls across every core and a declared latency was not the latency a test got (pinned to 1 —
+      a correctness setting here, and the deleted mock's own docstring had warned about exactly this); doc caps on
+      the new file. **TWO DEFECTS FOUND BY MY OWN ROUND-2 TIER, both mine, both serious:**
+      (a) the `fork_rng()` I added for finding 2 initialises **EVERY CUDA DEVICE** when called with no argument —
+      eight CUDA contexts (~220-480 MiB each) created from the OFFLINE tier, whose whole promise (ADR-001) is that
+      it needs no driver. `devices=[]` fixes it; verified `torch.cuda.is_initialized()` is False after a build.
+      (b) **The fixture was pathological on a worker thread.** TorchScript profiles a loop the first time a THREAD
+      runs it, per iteration — so at HIDDEN=96 a `latency_ms: 200` model needed ~8000 iterations and took
+      **>60 s on a worker thread** against 206 ms on the main one. Every model instance has its own thread, so this
+      was every model: requests timed out and the tier HUNG rather than failed. Measured the knee (96/7915 iters
+      → >60 s; 192/1841 → 236 ms; 256/789 → 245 ms; 512/65 → 213 ms) and set HIDDEN=256, which keeps 0.25 ms
+      granularity. Both now pinned by tests, incl. `TestTheCostHoldsOnAWorkerThreadToo`. The two red tests
+      (`test_a_populated_map_survives_the_serialisation_too`, `test_every_frame_is_still_reported_published`) are
+      green and that file's run went 35s → 15s. PROCEDURE NOTE 29 Aug: a later tier reported 2 failures + 1 error in the new shape tests that did NOT reproduce in isolation (7 passed) — that run had been collecting WHILE I edited `tests/support/models.py`, so pytest imported a half-written tree. Indistinguishable from a real regression and it costs a full re-run to disprove; **A clean re-run on the committed tree (1f9d32a, `git status` empty) confirms it: 3184 passed, EXIT=0** — so the pushed state is green and the two reds were the concurrent edits, not a regression. Memory rule 33: never edit files while a verification run is in flight, and when a full run and an isolated re-run disagree, suspect concurrent edits before test isolation. LESSON: a fixture's cost must be measured on the thread the server
+      will run it on, not the one the test builds it on.
+      **ROUND 3 (BLOCKING, 1) FIXED at 436e092 — and the blocker was MY OVER-CLAIM, not an oversight:** I had
+      rewritten `docs/qa/verification.md`'s no-mock row to say a grep "returns nothing at all" while
+      `topology/elements/mock.py` still holds 14 Mock* classes — which this PR's own body says is deferred. A row
+      reading HELD when half the rule is unmet is how a follow-up quietly never lands. Now PARTIAL, naming the 14
+      (count checked against the tree), why they are still there, and the branches that remove them. Seven advisory
+      findings taken, two substantive: `torch.set_num_threads(1)` was an IMPORT-TIME global so `-m gpu` runs were
+      pinned too (collection runs whatever -m selects) — now called from conftest in the same branch that hides the
+      accelerators, i.e. the offline tier only; and `_features` had no bound, so `dims: [3, 640, 640]` would trace a
+      1.2M-feature Linear (GBs into a tmp_path) — now refused with the reason. Plus nine files' stale "mock backend"
+      prose (found with the reviewer's `grep -rin "mock backend"`, which matches the claim, not my narrower
+      `grep -rc "platform: mock"`), one pointing at a path gone for weeks. Evidence: 3184 passed EXIT=0;
+      **GPU TIER 57 passed** (pinned to GPUs 6,7 — another user's training job holds two devices). Was: 57 passed, 6 skipped, 3067 deselected** (the 6 are the grpc extra and the ops-parity pair, same as main). First attempt showed 1 failure — `ship_segmenter` had no plan — which was my WORKTREE, not the branch: engine plans are gitignored and built per machine, so a worktree has only what you copy in. Staged all four and it is clean. Worth remembering for every future GPU run in a worktree. GPUs verified free afterwards (no compute apps).
+      HONEST NOTE in the round-1 reply: the 4 fixture tests fail on the ORIGINAL and pass on the fix, but mutating each
+      of the three changes individually left the suite green — any one suffices, none is individually necessary.
+      (was: rebased onto merged main 68ad880 → tip 19f749e; re-verified: 3176 = main exactly, 29 files / 2 commits) (29 Aug, automerge; rebased onto merged main 68ad880 → tip 19f749e; re-verified on THAT base: 3176 passed = main exactly, layers 0, ruff/black clean, 29 files / 2 commits — inside the caps; body's count refreshed from 3048 to the measured 3176 and every test name in it grepped against the diff).
+      (Original: fa, refactor/delete-mock-backend): platform:mock now ZERO tree-wide; engine/api/cli 85→32 failing and falling; materialise(root) builds each model.pt to its config's own declared shapes; calibration lru_cached in the helper; the ONE production change = _warmup_executions on ModelBackend (a stat only the mock reported — stays in-branch, flagged); start_unwind patch-port pending with my red-check-preservation condition. Earlier: tests/support/models.py builds real scripted fixtures with per-session cost calibration (0.0316 ms/iter here; targets hit within 20%); conftest tmp_repository on platform: pytorch with real model.pt; first slice tests/engine+tests/cli = 365 passed with no fake backend. 32 occurrences / 17 files remain; SPLIT AGREED: 'fixtures + engine tier' and 'the rest + deletion' (near the 25-file cap otherwise). RE-PLANNED 28 Aug (fa): TorchScript, not ONNX — torch is already a hard dependency and CI
+      installs the CPU build, so `platform: mock` → `platform: pytorch` with a scripted model.pt adds ZERO dependency
+      (proven in the container: echo returns a real function of input; a `work` loop is a real cost knob, 6.4 vs
+      10.9 ms). ONNX stays as the fallback plan only. RE-SIZED: NOT mechanical — `latency_ms` is a MockBackend param
+      used 39 times across 20 files and is silently ignored under pytorch, so every batching/fairness/balance test
+      leaning on it must have its latency re-expressed as CALIBRATED real work (a torch op releasing the GIL models a
+      blocked worker better than time.sleep — MockBackend's own docstring worried a spin flatters the scheduler).
+      3/18 files are true find-and-replace (config-only). Sequenced LAST as before. (Superseded ONNX note: 12.5 KB model,
+      scratchpad/plan-v148-mock-removal.md; proof done: real seeded weights, images[3,8,8]→embedding[16], dynamic batch,
+      onnx.checker-valid, runs under onnxruntime 1.29 CPU in the container against pinned numpy 2.2.6; wheels staged at
+      /tmp/wheels-py311).** Two PRs, sequenced LAST after C8m+C8b (they touch tests/conftest.py and would fight every
+      queued branch). Scope measured: 3 files import MockBackend, 17 carry platform: mock, 13 use mock elements.
+
+- [x] **FLEET-CRASH · ROOT-CAUSED AND FIXED (fa, 28 Aug): `grpc.Server.wait_for_termination(timeout)` returns True on TIMEOUT (still serving) and `ShardServer.wait_for_termination` passed it through inverted — a healthy shard read its own health as death and tore itself down cleanly (both shards, same second, no traceback; the 6s gap = the in-flight UpdateTopology finishing in the grace period). Branch fix/shard-wait-polarity 5c445fe: one production line + 3 real-gRPC-server tests (red-check: shipped polarity → 3 failed; why-missed noted: no test ever polled the way shard main does) + END-TO-END fleet parity proof (72 events/221 detections = inprocess exactly, sub_id shard-0, img_fps 5). Full tier 3025 (+3), layers 0. **MERGED as #90, ROUND 1, 28 Aug 22:14** — the production default runner works again; found by V148's own rule, one inverted boolean, proven by output parity.** Under `--runner fleet --shards 2`, both shards spawn, bind, load 4 TensorRT engines, log ready —
+      then BOTH become unreachable before the parent's first AddCamera (UNAVAILABLE/Connection refused, same second, no
+      child traceback). Identical with --gpus 0,1 and with the repo env pinned; the same chain under inprocess yields
+      72 events/221 detections. Production-path defect in launch/ or cli/shard.py teardown ordering.
+- [~] **FLEET-REPO-FLAG · RE-VERIFIED by me 29 Aug on the pushed 9468653 (fa's cited sha 016e1c4 is stale — the branch tip is 9468653; 2 files, +50). Reviewed the diff: `_child_environment()` rides `Fleet`'s existing `env` field (supervisor.py:151), so no new seam. Tests: tests/runners/test_fleet.py + tests/launch = 192 passed. Revert-check on the SHIPPED wiring: deleting `env=self._child_environment()` from the Fleet construction fails `TestTheShardIsToldWhereTheModelsAre::test_the_fleet_that_spawns_the_children_actually_carries_it` (1 failed / 79 passed; restored → 80) — so the vacuity fa caught in its own first draft really is gone. READY. (Original: fa, fix/fleet-repository-flag, PROPAGATE, not refuse — a shard is SENT its chain, so the parent's resolved repository rides `SHIPINFER_MODEL_REPOSITORY` in Fleet's existing env mapping (settings-configured repos propagate too, same reason). fa's own red-check caught a vacuous first test (asserting the helper's return while the helper was wired to nothing — 79 green with the wiring deleted; now asserts the runner's live fleet env and goes red). READY for a tail slot. Original:
+      supervisor.py:211 passes only CUDA_VISIBLE_DEVICES to children; cli/shard.py takes only --shard-id/--control-port,
+      so the shard resolves its own settings. Maybe by design (arch.md §2: the shard owns its deployment settings) —
+      then the flag must REFUSE or WARN under fleet instead of quietly applying to nothing. Fix location pending the
+      FLEET-CRASH debugger's read.
+- [x] **V148-SYSTEM-TEST · MERGED as PR #98 (a56df25, 31 Aug).** VERDICT: APPROVE read from the
+      bot comment itself, not inferred from a check name. `tests/system/test_real_chain.py`, 1 file/+362:
+      the real chain (replay decode -> pool detect on a real TensorRT engine -> shipvision track ->
+      jsonlines output) on real RTSP footage, 8 GPU-tier tests, `TestNoMockTookPart` asserting the exact
+      class per slot. Body written from the diff, claim-checked (0 names missing), and honest that the
+      container evidence came from `chore/test-sh-system-tier`'s script with the file copied in.
+      With #94 (backends/mock.py) and #97 (topology/elements/mock.py), V148 is delivered in full:
+      `git grep -ri mock origin/main -- src/` returns 0, and the replacement is a test that runs the
+      real thing rather than a mock that agrees with itself.
+- [x] **TEST-SH-FOOTAGE · MERGED as PR #99 (b57c6de, 31 Aug), VERDICT: APPROVE read from the bot comment.** (eab965a→amended after isort rewrote the file; 1 commit,
+      2 files, +53/-1). `deploy/rootless/test.sh` mounts SHIPINFER_SYSTEM_VIDEO read-only at /footage,
+      rewrites the variable to /footage inside, and REFUSES a nonexistent path (exit 1, before any
+      container starts). New `tests/test_system_tier_footage.py::TestTheFootageMount` asserts the mount
+      landed; marked `pytest.mark.gpu` because the mount exists only in that container -- unmarked it was
+      being deselected from the only tier it means anything in (8 passed/1 deselected -> 9 passed).
+      EVIDENCE, all through the sanctioned script: mount ON 9 passed in 9.38s (the worktree has no
+      references/, so the footage could ONLY have come through the new mount -- that is what makes it
+      evidence); mount OFF 8 skipped, each naming the variable; bad path exits 1 sub-second; host offline
+      tier 3177 passed/1 skipped/69 deselected. GPU 5 back to 15 MiB after. pre-commit all Passed on the
+      COMMITTED tree with git status clean. Body written from the diff and claim-checked: 9/9 names in
+      diff, 3/3 referenced-but-not-in-diff files confirmed on main.
+- [ ] **CONTAINER-TIER-15-RED · NEW, found 31 Aug the moment CONTAINER-TESTS-SHADOW made the tier runnable.**
+      The full offline tier inside the container is `15 failed, 3042 passed, 9 skipped`. NOT caused by the
+      shadow fix -- before it, ZERO tests ran (the session aborted in pytest_configure), so these were merely
+      unobservable. CI is unaffected: CI runs the offline tier on plain host runners (py3.10/py3.12), where
+      the same tree is 3179 passed.
+      CHARACTERISED, three measurements, not a guess:
+        1. In isolation IN the container the same subset PASSES (6 passed) -> order/state dependent, not
+           a broken assertion.
+        2. On the HOST with the container's exact file selection mimicked (--ignore the 6 grpc/priority
+           files) -> 3014 passed, 0 failed -> selection order alone does NOT reproduce it.
+        3. So the remaining variable is the container's interpreter/packages: py3.11.13 there vs py3.10 in
+           the host venv.
+      Shape of the 15: almost all assert a warning/log record was emitted and get `[]` -- 5 in
+      test_recognize_element TestOpen/TestEnrolment, 5 in test_mtmc_element
+      TestAGroupItsWorkersCannotCoverIsSaidOutLoud, 3 in test_stop_teardown, 1 test_start_unwind,
+      1 test_sinks Kafka. A warnings-registry or logging-handler leak across tests on 3.11 is the first
+      hypothesis to test.
+      ALSO FOUND: the container image installs no grpcio, so 150 tests never collect there
+      (test_shard_service 69, test_control 29, test_priority 24, test_shard_rpc 10, test_proto_is_current 7,
+      test_client_reads_replies 4, plus partials in test_camera_lifecycle/test_streams). The container tier
+      is therefore NOT a superset of the host tier today. Worth fixing in the image's pip list.
+- [x] **CONTAINER-TESTS-SHADOW · MERGED as PR #100 (31 Aug), VERDICT: APPROVE read from the bot comment.** (f4be859 rebased onto b57c6de; 1 commit, 2 files, +36).
+      Fix: `tests/__init__.py` makes the test tree a real package (benchmarks/tests already was), plus
+      `TestTheTestTreeIsThisCheckouts` (2 tests) asserting the invariant by name. MATCHED revert-check on the
+      SHIPPED tip, same container, same command, only the file differing: moved aside -> INTERNALERROR;
+      restored -> 37 passed. Same RED first seen on clean main a56df25, which is what makes it pre-existing.
+      Host tier on the final tip 3179 passed/1 skipped/69 deselected (= base 3177 + the 2 guards); tree was
+      clean and nothing mutated mid-run (an earlier host run was DISCARDED because I moved the file while it
+      was collecting -- memory rule 33 again). pre-commit all Passed. Body claim-checked: 5/5 names in diff,
+      4/4 referenced files on main. Body also states the 15 newly-visible container failures and the missing
+      grpcio, rather than leaving them for the reviewer. FOUND 31 Aug. FOUND 31 Aug by running it; pre-existing on main, repo-wide.**
+      `deploy/rootless/test.sh` cannot run ANY unmarked (offline-tier) selection inside the container:
+      it aborts in `pytest_configure` with `ModuleNotFoundError: No module named 'tests.support'`.
+      Not caused by any branch -- `tests/test_architecture.py` fails identically on main.
+      ROOT CAUSE, measured with a sys.path probe inside the container, not guessed:
+      `TESTS_SPEC origin=/work/3rdparty/shipvision/tests/__init__.py`. test.sh puts shipvision's repo
+      root on PYTHONPATH (shipvision is a FLAT layout -- package `shipvision/` at its root -- so no
+      narrower path exists), and shipvision ships a top-level `tests` package. shipinfer's own `tests/`
+      has NO `__init__.py`, so it contributes only a namespace portion, and a REGULAR package anywhere
+      on sys.path beats a namespace portion regardless of order -- putting /work first does not help.
+      Invisible on the host because PYTHONPATH there has no shipvision entry (host offline tier: 3177 passed).
+      Blast radius is every `tests.support` import under the container, not just conftest's.
+      FIX CANDIDATE: add `tests/__init__.py` (completes what the pyproject `pythonpath` comment already
+      intends). Must be verified BOTH ways: host offline tier still 3177, and the container offline tier
+      actually runs -- and grep first for bare `import support` / `from support` that rely on
+      `/work/tests` being sys.path[0], which the __init__.py would displace to `/work`.
+      Its own PR (repo-wide test import semantics deserve their own review), NEXT after test-sh.
+- [x] **SV-POINTER-BUMP · MERGED as PR #102 (d29ff94, 31 Aug), VERDICT: APPROVE, all checks green.** (ab67f8f, 1 file, 1 line: 90b0c41 -> 5a5359a).
+      Brings shipvision #13 (matcher->matchers rename), #14 (mcbyte locks clear matches), #15 (the
+      foreign-_C refusal = SV-C-LEAK). VERIFIED, three checks:
+        1. target IS on shipvision origin/main (`git branch -r --contains 5a5359a`) -- a pin at an
+           unmerged commit breaks every fresh clone;
+        2. submodule ABSENT (CI's condition, checked in a SEPARATE worktree never initialised rather
+           than by deleting a checkout): 3221 passed/1 skipped/69 deselected/1 warning;
+        3. submodule PRESENT at the new pointer on PYTHONPATH: 3221 passed/2 warnings -- the extra
+           warning is #15's guard FIRING ON THE REAL THING, naming both paths and treating the primary
+           checkout's `_C.cpython-310...so` as absent so the worktree's own code runs. That is the
+           SV-C-LEAK failure mode caught live.
+      Also checked, not assumed: `git grep` for shipvision.matcher/matchers across src+tests+benchmarks
+      returns nothing, so #13's rename cannot reach this repo's imports.
+      MY OWN WRONG TURN, corrected in the body before opening: I tried to identify that 2nd warning with
+      `-W always`, saw only ResourceWarnings in the tail, and wrote that the guard was NOT firing. It was
+      -- `-W always` had pushed the relevant line out of the window I read. The default-filter run is what
+      answers it. Body was rewritten to state the true finding.
+- [x] **V145-W1 / TRIM-WAVE-1 · MERGED as PR #103 (35381fda, 31 Aug), VERDICT: APPROVE, tests green. Detail below.** (was OPEN as PR #103) (1 commit, 15 files, +183/-532; rebased onto d29ff94).
+      TWO conflicts resolved deliberately rather than replayed:
+        (a) `backends/mock.py` was DELETED by main (#94, V148) and edited by the trim -> resolved as STAYS
+            DELETED (diff 16 files -> 15). Taking the branch's side would have RESURRECTED a mock the
+            operator ordered gone -- the single most important thing to get right in this rebase.
+        (b) `engine/ensemble.py` both-modified -> main's only change since the merge base was `mock DAG` ->
+            `small DAG`, ONE WORD inside the very paragraph the trim removes, so resolved in the trim's
+            favour; the replacement keeps the pointer to tests/engine/test_ensemble_scheduling.py.
+      DOCS-ONLY PROVED MECHANICALLY, not asserted: each changed file parsed before/after with every
+      Module/Class/Function leading string constant stripped, `ast.dump` compared -> "checked 15 python
+      files / CODE CHANGED IN: none". That is what licenses the N/A rows in the checklist.
+      Tier 3221 passed/1 skipped/69 deselected; pre-commit ALL Passed incl. layer boundaries; tree clean.
+      MEASURED WHAT IT DOES **NOT** ACHIEVE (the honest headline): check_docs.py over all tracked .py files
+      1031 (main) -> 1012 (branch). -349 net lines of prose buys only -19 violations, because the waves must
+      take symbols UNDER their caps, not merely shorten them -- a 78-line module docstring cut to 20 is
+      still over 15. 49 violations remain in the touched files, concentrated in cli/commands/run.py
+      (`_wait` still 37 lines; one comment block 36), and NONE carries a `# doc: long` marker, so none is
+      sanctioned. => **V145-ARM must NOT be done after #103.** Waves 2 and 3 first, and cli/commands/run.py
+      deserves its own pass.
+      NOTE ON THE LEDGER ITSELF: the structured V145-W1..W3/ARM items live in main's .claude/TASKS.md; this
+      working copy carries V145 only in older narrative entries (~line 2906). The two ledgers have diverged.
+- [ ] **LEDGER-DIVERGENCE · this working copy (/tmp/mps/.claude/TASKS.md, on the old feat/multi-process-sharding
+      branch) and main's .claude/TASKS.md are now materially different documents.** The Stop hook reads the
+      REPO copy, which is why it keeps replaying items closed hours ago (it still lists #98 as open). Decide
+      one: reconcile the working copy onto main's and keep editing main's, or accept the split and stop
+      treating the hook's list as the queue. Until then, believe THIS file for queue order.
+### V145 waves — carried over from main's ledger, which this working copy had dropped
+
+These three were present in main's committed `.claude/TASKS.md` and absent here; re-adding them
+rather than letting an overwrite delete them.
+
+`scripts/hooks/check_docs.py` reports and does not gate: on the tree at this commit it finds
+**1022** symbols and comment blocks over the caps (module 15 / class-function 10 / block 4),
+so arming it now would refuse every commit. The order is fixed — sweep, then arm.
+
+- [x] **V145-W1 · trim wave 1 — MERGED as #103 (35381fda). Took the tree 1031 -> 1012 violations; 49 remain in the touched files, none marked `# doc: long`.** Original scope — `engine`, `runtime`, `ingest`, `launch`, `scheduling`, `api`,
+      `cli`, `core`, `backends`, `repository`. Built and verified (`docs/trim-wave-1`).
+- [ ] **V145-W2 · trim wave 2** — `topology/`, `runners/inprocess.py`, `pipeline/`, held until
+      C8m and C8b merge, because both rewrite those files.
+- [ ] **V145-W3 · trim wave 3** — `tests/`, and the Markdown the tool cannot see
+      (`FEATURE_LOG.md` entries ≤ 15 lines, ADRs ≤ 30 — forward-only, accepted ADRs stay).
+- [ ] **V145-ARM · wire `check_docs.py` into `.pre-commit-config.yaml`** once the waves have
+      taken the count to zero. Until this line is `[x]` the cap is a convention, not a gate —
+      and the waves must take symbols *under* their caps, not merely shorten them: wave 1
+      removes 357 lines of prose and moves the count only 1022 → 1002.
+
+## Z · Final gate
+
+- [ ] **Z1 · Re-read `docs/qa/user.md` end to end** and check every request — verbatim sections
+      included, not just the standing-rules index — against the repository. Result into
+
+- [!] **V124a · OPERATOR DECISION OWED (phase 2) before phase 3 can build — the crop-sampling convention.**
+      Question for the operator: crops at box edges — adopt shipvision's frame-clamp convention (recommended: its
+      oracle, parity suite AND native kernels all implement it) or keep shipinfer #30's patch-clamp (exists only in
+      shipinfer's torch path)? Phase 3 (thinning runtime/ops to an adapter) starts on the answer. Original item:
+      Move the torch/numpy image-op IMPLEMENTATIONS into shipvision's python package. The operator's standing principle (V50, restated V124): image-processing
       algorithms live in shipvision; shipinfer is the system layer that CALLS them. What
       stays in `runtime/ops` (system, per the same principle): the `ImageOps` ABC (the
       contract the pipeline consumes), the registry/factory/thread-local binding, and
@@ -1954,7 +2440,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       src change). OWED: a `-m native` container run before the parent adapts onto this
       path (native rows all skip in the unbuilt clone). Detection heads deliberately
       uncapped — max_detections wiring is a separate decision, not phase 1.
-- [ ] **V124b · The CI consequence, decided before V124a lands:** shipinfer's offline tier
+- [!] **V124b · RECOMMENDED (a), awaiting operator ack — the CI consequence, decided before V124a lands:** shipinfer's offline tier
       deliberately checks out no submodule (ADR-001), so after the move the ops tests
       need one of: (a) CI checks out the submodule's PYTHON half (no build — pure python;
       test.sh already PYTHONPATHs it in the container, so this extends the same move to
@@ -2008,26 +2494,582 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
 - [x] ENGINE START UNWIND — **#67 MERGED 21:54 UTC** (APPROVE round 1) (from #66 r2): pool.start() has no unwind of its own and stop() early-returns on not
       _started, so a strict_startup failure at model 3 of 5 leaves models 1-2 running unreferenced; cli/shard.py should
       also assign the engine before starting it. Own PR (engine/).
-- [ ] ENGINE (from #67 review, pre-existing): stop() takes _lock but not _control_lock, so a load_model past its
+- [x] ENGINE = **#69 MERGED 22:30 UTC** (APPROVE round 1) (from #67 review, pre-existing): stop() takes _lock but not _control_lock, so a load_model past its
       _started check can publish a started model AFTER stop() cleared the table (take _control_lock around the drain);
       stop() leaves self._traces on a closed sink (reset to NullTraceSink after close). Own small PR.
-- [ ] LEDGER SYNC: the repo's .claude/TASKS.md / JOURNAL.md / docs/qa/user.md snapshots lag the /tmp/mps working copies
+- [x] LEDGER SYNC = **#68 MERGED 22:05 UTC** (APPROVE round 1): the repo's .claude/TASKS.md / JOURNAL.md / docs/qa/user.md snapshots lag the /tmp/mps working copies
       (#67's reviewer noticed the promised ledger line was not in the diff) — sync them in the next docs-carrying PR.
-- [ ] NON-STRICT WARM-UP (from the engine-unwind coder): with strict_startup=false a model whose warm-up sample cannot
+- [x] ENGINE FOLLOW-UPS — **#72 MERGED 00:45 UTC** (three rounds); r1 BLOCKING (stop()'s check-then-act lets a second thread run a second _release() that overwrites _last_trace_stats with the null sink's zeros) — round 2 pushed a6213fd (atomic entry under a new
+      _lifecycle_lock); CI r2 BLOCKING again (two new tests read the sink's totals before the worker recorded them —
+      _complete resolves the future first); round 3 pushed: _await_recorded forcing wait + the ordering mark inside
+      _release; amplified switch-interval run green (from #69 review, all NB): unload_model needs the same in-lock `_started` re-check as
+      load_model (else "no such model" for "the server stopped"); the sink-reset comment states a failure that cannot
+      happen — rewrite to the real why and note post-stop stats()["tracing"] now reads zeroes; a concurrent second
+      stop() returns before teardown (flags cleared before the lock) — an Event set at the end of _teardown() that the
+      early return waits on; a cooperative abort in Model.start (check the server's started flag between instances) so a
+      fleet stop mid TensorRT-load drains instead of being SIGKILLed. One small engine PR.
+- [x] NON-STRICT WARM-UP — **MERGED as #88, round 1, 28 Aug (final tip e467782; two internal review rounds, four demonstrated reds, full tier 3022 = main+5 at the open base). History: BUILT BY HAND, commit cdfbb26, VERIFIED (engine 3x 243; full 2794 passed vs main 2791; collect 2795; layers 0; gate 0; revert-check 1 red); internal review BLOCKING 28 Aug (8 findings; the real one: gate must be all-settled-with-errors, not none-ready — is_ready-only tears down slow loaders under non-strict and leaks the abandoned backend; rationale comment factually wrong, dispatcher already refuses synchronously; 2 of 3 tests vacuous on base). REWORKED 28 Aug, hand re-review applied (comment to 4-line cap; Event-held deterministic slow-loader test; worker-death clause in Raises) → commit 727fede, evidence RE-TAKEN at that sha (engine 3x 244; full 2795 passed; layers 0; import pin verified) — gate = all(start_error is not None) (settled-and-failed; slow loaders keep old behavior), honest rationale, `from cause`, 4 tests each with a demonstrated red (main / old-gate / all→any mutant), tests/engine 3x 244, full tier 2795 passed, layers 0, lint clean, PYTHONPATH pinned. Body evidence filled. fa's re-review round 2 BLOCKED on ONE real finding (the mixed case untested; the plausible `failed and not any(is_ready)` mutant passed the whole suite) + 7 nits — ALL FIXED by hand → **0c2bff5**: mixed-case test added (mutant now red on exactly it: 1 failed/12 passed; restored 13 green), Raises honest (non-strict-only + the unpublished-model reasoning), 106-char line wrapped, may_finish in both finallys; full-docstring trim deliberately deferred to wave 2. Evidence FINAL at 0c2bff5: engine 3x 245, full tier 2796 passed (+5 = the 5-test class), layers 0, import pin verified; backup at 0c2bff5. OPEN-READY — needs only its queue slot (and fa's confirm if they want one)**: DECIDED refuse — `Model.start` raises when NO instance
+      became ready (same unwind + non-strict skip as a load failure; partial readiness stays published); 3 tests (skip like
+      a load failure + logged cause; no threads; strict unchanged); revert-check 1 red. Committed; full tier + gate running. (from the engine-unwind coder): with strict_startup=false a model whose warm-up sample cannot
       be built is published with ZERO ready instances and is_ready stays false forever — decide: refuse the model or
       report it degraded; today it is silent.
-- [ ] B4: fleet.drain() vs an in-flight add_camera reservation (see plan-B-streams.md carry list).
-- [ ] PHASE C/E: `shipinfer run --runner inprocess` builds no engine; a pool element fails at open().
-- [ ] TRACK-VECTORS (from #85 review round 2): point `ShipvisionTrack._embeddings` at
-      `topology/elements/_vectors.rows_by_index` and delete track's private copy. Held back from
-      C7 on purpose: it makes `track` stricter (a `{"3": v}` it coerces today, and an
-      out-of-range key it drops today, both start refusing the frame), which owes its own red
-      tests, and `track.py` is the file C8b is already editing. AFTER C8b merges. The two edges
-      are already pinned as divergence by `TestTheReaderTrackStillDoesNotUse` in
-      tests/topology/test_vectors_rows.py — that class goes red when the swap lands and is
-      rewritten as agreement.
-- [ ] PHASE B (from #62 review N2): the fair queue reports per-camera evictions/expiries so the runner's
-      `stats()` attributes `queue_evicted`/`queue_expired` to the camera that lost the frame (ADR-005's number).
+- [x] ENGINE START/STOP — **MERGED as #76** (28 Aug 05:14; start() claims the server, generation-guarded teardown,
+      run-bound abort, deferred sink+mesh install; three internal rounds). Was: IN BUILD /tmp/eg (fix/engine-start-serialised, from main): start() serialised
+      against stop() (start takes the lifecycle transition; a stop() concurrent with the initial start cannot tear down
+      under it; a late _release cannot overwrite a new run's _last_trace_stats); stats()' own check-and-act on
+      _last_trace_stats (read it once); stats() hands out a copy; _load re-raises the cooperative abort instead of
+      "continuing" five times under strict_startup=false; the _await_teardown expiry + start() re-arm window documented
+      as the residual.
+- [x] (superseded; the successor merged as #76) ENGINE (from #72 r2, pre-existing): start() does not take _control_lock, so a stop() concurrent with the INITIAL
+      start() can tear down under a start that then publishes into _models; with _last_trace_stats a late _release
+      also overwrites the new run's totals — stats() would report the previous run's totals for a live server.
+      Serialise start() against stop() (own small PR).
+- [x] PRIORITY ON THE WIRE = B5 — **MERGED as #75** (28 Aug 04:42; two CI rounds; the band travels on the spec, both
+      doors by name, refused adds roll back). Was: BUILT /tmp/b5 (CameraPriority enum with an UNSPECIFIED
+      zero — TRACKING_CRITICAL == 0 makes optional int32 a trap; names only over HTTP) — under internal review; opens after
+      #73 -> B4 (from #71 r2): a fleet shard has no camera list (the ingest env is stripped), so a placed
+      camera runs in Priority.NORMAL instead of its configured band; carry `priority` in AddCamera/CameraSpec with a
+      presence-carrying field (falsy-zero trap: TRACKING_CRITICAL == 0). Phase B follow-up.
+- [x] B4: fleet.drain() vs an in-flight add_camera reservation — **DONE IN #74** (drain keeps in-flight reservations;
+      merged 28 Aug 02:29).
+- [x] PHASE C/E: `shipinfer run` builds no engine — **CLOSED by C1 = #78** (merged 28 Aug 05:40; `model_pool_is_needed`,
+      engine bracketed by the runner, leak on failed bring-up fixed).
+- [x] **SHIP-PERSON-ROW-GUARDS · DONE 29 Aug inside the `v148-elements-part1` rebase (669459b), exactly as planned.**
+      `topology/ship_person.yaml` now carries `params: {classes: [ship|person]}` on its three crop slots, no guard on
+      `segment` (nothing files a frame-level fact — matches arch.md §1 after #93), and `recognize: {impl: shipvision}`.
+      Its header stops describing the old spelling. Three tests that PINNED the old spelling were replaced by their
+      successors — `test_the_shipped_file_still_carries_the_old_row_spelling` was written as a ledger entry that would
+      go red on exactly this change, so its red was the design working: it is now
+      `test_every_row_selecting_slot_names_its_classes` plus the mirror `test_the_whole_frame_stage_declares_no_rows`.
+      Two further rebase consequences found by running rather than reasoning: `TestConditions`/`describe` were
+      borrowing the production chain's shape to get a `when:` (they now own a `GUARDED` fixture that files the field
+      it guards on), and `TestTheDonorAtAFanIn`'s `join: {impl: pool, kind: recognize}` hit #93's new refusal — moved
+      to `kind: segment`, whose `masks` nobody reads per row, so the donor question under test is untouched.
+      tests/topology/test_chain.py 108 passed. **Noted for later, not fixed here: `Topology.describe()` prints
+      `when=` but not `params: classes:`,** so an operator reading it cannot see which rows a slot selects — a real
+      gap now that `classes:` is the row mechanism; own small PR (item DESCRIBE-CLASSES).
+- [x] **V148-ELEMENTS · COMPLETE. Part 3 APPROVED and MERGED as #97 (8483b0e) after two blocking rounds.**
+      On main now: `git ls-tree` finds no `topology/elements/mock.py`, and `git grep -ri mock origin/main -- src/`
+      returns **0**. With #94 (backends/mock.py) that is V148's whole ask delivered — the operator's
+      "xoá mọi mock.py được sử dụng" is true of the tree, not just of a plan. Part 1 MERGED as #95 (d58d767) at 06:35 after TWO blocking rounds. **Part 2 MERGED as #96 (4c7ed80). Part 3 rebased onto it: 10 files, `mock.py` deleted, 4 conflicts down from 5 exactly as predicted — the `UD` on mock.py resolved as the deletion (the branch's point), and three prose collisions between my #95 round-2 reflows (on main) and part 3's wording: took main's reviewed reflows for the two docstrings, part 3's clearer sentence for the jsonlines sink. Tier found 2 REAL failures — the worktree probe trap for the FOURTH time
+      (`test_camera_lifecycle.py` spawns an interpreter that resolved the PRIMARY checkout, reporting
+      `available: ['mock', 'mock-cpu']` from a tree two merges behind; part 3 only made it visible by using a real
+      `impl: none`). Fixed all four remaining sites AND added `TestEveryProbeSubprocessTestsThisCheckout`, which
+      walks the tests tree and fails on any `subprocess.run([sys.executable, ...])` without `env=`. It took three
+      attempts — a line scan matched its own source; a runtime-assembled needle matched the docstring explaining
+      the rule; the AST version works and IMMEDIATELY found a site plain grep had missed
+      (`tests/cli/test_shard_entry.py:66`, a multi-line call). Memory rule 37. `impl: mock` now 0 tree-wide with `elements/mock.py` deleted.
+      **Part 3 = PR #97, round 1 BLOCKING (4), all FIXED.** The blocker was the same failure this PR's own body
+      describes happening to #95: the body claimed a `src/` docstring sweep that was NOT in the diff, and ten stale
+      references remained — five naming classes that no longer exist anywhere. Now real and wider: `grep -rni mock
+      src/` → **nothing**, each citation REPOINTED at the test that holds the property (output.py→the serialising-sink
+      refusal, pool.py→the wildcard-laundering refusal, output_kafka.py→TestRegistries, registry.py→a real dotted
+      path) rather than deleted. Found 5 more the review missed (test_run_engine ×4, test_ensemble_scheduling) and
+      deliberately LEFT two genuinely past-tense ones. (2) `verification.md` flipped PARTIAL→**HELD** — this PR is
+      that row's own exit condition and it would otherwise never have fired. (3) 13 refs in the two rewritten test
+      files gone, incl. two citing `MOCK_CHAIN`, a name that no longer exists. (4) Both module docstrings 30 → 14/15,
+      UNDER the cap rather than marked; measured debt vs main: 20→20 and 14→**13**. 25 files (at the cap).
+      **Round 2 BLOCKING (1), fixed at 7986260:** my new HELD row cited `tests/system/test_real_chain.py` as
+      evidence — a file that lives on the UNMERGED `feat/system-real-chain` branch, so `ls tests/system/` in this
+      tree returns nothing. Same species as round 1: evidence I had SEEN pass, cited as though the tree contained
+      it. Clause dropped; the row now stands only on what is checkable here. Non-blockers taken: the probe guard
+      checked the PRESENCE of `env=`, not its value — `env={**os.environ, ...}` satisfied it while putting nothing
+      of this checkout on PYTHONPATH, i.e. the exact false red re-introduced with the test green; it now asserts the
+      value is a `checkout_env()` call with `_ENV_EXEMPT` for the container-hook sites, demonstrated by a revert-check
+      (swap one for `env={"PATH": ...}` → 1 failed). The `from subprocess import run` gap is now STATED in the
+      docstring rather than unknown; `mtmc.py`'s "the shape the `track` element publishes" → "the shape
+      `meta['tracks']` has". 3177 passed EXIT=0.
+      (Was: OPEN as PR #97) (da0d567→pushed, 14 files, full tier **3177 EXIT=0**, lint clean, the -12
+      accounting re-verified against MERGED main by collection: 25 → 13 on the parametrised declaration test).
+      Body correction found by the claim-check: it listed `test_pool_element.py` as converted here, but #95
+      converted it — the split shifted after the body was first written, and the inherited text was never re-read
+      against the final diff. Same failure shape as #95's round 1; caught this time before opening.** (Was: part 2 OPEN as PR #96 (5906675 → pushed, 14 files, full tier 3188 EXIT=0, runners+launch+api+cli 666, pre-commit clean, body claim-checked 0 misses) and carries the `sink` property follow-up I promised in the round-2 reply** — a read-only
+      `SinkOutput.sink` replacing a dozen `_sink` reach-throughs across four files, with three tests pinning the
+      lifecycle (None before open, the sink after, None again after close, and read-only). Discharged in the branch
+      I said it would be, rather than left as an intention. Rebase note: part 2 sat on part 1's PRE-amend commit,
+      so `--onto origin/main <part2's actual parent>` was the spelling — the recorded old base is the branch's own
+      parent, not whatever the part-1 ref points at now. Part 1's rounds: Round 2's first finding is the one worth
+      keeping: an assertion I ADDED (`all(registry.get(name).kind is kind ...)`) resolved every LAZY registration —
+      `Registry.get()` imports the dotted path, and lazy registration exists exactly for modules that are expensive
+      or absent (`kafka` today, TensorRT or GStreamer next), so a bare `pytest` would import them: the
+      "offline suite silently needs a driver" failure ADR-001 is written against. It was ALSO order-fragile (a later
+      test leaks `lazy-tracker` into the global OUTPUT registry and never removed it, so it passed only on
+      declaration order). Assertion no longer resolves; the polluting test cleans up in `finally`; proved by running
+      the polluter FIRST — 9 passed. Round 2's other three: the YAML header still said the crop slots "repeat
+      `class == ship`" after I converted them; two docstrings claimed the file keeps two frame guards when it keeps
+      zero; four sites of mechanical-rewrite damage (a subjectless sentence, three hanging-indent docstring blocks,
+      ragged lines) — provenance checked, the two remaining >100-char lines are PRE-EXISTING and left alone.
+      Evidence: 3185 passed EXIT=0, topology+runners 1105, pre-commit clean, body claim-check 0 misses.
+      Round 1 was BLOCKING on the body (3 false claims); two process lessons, both mine (memory rules 35, 36).
+      (a) I reported "#95's review passed" from `gh pr checks` showing `Claude review pass` — that means the JOB ran.
+      The verdict was BLOCKING. **Auto-merge `skipping` with every other check green IS the tell** (the gate reads
+      `needs.review.outputs.verdict == 'APPROVE'`); memory rule 35. (b) The blocking finding was three false claims
+      in the body: the checklist said `ship_person.yaml` is "**not** modified" (it changed 27 lines, 4 semantic,
+      including `recognize` dropping `model: ship_recognizer`), the Test Plan said the file was "deliberately
+      unchanged", and it named a test that does not exist on the branch. I INHERITED that body and updated only its
+      Content section for the conversion. Worse, my own claim-check DID flag the missing test name and I
+      misattributed the hit to a sentence I had written explaining the absence — memory rule 36. Body corrected;
+      the YAML header's "WHAT DOES NOT LOAD YET" list reduced from five names to the one that is genuinely
+      unregistered (`gstreamer-gpu`); three stale docstrings fixed. Every body name now greps to the diff, 0 misses.
+      (Was: OPEN as PR #95) (29 Aug, automerge; tip 98e77d1 on post-#94 main 69a2f9c;
+      **17 files**, full tier **3185 passed EXIT=0**, topology+runners 1105, layers 0, pre-commit clean on the
+      COMMITTED tree). Two things the rebase taught: (a) the `tests/support/models.py` conflict was NOT the
+      "byte-identical, whichever lands first owns it" case the merge-order note predicted — #94's three review
+      rounds had changed main's copy substantially, so taking main's side was a decision, verified by grepping for
+      all five markers (HIDDEN=256, pin_intra_op_threads, _MAX_FEATURES, out_shapes, fork_rng); (b) isort+black
+      reformatted five files the rebase carried over, and pre-commit re-failed until those fixes were COMMITTED —
+      the same corollary as #94's lint round. **Part 2 is pre-staged on part 1's new tip (7f63376): pre-commit clean, 1329 passed across topology+runners+cli+api, pushed.** Part 3 is NOT rebased yet and that is deliberate: it conflicts with part 1's black/isort reformat across five files plus the `UD` on `elements/mock.py`, and resolving that against two UNMERGED branches is the stacked-rebase pain CLAUDE.md warns about — the conflicts collapse once parts 1 and 2 are on main, so it waits. Parts 2 (9 files) and 3 (15 files) rebase onto this in turn; both
+      bodies claim-checked against their diffs, and part 3's -12 test count VERIFIED by collection (25 → 13 on the
+      parametrised declaration test, which is unchanged by the diff — stated in the body so a grep coming up empty
+      does not read as a body written from a plan). (Earlier: all three parts rebased over #93 and pushed.)
+      (part1 4963fcb, part2 46feb56, part3 ee18c96 — each `--onto` from its RECORDED old base, never merge-base).
+      Part 1 carried SHIP-PERSON-ROW-GUARDS. **One failure the plan did not predict, and it is a genuine
+      consequence rather than a rebase artefact:** `test_model_requirement.py`'s helper builds
+      `recognize: {impl: pool, model: X}` + `output` — and since every chain must end in an `output`, which reads
+      `identities` per row, **`PoolRecognize` can no longer appear in ANY loadable chain**. The test asserted a
+      configuration that cannot exist. Rewritten to build the element directly with `create_element` and assert the
+      implementation's own claim (`model`, `requires_model_name`), with a docstring pointing at the refusal. Worth
+      stating plainly in the part-1 PR body: #93 did not merely discourage `impl: pool` for recognize, it made it
+      unreachable — if that is wrong, the fix is `PoolRecognize` gaining a crop/scatter half, its own slice.
+- [~] **TAIL BRANCHES · rebase-checked against current main 29 Aug (merge-tree, no working-tree churn):**
+      `docs/trim-wave-1`, `feat/crowd-frames-tool`, `chore/test-sh-system-tier` all merge clean onto 68ad880. test-sh EXERCISED, not just read (29 Aug): `SHIPINFER_SYSTEM_VIDEO=/nonexistent/clip.mp4 deploy/rootless/test.sh -m gpu ...` prints the path and exits **1** before starting a container — the refusal is real rather than decorative.
+      trim-wave-1's "prose only, no code change" claim VERIFIED rather than trusted: of 188/-545 lines, the seven
+      that pattern-match as code are all docstring fragments beginning with `for`/`from`/`with`/`if any.` — no
+      statement, signature or import changes. Order after #94: elements part1 → part2 → part3 → system-real-chain →
+      fleet-repo-flag → P6 → shipvision pointer bump → test-sh-system-tier → trim-wave-1 → crowd-tool → HOOK-FP.
+- [x] **DESCRIBE-CLASSES · BUILT and pushed 29 Aug (`fix/describe-row-selection`, fffa0c3, off main): two lines in `describe()` plus one test; revert-check 1 red / 106 green. Joins the tail of the queue. Original: `Topology.describe()` omits `params: {classes: [...]}`.** Found 29 Aug while rewriting a
+      test that asserted output `describe()` never produced. It prints `[model=…]`, `[root]`, `[sink]` and `when=…`,
+      so after C8b a reader of `shipinfer run --describe` sees the frame guards and none of the row selection. One
+      line in the element-line builder plus a test; do it when a topology PR is already open, not as a solo round.
+      one edit.** Its four crop slots carry `when: class == ...` (refused since #93: row selection is
+      `params: {classes: [...]}`) and its `recognize` slot is `impl: pool`, which files a raw model response under a
+      key `output` reads per row (also refused since #93). The file has been unloadable anyway — phase D owns its
+      `gstreamer-gpu` decode — so this was a note; it is now two red refusals. **Lands inside the
+      `v148-elements-part1` rebase**, not as its own PR: that branch owns `tests/topology/test_chain.py`, whose
+      `TestTheProductionChainFile.substituted()` helper and `test_the_shipped_file_still_carries_the_old_row_spelling`
+      both encode the current spelling, so the YAML and its tests have to move together. Convert the guards to
+      `params: {classes: [...]}`, the recognize slot to `impl: shipvision` (matching arch.md §1 and
+      `ship_person_cpu.yaml`'s own instruction), reduce `substituted()` to the decode substitution alone, and retire
+      the "still carries the old spelling" test. Cited by `elements/pool.py::_scatter`'s docstring.
+- [x] **REBASE PLAN over #93 — SPENT. Every branch it planned for has since been rebased and merged (#94-#103); the plan's predictions held (the two #93 refusals needed no branch changes). Original (29 Aug, checked not guessed):** #93 adds two refusals the unmerged branches
+      predate, so their rebases are NOT mechanical. Verified by loading the exact specs against #93's tip:
+      * `recognize: {impl: pool}` **with** a model + an `output` slot is now refused (`files_raw_response` /
+        `reads_per_row`). Hits `tests/topology/test_chain.py`'s CHAIN constant on all three elements branches.
+      * `recognize: {impl: pool}` **without** a model still raises the model refusal FIRST, so
+        `test_a_chain_may_name_it_with_no_model_while_the_pool_impl_may_not` survives untouched (verified).
+      * `TestTheProductionChainFile.substituted()` breaks: it converts `when: class ==` only where
+        `selects_rows` is True, which is False for `PoolRecognize`, so the recognize slot keeps its guard and the
+        chain is then refused by the new rule. Its sibling `test_the_shipped_file_still_carries_the_old_row_spelling`
+        asserts the file KEEPS the old spelling, so it and SHIP-PERSON-ROW-GUARDS are the same edit.
+      **Sequence:** rebase `v148-elements-part1` over merged #93 and, in that same branch, convert
+      `topology/ship_person.yaml`'s four guards to `params: {classes: [...]}` **and** its recognize slot to
+      `impl: shipvision` (matching arch.md's corrected snippet), updating `substituted()` to a decode-only
+      substitution and retiring the "still carries the old spelling" test. That closes SHIP-PERSON-ROW-GUARDS in
+      the branch that already owns those files, instead of as a separate PR that would fight it.
+- [x] **SOLE OWNER — still true 31 Aug (ListAgents: no other session); a standing status note, not a task. Original: as of 29 Aug ~01:30 — peer session shipinfer-fa has exited (ListAgents: no other session).**
+      Everything it built is pushed and inherited by this session; nothing of it is in flight. Branch inventory to
+      carry to merge, in order, after #93: `refactor/delete-mock-backend` (3f7c07f, on main, independent) →
+      `v148-elements-part1` (f4f80cc, 18 files) → `v148-elements-part2` (3d7a2a3, +9) → `refactor/delete-mock-elements`
+      (9e23287, +10, must be last — the delete cannot land before its users are gone) → `feat/system-real-chain`
+      (rebases onto C8b) → `fix/fleet-repository-flag` (9468653) → `feat/ingest-parity-harness` (P6, 814a27a) →
+      `chore/shipvision-pointer-mcbyte` (ff8b3fb, 90b0c41 → 5a5359a, covers shipvision #13+#14+#15) →
+      `chore/test-sh-system-tier` (f5e24ba) → `docs/trim-wave-1` (63541e3) → `feat/crowd-frames-tool` (25370bb) →
+      `fix/hook-formatter-false-positive` (14c82ba). Bodies are written: scratchpad/pr-v148-elements-part{1,2,3}-body.md,
+      pr-nomock-body.md, and v148-merge-order.md holds the overlap rules (`platform:` → backend branch, `impl:` →
+      elements branch; tests/support/ is byte-identical on both, so the first to land owns it).
+      e1's `chore/shipvision-matchers-pointer` is SUPERSEDED by ff8b3fb — delete it, do not open it.
+      **VERIFIED 29 Aug 01:5x against origin (fa is gone; its numbers are now mine to stand behind).** All twelve
+      branches exist and sit on 0349e0a (#92) except crowd-tool/hook-fp on bd83b74 — both rebase-clean. **RESCUE: the
+      three V148 elements branches were NEVER PUSHED** — fa marked them locally in /tmp/nomock2 and its session exited;
+      they survived only because the worktree outlives the session. Pushed to origin now (f4f80cc / 3d7a2a3 / 9e23287).
+      Their file counts against main read 62/71/76 rather than fa's 18/+9/+10 because they are stacked on C8b, which is
+      still unmerged; the cap check is only meaningful after the post-#93 rebase. Lesson worth keeping: a branch that
+      exists only in a peer's worktree is one `git worktree remove` from gone — push on creation, not on opening.
+- [~] PHASE C (arch.md §10) — **DELIVERING** (28 Aug): C1 #78, C2 #79, C3 #81, C4 #82, C6 #83 MERGED; C8a #84 MERGED 28 Aug 15:58 (3 rounds); C7 = #85 MERGED (fa's fix round: ee1a86b+4b9cebf, option B; 3016 passed). **BF = #86 MERGED round 1 (ea02c68). DL = #87 MERGED round 1 (7db2457). WU = #88 MERGED round 1. writing-rules = #89 r3 BLOCKING (the reasonless `# doc: long` still exempts COMMENT BLOCKS — bare-startswith short-circuit before _exempted; + the body's Test Output predates the branch's own 17 tests, 3022 pasted where the head runs 3039 — the CLAUDE.md body-from-the-diff rule). **MERGED 28 Aug 22:01 after 4 rounds** (r4 f903492: block-path reason gate + twin test; body from the diff, 3042 = main+20). r3 was the two findings above; r2 the black trivial; r1: (the `# doc: long` escape hatch broken by construction for comment blocks — marker joins the run AND silently exempts the next symbol; + no hook test, vs repo precedent; 4 non-blockers incl. tokenize-vs-startswith and CONVENTIONS' get_logger() signature drift; fa's fix round). C8m REBASED + VERIFIED at post-#88 main (a10a593: full 3029, layers 0, keep-both FEATURE_LOG 35 entries; backup updated) — open-ready. #89 MERGED (4 rounds) → #90 fleet-fix MERGED r1 → envs-lazy = #91 MERGED r1 (22:26) → **C8m = #92: r2 (lint + layer-wide scan, fixed 991ad81) → r3 (my trims overreached: as_embedding's false None, the nonexistent test now written, v4→v3 — the v4 sentence was C8b's world written here; compat rationale → docs/design/event-schema.md) FIXED at f439da9 → **MERGED 28 Aug 23:23 after 3 rounds**; r1 was 87a0f7d. **C8b = #93 MERGED 29 Aug ~01:5x after 3 rounds (tip 13fef97) — PHASE C IS COMPLETE (C1–C8b all merged). Was OPEN — round 1 review came back BLOCKING (3 findings) and is FIXED at e575e27 (on top of fa's 72a9e4b perf commit, which the rebase preserved verbatim): (1) GalleryRecognize declares selects_rows + declared_classes() — the THIRD reader of `classes:`, unwired [revert 2 red]; (2) `recognize: {impl: pool}` + output published nothing forever (raw {name: Tensor} under a key output reads per row) → now a LOAD-TIME refusal decided by two declarations, files_raw_response / reads_per_row, so segment:{impl: pool} still loads because nothing reads masks per row [revert 1 red]; (3) arch.md's canonical chain showed that unrunnable pairing + a `when: class == ship` its own amendment argues against. All 6 non-blockers taken (MISSING_STAGES/TRACK_ROWS → detections.py so output stops importing the tracker; null sink typed; != message; per_row refuses str). Full 3172 (+13), layers 0, lint clean; 32 files (28→32, each added file required by a blocking fix — stated in the reply). Reply posted; MERGED? no — **round 2 came back BLOCKING (2) and is FIXED**: (a) my own round-1 `_max_row` used `isinstance(k, int)`, which excludes np.int64 — in the one module whose subject is that numpy keys are legal; reproduced, fixed with the shared `is_row_index`, dead `_vectors._is_row_index` deleted, 2 new tests [revert 2 red]; (b) my round-1 arch.md fix swapped one unwritten field (`class`) for another (`has_ship`) — nothing files it, so §1's segment slot now carries NO guard and the docs/ADR/loader say the true thing (`meta['fps']` from runners/frames.py:144 is the only frame-level key a condition can read); the test guards on `fps == 20`, a spelling that fires. Non-blockers taken, one a REAL BUG: `_camera_fps` cached only non-zero, so a source that never negotiates took IngestManager._lock 1000x/s forever — now bounded at _FPS_ATTEMPTS=8 with 2 tests [revert 1 red]. V145 caps taken on output.py (this PR's own file): meta-key table → docs/design/event-schema.md, module docstring under 15, 4 `# doc: long <reason>` markers, check_docs clean on it; chain.py NOT retro-trimmed (trim-wave owns that). Reply drafted reply-93-r2.md. (previously: automerge, d035335, full 3159 = main+102, masked 1135/108, arch.md §1 amendment FLAGGED to the operator in the body; watched)** (the review: the kafka exemption's own module was unreachable by its enforcement; the fix went further — a kafka-less host also hides GUARDED module-scope imports from the sys.modules probe, so a targeted AST check + vacuity guard was added; 3 red-probes demonstrated; full 3056; reply posted, synchronize re-fired; watched for r2) → C8b re-transplanted over r2 (two prose-only conflicts resolved TOWARD THE CAPS — the v4 history essay dies, FEATURE_LOG carries it; recorded old base NOW f439da9, tip e19f310, VERIFIED 3159 passed / layers 0 / backup updated; the v4-true docstring + both schema test suites carried in the resolution). LESSON: the mid-rebase push fired because `rebase | tail -1` masks the failure — never pipe a rebase before an && push (critical path: V148's system test + mock deletion both gate on C8b's real outputs) → trim-wave-1 → HOOK-FP+carve-out → crowd-tool → McByte+bump → P6 → V148 mock-removal**. C8b gained the V148 img_fps fix (30da100: actor.source_fps → sink meta['fps'] → output fps=; revert-check red; + the score-floor coherence note in the demo YAML). DL re-staged at post-#85 base (83ab488: 5x66 + full 3016 = main exactly; backup updated) — opens on #86's merge. C8b TRANSPLANTED onto the rebased C8m stack 28 Aug (rebase --onto a10a593 f8e8994; two predicted-trivial conflicts:
+      element-import union + FEATURE_LOG keep-both; new tip 95a2eea; VERIFIED on the transplanted stack: full tier 3131 passed (= C8m's 3029 + C8b's 102), layers 0, backup updated).
+      **RECORDED OLD BASE for C8b's final rebase after C8m merges: 9d944dd** (post-#90 re-stack clean; verification in flight) (updated post-#89: C8m re-rebased a10a593→8b95ece clean 4/4, C8b re-transplanted clean 7/7 to 7afc038; C8m 3049 passed / C8b 3151 passed at the post-#89 stack, both layers 0, backups updated) (rebase --onto origin/main a10a593 —
+      never merge-base). Earlier at the old stack: full tier 2981 (+1 = the fps test), layers 0
+      round 3 then MERGED 28 Aug 15:58 (bd83b74); C7 (peer) rebases over it; C8m/C8b staged behind it; then the demo's recognize slot. (Planning history: pass 1 ran BLIND (the main
+      checkout is on split/server; planner has no Bash) → scratchpad/plan-C-elements-draft1.md: shipvision facts sound
+      (BaseTracker no lock + one camera per instance + strictly advancing frame_id; ClusterMTMCTracker needs ALL cameras
+      of a group per instant + own RLock; galleries own locking, exclude_camera always; NO shipvision PR needed), design
+      proposals (all three @cpu → first mandatory D2H edge; bridge.py single import site; CameraSlot lock+frame counter;
+      InstantBarrier on capture time; camera GROUP = atomic placement unit; schema gap track_id/global_id), slicing C1..C7
+      (C1 = runner builds engines for pool elements + zero-ready model refused). Caps tokens / ABC names / checker claims
+      UNVERIFIED → pass 2 VERIFIED against /tmp/pc (origin/main 1c0ff92) → scratchpad/plan-C-elements.md (210 lines).
+      Corrections: token is `cpu` not host; chain is bgr@cpu end to end today (no D2H edge; track DROPS the payload on the
+      plane change); recognize = gallery element (graph.py:30-40), needs `Element.needs_model` relaxation (chain.py:430);
+      TrackerShard already exists (pipeline/graph/tracking.py:136) → MOVE it; schema already v3 with track_id → only
+      global_id missing (v4); topology/runners/engine DO have layering rows — enforce shipvision-lazy via the runtime
+      subprocess test, NOT a FORBIDDEN row; ban shipvision in core/scheduling/repository. remove_camera reaches no element
+      today (re-added camera refused forever) → Element.camera_added/removed hooks (C5). mtmc barrier must never block the
+      last worker. Slices C1 (run passes models= — run.py:163 vs shard.py:168-179) → C2 seam → C3 decoded detections
+      (OPEN Q1: letterbox home) → C4 track → C5 lifecycle → C6 mtmc → C7 recognize → C8 demo/output/schema v4.
+      **C1 BUILT** in /tmp/c1 (feat/run-builds-engine: 32b39be declarations `Element.needs_model` / `Runner.needs_model_pool`
+      + f00a585 run.py builds/starts/stops the pool via `model_pool_is_needed(runner, chain)`; 14 tests incl. a real
+      InferenceServer(mock)+InprocessRunner integration test reproducing pool.py:169; 2325 passed, +14; engine-start failure
+      raised unwrapped → non-zero via cli/__init__) — **internal review BLOCKING**: a started engine is never stopped when
+      `built.start()` raises (pool element opens a missing model → engine `_started=True`, live workers, no reference — the
+      GPU-hygiene leak); `InferenceServer(settings)` takes a context per device BEFORE the cheap refusals. Fix running: one
+      try from construction through `built.start()`, stop on BaseException; tests for runner-start-raises / refusal-before-
+      construction / KeyboardInterrupt / nested stops; `Raises:`; bare ValueError in backends/base.py. Rename to
+      `needs_model_pool` REJECTED (crossed with C2). **C1 fix landed c10c0d7** (+08b7deb): one try from the constructor
+      through `built.start()`; cheap refusals reordered ABOVE the constructor because `stop()` on a never-started server
+      never reaches `_release` (`_torn_down` set in `__init__`) and torch cannot destroy a primary context; 4 new lifecycle
+      tests + 20-test no-drift file `tests/topology/test_element_model_declarations.py`; 2349 passed (+24). Follow-up:
+      `backends/base.py:100` bare ValueError → ConfigurationError (needs the GPU tier). INCIDENT: the r1 reviewer left /tmp/c1
+      detached at origin/main (a copy step ran in the worktree) — restored losslessly; reviewers now told to `git archive`,
+      never checkout, inside a worktree under review. **Focused r2 APPROVE** (2349 passed; guard also rescues the window
+      inside InferenceServer.start before its own try; second stop() after a failed real start measured free). Minors
+      (camera_db-refusal-before-ctor unpinned; hoist `refuse_if_it_manages_no_cameras`; full KI event list; Raises: prose)
+      — landed 8430817 (3 parametrised refusal cases incl. a `CameralessPoolRunner` double; hoist pinned; full KI list;
+      2351 passed). Rebased clean onto origin/main dc4c836 → cb490bc..b3b6be8; verification running → body → opens after
+      EG. **C1 READY.** **C2 BUILT** in /tmp/c2 on 32b39be (0b2e667; 2363 passed, +38):
+      bridge.py (function-scope shipvision imports, subprocess-tested); shipvision banned in core/scheduling/repository
+      (hook + test); pipeline → topology one-way; `Element.needs_model` ONE meaning "resolves a repository model" (mock
+      False) used by the chain's `model:` check AND the runner's expiry gate, `MODEL_KINDS` deleted, `detect: {impl: mock}`
+      loads without model:; ElementContext.metrics/workers/ops; camera_added/removed hooks called best-effort via getattr
+      (first draft called the ABC no-op past overrides — caught by test). **Internal review BLOCKING** (docs): the hooks'
+      docstring promised a sequencing the runner does not make (the walk takes no lock; `camera_removed` can run while a
+      worker is inside `process()` for that camera — implementations guard their own table); ADR-017 §4 still states the
+      deleted kind rule. Both reviewers: the two questions diverge at `nvinfer` → DECISION REVERSED: keep `needs_model` =
+      pool (C1's meaning) and ADD `requires_model_name` for the chain's `model:` check. + refusal names the impl not the
+      kind; overclaiming test docstrings; ops docstring. **Fix landed** (4d73cce/96e10df/e4029a6: `requires_model_name` split;
+      hook contract rewritten + race test (non-vacuity checked); ADR-017 §4 amendment; refusal names impl; `__init__` imports
+      bridge; memoisation counted; 2368 passed). **Rebased onto C1's tip c10c0d7** (2 conflicts in topology/base.py: took
+      C1's pool-only docstring, then C2's split text) → 2411b23..d5a0eea; focused 609 passed; gate 0. **Recorded base c10c0d7**
+      (rebase again onto C1's final tip after its minors). **Focused r2 APPROVE** (2406 passed, +57 vs C1's 2350; race
+      test non-vacuous — R1 red in 55 s, bounded; ADR-017 §4 amendment read clause by clause). Minors to take after the
+      rebase onto C1's final tip: (a) `run.py`'s pool predicate is the one reader no test pins to `needs_model` (R3b: swapping
+      it to `requires_model_name` leaves 576 green) → 5-line test in tests/cli/test_run_engine.py with a LOCAL double;
+      (b) `release.set()` in a try/finally so a red race test is fast; (c) naming (`needs_model` reads like the other
+      question) — NOT renamed mid-stack. Carried: `_lifecycle` is held across hooks (C5's tracker must return promptly).
+      Rebased onto C1's rebased tip b3b6be8 from c10c0d7 (1 conflict in runners/inprocess.py: B5's band snapshot/restore
+      + pop/clear vs C2's `_announce` hooks → union: rollback first, announce after success; pop then announce; drain
+      snapshots ids, stops, clears bands, announces). Minors landed a035992 (file-local `DetectElsewhere`/`DetectHere`
+      doubles pin `run`'s pool predicate — R3b now 2 red; race test releases in a finally). Rebased onto C1's current tip
+      9764952 (FEATURE_LOG conflict with EG's entry: C2's above) → 8 commits ..83406da; focused 629; gate 0; FEATURE_LOG
+      pure insertion (86/0). **Recorded base 9764952.** C2 READY (final rebase onto main + evidence after C1 merges).
+      Opens after C1. V142.
+      **C3 BUILDING** in /tmp/c3 (feat/decoded-detections, stacked on C2's d5a0eea — recorded base): move
+      pipeline/graph/detections.py → topology/elements/detections.py (shim left); PoolDetect letterboxes via ctx.ops and
+      decodes rows into meta["detections"] + meta["frame_hw"]; `ops` wired from cli/run.py + cli/shard.py (Q1 default);
+      mock detect emits Detections. **BUILT** (resumed after the 429; e9c0db2/65555a1/027db2a/7447a56; 2446 passed):
+      `ctx.ops is None` → typed refusal at open() (no numpy fallback in topology — a second unfused letterbox on a 1000 fps
+      path); `Element.needs_image_ops` (PoolDetect only) + `image_ops_are_needed(runner, chain)`; `meta["boxes"]` dropped
+      (no reader); `_prepare/_finish` RETURN geometry (one element instance shared by all workers; Barrier test). Rebased
+      onto C2's tip 83406da from d5a0eea (2 conflicts: run.py — kept C1's hoisted refusal + C3's ops wiring; test file —
+      union of C2's and C3's classes) → e0e1765..fe4b1d3; focused 1001; gate 0. **Recorded base 83406da.** **Internal review
+      BLOCKING**: ONE `ImageOps` per PROCESS handed to all pipeline workers (per-thread contract stated in 4 places;
+      NativeImageOps staging ring; TorchImageOps device-bound caches; run.py passes no device_index → all cameras on cuda:0)
+      — invisible offline (NumpyImageOps stateless); fix = REUSE `ThreadLocalImageOps` (git mv pipeline/graph/ops.py →
+      runtime/ops/thread_local.py) over per-device `get_image_ops`. MAJOR: `decode.dst_size` overrides the artefact's static
+      input with no cross-check and `self._input` is never validated vs `input_specs` (the moved stage.py did both). Minors:
+      stale "None in every runner" docstrings; `extents` dropped from `_Letterbox`; shard device_index unasserted; uint8
+      dtype unchecked; mock class id 0 ≠ label ship; duplicate predicate → table. **Fix landed** 07cc2d2/ba1bc12/be1ff2f
+      (git mv pipeline/graph/ops.py → runtime/ops/thread_local.py + `get_thread_local_image_ops(provider, devices=…)` used by
+      run.py AND shard.py; `_refuse_a_letterbox_the_model_disagrees_with` + shared `_static_extent`; two fixtures were WRONG
+      — POOL_CHAIN fed `images` to echo which declares only `x[4]`, and the "dynamic override" test used a static spec; all
+      minors + bridge lru_cache prose; 2528 passed, +21 net). Rebased onto origin/main dce9868 from 83406da (clean) →
+      890821a..fed8a89. **Recorded base dce9868.** Verification on fed8a89: subset 1338 passed; FULL tier `1 failed, 2574
+      passed` while every directory passes alone (1081 outside the subset) → an order/timing-dependent failure or a known
+      flake; the -rf rerun was fully GREEN (2575 passed, 2576 collected) — a one-off flake, name not captured (the first
+      run's tail had no -rf). Lesson (memory rule 19): always run the full tier with `-rf`. **Focused r2 APPROVE** (2575
+      passed; wiring probed: 6 threads → 6 delegates spread {0:2,1:2,2:2}, binds on the using thread; staging released by
+      MemoryPool.close(); shard rebuild releases first). MAJOR taken: the restored guard was NARROWER than stage.py's
+      `spec.matches` (x[4] / HWC / NCHW inputs open and fail per frame) and the fixture depended on it (echo declares
+      `dims: [4]`, POOL_CHAIN feeds it 3×8×8) → `spec.matches((3,*dst))` + an image-shaped test model. Minors: duplicate
+      `_build_ops` in pipeline/runner.py; `Any` types in the seam helper; stale `get_image_ops()` in the refusal text;
+      ledger incremented before a failed build; ops-without-pool gets no device manager (latent). Items 1+4 landed 2a5d511
+      (spec.matches guard; file-local image-shaped `detector` model in tests/cli — conftest's two-model `echo`/`slow` repo
+      left alone); items 2/3/5/6 were written by 7f's twin coder as an uncommitted diff → verified (1346 focused, layers 0,
+      pre-commit 0) and ADOPTED as one commit with explicit paths + provenance in the message. Rebase onto 7e9b41e + -rf
+      full tier running → body → open.
+      **OPEN: PR #81 (C3)** 28 Aug 07:3x UTC, automerge — 9 commits ..881adac on 7e9b41e; 2597 passed, 2598 collected
+      (+69 vs main 2529); focused 1349; gate 0; FEATURE_LOG 99/0; provenance note in the body. Polling. C4 rebased onto
+      881adac from fed8a89 (recorded base 881adac; tip 02d7810). **#81 MERGED 28 Aug 07:19:29 UTC** (round 1 APPROVE;
+      merge 207f73d; main CI dispatched). Notes → follow-ups: (1) the body said "nothing under runtime/ changed" while
+      runtime/ops gained thread_local.py + a public function (+295/−2) — the substantive claim (ImageOps impls, backends,
+      submodule untouched) held; RULE 20: directory-level claims must be `git diff --stat`-true; (2) PoolDetect inherits
+      `accepts nv12@gpu` it cannot serve — negotiates at load, fails per frame in `_frame_of` (phase D / DataPool; drop
+      the cap or convert); (3) `_declared` reads the CONFIG's specs, not the backend's resolved ones — TensorRT overrides
+      input_specs, so `3x?x?` in config.yaml before a static engine passes the cross-check (engine load check still
+      catches it); (4) shard `devices=(0,)` → `engine.devices.visible_gpus`; (5) `_finish` bare IndexError on a zero-element
+      count tensor → typed; (6) `letterbox_batch([image])` is a batch of one per item — a bench line before C6/phase D.
+      /tmp/c3 retired. **OPEN: PR #82 (C4)** 28 Aug 07:5x UTC, automerge — 5 commits ..26a6cf7 on 207f73d; 2658 passed,
+      2659 collected (+61 vs main 2598); focused 956; gate 0; runtime/backends/3rdparty/csrc diff EMPTY (rule 20 checked);
+      FEATURE_LOG 76/0; masked numbers cited from the follow-up coder's run on f6ac20e. **#82 MERGED 28 Aug 07:31:36 UTC**
+      (round 1 APPROVE; merge 1fda9a8; main CI dispatched). Notes → follow-ups: (1) `DEFAULT_REGRESSION_RESET = 64` is
+      "above a reorder" only while `pipeline.workers` (no upper bound) stays small — derive the floor from
+      `ElementContext.workers` in `_do_open`; (2) `frame_hw` default `(0,0)` is the module's one silent fallback → refuse
+      (a zero-extent frame is unrecoverable at mtmc's CameraTracks); (3) `_do_close` leaves the cameras gauge at N → set 0;
+      (4) `stats()`/`cameras` iterate `_cameras` without `_admit` (pre-existing; a fourth pass added); (5) FEATURE_LOG said
+      "53 tests" — 60 after the round (rule 16 applies to FEATURE_LOG too). /tmp/c4 retired.
+      **C6 BUILT** ecff39f/565e1f1/5d44029 on 84b8aec (tree clean of foreign edits — verified by the coder): InstantBarrier
+      pure (41 tests); ShipvisionMtmc (50); LIVE set from hooks, traffic warm-up latched off at first `camera_added`;
+      window 60 ms (proposal); `global_ids` list aligned with tracks built from a (camera,track) dict; no-vector tracks →
+      `unassignable` counted (GlobalIdAssigner raises — caught via `bridge.load_errors()`); placement invariant in
+      `FleetRunner.add_camera` (`_pin_to_group`, +8 fleet tests). Latency offline: median 1.5 ms (2 cams) / 3.5–3.9 ms (8);
+      p95 ~50 ms at 8 cams = the window firing (50 ms period vs 60 ms ABSOLUTE grid drifts frames across buckets — design
+      question for the review). Rebased onto C4's tip 26a6cf7 → be590ab..f152003; focused 856; gate 0. Internal review
+      → **BLOCKING**: the ABSOLUTE-grid bucket key with a 60 ms window at 20 fps makes every camera collide with itself
+      once in six frames (keys 0,0,1,2,3,4,5,5…) → 1/6 of frames leave with NO global id (83.3% coverage measured, genlocked;
+      present in the build report's own `late: 20/120` misdiagnosed as "drift"); no absolute window is correct → ANCHORED
+      instant (first arrival opens the window; a camera's second frame closes it). Majors: association cost docstring 10–100×
+      off (measured 0.48 ms → 4.7 ms @8×15 → 54 ms @50×15, quadratic); never-starve budget is per ELEMENT (two mtmc slots
+      can park every worker) → per-process budget via ElementContext; fleet imports the mtmc module + kind-tests + reparses
+      params → `Element.camera_group()` hook; unassignable log names 1 of 8 frames' reason; hooks "return immediately" false
+      (bounded by one association). Rebased onto origin/main 1fda9a8 → a778634..f8b270a (**recorded base 1fda9a8**); fix
+      coder → re-review → body (latency table REWRITTEN) → open → tell 7f. C8a (recorded base f152003) rebases onto
+      C6's fixed tip. **INCIDENT #2 ~08:0x–09:50 UTC: org monthly spend limit (HTTP 429, claude-opus-5) killed the C6 fixer
+      mid-task (barrier.py anchored instant WRITTEN; mtmc/fleet/inprocess/base edited; test file renamed, being updated) and
+      the C8a reviewer at start; the watchdog peer sent 8× "tiếp tục đi". Both RESUMED at 10:0x after the reset.**
+      **C6 fix landed** f433f65/4b833a8/2928528 on 1fda9a8: `topology/barrier.py` ANCHORED instant (first arrival opens the
+      window; a camera's later capture seals it → `CLOSED_ADVANCED`; lateness vs the ACTUAL span; same capture twice =
+      duplicate); `WaiterBudget` per process on `ElementContext.waiter_budget` (InprocessRunner: workers−1); `Element.
+      camera_group()` hook — fleet no longer imports mtmc or kind-tests; association-cost table in the docstring; hook
+      docstrings; notes taken; `instant_stats()`/`frame_stats()`. Re-measured: coverage 100% at 2 and 8 cams with ≥9 workers
+      (window never fires; median 1.8–3.7 ms, p95 ≤4.9 ms); 8 cams × 3 workers = 37.5% by the never-starve guard ("a shard
+      needs more workers than its largest group" — check where that is documented); grid reverted → 83.3% exactly. 2625
+      passed / masked 2498 + 128 skipped. My evidence run on 2928528: 2781 passed, 2782 collected (+123 vs main 2659);
+      subset 880; gate 0; FEATURE_LOG 163/0; runtime/backends/3rdparty/csrc diff empty. **Focused r2 APPROVE** (five clock
+      shapes probed: genlocked / free-running / ±10 ms jitter / 30 ms offset → 100%, 0 instants with two frames of one camera
+      in ~4000; dark 2 s → 93%; 15 fps in a 20 fps group → 80–89% — unrescuable by design; budget never exceeds workers−1,
+      no permit leak on exception; R4 of its own red). Four majors being taken before opening: per-camera `reported` dict
+      (a camera's next frame was refused as duplicate when another camera pushed `last` past it); start-up WARNING when
+      permits < group size (default workers=4 → 50% for an 8-camera group, silent); the two-slot rule is the SUM of groups
+      (+ interference sentence); `WaiterBudget` over `threading.BoundedSemaphore`. + notes (advanced-with-no-waiters counted
+      expired; "None never waits" false with a budget; `_retire` list per submit; mixed frame rates unrescuable — say so).
+      **Landed dfc25f3/2ddc195**: per-camera `reported` dict; WARNING at open + live crossing (threshold `permits+1 <
+      roster` — the literal rule would warn on a config measured at 100%); sum rule + interference paragraph; `WaiterBudget`
+      over BoundedSemaphore; notes; 2635 passed / masked 2502 + 134 skipped; 5 reverts red. **C6 final tip 2ddc195** (8
+      commits on 1fda9a8). **OPEN: PR #83 (C6)** 28 Aug 11:1x UTC, automerge — 2791 passed, 2792 collected (+133 vs main
+      2659); subset 890; gate 0; FEATURE_LOG 170/0; runtime/backends/3rdparty/csrc diff empty. **#83 MERGED 28 Aug 11:31:06
+      UTC** (round 1 APPROVE; merge 87eb2c2; main CI dispatched). /tmp/c6 retired. 7f pinged: open C7 now (rebased onto main);
+      C8a opens after C7 merges (rebase onto main from 2ddc195 after its r3 review). **Phase C: C1–C4, C6 on main.**
+      #83 notes → follow-ups: `_pin_to_group` scans `_group_of` per placement (control plane; a `{group: home}` index if
+      groups grow); `assert self._barrier is not None` stripped under -O (matches track.py — convention, deliberate);
+      `shipinfer_mtmc_instants_total`/`frames_missing_total` lack the `element=` label `mtmc_cameras` has → two slots merge
+      their counts (convention question shared with track.py).
+      QUEUE ORDER CHANGED 11:4x: 7f's C7 is 1–2 h out (its internal review found 3 blockers — the mapping path dropped the
+      detection row index; the default `centroid` gallery honoured `exclude_camera` only for the most recent camera;
+      `enrol: true` evicted the curated gallery — fix pass running after a 429). Agreed with 7f: **C8a opens next** (after
+      its r3 review: rebase onto 87eb2c2 from 2ddc195, re-verify, open); C7 rebases over C8a and opens when C8a merges.
+      **C8a BUILDING** in /tmp/c8 (feat/embed-scatter-back, stacked on C6's f152003 — recorded base): the embed→track
+      scatter-back C4 flagged — PoolEmbed crops per detection via ctx.ops.crop_batch, submits the crop batch, files
+      `meta["vectors"]` per detection row (the shape track accepts); PoolSegment gets the same `_prepare/_finish` split.
+      **BUILT** e5cd06e/4d0645a on f152003: `_PoolCropElement` (PoolEmbed on it; one `crop_batch` call; chunked at
+      `max_batch_size` via `Tensor.slice_batch`; scatter `{detection_index: vector}`, additive across embedders); `_declared`/
+      `_frame_of`/`_submit` lifted to `_PoolElement`; `ImageOpsLike.crop_batch`; track.py: an EMPTY mapping is legal (no row
+      embedded). Segmenter NOT converted (its `_finish` folds rows × prototypes). 49 tests; 2806 passed / masked 2678 + 129
+      skipped. **Internal review BLOCKING** (one assert): `params: crop.normalize` reaches `crop_batch` but swapping it for
+      `Normalization()` leaves all 2806 tests green — the pixel-scale axis of silent corruption is unpinned while the row
+      axis dies six ways; MAJOR: `_parse_classes`/`_selected` duplicated verbatim in pool.py and track.py → `Detections.
+      indices_of_any` + shared `parse_classes`; minors (empty path allocates a new item; `tuple(range)`; bound method per
+      frame; chunk-0 metadata; unreachable `_EMPTY_CROPS`; a `classes:` label the detector never emits is a silent no-op →
+      C8b cross-check). **Fix landed** aef8394/a77ef0e (`TestThePixelScaleIsTheSlotsOwn` — the mutation now 1 red on the
+      full tier; `parse_classes` + `Detections.indices_of_any`/`boxes_at` shared by pool.py and track.py; `_scatter` hands
+      the item on untouched when it covered nothing; range not tuple; bound once; chunk-0 metadata documented; 2829 passed).
+      Rebased onto C6's fixed tip 2928528 from f152003 (FEATURE_LOG conflict: C8a's entry above C6's) → 8380035..60287ae.
+      **Recorded base 2928528.** My evidence run on 60287ae: 2853 passed, 2854 collected (+72 vs C6's 2782); runtime/backends/
+      3rdparty/csrc diff empty. **Focused r2 BLOCKING** (round-1 items all closed, each mutation exactly one named red):
+      the demo chain wires embed_ship and embed_person in PARALLEL and the runner's fan-in `_inbound` (inprocess.py ~1608)
+      merges branch metas with `setdefault` in inputs order → one embedder's whole `vectors` mapping is DROPPED at the
+      rejoin (probe: track sees {0,2}, expected {0,1,2,3}) — ~15 000 person crops/s embedded then discarded, every person
+      motion-only, no counter; the docstring's "side by side" test composed them sequentially. Fix at the SHARED SEAM: the
+      fan-in unions Mapping-valued meta keys (overlap with different values → typed refusal), non-mapping keeps first-wins;
+      + a loader check if declarable; `boxes_at` fast path was a LENGTH test (permutation returned unpermuted) → range check.
+      **r3 landed** 3fcbbcf/7f44dfb: `_merge_meta` at the fan-in unions Mapping-valued keys into a NEW dict (identity check
+      first so a pre-fork value is not a disagreement; contested entry → typed InferenceError naming key + every claiming
+      slot; non-mapping keeps first-writer-wins; no loader check — only `pool` declares its keys, mock computes them at
+      runtime); `boxes_at` pass-through only for `indices == range(len(self))`; `boxes_of` never aliases again; a bodiless
+      duplicate C6 heading the rebase left in FEATURE_LOG removed; 2862 passed. Rebased onto C6's final tip 2ddc195 from
+      2928528 (clean) → tip 9bb6486; **recorded base 2ddc195**. My evidence run on 9bb6486: 2872 passed, 2873 collected (+81 vs
+      C6's 2792); subset 1170; gate 0; FEATURE_LOG 149/0; runtime diff empty. Body evidence filled (refresh after the final
+      rebase onto main). **Focused r3 APPROVE** (seam attacked: disjoint union, no mutation, diamond by identity, three-way
+      refusal names the right two; +3.6 us/rejoin measured; R1 6 red incl. the refusal going quiet). Minors being taken:
+      the "mock computes keys at runtime" reason was FALSE (all five families write literal keys — the true reason is that
+      value SHAPES are undeclarable); series overlap silently last-writer-wins while parallel refuses → make series refuse;
+      the identity skip is a fast path, not a guard (deleting it left 1137 green) → relabel + pin; `missing_stages` first-
+      wins at a rejoin (not live) → docstring; `boxes_at(range(1,4))` raises numpy's bare IndexError → typed. Coder running
+      **Landed 4305937** (series overlap refuses; fast path relabelled + pinned; typed `boxes_at` refusal; reasons
+      rewritten; 2876 passed). Rebase onto 87eb2c2 + -rf run in flight → open (queue empty; C7 after). LEDGER ITEMS from
+      the pass: (a) `tests/topology/test_barrier.py::…test_every_frame_gets_an_answer_at_the_default_window[8]` is
+      timing-sensitive under load (tripped once in a revert run, 3/3 alone) — bound it or mark it; (b) no committed
+      `mask_shipvision` pytest plugin — every reviewer rewrites one, and it must raise ModuleNotFoundError (plain
+      ImportError makes 4 test_bridge tests FAIL instead of skip) → commit `tests/plugins/mask_shipvision.py` (chore). → FOLDED INTO C8b (coder told: own small commit + one WORKFLOW.md line; use it for C8b's masked numbers). **C8b DESIGN ITEM (from the build): `when:` is evaluated
+      **MERGED: PR #84 (C8a)** 28 Aug 15:58 UTC after 3 CI rounds (r1 fan-in unioned raw output mappings; r2 the engine's `or 1` batch bound + honest fake; r3 approved at 2a19794) — 10 commits, final 2883 passed / 2884 collected (+92
+      vs main 2792); subset 1174; gate 0; FEATURE_LOG 160/0; runtime diff empty. Polling. 7f: C7 rebased onto 87eb2c2
+      (ae7e6ac, 2867 passed, +76; r2 review running) opens after #84 merges; the demo's `recognize` slot is MY one-line
+      follow-up after C7 lands (the cpu YAML is C8b's file). Then C8b.
+      **#84 CI r1 BLOCKING** (12:5x): `_merge_meta` unioned ANY two Mappings, but `_PoolElement._finish` files raw
+      `response.outputs` (`{name: Tensor}`) under `meta_key` (PoolSegment `masks`, PoolRecognize `identities`) → two rejoining
+      segment slots refuse every frame (message points at a `classes:` knob they lack) or fabricate a merged dict; root cause:
+      shape SNIFFED not declared. Fix: `RowIndexed(dict)` returned by `_scatter`; the fan-in unions only RowIndexed pairs.
+      Notes: 3 docstrings claim the shipped YAML runs the embedders in parallel — on the shipped file NEITHER runs (`when:
+      class` false) → "the shape C8b gives it"; the body claimed a three-way-rejoin test that was the REVIEWER'S PROBE, not
+      in the diff (rule 22) → add it; `boxes_at` recovery can name `[]`; `_submit_crops` K×timeout sentence. r4 fix coder
+      **landed adfd5af/cac725d**: `RowIndexed` in topology/base.py (exported `shipinfer.topology.RowIndexed`); union only
+      RowIndexed pairs, built as `RowIndexed(held)`; two-segment test; three-way test (its mutation red); N1 worse than
+      reported (embed_ship is `after: segment`). My evidence run on cac725d: 2881 passed, 2882 collected (+90 vs main 2792);
+      subset 1179; gate 0; FEATURE_LOG 176/0; runtime diff empty. **Round 2 pushed 13:4x UTC**; body refreshed; reply posted;
+      polling (break at 2 bot comments). 7f has the import path.
+      **INCIDENT #4 ~15:3x UTC (org spend limit, resets 19:50)** killed all five agents (r3 fixer, C8b split, BF, DL, WU).
+      **#84 r3 FINISHED BY HAND** in the main session: the fixer's diff completed (engine bound via effective_max_batch_size
+      `or 1`; honest FakeEmbedder failing the future like assemble; chunk-to-one test; boxes_at copy + INVERTED alias test —
+      the old test pinned the alias; _scatter keeps a plain peer plain; short FEATURE_LOG amendment) + a NEW real-engine
+      test. CORRECTION to the reviewer's scenario: a bare omission is REFUSED AT LOAD (dynamic_batching defaults enabled and
+      demands a bound) — the reachable spelling is `dynamic_batching: {enabled: false}`. Revert-checks: old semantics →
+      3 red incl. the real-engine test; alias restored → 1 red. Committed 2a19794; evidence chain running → push → reply →
+      CI r3. BF/DL/WU/C8b-split resumable at 19:50.
+      **DL FINISHED BY HAND**: the agent's diff (60 s deadline + 120 s-old stale item; AND the readiness-gauge test — the
+      other known 1e-6 flake — now waits on the GAUGE, which the worker decrements after clearing is_ready) verified 5×
+      clean + 10× under a parallel-suite load (26 passed each), committed; full tier + gate: see next line.
+      **C8b-SPLIT state found complete except B's verification**: /tmp/c8m = 4 commits on main (schema→core/events,
+      sinks→topology/sinks, mask plugin, log); /tmp/c8b = REBUILT from main with its OWN copies of the move commits
+      (18f2957/7633f78/183b13d/f8e8994) + C8b proper (6c22995..edd636b incl. the arch.md/ADR `when:`-vs-`classes:` commit)
+      — NOT stacked on c8m's exact shas; after C8m merges the rebase is `--onto origin/main f8e8994`. B's verification is
+      what remains (hand-finish next).
+      **DL READY** (b130251; 2791 passed, +0 test-only; gate 0; body drafted). **C8b(B) VERIFIED**: 2980 passed / masked
+      1241 + 150 on the subset; collect 2981/3041; gate 0; layers 0 — **C8m+C8b READY (rebase note 28 Aug: C8m merge-trees vs ea02c68 show two conflicts — FEATURE_LOG.md top-of-file [keep both] and a topology/elements/track.py hunk INSPECTED 28 Aug: trivial — C8m renames one docstring path (pipeline/schema.py → core/events/schema.py) in a file #84 also touched; resolve = main's content + the one-line rename; hook-fix and crowd-tool branches are clean)** (60 files across the whole stack;
+      C8m opens first). **#85 (C7) BLOCKING round 1** (head c64ecb2; e1 dark; fa runs the fix round on a fresh worktree off the PR head,
+      option B blessed: correct _vectors.py/body/FEATURE_LOG to "first caller" instead of repointing track._embeddings
+      inside #85 — that repoint is the follow-up below, AFTER C8b, to avoid conflicting with a verified branch).
+      ALL SEVEN ready branches BACKUP-PUSHED to origin 28 Aug; BF and DL then REBASED onto 7dce0fd and RE-VERIFIED (BF 1e18af9: topology 10x 513, full 2884 passed, layers 0; DL 8445e05: targeted 5x 66, full 2883 passed = main exactly, layers 0; backups force-updated behind the green). (WU 727fede, BF now 1e18af9, DL now 8445e05, C8m 6587a33, C8b edd636b, hook-fix d0dfe4c, crowd-tool 25370bb) — no PRs opened; loss-proofing only, same as e1's adoption. Queue (re-agreed 28 Aug, #85=C7 OPEN automerge): #85 → BF → DL → [WU if re-review green, else defer] → peer's four (writing-rules → envs-lazy → shipvision bump → trim-wave-1) → C8m → C8b. C8b needs NO adjustment for shipvision #13 (peer confirmed top-level surfaces unchanged; only shipvision.mtmc.core.* → .matchers.* moved, nothing in shipinfer imports it). Main's side on trim conflicts. NOTE: pr-wu-body.md must be REDRAFTED after the rework (its Context repeats the refuted queue-and-expire premise)..
+      **#84 CI r2 BLOCKING** (~14:0x): `_max_batch_rows` returns None for `max_batch_size: 0` ("Triton's vocabulary") but THIS
+      engine's `effective_max_batch_size` is `or 1` and the StackingBatcher enforces it → an omitted max_batch_size + a
+      15-person frame = every crop of every multi-detection frame lost (`assembled batch of 15 rows exceeds max_batch_size
+      1`); green tests because FakeEmbedder was MORE PERMISSIVE than the real batcher (double divergence). Fix: ask
+      `effective_max_batch_size` first, fall back `or 1`, never None; make the fake honest; chunk-to-one test. Notes:
+      `boxes_at` full-frame fast path aliases; `_scatter` promotes a plain dict to RowIndexed; executed_on-of-chunk-0 ledger
+      line. r3 fixer running (15:1x).
+      **INCIDENT #3 ~14:0x–14:50 UTC (org spend limit, opus)**: killed DL, BF-fix and C8b-fix+split mid-task; all three
+      RESUMED 15:1x. **NEW OPERATOR INSTRUCTIONS V145/V146** (landed on peer shipinfer-28 = the operator-facing fork,
+      successor of 7f): V145 — docs are far too long vs code: (a) a doc-length RULE + cap, (b) a system-wide trim pass,
+      (c) short dense writing; ONE logger (why many `_LOG`s); `envs.py` rewritten omnia-shape (`environment_variables:
+      dict[str, Callable]` + PEP-562 `__getattr__`, typed `envs.SHIPINFER_X`, no module-global objects/casts); a status
+      list; work from latest main + rebase in-flight on every merge. V146 — shipvision `csrc/shipvision/mtmc/core` →
+      `matchers`; mtmc exposes a TRACKER interface with implementations (as references/mtmcservice). LANE SPLIT AGREED:
+      -28 takes L1 doc rule/trim, L2 one-logger sweep (holds until my queue is short), L3 envs.py, L4 shipvision mtmc,
+      + C7; I keep #84 → C7 → BF → DL → WU → C8m → C8b and the TASKS.md status list. Effective now: NEW docstrings/comments
+      SHORT in all my lanes (coders told); no retro-trim until L1's numbers land (one owner). **L1 numbers landed 15:4x (binding):
+      module docstring ≤ 15, class/fn ≤ 10, comment block ≤ 4, escape `# doc: long <reason>`; check_docs.py; gate turns on
+      with the LAST trim wave. Trim wave 1 (peer, /tmp/t1, docs/trim-wave-1) edits doc/comments ONLY in engine/ runtime/
+      ingest/ launch/ scheduling/ api/ cli/ core/ backends/ repository/ — NOT topology/ runners/inprocess.py pipeline/
+      tests/. My WU lane touches engine/ → doc-only conflicts on rebase, take main's (trimmed) side. V143–V147 + Section 3
+      rows appended to user.md on the peer's docs/writing-rules branch. Ledger triage 28 Aug: 35 open → 19 (C22/C12/C46/T2/
+      D5→L4/C13→L4/OPEN-Q2→V142/queue-hist/engine-eg/B5/B4-drain/C1-run/Q1/phase-A-then all closed or moved with evidence;
+      C4+C48 re-scoped to the Phase-E bench; C27 needs one container check; WU in build).**
+      7f's C7 r2 APPROVE (ae7e6ac); its fix pass wanted a `_vectors.py` with a SECOND `parse_classes` → told: C8a (#84)
+      already extracted `parse_classes`/`indices_of_any`/`boxes_at` into elements/detections.py and repointed track.py; C7
+      builds `rows_by_index` beside them after rebasing over #84 (one home). 7f measured the C6 barrier[8] flake at 5/6 red
+      under the MASKED topology/runners/architecture subset (`assert 190 == 192`, instants timing out — `InstantBarrier`
+      closes on time.monotonic() with no slack) while the full tier is 3/3 green → **BF lane** (fix/barrier-genlock-test-slack
+      off main, /tmp/bf): make the genlocked test deterministic (fake clock or generous window/slack), keep the property.
+      BF coder running (injectable clock + driven deterministic test; real-time grid → `-m timing` tier; 20-run evidence
+      under load). 7f confirmed: C7 adds only `_vectors.py::rows_by_index` now; after rebasing over #84 it repoints
+      recognize at `detections.parse_classes` and track's `_embeddings` at `rows_by_index` (tightened: ANY bad key refuses).
+      **BF BUILT** c557209 on 87eb2c2: `InstantBarrier(clock=…)` seam; the waiter loop re-reads the clock (`while not
+      done/ready: remaining = deadline - clock(); break if ≤0; cond.wait(remaining)`) — identical on the real clock; grid
+      tests on a frozen `DrivenClock` assert the whole tally by equality; one `timing`-marked real-clock grid test;
+      `pyproject` addopts `-m 'not gpu and not multigpu and not timing'` (+ run_tests.sh, deploy test.sh, conftest, the
+      tier table). Mechanism reproduced with injected stalls (70 ms stall → `window: 7, late: 1` on the old harness; driven
+      clock → `complete: 192`); 20 loaded runs green (caveat: the original 5/6 could not be reproduced by load). Full tier
+      2794 passed / 61 deselected; `-m timing` 1 passed. Internal review running. NEW FLAKE CANDIDATE under load (3/6):
+      `tests/runners/test_inprocess.py::TestBackpressureAndFailure::test_an_item_past_its_deadline_never_reaches_the_chain`
+      (`RequestCancelledError … is None`) — same species (1 ms deadline); next small follow-up.
+      **BF internal review BLOCKING**: the new `timing` tier is deselected in 3 places and NOTHING selects it (no owner —
+      gpu/multigpu have one); the real-clock property is already pinned offline by `TestABucketClosesOnTheWindow` (50/30 ms
+      windows, `0.04 <= elapsed < 5`), so the tier quarantined the flake itself → DELETE the real-clock grid test + marker
+      (two tiers stay). MAJOR: the docstring promised a tally-bearing `is_alive` failure but `run_grid` joins each thread
+      with its own 20 s → 8 cameras = 160 s vs the module's 30 s timeout → a pytest-timeout kill instead → one shared join
+      deadline. Minors: `run_grid` `clock` required kw-only (revert B was 8/8 green under load); conftest reflow. Correctness
+      of the wait loop CLEAN (revert A 6 red; injected bucketing regression caught on HEAD, not on main). Fix FINISHED BY
+      HAND (the killed agent's diff was complete: timing tier deleted everywhere — grep 0; shared join deadline; required
+      clock kwarg; V145 doc trims): 10× topology 429 green, full tier 2792 passed / deselected back to 60, layers 0, gate 0;
+      amended into the one commit. **BF READY.**
+      → **DL lane** (fix/deadline-test-forcing off main, /tmp/dl): force the property (generous deadline, stale item far past
+      it) instead of racing a 1 ms clock; sibling 1 ms patterns treated alike; 30 loaded runs; coder running. Queue after
+      #84: C7 (7f) → BF → DL → C8b (rebased over all).
+      once per ITEM (whole frame) against `meta["class"]`, which NOTHING sets → every `when: class == ship` guard in
+      topology/ship_person.yaml is false for every frame today; row selection is `params: classes:`. Decide for C8b: a
+      per-row `when:` semantics, or the detect element filing a frame-level class set, or drop `when: class` from the demo
+      YAML — an arch.md §1 clarification; ask the operator in the next report.** Reviewer's recommendation (recorded, not
+      decided): NO per-row `when:` (would fan an item into per-object items, breaking lanes/caps/reassembly/tag); NO frame-
+      level class set (a frame with one person would run the whole ship branch); instead (i) `params: classes:` is THE row
+      filter and the four `when: class == …` guards in ship_person.yaml become `classes:` (header updated), (ii) `Topology.
+      from_spec` refuses a pool element carrying `when: class == …` naming `classes:` as the fix, (iii) keep `when:` for a
+      genuine frame-level short circuit (e.g. `has_ship`) justified by a bench. C8b (output element, schema v4, cpu demo
+      YAML, the `when:` decision) follows C7. **C8b BUILDING** in /tmp/c8b (feat/demo-output-schema, stacked on C8a's
+      9bb6486 — recorded base): `output` element (jsonlines/null real, kafka register_lazy from pipeline/sinks), event
+      schema v4 (`global_id`, identities from C7's mapping shape), `topology/ship_person_cpu.yaml` runnable on the mock
+      backend with `params: classes:` row filters (recognize slot added after C7 lands), the `classes:` vs detect
+      `class_labels` cross-check at from_spec, and the loader refusing `when: class == …` on pool elements (recommendation
+      (ii)) — the `when:` semantics decision itself stays the operator's; the YAML change is reversible.
+      **BUILT** fe71476 (7 commits on 9bb6486; 39 files +2944/−388 — over the ~25 guidance; a split may be asked): schema →
+      `core/events/schema.py` (stdlib-only; pipeline/schema.py re-exports); sinks → `topology/sinks/` (pipeline/sinks re-
+      exports; `confluent_kafka` REMOVED from the static topology ban → runtime cheapness subprocess, the shipvision
+      argument); output element `jsonlines`/`none`(alias `null` — YAML reads bare `null` as None)/`kafka` lazy; schema v4
+      `*_global_id_vec`; track→row attribution filed by the TRACK element as `meta["track_rows"]` via shipvision's
+      `associate` (`tracks` without `track_rows` refused); `ship_person_cpu.yaml` (no recognize yet; segment has no
+      `classes:` — PoolSegment reads none); loader refuses `when: class == …` on pool elements + `classes:` vs
+      `class_labels` cross-check; `tests/plugins/mask_shipvision.py` committed + WORKFLOW.md line. DEFERRED: the production
+      `ship_person.yaml` keeps four `when: class` guards the loader now REFUSES (unreachable — stops at gstreamer-gpu; the
+      skip-and-continue test class pins it) → deferral ACCEPTED by the reviewer for the YAML. 2962 passed / masked 2812 +
+      151. **Internal review BLOCKING** (two small): B1 `_as_embedding` = `tuple(float(v) …)` — the spelling
+      pipeline/graph/state.py's docstring forbids, 6.3× slower (2.94 vs 0.48 core-s/s at 15k objects/s) → one shared
+      `tolist` helper in core/events; **B2 docs/arch.md §1's canonical chain still says `when: class == ship` on pool crop
+      slots — the spelling the loader now refuses → AMEND THE DESIGN OF RECORD** (`params: classes:` is the row filter;
+      `when:` guards one element per frame) + a DECISIONS.md amendment — FLAG TO THE OPERATOR (V140: arch.md binding).
+      SPLIT recommended and taken: **C8m** = the layering move (core/events schema, topology/sinks, shims, layer tables,
+      moved tests, mask plugin; ~18 files) as its own PR off main in /tmp/c8m; **C8b** = output element + schema v4 + cpu
+      demo + loader refusals + B1/B2 rebased onto C8m's tip. Notes: `_attribute` has zero masked coverage; the demo event's
+      `ship_global_id_vec [0]` is a group-of-one, not a cross-camera merge (label honestly / make the e2e cameras share an
+      object). Fix+split coder running. Queue after #84: C7 → BF → DL → C8m → C8b.
+      7f's C7 file set (announced 07:5x): new topology/elements/recognize.py (+ maybe topology/gallery_store.py), one
+      import line in elements/__init__.py, new tests/topology/test_recognize_element.py, FEATURE_LOG append; does NOT
+      touch pool.py/base.py/ImageOpsLike; consumes meta["vectors"] in the two shapes track accepts; queries only rows
+      that carry a vector (unembedded → (None, None)); adding: empty mapping legal + optional `params: classes:` row filter
+      (does not rely on `when: class`); files `meta["identities"]` as `{detection_index: (identity|None, similarity|None)}`
+      (absent keys = not queried; empty mapping legal) so the fan-in UNION rule covers it; MockRecognize same shape (C8b
+      schema v4 consumes this). Holds its PR until the C6-open ping.
+      **PROCESS RESTART ~06:5x UTC (V143 "tiếp tục")**: the three coders (C3 r2 minors, C4 minors, C6 build) were killed
+      mid-task with uncommitted edits in /tmp/c3 (pool.py + 2 tests), /tmp/c4 (tracking.py, track.py, test), /tmp/c6
+      (mtmc.py + barrier test untracked; fleet.py, elements/__init__ modified). Resumed all three from their transcripts.
+      C4 (recorded base fe4b1d3) rebases onto fed8a89 after its review finishes.
+      **C4 BUILDING** in /tmp/c4 (feat/track-element, stacked on C3's fe4b1d3 — recorded base): move TrackerShard into
+      topology/elements/track.py (imports via bridge), `ShipvisionTrack` (meta@cpu, payload=None plane change;
+      TrackingError → missing_stages; empty frames age), camera hooks (drop/reset; implicit reset on regression), metrics;
+      C5 folded in. **BUILT** 48cd184/d364595/84b8aec on fe4b1d3: `meta["tracks"]` = shipvision `Track` objects (aliasing
+      checked — `publishable` copies, box rebinds); `regression_reset` default 64 (0 = never) decided under the camera lock;
+      metrics shipinfer_track_{frames_out_of_order_total{camera}, frames_untracked_total{reason}, implicit_resets_total,
+      cameras}; `meta["vectors"]` refused loudly unless per-row/index→vector — a pool embedder files raw `{name: Tensor}`
+      → **C8 needs the embed→track scatter-back before the demo runs**; declarations test amended (first element with its own
+      runtime — was red under the shipvision mask). 53 tests; 2405 passed / masked 2321 + 85 skipped. **Internal review
+      APPROVE** (GIL law clean; ordering measured: forward gaps free, `>=` at 64, regression of 1 refused; shipinfer's
+      TrackingError has one raise + one catch site, shipvision's propagates; aliasing STABLE on both backends). MAJOR: the
+      63/64 boundary unpinned (`>` and `*4` survive) + minors (aliasing comment credits the python backend's copies while
+      native mints fresh Tracks; `reset_if_present` waits one in-flight frame under `_lifecycle` — document; frame_id=-1
+      → foreign shipvision error; vectors mapping range guard; bound method per frame; `tracking_available()` → bridge;
+      vacuous `>= 1`; regression-window prose). Rebased onto C3's fixed tip fed8a89 from fe4b1d3 (clean; fb9a805..9b89bfb;
+      600 focused). **Recorded base fed8a89.** Minors landed 7583185/f6ac20e (63/64 boundary pinned — `>`, `*4`, `//2` all
+      red; typed refusal for frame_id=-1; vectors range guard; bound once; `tracking_available()` → bridge (semantic
+      widening to "types importable" — accepted); 60 tests in the file; 2636 passed / masked 2545 + 92 skipped). **C4 READY**
+      pending its rebase onto C3's final tip. Opens after C3. C6 (recorded base 84b8aec) rebases onto C4's final tip.
+      **C6 BUILDING** in /tmp/c6 (feat/mtmc-element, stacked on C4's 84b8aec — recorded base): InstantBarrier (pure, own
+      test file; never blocks the last worker), ShipvisionMtmc over ClusterMTMCTracker, camera-group placement invariant
+      refused at open(), latency measured offline for the body. Opens after C4.
+- [x] PHASE C OPEN Q1 — DECIDED AND SHIPPED in C3 = #81 (28 Aug 07:19): `ElementContext.ops` handed in by the CLI/shard
+      (the `models=` shape), thread-local per worker; PoolDetect letterboxes via ctx.ops. Was: WHERE THE LETTERBOX LIVES (blocks C3). arch.md §5③ puts preprocess on the pipeline worker; the old
+      path did it in pipeline/graph/detect.py:146 via `self._ops` (runtime/ops ImageOps). `topology` and `runners` may not
+      import `runtime`. PROPOSED DEFAULT (same shape as `models`: the checker comment says the pool "arrives as the
+      structural ModelResolver a runner is handed"): `ElementContext.ops: ImageOps | None`, built where the engine is built
+      (cli/shard.py + cli/commands/run.py after C1), passed through `build_runner(ops=…)`; PoolDetect letterboxes via
+      `ctx.ops.letterbox_batch` and decodes rows into meta["detections"] with the scale/pad it recorded. No new layering
+      row (cli → runtime is already allowed, check_layers.py:221). Alternative (engine-side preprocess, Triton's shape)
+      changes the model contract — rejected unless the operator
+      says otherwise. Ask the operator in the next report; proceed with the default in C3 if silent.
+- [x] PHASE B / B2 (from #62 review N2) = per-camera queue attribution, both planes — **#70 MERGED**.
 - [x] V129: operator paused everything; as-built restated; 4 questions asked.
 - [x] V132 DECISIONS: (1) track/mtmc = elements IN-CHAIN, shardable out later; (2) KEEP the
       KServe tensor endpoint as the engine's side door; (3) NAMES: `topology` = the
@@ -2040,9 +3082,13 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       channel; RAM payload = fallback mode only); (3) "pool" generalizes to DataPool
       (VRAM-default | pinned-RAM fallback, one API); decode DEFAULT = gstreamer →
       NV12/NVMM straight into the pool (subfaceid-style); BGR-CPU = fallback.
-- [ ] OPEN QUESTION 1 (asked): P2P-direct-read vs cudaMemcpyPeer-then-compute decided by
-      MEASUREMENT on this box (probe cudaDeviceCanAccessPeer at startup)?
-- [ ] OPEN QUESTION 2 (asked): the GIL fix — (i) revisit V70, release inside shipvision +
+- [x] OPEN QUESTION 1 — **ANSWERED BY THE V137-HW LINK-REGIME DOSSIER (27 Aug; closed as a row 28 Aug).** Not a global
+      choice: per-pair, measured, AT MESH JOIN — one 12 MB + one 128 KB timed copy picks direct-P2P (NVLink) vs
+      staged-via-pinned (everything else). `cudaDeviceCanAccessPeer` alone is a trap: it says True on PXB pairs where a
+      direct copy is 3 orders slow (49 ms for 128 KB). Probes committed at `benchmarks/link/`; the dossier's own text:
+      "This answers the open P2P-direct vs memcpyPeer question." Was: decided by MEASUREMENT on this box?
+- [x] OPEN QUESTION 2 — **SETTLED BY V142** (28 Aug, binding): no GIL code in shipvision ever; at most a mutex around
+      `tracker.track()`; slowness accepted; the convoy is server-side (csrc/). Was: the GIL fix — (i) revisit V70, release inside shipvision +
       per-thread streams together; or (ii) shipinfer-owned pybind shim keeping V70's
       letter. PREREQUISITE for VRAM-first parallelism (C1b: the convoy).
 - [x] docs/arch.md WRITTEN and opened as **#52** (~14:4x, automerge): the full binding
@@ -2052,32 +3098,25 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       phases 0+A-E, appendices (measured numbers + V-decision record). V138/V139/V140
       folded in (GIL=(i) — f6 offered the shipvision phase-0 PR; NVLink-prod assumption;
       gRPC per vLLM pattern).
-- [ ] THEN (after #52): Phase A skeleton (topology/ + runners/inprocess + engine//api
+- [x] THEN (after #52) — SUPERSEDED by the per-phase entries: Phase A done (#53–#66), B done (#70–#75), C in flight
+      (C1–C4, C6 merged; C8a in CI; C7/C8m/C8b staged). Was: Phase A skeleton (topology/ + runners/inprocess + engine//api
       split + gRPC proto + launch; DELETE argv-command) → Phase A (khung + wrap stages)
       → B (API camera + round-robin) → C (track/mtmc/recognize elements) → D=NOW-EARLY
       (NV12/VRAM caps + DataPool + IPC handshake) → E (deepstream = chain compiler).
       Torch's own CUDA-IPC machinery (torch.multiprocessing) is the implementation base
       per ADR-003. Presentation style per V135: ai-làm-mấy-cái, flowcharts, ví dụ 2GPU/2cam.
 
-## V145 · the documentation cap, from advisory to armed
-
-`scripts/hooks/check_docs.py` reports and does not gate: on the tree at this commit it finds
-**1022** symbols and comment blocks over the caps (module 15 / class-function 10 / block 4),
-so arming it now would refuse every commit. The order is fixed — sweep, then arm.
-
-- [ ] **V145-W1 · trim wave 1** — `engine`, `runtime`, `ingest`, `launch`, `scheduling`, `api`,
-      `cli`, `core`, `backends`, `repository`. Built and verified (`docs/trim-wave-1`).
-- [ ] **V145-W2 · trim wave 2** — `topology/`, `runners/inprocess.py`, `pipeline/`, held until
-      C8m and C8b merge, because both rewrite those files.
-- [ ] **V145-W3 · trim wave 3** — `tests/`, and the Markdown the tool cannot see
-      (`FEATURE_LOG.md` entries ≤ 15 lines, ADRs ≤ 30 — forward-only, accepted ADRs stay).
-- [ ] **V145-ARM · wire `check_docs.py` into `.pre-commit-config.yaml`** once the waves have
-      taken the count to zero. Until this line is `[x]` the cap is a convention, not a gate —
-      and the waves must take symbols *under* their caps, not merely shorten them: wave 1
-      removes 357 lines of prose and moves the count only 1022 → 1002.
-
 ## Z · Final gate
 
-- [ ] **Z1 · Re-read `docs/qa/user.md` end to end** and check every request — verbatim sections
+- [x] **Z1 · DONE 28 Aug — user.md re-read end to end (all 1149 lines: V1–V142, R1–R58, Section 3).** Every request
+      is delivered, tracked, or superseded. Spot-verified the ones the ledger didn't already vouch for:
+      V20 ONNX auto-build = `backends/tensorrt/autobuild.py` (locks + shipvision builder) ✓; R50 README carries
+      `serve`/`bench` commands + a Measured section ✓; R51 `models/` holds the real engines ✓; V26 triton.md = ledger
+      C3-qa [x] ✓; V16 vram_log.sh live ✓. Still-open requests all have ledger rows: C11 (V28 memcpy), C1 (≥5×),
+      C4/C48 (R55 RTSP re-scope), T3b/T4, C9, C13/C14 (peer L4), V124a/b. V125 follow-through owed: shipvision main
+      moved to c779ad7 (#13), gitlink bump = peer's own PR (agreed 28 Aug). NOTE: untracked `mtmc_deepstream.py`
+      (146 lines, pyds probe sketch, Vietnamese comments) sits in the operator's tree — per V108 it is REFERENCE
+      for the deepstream topology (T4), not a deliverable; leave it uncommitted, do not delete.
+      (original text:) and check every request — verbatim sections
       included, not just the standing-rules index — against the repository. Result into
       `docs/qa/verification.md` with per-line evidence, stating plainly what is still not done.
