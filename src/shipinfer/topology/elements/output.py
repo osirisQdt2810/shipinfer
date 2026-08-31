@@ -105,7 +105,8 @@ class SinkOutput(Element):
     reads_per_row: ClassVar[tuple[str, ...]] = ("vectors", "identities")
     #: Metadata first, host pixels second. A sink serialises, so it can never read device
     #: memory — declaring ``nv12@gpu`` here is how a chain grows a silent per-frame download
-    #: (arch.md §8), and ``MockCpuOutput`` exists to prove the loader refuses that pairing.
+    #: (arch.md §8). ``test_chain.py::TestRefusals::test_a_serialising_sink_behind_a_device_decoder_is_refused``
+    #: is what proves the loader refuses that pairing.
     #: ``produces`` stays empty, which is what makes this a sink.
     accepts: ClassVar[tuple[str, ...]] = ("meta@cpu", "bgr@cpu")
     #: The name this element resolves in :data:`~shipinfer.topology.sinks.RESULT_SINKS`.

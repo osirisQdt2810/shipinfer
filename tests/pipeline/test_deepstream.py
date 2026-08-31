@@ -49,6 +49,7 @@ from shipinfer.pipeline.metrics import PipelineMetrics
 from shipinfer.pipeline.schema import PerceptionEvent
 from shipinfer.pipeline.sinks import NullResultSink
 from shipinfer.repository import ModelRepository
+from tests.support.subprocess_env import checkout_env
 
 pytestmark = pytest.mark.timeout(60)
 
@@ -150,7 +151,9 @@ import shipinfer.pipeline.deepstream.run
 import shipinfer.runtime.gstreamer
 assert 'gi' not in sys.modules and 'pyds' not in sys.modules
 """
-        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, env=checkout_env()
+        )
 
         assert result.returncode == 0, result.stdout + result.stderr
 

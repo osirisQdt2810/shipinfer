@@ -180,10 +180,9 @@ class ElementSpec(_Strict):
     #: **Not honoured by any runner yet.** ``InprocessRunner`` shares one element instance
     #: across every worker, so with ``workers > 1`` two frames of one camera can be inside a
     #: ``per: camera`` element at the same time and its per-camera order can invert. Nothing
-    #: stateful ships today (the mocks are stateless and a ``pool`` element holds only a model
-    #: handle), so this is a promise not yet kept rather than a live bug. Resolved in phase C,
-    #: either as a per-camera element instance or as a camera-keyed lock around a
-    #: ``per: camera`` element.
+    #: stateful ships today (a ``pool`` element holds only a model handle), so this is a
+    #: promise not yet kept rather than a live bug. Resolved in phase C, either as a
+    #: per-camera element instance or as a camera-keyed lock around a ``per: camera`` element.
     per: Optional[Literal["camera", "frame", "global"]] = None
     #: ``global`` marks an element with one instance for the whole fleet (mtmc). Carried, not
     #: yet interpreted — same phase C caveat as :attr:`per`.
@@ -442,11 +441,9 @@ class Topology:
         # The implementation decides, not the kind. This used to read
         # `kinds[slot] in MODEL_KINDS`, and the kind is the wrong thing to ask twice over:
         #
-        # * `recognize` is a model kind and `impl: shipvision` is a *gallery query* over an
-        #   embedding, with no repository model to name. The kind rule refused that chain at
-        #   load -- "recognize needs `model:`" -- and left no spelling that got past it.
-        # * `impl: mock` is not a model element at all. It invents a box and reads nothing, so
-        #   requiring a `model:` of it was the kind rule insisting on a name nobody reads.
+        # `recognize` is a model kind and `impl: shipvision` is a *gallery query* over an
+        # embedding, with no repository model to name. The kind rule refused that chain at
+        # load -- "recognize needs `model:`" -- and left no spelling that got past it.
         #
         # `Element.requires_model_name` and NOT `Element.needs_model`, which is a different
         # question with a different reader: this one is "must the chain file carry a name?"
@@ -464,9 +461,9 @@ class Topology:
         #
         # A `model:` on an element that does not need one stays *accepted* and ignored,
         # exactly as before: `ElementSpec.model` has always been documented "meaningless for
-        # the rest", `describe()` prints it, and every mock model element in the test suite
-        # carries one it never resolves. Refusing it is a separate decision with its own blast
-        # radius, and this slice is about the requirement, not the surplus.
+        # the rest", `describe()` prints it, and a chain may carry a leftover name nothing
+        # resolves. Refusing it is a separate decision with its own blast radius, and this
+        # slice is about the requirement, not the surplus.
         for slot, element in elements.items():
             if element.requires_model_name and not spec.elements[slot].model:
                 # The element and its implementation, not the kind: the kind decides nothing

@@ -18,11 +18,11 @@ So an element of this family is two declarations and a pass-through:
   than a base class.** ``InprocessRunner._head`` takes it off every root of the chain with
   ``getattr(root.element, "source", "")``, having first checked the root is an
   :attr:`~shipinfer.topology.base.ElementKind.DECODE` element. The empty default is what a
-  decode element outside this family means — ``MockDecode`` invents a frame handle and names
-  no decoder — and the runner reads it as "the chain did not say", leaving ``ingest.backend``
-  and then the environment to decide (``ingest/resolve.py``). An ``isinstance`` against
-  ``_IngestDecode`` would make a private class part of a public seam and would refuse the mock
-  chains every runner test is built on.
+  decode element outside this family means — one that produces frames some other way and
+  names no ingest source — and the runner reads it as "the chain did not say", leaving
+  ``ingest.backend`` and then the environment to decide (``ingest/resolve.py``). An
+  ``isinstance`` against ``_IngestDecode`` would make a private class part of a public seam
+  and would refuse every such element.
 * :attr:`~shipinfer.topology.base.Element.produces` is the head cap of the whole chain — what
   the frames the runner submits actually are. All three implementations here say ``bgr@cpu``,
   because all three of today's sources deliver a host-memory BGR image
@@ -31,9 +31,8 @@ So an element of this family is two declarations and a pass-through:
   it fails to load, which is what ``tests/topology/test_chain.py`` pins.
 * :meth:`_IngestDecode._do_process` is ``item.derive()`` with no ``caps=``: by the time the
   walk reaches this element the frame is already in the item, already carrying the cap the
-  loader negotiated for this element's outbound edge. Stamping ``output_caps[0]`` here — the
-  shortcut the mocks take, and say they are only entitled to — would overwrite a negotiated
-  per-edge cap with a per-element guess.
+  loader negotiated for this element's outbound edge. Stamping ``output_caps[0]`` here would
+  overwrite a negotiated per-edge cap with a per-element guess.
 
 Nothing here imports a decode runtime, at module scope or anywhere else. That is the rule
 this package's ``__init__`` states, and this family keeps it for free: the runtime is loaded
@@ -74,8 +73,7 @@ class _IngestDecode(Element):
 
         No ``caps=``: the runner's frame sink already stamped the cap the loader negotiated
         for this element's outbound edge, and re-stamping ``output_caps[0]`` would replace a
-        per-edge decision with a per-element guess (``elements/mock.py`` explains why the
-        mocks are the only things entitled to that shortcut).
+        per-edge decision with a per-element guess.
         """
         return item.derive()
 

@@ -1,26 +1,17 @@
-"""The in-process runner, end to end over the production chain's wiring with mock elements.
+"""The in-process runner, end to end over the production chain's wiring.
 
-This is the file that says the runner works: nine elements, two branches that split at
-``detect`` and rejoin at ``track``, six frames from three cameras, and the assertion that
-every one of them reaches the sink carrying the tag it arrived with. It runs offline, with no
-GPU and no driver, because every element in it is a mock and
-:class:`~shipinfer.topology.base.Element` constructors are required to be hardware-free — the
-same property that makes ``tests/topology/test_chain.py`` runnable anywhere.
+Nine elements, two branches splitting at ``detect`` and rejoining at ``track``, six frames from
+three cameras, each reaching the sink with the tag it arrived with — offline, no driver, real
+``replay`` decode at the head.
 
-**On the duplicated fixture.** ``MOCK_CHAIN`` below is ``tests/topology/test_chain.py``'s
-chain, adapted: the ``tests/`` directories are not packages (pytest's default import mode
-gives two same-named modules in non-package directories one module name), so there is nothing
-to import it from without inventing a shared test package for one string. It is adapted, not
-copied verbatim — ``detect`` and ``recognize`` carry substitution markers so a test can swap
-in an element that blocks, fails or refuses to open, which is what the edge cases here need.
-``tests/topology/test_chain.py::TestTheProductionChainFile`` is what keeps *both* honest
-against ``topology/ship_person.yaml``.
+The eight slots behind it are **probes declared here**: every property below needs an element
+told to do something no implementation does — block until released, raise one nominated typed
+error, consume one camera's item, refuse to open. The shipped elements' contracts are pinned
+against the real implementations in ``tests/topology/``; nothing here stands in for a shipped
+fake, because there is none.
 
-**Why the assertions read metadata rather than the mocks' counters.** ``_Mock.processes`` is a
-plain int and its docstring says, in as many words, not to reach for it from a multi-threaded
-runner test: with four workers a lost update would make this suite flaky. What is emitted is
-the property anyway — "the segmenter did not run on a person" is a fact about the person's
-event, not about a counter.
+``CHAIN`` is ``test_chain.py``'s chain with substitution markers. Assertions read emitted
+metadata, not ``_Probe`` counters: plain ints drop updates under four workers.
 """
 
 from __future__ import annotations
@@ -53,78 +44,76 @@ from shipinfer.topology import (
     Caps,
     ChainItem,
     ChainSpec,
+    Element,
     ElementContext,
     ElementKind,
+    RowIndexed,
     Topology,
-)
-from shipinfer.topology.elements.mock import (
-    MockDetect,
-    MockOutput,
-    MockRecognize,
-    MockSegment,
 )
 from shipinfer.topology.registry import registry_for
 
-#: ``topology/ship_person.yaml``'s wiring with every implementation replaced by its mock: the
-#: same nine slots, the same ``when:`` conditions repeated on every element of the ship
-#: branch, and the same two ``after:`` lines that spell out the fork and the rejoin. A
-#: **branching** chain, which is the only kind worth running a fan-in merge against.
-MOCK_CHAIN = """
-name: mock_ship_person
+#: ``topology/ship_person.yaml``'s wiring: the same nine slots, the same ``when:`` conditions
+#: repeated on every element of the ship branch, and the same two ``after:`` lines that spell
+#: out the fork and the rejoin. A **branching** chain, which is the only kind worth running a
+#: fan-in merge against. The head is the real ``replay`` element, so every edge is ``bgr@cpu``
+#: until the tracker, exactly as ``topology/ship_person_cpu.yaml`` negotiates.
+CHAIN = """
+name: probe_ship_person
 elements:
-  decode:       {impl: mock}
+  decode:       {impl: replay}
   detect:       {impl: __DETECT__, model: ship_detector, params: __PARAMS__}
   segment:      {impl: __SEGMENT__, model: ship_segmenter, when: class == ship}
-  embed_ship:   {impl: mock, model: ship_embedder, when: class == ship, after: segment}
-  embed_person: {impl: mock, model: person_embedder, when: class == person, after: detect}
+  embed_ship:   {impl: runner-embed, model: ship_embedder, when: class == ship, after: segment}
+  embed_person: {impl: runner-embed, model: person_embedder, when: class == person, after: detect}
   recognize:    {impl: __RECOGNIZE__, model: ship_recognizer, when: class == ship, after: embed_ship}
-  track:        {impl: mock, per: camera, after: [recognize, embed_person]}
-  mtmc:         {impl: mock, scope: global}
-  output:       {impl: mock}
+  track:        {impl: runner-track, per: camera, after: [recognize, embed_person]}
+  mtmc:         {impl: runner-mtmc, scope: global}
+  output:       {impl: runner-sink}
 """
 
 #: A **straight line** with one conditional element in the middle, which is the shape the
 #: branch conditions are actually deployed in and the one where skip-and-continue is the only
 #: thing keeping the sink fed: ``segment`` runs on ships, and a person still has to reach the
-#: output through the gap it leaves. ``MOCK_CHAIN`` cannot show this — every one of its
+#: output through the gap it leaves. ``CHAIN`` cannot show this — every one of its
 #: conditional elements has an unconditional sibling on the other branch, so the item reaches
 #: the tracker either way and a runner that dropped a skipped item would still look correct.
 LINEAR_CHAIN = """
 name: linear
 elements:
-  decode:  {impl: mock}
-  detect:  {impl: mock, model: ship_detector, params: {class: __CLASS__}}
-  segment: {impl: mock, model: ship_segmenter, when: class == ship}
-  output:  {impl: mock}
+  decode:  {impl: replay}
+  detect:  {impl: runner-detect, model: ship_detector, params: {class: __CLASS__}}
+  segment: {impl: runner-segment, model: ship_segmenter, when: class == ship}
+  output:  {impl: runner-sink}
 """
 
 #: A fan-in whose two inbound edges carry **different** negotiated caps: ``detect`` hands
-#: ``track`` the frame (``nv12@gpu``) and ``track_a`` hands it metadata (``meta@cpu``). The
-#: loader nominates ``detect`` as ``track``'s donor, because ``track`` accepts ``nv12@gpu``
-#: first — so when ``detect`` consumes an item there is a contributor left, but not one that
-#: donates under the cap the loader negotiated for the donor's edge. ``MOCK_CHAIN`` cannot
-#: show this: both of *its* fan-in edges are ``nv12@gpu``, so any contributor would do.
+#: ``track`` the frame (``bgr@cpu``) and ``track_a`` hands it metadata (``meta@cpu``). The
+#: loader nominates ``track_a`` as ``track``'s donor, because a tracker accepts ``meta@cpu``
+#: before the frame planes — so when ``track_a`` consumes an item there is a contributor left,
+#: but not one that donates under the cap the loader negotiated for the donor's edge.
+#: ``CHAIN`` cannot show this: both of *its* fan-in edges are ``bgr@cpu``, so any contributor
+#: would do.
 FAN_IN_CHAIN = """
 name: donor_gap
 elements:
-  decode:  {impl: mock}
-  detect:  {impl: runner-drops, model: ship_detector, params: {drop_camera: __DROP__}}
-  track_a: {impl: mock, after: decode}
-  track:   {impl: mock, after: [detect, track_a]}
-  output:  {impl: mock}
+  decode:  {impl: replay}
+  detect:  {impl: runner-detect, model: ship_detector}
+  track_a: {impl: runner-drops-track, after: decode, params: {drop_camera: __DROP__}}
+  track:   {impl: runner-track, after: [detect, track_a]}
+  output:  {impl: runner-sink}
 """
 
 #: A gated detector in front of a ``recognize`` slot the test chooses, so the question "is
-#: this element charged an expiry check?" is asked of exactly one element. In ``MOCK_CHAIN``
+#: this element charged an expiry check?" is asked of exactly one element. In ``CHAIN``
 #: the answer would always come from ``segment``, which is the next element that needs a model
 #: after ``detect`` and would fail the item before ``recognize`` was reached.
 EXPIRY_CHAIN = """
 name: expiry
 elements:
-  decode:    {impl: mock}
+  decode:    {impl: replay}
   detect:    {impl: runner-gate, model: ship_detector}
   recognize: {impl: __RECOGNIZE__, after: detect__MODEL__}
-  output:    {impl: mock}
+  output:    {impl: runner-sink}
 """
 
 #: The slots in the order the loader resolves them, which is the order elements are opened in
@@ -144,6 +133,11 @@ ORDER = (
     "output",
 )
 
+#: The slots whose lifecycle is *counted*. ``decode`` is the shipped ``replay`` element and
+#: keeps no counters -- nothing in production would read them -- so idempotence is asserted
+#: over the eight probes and ``is_open`` covers all nine.
+COUNTED = tuple(slot for slot in ORDER if slot != "decode")
+
 TAGS = (("cam-1", 1), ("cam-1", 2), ("cam-2", 1), ("cam-2", 2), ("cam-3", 1), ("cam-3", 2))
 
 
@@ -156,18 +150,140 @@ TAGS = (("cam-1", 1), ("cam-1", 2), ("cam-2", 1), ("cam-2", 2), ("cam-3", 1), ("
 # outside the chain.
 
 
+class _Probe(Element):
+    """The shared shape of this file's chain: count the lifecycle, add one metadata key.
+
+    ``bgr@cpu`` in and out, which is what a ``replay`` head negotiates all the way to the
+    tracker. Nothing here does any work: the key each subclass adds is a marker so a fan-in
+    merge and a ``when:`` guard have something observable to be right or wrong about, and the
+    values are obviously invented for the same reason.
+    """
+
+    accepts: ClassVar[tuple[str, ...]] = ("bgr@cpu", "nv12@gpu")
+    produces: ClassVar[tuple[str, ...]] = ("bgr@cpu",)
+
+    def __init__(self, name: str, params: Any = None, *, model: str | None = None) -> None:
+        super().__init__(name, params, model=model)
+        self.opens = 0
+        self.processes = 0
+        self.closes = 0
+
+    def _do_open(self, context: ElementContext) -> None:
+        self.opens += 1
+
+    def _do_close(self) -> None:
+        self.closes += 1
+
+    def _meta(self, item: ChainItem) -> dict[str, Any]:
+        return {}
+
+    def _do_process(self, item: ChainItem) -> ChainItem | None:
+        self.processes += 1
+        # `derive`, never a fresh ChainItem: that is what carries the (camera_id, frame_id)
+        # tag forward, and a probe that cut the corner would make these tests agree with a
+        # mistake a real element must not make.
+        return item.derive(caps=self.output_caps[0], **self._meta(item))
+
+
+@registry_for(ElementKind.DETECT).register("runner-detect")
+class ProbeDetect(_Probe):
+    """Files a box and the class its ``params`` name, which is what the ``when:`` guards read."""
+
+    kind: ClassVar[ElementKind] = ElementKind.DETECT
+
+    def _meta(self, item: ChainItem) -> dict[str, Any]:
+        return {"boxes": [(0, 0, 10, 10)], "class": str(self.params.get("class", "ship"))}
+
+
+@registry_for(ElementKind.SEGMENT).register("runner-segment")
+class ProbeSegment(_Probe):
+    kind: ClassVar[ElementKind] = ElementKind.SEGMENT
+
+    def _meta(self, item: ChainItem) -> dict[str, Any]:
+        return {"masks": [[0, 1]]}
+
+
+@registry_for(ElementKind.EMBED).register("runner-embed")
+class ProbeEmbed(_Probe):
+    kind: ClassVar[ElementKind] = ElementKind.EMBED
+
+    def _meta(self, item: ChainItem) -> dict[str, Any]:
+        return {"vectors": [[0.0, 1.0]]}
+
+
+@registry_for(ElementKind.RECOGNIZE).register("runner-recognize")
+class ProbeRecognize(_Probe):
+    """Files the row-indexed shape a real recogniser does, because the fan-in unions it."""
+
+    kind: ClassVar[ElementKind] = ElementKind.RECOGNIZE
+
+    def _meta(self, item: ChainItem) -> dict[str, Any]:
+        return {"identities": RowIndexed({0: ("ship-1", 1.0)})}
+
+
+@registry_for(ElementKind.TRACK).register("runner-track")
+class ProbeTrack(_Probe):
+    """Where the chain leaves the frame behind: ``meta@cpu`` out, as a real tracker does.
+
+    ``accepts`` is the shipped tracker's order (``elements/track.py``) — ``meta@cpu`` before
+    the frame planes — because the loader nominates a fan-in's donor from it, and a probe that
+    reordered it would make :data:`FAN_IN_CHAIN` prove the opposite of what it says.
+    """
+
+    kind: ClassVar[ElementKind] = ElementKind.TRACK
+    accepts: ClassVar[tuple[str, ...]] = ("meta@cpu", "bgr@cpu", "nv12@gpu")
+    produces: ClassVar[tuple[str, ...]] = ("meta@cpu",)
+
+    def _meta(self, item: ChainItem) -> dict[str, Any]:
+        return {"tracks": [1]}
+
+
+@registry_for(ElementKind.MTMC).register("runner-mtmc")
+class ProbeMtmc(_Probe):
+    kind: ClassVar[ElementKind] = ElementKind.MTMC
+    accepts: ClassVar[tuple[str, ...]] = ("meta@cpu",)
+    produces: ClassVar[tuple[str, ...]] = ("meta@cpu",)
+
+    def _meta(self, item: ChainItem) -> dict[str, Any]:
+        return {"global_ids": ["g-1"]}
+
+
+@registry_for(ElementKind.OUTPUT).register("runner-sink")
+class ProbeSink(_Probe):
+    """Keeps the *items* it was handed, not the events they became.
+
+    A shipped ``output`` element assembles a
+    :class:`~shipinfer.core.events.PerceptionEvent` and drops the item, which is right for a
+    deployment and wrong here: what these tests ask is whether the whole chain's contributions
+    arrived on one item with the tag it was submitted under, and an event carries neither.
+    """
+
+    kind: ClassVar[ElementKind] = ElementKind.OUTPUT
+    accepts: ClassVar[tuple[str, ...]] = ("*@*",)
+
+    def __init__(self, name: str, params: Any = None, *, model: str | None = None) -> None:
+        super().__init__(name, params, model=model)
+        self.emitted: list[ChainItem] = []
+
+    def _do_process(self, item: ChainItem) -> ChainItem | None:
+        self.processes += 1
+        self.emitted.append(item)
+        # None because the item is *consumed*, not because anything failed.
+        return None
+
+
 class _Pooled:
-    """Mixin: a mock that declares it resolves a repository model, without owning one.
+    """Mixin: a probe that declares it resolves a repository model, without owning one.
 
     The stand-in for a ``pool`` element, and it has to be a *double* rather than a flag on the
-    shipped mocks. :attr:`~shipinfer.topology.base.Element.needs_model` is what tells the
+    probes below. :attr:`~shipinfer.topology.base.Element.needs_model` is what tells the
     process building a runner to construct an ``InferenceServer`` (``cli/commands/run.py``),
-    so a ``MockDetect`` that answered ``True`` would make a chain of mocks load the whole
+    so a probe that answered ``True`` would make a chain that needs no pool load the whole
     model repository to run elements that invent a box.
 
     What it buys here is the runner's *other* reader of the same declaration: the expiry
     re-check in the walk, which used to ask ``node.kind in MODEL_KINDS``. That question and
-    this one differ for every mock in the file, which is why the gate needs an element that
+    this one differ for every probe in the file, which is why the gate needs an element that
     says yes and there is none to hand.
 
     :attr:`~shipinfer.topology.base.Element.requires_model_name` is deliberately left
@@ -180,17 +296,17 @@ class _Pooled:
 
 
 @registry_for(ElementKind.SEGMENT).register("runner-pooled")
-class PooledSegment(_Pooled, MockSegment):
+class PooledSegment(_Pooled, ProbeSegment):
     """A segmenter that would submit to the pool and sleep on the answer."""
 
 
 @registry_for(ElementKind.RECOGNIZE).register("runner-pooled")
-class PooledRecognize(_Pooled, MockRecognize):
+class PooledRecognize(_Pooled, ProbeRecognize):
     """The same, one kind over, so the gate can be asked about one element at a time."""
 
 
 @registry_for(ElementKind.DETECT).register("runner-gate")
-class GateDetect(MockDetect):
+class GateDetect(ProbeDetect):
     """A detector that parks the worker until a test releases it.
 
     Exists to make backpressure *deterministic*: with the only worker held here, the queue's
@@ -224,11 +340,11 @@ class GateDetect(MockDetect):
 
 
 @registry_for(ElementKind.DETECT).register("runner-typed")
-class TypedFailureDetect(MockDetect):
+class TypedFailureDetect(ProbeDetect):
     """A detector that raises one nominated typed error, exactly as a ``pool`` element does.
 
     ``pool.py`` promises a ``QueueFullError`` from a saturated model queue reaches the
-    submitter untouched; the mock chain runs offline with no model pool, so this is what makes
+    submitter untouched; this chain runs offline with no model pool, so this is what makes
     that promise testable in the offline tier. Params-driven so one chain covers every member
     of the family — including a plain ``ValueError``, which is the case that *must* still be
     wrapped.
@@ -255,14 +371,15 @@ class TypedFailureDetect(MockDetect):
         return super()._do_process(item)
 
 
-@registry_for(ElementKind.DETECT).register("runner-drops")
-class DroppingDetect(MockDetect):
-    """A detector that *consumes* the item for one class instead of handing it on.
+@registry_for(ElementKind.TRACK).register("runner-drops-track")
+class DroppingTrack(ProbeTrack):
+    """A tracker that *consumes* the item for one camera instead of handing it on.
 
     An element returning ``None`` is ordinary — a filter, a sink — and it is what makes a
     fan-in lose its nominated donor mid-run. Params-driven so the same chain can be loaded
     with the donor producing and with it dropping, which is the only way to show the merge
-    rule refuses one and not the other.
+    rule refuses one and not the other. It is the ``track`` kind rather than ``detect``
+    because the donor is the branch carrying ``meta@cpu`` (see :data:`FAN_IN_CHAIN`).
     """
 
     def _do_process(self, item: ChainItem) -> ChainItem | None:
@@ -272,7 +389,7 @@ class DroppingDetect(MockDetect):
 
 
 @registry_for(ElementKind.DETECT).register("runner-boom")
-class BoomDetect(MockDetect):
+class BoomDetect(ProbeDetect):
     """A detector that fails on one nominated frame and works on every other."""
 
     def _do_process(self, item: ChainItem) -> ChainItem | None:
@@ -282,10 +399,8 @@ class BoomDetect(MockDetect):
 
 
 @registry_for(ElementKind.RECOGNIZE).register("runner-unopenable")
-class UnopenableRecognize(MockDetect):
+class UnopenableRecognize(ProbeRecognize):
     """An element that cannot acquire what it needs — a missing model, a dead camera."""
-
-    kind: ClassVar[ElementKind] = ElementKind.RECOGNIZE
 
     def _do_open(self, context: ElementContext) -> None:
         raise ServerStateError("this element cannot open")
@@ -339,14 +454,14 @@ class PausingRunner(InprocessRunner):
 
 def load(
     *,
-    detect: str = "mock",
-    segment: str = "mock",
-    recognize: str = "mock",
+    detect: str = "runner-detect",
+    segment: str = "runner-segment",
+    recognize: str = "runner-recognize",
     params: str = "{class: ship}",
 ) -> Topology:
-    """The mock chain, with the three swappable slots filled in."""
+    """The branching chain, with the three swappable slots filled in."""
     text = (
-        textwrap.dedent(MOCK_CHAIN)
+        textwrap.dedent(CHAIN)
         .replace("__DETECT__", detect)
         .replace("__SEGMENT__", segment)
         .replace("__RECOGNIZE__", recognize)
@@ -386,13 +501,13 @@ def item(camera: str, frame: int, *, captured_ns: int = 0) -> ChainItem:
     """One item as a producer would submit it: a tag and nothing else yet."""
     return ChainItem(
         RequestContext(camera_id=camera, frame_id=frame, captured_ns=captured_ns),
-        Caps.parse("nv12@gpu"),
+        Caps.parse("bgr@cpu"),
     )
 
 
-def sink(chain: Topology) -> MockOutput:
+def sink(chain: Topology) -> ProbeSink:
     element = chain.node("output").element
-    assert isinstance(element, MockOutput)
+    assert isinstance(element, ProbeSink)
     return element
 
 
@@ -504,7 +619,6 @@ class TestTheChainRuns:
 
         for emitted in sink(chain).emitted:
             assert set(emitted.meta) >= {
-                "frame_id",
                 "boxes",
                 "class",
                 "masks",
@@ -626,7 +740,8 @@ class TestTheLifecycle:
         finally:
             runner.stop(timeout_s=5.0)
 
-        assert [chain.node(slot).element.opens for slot in ORDER] == [1] * len(ORDER)
+        assert [chain.node(slot).element.opens for slot in COUNTED] == [1] * len(COUNTED)
+        assert not chain.node("decode").element.is_open, "the real head closed with the rest"
         assert runner.workers == 1
 
     def test_stopping_twice_closes_the_chain_once(self) -> None:
@@ -638,7 +753,7 @@ class TestTheLifecycle:
         runner.stop(timeout_s=5.0)
 
         assert not runner.is_running
-        assert [chain.node(slot).element.closes for slot in ORDER] == [1] * len(ORDER)
+        assert [chain.node(slot).element.closes for slot in COUNTED] == [1] * len(COUNTED)
         assert all(not chain.node(slot).element.is_open for slot in ORDER)
 
     def test_stopping_before_starting_is_a_no_op(self) -> None:
@@ -646,7 +761,7 @@ class TestTheLifecycle:
 
         InprocessRunner(chain).stop()
 
-        assert [chain.node(slot).element.closes for slot in ORDER] == [0] * len(ORDER)
+        assert [chain.node(slot).element.closes for slot in COUNTED] == [0] * len(COUNTED)
 
     def test_a_runner_can_be_restarted(self) -> None:
         """A supervisor restarts a shard; the second cycle must serve traffic, not silence.
@@ -664,7 +779,7 @@ class TestTheLifecycle:
             assert [future.exception() for future in futures] == [None] * 6
             runner.stop(timeout_s=5.0)
 
-        assert [chain.node(slot).element.opens for slot in ORDER] == [2] * len(ORDER)
+        assert [chain.node(slot).element.opens for slot in COUNTED] == [2] * len(COUNTED)
         assert len(sink(chain).emitted) == 12
 
     def test_an_element_that_cannot_open_unwinds_the_ones_before_it(self) -> None:
@@ -683,8 +798,8 @@ class TestTheLifecycle:
             runner.start()
 
         assert not runner.is_running
-        before = ORDER[: ORDER.index("recognize")]
-        after = ORDER[ORDER.index("recognize") + 1 :]
+        before = COUNTED[: COUNTED.index("recognize")]
+        after = COUNTED[COUNTED.index("recognize") + 1 :]
         assert [chain.node(slot).element.opens for slot in before] == [1] * len(before)
         assert [chain.node(slot).element.closes for slot in before] == [1] * len(before)
         assert [chain.node(slot).element.opens for slot in after] == [0] * len(after)
@@ -735,9 +850,9 @@ class TestTheLifecycle:
         Reverse order is the whole reason ``_do_stop`` iterates ``reversed(nodes)``, and
         without this test the loop could iterate forwards and every other assertion in the
         file would still pass — the counters only say *that* each element closed. Recording
-        the order on the instances rather than in the mock class keeps it a property of this
-        test: a shared list in ``topology/elements/mock.py`` would be module state that two
-        tests running in one process could interleave.
+        the order on the instances rather than on the probe class keeps it a property of this
+        test: a class attribute shared by every instance would be module state that two tests
+        running in one process could interleave.
         """
         chain = load()
         closed: list[str] = []
@@ -1370,10 +1485,10 @@ class TestBackpressureAndFailure:
         ``segment`` — the next element that would submit — rather than walked to the sink
         having consumed the whole chain's GPU on a frame nobody can act on any more.
 
-        ``segment`` is a :class:`PooledSegment` rather than the plain mock because the gate
-        asks the *element* whether it resolves a model, and no shipped mock does. It used to
-        ask the kind, which every ``segment`` slot answers the same way — including a mock
-        that never waits for anything.
+        ``segment`` is a :class:`PooledSegment` rather than the plain probe because the gate
+        asks the *element* whether it resolves a model, and a probe does not. It used to ask
+        the kind, which every ``segment`` slot answers the same way — including one that never
+        waits for anything.
         """
         chain = load(detect="runner-gate", segment="runner-pooled")
         gate = chain.node("detect").element
@@ -1404,7 +1519,7 @@ class TestBackpressureAndFailure:
 
         ``recognize`` is a model *kind*, and the gate used to read ``node.kind in
         MODEL_KINDS``, so an element that submits to nothing — a gallery query in phase C, a
-        mock here — was refused an already-late item exactly as a network would be. That is
+        probe here — was refused an already-late item exactly as a network would be. That is
         not a saving: the frame has crossed the whole chain and the only cost left is the
         microseconds this element takes, so dropping it there throws away work already paid
         for and emits nothing.
@@ -1412,7 +1527,7 @@ class TestBackpressureAndFailure:
         Same gate, same 100 ms budget and the same 250 ms overshoot as the test below; the
         difference is only which implementation fills the slot.
         """
-        chain = load_expiry(recognize="mock")
+        chain = load_expiry(recognize="runner-recognize")
         gate = chain.node("detect").element
         assert isinstance(gate, GateDetect)
         runner = running(
@@ -1462,9 +1577,9 @@ class TestBackpressureAndFailure:
     def test_a_fan_in_refuses_to_donate_under_a_cap_nobody_negotiated(self, running) -> None:
         """The donor consumed its item, and the branch left over carries a different cap.
 
-        ``track`` takes the frame from ``detect`` (``nv12@gpu``) and metadata from ``track_a``
-        (``meta@cpu``), and the loader nominated ``detect`` as its donor. With ``detect``
-        consuming this camera's items the only contribution left is the ``meta@cpu`` one — and
+        ``track`` takes the frame from ``detect`` (``bgr@cpu``) and metadata from ``track_a``
+        (``meta@cpu``), and the loader nominated ``track_a`` as its donor. With ``track_a``
+        consuming this camera's items the only contribution left is the ``bgr@cpu`` one — and
         handing *that* payload on as the donation would label an item with a cap the loader
         never negotiated for the donor's edge, which is the relabelling the ``*@*`` fix on the
         ``pool`` element was about. So the item fails, typed, naming both sides.
@@ -1476,8 +1591,8 @@ class TestBackpressureAndFailure:
 
         error = dropped.exception(timeout=10.0)
         assert isinstance(error, InferenceError)
-        assert "track" in str(error) and "detect" in str(error), "both sides are named"
-        assert "nv12@gpu" in str(error), "and the cap that was negotiated"
+        assert "'track'" in str(error) and "'track_a'" in str(error), "both sides are named"
+        assert "meta@cpu" in str(error), "and the cap that was negotiated"
         assert emitted_tags(chain) == set(), "nothing travelled under an unnegotiated cap"
         assert runner.stats()["items"]["failed"] == 1
         assert runner.metrics.items_failed.value(camera="cam-1") == 1
@@ -1596,7 +1711,7 @@ class TestHealthAndStats:
 
         assert health["runner"] == "inprocess"
         assert health["state"] == "stopped"
-        assert health["topology"] == "mock_ship_person"
+        assert health["topology"] == "probe_ship_person"
         assert health["elements"] == dict.fromkeys(ORDER, False)
         assert health["workers"] == {"wanted": 2, "alive": 0}
 
