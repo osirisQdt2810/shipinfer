@@ -1,0 +1,33 @@
+# The taxonomy is the contract: a missing decode runtime is fatal and is never retried, an
+# unreachable stream is retried, and a decode failure reconnects at once.
+scenario fatal_vs_retryable
+records_min 24
+
+empty_read_sleep_ms 0
+empty_reads_before_reconnect 3
+failures_before_unhealthy 3
+reconnect_initial_ms 2
+reconnect_max_ms 8
+reconnect_factor 2.0
+reconnect_jitter 0.0
+
+# SourceUnavailableError: one attempt, UNHEALTHY, and the actor gives up.
+camera cam_fatal
+open SourceUnavailableError no-decoder
+read exhaust
+
+# SourceOpenError: retried, with the backoff growing, until the stream comes back.
+camera cam_retry
+open SourceOpenError refused
+open SourceOpenError refused
+open ok
+read frame
+read exhaust
+
+# FrameDecodeError: the source is torn down and rebuilt at once.
+camera cam_decode
+open ok
+read frame
+read FrameDecodeError eos
+read frame
+read exhaust

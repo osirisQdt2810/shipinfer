@@ -1,0 +1,31 @@
+# One camera through the whole reconnect vocabulary: a broken read, a refused open, an
+# exhausted empty-read budget, a frame that clears it all, and a finite source finishing.
+scenario reconnect
+records_min 30
+
+empty_read_sleep_ms 0
+empty_reads_before_reconnect 3
+failures_before_unhealthy 3
+reconnect_initial_ms 2
+reconnect_max_ms 8
+reconnect_factor 2.0
+reconnect_jitter 0.0
+
+camera cam0
+# Attempt 1 connects; attempt 2 is refused; every later attempt connects (the last entry
+# of each list repeats for ever).
+open ok
+open SourceOpenError refused
+open ok
+# Two frames, then a decode failure: reconnect at once, no empty-read budget spent.
+read frame
+read frame
+read FrameDecodeError eos
+# Three empty reads exhaust the budget and force a teardown+reopen. A connect is not a
+# frame, so the failure count is not cleared by it.
+read empty
+read empty
+read empty
+# A frame clears the failure state, and the finite source then finishes on its own.
+read frame
+read exhaust
