@@ -52,7 +52,13 @@ def _sources(src_dir: Path) -> list[Path]:
 
 
 def _letterbox(image: Image.Image, cell_w: int, cell_h: int) -> Image.Image:
-    """``image`` fit inside a cell, aspect preserved, gray-padded — never distorted."""
+    """``image`` fit inside a cell, aspect preserved, gray-padded — never distorted.
+
+    Not a duplicate of ``NumpyImageOps.letterbox_batch`` (ADR-003), which the yield test does
+    use: that one returns a normalised ``(N, C, H, W)`` float32 tensor for an engine, and
+    getting a pasteable image back out of it would mean denormalising and transposing. This
+    works in uint8 RGB image space at arbitrary cell sizes, which is what compositing needs.
+    """
     scale = min(cell_w / image.width, cell_h / image.height)
     fitted = image.resize(
         (max(1, round(image.width * scale)), max(1, round(image.height * scale))),

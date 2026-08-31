@@ -152,12 +152,14 @@ class TestTheBenchDataAlreadyRepresentsTheFanOutCase:
         )
 
     def test_the_cliff_is_cell_size_not_mosaicing(self, server, tmp_path: Path) -> None:
-        """The 2x2 and 3x3 rows of the table, so three of its four rows are asserted.
+        """The 2x2, 3x3 and 4x4 rows of the table, so every mosaic row is asserted.
 
         2x2 is modestly BETTER than a single photo, which is why the flat claim "composing
-        more people never composes more detectable ones" is wrong as stated and the docstring
-        says cell size instead. The assertion is the ordering, not the bands: exact counts are
-        data-dependent and would rot into a flaky gate.
+        more people never composes more detectable ones" is wrong as stated and the module
+        docstring says cell size instead. The assertion is the ORDERING, not the bands: exact
+        counts are data-dependent and a band would rot into a flaky gate. Measuring 3x3 costs
+        four more inferences and is what makes the table's third row regression-guarded rather
+        than measured once and trusted.
         """
         grids = {
             grid: np.mean(
@@ -168,12 +170,13 @@ class TestTheBenchDataAlreadyRepresentsTheFanOutCase:
                     )
                 ]
             )
-            for grid in (2, 4)
+            for grid in (2, 3, 4)
         }
 
-        assert grids[4] < grids[2], (
-            f"means by grid: {grids}. The 4x4 cliff is the table's headline; if this inverts, "
-            f"the detector's input size changed and the table needs re-measuring"
+        assert grids[4] < grids[3] <= grids[2], (
+            f"means by grid: {grids}. The cliff falls with cell size: 4x4 is the table's "
+            f"headline and 3x3 is no better than a single photo. If this inverts, the "
+            f"detector's input size changed and the table needs re-measuring"
         )
 
     def test_a_four_by_four_mosaic_yields_fewer_not_more(self, server, tmp_path: Path) -> None:
