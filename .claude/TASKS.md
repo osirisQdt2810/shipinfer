@@ -2059,6 +2059,22 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       scripts/emit_parity_golden.py) and states that this tip's re-derivation used NO override.
       Body also describes the .claude/TASKS.md part of the diff (P6-D1/D2/D3 opened), which the sync rule
       requires and which my first draft had omitted.
+- [ ] P6-D1 `CameraHealth.last_error`: pick one spelling across the planes. Python stores
+      f"{type(error).__name__}: {error}" (`src/shipinfer/ingest/camera/actor.py`
+      `_record_failure`); C++ stores `redact_in(reason)`, i.e. `what()` with no type in front
+      (`csrc/shipinfer/ingest/camera/actor.cpp` `record_failure`). The field is served by the
+      health API on both planes. Registered as `last_error_type_prefix` in
+      `benchmarks/parity/known.py`; deleting the entry is part of the fix.
+- [ ] P6-D2 `CameraHealth.consecutive_failures` after a FATAL open: 0 (py) vs 1 (cpp).
+      Python's health reads `backoff.attempts`, and the `SourceUnavailableError` path never
+      calls `next_delay()`; C++ increments `consecutive_failures_` inside `record_failure`.
+      Decide whether a failure that is never retried counts as one. Registered as
+      `fatal_consecutive_failures`.
+- [ ] P6-D3 `CameraActor.stop()` fate stickiness: C++ latches `thread_abandoned_` and answers
+      false for ever (`csrc/shipinfer/ingest/camera/actor.h:139-145`, decided in #39 round 4);
+      Python re-reads `thread.is_alive()`, so a second `stop()` after the abandoned thread
+      exits answers True. Decide whether Python latches too, or the C++ header stays the
+      single statement of it. Registered as `stop_fate_stickiness` (documentary: it shows in
 - [x] **C22 progress (V80/V81).** shipvision: #2 split into #1, #3, #4, #5, #6, #7, #8, #9 — all
       merged, #2 closed; the native sessions in the restructured `csrc/` layout remain (from the
       V79 branch). shipinfer: #8 split into #9, #10, #11, #12, #13, #14, #15 (all merged; csrc took six review
