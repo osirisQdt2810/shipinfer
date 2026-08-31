@@ -5,6 +5,51 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-08-28 — The ingest parity harness: one scenario, two planes, one committed golden (P6 PR-A)
+
+**What.** CLAUDE.md's sync rule says a change to a Python data-plane seam is not finished
+until the C++ seam carries it. Nothing checked. `test_ingest.py` and `test_ingest.cpp` assert
+the same *properties* in two languages, which catches a property somebody deleted and not a
+behaviour that quietly differs. `benchmarks/parity/` is the gate: a line-oriented scenario
+drives the **real `IngestManager`** in both planes against a scripted source, each writes a
+canonical JSONL trace, and both are held to one golden emitted once by the Python plane and
+committed. Per-camera sequences in order; cross-camera interleaving never compared.
+
+**Found on the first run, exactly as the plan expected.** Two real divergences, both in
+`CameraHealth`, both registered in `benchmarks/parity/known.py` with citations on both sides
+and an open ledger line: `last_error` carries a `"<ExceptionType>: "` prefix on the Python
+plane and not on the C++ one; `consecutive_failures` after a fatal open is 0 there and 1
+here. A third, the sticky stop fate (`actor.h:139-145`), is documentary — it shows in no
+trace field. No golden was regenerated and nothing was `xfail`ed; that is the whole point.
+
+**The seam.** `csrc/tests/` gains three header-only support files, off every link line. The
+binary is `test_ingest_parity` so CI's existing `for candidate in csrc/build/test_*` loop
+runs it: **zero workflow changes**. Offline in both planes, and no GPU tier by design.
+
+**What internal review broke, and what it cost (round 2).** Three claims the harness made
+about itself were falsified by running it, and every fix is a test that fails without it:
+
+- The C++ half of the divergence register could be widened with one line and no entry in
+  `known.py` — the mirror test only checked Python → C++. The register is a table now, both
+  halves' id sets must be **equal**, and the binary also fails on an id excused past its own
+  table.
+- `retry.peek_us` could not fail: both planes recomputed `initial · factorⁿ` from the
+  scenario's config, so doubling production `ExponentialBackoff.peek()` left the gate green
+  while the README called the column coverage. Each recorder now mirrors a **production**
+  backoff, stepped in lockstep with the observed failure count; the mutation is red on both
+  planes.
+- The three entries cited ledger items `P6-D1/D2/D3` that did not exist — the test asserted
+  the *shape of a string*. It reads `.claude/TASKS.md` now, and the three items are open.
+
+Plus: a registered divergence that fires in no scenario fails the C++ gate (a fix at the
+call site otherwise just stops printing `KNOWN:`); the goldens assert their scenario's
+promise rather than a record-count floor; and the emitter's entry point moved to
+`scripts/emit_parity_golden.py`, because `require_container.py` denies `-m benchmarks.*`
+wholesale and a README documenting a denied command teaches the reader to reach for
+`SHIPINFER_ALLOW_HOST_RUN`.
+
+---
+
 ## 2026-08-28 — `recognize` as a gallery query: `GalleryRecognize` + the gallery on disk (Phase C7)
 
 ---

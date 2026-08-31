@@ -1,0 +1,38 @@
+# Two cameras, one sink, and the drop charged to the camera that caused it (ADR-005).
+# cam_loud is refused twice and then accepted; cam_quiet is never refused, and its counters
+# have to prove it.
+scenario backpressure
+records_min 30
+
+empty_read_sleep_ms 0
+empty_reads_before_reconnect 5
+failures_before_unhealthy 3
+reconnect_initial_ms 2
+reconnect_max_ms 8
+reconnect_factor 2.0
+reconnect_jitter 0.0
+
+camera cam_loud
+open ok
+read frame
+read frame
+read frame
+read frame
+read frame
+read exhaust
+sink accept
+sink full
+sink full
+sink accept
+# The consumer goes away: the actor finishes cleanly rather than dropping for ever.
+sink closed
+
+camera cam_quiet
+open ok
+read frame
+read frame
+read exhaust
+sink accept
+
+# A camera in the database but out of the fleet: no actor, no records, no health.
+camera cam_offline disabled

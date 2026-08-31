@@ -95,6 +95,27 @@ class TestTheLaneTablesAgree:
             )
 
 
+class TestTheParityBinaryStaysOffline:
+    """``test_ingest_parity`` has to be in every offline build, or its gate stops running."""
+
+    def test_its_closure_reaches_no_driver_and_no_external_lane(
+        self, build_csrc: ModuleType
+    ) -> None:
+        """CI runs whatever ``--offline`` produced, by glob, and never by name.
+
+        So a parity binary whose includes reached ``core/platform.h`` or a ``pkg-config``
+        lane would simply drop out of that build -- and the ingest parity gate would stop
+        running with nothing red to say so. The binary is named ``test_ingest_parity``
+        precisely to be picked up by that glob; this is the other half of the promise.
+        """
+        closure = build_csrc.include_closure(CSRC / "tests" / "test_ingest_parity.cpp")
+        assert not build_csrc.needs_accelerator(closure)
+        assert build_csrc.lanes_in(closure) == set(), (
+            "the parity binary reached an external lane; `--offline` would leave it out of "
+            "the build and CI's `for candidate in csrc/build/test_*` loop would find nothing"
+        )
+
+
 class TestTheDefineSaysWhatIsMissing:
     """``-DSHIPINFER_OMITTED_LANES`` is the whole contract with the C++ side."""
 
