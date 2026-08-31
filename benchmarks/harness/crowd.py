@@ -1,3 +1,4 @@
+# doc: long the container-hook reasoning is why this is a library and not a `-m` entry point
 """Compose crowd frames: an N x N mosaic of the single-person bench JPEGs.
 
 **Measured before you reach for this** (`benchmarks/tests/test_crowd_yield.py`, real engine):
@@ -68,6 +69,14 @@ def compose_crowd_frames(
         raise ValueError(f"grid must be >= 1, got {grid}")
     if frames < 1:
         raise ValueError(f"frames must be >= 1, got {frames}")
+    # A tool sold on determinism must not hand back a mixed set: `--frames 20` then
+    # `--frames 5` used to leave 15 files from the earlier run, and a bench pointed at the
+    # directory consumes all of them. Refusing beats deleting someone else's data.
+    if out_dir.exists() and any(out_dir.iterdir()):
+        raise ValueError(
+            f"{out_dir} is not empty; composing into it would mix these frames with "
+            f"whatever is already there. Choose a fresh directory or empty this one."
+        )
     sources = _sources(src_dir)
     images = [Image.open(p).convert("RGB") for p in sources]
     width, height = size
@@ -86,6 +95,14 @@ def compose_crowd_frames(
     return written
 
 
+def _wxh(text: str) -> tuple[int, int]:
+    """``WxH`` -> (w, h). An argparse error beats dying on the unpack two frames later."""
+    parts = text.split("x")
+    if len(parts) != 2 or not all(p.isdigit() and int(p) > 0 for p in parts):
+        raise argparse.ArgumentTypeError(f"expected WxH with positive integers, got {text!r}")
+    return int(parts[0]), int(parts[1])
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--src", type=Path, required=True, help="directory of source photos")
@@ -100,7 +117,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--frames", type=int, default=10, help="mosaics to write (default 10)")
     p.add_argument(
         "--size",
-        type=lambda s: tuple(int(v) for v in s.split("x")),
+        type=_wxh,
         default=(1920, 1080),
         metavar="WxH",
         help="output frame size (default 1920x1080)",
@@ -115,7 +132,3 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"wrote {len(written)} frame(s) of {args.grid**2} photos each to {args.out}")
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

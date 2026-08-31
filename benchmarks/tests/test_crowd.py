@@ -1,13 +1,20 @@
-"""The mosaic composer that gives T3b its 10-20-detections-per-frame source."""
+"""The mosaic composer: determinism, geometry and refusals, with no device.
+
+What it is NOT for: raising detections per frame. See ``test_crowd_yield.py`` -- a 4x4 mosaic
+yields fewer people than a single photo, and the stock photos already carry 10-20.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
+
+pytest.importorskip("PIL", reason="Pillow is needed by the composer; pip install '.[dev]'")
+
 from PIL import Image
 
-from benchmarks.harness.crowd import compose_crowd_frames, main
+from benchmarks.harness.crowd import compose_crowd_frames, main, parse_args
 
 
 @pytest.fixture()
@@ -97,3 +104,36 @@ class TestCli:
         assert code == 0
         assert len(list(out.glob("crowd*.jpg"))) == 3
         assert "3 frame(s) of 4 photos" in capsys.readouterr().out
+
+
+class TestItRefusesToMixRuns:
+    """A tool sold on determinism must not hand back a set it did not write.
+
+    `--frames 20` then `--frames 5` left fifteen files from the earlier run in place, and a
+    bench pointed at the directory consumes all twenty.
+    """
+
+    def test_a_non_empty_output_directory_is_refused(self, sources: Path, tmp_path: Path):
+        out = tmp_path / "out"
+        compose_crowd_frames(sources, out, grid=2, frames=3)
+
+        with pytest.raises(ValueError, match="not empty"):
+            compose_crowd_frames(sources, out, grid=2, frames=2)
+
+    def test_an_empty_or_absent_directory_is_fine(self, sources: Path, tmp_path: Path):
+        """The refusal must not make the ordinary case harder."""
+        assert compose_crowd_frames(sources, tmp_path / "absent", grid=1, frames=1)
+
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        assert compose_crowd_frames(sources, empty, grid=1, frames=1)
+
+
+class TestTheSizeFlagFailsAsAFlag:
+    def test_a_malformed_size_is_an_argparse_error_not_an_unpack(self):
+        """`--size 1920x1080x3` used to build a 3-tuple and die on the unpack later."""
+        with pytest.raises(SystemExit):
+            parse_args(["--src", "s", "--out", "o", "--size", "1920x1080x3"])
+
+    def test_a_well_formed_size_parses(self):
+        assert parse_args(["--src", "s", "--out", "o", "--size", "800x600"]).size == (800, 600)

@@ -92,6 +92,11 @@ grpc = ["grpcio>=1.71.2,<2", "protobuf>=5.29,<6"]        # shard control plane (
 
 # Everything a developer needs, and nothing that needs a GPU to install.
 dev = [
+    # Read/write JPEGs for the bench crowd composer (`benchmarks/harness/crowd.py`) and the
+    # premise measurement. In `dev` rather than an extra of its own because CI installs
+    # `.[dev,cli]` and `testpaths` collects `benchmarks/tests` -- an undeclared import there
+    # interrupts collection, which does not add failures, it hides the whole tier.
+    "pillow>=10.0",
     "pytest>=8.2",
     "pytest-cov>=5.0",
     "pytest-asyncio>=0.23",
