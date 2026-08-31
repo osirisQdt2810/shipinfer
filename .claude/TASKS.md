@@ -2163,7 +2163,16 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       data; ADR-014 puts data-driven config in Python — which argues for the resolved-list answer, but it is a design
       call for the operator.**
 
-- [~] **HOOK-FP · COMPLETE 28 Aug — both false positives in one branch (d0dfe4c formatters + 14c82ba the parity carve-out from P6's round; 82 tests, two demonstrated revert-checks: 4 red / 2 red; body covers both; backup updated). READY for its tail slot. (Original first half: READ_ONLY_TOOL_MODULES={black,isort,ruff} carve-out in verdict's -m branch; 6 new tests incl. pytest-gains-nothing and second-segment-still-judged; revert-check 4 red on the unfixed hook / 77 green restored; black+layers clean. READY — joins the queue. Original: `require_container.py` false-positives on formatters:**
+- [~] **HOOK-FP · OPEN as PR #104** (2 commits, 2 files, +89/-1, rebased onto 9d315da). 82 hook tests; full
+      tier 3232 passed; pre-commit all Passed; clean. BOTH revert-checks reproduced on this tip: formatter
+      carve-out deleted -> 4 failed/78 passed; parity carve-out deleted -> 2 failed/80 passed; restored -> 82.
+      ADVERSARIAL TABLE against the real `verdict()` (the risk of a carve-out is allowing too much, and the
+      read-only branch `continue`s past that segment's remaining checks): 13/13 intended, 0 mismatches.
+      `python -m black x.py && pytest -m gpu`, `; pytest -m gpu`, `| pytest -m gpu` ALL still refuse, so a
+      device-tier pytest cannot ride in behind a formatter on any separator; `benchmarks.parity_bench` and
+      `benchmarks.parityx.thing` still refuse, so the trailing-dot match stays narrow. Body discloses that
+      `python -m pip install torch` is allowed and was before this branch (pip is deliberately NOT read-only).
+      Original: COMPLETE 28 Aug — both false positives in one branch (d0dfe4c formatters + 14c82ba the parity carve-out from P6's round; 82 tests, two demonstrated revert-checks: 4 red / 2 red; body covers both; backup updated). READY for its tail slot. (Original first half: READ_ONLY_TOOL_MODULES={black,isort,ruff} carve-out in verdict's -m branch; 6 new tests incl. pytest-gains-nothing and second-segment-still-judged; revert-check 4 red on the unfixed hook / 77 green restored; black+layers clean. READY — joins the queue. Original: `require_container.py` false-positives on formatters:**
       `python -m black --check src/shipinfer/engine/model.py` is refused because `script_touches_device` scans every
       `.py` ARGUMENT for a torch import regardless of whether python executes it. Fix: skip the argument scan when the
       python invocation is `-m black|isort|ruff|pip|pytest --collect-only`-class tooling. Workaround in use: the venv
@@ -2379,20 +2388,18 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       deserves its own pass.
       NOTE ON THE LEDGER ITSELF: the structured V145-W1..W3/ARM items live in main's .claude/TASKS.md; this
       working copy carries V145 only in older narrative entries (~line 2906). The two ledgers have diverged.
-- [ ] **LEDGER-DIVERGENCE · this working copy (/tmp/mps/.claude/TASKS.md, on the old feat/multi-process-sharding
-      branch) and main's .claude/TASKS.md are now materially different documents.** The Stop hook reads the
-      REPO copy, which is why it keeps replaying items closed hours ago (it still lists #98 as open). Decide
-      one: reconcile the working copy onto main's and keep editing main's, or accept the split and stop
-      treating the hook's list as the queue. Until then, believe THIS file for queue order.
-### V145 waves — carried over from main's ledger, which this working copy had dropped
-
-These three were present in main's committed `.claude/TASKS.md` and absent here; re-adding them
-rather than letting an overwrite delete them.
-
-`scripts/hooks/check_docs.py` reports and does not gate: on the tree at this commit it finds
-**1022** symbols and comment blocks over the caps (module 15 / class-function 10 / block 4),
-so arming it now would refuse every commit. The order is fixed — sweep, then arm.
-
+- [x] **LEDGER-DIVERGENCE · RECONCILED 31 Aug (5667911) and the reconciliation BROKE MAIN, fixed in 9d315da
+      (main CI completed success 13:51).** The repo ledger was ~20 commits behind, so the Stop hook replayed
+      items closed hours earlier. Reconciled onto the session's copy (strictly newer), carrying main's
+      V145-W2/W3/ARM over rather than overwriting them.
+      WHAT WENT WRONG: the overwrite deleted the three `- [ ] P6-D1/D2/D3` lines #101 added, and
+      `benchmarks/tests/test_parity_ingest.py::TestKnownDivergences` ASSERTS every `known.py` entry cites an
+      OPEN ledger line -- so a pure-docs commit turned main red. The guard exists for exactly this and caught
+      me. My pre-overwrite check greped `**BOLD ·` headings; P6-D lines are plain `- [ ] P6-D1`, so it said
+      "nothing missing". Memory: `ledger-is-load-bearing`.
+      RULE: THIS repo file is now the single ledger -- edit it directly, never overwrite it wholesale, diff
+      both directions over `^-\s*\[[ x~!]\]` lines rather than headings, and run
+      `pytest benchmarks/tests/test_parity_ingest.py` before pushing any ledger change.
 - [x] **V145-W1 · trim wave 1 — MERGED as #103 (35381fda). Took the tree 1031 -> 1012 violations; 49 remain in the touched files, none marked `# doc: long`.** Original scope — `engine`, `runtime`, `ingest`, `launch`, `scheduling`, `api`,
       `cli`, `core`, `backends`, `repository`. Built and verified (`docs/trim-wave-1`).
 - [ ] **V145-W2 · trim wave 2** — `topology/`, `runners/inprocess.py`, `pipeline/`, held until
