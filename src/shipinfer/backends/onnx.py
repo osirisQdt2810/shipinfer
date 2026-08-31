@@ -30,14 +30,10 @@ _ONNX_TYPES = {
 class OnnxRuntimeBackend(ModelBackend):
     """Runs an ``.onnx`` graph, preferring the CUDA execution provider.
 
-    Its role is portability, not peak speed: an ONNX graph runs on any host and any GPU
-    architecture, while a TensorRT engine is specific to both. Use it to bring a model up,
-    to compare numerics against the TensorRT build, and on nodes where building an engine
-    is not practical.
-
-    It is deliberately *not* wired to CUDA graphs. ONNX Runtime manages its own allocations
-    and stream internally, so the stable-address precondition is not ours to guarantee, and
-    capturing anyway would be a correctness gamble for a backend chosen for safety.
+    Portability, not peak speed: bring-up, numeric comparison against TensorRT, and
+    hosts where building an engine is impractical. Deliberately not wired to CUDA
+    graphs — ONNX Runtime owns its allocations and stream, so the stable-address
+    precondition for capture is not ours to guarantee.
     """
 
     platform = "onnxruntime"

@@ -168,46 +168,26 @@ class ModelBackend(abc.ABC):
 
     @abc.abstractmethod
     def execute(self, inputs: dict[str, Tensor], batch_size: int) -> dict[str, Tensor]:
-        """Run one batch.
+        """Run one batch of validated batch-major tensors.
 
-        Args:
-            inputs: batch-major tensors, already validated against :attr:`input_specs`.
-            batch_size: rows in the batch — passed explicitly because a padded batch's
-                tensor shape and its *useful* row count can differ.
-
-        Returns:
-            Batch-major outputs with exactly ``batch_size`` rows.
+        ``batch_size`` is explicit because a padded batch's tensor shape and its
+        useful row count can differ; outputs must have exactly that many rows.
 
         Raises:
-            InferenceError: on any execution failure. The instance catches it, fails the
-                batch's futures individually, and stays alive: one bad batch must not take
-                a GPU worker down.
+            InferenceError: on any execution failure. The instance catches it, fails
+                the batch's futures, and stays alive — one bad batch must not take a
+                GPU worker down.
         """
 
     def warmup(self, iterations: int) -> None:
         """Run throwaway batches so the first real request does not pay for lazy init.
 
-        Skipping this makes the first p99 after every deploy meaningless: cuBLAS
-        autotuning, lazy CUDA module loading and TensorRT's first-call allocations all
-        land on whichever unlucky request arrives first.
-
-        Two paths, and which one runs is decided by the model's own config:
-
-        **Declared samples win.** ``model_warmup`` in ``config.yaml`` (Triton's key, same
-        semantics) names batches with real shapes and, optionally, real data. Those run
-        whatever ``iterations`` says, including zero — the count is a *deployment* knob for
-        the implicit warm-up, and a deployment-wide number silently cancelling a per-model
-        instruction is the settings split in section 2.6 backwards. Remove the samples to
-        stop them running.
-
-        **Otherwise, the old behaviour:** ``iterations`` batches of zeros shaped from
-        :attr:`input_specs`.
-
-        The two also differ in how they fail, deliberately. A zero-filled batch that cannot
-        be built is a guess that did not work out, so it is logged and skipped. A declared
-        sample that fails is an operator's explicit instruction not being carried out, so it
-        propagates and the instance does not report ready — a model that believes it is warm
-        and is not gives a first p99 nobody can interpret.
+        Declared ``model_warmup`` samples in ``config.yaml`` (Triton semantics) win and
+        run regardless of ``iterations`` — that knob only sizes the implicit fallback of
+        zero-filled batches shaped from :attr:`input_specs`. Failure differs on purpose:
+        a zero batch that cannot be built is a guess, logged and skipped; a declared
+        sample that fails is an operator instruction not carried out, so it propagates
+        and the instance does not report ready.
         """
         samples = build_warmup_batches(self._context.config, self._context.artifact.path)
         if samples:
@@ -230,14 +210,10 @@ class ModelBackend(abc.ABC):
         """Execute each declared sample ``count`` times, naming it if it fails.
 
         Raises:
-            ShipInferError: the project's own typed failures pass through **unchanged**, with
-                the sample's name attached as a note. A ``DeviceOutOfMemoryError`` during
-                warm-up and a sample whose data is wrong are different operational events —
-                one is fixed by a smaller batch or another GPU, the other by editing the
-                config — and flattening both into ``InferenceError`` here, and then again in
-                the instance's own handler, would leave an operator with one word for both.
-            InferenceError: for anything else, naming the sample. "warm-up failed" against a
-                config with four samples is not a diagnosis; which one failed is the message.
+            ShipInferError: typed failures pass through unchanged with the sample's
+                name attached — flattening them into ``InferenceError`` would give an
+                operator one word for distinct operational events.
+            InferenceError: for anything else, naming the failing sample.
         """
         for sample in samples:
             for _ in range(sample.count):

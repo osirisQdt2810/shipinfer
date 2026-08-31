@@ -21,14 +21,9 @@ def build_settings(
 ) -> ServerSettings:
     """Assemble settings from CLI flags on top of the environment.
 
-    Flags win over ``SHIPINFER_*`` env vars, which win over defaults — the ordering people
-    expect, and the reason a one-off ``--policy round_robin`` does not require unsetting
-    anything.
-
-    It used to narrow the camera list to ``SHIPINFER_SHARD_CAMERAS`` as well. It does not any
-    more: a shard is told its cameras over ``AddCamera``, on a process that is already running
-    (arch.md section 2), so every process built from these settings reads the whole configured
-    fleet — which is what a single-process run always did.
+    Flags win over ``SHIPINFER_*`` env vars, which win over defaults. Does NOT narrow the
+    camera list per shard: a shard learns its cameras over ``AddCamera`` at runtime
+    (arch.md section 2), so these settings always describe the whole fleet.
     """
     configure(log_level, force=True)
 

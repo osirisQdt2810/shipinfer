@@ -26,22 +26,12 @@ _MISSING = 'the HTTP API needs {name}: pip install "shipinfer[server]"'
 def require_server_extra() -> None:
     """Refuse now if FastAPI or uvicorn is missing. Builds nothing, binds nothing.
 
-    For the composition root, which learns whether it can serve HTTP *before* it starts
-    anything: ``shipinfer run --http`` on a host without the extra used to get as far as
-    sixteen shard processes and a placed camera set, and only then failed on the import
-    inside :class:`BackgroundHttpServer` -- so the operator paid a full start-up and a full
-    shutdown to be told about a ``pip install``. The refusal is a *fact about the host*, known
-    as soon as the flag is read, which is the same argument
-    ``cli/commands/run.py::refuse_if_it_manages_no_cameras`` makes one line above the call.
-
-    It does not replace the checks in :func:`create_app` and :class:`BackgroundHttpServer`.
-    Those are where the import actually happens and they are reachable from a library caller
-    who never went through the CLI; this is the early word, and a probe that let them be
-    deleted would be a probe every other entry point has to remember to call.
+    Lets the composition root learn the host cannot serve HTTP *before* starting anything;
+    it does not replace the checks in :func:`create_app` and :class:`BackgroundHttpServer`,
+    which sit where the import actually happens and are reachable from library callers.
 
     Raises:
-        ConfigurationError: either import failed. Typed and naming the extra, never an
-            ``ImportError``: the caller asked for something this host is not set up to do.
+        ConfigurationError: either import failed; typed and naming the extra.
     """
     import importlib
 
@@ -57,23 +47,13 @@ def create_app(
 ) -> Any:
     """Wrap a running server, a camera controller, or both, in a FastAPI application.
 
-    Two doors, two arguments, and each router is mounted only when the thing behind it exists
-    (arch.md section 2): ``server`` brings the KServe side-door for a caller who already has
-    tensors, ``cameras`` brings ``/streams`` for a caller who has a camera. They are separate
-    because the two commands that serve them are: ``shipinfer serve`` owns an engine and no
-    runner, ``shipinfer run --http`` owns a runner and — with ``--runner fleet`` — no engine
-    in this process at all. Mounting a router with nothing behind it would answer 500 for
-    every request to it, which is a worse answer than 404.
-
-    Neither lifecycle is tied to the app's: whoever created the server or the runner started
-    it and will stop it. Tying them would make the HTTP layer load-bearing for a library whose
-    main use is in-process.
+    Each router is mounted only when the thing behind it exists (arch.md section 2):
+    ``server`` brings the KServe side-door, ``cameras`` brings ``/streams``. Neither
+    lifecycle is tied to the app's: whoever created the server or runner stops it.
 
     Raises:
-        ConfigurationError: FastAPI is not installed (the ``server`` extra), or neither a
-            server nor a camera controller was given — an app with no routers answers 404 for
-            everything, and finding that out from a probe is more expensive than being told
-            here.
+        ConfigurationError: FastAPI is not installed (the ``server`` extra), or neither
+            argument was given — an app with no routers would answer 404 for everything.
     """
     try:
         from fastapi import FastAPI
@@ -121,29 +101,15 @@ def serve_http(server: InferenceServer, *, host: str = "0.0.0.0", port: int = 80
 
 
 class BackgroundHttpServer:
-    """uvicorn on a thread, so the process's main thread keeps supervising.
+    """uvicorn on a thread, so the main thread keeps supervising the runner.
 
-    ``shipinfer run --http`` has two jobs at once: supervise a runner until it is told to stop
-    (``launch/signals.py``'s invariant — the handler *records*, the supervising thread does the
-    blocking work) and answer ``/streams``. Only one of them can own the main thread, and it
-    has to be the supervisor: a signal handler installed by anything else is a Ctrl-C that
-    stops the web server and leaves fifty decoder threads running.
-
-    So uvicorn runs here instead, and **the thread is what keeps the signal handlers ours**.
-    ``uvicorn.Server.capture_signals`` installs its own ``SIGINT``/``SIGTERM`` handlers, and
-    the only thing that stops it is that it early-returns off the main thread (uvicorn 0.52
-    removed the ``install_signal_handlers`` flag that used to say this explicitly; the thread
-    rule is what is left, and ``tests/cli/test_run_http.py`` asserts the outcome rather than
-    the mechanism — after the server is up, ``SIGINT`` is still routed to the runner).
-
-    Shutdown is ``should_exit``, which is uvicorn's own cooperative flag: the serving loop
-    notices it within one tick, finishes what it is answering and returns. There is no kill —
-    a request in flight is somebody's ``POST /streams``, and cutting it off would leave a
-    camera placed with nobody told.
-
-    This class lives in ``api/`` and not in ``cli/`` because ``uvicorn`` may be named in
-    exactly one layer (``scripts/hooks/check_layers.py``), and because the missing-extra
-    refusal belongs next to the import that fails.
+    The thread is what keeps the signal handlers ours: uvicorn installs its own
+    ``SIGINT``/``SIGTERM`` handlers only when run on the main thread (uvicorn 0.52 removed
+    the flag that said this explicitly; ``tests/cli/test_run_http.py`` asserts the outcome —
+    after the server is up, ``SIGINT`` still routes to the runner). Shutdown is uvicorn's
+    cooperative ``should_exit`` flag — no kill, because a request in flight may be somebody's
+    ``POST /streams``. Lives in ``api/`` because ``uvicorn`` may be named in exactly one
+    layer (``scripts/hooks/check_layers.py``).
     """
 
     def __init__(
@@ -159,17 +125,12 @@ class BackgroundHttpServer:
 
         Args:
             bind_timeout_s: how long :meth:`start` waits for uvicorn to report it is
-                serving before it calls the start a failure. Generous rather than tight:
-                what is being waited for is a ``listen()`` on a socket this process already
-                chose, so a second is already long -- but this thread starts while a fleet is
-                spawning shards, and a deadline short enough to lose that race would refuse a
-                deployment that was about to work. Nothing waits on it in the normal case,
-                because the loop below returns the moment ``started`` flips.
+                serving. Generous on purpose: this thread starts while a fleet is spawning
+                shards, and a deadline that lost that race would refuse a deployment about
+                to work; the wait returns the moment ``started`` flips.
 
         Raises:
-            ConfigurationError: uvicorn is not installed. Typed and naming the extra, for the
-                reason the whole package imports lazily: a host that never installed
-                ``shipinfer[server]`` must still be able to import this module.
+            ConfigurationError: uvicorn is not installed (the ``server`` extra).
         """
         try:
             import uvicorn
@@ -195,35 +156,14 @@ class BackgroundHttpServer:
     def start(self) -> BackgroundHttpServer:
         """Serve on a daemon thread, and do not return until it is serving. Idempotent.
 
-        Daemon on purpose: the runner's shutdown is what the process waits for, and an HTTP
-        thread that could keep a stopped deployment alive would turn a failed
-        :meth:`stop` into a hang instead of a warning.
-
-        **The bind is confirmed, and that is the whole reason this method can fail.** A
-        daemon thread that dies takes its exception with it: ``uvicorn.Server.startup``
-        catches the ``OSError`` from a port already in use, logs it and calls
-        ``sys.exit(3)``, and off the main thread ``threading.excepthook`` discards
-        ``SystemExit`` without a word. So ``shipinfer run --http --port 8000`` against a
-        taken port used to spawn every shard, place every camera, log *"serving /streams on
-        ..."*, run the deployment with no ingress at all, and exit ``0`` -- there was nothing
-        for a supervisor or a readiness probe to notice. Confirming ``started`` turns that
-        into a refusal the operator reads before ``supervise()`` is ever entered, and the
-        INFO line moved below the wait so it can no longer assert something untrue.
-
-        Failure leaves nothing running: the thread reference is dropped, so :meth:`stop`
-        stays a safe no-op, and ``should_exit`` is set first for the case the deadline lost a
-        race rather than the bind failing -- a server that binds one tick after it was
-        declared failed must not go on holding the port. It is not joined, because a startup
-        wedged behind a lifespan hook would then hang the refusal it is meant to deliver, and
-        the thread is a daemon.
+        The bind must be confirmed: a daemon thread that dies takes its exception with it
+        silently, so a taken port once ran a whole deployment with no ingress and exited 0.
+        A failed start leaves nothing running -- ``should_exit`` set (a bind that wins the
+        race one tick late must not keep the port), thread reference dropped so :meth:`stop`
+        stays a no-op, and not joined (a wedged startup must not hang the refusal).
 
         Raises:
-            ConfigurationError: uvicorn did not report itself serving within
-                ``bind_timeout_s`` -- in practice the address is in use, or the host does not
-                own it. Named with the ``host:port`` because that is the one thing the
-                operator can change, and typed like every other refusal in this module so it
-                travels out of ``cli/commands/run.py::_wait`` through the ``finally`` that
-                stops the runner.
+            ConfigurationError: not serving within ``bind_timeout_s``; names the host:port.
         """
         if self._thread is not None:
             return self
@@ -245,14 +185,10 @@ class BackgroundHttpServer:
     def _serving_within(self, timeout_s: float) -> bool:
         """Whether uvicorn reported itself serving before the deadline.
 
-        ``Server.started`` is uvicorn's own flag, set at the end of ``startup()`` once every
-        listener is up; polling it is what there is, because ``Server`` offers no event and
-        the loop it would be set on belongs to the thread being waited for. Polled at 5 ms so
-        the normal case costs one tick rather than the deadline.
-
-        The thread is watched as well as the clock, and that is what makes the common failure
-        fast: a bind that fails ends the thread within milliseconds, so this returns then
-        rather than after ``bind_timeout_s`` of a port that was never going to open.
+        ``Server.started`` is uvicorn's own flag; polling (5 ms) is what there is, because
+        ``Server`` offers no event and its loop belongs to the thread being waited on. The
+        thread is watched as well as the clock, so a failed bind returns within
+        milliseconds rather than after ``bind_timeout_s``.
         """
         deadline = time.monotonic() + timeout_s
         thread = self._thread

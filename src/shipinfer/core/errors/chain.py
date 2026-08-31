@@ -1,20 +1,13 @@
 """Chain failures — everything wrong with a *declared element chain* (arch.md §1, §8).
 
-Every error here is raised at **load time**, before a frame exists. That is the whole point
-of having a declarative chain: a mis-wired topology should stop a deploy, not surface at
-3 a.m. as a camera that produces no detections. So they subclass
-:class:`~shipinfer.core.errors.config.ConfigurationError` — the layer above treats them like
-a bad ``config.yaml``, which is what they are.
+All raised at **load time**, before a frame exists: a mis-wired topology should stop a
+deploy, not surface as a camera that produces no detections. They subclass
+:class:`~shipinfer.core.errors.config.ConfigurationError`.
 
-Each one carries the *names* involved, as strings. Deliberately strings and never
-:class:`~shipinfer.topology.caps.Caps` or :class:`~shipinfer.topology.base.ElementKind`
-objects: ``core`` sits below ``topology`` and must stay importable on its own, so the error
-vocabulary cannot depend on the vocabulary of the thing that raises it.
-
-Not to be confused with :mod:`shipinfer.core.errors.launch` next door, which names the
-*shard-wire* failures of the older topology-as-placement classes (rings, peers, shards).
-The word "topology" means the chain from here on (arch.md §1); that module was renamed to
-``launch`` for the same reason, so the two vocabularies no longer share a name.
+Each error carries the *names* involved as plain strings — ``core`` sits below
+``topology`` and must stay importable on its own. Not to be confused with
+:mod:`shipinfer.core.errors.launch`, the shard-wire failures of the older
+topology-as-placement classes.
 """
 
 from __future__ import annotations
@@ -65,16 +58,9 @@ class ConditionSyntaxError(TopologyError):
 class UnknownElementKindError(TopologyError):
     """A chain slot, or an explicit ``kind:``, does not name one of the eight kinds.
 
-    Raised when neither an explicit ``kind:`` nor the slot name resolves: ``sement:`` is a
-    typo, and inferring nothing from it and running a chain with a missing stage would be
-    far worse than refusing to load.
-
-    **One mistake, one error type.** A misspelled kind is the same mistake whether it is
-    written as the slot name (``sement:``) or as an explicit value (``kind: sement``), so
-    the schema keeps ``kind`` a plain string and
-    :meth:`~shipinfer.topology.base.ElementKind.parse` raises this for both. Declaring the
-    field as the enum would answer the second spelling with a pydantic ``ChainSpecError``
-    and the first with this, which is two vocabularies for one typo.
+    The schema keeps ``kind`` a plain string so
+    :meth:`~shipinfer.topology.base.ElementKind.parse` raises this for both spellings of
+    the same typo (``sement:`` and ``kind: sement``) — one mistake, one error type.
 
     ``slot`` is whatever was misspelled — the slot name or the ``kind:`` value.
     """
@@ -142,36 +128,25 @@ class ChainCycleError(TopologyError):
 class ChainStructureError(TopologyError):
     """The chain is a DAG but not a runnable one.
 
-    A chain whose root is not a decode element has nothing to read frames with; one with no
-    output element computes results nobody emits; an output element with a successor is not
-    the end of anything; a model element with no ``model:`` has nothing to run; a root or a
-    fan-in whose caps cannot be pinned down leaves the loader unable to say what flows on an
-    edge. All of them are start-up refusals rather than silent no-ops.
-
-    Distinct from :class:`CapsMismatchError`, which is about *two* elements disagreeing.
-    This one is about *one* element's place in the chain.
+    A root that is not a decode element, no output element, an output with a successor,
+    a model element with no ``model:``, a root or fan-in whose caps cannot be pinned
+    down — all start-up refusals rather than silent no-ops. Distinct from
+    :class:`CapsMismatchError` (two elements disagreeing): this is one element's place
+    in the chain.
     """
 
 
 class CapsMismatchError(TopologyError):
     """Two elements that can hand data to each other agree on no format/location pair.
 
-    The message names the fix on purpose. The tempting alternative — quietly inserting a
-    device-to-host copy so ``nv12@gpu`` can feed ``bgr@cpu`` — is precisely the failure
-    arch.md §8 refuses: a 1000 fps chain that silently downloads every frame to host memory
-    looks like a working deployment and performs like a broken one.
+    The message names the fix and refuses the tempting alternative — an implicit
+    device-to-host copy so ``nv12@gpu`` can feed ``bgr@cpu`` — per arch.md §8.
 
     Args:
-        producer: the element the data comes from.
-        produced: its output caps, **as resolved** — a wildcard ``produces`` is filled in
-            from what arrives at the element before this check runs, so the message names
-            the cap that would really flow rather than the ``*@*`` the class declared.
-        consumer: the element the data goes to.
-        accepted: its declared input caps.
-        skipped: the ``when:`` element whose *bypass* is being refused, if any. A
-            conditional element is skipped for items its condition rejects, and the item
-            then travels straight from its predecessor to its successor; that hand-over is
-            checked too, and it is worth saying which element being absent creates it.
+        produced: the producer's output caps **as resolved** (wildcards filled in),
+            not the declared ``*@*``.
+        skipped: the ``when:`` element whose *bypass* created the checked hand-over,
+            if any.
     """
 
     def __init__(

@@ -18,12 +18,9 @@ from shipinfer.engine.model import Model
 from shipinfer.engine.pool import InferenceServer
 from shipinfer.engine.statistics import DurationStat, ModelStatistics
 
-# `InferenceServer` keeps its name: it is the KServe server — what `/v2/health/ready`
-# reports on and what every caller of `shipinfer.InferenceServer` holds — and renaming a
-# class in a public signature is a separate, breaking change from moving a package. No
-# `Engine` alias either: `csrc/shipinfer/backends/engine_api.h` already has `class Engine`
-# for the *backend contract*, and ADR-014 wants the two planes to mean the same thing by
-# the same name.
+# `InferenceServer` keeps its name (renaming a public class is a separate, breaking
+# change), and no `Engine` alias: `csrc/.../engine_api.h` already uses `Engine` for the
+# backend contract (ADR-014).
 
 __all__ = [
     "RESPONSE_CACHES",

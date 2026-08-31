@@ -19,15 +19,12 @@ def deepstream(
 ) -> int:
     """Decode, detect, track and embed this shard's cameras inside one DeepStream graph.
 
-    The child of ``shipinfer fleet --topology deepstream``, and usable on its own — the fleet
-    tells it which cameras and which GPU through the environment, exactly as it tells a
-    ``serve`` shard, so running one by hand is running what the fleet runs.
+    Child of ``shipinfer fleet --topology deepstream``, and usable alone: the fleet passes
+    cameras and GPU through the environment, so running one by hand runs what the fleet runs.
 
-    ``--dry-run`` generates the nvinfer, tracker and label files, says where they are, and
-    stops. It is exempt from the container gate on purpose: it reads a repository and writes
-    text, touching no device and producing no measurement, and the machine an operator reviews
-    a config on is usually not the machine that will run it. The real run is gated, like
-    ``serve`` and ``bench``.
+    ``--dry-run`` generates the nvinfer/tracker/label files and stops; it is deliberately
+    exempt from the container gate (no device touched, no measurement produced). The real
+    run is gated, like ``serve`` and ``bench``.
     """
     out = console()
     settings = build_settings(repository, gpus=gpus, log_level=log_level)
