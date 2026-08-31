@@ -931,6 +931,14 @@ the bloat is INSIDE the source. Nine files over 850 lines, worst `runners/inproc
 94 single-use private helpers under 12 lines. NOTE: the doc the operator named as
 `docs/qa/architecture.md` is actually `docs/arch.md`.
 
+### V150 · 31 Aug 2026, ~15:2x UTC — viết docs/system-design.md: đọc code top-down, đủ mọi component, và timeline phần chưa xong
+
+> tôi nên đọc code như nào để thấy được system từ trên xuống dưới, hãy ghi vào trong docs/system-design.md nhé. ghi đầy đủ toàn bộ components mà chúng ta đang build, mục tiêu của từng pcomponents và ý nghĩa của chúng. những timeline chưa xong và dự định nó là các component gì
+
+**Follows V149.** The answer to V149 is therefore: ONE doc that is a reading order (not more
+prose in the source), plus the code changes V149 already agreed. This doc is the map; V149's
+splits are what make the territory match it.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
