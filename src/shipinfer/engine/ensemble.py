@@ -1,43 +1,18 @@
 """Ensembles: a DAG of models addressed as one model.
 
-Triton's ensemble idea, kept because it earns its place here. The alternative is that every
-client orchestrates the pipeline itself, which means the intermediate tensors — crops,
-masks, embeddings — round-trip to the caller and back on every frame. Declaring the graph
-server-side keeps them where they were produced.
+Declaring the graph server-side keeps intermediate tensors (crops, masks, embeddings)
+where they were produced instead of round-tripping through the client. Two additions to
+Triton's vocabulary:
 
-Two things this adds to the Triton vocabulary, both because this pipeline needs them:
+* ``condition`` — a step runs only when a named tensor is present and non-empty
+  ("segment only where a ship was detected"), declaratively.
+* **DAG validation at load time** — every step input must be an ensemble input or an
+  earlier step's output; bad wiring fails at start-up with the missing tensor named.
 
-* ``condition`` — a step runs only when a named tensor is present and non-empty. That is
-  how "segment only where a ship was detected" is expressed declaratively, instead of in a
-  hand-written orchestration loop each caller would have to reimplement.
-* **DAG validation at load time.** Every step's inputs must be either an ensemble input or
-  produced by an earlier step. A repository whose wiring is wrong fails at start-up with
-  the missing tensor named, rather than at the first inference.
-
-**Steps are scheduled, not walked.** This used to run the DAG on one pool thread per
-request: a ``for step in steps`` loop that blocked on ``future.result()`` at every step. A
-thread therefore sat idle for the entire time some *other* model was computing, which is
-most of a DAG's wall time — so a pool of eight bounded the whole ensemble to eight frames
-in flight no matter how many instances the step models had, and one slow step held threads
-away from the frames that were already past it. Triton's ensemble scheduler does not work
-that way (``core/src/ensemble_scheduler``) and neither does this one any more: an execution
-is a state machine advanced by the completion callback of whichever step just finished, so
-a pool thread is occupied only while a step is being *dispatched*, never while one is being
-waited for. The pool now bounds how much DAG bookkeeping runs at once, which is microseconds
-of work, rather than how many frames may be in flight.
-
-What is *measured* about that, and what is not — stated because a design argument reads like a
-throughput claim if it is not labelled. ``tests/engine/test_ensemble_scheduling.py`` runs a
-small DAG with two independent steps and asserts ``stats()["peak_parallel_steps"] >= 2``: two
-steps of one execution genuinely run at once, which the walked design could not do. No
-frames-per-second figure is claimed for the scheduler, because the repository ships no
-ensemble to bench — the perception DAG is a pipeline, not an ensemble — and a number about the
-old pool's ceiling would be arithmetic about a design, not a measurement of a deployment.
-
-Falling out of that: steps whose inputs are all satisfied run **concurrently**. A step is
-ready when every step that could produce a tensor it reads has finished or skipped, which is
-the same relation the load-time validation already computes — so two branches that share
-only the ensemble's input no longer serialise behind each other.
+**Steps are scheduled, not walked.** An execution is a state machine advanced by each
+step's completion callback: a pool thread is occupied only while dispatching, never while
+waiting, so the pool bounds bookkeeping, not frames in flight — and steps whose inputs are
+all satisfied run concurrently (asserted by ``tests/engine/test_ensemble_scheduling.py``).
 """
 
 from __future__ import annotations

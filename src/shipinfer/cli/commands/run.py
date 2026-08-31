@@ -69,82 +69,30 @@ def run(
 ) -> int:
     """Load a chain and run it. Blocks until interrupted.
 
-    Args:
-        topology: the chain file. Read **once**, here: the text is what a shard is sent (the
-            loader lives on the shard, ADR-017) and the parsed chain is what this process
-            validates before anything is spawned. A mistyped chain therefore fails on this
-            line rather than on sixteen children at once.
-        runner: which runner executes it. ``None`` takes ``runner.runner`` from the settings.
-        repository: the model repository, for the runners that load one.
-        inputs: files or URLs to run as cameras (arch.md §2's offline mode). Each becomes one
-            camera, named by its position, placed on the runner once it is up — *after* the
-            cameras the settings tree already configures, which are placed the same way
-            (:func:`cameras_to_place`). A dry run reports how many there are and places none,
-            because placing one means starting a decoder thread — but it still refuses a
-            runner that manages no cameras, because that is a fact about the ``--runner``
-            chosen rather than about this run.
-        loop: whether an ``--inputs`` file restarts at EOF. ``True`` is the historical
-            behaviour and what a stress run wants; ``--no-loop`` is how a file is processed
-            once. It applies to ``--inputs`` only: a camera the settings tree configures
-            already has its own ``loop:`` and keeps it, and one posted to ``/streams`` carries
-            its own (``StreamRequest.loop``, which defaults the same way this flag does).
-        shards: how many shard processes, for the runners that have any. ``None`` leaves
-            ``runner.shards``, whose own default is one per visible GPU (ADR-006).
-        gpus: which devices, as ``0,1,2``. ``None`` leaves ``devices.visible_gpus``, and
-            only when *that* is empty too is the driver asked, once (:func:`_fill_in_gpus`).
-            A flag is not the only way an operator answers this question.
-        http: serve ``/streams`` (arch.md §2's camera door) beside the running chain, on a
-            thread. Off by default: a chain driven by ``--inputs`` needs no ingress, and a
-            port that nobody asked for is a port somebody has to firewall.
-        host: what the HTTP server binds; ``None`` means the operator did not say and takes
-            ``127.0.0.1``. **Loopback by default**, unlike ``shipinfer serve``: these routes
-            start and stop video decoding on a shared GPU box and phase B has no
-            authentication on them, so reaching them from another machine is a decision an
-            operator makes explicitly — by putting an authenticating proxy in front, or, at
-            their own risk, by passing ``--host 0.0.0.0``. Given *without* ``--http`` it is
-            refused rather than ignored (:func:`refuse_flags_that_would_be_ignored`).
-        port: what it binds, or ``None`` for 8000. ``0`` is not special-cased; ask the OS for
-            one only if you have a way to find out which it chose. Refused without ``--http``
-            for ``host``'s reason.
-        drain_s: seconds a shard gets to finish before it is killed. ``None`` leaves
-            ``runner.drain_s``. It is ``shipinfer fleet --drain`` under its settings-tree
-            name: the same budget, on the command that replaced it, so an operator who had
-            tuned it for a slow decoder does not silently get the default back.
-        dry_run: resolve everything and print it, spawn nothing. The plan is the decision
-            worth reading before fifty cameras start reconnecting.
+    The chain file is read once, here: the text is what a shard is sent (the loader lives on
+    the shard, ADR-017) and the parsed chain is what this process validates, so a mistyped
+    chain fails on this line rather than on sixteen children at once. ``None`` for `runner`,
+    `shards`, `gpus`, `drain_s` and `port` means "the settings tree decides". ``--inputs``
+    files become cameras placed after the configured ones, and ``--no-loop`` applies to them
+    only. ``--http`` serves arch.md §2's camera door on a thread, bound to loopback unless the
+    operator says otherwise — these routes start and stop decoding on a shared box and phase B
+    has no authentication — and ``--host``/``--port`` without it are refused, not ignored.
+    ``--dry-run`` resolves and prints the plan, spawns nothing, and is the mode for a laptop.
 
     Raises:
         ConfigurationError: an unknown runner, an invalid chain, an unreadable
-            ``ingest.camera_db``, a runner that manages no cameras given ``--inputs``, an
-            input the runner refuses, ``--host``/``--port`` without the ``--http`` that gives
-            them meaning, ``--http`` on a host where the ``server`` extra was never installed,
-            an HTTP port that could not be bound
-            (:meth:`shipinfer.api.BackgroundHttpServer.start`), or a chain element that will
-            not open -- a ``pool`` element with no ``model:``, for instance. The HTTP bind is
-            raised after the runner is up and therefore travels through the ``finally`` that
-            stops it, which is what an operator who typed ``--http`` is asking for: no
-            ingress, no deployment.
-        ServerStateError: the model pool this chain needs would not start, or a model it needs
-            has no live instance. Raised by
-            :meth:`~shipinfer.engine.InferenceServer.start`, unwrapped, because it already
-            names the model that would not load.
-        BackendUnavailableError: a model in the repository needs a runtime this host has not
-            got (no TensorRT, no onnxruntime). Also from the engine's start.
-        ModelNotFoundError: a ``pool`` element names a model the pool did not load. Raised
-            from ``built.start()``, one line further on than the engine's own start, which is
-            why every one of these travels through the guard below rather than past it.
+            ``ingest.camera_db``, a runner that manages no cameras, an input it refuses,
+            ``--host``/``--port`` without ``--http``, a missing ``server`` extra, an HTTP port
+            that would not bind, or an element that will not open.
+        ServerStateError: the model pool this chain needs would not start.
+        BackendUnavailableError: a model needs a runtime this host has not got.
+        ModelNotFoundError: a ``pool`` element names a model the pool did not load.
 
     Note:
-        **Every one of them leaves the GPU as it found it.** The bring-up -- the engine's
-        construction, the runner's construction, both ``start()`` calls -- sits under one
+        Every one of them leaves the GPU as it found it: the whole bring-up sits under one
         ``except BaseException`` that stops the engine if one was built, and the cheap
-        refusals are made above it so that no context is taken to answer them.
-
-        The list above is not closed. The engine's start surfaces whatever a backend raises,
-        and not every backend raises a typed error: a ``requires_gpu`` backend placed on a
-        CPU device is refused by :class:`~shipinfer.backends.base.ModelBackend` with a bare
-        ``ValueError``. It leaves the GPU as the typed ones do -- the guard catches
-        ``BaseException`` -- so this is about what an operator reads, not about what is held.
+        refusals are made above it. The list is not closed — a backend may raise a bare
+        ``ValueError`` — which is about what an operator reads, not about what is held.
     """
     from shipinfer.runners import RUNNERS, build_runner
     from shipinfer.runtime.containment import require_container

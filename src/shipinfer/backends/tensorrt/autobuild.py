@@ -1,33 +1,14 @@
 """Build a TensorRT plan from an ONNX in the model repository, on demand.
 
-The reference detector libraries do this — `BaseDetector::loadEngine` deserialises the plan
-and, on any failure, calls `buildEngine` and retries up to three times
-(`references/generic-object-detection-yolo26-trt/src/process/BaseDetector.cpp:225-231`). The
-reason is operational: an engine is only valid for the GPU architecture and the TensorRT
-version that produced it, so a plan cannot be shipped. What ships is the ONNX, and the plan is
-a **build artefact of this machine**.
+A plan is only valid for the GPU architecture and TensorRT version that produced it, so
+what ships is the ONNX; the plan is a build artefact of this machine. Unlike the reference
+detectors, the build is in-process (``shipvision.detection.engine_build``), runs once under
+a lock however many instances race for it, and keys the cache on TensorRT version plus
+compute capability so a plan from another environment is a miss rather than a landmine.
 
-Three things the reference gets wrong, and this does not:
-
-**It shells out.** `Yolo26Detector::buildEngine` runs `system("python3 pytools/onnx2trt.py ...")`
-and recovers its own configuration by regex-parsing `mbs(\\d+)` and `imgsz(\\d+)` out of the
-ONNX *filename*. A library that shells out to a script at a compile-time-baked path cannot be
-packaged. Here the build is in-process, through `shipvision.detection.engine_build`.
-
-**It rebuilds per instance.** A build takes ~90 s for yolo26n. With two instances on each of
-eight GPUs that is sixteen builds of the same plan, and they race to write the same file. A
-lock makes exactly one build and the rest wait for it.
-
-**It trusts a plan it finds.** A stale plan built by a different TensorRT, or for a different
-GPU, deserialises to `None` — or worse, loads and misbehaves. The cache key therefore carries
-the TensorRT version and the device's compute capability, so a plan from another environment
-is a miss rather than a landmine.
-
-And one thing neither could have known: **TensorRT's ONNX parser segmentation-faults on
-malformed input.** Measured on 10.14.1 — a text file named `*.onnx` dumps core with no
-exception to catch. Since this code path is reached at server start-up, a truncated download or
-an unresolved Git-LFS pointer would kill the worker and leave an operator with a core dump.
-`engine_build` validates the ONNX before the parser sees it; this module never bypasses it.
+Failure mode: TensorRT's ONNX parser segfaults on malformed input (measured on 10.14.1 —
+a text file named ``*.onnx`` dumps core, no exception). This path runs at server start-up,
+so ``engine_build`` validates the ONNX before the parser sees it; never bypass that.
 """
 
 from __future__ import annotations
@@ -57,21 +38,13 @@ def cache_name(
 ) -> str:
     """A plan filename that changes when anything invalidating it changes.
 
-    Everything that makes a plan valid or not is in the name: the ONNX's content, the
-    TensorRT version, the GPU's compute capability, and the precision. A plan built for sm_86
-    on TensorRT 10.14 is simply a different file from one built for sm_89 on 10.13 — naming
-    them the same is how a stale artefact gets loaded and then misbehaves.
-
-    The ONNX is hashed by content rather than by mtime: a re-export with the same timestamp is
-    a real thing (a build system that preserves times), and an mtime cache would serve the old
-    plan for the new model.
+    The name carries everything that makes a plan valid: ONNX content hash (content, not
+    mtime — an mtime cache would serve the old plan for a re-export with a preserved
+    timestamp), TensorRT version, compute capability, and precision.
     """
     digest = hashlib.sha256(onnx.read_bytes()).hexdigest()[:16]
     precision = "fp16" if fp16 else "fp32"
-    # The batch is part of what makes a plan valid, and it was not in the name. A model's
-    # `max_batch_size` could change in config while the cached plan — built for the old one —
-    # kept being loaded, so the scheduler assembled batches the engine could not hold.
-    # Omitted entirely when unset, so existing plan names are unchanged.
+    # max_batch also invalidates a plan; omitted when unset so existing names are unchanged.
     batch = f".b{max_batch}" if max_batch else ""
     return f"{onnx.stem}.{digest}.trt{trt_version}.sm{capability}.{precision}{batch}.plan"
 
@@ -89,24 +62,14 @@ def resolve_engine(
 ) -> Path:
     """The path to a loadable plan, building it from an ONNX if one is needed.
 
-    Args:
-        directory: the model version directory, e.g. ``model_repository/ship_detector/1``.
-        engine_file: the configured plan name. Used as-is when the file is present, which
-            keeps a hand-built or vendor-supplied plan working unchanged.
-        onnx_file: the ONNX to build from. Defaults to the only ``*.onnx`` in the directory,
-            because a directory with one ONNX needs no configuration to say which.
-        builder: injected for testing; defaults to
-            :func:`shipvision.detection.engine_build.build_engine`.
-
-    Resolution order, and each step is there for a reason:
-
-    1. **The configured plan, if it exists.** An operator who supplied a plan gets that plan.
-    2. **A cached plan for this exact (ONNX, TensorRT, GPU, precision).** Restarts are free.
-    3. **Build it**, under a lock so concurrent instances produce one plan between them.
+    Resolution order: the configured ``engine_file`` if present (a hand-built plan wins);
+    then a cached plan for this exact (ONNX, TensorRT, GPU, precision); else build under a
+    lock so concurrent instances produce one plan. ``onnx_file`` defaults to the only
+    ``*.onnx`` in ``directory``; ``builder`` is injected for testing.
 
     Raises:
-        BackendLoadError: if there is neither a plan nor an ONNX, if several ONNX files make
-            the choice ambiguous, or if a concurrent build does not finish in time.
+        BackendLoadError: no plan and no ONNX, several ONNX files making the choice
+            ambiguous, or a concurrent build that does not finish in time.
     """
     configured = directory / engine_file
     if configured.is_file():

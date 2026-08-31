@@ -1,18 +1,15 @@
 """Scheduling: the work item, the queues, the batchers, the policies, the dispatcher.
 
-Pure Python, and that is not incidental. The load-balancing and fairness behaviour is the
-part of this system most worth having tests for, and tests that need sixteen GPUs get
-written once and then never run again.
-
-Four extension families, each a sub-package with its own registry:
+Pure Python by design: the fairness and balancing logic is the part most worth testing,
+and it must be testable with no GPU. Four extension families, each with a registry:
 
 * :mod:`~shipinfer.scheduling.queues` — ordering, fairness and overflow (:data:`QUEUES`)
 * :mod:`~shipinfer.scheduling.batching` — pack/scatter (:data:`BATCHERS`)
 * :mod:`~shipinfer.scheduling.policies` — instance placement (:data:`POLICIES`)
 * :mod:`~shipinfer.scheduling.limits` — concurrent-execution bounds (:data:`RATE_LIMITERS`)
 
-The compiled ``shipinfer._C`` extension implements the queue and batcher contracts with a
-lock-free ring and a fused staging copy; parity tests keep the two honest.
+``shipinfer._C`` implements the queue and batcher contracts natively; parity tests keep
+the two honest.
 """
 
 from shipinfer.scheduling.batching import (
