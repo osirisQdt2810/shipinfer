@@ -2277,7 +2277,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       then BOTH become unreachable before the parent's first AddCamera (UNAVAILABLE/Connection refused, same second, no
       child traceback). Identical with --gpus 0,1 and with the repo env pinned; the same chain under inprocess yields
       72 events/221 detections. Production-path defect in launch/ or cli/shard.py teardown ordering.
-- [~] **FLEET-REPO-FLAG · OPEN as PR #105** (1 commit, 2 files, +50; rebased onto post-#104 main).
+- [x] **FLEET-REPO-FLAG · MERGED as PR #105 (31 Aug), VERDICT: APPROVE.** (was OPEN as PR #105) (1 commit, 2 files, +50; rebased onto post-#104 main).
       `FleetRunner._child_environment()` -> `{SHIPINFER_MODEL_REPOSITORY: settings.model_repository}`, passed
       as `env=` to the Fleet construction, riding Fleet's EXISTING env field so there is no new seam.
       VERIFIED END TO END, not from the variable's name: a real ServerSettings load with
