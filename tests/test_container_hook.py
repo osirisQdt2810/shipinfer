@@ -142,6 +142,44 @@ class TestAllows:
     @pytest.mark.parametrize(
         "command",
         [
+            "python -m benchmarks.parity.drive_python --scenario reconnect --emit-golden",
+            "python3 -m benchmarks.parity.diff --left a.jsonl --right b.jsonl",
+        ],
+    )
+    def test_a_module_under_benchmarks_that_is_not_a_benchmark_is_allowed(
+        self, command: str
+    ) -> None:
+        """The false positive that cost a disclosure line.
+
+        `BLOCKED_MODULE_ROOTS` matched the whole `benchmarks` package, and the cross-plane
+        ingest parity harness lives under it -- though it imports numpy and
+        `shipinfer.ingest`, drives a scripted source, touches no device and produces no
+        measurement. Refusing it teaches a developer to reach for SHIPINFER_ALLOW_HOST_RUN,
+        and that is how the container rule was lost the first time. (Its emitter was moved
+        to `scripts/emit_parity_golden.py` under that refusal, so neither module above is an
+        entry point today; the rule is about what the package *is*, not about one command.)
+        """
+        assert refused(command) is None, command
+
+
+class TestTheCarveOutIsNarrow:
+    """A carve-out that swallowed its root would be worse than the false positive."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python -m benchmarks.run_bench --cameras 50",
+            "python -m benchmarks.harness.shards --shard 0",
+            # A prefix, not a substring: a future sibling must not inherit the carve-out.
+            "python -m benchmarks.parity_bench --op letterbox",
+        ],
+    )
+    def test_the_rest_of_the_benchmarks_package_is_still_refused(self, command: str) -> None:
+        assert refused(command) is not None, command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
             "deploy/rootless/test.sh tests/scheduling -q",
             "deploy/rootless/prove.sh",
             "docker run --rm --device nvidia.com/gpu=all img pytest -m gpu",
@@ -212,6 +250,30 @@ class TestAllows:
         commands would refuse a block for merely containing the word pytest."""
         command = "python3 - <<'PY'\nprint('pytest tests/ would be a lie here')\nPY"
         assert refused(command) is None
+
+
+class TestReadOnlyToolsAreNotExecutionVectors:
+    """`python -m black|isort|ruff` reads its arguments; it executes nothing it is handed."""
+
+    @pytest.mark.parametrize("tool", ["black", "isort", "ruff"])
+    def test_a_formatter_over_a_device_importing_file_is_allowed(
+        self, tool: str, tmp_path: Path
+    ) -> None:
+        script = tmp_path / "model.py"
+        script.write_text("import torch\n")
+        assert refused(f"python -m {tool} --check {script}", cwd=tmp_path) is None
+
+    def test_a_device_named_path_is_still_only_data_to_a_formatter(self) -> None:
+        assert refused("python -m black --check src/shipinfer/runtime/ops/torch_ops.py") is None
+
+    def test_pytest_gains_nothing_from_the_carve_out(self) -> None:
+        assert refused("python -m pytest tests/ -m gpu") is not None
+
+    def test_a_following_segment_is_still_judged_on_its_own(self, tmp_path: Path) -> None:
+        script = tmp_path / "model.py"
+        script.write_text("import torch\n")
+        command = f"python -m black {script}; python -m pytest tests/ -m gpu"
+        assert refused(command, cwd=tmp_path) is not None
 
 
 class TestTheGuardCanFail:
