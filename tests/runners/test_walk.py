@@ -3,7 +3,7 @@
 Two branches split at ``detect`` and rejoin at ``track`` (arch.md §1), and "whichever
 finished last wins" is not an answer when the two carry different metadata: one branch has
 the ship's ``identities``, the other the person's ``vectors``, and the tracker needs both.
-:meth:`~shipinfer.runners.inprocess.InprocessRunner._inbound` is the rule, and it is tested
+:meth:`~shipinfer.runners.walk.ChainWalk.inbound` is the rule, and it is tested
 here directly — the walk that calls it is tested end to end in ``test_inprocess.py``, but a
 merge is worth pinning where the inputs can be stated by hand.
 
@@ -135,7 +135,7 @@ class TestTheFanInMerge:
         """The property the tracker depends on: it sees both branches' results."""
         node = runner.topology.node("join")
 
-        merged = runner._inbound(
+        merged = runner._walker.inbound(
             node,
             {"tap": item(caps="meta@cpu", tracks=[1]), "detect": item(boxes=[(0, 0, 1, 1)])},
         )
@@ -155,7 +155,7 @@ class TestTheFanInMerge:
         """
         node = runner.topology.node("join")
 
-        merged = runner._inbound(
+        merged = runner._walker.inbound(
             node,
             {
                 "tap": item(caps="meta@cpu", **{"class": "person"}),
@@ -180,7 +180,7 @@ class TestTheFanInMerge:
         frame = item(payload="frame:cam-1:7")
         meta_only = item(caps="meta@cpu", payload="tracks:cam-1:7", tracks=[1])
 
-        merged = runner._inbound(node, {"detect": frame, "tap": meta_only})
+        merged = runner._walker.inbound(node, {"detect": frame, "tap": meta_only})
 
         assert merged is not None
         assert merged.payload == "tracks:cam-1:7"
@@ -191,7 +191,7 @@ class TestTheFanInMerge:
         node = runner.topology.node("join")
         donated = item(caps="meta@cpu", payload="tracks")
 
-        merged = runner._inbound(node, {"detect": item(payload="frame"), "tap": donated})
+        merged = runner._walker.inbound(node, {"detect": item(payload="frame"), "tap": donated})
 
         assert merged is not None
         assert merged.context is donated.context, "the tag is carried, never rebuilt"
@@ -209,7 +209,7 @@ class TestWhatTheMergeDoesNotDo:
         node = runner.topology.node("tap")
         only = item(boxes=[(0, 0, 1, 1)])
 
-        assert runner._inbound(node, {"detect": only}) is only
+        assert runner._walker.inbound(node, {"detect": only}) is only
 
     def test_a_predecessor_that_consumed_its_item_contributes_nothing(
         self, runner: InprocessRunner
@@ -218,7 +218,7 @@ class TestWhatTheMergeDoesNotDo:
         node = runner.topology.node("join")
         tracks = item(caps="meta@cpu", payload="tracks")
 
-        merged = runner._inbound(node, {"detect": None, "tap": tracks})
+        merged = runner._walker.inbound(node, {"detect": None, "tap": tracks})
 
         assert merged is tracks
 
@@ -228,8 +228,8 @@ class TestWhatTheMergeDoesNotDo:
         """Not a failure: it is what a branch that ended in a sink looks like."""
         node = runner.topology.node("join")
 
-        assert runner._inbound(node, {"tap": None, "detect": None}) is None
-        assert runner._inbound(node, {}) is None
+        assert runner._walker.inbound(node, {"tap": None, "detect": None}) is None
+        assert runner._walker.inbound(node, {}) is None
 
 
 class TestASkippedPredecessor:
@@ -249,7 +249,7 @@ class TestASkippedPredecessor:
         # `detect` was skipped, so what stands in for its output is what *it* was handed.
         skipped_inbound = item(boxes=[(0, 0, 1, 1)], **{"class": "person"})
 
-        merged = runner._inbound(
+        merged = runner._walker.inbound(
             node,
             {"detect": skipped_inbound, "tap": item(caps="meta@cpu", tracks=[1])},
         )
@@ -283,7 +283,7 @@ class TestTwoBranchesFilingTheSameMapping:
         ships = item(vectors=RowIndexed({0: "ship-0", 2: "ship-2"}))
         people = item(vectors=RowIndexed({1: "person-1", 3: "person-3"}))
 
-        merged = rejoin._inbound(node, {"embed_ship": ships, "embed_person": people})
+        merged = rejoin._walker.inbound(node, {"embed_ship": ships, "embed_person": people})
 
         assert merged is not None
         assert merged.meta["vectors"] == {
@@ -305,7 +305,7 @@ class TestTwoBranchesFilingTheSameMapping:
         ships = item(vectors=RowIndexed({0: "ship-0"}))
         people = item(vectors=RowIndexed({1: "person-1"}))
 
-        merged = rejoin._inbound(node, {"embed_ship": ships, "embed_person": people})
+        merged = rejoin._walker.inbound(node, {"embed_ship": ships, "embed_person": people})
 
         assert merged is not None
         assert ships.meta["vectors"] == {0: "ship-0"}
@@ -328,7 +328,7 @@ class TestTwoBranchesFilingTheSameMapping:
         node = rejoin.topology.node("track")
         before_the_fork = RowIndexed({0: "row-0", 1: "row-1"})
 
-        merged = rejoin._inbound(
+        merged = rejoin._walker.inbound(
             node,
             {
                 "embed_ship": item(shared=before_the_fork, vectors=RowIndexed({0: "ship-0"})),
@@ -360,7 +360,7 @@ class TestTwoBranchesFilingTheSameMapping:
         node = rejoin.topology.node("track")
         before_the_fork = RowIndexed({0: "row-0", 1: "row-1"})
 
-        merged = rejoin._inbound(
+        merged = rejoin._walker.inbound(
             node,
             {
                 "embed_ship": item(shared=before_the_fork, vectors=RowIndexed({0: "ship-0"})),
@@ -386,7 +386,7 @@ class TestTwoBranchesFilingTheSameMapping:
         node = rejoin.topology.node("track")
 
         with pytest.raises(InferenceError) as raised:
-            rejoin._inbound(
+            rejoin._walker.inbound(
                 node,
                 {
                     "embed_ship": item(vectors=RowIndexed({1: "ship-1"})),
@@ -406,7 +406,7 @@ class TestTwoBranchesFilingTheSameMapping:
     ) -> None:
         """The refusal names the two slots at fault, and not the innocent third.
 
-        This is what :meth:`~shipinfer.runners.inprocess.InprocessRunner._collision`'s re-scan
+        This is what :class:`~shipinfer.runners.walk.ChainWalk`'s collision re-scan
         exists for, and with two branches it is untestable because the two the merge is
         holding are always the two at fault. With three it is not: ``embed_ship`` covers row 0
         and ``embed_person`` covers row 1, they union cleanly, and then ``embed_vehicle``
@@ -420,7 +420,7 @@ class TestTwoBranchesFilingTheSameMapping:
         node = three_way.topology.node("track")
 
         with pytest.raises(InferenceError) as raised:
-            three_way._inbound(
+            three_way._walker.inbound(
                 node,
                 {
                     "embed_ship": item(vectors=RowIndexed({0: "ship-0"})),
@@ -448,14 +448,14 @@ class TestTwoBranchesFilingTheSameMapping:
         """
         node = rejoin.topology.node("track")
 
-        scalars = rejoin._inbound(
+        scalars = rejoin._walker.inbound(
             node,
             {
                 "embed_ship": item(**{"class": "ship"}),
                 "embed_person": item(**{"class": "person"}),
             },
         )
-        mixed = rejoin._inbound(
+        mixed = rejoin._walker.inbound(
             node,
             {
                 "embed_ship": item(vectors=RowIndexed({0: "ship-0"})),
@@ -498,7 +498,7 @@ class TestTwoBranchesFilingAModelsRawOutputs:
         """
         node = segmenters.topology.node("track")
 
-        merged = segmenters._inbound(
+        merged = segmenters._walker.inbound(
             node,
             {
                 "seg_ship": item(masks={"masks": "ship-masks"}),
@@ -522,7 +522,7 @@ class TestTwoBranchesFilingAModelsRawOutputs:
         """
         node = segmenters.topology.node("track")
 
-        merged = segmenters._inbound(
+        merged = segmenters._walker.inbound(
             node,
             {
                 "seg_ship": item(masks={"ship_masks": "T1"}),

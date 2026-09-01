@@ -1116,7 +1116,7 @@ class TestTheShippedChainRunsThemInParallel:
 
         # What the walk does at a fork: the *same* item to each branch, neither seeing the
         # other, and then one merge at the node they rejoin on.
-        merged = runner._inbound(
+        merged = runner._walker.inbound(
             runner.topology.node("track"),
             {"embed_ship": ships.process(detected), "embed_person": people.process(detected)},
         )
@@ -1213,7 +1213,7 @@ class TestTheChainReachesTrackWithAppearance:
         runner, ships, people = two_branches()
         detected = item(mixed())
 
-        merged = runner._inbound(
+        merged = runner._walker.inbound(
             runner.topology.node("track"),
             {"embed_ship": ships.process(detected), "embed_person": people.process(detected)},
         )

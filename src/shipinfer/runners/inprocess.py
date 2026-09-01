@@ -18,7 +18,7 @@ being generalised over a second element type. The three fields the queue reads �
 ``request.context.camera_id`` for the lane, ``request.priority`` for the band,
 ``request.deadline_ns`` for expiry — are request fields, so the wrap is what buys a
 per-camera fair lane for free. The :class:`~shipinfer.topology.base.ChainItem` rides on the
-work item and is taken off it at the top of :meth:`InprocessRunner._walk`, the way
+work item and is taken off it at the top of :meth:`~shipinfer.runners.walk.ChainWalk.run`, the way
 ``FrameState`` is derived at the top of the pipeline's per-frame work.
 
 **One worker walks the topological order, skipping what does not admit the item.** Not a
@@ -30,7 +30,7 @@ this item" identically for all three runners.
 
 **Fan-in is merged deterministically or not at all.** Two branches rejoin at ``track``, and
 "whichever finished last wins" is not an answer when the two carry different metadata. See
-:meth:`InprocessRunner._inbound` for the rule.
+:meth:`~shipinfer.runners.walk.ChainWalk.inbound` for the rule.
 
 **An element that raises loses one item, not the worker.** A worker thread that dies stops
 serving every camera on the shard, so the loop survives one bad frame and the item's future
@@ -68,25 +68,18 @@ then a fix that applies to both belongs in both, and this paragraph is the remin
 
 from __future__ import annotations
 
-import contextlib
 import threading
 import time
 from collections.abc import Callable, Mapping
-from concurrent.futures import InvalidStateError
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from shipinfer.core.errors import (
     ConfigurationError,
-    InferenceError,
     QueueFullError,
     RequestCancelledError,
-    RequestTimeoutError,
-    RingClosedError,
     ServerStateError,
-    ShipInferError,
-    WireRefusedError,
 )
 from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.request import InferenceRequest, Priority, ResponseFuture
@@ -98,6 +91,7 @@ from shipinfer.runners.base import Runner
 from shipinfer.runners.frames import ChainFrameSink
 from shipinfer.runners.metrics import RunnerMetrics
 from shipinfer.runners.registry import RUNNERS
+from shipinfer.runners.walk import ChainWalk, ChainWork
 from shipinfer.scheduling.queues import QUEUES, BatchWindow, RequestQueue
 from shipinfer.scheduling.work import WorkItem
 from shipinfer.topology import (
@@ -106,10 +100,8 @@ from shipinfer.topology import (
     Element,
     ElementContext,
     ElementKind,
-    ElementNode,
     ImageOpsLike,
     ModelResolver,
-    RowIndexed,
     Topology,
     WaiterBudget,
 )
@@ -155,7 +147,7 @@ class _Head:
 
     Resolved once per runner from the *loader's* answers, and both fields refuse a chain
     whose roots disagree: one ingest manager publishes into one sink, every root of the walk
-    sees that one item (:meth:`InprocessRunner._walk`), so two roots wanting different
+    sees that one item (:meth:`~shipinfer.runners.walk.ChainWalk.run`), so two roots wanting different
     payloads or different decoders is a chain this runner cannot honour. Refusing at start
     beats stamping one root's answer on the other's frames.
 
@@ -170,23 +162,6 @@ class _Head:
 
     caps: Caps
     source: str | None
-
-
-@dataclass(slots=True)
-class _ChainWork(WorkItem):
-    """A queued :class:`WorkItem` carrying the chain item it will start from.
-
-    A subclass rather than a second queue type, and rather than smuggling the item through
-    ``request.parameters``: it *is* a work item — the queue's fairness, priority and expiry
-    all read the request it wraps — and a named field is greppable where a magic parameter
-    key is not.
-
-    Optional only because ``WorkItem.enqueued_ns`` has a default and a dataclass field after
-    a defaulted one must have one too; :meth:`InprocessRunner._walk` refuses a ``None``
-    rather than walking an item that does not exist.
-    """
-
-    item: ChainItem | None = None
 
 
 @RUNNERS.register("inprocess", "single")
@@ -319,11 +294,13 @@ class InprocessRunner(Runner):
         #: slot, `frames_per_wakeup: 4` and a worker wedged on item 0, closing the queue would
         #: resolve nothing and three producers would wait forever on futures nobody owns.
         self._inflight: list[tuple[WorkItem, ...]] = [()] * self._wanted_workers
-        #: The cap the loader negotiated per edge, read by :meth:`_inbound` when a fan-in has
-        #: to substitute for a donor that produced nothing. Snapshotted here because a
-        #: topology is immutable once built, and the alternative is a dict comprehension per
-        #: fan-in per frame.
-        self._edge_caps = {(edge.producer, edge.consumer): edge.caps for edge in topology.edges}
+        #: The bottom half: everything from here down is chain items and elements. See
+        #: `runners/walk.py`, which is where the per-frame loop lives.
+        self._walker = ChainWalk(
+            topology,
+            self._metrics,
+            {(edge.producer, edge.consumer): edge.caps for edge in topology.edges},
+        )
         #: The cameras, or ``None`` when this runner has none: before the first start, after
         #: a stop released them, and on a started runner that has not been given one yet.
         #: Built on **first use** and never here, because constructing it imports the whole
@@ -1173,7 +1150,8 @@ class InprocessRunner(Runner):
         makes — a future that never completes, on a producer that is waiting for it — so every
         in-flight slot is drained here and each item failed with the same typed cancellation
         the queue uses. The race with a worker that finishes a microsecond later is benign
-        because :meth:`_fail` and :meth:`_finish` both refuse a future that is already
+        because :meth:`~shipinfer.runners.walk.ChainWalk.fail` and
+        :meth:`~shipinfer.runners.walk.ChainWalk.finish` both refuse a future that is already
         resolved, whichever of the two got there first.
 
         The signal and the queue are **this cycle's** too, and that is load-bearing rather
@@ -1312,7 +1290,7 @@ class InprocessRunner(Runner):
 
         Each slot holds the item being walked *and* the rest of its wake-up batch, because
         neither is in the queue any more. An abandoned worker that finishes its current item a
-        microsecond later is benign: :meth:`_fail` and :meth:`_finish` both refuse a future
+        microsecond later is benign: the walker's ``fail`` and ``finish`` both refuse a future
         that is already resolved, whichever of the two arrived first.
 
         Args:
@@ -1326,8 +1304,8 @@ class InprocessRunner(Runner):
             for work in batch:
                 stranded += 1
                 error = RequestCancelledError("the runner stopped")
-                self._count_failure(work, error)
-                self._fail(work, error)
+                self._walker.count_failure(work, error)
+                self._walker.fail(work, error)
         return stranded
 
     # -- submission --------------------------------------------------------------------
@@ -1357,7 +1335,8 @@ class InprocessRunner(Runner):
                 counter is ``items_dropped``, which this is the only writer of — the item was
                 refused at the door and never became one of ``accepted``, so it is not an
                 outcome the ``stats()`` ledger has to name. A model queue refusing an item
-                already inside the chain is ``items_backpressure``; see :meth:`_count_failure`.
+                already inside the chain is ``items_backpressure``; see
+                :meth:`~shipinfer.runners.walk.ChainWalk.count_failure`.
             RequestCancelledError: the queue is closed — the runner is shutting down.
         """
         context = item.context
@@ -1372,7 +1351,7 @@ class InprocessRunner(Runner):
                 else 0
             ),
         )
-        work = _ChainWork(request, ResponseFuture(request), item=item)
+        work = ChainWork(request, ResponseFuture(request), item=item)
         try:
             self._queue.put(work)
         except QueueFullError:
@@ -1472,522 +1451,19 @@ class InprocessRunner(Runner):
                     # its own: one wedged element would hold the whole shutdown open.
                     break
                 try:
-                    self._walk(work)
+                    self._walker.run(work)
                 except Exception as exc:
                     # Reaching here means something outside an element failed. A worker that
                     # dies stops serving every camera on this shard, so the loop survives it
                     # — and the item's future is resolved, because a frame that vanishes with
                     # no typed outcome is the failure ADR-005 exists to prevent.
-                    self._count_failure(work, exc)
+                    self._walker.count_failure(work, exc)
                     _LOG.exception("runner failed on %s", work.request.context.key)
-                    self._fail(work, self._typed(exc, "the runner failed"))
+                    self._walker.fail(work, self._walker.typed(exc, "the runner failed"))
                 finally:
                     inflight[slot] = batch[index + 1 :]
 
-    def _walk(self, work: WorkItem) -> None:
-        """Walk one item through every element that admits it, in topological order.
-
-        The :class:`ChainItem` is taken off the work item here, at the top, exactly where
-        ``pipeline/runner.py`` derives its ``FrameState`` from the queued request: everything
-        above this line deals in work items and queues, everything below it deals in chain
-        items and elements.
-
-        Three rules, all of them the loader's and none of them re-decided per runner:
-
-        * an element whose ``when:`` rejects the item is **skipped**, and the item it was
-          given is handed to its successors unchanged (``ElementNode.admits``);
-        * an element that returns ``None`` **consumed** the item — a sink, or a filter — so
-          its successors receive nothing from it, which is different from a skip;
-        * a fan-in merges its predecessors' contributions by :meth:`_inbound`.
-
-        An element that raises costs this item and nothing else: it is counted, logged with
-        the ``(camera, frame)`` tag, and its future carries the typed failure. Walking on
-        would produce a plausible event with no boxes in it, which is worse than a reported
-        failure.
-
-        **The failure the submitter sees is the element's own, whenever the element raised
-        one of ours.** A :class:`~shipinfer.core.errors.QueueFullError` from a ``pool``
-        element carries the depth and the capacity of the model queue that refused it, a
-        :class:`~shipinfer.core.errors.RequestTimeoutError` says the model never answered, and
-        a :class:`~shipinfer.core.errors.ValidationError` says the payload was wrong — three
-        different events with three different responses (shed load, add capacity, fix the
-        chain). This wrapped all three in ``InferenceError`` and flattened them into one, which
-        also made ``pool.py``'s "propagated untouched" promise false. Only a failure that is
-        *not* ours — the ordinary bug, ``RuntimeError`` and friends — is wrapped, and then the
-        wrapper names the element and the tag because nothing else will.
-        """
-        # Taken off the work item, and checked rather than assumed: the queue's element type
-        # is `WorkItem`, so anything that reached it without going through `submit` — a test
-        # or a caller putting into an injected queue directly — gets a typed refusal here
-        # instead of an `AttributeError` from inside a worker thread.
-        item = work.item if isinstance(work, _ChainWork) else None
-        if item is None:
-            raise InferenceError(
-                f"the work item for {work.request.context.key} carries no chain item; "
-                "items enter a runner through submit()"
-            )
-        if self._expired(work, "before the walk"):
-            return
-
-        produced: dict[str, ChainItem | None] = {}
-        last = item
-        for node in self._topology.nodes:
-            try:
-                incoming = item if node.is_root else self._inbound(node, produced)
-            except InferenceError as exc:
-                # A fan-in the loader's donor rule cannot answer for this item. Counted and
-                # failed like an element failure, because it is the same shape: one item, a
-                # typed reason naming the node, and the walk stops rather than handing a
-                # payload on under a cap nobody negotiated.
-                self._count_failure(work, exc)
-                _LOG.error(
-                    "fan-in %s could not be merged for %s: %s",
-                    node.name,
-                    work.request.context.key,
-                    exc,
-                    extra=log_context(
-                        camera_id=work.request.context.camera_id,
-                        frame_id=work.request.context.frame_id,
-                    ),
-                )
-                self._fail(work, exc)
-                return
-            if incoming is None:
-                continue
-            if not node.admits(incoming):
-                # Skip and continue: the item is not dropped and the walk does not stop, so
-                # this element's successors receive *its* inbound item unchanged. The loader
-                # negotiated that bypass pair, which is why it is safe to do here.
-                produced[node.name] = incoming
-                continue
-            if node.element.needs_model and self._expired(
-                work, f"before element {node.name!r}"
-            ):
-                # Re-checked in front of every element that can *wait*. The elements that need
-                # a model are the ones that submit to the pool and sleep on the answer, so a
-                # nine-step chain can spend several stage timeouts between the check at the
-                # top of the walk and this element — and a frame that is already too late to
-                # act on must not be given another GPU. Everything else is local work with no
-                # wait in it, so checking in front of it would only cost a clock read.
-                #
-                # The element's declaration and not `node.kind in MODEL_KINDS`, which read
-                # the same for every implementation that exists today and stops doing so at
-                # the first `recognize` that queries a gallery instead of a network: that one
-                # is local work, it never touches the pool, and charging it an expiry check
-                # would drop frames in front of an element that cannot be slow.
-                return
-            try:
-                result = node.element.process(incoming)
-            except Exception as exc:
-                self._count_failure(work, exc)
-                _LOG.exception(
-                    "element %s failed on %s",
-                    node.name,
-                    incoming.key,
-                    extra=log_context(camera_id=incoming.key[0], frame_id=incoming.key[1]),
-                )
-                self._fail(
-                    work, self._typed(exc, f"element {node.name!r} failed on {incoming.key}")
-                )
-                return
-            produced[node.name] = result
-            if result is not None:
-                last = result
-
-        self._metrics.items_walked.inc(camera=work.request.context.camera_id)
-        self._finish(work, last)
-
-    def _inbound(
-        self, node: ElementNode, produced: Mapping[str, ChainItem | None]
-    ) -> ChainItem | None:
-        """The item a non-root element receives, merged from its predecessors.
-
-        Returns ``None`` when no predecessor contributed anything — every one of them either
-        consumed its item or never saw one — in which case this element does not run. That is
-        not a failure: it is what a branch that ended in a sink looks like.
-
-        The merge rule, and it is deliberately boring, because "whichever branch finished
-        last wins" is not an answer when two branches carry different metadata:
-
-        * **metadata is the union, in ``node.inputs`` order.** So a fan-in at ``track`` sees
-          the ship branch's ``identities`` *and* the person branch's ``vectors``.
-        * **a key two branches both wrote is merged if both wrote a**
-          :class:`~shipinfer.topology.base.RowIndexed`, **and otherwise resolved
-          first-writer-wins.** The merged case is the two-embedder rejoin -- the shape C8b
-          gives ``topology/ship_person.yaml``, and the shape
-          ``tests/topology/test_pool_embed_crops.py``'s two-branch fixture declares today:
-          ``embed_ship`` and ``embed_person`` both ``after: detect``, each with its own
-          ``params: classes:``, rejoining here, and each filing a *partial* ``meta["vectors"]``
-          -- ``{detection row: vector}`` covering only its own classes.
-          Taking one wholesale would hand ``track`` half the frame's appearance vectors with
-          no exception and no counter, which is the failure the mapping form exists to make
-          impossible; so two row-indexed mappings under one key become their union. For
-          anything else there is no union to take -- two branches disagreeing about
-          ``meta["class"]`` is a chain-file problem, not a merge problem -- and the first
-          writer wins, so that the
-          resolution is a property of the chain file's declaration order and does not change
-          between runs. A ``RowIndexed`` meeting anything else is that same disagreement about
-          what the key *is*, so it resolves the same way.
-        * **payload and caps come from one donor**, the predecessor the *loader* nominated
-          (:attr:`~shipinfer.topology.chain.ElementNode.donor`, resolved from the negotiated
-          edge caps). A payload is a frame handle or a tensor, and half of one plus half of
-          another is not a thing; the choice belongs where ``admits`` belongs, so that
-          ``inprocess`` and ``fleet`` cannot come to disagree about which branch donated the
-          frame.
-        * **a skipped predecessor contributes its own inbound item**, because that is what
-          skip-and-continue means — the walk stored it under that predecessor's name.
-
-        **The shape is declared, not sniffed, and that is what makes this rule total.** An
-        earlier version of it unioned any two ``Mapping`` values, which cannot tell a
-        ``{detection row: vector}`` attribution from a model's raw ``{output name: Tensor}``
-        response -- and ``_PoolElement._finish`` files exactly the latter under its
-        ``meta_key``, which ``segment`` and ``recognize`` both keep. Two rejoining
-        ``segment`` slots therefore either failed every frame (engines naming their output
-        the same collided on the *name*, and the refusal sent the operator to a
-        ``params: classes:`` that family does not have) or silently produced a composite
-        mapping neither engine emitted. So the writer says what it wrote:
-        :meth:`~shipinfer.topology.elements.pool._PoolCropElement._scatter` files a
-        :class:`~shipinfer.topology.base.RowIndexed`, and only that type unions here.
-        Everything else keeps first-writer-wins, which is the right answer for a value whose
-        shape nobody declared -- and it makes the refusal below reachable *only* from slots
-        that have a ``classes:`` to check.
-
-        There is still deliberately **no general load-time check** behind this rule, and that
-        is a decision rather than an omission (CONVENTIONS 2.6 would prefer one). To refuse
-        "two elements on rejoining branches write the same key with incompatible shapes" at
-        ``from_spec``, the loader would have to know two things about *every* element: which
-        metadata keys it writes, and which of them it writes as a ``RowIndexed``. The ``pool``
-        family declares both -- ``meta_key`` is a ClassVar and only ``_PoolCropElement``
-        scatters -- but the family is not the tree: an ``Element`` is an ABC anyone may
-        implement, ``process`` may file any key it likes, and a loader that walked only the
-        classes it recognises would pass every pair it cannot see, which reads as coverage and
-        is not. The check that *is* sound is correspondingly narrower, it is about ``classes:``
-        rather than about shapes, and it is described in the next paragraph. The shape question
-        is answered here, where the values are -- and now it is answered by reading a
-        declaration rather than by guessing at one.
-
-        The check that *is* sound is a narrower one, and it is deliberately not here either:
-        two ``pool`` crop elements on rejoining branches with the same ``meta_key`` and
-        ``params: classes:`` that overlap or are absent is a *static* fact, because ``meta_key``
-        is a ClassVar and ``classes:`` is a param. It belongs beside the
-        ``classes:``-against-``class_labels`` cross-check, which reads the same two fields, and
-        lands with it rather than as a second reader of them here.
-
-        Raises:
-            InferenceError: the nominated donor produced nothing and no other contributor
-                donates under the same negotiated cap (see :meth:`_substitute_donor`); or two
-                branches filed *different* values for the same entry of the same mapping-valued
-                key (see :meth:`_merge_meta`).
-        """
-        contributors = [
-            (name, contributed)
-            for name in node.inputs
-            if (contributed := produced.get(name)) is not None
-        ]
-        if not contributors:
-            return None
-        donor = produced.get(node.donor) if node.donor is not None else None
-        if donor is None:
-            donor = self._substitute_donor(node, contributors)
-        if len(contributors) == 1:
-            # The common case — a straight line — allocates nothing.
-            return donor
-
-        return ChainItem(
-            context=donor.context,
-            caps=donor.caps,
-            payload=donor.payload,
-            meta=self._merge_meta(node, contributors),
-        )
-
-    def _merge_meta(
-        self, node: ElementNode, contributors: list[tuple[str, ChainItem]]
-    ) -> dict[str, Any]:
-        """The merged metadata of a fan-in: union by key, and union again inside a scatter-back.
-
-        Split out of :meth:`_inbound` because it is the half with a rule in it. See that
-        method's docstring for the rule; this is how it is spelled.
-
-        The inner union is gated on :class:`~shipinfer.topology.base.RowIndexed` and **not**
-        on ``Mapping``, and that one word is the whole correctness of this method. A
-        ``Mapping`` gate reads any dict as an attribution, and the tree has another kind: the
-        raw ``{output name: Tensor}`` response ``_PoolElement._finish`` files under
-        ``meta_key``, which ``segment`` (``masks``) and ``recognize`` (``identities``) both
-        keep. Under a ``Mapping`` gate two rejoining ``segment`` slots collide on an *engine
-        output name* -- refusing every frame of a chain that used to resolve
-        first-writer-wins -- or, when the engines name their outputs differently, union into a
-        composite dict neither of them produced. Gated on the declared type, those two keys
-        are untouched by this method and keep the pre-existing rule, and the only values that
-        union are the ones an element said were keyed by detection row.
-
-        The union is itself a ``RowIndexed``, not a plain ``dict``. A three-way rejoin merges
-        contributor three into the result of merging one and two, so a union that lost the
-        declaration would union the first pair and then quietly take the first writer for the
-        third -- half of a frame's coverage, by arithmetic on the number of branches.
-
-        The identity test before the merge is a **fast path, not a correctness guard**, and
-        saying so is the point of this paragraph. A key written before the fork rides down both
-        branches as the same object, because :meth:`~shipinfer.topology.base.ChainItem.derive`
-        copies the dict and not the values, so a diamond arrives with both contributors holding
-        one mapping. Merging that mapping into itself would answer correctly anyway -- every
-        entry would meet itself, and ``union[entry] is not row`` is false against the same
-        object, so no refusal is reachable -- and the branch buys nothing but the O(rows) copy
-        it skips. What it is worth is that copy, at 1000 frames a second, on a chain that
-        embeds before it forks; it is pinned by a test that files a ``RowIndexed`` before the
-        fork -- the only kind that would otherwise be copied -- and asserts the merged value
-        *is* that object, so a refactor that drops the branch fails rather than quietly copying
-        every pre-fork scatter-back at every fan-in.
-
-        ``meta["missing_stages"]`` is the tree's *other* partial-coverage value and it does not
-        get the union: it is a ``tuple[str, ...]`` appended to by ``track`` and ``mtmc``, so two
-        branches each naming a different gap resolve first-writer-wins and one name is dropped.
-        That is not live -- on ``topology/ship_person.yaml`` both writers sit *after* the
-        rejoin -- and unioning tuples in general would be wrong, because ``meta["frame_hw"]`` is
-        a tuple too and two branches disagreeing about a frame's size must not resolve to a
-        four-tuple. Special-casing the name here would put a pipeline key in the pure runner.
-        The next chain that loses a stage per branch should reach for the ``RowIndexed`` form,
-        which is the shape ``vectors`` moved to for exactly this reason.
-
-        Equality is deliberately *not* attempted beyond identity. The values under a
-        ``RowIndexed`` key are numpy arrays -- an embedding per detection row -- and
-        ``a == b`` on two arrays is an array, whose truth value raises; a merge that crashed
-        the walk while deciding whether to raise would be worse than the loss it replaced. So
-        two branches that independently computed a row are refused even if the numbers would
-        have matched, which is right anyway: it means both embedders cropped it, and that is
-        the duplicated GPU work this element's ``classes:`` exists to prevent.
-
-        Args:
-            node: the fan-in being merged, named in the refusal.
-            contributors: ``(predecessor name, its contribution)`` in ``node.inputs`` order.
-
-        Raises:
-            InferenceError: two branches filed different values for the same detection row of
-                the same ``RowIndexed`` key. Names the key, the row and every branch that
-                claimed it, because the fix is in the chain file -- two elements were told to
-                cover the same detection.
-        """
-        merged: dict[str, Any] = {}
-        for _, contributed in contributors:
-            for key, value in contributed.meta.items():
-                if key not in merged:
-                    merged[key] = value
-                    continue
-                held = merged[key]
-                if held is value:
-                    # Fast path, not a guard: the same object down both branches (written
-                    # before the fork) merges into itself entry-for-entry and cannot be
-                    # refused, so skipping the merge only skips the copy.
-                    continue
-                if not (isinstance(held, RowIndexed) and isinstance(value, RowIndexed)):
-                    # Not a *declared* union to take: the first writer wins. Two plain
-                    # mappings land here too, on purpose -- a model's raw `{output name:
-                    # Tensor}` response is a mapping and is not an attribution.
-                    continue
-                union = RowIndexed(held)
-                for entry, row in value.items():
-                    if entry in union and union[entry] is not row:
-                        raise InferenceError(self._collision(node, key, entry, contributors))
-                    union[entry] = row
-                merged[key] = union
-        return merged
-
-    def _collision(
-        self,
-        node: ElementNode,
-        key: str,
-        entry: Any,
-        contributors: list[tuple[str, ChainItem]],
-    ) -> str:
-        """The message for two branches filing different values for one detection row.
-
-        Off the ordinary path by construction, so it re-scans the contributors to name *every*
-        branch that claimed the row rather than only the two the merge happened to be holding.
-        On a three-way rejoin the pair being merged need not be the pair at fault -- branches
-        one and two may cover disjoint rows and branch three contest one of them, in which
-        case the merge is holding the *union* of one and two on one side and the culprit on
-        the other -- and an operator sent to the wrong two slots of the chain file is worse
-        served than one sent to none. Pinned by
-        ``tests/runners/test_walk.py::TestTwoBranchesFilingTheSameMapping::
-        test_a_three_way_rejoin_names_only_the_branches_that_claimed_the_row``.
-
-        The re-scan matches on :class:`~shipinfer.topology.base.RowIndexed` for the same
-        reason the merge does: a third branch carrying a plain mapping under this key never
-        entered the union, so naming it would send the operator to a slot that is not
-        involved.
-        """
-        claimants = [
-            name
-            for name, contributed in contributors
-            if isinstance(inbound := contributed.meta.get(key), RowIndexed) and entry in inbound
-        ]
-        return (
-            f"fan-in {node.name!r}: branches {', '.join(repr(name) for name in claimants)} "
-            f"each filed a different value for meta[{key!r}][{entry!r}]. Rejoining branches "
-            "merge a row-indexed scatter-back rather than one replacing the other, and two "
-            "elements covering detection row "
-            f"{entry!r} means the chain file asked both of them for it -- check their "
-            "`params: classes:` do not overlap"
-        )
-
-    def _substitute_donor(
-        self, node: ElementNode, contributors: list[tuple[str, ChainItem]]
-    ) -> ChainItem:
-        """Who donates payload and caps when the nominated donor did not, or a typed refusal.
-
-        The loader nominated one predecessor (:attr:`~shipinfer.topology.chain.ElementNode.
-        donor`) by walking this element's ``accepts`` in order against the negotiated cap of
-        each inbound edge. Reached only when that one contributed nothing — it consumed its
-        item, or it never received one — so this is off the ordinary path by construction.
-
-        A **substitute is only legal if it donates under the same negotiated cap**. That cap
-        is not decoration: it is what the loader resolved this element's own ``produces: *@*``
-        from, what it checked every bypass pair against, and what every element downstream
-        was validated against. Handing the payload over under a *different* one relabels it exactly the way
-        a concrete ``produces`` on a ``pool`` element used to — the item claims a format and a
-        location it does not have, and the device-to-host download arch.md §8 exists to refuse
-        becomes invisible. This used to take ``contributors[0]`` unconditionally, which is the
-        one place an item could travel under a cap nobody negotiated.
-
-        So: the donor, else the first contributor whose edge into ``node`` carries the donor's
-        cap, else a typed failure for this item alone. A chain where that failure is reachable
-        on every frame is a chain whose fan-in the loader cannot resolve, and phase B's
-        load-time check is where it will be caught before a deploy rather than per frame.
-
-        Args:
-            node: the fan-in being merged.
-            contributors: ``(predecessor name, its contribution)``, in ``node.inputs`` order.
-
-        Raises:
-            InferenceError: no contributor donates under the donor's negotiated cap. Names the
-                node, the donor and both caps, because the fix is in the chain file.
-        """
-        wanted = self._edge_caps.get((node.donor, node.name)) if node.donor else None
-        if wanted is None:
-            # No nominated donor, or no negotiated edge to read a cap from — a root, or a node
-            # the loader wired without one. There is nothing to be inconsistent with, so the
-            # first contributor donates, as it always did.
-            return contributors[0][1]
-        for name, contributed in contributors:
-            if self._edge_caps.get((name, node.name)) == wanted:
-                return contributed
-        offered = ", ".join(
-            f"{name} [{self._edge_caps.get((name, node.name))}]" for name, _ in contributors
-        )
-        raise InferenceError(
-            f"fan-in {node.name!r} has no donor for this item: {node.donor!r} produced "
-            f"nothing and none of the predecessors that did ({offered}) donates under the "
-            f"negotiated cap [{wanted}]. Handing the payload on under another cap would "
-            f"relabel it; declare {node.name!r}'s inbound edges with one cap, or make "
-            f"{node.donor!r} produce for every item it admits"
-        )
-
     # -- failure and observability -----------------------------------------------------
-
-    def _expired(self, work: WorkItem, where: str) -> bool:
-        """Fail and count ``work`` if its deadline has passed. Returns whether it did.
-
-        One helper and not two checks written out, because the counter and the typed error
-        have to stay identical wherever the walk asks: an expiry that was counted at the top
-        of the walk and merely logged in the middle would make ``stats()["items"]["expired"]``
-        answer a different question depending on where the frame died.
-
-        Args:
-            work: the queued item.
-            where: named in the message, so an operator reading the failure can tell the
-                deadline the queue enforces from the one the walk re-checks, and can tell
-                *which* element the frame had already reached.
-        """
-        if not work.request.is_expired():
-            return False
-        self._metrics.items_expired.inc(camera=work.request.context.camera_id)
-        self._fail(work, RequestCancelledError(f"the item's deadline passed {where}"))
-        return True
-
-    @staticmethod
-    def _typed(error: Exception, context: str) -> BaseException:
-        """The failure this item's future should carry.
-
-        One of ours travels untouched: the submitter is meant to branch on it, and re-wrapping
-        turns backpressure, a stage timeout and a bug into the same ``InferenceError``. A
-        foreign exception is wrapped, because ``RuntimeError('the detector fell over')`` on its
-        own says neither which element fell over nor for which frame.
-
-        Args:
-            error: whatever was raised.
-            context: the prefix for the wrapper — the element and the tag, or the walk.
-        """
-        return (
-            error
-            if isinstance(error, ShipInferError)
-            else InferenceError(f"{context}: {error}")
-        )
-
-    def _count_failure(self, work: WorkItem, error: BaseException | None = None) -> None:
-        """Charge one lost item to the counter its *kind* of failure belongs on, per camera.
-
-        Three destinations, because an operator does three different things about them:
-        backpressure means shed load or add lanes, a stage timeout means the model is
-        saturated, and anything else means read a stack trace. Counting all of them as
-        ``failed`` — which is what this did — hid the first two behind the third, so a shard
-        under sustained overload looked like a shard full of bugs.
-
-        Backpressure lands on ``items_backpressure``, not on ``items_dropped``. Every item
-        this method sees was ``accepted`` — it is mid-walk, off the queue and inside the chain
-        — whereas ``items_dropped`` is the submission that never got in at all. One counter
-        for both is a defensible operational graph and an indefensible ledger: ``accepted``
-        could then only be reconciled against the outcomes by subtracting the queue's own
-        ``rejected`` first. See :meth:`_do_stats` for the identity that buys.
-
-        The backpressure family is narrowed by hand, because inheritance does not carry the
-        operator's response. ``core/errors/launch.py`` makes :class:`RingClosedError` and
-        :class:`WireRefusedError` :class:`QueueFullError` subclasses so that phase D's
-        dispatcher spill loop treats them as a refusal and tries the next candidate — the
-        right call there, and the wrong label here: a ring whose peer died and a wire that
-        cannot carry the payload are both "file a ticket", not "shed load or add capacity".
-        They count as ``failed``. :class:`RingFullError` stays with ``items_backpressure``,
-        which is exactly what it is.
-
-        Args:
-            work: the item being failed; its camera is the label.
-            error: the failure. ``None``, or anything outside the backpressure and timeout
-                families, counts as ``items_failed``.
-        """
-        camera = work.request.context.camera_id
-        if isinstance(error, (RingClosedError, WireRefusedError)):
-            self._metrics.items_failed.inc(camera=camera)
-        elif isinstance(error, QueueFullError):
-            self._metrics.items_backpressure.inc(camera=camera)
-        elif isinstance(error, RequestTimeoutError):
-            self._metrics.items_timed_out.inc(camera=camera)
-        else:
-            self._metrics.items_failed.inc(camera=camera)
-
-    def _fail(self, work: WorkItem, error: BaseException) -> None:
-        """Resolve this item's future with a typed failure, unless it is already resolved.
-
-        The ``done()`` guard is what makes shutdown and a slow worker safe to race: a future
-        :meth:`_do_stop` has already cancelled is *finished*, and
-        ``Future.set_running_or_notify_cancel`` raises ``RuntimeError`` on a finished future
-        rather than answering ``False``. Without the guard, an abandoned worker that reached
-        the end of its walk after the runner stopped would die inside the failure handler,
-        which is a stack trace about the thing that was supposed to be handled cleanly.
-        """
-        if work.future.done():
-            return
-        with contextlib.suppress(RuntimeError, InvalidStateError):
-            work.fail(error)
-
-    def _finish(self, work: WorkItem, item: ChainItem) -> None:
-        """Resolve this item's future with the walked item, unless it is already resolved.
-
-        Same guard as :meth:`_fail`, and the same race: the loser of a stop-versus-finish is
-        whoever arrives second, and the caller sees exactly one outcome either way.
-        """
-        if work.future.done():
-            return
-        with contextlib.suppress(RuntimeError, InvalidStateError):
-            if work.future.set_running_or_notify_cancel():
-                work.future.set_result(item)
 
     def _do_health(self) -> dict[str, Any]:
         """Queue, workers and one entry per camera.
