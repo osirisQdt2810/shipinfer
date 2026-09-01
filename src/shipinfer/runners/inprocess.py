@@ -1,69 +1,34 @@
+# doc: long the five choices below each had a simpler-looking alternative that is wrong
 """The single-process runner: a fair lane per camera, N workers, one frame each.
 
-This is arch.md §5 with the process boundary removed — ② the fair lanes and ③ the pipeline
-workers, over ④ whatever model pool the runner was handed. One worker takes one item and
-walks it through the whole chain, sleeping at every pool wait; concurrency comes from having
-several workers and from each *model* batching across every frame in flight. It is the
-runner for dev, tests and a few cameras, and it is the shard-side executor the ``fleet``
-runner will drive in phase A2f — which is why the walk lives here and not in a launcher.
+arch.md section 5 with the process boundary removed -- the fair lanes and the pipeline
+workers, over whatever model pool the runner was handed. One worker takes one item and walks
+it through the whole chain, sleeping at every pool wait; concurrency comes from having
+several workers and from each *model* batching across the frames in flight. The per-frame
+walk itself is :mod:`shipinfer.runners.walk`.
 
-Five choices are worth defending, because each one had an alternative that looks simpler.
+Five choices, each with a simpler-looking alternative that is wrong:
 
-**The queue is the fair one, and it stays typed on** :class:`~shipinfer.scheduling.work.
-WorkItem`. Admission into the chain is the same problem the engine's per-model queues solve
-— bounded, bucketed by ``camera_id``, drained round-robin, honest overflow — and it is
-already solved (ADR-005). So an item submitted here is *wrapped* in a ``WorkItem`` exactly as
-:class:`~shipinfer.pipeline.sink.QueueFrameSink` wraps a decoded frame, rather than the queue
-being generalised over a second element type. The three fields the queue reads —
-``request.context.camera_id`` for the lane, ``request.priority`` for the band,
-``request.deadline_ns`` for expiry — are request fields, so the wrap is what buys a
-per-camera fair lane for free. The :class:`~shipinfer.topology.base.ChainItem` rides on the
-work item and is taken off it at the top of :meth:`~shipinfer.runners.walk.ChainWalk.run`, the way
-``FrameState`` is derived at the top of the pipeline's per-frame work.
+* **The queue is the fair one, typed on** :class:`~shipinfer.scheduling.work.WorkItem`.
+  Admission is the problem the engine's per-model queues already solve (ADR-005), so an item
+  is *wrapped* rather than the queue generalised. The three fields it reads -- camera, band,
+  deadline -- are request fields, so the wrap buys the per-camera lane for free.
+* **One worker walks the topological order.** Not a thread per element: nine elements as nine
+  queues puts eight hand-offs in every frame's path, and the loader already proved the order
+  legal (ADR-017).
+* **Fan-in merges deterministically or not at all** -- "whichever finished last" is no answer
+  when the branches carry different metadata (:meth:`~shipinfer.runners.walk.ChainWalk.inbound`).
+* **An element that raises loses one item, not the worker**, which would stop serving every
+  camera on the shard.
+* **A batch is as wide as the worker pool.** The walk is synchronous, so at
+  ``pipeline.workers = 4`` a shard offers each model batches of at most 4 whatever
+  ``max_batch_size`` says. A throughput ceiling, not a correctness bug; the fix is more
+  workers, and the asynchronous walk is arch.md section 5.
 
-**One worker walks the topological order, skipping what does not admit the item.** Not a
-thread per element: a chain of nine elements as nine queues would put eight hand-offs and
-eight context switches in the path of every frame, and the branch conditions would have to be
-re-decided at each one. The loader has already proved the order legal (ADR-017), and
-:meth:`~shipinfer.topology.chain.ElementNode.admits` already answers "should this element see
-this item" identically for all three runners.
-
-**Fan-in is merged deterministically or not at all.** Two branches rejoin at ``track``, and
-"whichever finished last wins" is not an answer when the two carry different metadata. See
-:meth:`~shipinfer.runners.walk.ChainWalk.inbound` for the rule.
-
-**An element that raises loses one item, not the worker.** A worker thread that dies stops
-serving every camera on the shard, so the loop survives one bad frame and the item's future
-carries the typed failure — the same shape ``pipeline/runner.py`` uses, and for the same
-reason.
-
-**A batch is as wide as the worker pool, and that is the known ceiling.** The walk is
-synchronous: a worker submits to a model and sleeps on the future, so the most frames that
-can be sitting in one model's queue at once is the number of workers. With the default
-``pipeline.workers = 4`` a shard therefore offers each model **batches of at most 4**, whatever
-``max_batch_size`` the model declares. That is arch.md §5⑤'s asynchronous walk, deferred: it
-is a throughput ceiling and not a correctness bug, the workaround is more workers, and the
-number phase B's bench has to produce is the achieved batch size per model per shard against
-this bound.
-
-**The cameras are the runner's, and the decode element only names them.** This runner owns
-an :class:`~shipinfer.ingest.IngestManager` for the length of one start cycle: one actor
-thread per camera, publishing through :class:`~shipinfer.runners.frames.ChainFrameSink` into
-the same ``submit`` everything else goes through (arch.md §5①→②). The alternative — a decode
-*element* that opened its own camera — was rejected because it would drag the camera set and
-the runner's own admission door into ``topology``, which must stay pure enough to validate a
-chain on a laptop. So ``decode: {impl: replay}`` selects an ingest *source by name* and
-declares the chain's head cap, and everything with a thread in it lives here. The import of
-``shipinfer.ingest`` is inside :meth:`InprocessRunner._ingest` for the same purity reason one
-layer down: ``import shipinfer.runners`` must cost no decode runtime and no
-``shipinfer.runtime`` (and, through it, no torch on a host where a device source is present).
-
-**On the duplication with** :mod:`shipinfer.pipeline.runner`. That module is the precedent
-this one follows: the queue-and-workers shape, the expiry re-check, the per-frame error
-handling and the shared shutdown deadline are all its ideas. The two coexist deliberately
-until phase C, when the perception stages become chain elements and ``pipeline/graph/``'s
-hard-coded DAG is superseded by a topology; whichever survives, it is one file then. Until
-then a fix that applies to both belongs in both, and this paragraph is the reminder.
+**The cameras are the runner's; the decode element only names them.** A decode element that
+opened its own camera would drag the camera set into ``topology``, which must stay pure
+enough to validate a chain on a laptop. ``shipinfer.ingest`` is imported inside
+:meth:`InprocessRunner._ingest` so ``import shipinfer.runners`` costs no decode runtime.
 """
 
 from __future__ import annotations
@@ -164,46 +129,37 @@ class _Head:
     source: str | None
 
 
+# doc: long an Args block for nine constructor parameters is specification, not prose
 @RUNNERS.register("inprocess", "single")
 class InprocessRunner(Runner):
     """Runs the whole chain in this process, on a pool of worker threads.
 
     Args:
         topology: the validated chain.
-        settings: deployment settings; ``pipeline.workers``, ``pipeline.queue_type``,
-            ``pipeline.queue_capacity``, ``pipeline.overflow_policy`` and
-            ``pipeline.frames_per_wakeup`` are the ones read here.
-        shard_id: passed to every element (arch.md §2).
+        settings: deployment settings; ``pipeline.workers``, ``queue_type``,
+            ``queue_capacity``, ``overflow_policy`` and ``frames_per_wakeup`` are read here.
+        shard_id: passed to every element (arch.md section 2).
         device: the GPU this runner owns, or ``None``.
         models: the model pool for ``pool`` elements.
-        ops: image pre-processing for the elements that transform a frame before submitting
-            it. Handed in for the reason ``models`` is — see :class:`~shipinfer.runners.base.Runner`.
-        queue: override the admission queue. A test injects a tiny one to provoke overflow;
-            production takes the configured
-            :class:`~shipinfer.scheduling.queues.fair.FairPriorityQueue`. An injected queue
-            is never replaced — see :meth:`_do_start` for what that means for a restart.
-        workers: override the worker count. ``None`` takes ``pipeline.workers``.
-        metrics: share a :class:`~shipinfer.runners.metrics.RunnerMetrics` with the rest of
-            the process. ``None`` mints a private registry, which is what a test wants; a
-            shard passes the one its exporter scrapes. The ingest plane's own handles are put
-            on the *same* registry, so one exporter carries both halves of a dropped frame.
-        source_factory: overrides how every camera's source is built, forwarded to the ingest
-            manager. The seam a test uses to run the whole camera lifecycle against a fake
-            camera; ``None`` resolves the source the chain's decode element names.
+        ops: image pre-processing, handed in for the reason ``models`` is.
+        queue: override the admission queue. An injected one is never replaced -- see
+            :meth:`_do_start` for what that means for a restart.
+        workers: override the worker count; ``None`` takes ``pipeline.workers``.
+        metrics: share a registry with the rest of the process. ``None`` mints a private one.
+            The ingest plane's handles go on the *same* registry, so one exporter carries
+            both halves of a dropped frame.
+        source_factory: overrides how every camera's source is built. The seam a test uses to
+            run the camera lifecycle against a fake camera.
 
     Raises:
-        ConfigurationError: ``workers`` below one. A runner with no workers accepts items and
-            walks none of them, which looks exactly like a hung chain.
+        ConfigurationError: ``workers`` below one -- a runner that accepts items and walks
+            none of them looks exactly like a hung chain.
 
-    **What this runner does not honour yet: ``per:`` and ``scope:``.** One element instance is
-    shared by every worker, so with ``workers > 1`` two frames of the same camera can be inside
-    a ``per: camera`` element at the same time, and that element's per-camera ordering can
-    invert — frame 8 finishing before frame 7 because a different worker got to it first. A
-    ``scope: global`` element is likewise just an ordinary element here. Nothing stateful ships
-    today (a ``pool`` element holds only a model handle), so this
-    is a promise not yet kept rather than a live defect; it is resolved in phase C, either with
-    a per-camera element instance or with a camera-keyed lock around a ``per: camera`` element.
-    Until then, a chain with a stateful element runs it correctly at ``workers=1``.
+    **Not honoured yet: ``per:`` and ``scope:``.** One element instance is shared by every
+    worker, so at ``workers > 1`` two frames of one camera can be inside a ``per: camera``
+    element at once and its ordering can invert. Nothing stateful ships today, so this is a
+    promise not yet kept rather than a live defect; a chain with a stateful element runs
+    correctly at ``workers=1``. Resolved in phase C.
     """
 
     name: ClassVar[str] = "inprocess"
@@ -272,27 +228,19 @@ class InprocessRunner(Runner):
         #: the *new* cycle's queue. See `_work` for what that cost.
         self._stopping = threading.Event()
         self._metrics = RunnerMetrics() if metrics is None else metrics
-        #: What each worker still owes an answer for, one slot per worker, indexed by the
-        #: worker's own number. Written only by the worker that owns the slot and read only by
-        #: `_do_stop` after the join deadline, so the hot path takes no lock — the same
-        #: single-writer discipline `pipeline/runner.py` gets from `_awaiting` being keyed by
-        #: the tag. It exists so that a worker abandoned at the deadline does not take its
-        #: items' futures with it: an unresolved future is exactly the frame that vanishes
-        #: with no typed outcome that ADR-005 exists to prevent, and `base.py`'s `submit`
-        #: promises there is always one.
+        #: What each worker still owes an answer for, one slot per worker. Single writer (the
+        #: owning worker), read only by `_do_stop` after the join deadline, so the hot path
+        #: takes no lock. It exists so an abandoned worker does not take its items' futures
+        #: with it -- an unresolved future is the frame ADR-005 exists to prevent.
         #:
-        #: **One list per start cycle, handed to the workers as an argument.** This attribute
-        #: is only where `_do_stop` finds the *current* cycle's list; a worker never reads it.
-        #: It used to, and an abandoned worker then wrote its `()` into whatever list the
-        #: attribute pointed at *now* — so abandon, restart, abandon cleared a live worker's
-        #: slot in the new cycle and the second shutdown had nothing left to fail. Binding the
-        #: list at thread start is what makes a slot belong to one cycle.
+        #: **One list per start cycle, handed to the workers as an argument**; this attribute
+        #: is only where `_do_stop` finds the current one. A worker that read it instead wrote
+        #: into whatever list it pointed at *now*, so abandon-restart-abandon cleared a live
+        #: worker's slot in the new cycle.
         #:
-        #: A **tuple of the undelivered remainder**, not the one item being walked. A worker
-        #: takes a whole wake-up batch off the queue (`pipeline.frames_per_wakeup`), and the
-        #: items behind the current one are no longer in the queue either — so with a single
-        #: slot, `frames_per_wakeup: 4` and a worker wedged on item 0, closing the queue would
-        #: resolve nothing and three producers would wait forever on futures nobody owns.
+        #: A tuple of the undelivered **remainder**, not the item being walked: the rest of a
+        #: wake-up batch is off the queue too, so a single slot would strand
+        #: `frames_per_wakeup - 1` futures nobody owns.
         self._inflight: list[tuple[WorkItem, ...]] = [()] * self._wanted_workers
         #: The bottom half: everything from here down is chain items and elements. See
         #: `runners/walk.py`, which is where the per-frame loop lives.
@@ -301,19 +249,13 @@ class InprocessRunner(Runner):
             self._metrics,
             {(edge.producer, edge.consumer): edge.caps for edge in topology.edges},
         )
-        #: The cameras, or ``None`` when this runner has none: before the first start, after
-        #: a stop released them, and on a started runner that has not been given one yet.
-        #: Built on **first use** and never here, because constructing it imports the whole
-        #: ingest plane -- and with it a decode runtime, and ``shipinfer.runtime`` behind that
-        #: -- which ``import shipinfer.runners`` must not pay for
-        #: (``tests/test_architecture.py``). First use is :meth:`add_camera`, the one door a
-        #: camera arrives through, so a runner nobody has placed a camera on -- a chain built
-        #: but never fed, and every shard until its launcher calls ``AddCamera`` -- starts
-        #: without ever touching the ingest plane at all. Rebuilt per start cycle for the
-        #: reason the queue and the stop signal
-        #: are: a manager stopped at a shutdown deadline may still hold an abandoned decoder
-        #: thread, and handing that thread's manager back to the next cycle would make it a
-        #: live producer into the new cycle's queue.
+        #: The cameras, or ``None`` when this runner has none. Built on **first use**
+        #: (:meth:`add_camera`) and never here, because constructing it imports the ingest
+        #: plane and ``shipinfer.runtime`` behind it, which ``import shipinfer.runners`` must
+        #: not pay for (``tests/test_architecture.py``). A runner nobody places a camera on
+        #: never touches it. Rebuilt per start cycle: a manager stopped at a deadline may still
+        #: hold an abandoned decoder thread, and reusing it would make that thread a live
+        #: producer into the next cycle's queue.
         self._ingest_manager: IngestManager | None = None
         self._source_factory = source_factory
         #: negotiated-rate cache for `_camera_fps`; dropped on re-add (the rate may change).
@@ -331,17 +273,12 @@ class InprocessRunner(Runner):
         #: resolves it: a frame is data and a priority is configuration, so there is one place
         #: it can be wrong and it is the config file.
         self._configured: dict[str, Priority] = {}
-        #: ``camera_id -> priority`` for the band a **launcher** named on the
-        #: :class:`~shipinfer.launch.control.CameraSpec` of a camera this runner is holding
-        #: right now (:meth:`_admit_at`). Kept apart from :attr:`_configured` rather than
-        #: merged into it because the two have different *lifetimes*, and merging them cost a
-        #: camera its lane: one dict meant nothing could be un-said, so a ``DELETE`` followed
-        #: by a ``POST`` with no band left the re-posted camera in the removed one's
-        #: ``tracking_critical`` -- an escalation nobody asked for, and the wrong direction to
-        #: get wrong (ADR-005). This one therefore tracks the manager's live camera set: an
-        #: entry is written when a spec carries a band, dropped when a spec carries none
-        #: (:meth:`_admit_at`), and dropped again whenever the placement ends
-        #: (:meth:`remove_camera`, :meth:`drain`, :meth:`_stop_ingest`).
+        #: ``camera_id -> priority`` for the band a **launcher** named on the spec of a camera
+        #: held right now (:meth:`_admit_at`). Kept apart from :attr:`_configured` because the
+        #: two have different lifetimes: one dict meant nothing could be un-said, so DELETE then
+        #: POST-with-no-band left the camera in the removed one's ``tracking_critical`` -- the
+        #: wrong direction to get wrong (ADR-005). Tracks the live camera set: written when a
+        #: spec carries a band, dropped when it does not and when the placement ends.
         self._placed_bands: dict[str, Priority] = {}
         #: Only taken when a camera is seen for the first time, which is once per camera for
         #: the life of the process -- never on the steady-state submission path.
@@ -411,32 +348,19 @@ class InprocessRunner(Runner):
 
     # -- cameras -----------------------------------------------------------------------
     #
-    # The control plane's three per-camera RPCs (arch.md section 2), over an ingest manager
-    # this runner owns for the length of one start cycle. Every invariant that matters --
-    # one actor per camera and never recycled, the insert/start/re-check that refuses a
-    # camera the fleet forgot mid-add, the ONE deadline charged to the whole camera set --
-    # is the manager's, hardened across #33-#41 in both planes. Nothing is re-derived here;
-    # what is added is the mapping from the launcher's vocabulary to the ingest plane's, and
-    # the sink that turns a frame into an admitted chain item.
+    # doc: long the lock rule below is the one thing that cannot be re-derived from the code
+    # The three per-camera RPCs (arch.md section 2), over an ingest manager this runner owns
+    # for one start cycle. Every invariant -- one actor per camera, the insert/start/re-check,
+    # the one deadline for the whole camera set -- is the manager's; what is added here is the
+    # mapping from the launcher's vocabulary to the ingest plane's.
     #
-    # **All three take :attr:`_lifecycle`, and that is what makes them safe against a
-    # concurrent stop.** They are called from a servicer's thread pool (``runners/service.py``
-    # answers ``AddCamera`` on one, and the HTTP ``POST /streams`` that lands on this runner
-    # will too), so an add and a ``stop()`` on two threads is an ordinary event rather than a
-    # contrived one. Without the lock ``add_camera`` read ``_running`` outside it, and
-    # :meth:`_ingest` builds a manager unconditionally -- so an add that passed the check just
-    # before :meth:`Runner.stop` cleared the flag went on to construct a *fresh* manager on a
-    # runner that had already released its cameras, started a decoder thread into it, and left
-    # it there forever: :meth:`_stop_ingest` had already run and a second ``stop()`` returns at
-    # the idempotence check without reaching it. The lock is the same ``RLock``
-    # :meth:`Runner.start` and :meth:`Runner.stop` hold, and it is re-entrant on purpose --
-    # a camera method called from inside another lifecycle step must not deadlock on it.
-    #
-    # It is *not* taken by ``submit``, ``health``, ``stats`` or :attr:`cameras`, for the reason
-    # ``runners/base.py`` gives: the first is the hot path and the others must answer while a
-    # stop is joining threads. What that costs is bounded -- a camera call now waits out a
-    # concurrent stop rather than racing it, and ``IngestManager.add_camera`` returns as soon
-    # as the actor thread is started, without waiting on the RTSP open.
+    # **All three take :attr:`_lifecycle`**, because they are called from a servicer's thread
+    # pool, so an add racing a `stop()` is ordinary. Without it, an add that passed the
+    # `_running` check just before `stop()` cleared the flag went on to build a *fresh*
+    # manager on a torn-down runner and started a decoder thread into it that nothing stops.
+    # Re-entrant on purpose: a camera method called from inside a lifecycle step must not
+    # deadlock. Not taken by `submit`, `health`, `stats` or `cameras` -- the first is the hot
+    # path, the rest must answer while a stop is joining threads.
 
     #: How many frames may ask a camera for a rate it has not negotiated. `actor()` takes
     #: `IngestManager._lock` -- the one `add_camera`/`remove_camera` hold -- so a source whose
@@ -835,37 +759,25 @@ class InprocessRunner(Runner):
         ingest = self._settings.ingest
         manager = IngestManager(
             sink,
-            # WITHOUT the configured camera set, and that is a defence rather than a
-            # tidy-up. `IngestManager.start()` starts `ingest.cameras` and `ingest.camera_db`,
-            # and a **shard is an `InprocessRunner`** built from `build_settings()` -- which
-            # is env-only, so every shard inherits the operator's whole fleet verbatim. A
-            # manager holding that list is one `start()` away from 8 shards x 50 cameras:
-            # 400 RTSP sessions, eight `FrameCounter`s minting the same `(camera_id,
-            # frame_id)` tags, and every later `add_camera` refused as "already running".
-            # `add_camera` is THE door (`cli/commands/run.py` places the configured fleet
-            # through it, on whichever runner the operator chose), so the manager is given
-            # nothing to start on its own.
+            # WITHOUT the configured camera set -- a defence, not a tidy-up. A shard is an
+            # `InprocessRunner` built from env-only settings, so it inherits the operator's
+            # whole fleet; a manager holding that list is one `start()` away from 8 shards x
+            # 50 cameras, duplicate `(camera_id, frame_id)` tags, and every later
+            # `add_camera` refused as already running. `add_camera` is THE door.
             #
-            # `model_copy` rather than a rebuilt `IngestSettings`: the two fields are being
-            # *cleared*, so there is no operator-supplied value left for a field validator to
-            # judge, and rebuilding would re-validate fifty camera records only to drop them.
+            # `model_copy` rather than a rebuilt `IngestSettings`: the fields are being
+            # cleared, so there is nothing left for a validator to judge.
             settings=ingest.model_copy(update={"cameras": [], "camera_db": None}),
             metrics=IngestMetrics(registry=self._metrics.registry),
             source_factory=self._source_factory,
         )
-        # From the FULL settings, and before any actor exists: a band is configuration keyed
-        # by camera id (CONVENTIONS 2.6), so a camera this process is *told* about is still
-        # admitted into the band this process's config names, even though this process will
-        # not start it.
+        # From the FULL settings, before any actor exists: a band is configuration keyed by
+        # camera id (CONVENTIONS 2.6), so a camera this process is *told* about is admitted
+        # into the band its config names even if it does not start it.
         #
-        # ON A FLEET SHARD THAT TABLE IS EMPTY, and saying so is the point of this comment.
-        # `ingest.cameras` is cleared a few lines up and a shard's settings come from the
-        # environment, so `configured_cameras` here yields nothing and no band an operator
-        # wrote can be resolved from it -- which is why the launcher sends the band on the
-        # `CameraSpec` and `_admit_at` records it in `_placed_bands`, which this one is only
-        # consulted behind. What is left over for this line is the single-process deployment,
-        # where the config IS the operator's. A camera neither door names gets the default,
-        # once, with a log line (`_priority_for`).
+        # ON A FLEET SHARD THIS TABLE IS EMPTY -- `ingest.cameras` was cleared above -- which
+        # is why the launcher sends the band on the `CameraSpec` instead. What is left for
+        # this line is the single-process deployment, where the config IS the operator's.
         self._configured.update(
             {camera.camera_id: camera.priority for camera in configured_cameras(ingest)}
         )
@@ -998,18 +910,11 @@ class InprocessRunner(Runner):
             head.caps,
         )
         # No cameras. A start opens the chain and raises the workers; it reads nothing until
-        # somebody places a camera on it, and that is the entire content of `manages_cameras`
-        # being a control-plane property (arch.md section 2).
-        #
-        # This used to start `settings.ingest.cameras` here, which is right for a single
-        # process and wrong for a shard -- and a shard is an `InprocessRunner`
-        # (`cli/shard.py` hard-codes it) whose settings come from `build_settings()`, an
-        # env-only tree that inherits the operator's whole fleet. Every shard therefore
-        # started every camera: eight shards x fifty cameras, duplicate `(camera_id,
-        # frame_id)` tags by construction, and a control plane whose `add_camera` was then
-        # refused everywhere as "already running". `cli/commands/run.py` places the configured
-        # fleet through `add_camera` instead, on whichever runner the operator chose -- which
-        # is the fleet's placement for a fleet and this runner's own manager for `inprocess`.
+        # somebody places a camera, which is what `manages_cameras` being a control-plane
+        # property means (arch.md section 2). Starting `settings.ingest.cameras` here is right
+        # for one process and wrong for a shard, whose env-only settings inherit the operator's
+        # whole fleet -- every shard would start every camera. `cli/commands/run.py` places
+        # them through `add_camera` instead.
 
     def _do_stop(self, timeout_s: float) -> None:
         """Release the cameras, close the queue, join the workers, close the chain.
@@ -1237,36 +1142,21 @@ class InprocessRunner(Runner):
                 if queue.is_closed:
                     return
                 continue
-            # The whole batch is published *before* the first walk and narrowed to the
-            # remainder in a `finally` after each item, so that from the drain to the last
-            # resolution every item this worker owes an answer for has an owner a shutdown
-            # can find. The window where a frame's future could go unresolved is the two
-            # stores between `get_batch` returning and this line.
-            #
-            # The *remainder*, not the item being walked: the ones behind it left the queue in
-            # the same drain, so a slot holding only the current item would strand them —
-            # `frames_per_wakeup: 4` with a worker wedged on item 0 loses three futures. Both
-            # slices are free at the default `frames_per_wakeup = 1`: `batch[1:]` on a
-            # one-tuple is the empty-tuple singleton, so the hot path allocates one tuple per
-            # wake-up and none per item.
+            # Published before the first walk and narrowed in a `finally` after each item, so every
+            # item this worker owes an answer for has an owner a shutdown can find. The
+            # *remainder*, not the current item: the ones behind it left the queue in the same
+            # drain. Both slices are free at the default `frames_per_wakeup = 1`.
             batch = tuple(items)
             inflight[slot] = batch
             for index, work in enumerate(batch):
                 if stopping.is_set():
-                    # Abandoned mid-batch. The remainder is left in the slot exactly as the
-                    # previous iteration's `finally` published it, so `_do_stop`'s drain --
-                    # which ran after the join deadline, before this thread woke -- has
-                    # already failed every one of these futures. Walking them anyway would
-                    # emit ghost events through a chain this cycle closed.
+                    # Abandoned mid-batch. `_do_stop`'s drain already failed these futures,
+                    # so walking them would emit ghost events through a closed chain.
                     #
-                    # This is deliberate on the CLEAN stop path too, not only the abandoned
-                    # one: `stop` is abort-shaped, the same shape `_close_queue` already
-                    # gives the items still queued. A healthy worker that notices mid-batch
-                    # breaks here and leaves the remainder for `_fail_in_flight`, which
-                    # resolves each with `RequestCancelledError` -- a typed outcome its
-                    # producer can act on, delivered inside the shutdown budget. Finishing
-                    # the batch instead would be a *drain*, and a drain has no deadline of
-                    # its own: one wedged element would hold the whole shutdown open.
+                    # Deliberate on the CLEAN stop path too: `stop` is abort-shaped, and the
+                    # remainder goes to `_fail_in_flight` for a typed cancellation inside the
+                    # shutdown budget. Finishing the batch would be a *drain*, and a drain has
+                    # no deadline -- one wedged element would hold the shutdown open.
                     break
                 try:
                     self._walker.run(work)
@@ -1340,21 +1230,13 @@ class InprocessRunner(Runner):
             "items": items,
             "queue": queue.as_dict(),
             "workers": self._wanted_workers,
-            # The producer's side of the same story. `items["accepted"]` counts what got in;
-            # `ingest["frames_read"]` counts what was offered, and while the same camera set
-            # is live the gap between them is backpressure -- the number the previous
-            # generation could not report at all.
+            # The producer's side: `accepted` is what got in, `ingest["frames_read"]` what was
+            # offered, and while the camera set is unchanged the gap is backpressure.
             #
-            # **The two do not share a lifetime, so the gap is only that between camera
-            # changes.** `IngestSummary` is summed over the actors that exist *now*
-            # (`ingest/manager.py::summary`), so a `drain()` or a `remove_camera()` takes that
-            # camera's `frames_read` with it and the whole `ingest` block returns to zero,
-            # while `items["accepted"]` is a runner counter and keeps every frame it ever
-            # admitted. Subtracting the two across a drain therefore reads as *negative*
-            # backpressure. That is the ingest plane's own semantics and not something to
-            # paper over here: per-camera the honest pairing is
-            # `shipinfer_ingest_frames_dropped_total{camera}` against
-            # `shipinfer_runner_items_dropped_total{camera}` on the shared registry, which is
-            # cumulative on both sides (`runners/frames.py`).
+            # **They do not share a lifetime.** `IngestSummary` sums the actors that exist
+            # *now*, so a drain or a remove takes that camera's `frames_read` with it while
+            # `accepted` keeps every frame ever admitted -- subtracting across a drain reads as
+            # negative backpressure. Per camera the honest pairing is the two
+            # `*_dropped_total{camera}` counters, cumulative on both sides.
             "ingest": dict(_NO_INGEST) if manager is None else manager.summary().as_dict(),
         }
