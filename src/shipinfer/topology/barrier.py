@@ -1,50 +1,43 @@
-"""The instant barrier: a stream of per-camera frames, turned back into synchronised instants.
+"""The instant barrier: per-camera frames, turned back into synchronised instants.
 
-Cross-camera association is not a per-frame function. A cross-camera tracker consumes *every*
-camera of a group at one synchronised instant and refuses anything less, because handing it
-one camera at a time turns cross-camera association into within-camera deduplication. A chain,
-however, delivers **one frame at a time**, on whichever pipeline worker happened to take it off
-the fair lane. Something has to turn that stream back into instants, and that something is
-:class:`InstantBarrier`.
+A cross-camera tracker consumes *every* camera of a group at one synchronised instant and
+refuses anything less, because handing it one camera at a time turns cross-camera
+association into within-camera deduplication. A chain delivers **one frame at a time**, on
+whichever pipeline worker took it off the fair lane. :class:`InstantBarrier` turns that
+stream back into instants.
 
-This module is **pure** — no ``shipvision``, no numpy, no knowledge of what a "track" is. It
-buckets opaque payloads by capture instant, decides when a bucket is complete, picks the thread
-that runs the association, and scatters the answer back. Every property worth testing about
-cross-camera synchronisation is a property of this file, and it is testable with strings and a
-callback (``tests/topology/test_barrier.py``). The element that gives the payloads meaning is
-:mod:`shipinfer.topology.elements.mtmc`.
+This module is **pure** — no ``shipvision``, no numpy, no knowledge of what a "track" is.
+It buckets opaque payloads by capture instant, decides when a bucket is complete, picks the
+thread that runs the association, and scatters the answer back; so every property worth
+testing about cross-camera synchronisation is testable with strings and a callback
+(``tests/topology/test_barrier.py``). :mod:`shipinfer.topology.elements.mtmc` gives the
+payloads meaning.
 
-**Why the instant is anchored and not a grid.** The obvious bucket key is
-``floor(capture_s / window)`` on an absolute grid, and it is wrong at every setting. A window
-*wider* than one frame period puts two consecutive frames of one camera into the same bucket
-once every ``window / period`` frames — at 20 fps with a 60 ms window that is one frame in six,
-each of which is refused an answer, with perfectly genlocked cameras and no jitter anywhere. A
-window *narrower* than the frame period fixes that and breaks the other half: free-running
-cameras spread their captures across a whole period, so no absolute cell holds the whole group.
-The two constraints are incompatible, which is the proof that no absolute window is correct.
+**Why the instant is anchored and not a grid.** The obvious key, ``floor(capture_s /
+window)`` on an absolute grid, is wrong at every setting. A window *wider* than one frame
+period puts two consecutive frames of one camera into the same bucket once every
+``window / period`` frames — one frame in six at 20 fps and 60 ms, each refused an answer,
+with genlocked cameras and no jitter. A window *narrower* than the period fixes that and
+breaks the other half: free-running cameras spread captures across a whole period, so no
+absolute cell holds the whole group. The two constraints are incompatible, which is the
+proof that no absolute window is correct. So an instant is **anchored by its first
+arrival**, and a camera reporting a *second, later* frame is the signal that the instant it
+was in has all the evidence it will get. A camera can no longer collide with itself at any
+window, and a group whose arrival spread is under the window still lands together.
 
-So an instant is **anchored by its first arrival**: the frame that opens a bucket sets the
-instant's capture span, later frames join while the span stays inside ``sync_window_s``, and a
-camera reporting a *second, later* frame is the signal that the instant it was in has all the
-evidence it is going to get — that bucket closes and the next one opens with that frame. A
-camera can no longer collide with itself whatever the window is, and a group whose arrival
-spread is under the window still lands together.
-
-**Why the barrier must never block the last worker.** The walk is synchronous: a pipeline
-worker that is waiting inside an element is a worker that is not draining its lane. If every
-worker parks in a barrier waiting for cameras whose frames are still *queued*, no bucket can
-ever complete on evidence — the only way out is the timeout, and the deployment has converted
-itself into a fixed ``sync_window_s`` of latency per frame with a stalled queue behind it. So a
-:class:`WaiterBudget` caps the waiters, and the frame that would take the last permit is
-emitted immediately with an honest gap. The budget is a **process-wide** object rather than a
-per-barrier counter for the reason its own docstring gives: two barriers each admitting
-``workers - 1`` waiters park every worker between them.
+**Why the barrier must never block the last worker.** The walk is synchronous: a worker
+waiting inside an element is a worker not draining its lane. If every worker parks waiting
+for cameras whose frames are still *queued*, no bucket can complete on evidence — the only
+way out is the timeout, and the deployment has converted itself into a fixed
+``sync_window_s`` of latency per frame with a stalled queue behind it. A
+:class:`WaiterBudget` caps the waiters and the frame that would take the last permit is
+emitted immediately with an honest gap.
 
 **Why the scatter is keyed and never positional.** A group's association answers for every
-camera in one flattened list, and camera A's three results and camera B's one come back as four
-whose positions mean nothing to either frame. The barrier therefore publishes whatever mapping
-the association returned and never indexes it — each waiting caller reads its own entries out
-by a key it chose. Scattering by list position is the classic reassembly bug (ADR-002's tag
+camera in one flattened list, and camera A's three results and camera B's one come back as
+four whose positions mean nothing to either frame. The barrier publishes whatever mapping
+the association returned and never indexes it — each caller reads its own entries out by a
+key it chose. Scattering by list position is the classic reassembly bug (ADR-002's tag
 rule, one layer up), and it produces a plausible answer rather than an error.
 """
 
@@ -80,19 +73,17 @@ __all__ = [
 
 # -- the vocabulary of outcomes ---------------------------------------------------------
 #
-# Strings and not an enum, for the same reason `ElementKind` is a `str` enum: every one of
-# these is written straight into a metric label, and a conversion at each site is a
-# conversion to get wrong. They are split into two families because they answer two
-# different questions -- what happened to an *instant* (there is one of these per closed
-# bucket, and `InstantBarrier.on_event` reports them, counted in `instant_stats`) and what
-# happened to a *frame* (one per item, counted in `frame_stats`). The two families are
-# counted in two dictionaries and never summed into one, because `shutdown` is a member of
-# both and an operator reading a single number would be reading frames plus instants.
+# Strings and not an enum, for the same reason `ElementKind` is a `str` enum: every one goes
+# straight into a metric label, and a conversion at each site is a conversion to get wrong.
+# Two families, because they answer two questions — what happened to an *instant* (one per
+# closed bucket, reported by `on_event`, counted in `instant_stats`) and what happened to a
+# *frame* (one per item, counted in `frame_stats`). Never summed into one, because `shutdown`
+# is a member of both and a single number would be reading frames plus instants.
 
 #: The bucket closed because every live camera has reported. The good case.
 CLOSED_COMPLETE = "complete"
 #: The bucket closed because ``sync_window_s`` ran out with a camera still missing. The
-#: association still ran, over whoever did report -- a partial instant is worth more than
+#: association still ran, over whoever did report — a partial instant is worth more than
 #: no instant, and MTMC over a subset of a group is exactly what a camera outage looks like.
 CLOSED_WINDOW = "window"
 #: The bucket closed because a camera already in it reported its **next** frame, so no
@@ -104,7 +95,7 @@ CLOSED_ADVANCED = "advanced"
 #: these means the group's clocks disagree by more than the window, or one camera is running
 #: far ahead of the others.
 DROPPED_EVICTED = "evicted"
-#: The bucket passed its deadline with nobody waiting on it -- every frame in it had already
+#: The bucket passed its deadline with nobody waiting on it — every frame in it had already
 #: been emitted by the never-starve guard, so there was no answer for anyone to receive. A
 #: bucket that was *sealed* before it expired keeps its sealing reason instead: what happened
 #: to it is that a camera moved on (:data:`CLOSED_ADVANCED`), and counting it here would read
@@ -115,7 +106,7 @@ DROPPED_EXPIRED = "expired"
 #: counted apart.
 DROPPED_SHUTDOWN = "shutdown"
 #: The association itself raised. The waiters are released with no result and the closing
-#: thread gets the exception -- one frame carries the failure, the rest carry a gap.
+#: thread gets the exception — one frame carries the failure, the rest carry a gap.
 DROPPED_FAILED = "failed"
 
 #: The frame's instant had already been closed when it arrived. Counted, never retro-fitted:
@@ -125,26 +116,25 @@ MISSED_LATE = "late"
 #: The same camera offered the same capture instant twice. A cross-camera cluster refuses
 #: two frames from one camera in one instant (they are two instants), so the second is
 #: emitted with a gap rather than allowed to make the group's same-camera exclusion mask
-#: leak. A *later* capture from a camera already in the bucket is not this -- it is the next
+#: leak. A *later* capture from a camera already in the bucket is not this — it is the next
 #: instant, and it closes the open one (:data:`CLOSED_ADVANCED`).
 MISSED_DUPLICATE = "duplicate"
 #: Waiting would have parked the last pipeline worker. See the module docstring. The
 #: frame's payload is already in its bucket when the guard fires, so its tracks still take
-#: part in the group's association -- only the *answer* is not delivered to this frame.
+#: part in the group's association — only the *answer* is not delivered to this frame.
 #: Dropping the entry instead would degrade the instant for every camera that did wait.
 MISSED_WOULD_STARVE = "would_starve"
 
-#: How wide an instant is, in milliseconds -- the maximum capture spread of one instant, and
-#: also the longest any caller waits. **A proposal, not a measurement** (the phase-C plan's
-#: open question 3): nothing in ``docs/arch.md`` states one. With the anchored instant it is
-#: no longer constrained from below by the frame period: it has to be at least the group's
+#: How wide an instant is, in milliseconds — the maximum capture spread of one instant, and
+#: the longest any caller waits. **A proposal, not a measurement** (the phase-C plan's open
+#: question 3): nothing in ``docs/arch.md`` states one. With the anchored instant it is no
+#: longer constrained from below by the frame period; it has to be at least the group's
 #: arrival spread, and 60 ms is a comfortable margin over the ~1 ms genlock skew of a wired
-#: group while staying near one frame period at 20 fps, which is the worst-case latency this
-#: bounds. What no window can rescue is a group whose cameras run at **different frame
-#: rates**: the slow camera stretches each instant's span until it reaches the fast cameras'
-#: next capture, which then reads late against the instant that has just closed. Measured,
-#: one 15 fps camera in a group of eight at 20 fps: 80% coverage. A group is one frame rate,
-#: and mixed rates belong in separate groups.
+#: group while staying near one frame period at 20 fps. What no window can rescue is a group
+#: whose cameras run at **different frame rates**: the slow camera stretches each instant's
+#: span until it reaches the fast cameras' next capture, which then reads late against the
+#: instant just closed. Measured, one 15 fps camera among eight at 20 fps: 80% coverage. A
+#: group is one frame rate.
 DEFAULT_SYNC_WINDOW_MS = 60.0
 #: How many instants may be open at once before the oldest is evicted. Eight is half a second
 #: at the default window: enough to absorb one camera running a few frames behind, far too
@@ -155,41 +145,31 @@ DEFAULT_MAX_INSTANTS = 8
 class WaiterBudget:
     """How many pipeline workers may be parked inside a barrier at once, **per process**.
 
-    The never-starve guard the module docstring describes counts permits here rather than
-    waiters in one barrier, and that is the whole reason this class exists. A chain may hold
-    two ``mtmc`` slots — two independent camera groups is a supported configuration, and the
-    loader takes an explicit ``kind:`` so two are expressible — and with a per-barrier count
-    barrier A admits ``workers - 1`` waiters while barrier B, which sees zero, admits the
-    last one. Every pipeline worker is then parked, neither barrier can close on evidence,
-    and the shard degrades to exactly the "stall dressed as a wait" the guard exists to
-    prevent. One budget for the process, constructed by the runner with ``workers - 1``
-    permits, makes the invariant hold however many barriers there are.
+    The never-starve guard counts permits here rather than waiters in one barrier, and that is
+    the whole reason this class exists. A chain may hold two ``mtmc`` slots — two camera groups
+    is a supported configuration — and with a per-barrier count, barrier A admits
+    ``workers - 1`` waiters while barrier B, which sees zero, admits the last one. Every worker
+    is then parked and neither barrier can close on evidence. One budget for the process, built
+    by the runner with ``workers - 1`` permits, makes the invariant hold for any number of them.
 
-    One budget for two groups also makes their coverage **interfere**, because the permits are
-    handed out first-come and neither barrier knows about the other: a shard running two
-    barriers needs the *sum* of its groups' sizes in workers rather than the larger of them.
-    Measured, two 8-camera groups: 100% coverage each at 16 workers, and 73% / 52% at 9, where
-    whichever group's frames arrive first takes the permits and the other waits with a gap.
+    One budget for two groups also makes their coverage **interfere**: permits are handed out
+    first-come, so a shard running two barriers needs the *sum* of its groups' sizes in workers
+    rather than the larger. Measured, two 8-camera groups: 100% coverage each at 16 workers,
+    73% / 52% at 9.
 
-    ``acquire`` never blocks: a barrier calls it while holding its own condition lock, and a
-    budget that could block there would be a lock-ordering hazard between two barriers. It
-    takes only this object's lock and the semaphore's, and calls nothing back, so a barrier's
-    lock and these are always taken in that order and never the reverse.
+    ``acquire`` never blocks — a barrier calls it holding its own condition lock, so blocking
+    here would be a lock-ordering hazard between two barriers. It takes only this object's lock
+    and the semaphore's and calls nothing back.
 
-    **What is not the stdlib's.** The permit counting is
-    :class:`threading.BoundedSemaphore` and nothing else: ``acquire(blocking=False)`` is "take
-    one if there is one" and ``release()`` past the bound is the over-release this guard must
-    refuse rather than absorb. Two things a semaphore does not give: how many permits are
-    *out* — ``Semaphore._value`` is private and there is no public reader, and that number is
-    what the health report and every test of the never-starve invariant read — and a typed
-    failure, since a bare ``ValueError`` names neither the subsystem nor what it costs. So a
-    counter is kept beside it, under a lock held only across the semaphore's own non-blocking
-    calls, and the refusal is re-raised as :class:`ServerStateError`.
+    **What is not the stdlib's.** The counting is :class:`threading.BoundedSemaphore` and
+    nothing else. Two things it does not give: how many permits are *out* (``_value`` is
+    private, and that number is what the health report and the never-starve tests read), and a
+    typed failure, since a bare ``ValueError`` names neither the subsystem nor the cost. So a
+    counter is kept beside it and the over-release is re-raised as :class:`ServerStateError`.
 
     Args:
         permits: how many waiters may be outstanding. ``0`` is legitimate and means "never
-            wait" — a single-worker runner, or a runner that did not say how many workers it
-            has, which is the same state and deliberately spelled the same way.
+            wait" — a single-worker runner, or one that did not say how many workers it has.
 
     Raises:
         ConfigurationError: a negative number of permits.
@@ -260,7 +240,7 @@ class InstantEntry:
     """One camera's contribution to an instant: who, and whatever the caller put in.
 
     ``payload`` is typed ``object`` on purpose. The barrier is pure and must not learn what a
-    ``CameraTracks`` is -- that is the element's vocabulary, and keeping it out of here is
+    ``CameraTracks`` is — that is the element's vocabulary, and keeping it out of here is
     what lets the synchronisation properties be tested with strings.
     """
 
@@ -273,7 +253,7 @@ class InstantOutcome:
     """What a submitted frame got back from the barrier.
 
     ``results`` is ``None`` for every reason the frame did **not** take part in an
-    association, and a mapping otherwise -- never an empty mapping to mean failure (ADR-005).
+    association, and a mapping otherwise — never an empty mapping to mean failure (ADR-005).
     An instant in which nothing was visible on any camera legitimately returns an empty map,
     and that is a different fact from "this frame missed its instant".
 
@@ -316,14 +296,14 @@ class _Bucket:
     #: because the duplicate test is per camera: ``last`` is the maximum over the whole
     #: group, so testing a repeat against it refuses a camera's genuinely next frame
     #: whenever another camera has already pushed the span past it (a@100.000, b@100.055,
-    #: then a@100.050 -- 50 ms after a's own frame, and a duplicate of nothing).
+    #: then a@100.050 — 50 ms after a's own frame, and a duplicate of nothing).
     reported: dict[str, float] = field(default_factory=dict)
     waiters: int = 0
     #: Set by the thread that resolved this bucket. A waiter wakes, sees it, and returns.
     done: bool = False
     #: "Somebody sealed this bucket but had no association function in hand." Set by
-    #: :meth:`InstantBarrier.drop_camera` -- the lifecycle thread must return promptly and
-    #: must not run a tracker -- and by the frame path when a camera in the bucket reports its
+    #: :meth:`InstantBarrier.drop_camera` — the lifecycle thread must return promptly and
+    #: must not run a tracker — and by the frame path when a camera in the bucket reports its
     #: next frame. Either way a waiter, which *is* a pipeline worker with the callback, does
     #: the work. A sealed bucket accepts no further entries.
     ready: bool = False
@@ -341,61 +321,37 @@ class InstantBarrier:
     """Turns a stream of per-camera frames back into synchronised instants. Pure.
 
     An instant is a set of frames whose **capture** times lie within ``sync_window_s`` of each
-    other — the capture clock and not the arrival clock, because arrival order is the
-    pipeline's business (fair lanes, N workers, spill) and has nothing to do with whether two
-    frames show the same moment. Two cameras 40 ms apart in arrival but 2 ms apart in capture
-    are one instant; the reverse is two.
+    other — the capture clock, not the arrival clock, because arrival order is the pipeline's
+    business and says nothing about whether two frames show the same moment.
 
-    The instant is **anchored, not gridded** (see the module docstring for why no absolute
-    window is correct). The first frame to arrive opens a bucket and sets its span; a later
-    frame joins the newest open bucket whose span it keeps inside one window; a camera already
-    in that bucket offering a *later* capture seals it — its instant has all the evidence it
-    will get — and opens the next with that frame; the same camera offering a capture inside
-    the span it already contributed to is a duplicate and is refused.
+    The instant is **anchored, not gridded** (the module docstring says why no absolute window
+    is correct). The first frame opens a bucket and sets its span; a later frame joins the
+    newest open bucket it fits; a camera already in that bucket offering a *later* capture seals
+    it and opens the next; the same camera offering a capture inside its own span is a duplicate
+    and is refused. A bucket closes when every live camera has reported, when it is sealed, or
+    when the window has passed — whichever is first.
 
-    A bucket closes when **every live camera has reported**, when it is sealed, or when
-    ``sync_window_s`` has passed since it opened, whichever is first. Whichever thread closes
-    it runs the association and publishes the answer to every thread waiting on that bucket,
-    keyed by whatever the association function returned — the barrier never indexes results by
-    position.
-
-    LOCKING. One :class:`threading.Condition` over one lock guards everything: the bucket map,
-    the live set, the waiter count and the counters. It is held across the association
-    callback, which is deliberate and is the *only* lock this codebase takes around a
-    cross-camera tracker call (``docs/arch.md`` §7). Every wait is bounded by the bucket's own
-    deadline *on the clock this barrier was given*, so no caller is parked here for longer than
-    one window even if the callback never runs — and a test driving that clock holds its own
-    waiters by choice.
+    LOCKING. One :class:`threading.Condition` guards the bucket map, the live set, the waiter
+    count and the counters. It is held across the association callback, which is deliberate and
+    is the *only* lock this codebase takes around a cross-camera tracker call (arch.md section
+    7). Every wait is bounded by the bucket's own deadline **on the clock this barrier was
+    given**, so no caller is parked longer than one window even if the callback never runs.
 
     Args:
-        sync_window_s: how wide an instant is — the largest capture spread one instant may
-            hold, and also the maximum time any caller waits.
-        workers: how many threads may be inside :meth:`submit` at once —
-            :attr:`~shipinfer.topology.base.ElementContext.workers`. Used only to size a
-            private :class:`WaiterBudget` when ``budget`` is not supplied. ``None`` means the
-            runner did not say, and sizes that private budget to zero permits — a barrier
-            given neither a worker count nor a budget never waits at all, because guessing
-            would park the only thread there is on a single-worker runner.
-        budget: the process-wide waiter budget, from
-            :attr:`~shipinfer.topology.base.ElementContext.waiter_budget`. ``None`` builds a
-            private one with ``workers - 1`` permits, which is right for a barrier that is the
-            only one in its process and is what the offline tier uses. **A supplied budget
-            wins over ``workers``**, which is only ever a way to size the private one: a
-            barrier built with ``workers=None`` and a non-empty budget does wait, on the
-            budget's permits, and :attr:`workers` then reads 1 while governing nothing.
+        sync_window_s: how wide an instant is, and the longest any caller waits.
+        workers: how many threads may be inside :meth:`submit` at once. Used only to size a
+            private :class:`WaiterBudget` when ``budget`` is absent. ``None`` sizes it to zero
+            permits — a barrier told neither never waits, because guessing would park the only
+            thread there is on a single-worker runner.
+        budget: the process-wide waiter budget. **A supplied budget wins over** ``workers``,
+            which is only ever a way to size the private one.
         max_instants: how many buckets may be open before the oldest is evicted.
-        on_event: called once per *instant-level* event, under the lock, with one of
-            :data:`CLOSED_COMPLETE`, :data:`CLOSED_WINDOW`, :data:`CLOSED_ADVANCED`,
-            :data:`DROPPED_EVICTED`, :data:`DROPPED_EXPIRED`, :data:`DROPPED_SHUTDOWN` or
-            :data:`DROPPED_FAILED`. For metrics, so it must be a counter increment and nothing
-            else: it runs on the association's critical path. Frame-level outcomes are *not*
-            reported here — the caller reads those off its own :class:`InstantOutcome`,
-            because one closed instant resolves many frames and counting instants per frame
-            would report the wrong number.
-        clock: where "now" comes from. The real monotonic clock, and the deployment passes
-            nothing else. It is a seam because expiry is this class's only dependence on wall
-            time, so a test that cannot control it is a test whose verdict is partly the
-            host's. Read on every deadline decision, always under the lock.
+        on_event: called once per *instant-level* event, under the lock, so it must be a counter
+            increment and nothing else. Frame-level outcomes are not reported here — one closed
+            instant resolves many frames, so counting instants per frame reports the wrong number.
+        clock: where "now" comes from. A seam because expiry is this class's only dependence on
+            wall time, and a test that cannot control it is a test whose verdict is partly the
+            host's.
 
     Raises:
         ConfigurationError: a non-positive window, or fewer than one worker.
@@ -446,7 +402,7 @@ class InstantBarrier:
                 f"not say', which sizes a private budget of zero permits"
             )
         self._window_s = float(sync_window_s)
-        # `None` collapses to 1, and 1 gives a private budget of zero permits -- i.e. never
+        # `None` collapses to 1, and 1 gives a private budget of zero permits — i.e. never
         # wait. The two states are deliberately the same state: "I do not know how many
         # workers there are" and "there is one worker" have the same correct behaviour, and
         # spelling them differently would be a second code path.
@@ -457,7 +413,7 @@ class InstantBarrier:
         self._clock = clock
         self._cond = threading.Condition(threading.Lock())
         #: Open instants, keyed by instant id. Insertion-ordered, so the first key is always
-        #: the instant that has been open longest -- and, since every deadline is set one
+        #: the instant that has been open longest — and, since every deadline is set one
         #: window after its bucket opened, the one that expires first.
         self._buckets: dict[int, _Bucket] = {}
         self._next_instant = 0
@@ -468,7 +424,7 @@ class InstantBarrier:
         #: Cameras the runner announced through the lifecycle hooks.
         self._announced: set[str] = set()
         #: Cameras that have actually submitted a frame. Only consulted before the first
-        #: announcement -- see :meth:`camera_added`.
+        #: announcement — see :meth:`camera_added`.
         self._seen: set[str] = set()
         self._hooked = False
         #: The answer :meth:`_live` gives, recomputed only when the two sets above change, so
@@ -546,23 +502,19 @@ class InstantBarrier:
     def camera_added(self, camera_id: str) -> None:
         """A camera is live on this shard: instants now wait for it.
 
-        **The live set is the announced set, not the configured roster**, and that is the one
-        decision in this class that a reader will want the reason for. A group's roster names
-        every camera in it; a shard runs only the ones placed on it, and the rest are on other
-        shards or not started. A barrier that waited for the roster would time out on every
-        single instant, for the life of the process, and report it as a healthy chain running
-        one window slower.
+        **The live set is the announced set, not the configured roster.** A group's roster names
+        every camera in it; a shard runs only the ones placed on it. A barrier that waited for the
+        roster would time out on every instant for the life of the process, and report it as a
+        healthy chain running one window slower.
 
-        Before the *first* announcement the barrier falls back to the cameras it has seen
-        traffic from, so a runner that does not drive the lifecycle hooks at all degrades to a
-        one-instant warm-up rather than to per-camera MTMC. The fallback latches off for good
-        at the first announcement: a set that came back after ``camera_removed`` emptied it
-        would resurrect the camera this hook exists to forget.
+        Before the *first* announcement it falls back to the cameras it has seen traffic from, so a
+        runner that never drives the lifecycle hooks degrades to a one-instant warm-up rather than
+        to per-camera MTMC. The fallback latches off for good at the first announcement: a set that
+        came back after ``camera_removed`` emptied it would resurrect the camera this hook forgets.
 
-        Takes only this barrier's lock and does no work under it, so the runner's lifecycle
-        lock -- behind which every other lifecycle call queues -- is held for a set insertion.
-        It can still queue behind an association in progress, which is bounded by one
-        :meth:`submit` and is why the ABC asks for "promptly" rather than "immediately".
+        Takes only this barrier's lock and does no work under it. It can still queue behind an
+        association in progress, bounded by one :meth:`submit` — which is why the ABC asks for
+        "promptly" rather than "immediately".
         """
         with self._cond:
             self._hooked = True
@@ -572,24 +524,20 @@ class InstantBarrier:
     def drop_camera(self, camera_id: str) -> None:
         """A camera is gone: stop waiting for it, including in instants already open.
 
-        The second half is the point. Dropping the camera from the live set alone would leave
-        every *currently open* bucket still counting it, so each one would sit out its full
-        window before closing — and at 20 fps that is a permanent tax paid for a camera that
-        will never report again. So the open buckets are re-checked here, and any that is now
-        complete has its waiters woken with ``ready`` set.
+        The second half is the point. Dropping it from the live set alone would leave every
+        *currently open* bucket still counting it, so each would sit out its full window before
+        closing — at 20 fps, a permanent tax for a camera that will never report again. So the
+        open buckets are re-checked here and any now complete has its waiters woken with ``ready``.
 
-        Woken rather than closed, because this thread must not run an association: it holds
-        the runner's lifecycle lock, and every ``add_camera``, ``remove_camera``, ``drain``
-        and ``stop`` on the shard is queued behind it. The waiter it wakes is a pipeline
-        worker that already has the association callback in hand. Like :meth:`camera_added`
-        this does no work under the barrier's lock, but it can queue behind an association in
-        progress -- bounded by one instant, not by the window.
+        Woken rather than closed, because this thread must not run an association: it holds the
+        runner's lifecycle lock, behind which every ``add_camera``, ``remove_camera``, ``drain``
+        and ``stop`` is queued. The waiter it wakes already has the association callback in hand.
 
         A bucket with no waiters is left alone: every frame in it was already emitted by the
         never-starve guard, so nobody is owed an answer, and its own deadline will retire it.
 
-        Idempotent, and safe for a camera that was never added -- a removal racing an
-        in-flight frame is ordinary (``Element.camera_removed``).
+        Idempotent, and safe for a camera that was never added — a removal racing an in-flight
+        frame is ordinary (``Element.camera_removed``).
         """
         with self._cond:
             self._announced.discard(camera_id)
@@ -652,7 +600,7 @@ class InstantBarrier:
                 if capture_s <= bucket.reported[camera_id]:
                     return self._missed(MISSED_DUPLICATE, bucket.instant)
                 # This camera has moved on, so that instant has every frame it will ever get
-                # from it. Seal it -- a waiter, which holds a callback, closes it -- and put
+                # from it. Seal it — a waiter, which holds a callback, closes it — and put
                 # this frame in the instant that starts here.
                 self._seal(bucket, CLOSED_ADVANCED)
                 bucket = self._open(capture_s, now)
@@ -842,19 +790,16 @@ class InstantBarrier:
     def _retire(self, now: float) -> None:
         """Discard instants that ran out of time with nobody waiting on them.
 
-        A bucket in this state holds only frames the never-starve guard already emitted, so
-        there is no association anybody would receive — running one would cost a tracker call
-        and a global-id assignment for an answer with no reader, and *not* running one would
-        leave the bucket to be evicted later and read as clock skew. It is discarded and
-        counted — under the reason it was **sealed** with when it was sealed, because "a
-        camera moved on" is what happened to that instant and :data:`CLOSED_ADVANCED` is the
-        share an operator reads before touching ``sync_window_ms``.
+        Such a bucket holds only frames the never-starve guard already emitted, so no association
+        would have a reader — running one would cost a tracker call and a global-id assignment for
+        nothing, and *not* running one would leave the bucket to be evicted later and read as clock
+        skew. It is discarded and counted under the reason it was **sealed** with, because "a
+        camera moved on" is what happened to that instant and :data:`CLOSED_ADVANCED` is the share
+        an operator reads before touching ``sync_window_ms``.
 
-        Runs on every :meth:`submit`, and almost always finds nothing. The map is
-        insertion-ordered by instant id and every deadline is one window after its bucket
-        opened, so the bucket at the front has the earliest deadline of all of them: if *it*
-        has not expired, none has, and the common case costs one comparison rather than a list
-        nobody reads.
+        Runs on every :meth:`submit` and almost always finds nothing. The map is insertion-ordered
+        by instant id and every deadline is one window after its bucket opened, so the front bucket
+        has the earliest deadline of all: if *it* has not expired, none has.
         """
         if not self._buckets:
             return

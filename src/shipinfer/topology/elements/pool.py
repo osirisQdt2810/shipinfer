@@ -1,14 +1,14 @@
 # doc: long the wildcard-cap rule and the two-hooks split are both load-bearing and unobvious
 """The ``pool`` elements: a chain step that submits to the model pool and waits.
 
-Four kinds run a model from the repository -- ``detect``, ``segment``, ``embed``,
-``recognize`` -- and for all four the default implementation is this one: build a request,
+Four kinds run a model from the repository — ``detect``, ``segment``, ``embed``,
+``recognize`` — and for all four the default implementation is this one: build a request,
 hand it to the engine, sleep until the answer arrives, add the outputs to the item's meta.
 The alternatives behind the same kinds (``nvinfer``, ``nvinferserver``) run the model
 elsewhere entirely, which is why this is a registry and not a base class with a flag.
 
 **Why this lives in a pure layer.** It never imports the engine: the pool arrives as
-:class:`~shipinfer.topology.base.ModelResolver` -- one method, ``get(name)`` -- which the
+:class:`~shipinfer.topology.base.ModelResolver` — one method, ``get(name)`` — which the
 engine satisfies structurally and a test satisfies with a dict. The name is resolved once at
 ``open``, not per frame: ``get`` takes a lock, and a missing model must stop the deploy rather
 than fail on the first frame (CONVENTIONS 2.6).
@@ -16,7 +16,7 @@ than fail on the first frame (CONVENTIONS 2.6).
 **It hands on the caps it was handed.** Accepts ``nv12@gpu``, then ``tensor@gpu``, then
 ``bgr@cpu``; *produces* ``*@*``, which is a precise claim rather than vagueness: this element
 adds a meta key and passes the payload through **unchanged**, so its outbound cap is its
-negotiated inbound one. Declaring a concrete ``produces: nv12@gpu`` -- which this file did --
+negotiated inbound one. Declaring a concrete ``produces: nv12@gpu`` — which this file did —
 was a **relabelling**: fed ``bgr@cpu`` it told the loader host memory was device memory, and
 the download that arch.md section 8 exists to refuse went invisible one element later with
 every edge reported valid. The corollary: :meth:`_PoolElement._do_process` must not stamp a
@@ -25,21 +25,21 @@ cap on the item it derives, because a cap belongs to the edge and the edge is th
 **Two of the four read pixels; two forward.** A detector must letterbox and then undo exactly
 that transform to put boxes back in source pixels; an embedder must cut the frame into one
 crop per detection and put the vectors back on the rows they came from. Both replace
-``_prepare`` and ``_finish`` and declare ``needs_image_ops``. That split -- rather than a flag
-or an ``isinstance`` inside one method -- is what keeps the per-frame geometry on the walking
+``_prepare`` and ``_finish`` and declare ``needs_image_ops``. That split — rather than a flag
+or an ``isinstance`` inside one method — is what keeps the per-frame geometry on the walking
 worker's stack: one element instance is shared by every worker, so an attribute would let two
 frames overwrite each other's scale, or each other's row indices, which is an appearance
 vector attached to the wrong object.
 
 **The embedder is where the chain's cardinality changes**: one frame in, N crops at the
-model, N vectors back. It answers two questions no forwarding element has to -- *which rows*
+model, N vectors back. It answers two questions no forwarding element has to — *which rows*
 (its own ``params: classes:``, because ``when:`` decides frames, not rows) and *how many
 requests* (``max_batch_size``, because a crowded frame outgrows a fixed plan).
 
 **Two knobs**, resolved at ``open`` in a fixed precedence: this slot's ``params:``, then the
 runner's context (``stage_timeout_s``, ``input_name``), then the module default. Params win
 because a tensor name belongs to the model; the context wins over the default because an
-operator who lowers ``stage_timeout_ms`` means it -- before the context carried it, every
+operator who lowers ``stage_timeout_ms`` means it — before the context carried it, every
 ``pool`` element still waited 5 s and the settings key applied to nothing.
 """
 
@@ -157,7 +157,7 @@ class _PoolElement(Element):
     #: subclass must declare, and the vocabulary the downstream elements read: ``track`` wants
     #: ``detections``, ``mtmc`` wants ``vectors``.
     #: The default ``_finish`` files the response verbatim, so a consumer that reads this
-    #: element's key per detection row cannot be satisfied by it -- the loader refuses that
+    #: element's key per detection row cannot be satisfied by it — the loader refuses that
     #: pairing rather than letting it fail on frame 1.
     files_raw_response: ClassVar[bool] = True
 
@@ -246,14 +246,25 @@ class _PoolElement(Element):
         what reassembly, tracing and every log line group on (ADR-002).
 
         **A timeout abandons the request; it does not cancel it.** There is no cancellation path to
-        call -- an item that has been queued is dequeued, assembled and executed whatever its future
+        call — an item that has been queued is dequeued, assembled and executed whatever its future
         says, and only the *result* is discarded. So a timed-out frame still costs the instance slot
         that made it late, and under sustained overload that compounds into a queue that never
         drains rather than one that sheds. The bound is still worth having, because it frees the
         *worker*; real cancellation needs a queue-side removal and is deliberately not guessed here.
 
         Returns:
-            The successor item -- same tag, same payload, and whatever :meth:`_finish` added.
+            The successor item — same tag, same payload, and whatever :meth:`_finish` added.
+
+        Raises:
+            QueueFullError: the pool is saturated — backpressure, propagated untouched.
+            RequestTimeoutError: the pool did not answer within ``timeout_s``.
+            ValidationError: from :meth:`_prepare` or :meth:`_finish`; a mis-wired chain.
+            InferenceError: the model answered and the answer cannot be attributed to rows.
+
+            All four propagate **as themselves**, and that is the contract:
+            :meth:`~shipinfer.runners.walk.ChainWalk.count_failure` sorts them into three
+            counters — backpressure, timed-out, failed — so collapsing them into one type here
+            would collapse the numbers an operator acts on.
         """
         tensor, carried = self._prepare(item)
         return self._finish(item, self._submit(item, tensor), carried)
@@ -303,15 +314,15 @@ class _PoolElement(Element):
     def _max_batch_rows(self) -> int:
         """The rows one request may carry: the engine's bound, never ``None``.
 
-        Read off the artefact for the reason :meth:`_declared` is -- the number belongs to the
-        engine, not to the chain file -- and it is ``effective_max_batch_size``, because that
+        Read off the artefact for the reason :meth:`_declared` is — the number belongs to the
+        engine, not to the chain file — and it is ``effective_max_batch_size``, because that
         is what the assembler is built with (``engine/model.py``) and therefore what a request
         is refused against.
 
         ``max_batch_size: 0`` is **not** "no bound" here. Triton reads it as server-side
         batching off; this engine reads it as ``max_batch_size or 1``
         (``repository/model_config.py``), and ``0`` is what a ``config.yaml`` gets by
-        *omission* -- so an unchunked frame of 15 people is refused whole, every frame. The
+        *omission* — so an unchunked frame of 15 people is refused whole, every frame. The
         fallback is ``1``: one crop per request beats every crop lost.
         """
         config = getattr(getattr(self._handle, "artifact", None), "config", None)
@@ -383,14 +394,14 @@ class _PoolElement(Element):
     # Split out of `_do_process` rather than left inline, and the seam is where it is for one
     # reason: `PoolDetect` has to *undo* in the second half exactly the transform it applied
     # in the first, and the numbers that describe that transform belong to one frame. An
-    # element attribute would be wrong -- one element instance is shared by every pipeline
+    # element attribute would be wrong — one element instance is shared by every pipeline
     # worker (`runners/inprocess.py`), so two frames in flight would overwrite each other's
     # scale and pad and publish boxes computed from the wrong letterbox. So the first half
     # *returns* what the second half needs, the walk carries it on its own stack, and no
     # subclass can accidentally make it shared state.
     #
-    # The alternative -- `if isinstance(self, PoolDetect)` inside `_do_process`, or a
-    # `decodes: bool` flag -- is the switch statement CONVENTIONS 2.3 exists to refuse.
+    # The alternative — `if isinstance(self, PoolDetect)` inside `_do_process`, or a
+    # `decodes: bool` flag — is the switch statement CONVENTIONS 2.3 exists to refuse.
 
     def _prepare(self, item: ChainItem) -> tuple[Tensor, Any]:
         """What to submit for this item, and what :meth:`_finish` needs to interpret it.
@@ -436,7 +447,7 @@ class _Letterbox:
 
     Per frame and on the walking worker's stack, never on the element: one ``PoolDetect``
     instance is shared by every pipeline worker, so an attribute here would let two frames in
-    flight overwrite each other's scale and publish boxes computed from the wrong letterbox --
+    flight overwrite each other's scale and publish boxes computed from the wrong letterbox —
     a corruption with no exception and no visible symptom short of a tracker that swaps
     identities.
 
@@ -470,23 +481,23 @@ class PoolDetect(_PoolElement):
     scale. Split across two elements, or recomputed from shapes, and every published box drifts.
 
     This is the proven arithmetic from ``pipeline/graph/detect.py`` moved onto the chain rather
-    than reimplemented -- the same ``decode_detections``, the same ``letterbox_batch``, the same
+    than reimplemented — the same ``decode_detections``, the same ``letterbox_batch``, the same
     order. What is new is where the configuration comes from.
 
     **Nothing is guessed.** The model's ``config.yaml`` is the source of truth for what the
-    artefact knows -- input extent, output tensor names -- and this slot's
+    artefact knows — input extent, output tensor names — and this slot's
     ``params: {decode: {...}}`` overrides it for a deployment that knows better. A model that
     declares neither a usable input shape nor a ``dst_size`` stops the deploy, because the
     alternative is a letterbox to the wrong size and a whole shard's boxes silently wrong.
 
     ``params: {decode: {...}}`` takes:
 
-    * ``dst_size: [height, width]`` -- the model input. Default: the declared input spec.
-    * ``pad_value`` -- letterbox fill, default 114 (the YOLO grey; trained with it and served
+    * ``dst_size: [height, width]`` — the model input. Default: the declared input spec.
+    * ``pad_value`` — letterbox fill, default 114 (the YOLO grey; trained with it and served
       without it is a silent accuracy loss).
-    * ``normalize``, ``score_threshold``, ``max_detections``, ``class_labels`` -- see
+    * ``normalize``, ``score_threshold``, ``max_detections``, ``class_labels`` — see
       :mod:`~shipinfer.topology.elements.detections`.
-    * ``boxes_output`` / ``count_output`` -- default to the model's declared output, and
+    * ``boxes_output`` / ``count_output`` — default to the model's declared output, and
       ``num_detections`` only when the model *declares* it. Guessing a count name and finding
       nothing is indistinguishable from a model that reports no count, and the trailing rows of
       a padded output are undefined rather than zero.
@@ -972,38 +983,51 @@ class _PoolCropElement(_PoolElement):
     """A ``pool`` element that runs its model on **one crop per detection**, not the frame.
 
     The element that changes cardinality: one frame in, N rows at the model, N vectors back,
-    scattered onto the rows they came from -- arch.md section 5's "branch on class -> crop
+    scattered onto the rows they came from — arch.md section 5's "branch on class -> crop
     batch -> submit crops". The same single ``crop_batch`` call for all N boxes, the same
     chunking at ``max_batch_size``, the same rule that every row knows its detection.
 
     **Why not the whole frame.** ``embed`` used to hand the detector's letterboxed frame to a
     re-identification model whose input is 3x256x128, and file the raw ``response.outputs``
-    under ``meta['vectors']`` -- which ``track`` refuses, because an embedder's raw output
+    under ``meta['vectors']`` — which ``track`` refuses, because an embedder's raw output
     tensors are not an attribution. So the chain could not reach ``track`` with appearance.
 
     **The scatter-back is a mapping, and that is load-bearing.** ``track`` accepts one row per
     detection or ``{detection index: vector}``. A per-row array would need a filler for the rows
-    this slot did not embed -- and the sizing puts two embedders side by side, so *partial
+    this slot did not embed — and the sizing puts two embedders side by side, so *partial
     coverage is the normal case*. The mapping says exactly which rows were covered and stays
     legal when two of these merge into one frame's meta; a NaN row would have to be recognised
     as absence by every consumer, and the first one that forgot would match a track against a
     vector of NaNs and never say so.
 
     **Which rows is its own ``params: classes:``, not the chain's ``when:``.** A ``when:`` guard
-    is evaluated once per *item*, and an item is a whole frame -- so it can only decide whether
+    is evaluated once per *item*, and an item is a whole frame — so it can only decide whether
     the element runs at all. A frame holds ships and people at once, which is why row selection
     cannot be a frame guard.
+
+    ``params:`` takes, on top of the base's ``input`` and ``timeout_s``:
+
+    * ``classes: [ship]`` — which detection labels to crop. Default: every row.
+    * ``crop: {size: [h, w]}`` — the extent each crop is resized to. Default: the model's own
+      declared input. **The one an operator has to know about**: a model with a dynamic input
+      declares no extent, so without this the deploy is refused at ``open()`` — and a wrong
+      extent is the silent failure, accepted by the backend and answered with a vector
+      computed from the wrong pixels.
+    * ``crop: {normalize: ...}`` — the normalisation applied to each crop, as ``PoolDetect``'s
+      ``decode: {normalize: ...}``.
+    * ``output: <name>`` — which response output holds one row per crop. Default: the model's
+      single output, and required when it has more than one.
     """
 
     #: A crop element scatters its response back onto the rows it cropped, so its key is
-    #: row-indexed and readable by ``output`` -- the opposite of the base's default.
+    #: row-indexed and readable by ``output`` — the opposite of the base's default.
     files_raw_response: ClassVar[bool] = False
 
     #: This element crops, so it is opened with :attr:`ElementContext.ops` and refuses without
-    #: one -- the same declaration, and the same refusal, as :class:`PoolDetect`.
+    #: one — the same declaration, and the same refusal, as :class:`PoolDetect`.
     needs_image_ops: ClassVar[bool] = True
     #: It selects which rows to crop with ``params: classes:``, so the loader refuses a
-    #: ``when: class == …`` on this slot and names the key that does the job -- see
+    #: ``when: class == …`` on this slot and names the key that does the job — see
     #: :attr:`~shipinfer.topology.base.Element.selects_rows`.
     selects_rows: ClassVar[bool] = True
     _frame_verb: ClassVar[str] = "crop"
@@ -1046,7 +1070,7 @@ class _PoolCropElement(_PoolElement):
     def _do_open(self, context: ElementContext) -> None:
         """Resolve the pool, the ops, the crop extent, the output name and the row bound.
 
-        All five now, none per frame -- the rule :class:`PoolDetect` states and the reason
+        All five now, none per frame — the rule :class:`PoolDetect` states and the reason
         ``max_batch_size`` is read here rather than at the first crowded frame.
 
         Raises:
@@ -1087,7 +1111,7 @@ class _PoolCropElement(_PoolElement):
         # Built once, here, so a quiet camera's frame does not build one: `_prepare` has to
         # answer with a tensor and this is the one it answers with when there is nothing to
         # crop. It is never submitted and never written to, so one instance shared by every
-        # worker is safe -- which an array that a kernel wrote into would not be.
+        # worker is safe — which an array that a kernel wrote into would not be.
         self._nothing_to_crop = Tensor.from_numpy(
             np.empty((0, 3, *self._crop_size), dtype=np.float32)
         )
@@ -1133,7 +1157,7 @@ class _PoolCropElement(_PoolElement):
         The same two refusals :meth:`PoolDetect._refuse_a_letterbox_the_model_disagrees_with`
         makes, asked of the spec itself with
         :meth:`~shipinfer.core.types.TensorSpec.matches` rather than of a hand-rolled
-        predicate over the extent -- one call covers a ``crop.size`` that contradicts a static
+        predicate over the extent — one call covers a ``crop.size`` that contradicts a static
         ``(3, H, W)``, an input that is not image-shaped at all, and the dynamic ``3x?x?`` the
         override exists for.
 
@@ -1167,7 +1191,7 @@ class _PoolCropElement(_PoolElement):
     def _resolve_output(self) -> str:
         """Which response output holds one row per crop.
 
-        This slot's ``output``, else the model's single declared output -- a re-identification
+        This slot's ``output``, else the model's single declared output — a re-identification
         engine has one, and both embedders in the demo repository call it ``embedding``. A name
         is a property of the artefact, so guessing one refuses a valid engine over a naming
         preference; that is why a multi-output model must say.
@@ -1187,7 +1211,7 @@ class _PoolCropElement(_PoolElement):
     # -- one frame ---------------------------------------------------------------------
 
     def _do_process(self, item: ChainItem) -> ChainItem:
-        """Crop, submit, scatter -- and on a frame with nothing to crop, do none of it.
+        """Crop, submit, scatter — and on a frame with nothing to crop, do none of it.
 
         Overrides the base walk for one reason, and it is the first line: **zero rows means no
         request**. The base submits unconditionally because the payload it forwards is always
@@ -1196,9 +1220,9 @@ class _PoolCropElement(_PoolElement):
         round-trip to be told nothing. A quiet camera is the common case at this sizing, not
         an edge one.
 
-        The three halves the base names are still the three halves here --
+        The three halves the base names are still the three halves here —
         :meth:`_prepare` cuts the crops, :meth:`_PoolElement._submit` runs them,
-        :meth:`_finish` files them -- so a second crop element (a segmenter fed crops) needs
+        :meth:`_finish` files them — so a second crop element (a segmenter fed crops) needs
         only its own :meth:`_finish`.
 
         Returns:
@@ -1229,7 +1253,7 @@ class _PoolCropElement(_PoolElement):
         answered without an error and shows up only as appearance matching that degrades.
 
         The crops are cut from the **source** frame the item still carries, not from the
-        letterboxed one the detector submitted -- which is why ``PoolDetect`` hands its payload
+        letterboxed one the detector submitted — which is why ``PoolDetect`` hands its payload
         on unchanged. Cropping the full-resolution frame is both cheaper and sharper than
         cropping a letterbox and resizing again (``pipeline/graph/crop.py``), and the boxes
         ``PoolDetect`` filed are already in exactly those pixels.
@@ -1268,7 +1292,7 @@ class _PoolCropElement(_PoolElement):
         return self._classes
 
     def _selected(self, detections: Detections) -> range | tuple[int, ...]:
-        """The detection rows this slot embeds -- every one, or the declared classes.
+        """The detection rows this slot embeds — every one, or the declared classes.
 
         A ``range`` in the "no ``classes:``" case, exactly as ``track._selected`` returns one
         and for the same reason: nothing here materialises it. :meth:`_finish` iterates it
@@ -1291,8 +1315,8 @@ class _PoolCropElement(_PoolElement):
         elements behind it need not re-derive it, and this is the one place it is *checked*
         rather than read: the boxes are in those pixels, so cropping a frame of a different
         extent takes the wrong pixels for every object at once. It is two integer compares on
-        the per-frame path and it catches the corruption that has no other symptom -- a
-        resized payload, a second decoder, a chain where two frames were confused -- which
+        the per-frame path and it catches the corruption that has no other symptom — a
+        resized payload, a second decoder, a chain where two frames were confused — which
         would otherwise surface as a tracker that swaps identities weeks later.
 
         A chain that filed no ``frame_hw`` is not second-guessed: an element that filed
@@ -1315,8 +1339,8 @@ class _PoolCropElement(_PoolElement):
     def _submit_crops(self, item: ChainItem, crops: Tensor) -> InferenceResponse:
         """Run the crop batch, in as many requests as the model's ``max_batch_size`` allows.
 
-        A frame holds however many objects the detector found -- 10 to 20 people is the
-        sizing this project targets and 25 was observed -- while an engine's plan is built at
+        A frame holds however many objects the detector found — 10 to 20 people is the
+        sizing this project targets and 25 was observed — while an engine's plan is built at
         a fixed batch. Without this, one crowded frame becomes a single request larger than
         the model can ever accept:
 
@@ -1340,10 +1364,10 @@ class _PoolCropElement(_PoolElement):
         **The chunks are submitted one at a time, and that is the latency budget to know
         about.** Each :meth:`_submit` blocks on its own future, so a frame split into K
         requests costs K sequential round trips and can hold this worker for up to
-        ``K * timeout_s`` -- with the default four workers, a crowded frame is a worker
+        ``K * timeout_s`` — with the default four workers, a crowded frame is a worker
         unavailable to any camera for that long. It is not a regression (``pipeline/graph/
         objects.py`` serialises the same way) and K is small on a *batching* model: 25 objects
-        against a plan built at batch 16 is K=2. On ``max_batch_size: 0`` it is not -- the
+        against a plan built at batch 16 is K=2. On ``max_batch_size: 0`` it is not — the
         engine's bound is then one row, K == N, and a 15-person frame is 15 round trips, so
         declare a ``max_batch_size`` on a model a crop element feeds. Submitting all K first and then collecting
         the futures would cost one round trip instead of K, at the price of K requests in
@@ -1389,14 +1413,14 @@ class _PoolCropElement(_PoolElement):
     def _finish(self, item: ChainItem, response: InferenceResponse, carried: Any) -> ChainItem:
         """Scatter the model's rows back onto the detections they were cut from.
 
-        ``{detection index: vector}`` -- the mapping form
+        ``{detection index: vector}`` — the mapping form
         :meth:`~shipinfer.topology.elements.track.ShipvisionTrack._embeddings` accepts, chosen
         because partial coverage is this chain's normal case and not its exception; the class
         docstring has the argument. The pairing is positional and that is the whole contract:
         ``crop_batch`` returned the rows in the order the boxes went in, so row ``i`` of the
         response belongs to ``rows[i]``.
 
-        No ``caps=``: the payload -- the source frame -- is handed on unchanged, so the cap it
+        No ``caps=``: the payload — the source frame — is handed on unchanged, so the cap it
         carries is the cap it arrived with. This element adds a metadata key and nothing else,
         which is why its ``produces`` stays ``*@*``.
 
@@ -1421,8 +1445,8 @@ class _PoolCropElement(_PoolElement):
     def _scatter(self, item: ChainItem, covered: dict[int, Any]) -> ChainItem:
         """File ``covered`` under this element's key, **merged** with what is already there.
 
-        Additive, and not a nicety. The sizing runs two of these over disjoint rows --
-        ``embed_ship`` and ``embed_person``, both filing ``meta["vectors"]`` -- and ``derive``
+        Additive, and not a nicety. The sizing runs two of these over disjoint rows —
+        ``embed_ship`` and ``embed_person``, both filing ``meta["vectors"]`` — and ``derive``
         merges meta *by key*, so a plain assignment by the second would replace the first
         wholesale. Every ship would then reach ``track`` with ``embedding=None`` on a chain
         whose logs and counters all say both embedders ran.
@@ -1434,7 +1458,7 @@ class _PoolCropElement(_PoolElement):
 
         What is filed is a :class:`~shipinfer.topology.base.RowIndexed`, which is what tells the
         fan-in the value is keyed by detection row and may be unioned. A bare dict still reaches
-        ``track`` and simply does not union -- the right default for a value nobody declared, and
+        ``track`` and simply does not union — the right default for a value nobody declared, and
         why the ``segment`` slots filing raw outputs are left alone. Merging into a peer keeps the
         peer's declaration: a plain dict stays plain.
 
@@ -1442,6 +1466,11 @@ class _PoolCropElement(_PoolElement):
         :class:`~shipinfer.core.errors.InferenceError` here exactly as at the fan-in, because two
         elements covering one detection is a property of the chain file, equally true in series and
         in parallel. ``{**existing, **covered}`` would turn that into a silently wrong vector.
+
+        Raises:
+            ValidationError: something upstream filed a non-mapping under this key, so there is
+                nothing to merge into — a mis-wired chain, and refusing beats replacing.
+            InferenceError: two elements cover the same detection row.
         """
         existing = item.meta.get(self.meta_key)
         if existing is None:
@@ -1489,7 +1518,7 @@ class PoolSegment(_PoolElement):
     change of base class. The *second* half is not: a YOLO segmentation engine emits detection
     rows and a bank of mask prototypes, never a mask, and the mask for one crop is the two
     multiplied together and then reduced to an area
-    (``pipeline/graph/masks.py::InstanceMaskArea``) -- a fold over two outputs at once, which
+    (``pipeline/graph/masks.py::InstanceMaskArea``) — a fold over two outputs at once, which
     a per-row scatter-back cannot express.
 
     Filing the raw rows per detection instead would be worse than leaving this alone: it pins
@@ -1509,15 +1538,15 @@ class PoolEmbed(_PoolCropElement):
     """Embedding through the model pool: one crop per detection, one vector per row.
 
     One instance per embedder slot in the chain, and the sizing expects two of them side by
-    side -- ``embed_ship`` with ``classes: [ship]`` and ``embed_person`` with
-    ``classes: [person]`` -- each filing the rows it covered into the same
+    side — ``embed_ship`` with ``classes: [ship]`` and ``embed_person`` with
+    ``classes: [person]`` — each filing the rows it covered into the same
     ``meta["vectors"]`` key. That is the case the mapping scatter-back is for; see
     :class:`_PoolCropElement`.
 
     A re-identification engine L2-normalises its own output (both embedders in the demo
     repository are ResNet-50 backbones "global-pooled and L2-normalised to a 2048-d vector",
     and their ``config.yaml`` says so), and the proven path normalised nothing in Python
-    either -- ``ObjectStage`` forwards ``embedding`` untouched. So this element forwards it
+    either — ``ObjectStage`` forwards ``embedding`` untouched. So this element forwards it
     untouched too. Re-normalising here would be a second normalisation of an already-unit
     vector: harmless on a well-behaved model, and a silent divide-by-a-tiny-number on the row
     where the engine answered with zeros.
