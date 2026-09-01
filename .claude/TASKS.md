@@ -2333,27 +2333,26 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       tier 3177 passed/1 skipped/69 deselected. GPU 5 back to 15 MiB after. pre-commit all Passed on the
       COMMITTED tree with git status clean. Body written from the diff and claim-checked: 9/9 names in
       diff, 3/3 referenced-but-not-in-diff files confirmed on main.
-- [ ] **CONTAINER-TIER-15-RED · NEW, found 31 Aug the moment CONTAINER-TESTS-SHADOW made the tier runnable.**
-      The full offline tier inside the container is `15 failed, 3042 passed, 9 skipped`. NOT caused by the
-      shadow fix -- before it, ZERO tests ran (the session aborted in pytest_configure), so these were merely
-      unobservable. CI is unaffected: CI runs the offline tier on plain host runners (py3.10/py3.12), where
-      the same tree is 3179 passed.
-      CHARACTERISED, three measurements, not a guess:
-        1. In isolation IN the container the same subset PASSES (6 passed) -> order/state dependent, not
-           a broken assertion.
-        2. On the HOST with the container's exact file selection mimicked (--ignore the 6 grpc/priority
-           files) -> 3014 passed, 0 failed -> selection order alone does NOT reproduce it.
-        3. So the remaining variable is the container's interpreter/packages: py3.11.13 there vs py3.10 in
-           the host venv.
-      Shape of the 15: almost all assert a warning/log record was emitted and get `[]` -- 5 in
-      test_recognize_element TestOpen/TestEnrolment, 5 in test_mtmc_element
-      TestAGroupItsWorkersCannotCoverIsSaidOutLoud, 3 in test_stop_teardown, 1 test_start_unwind,
-      1 test_sinks Kafka. A warnings-registry or logging-handler leak across tests on 3.11 is the first
-      hypothesis to test.
-      ALSO FOUND: the container image installs no grpcio, so 150 tests never collect there
-      (test_shard_service 69, test_control 29, test_priority 24, test_shard_rpc 10, test_proto_is_current 7,
-      test_client_reads_replies 4, plus partials in test_camera_lifecycle/test_streams). The container tier
-      is therefore NOT a superset of the host tier today. Worth fixing in the image's pip list.
+- [~] **CONTAINER-TIER-15-RED · ROOT-CAUSED AND FIXED, open as PR #108. Container offline tier 15 -> 7 -> 0.**
+      One line explains all of it. `cli.common.build_settings` calls `core.logging.configure(force=True)`,
+      which sets `propagate = False` on the `shipinfer` logger (so an embedder's root does not double-print).
+      **Nothing calls `shutdown()`**, so the flag stays off for the process -- and with it off records reach
+      no handler here AND are not propagated up, so `caplog` sees nothing and every later test that asserts
+      on a log record fails. Host vs container differed ONLY in collection order: the three files that call
+      build_settings (test_priority, test_run_command, test_shard_service) are among those whose collection
+      differs, so whether they run before or after the record-reading tests differs.
+      Two fixes, different in kind: (1) `shutdown()` restores propagate -- a production bug of its own, an
+      embedder who stops us never got logging back; (2) an autouse fixture in tests/conftest.py snapshots
+      the logger's propagate/level/handlers per test -- THIS is what closes the failures, since fix 1 only
+      helps when shutdown is called. Container tier now **2943 passed, 0 failed**; host 3256 passed.
+      TWO OF MY OWN WRONG TURNS, recorded: (a) I fixed (1) first and re-ran the container expecting green --
+      got 7 failed, because the flag was set by build_settings and never unset; the probe-passes-so-suite-
+      passes inference was wrong. (b) my earlier "host cannot reproduce it" experiment `--ignore`d the six
+      files the container lacked, which REMOVED the leaking tests rather than reordering them -- so I
+      concluded the cause was py3.11-vs-3.10 when it is collection ORDER. Both recorded in the PR body.
+      Also fixed en route, its own branch `fix/container-tier-grpc` (queued): grpcio/protobuf were absent
+      from the container's pip list so 150 tests never COLLECTED there, and the single install list fell
+      back to a minimal set when any one package was missing, silently dropping fastapi/opencv/scipy too.
 - [x] **CONTAINER-TESTS-SHADOW · MERGED as PR #100 (31 Aug), VERDICT: APPROVE read from the bot comment.** (f4be859 rebased onto b57c6de; 1 commit, 2 files, +36).
       Fix: `tests/__init__.py` makes the test tree a real package (benchmarks/tests already was), plus
       `TestTheTestTreeIsThisCheckouts` (2 tests) asserting the invariant by name. MATCHED revert-check on the
