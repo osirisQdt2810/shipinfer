@@ -19,6 +19,7 @@ Two rules the whole suite depends on:
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -102,6 +103,42 @@ def pytest_configure(config) -> None:
     from tests.support.models import pin_intra_op_threads
 
     pin_intra_op_threads()
+
+
+# doc: long the leak it prevents is three steps long and invisible from the call site
+@pytest.fixture(autouse=True)
+def _logging_state_is_not_shared_between_tests():
+    """Give every test the ``shipinfer`` logger back the way it found it.
+
+    ``cli.common.build_settings`` calls ``core.logging.configure(force=True)``, which sets
+    ``propagate = False`` so an embedder's root logger does not print every record twice.
+    Nothing calls ``shutdown``, so the flag stayed off for the REST OF THE SESSION -- and with
+    it off, records reach no handler here and are not passed up either, so ``caplog`` sees
+    nothing. Six tests that assert on log records failed for this and only in the container,
+    because host and container collect different sets and therefore order the leaking test
+    (``test_priority``, ``test_run_command``, ``test_shard_service``) differently against them.
+
+    A whole-state snapshot rather than the one flag: handlers and level leak the same way, and
+    a fixture that fixes the symptom it happened to be debugged from is how the next one hides.
+    """
+    from shipinfer.core.logging import reset_for_tests
+
+    logger = logging.getLogger("shipinfer")
+    propagate, level, handlers = logger.propagate, logger.level, list(logger.handlers)
+    try:
+        yield
+    finally:
+        # The logger is not the only thing `configure` writes to: `_active_sink` and
+        # `_prior_propagate` are module globals, and leaving them set makes the NEXT test's
+        # `configure` restore a previous test's propagate value over the one it just set.
+        reset_for_tests()
+        for handler in list(logger.handlers):
+            if handler not in handlers:
+                logger.removeHandler(handler)
+        for handler in handlers:
+            if handler not in logger.handlers:
+                logger.addHandler(handler)
+        logger.propagate, logger.level = propagate, level
 
 
 @pytest.fixture(scope="session")
