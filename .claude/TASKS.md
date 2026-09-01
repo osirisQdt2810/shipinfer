@@ -2431,8 +2431,24 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `pytest benchmarks/tests/test_parity_ingest.py` before pushing any ledger change.
 - [x] **V145-W1 · trim wave 1 — MERGED as #103 (35381fda). Took the tree 1031 -> 1012 violations; 49 remain in the touched files, none marked `# doc: long`.** Original scope — `engine`, `runtime`, `ingest`, `launch`, `scheduling`, `api`,
       `cli`, `core`, `backends`, `repository`. Built and verified (`docs/trim-wave-1`).
-- [ ] **V145-W2 · trim wave 2** — `topology/`, `runners/inprocess.py`, `pipeline/`, held until
-      C8m and C8b merge, because both rewrite those files.
+- [~] **V145-W2 · IN PROGRESS. base.py done and OPEN as PR #112; runners/inprocess.py already done by
+      V149 steps 2-3 (#110, #111).** topology/ measured per file: base.py **4.22** (the worst file in the
+      tree), registry.py 2.07, elements/pool.py 1.67 (1697 lines, 559 code -- the next real target),
+      elements/track.py 1.43, barrier.py 1.37, chain.py 1.15. Package total 10204 lines / 1.40.
+      #112: base.py 852 -> 722, ratio 4.22 -> **3.07**, ten docstrings. The biggest win was
+      DE-DUPLICATION not shortening -- camera_added and camera_removed each carried the same three
+      paragraphs on the lifecycle lock not serialising the walk; stated once now, with camera_removed
+      pointing at it. Docs-only proved by AST; tier 3257, topology 766.
+      WHY IT STOPS AT 3.07, and it is structural: base.py is an ABC plus frozen dataclasses, so what is
+      left is Args blocks and contract text an implementer must read. 147 lines of code cannot carry a
+      layer's vocabulary at a low ratio. elements/pool.py at 1.67 over 559 lines of code is the genuine
+      next target, not this file.
+      TWO SELF-INFLICTED BREAKS, both caught by RUNNING the suite rather than reading the diff: four
+      replacements lost their leading indent (my helper replaced from the indent while the new text began
+      at the quote) -> IndentationError, 17 collection errors; and crop_batch's replacement omitted the
+      closing triple-quote, swallowing its Args block into an unterminated string. The Args had to be
+      recovered from `git show HEAD:`. A docstring rewrite can silently delete adjacent content.
+      Original scope: topology/, runners/inprocess.py, pipeline/.
 - [ ] **V145-W3 · trim wave 3** — `tests/`, and the Markdown the tool cannot see
       (`FEATURE_LOG.md` entries ≤ 15 lines, ADRs ≤ 30 — forward-only, accepted ADRs stay).
 - [ ] **V145-ARM · wire `check_docs.py` into `.pre-commit-config.yaml`** once the waves have
