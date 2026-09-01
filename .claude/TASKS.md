@@ -2446,6 +2446,20 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
 - [ ] **Z1 · Re-read `docs/qa/user.md` end to end** and check every request — verbatim sections
       included, not just the standing-rules index — against the repository. Result into
 
+- [!] **GPU7-DEGRADED · OPERATOR: the box's GPU tier is DOWN, 1 Sep ~16:0x. GPU 7 needs a reset.**
+      `nvidia-smi -i 7` returns `[Unknown Error]` for temperature and `[N/A]` for power, utilisation and
+      ECC; `nvidia-smi --query-compute-apps` lists a row it cannot attribute (`[N/A], [N/A]`). Memory still
+      reads (15/24564 MiB), so it is a partial fault rather than a missing card.
+      EFFECT: every `-m gpu` test errors at CUDA init with `DeferredCudaCallError` from torch's deferred
+      `_check_capability`, which runs across ALL visible devices -- the container is started with
+      `--device nvidia.com/gpu=all`, so one sick device takes the whole tier down.
+      NOT a code fault, established by discriminator: `tests/engine/test_warmup_on_a_real_engine.py`
+      (unrelated to any open branch) fails the same way, 2 failed. #106's own tests passed `3 passed in
+      12.79s` on 6372f5e an hour earlier and nothing since touches CUDA (re-checked by removing the new
+      conftest: still 3 errors).
+      LEFT ALONE: tts26's two training processes on GPUs 0-1 (13.5 GB each, ~48 min elapsed) are live work.
+      UNTIL FIXED: no GPU-tier evidence can be produced, so anything needing `-m gpu` is blocked -- that
+      includes the V148 system test, the crowd yield measurement, and any Phase D/E bench work.
 - [~] **V149 · READABILITY: main cannot be read top-down against docs/arch.md. THE PRIORITY NOW; PR queue paused.**
       Operator, 31 Aug: cannot map remote main onto the architecture doc; too many docs, too many
       superfluous functions, no idea where to start reading top layer -> bottom layer. MEASURED, and the
