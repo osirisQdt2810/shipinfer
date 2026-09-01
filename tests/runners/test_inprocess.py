@@ -1067,10 +1067,15 @@ class TestBackpressureAndFailure:
 
         blamed = [r for r in caplog.records if "failed on" in r.getMessage()]
         assert blamed, f"no element-failure record: {[r.getMessage() for r in caplog.records]}"
-        assert blamed[-1].exc_info is not None, (
-            "the element failure was logged without exc_info, so the traceback naming the "
-            "element's own line is unrecoverable"
+        # Truthiness, not `is not None`: `Logger._log` rewrites `exc_info` only when it is
+        # truthy, so `exc_info=False` reaches the record as the literal `False` and
+        # `False is not None` is True. The first version of this assertion was that tautology,
+        # and it stayed green with the regression re-introduced.
+        assert blamed[-1].exc_info, (
+            f"the element failure was logged with exc_info={blamed[-1].exc_info!r}, so the "
+            f"traceback naming the element's own line is unrecoverable"
         )
+        assert blamed[-1].exc_info[0] is not None, "exc_info carries no exception type"
 
     def test_an_item_past_its_deadline_never_reaches_the_chain(self, running) -> None:
         """Spending a GPU on a frame that is already too late to act on is pure waste.

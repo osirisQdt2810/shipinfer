@@ -96,7 +96,8 @@ class ChainWalk:
                 self._blame(
                     work,
                     exc,
-                    f"fan-in {node.name} could not be merged",
+                    f"fan-in {node.name} could not be merged for "
+                    f"{work.request.context.key}",
                     with_traceback=False,
                 )
                 return
@@ -215,6 +216,7 @@ class ChainWalk:
             else InferenceError(f"{context}: {error}")
         )
 
+    # doc: long why `with_traceback` cannot be inferred from the error is the whole point
     def _blame(
         self, work: WorkItem, error: Exception, context: str, *, with_traceback: bool
     ) -> None:

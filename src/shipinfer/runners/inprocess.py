@@ -1150,7 +1150,8 @@ class InprocessRunner(Runner):
         makes — a future that never completes, on a producer that is waiting for it — so every
         in-flight slot is drained here and each item failed with the same typed cancellation
         the queue uses. The race with a worker that finishes a microsecond later is benign
-        because :meth:`_fail` and :meth:`_finish` both refuse a future that is already
+        because :meth:`~shipinfer.runners.walk.ChainWalk.fail` and
+        :meth:`~shipinfer.runners.walk.ChainWalk.finish` both refuse a future that is already
         resolved, whichever of the two got there first.
 
         The signal and the queue are **this cycle's** too, and that is load-bearing rather
@@ -1289,7 +1290,7 @@ class InprocessRunner(Runner):
 
         Each slot holds the item being walked *and* the rest of its wake-up batch, because
         neither is in the queue any more. An abandoned worker that finishes its current item a
-        microsecond later is benign: :meth:`_fail` and :meth:`_finish` both refuse a future
+        microsecond later is benign: the walker's ``fail`` and ``finish`` both refuse a future
         that is already resolved, whichever of the two arrived first.
 
         Args:
@@ -1334,7 +1335,8 @@ class InprocessRunner(Runner):
                 counter is ``items_dropped``, which this is the only writer of — the item was
                 refused at the door and never became one of ``accepted``, so it is not an
                 outcome the ``stats()`` ledger has to name. A model queue refusing an item
-                already inside the chain is ``items_backpressure``; see :meth:`_count_failure`.
+                already inside the chain is ``items_backpressure``; see
+                :meth:`~shipinfer.runners.walk.ChainWalk.count_failure`.
             RequestCancelledError: the queue is closed — the runner is shutting down.
         """
         context = item.context
