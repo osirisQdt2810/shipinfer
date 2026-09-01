@@ -49,6 +49,10 @@ LOG_SINK_ENV = "SHIPINFER_LOG_SINK"
 _ROOT = "shipinfer"
 _active_sink: LogSink | None = None
 
+#: What ``propagate`` was before :func:`configure` turned it off, so :func:`shutdown` can put
+#: it back. ``None`` means nothing is configured and there is nothing to restore.
+_prior_propagate: bool | None = None
+
 
 def get_logger(area: str) -> logging.Logger:
     """Return the logger for ``area`` (e.g. ``"scheduling.dispatcher"``)."""
@@ -74,7 +78,7 @@ def configure(
     Returns:
         The active sink, so a caller can :meth:`LogSink.close` it on shutdown.
     """
-    global _active_sink
+    global _active_sink, _prior_propagate
     if _active_sink is not None and not force:
         return _active_sink
 
@@ -91,7 +95,10 @@ def configure(
     logger.addHandler(active.build())
     logger.setLevel(resolved_level)
     # This package is a library first: never let records escape to the root logger and get
-    # printed a second time by whatever embeds us.
+    # printed a second time by whatever embeds us. Remembered rather than assumed, so
+    # `shutdown` restores what the embedder had rather than what logging defaults to.
+    if _prior_propagate is None:
+        _prior_propagate = logger.propagate
     logger.propagate = False
 
     _active_sink = active
@@ -99,12 +106,23 @@ def configure(
 
 
 def shutdown() -> None:
-    """Detach and close the active sink. Safe to call when nothing is configured."""
-    global _active_sink
+    """Detach and close the active sink, and give propagation back.
+
+    Restoring ``propagate`` is the half that was missing, and it was not only untidy.
+    :func:`configure` turns propagation off so an embedder's root logger does not print every
+    record twice; leaving it off after shutdown means an embedder who stops us **never gets
+    their logging back**, and in a test session it silences ``caplog`` for everything that
+    runs afterwards — records reach no handler here and are not passed up either. That is
+    what made six container-tier tests assert on log records and find none.
+    """
+    global _active_sink, _prior_propagate
     logger = logging.getLogger(_ROOT)
     for handler in list(logger.handlers):
         logger.removeHandler(handler)
         handler.close()
+    if _prior_propagate is not None:
+        logger.propagate = _prior_propagate
+        _prior_propagate = None
     if _active_sink is not None:
         _active_sink.close()
         _active_sink = None
