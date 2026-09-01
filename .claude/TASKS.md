@@ -2532,7 +2532,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       track.py 945, barrier.py 900, base.py 852, mtmc.py 847).**
 - [ ] **V149-engine · same for engine/ (pool.py 1421, ensemble.py 828, spill/remote_instance.py 747).**
 - [ ] **V149-cli · cli/commands/run.py 694 -> a thin composition root.**
-- [~] **CONTAINER-TIER-COLLECTION · OPEN as PR #109** (1 file, +18/-4). The other half of the container
+- [x] **CONTAINER-TIER-COLLECTION · MERGED as PR #109 (7e24cee, 1 Sep), VERDICT: APPROVE after 1 round. Container now collects 3258 = EXACTLY the host count; gap 119 -> 0 (the review was right that grpcio-tools is a PyPI wheel, closing the last 7). Round 1 caught two of my errors: wheels.sh never staged the wheels so the fix was a no-op off this box, and bare package names bypassed pyproject's constraints -- protobuf had resolved to 7.36.0, two majors outside the declared <6, and an unpinned grpcio-tools would have turned test_proto_is_current red on a clean tree. Also self-inflicted: an apostrophe in a comment closed the `bash -c '...'` string and the outer shell ran the backticks (`bash -n` still passes -- the file stays valid, it just means something else). (1 file, +18/-4). The other half of the container
       problem: the tier was not a SUPERSET of the host tier and nothing said so. grpcio/protobuf were absent
       from test.sh's pip list, so tests/launch, the shard service and core/test_priority never COLLECTED
       there. MEASURED same-worktree, same commit, only test.sh differing: **3139 -> 3251** collected against
