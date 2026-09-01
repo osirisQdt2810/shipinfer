@@ -62,20 +62,18 @@ class InferenceServer:
         # the table lock for that long would block every inference on the server.
         self._control_lock = threading.Lock()
         # A third lock, and the smallest of the three: it covers every *lifecycle
-        # transition* -- `start()`'s claim, `stop()`'s read-and-clear of the flags, and the
-        # teardown's hand-off of the trace state -- and nothing else, so it is never held
-        # for more than a few bytecodes and never contended in practice. `_control_lock`
-        # cannot do this job -- `stop()` has to clear the flags *before* it takes that one,
-        # for the reason spelled out there -- and without a lock the check and the act sit
-        # either side of a log emit, which is a GIL switch point. See `stop()`.
+        # transition* — `start()`'s claim, `stop()`'s read-and-clear of the flags, and the
+        # teardown's hand-off of the trace state — and nothing else, so it is never held
+        # for more than a few bytecodes. `_control_lock` cannot do this job: `stop()` has
+        # to clear the flags *before* it takes that one, and without a lock the check and
+        # the act sit either side of a log emit, which is a GIL switch point.
         #
-        # Lock order, where more than one is held at once: `_control_lock`, then
-        # `_lifecycle_lock`, then `_lock`. `_release` runs under the control lock and takes
-        # this one twice; `_build_and_start`'s publish takes this one and then the table
+        # Lock order, where more than one is held: `_control_lock`, then `_lifecycle_lock`,
+        # then `_lock`. `_build_and_start`'s publish takes this one and then the table
         # lock, because "does this run still own the server" and "write the table" are one
-        # decision (see there). Nothing takes them the other way round: `stop()` drops this
-        # one before taking the control lock, `_begin_start` never touches the control lock
-        # at all, and nothing acquires the lifecycle lock while holding the table lock.
+        # decision. Nothing takes them the other way round: `stop()` drops this one before
+        # taking the control lock, `_begin_start` never touches the control lock, and
+        # nothing acquires the lifecycle lock while holding the table lock.
         self._lifecycle_lock = threading.Lock()
         self._traces: TraceSink = NullTraceSink()
         # The last run's trace totals, captured by `_release` before the sink is closed, or
@@ -97,20 +95,18 @@ class InferenceServer:
         # nothing to release" from "another thread is releasing it right now". Both look
         # identical from the flags alone — `stop()` clears them before it takes the control
         # lock — and a caller pairing `stop()` with an immediate `start()` would otherwise
-        # get the first thread's teardown landing on its fresh server. Starts set, because a
-        # server that was never started has nothing to wait for.
+        # get the first thread's teardown landing on its fresh server. Starts set, because
+        # a server that was never started has nothing to wait for.
         #
         # **What the barrier means, exactly: "the teardown returned".** Not "nobody is
-        # holding this server" -- `_teardown` sets it in a `finally`, so it is set even for
-        # a teardown that stood down, and a `start()` that lost its claim can still be
-        # unwinding on another thread long after it. That gap used to be load-bearing: the
-        # next `start()` was let through on the barrier alone and the losing start then
-        # drained *its* table. It is no longer, and the two properties that make it harmless
-        # are the ones to keep: a losing start releases only the models it published, by
-        # identity (`_abandon_start`), and it cannot publish into a newer run's table at all
-        # (`_build_and_start`). A stronger barrier -- one that also waited for every losing
-        # start -- would be a wait with no bound, because a start is blocked on an engine
-        # load, which is the thing `shutdown_grace_s` exists to stop waiting for.
+        # holding this server" — `_teardown` sets it in a `finally`, so a `start()` that
+        # lost its claim can still be unwinding on another thread long after it. That gap
+        # used to be load-bearing; it no longer is, and the two properties that make it
+        # harmless are the ones to keep: a losing start releases only the models it
+        # published, by identity (`_abandon_start`), and it cannot publish into a newer
+        # run's table at all (`_build_and_start`). A stronger barrier — one that waited for
+        # every losing start — would be a wait with no bound, because a start is blocked on
+        # an engine load, the thing `shutdown_grace_s` exists to stop waiting for.
         self._torn_down = threading.Event()
         self._torn_down.set()
         # The name of the thread that is releasing this server, so an `_await_teardown`
@@ -238,58 +234,43 @@ class InferenceServer:
     def start(self) -> InferenceServer:
         """Scan the repository, load the selected models, and wait for readiness.
 
-        **A start that fails releases what it had already taken.** Under
-        ``strict_startup`` the first model that will not load aborts the whole start, and
-        the models loaded before it are running: worker threads bound to devices, holding
-        backends and CUDA contexts. The caller has no handle on them — ``start()`` raised,
-        so nothing was returned and nothing was assigned — so unless this method cleans up
-        after itself, those contexts are held for the life of the process by an object
-        nothing references. On a shared box that is somebody else's job failing to fit.
+        **A start that fails releases what it had already taken.** Under ``strict_startup`` the
+        first model that will not load aborts the whole start, and the models loaded before it are
+        running: worker threads bound to devices, holding backends and CUDA contexts. The caller
+        has no handle on them — ``start()`` raised — so unless this method cleans up after itself
+        those contexts are held for the life of the process by an object nothing references. So a
+        failure calls :meth:`stop` and then re-raises the original error unchanged: the operator
+        must see *why* model 3 would not load, not a teardown error from the clean-up.
 
-        So a failure here calls :meth:`stop`, which stops every model that did start (and
-        the trace sink and the memory pool), and then the original error is re-raised
-        unchanged: the operator must still see *why* model 3 would not load, not a teardown
-        error from the clean-up that followed.
-
-        ``strict_startup=false`` is untouched — a model that fails is logged and skipped,
-        and the server starts with the rest, which is what a heterogeneous fleet needs.
+        ``strict_startup=false`` is untouched — a model that fails is logged and skipped.
 
         **The entry and the exit are both atomic transitions**, under the same
-        ``_lifecycle_lock`` :meth:`stop` uses, and that is what keeps the two apart. Without
-        it a ``stop()`` arriving mid-start cleared the flags, drained the table and closed
-        the sink underneath a start that then set ``_started = True`` regardless — a server
-        answering ``is_started`` with an empty model table, which every readiness probe
-        reads as "up and serving nothing". Now the start claims the server or is refused,
-        and publishes its result only if it still owns the claim.
+        ``_lifecycle_lock`` :meth:`stop` uses. Without it a ``stop()`` arriving mid-start cleared
+        the flags, drained the table and closed the sink underneath a start that then set
+        ``_started = True`` regardless — a server answering ``is_started`` over an empty model
+        table, which every readiness probe reads as "up and serving nothing".
 
-        **What a start that lost the claim releases: exactly what it built, and nothing
-        else.** The models it started (whether or not they reached the table) and the trace
-        sink it built. It is deliberately *not* "whatever is in the model table" — by the
-        time a losing start unwinds, a later run can already own this server, and a
-        table-wide drain there stops the live run's instances and leaves ``is_started`` true
-        over an empty table, which is the readiness lie this method exists to remove,
-        re-entered from the other side. The claim is what makes "exactly what it built"
-        enough: three things ride the run's generation, and between them a losing start
-        cannot touch a newer run at all —
+        **A start that lost the claim releases exactly what it built**: the models it started
+        (whether or not they reached the table) and the trace sink. Deliberately *not* "whatever is
+        in the model table" — by then a later run can own this server, and a table-wide drain there
+        stops the live run's instances and leaves ``is_started`` true over an empty table, the same
+        readiness lie from the other side. Three things ride the run's generation, and between them
+        a losing start cannot touch a newer run at all:
 
-        * its models poll an abort that fires the moment the generation moves on, so a start
-          that lost the server stops loading rather than finishing — whatever
-          ``strict_startup`` says, because the abort is a decision about the *server* and
-          the non-strict skip asks the same run-bound predicate the models do;
+        * its models poll an abort that fires the moment the generation moves on, whatever
+          ``strict_startup`` says — the abort is a decision about the *server*;
         * its publish is refused, so it cannot overwrite the newer run's table entry;
-        * its release pops the table by *identity*, so it removes only entries that are the
-          objects it put there.
+        * its release pops the table by *identity*, so it removes only its own objects.
 
-        The trace sink and the service mesh are the same rule one field over: both are built
-        by this method and installed by :meth:`_finish_start`, therefore only by a start that
-        kept its claim, and a losing start closes the ones it built. Otherwise it leaves an
-        open file descriptor and a set of shared-memory rings on a stopped server, with the
-        peers on the other end still writing into them.
+        The trace sink and the service mesh are the same rule one field over: built here, installed
+        by :meth:`_finish_start` and therefore only by a start that kept its claim, and closed by a
+        losing start. Otherwise it leaves an open file descriptor and a set of shared-memory rings
+        on a stopped server, with the peers on the other end still writing into them.
 
         Raises:
-            ServerStateError: when another thread is already starting this server, when a
-                teardown is still in flight after ``shutdown_grace_s``, and when a
-                :meth:`stop` took the server over while this start was loading.
+            ServerStateError: another thread is already starting this server, a teardown is still
+                in flight after ``shutdown_grace_s``, or a :meth:`stop` took the server over while
+                this start was loading.
         """
         if self._started:
             return self
@@ -316,8 +297,8 @@ class InferenceServer:
             # Built here, installed by `_finish_start` and only there. Installing it now
             # would be a write to shared state made before this start knows it still owns
             # the server: a concurrent `stop()` whose `_release` has already swapped in the
-            # null sink leaves this live sink -- with `JsonLinesTraceSink`, an open file
-            # descriptor -- on a torn-down server, held for the life of the process by a
+            # null sink leaves this live sink — with `JsonLinesTraceSink`, an open file
+            # descriptor — on a torn-down server, held for the life of the process by a
             # field nothing will close, and `stats()` answering `{"sink": "recording",
             # "recorded": 0}` for a shard that is down. The models below are handed this
             # local instead of reading `self._traces`, which is the only reason the field
@@ -419,36 +400,32 @@ class InferenceServer:
     def _finish_start(self, generation: int, sink: TraceSink | None, mesh: Any) -> bool:
         """Publish a completed start, unless a :meth:`stop` took the server over first.
 
-        The other half of :meth:`_begin_start`'s claim, and the reason it is a generation
-        rather than a flag: ``_starting`` alone cannot tell "still mine" from "cleared by a
-        stop, and a later start set it again".
+        The other half of :meth:`_begin_start`'s claim, and the reason it is a generation rather
+        than a flag: ``_starting`` alone cannot tell "still mine" from "cleared by a stop, and a
+        later start set it again".
 
-        The run's trace sink and its service mesh are installed **here**, in the same
-        transition as the flags, and that placement is the point. Both are process-wide and
-        both are released by the ledger — a start that loses the claim installs neither and
-        closes what it built — so one rule covers them: *published by the claim, released by
-        the ledger*. The mesh used to be published under the generation alone, which is a
-        weaker question by exactly "a ``stop()`` for this same run has been and gone", and
-        that gap put a live mesh on a torn-down server.
+        The run's trace sink and its service mesh are installed **here**, in the same transition as
+        the flags. Both are process-wide and both are released by the ledger, so one rule covers
+        them: *published by the claim, released by the ledger*. The mesh used to be published under
+        the generation alone — a weaker question by exactly "a ``stop()`` for this same run has
+        been and gone" — and that gap put a live mesh on a torn-down server.
 
-        The sink and the previous run's totals are one fact, so they change together:
-        before this a scrape reports the run that ended, after it the live one, and never
-        the gap between them — which reads as a sink named "none" that recorded nothing (see
-        :meth:`_trace_stats`). And a start that loses the claim installs nothing at all, so
-        it cannot leave an open sink on a server somebody else has already torn down.
+        The sink and the previous run's totals are one fact, so they change together: before this a
+        scrape reports the run that ended, after it the live one, and never the gap between them,
+        which reads as a sink named "none" that recorded nothing (see :meth:`_trace_stats`).
 
         Args:
             generation: The run this start claimed.
-            sink: The sink this start built, or None when it never got that far. Installed
-                only on success; the caller closes it otherwise.
-            mesh: The service tier this start joined, or None when it joined none — which
-                is the ordinary case, since only a shard of a service tier joins one.
-                Installed on success; the caller stops it otherwise.
+            sink: The sink this start built, or None when it never got that far. Installed only on
+                success; the caller closes it otherwise.
+            mesh: The service tier this start joined, or None — the ordinary case, since only a
+                shard of a service tier joins one. Installed on success; the caller stops it
+                otherwise.
 
         Returns:
-            True when this start now owns a started server. False when it lost the claim —
-            the caller must release what it built, because the teardown that took the
-            server over has already been past the model table.
+            True when this start now owns a started server. False when it lost the claim — the
+            caller must release what it built, because the teardown that took the server over has
+            already been past the model table.
         """
         with self._lifecycle_lock:
             if self._generation != generation or not self._starting:
@@ -468,27 +445,22 @@ class InferenceServer:
     def _start_abort(self, generation: int) -> Callable[[], str | None]:
         """The abort a start's own models poll: has this *run* lost the server, and how?
 
-        It answers the **reason**, not a bool, and None for "carry on". There are two
-        reasons, they are different events to whoever reads the log — a shutdown, or a
-        restart that overtook this start — and :meth:`~shipinfer.engine.model.Model.start`
-        used to name the first for both.
+        It answers the **reason**, not a bool, and None for "carry on". The two reasons — a
+        shutdown, or a restart that overtook this start — are different events to whoever reads the
+        log, and :meth:`~shipinfer.engine.model.Model.start` used to name the first for both.
 
-        Two ways a run can lose the server, and :meth:`_is_stopping` only sees one of them.
-        It answers ``not (self._started or self._starting)``, so the moment a *later* start
-        sets ``_starting`` it goes false again — and the losing start, which was aborting
-        correctly a microsecond earlier, resumes loading, finishes, and publishes itself on
-        top of the run that replaced it. The generation is what tells the two apart: a run
-        that no longer owns the server is done, whatever the flags currently say about the
-        run that does.
+        :meth:`_is_stopping` only sees one of them. It answers ``not (_started or _starting)``, so
+        the moment a *later* start sets ``_starting`` it goes false again — and the losing start,
+        aborting correctly a microsecond earlier, resumes loading, finishes, and publishes itself on
+        top of the run that replaced it. The generation tells the two apart: a run that no longer
+        owns the server is done, whatever the flags say about the run that does.
 
-        **Why a start never reads itself as aborted.** ``_generation`` is bumped in exactly
-        one place — :meth:`_begin_start`, which bumps it and hands back the new value — so
-        for the whole of a run's own start ``self._generation == generation`` holds unless
-        another start claims the server. :meth:`stop` does *not* bump it; it only reads it,
-        precisely so the teardown and the run it is tearing down carry the same number. And
-        ``_is_stopping()`` is false while ``_starting`` is set, which this run set in
-        ``_begin_start``. So both disjuncts are false for the run that owns the claim, and
-        the first one becomes true only when someone else has taken it.
+        **Why a start never reads itself as aborted.** ``_generation`` is bumped in exactly one
+        place — :meth:`_begin_start`, which bumps it and hands back the new value — so for the whole
+        of a run's own start ``self._generation == generation`` holds unless another start claims
+        the server. :meth:`stop` does *not* bump it, precisely so the teardown and the run it is
+        tearing down carry the same number. And ``_is_stopping()`` is false while ``_starting`` is
+        set, which this run set in ``_begin_start``.
 
         Args:
             generation: The run whose models will poll this.
@@ -517,29 +489,24 @@ class InferenceServer:
     ) -> None:
         """Release what a start built after it lost the claim — and only what it built.
 
-        Under the control lock, which is also the wait: a concurrent ``stop()`` holds it for
-        the whole of its teardown, so this runs after that has finished. Deliberately
-        narrower than :meth:`_release` — the run's totals and the memory pool belong to
-        whoever owns the server now, and this start does not.
+        Under the control lock, which is also the wait: a concurrent ``stop()`` holds it for the
+        whole of its teardown, so this runs after that has finished. Deliberately narrower than
+        :meth:`_release` — the run's totals and the memory pool belong to whoever owns the server
+        now, and this start does not.
 
-        **Everything here is scoped to this run, and that is the fix.** The first version
-        called :meth:`_drain_models`, which empties the *whole* table and stops everything in
-        it, and consulted no generation at all. By the time a losing start reaches this
-        point a later run can already be up — ``_torn_down`` is set by the teardown's
-        ``finally``, which knows nothing about a start still running — so that drain stopped
-        the live run's worker threads and left ``is_started`` true over an empty table. Two
-        real orderings, both reproduced: the losing start drains the new run's models, and
-        the losing start's own copy is left running because the drain removed a *different*
-        object from the table.
+        **Everything here is scoped to this run, and that is the fix.** The first version called
+        :meth:`_drain_models`, which empties the *whole* table, and consulted no generation. By the
+        time a losing start reaches this point a later run can already be up, so that drain stopped
+        the live run's worker threads and left ``is_started`` true over an empty table. Two real
+        orderings, both reproduced: the losing start drains the new run's models, and the losing
+        start's own copy is left running because the drain removed a *different* object.
 
-        So: the models are popped by **identity** (an entry survives unless it is one of the
-        objects this run put there) and stopped by **ledger** (everything this run started
-        is stopped, including a copy the table never took). The sink and the mesh are
-        released unconditionally and **from the arguments, never from the fields**, because
-        :meth:`_finish_start` installed neither — a start that lost the claim never reached
-        it, so nobody else can be holding these two objects and the fields belong to whoever
-        owns the server now. That is the whole of why this method needs no generation check:
-        every resource it touches is one this run built and this run alone can see.
+        So: the models are popped by **identity** (an entry survives unless it is one this run put
+        there) and stopped by **ledger** (everything this run started, including a copy the table
+        never took). The sink and the mesh are released unconditionally and **from the arguments,
+        never from the fields**, because :meth:`_finish_start` installed neither — a start that lost
+        the claim never reached it. That is why this method needs no generation check: every
+        resource it touches is one this run built and this run alone can see.
 
         Args:
             generation: The run that is standing down. Reported, not consulted: see above.
@@ -694,19 +661,19 @@ class InferenceServer:
             if self._settings.strict_startup:
                 raise
             if abort():
-                # The run's own abort, not `_is_stopping()`: the question here is "has *this
+                # The run's own abort, not `_is_stopping()`: the question is "has *this
                 # run* lost the server", and `_is_stopping()` answers a different one. It
                 # reads `not (_started or _starting)`, so the moment a *later* start sets
-                # `_starting` it goes false again -- and this skip, correct a microsecond
+                # `_starting` it goes false again — and this skip, correct a microsecond
                 # earlier, went back to swallowing the abort and building the rest of the
-                # list for a run that owns nothing, on devices that belong to the new one.
+                # list for a run that owns nothing, on devices belonging to the new one.
                 #
-                # "Continuing" is meaningless once the server is gone, and it was not free: a
-                # non-strict start met by a `stop()` logged one ERROR with a full traceback
-                # per remaining model -- five for one shutdown -- and then went on building
-                # models the teardown had already been past, which is the leak `stop()`
-                # takes the control lock to prevent. The abort `Model.start` polls is a
-                # decision about the *server*, not about this model, so it propagates.
+                # "Continuing" is meaningless once the server is gone, and it was not free:
+                # a non-strict start met by a `stop()` logged one ERROR with a full
+                # traceback per remaining model — five for one shutdown — and then went on
+                # building models the teardown had already been past, which is the leak
+                # `stop()` takes the control lock to prevent. The abort `Model.start` polls
+                # is a decision about the *server*, so it propagates.
                 raise
             # Non-strict start-up is for a heterogeneous fleet where one node genuinely
             # cannot host one model. It is logged at ERROR, never swallowed: a server
@@ -727,32 +694,29 @@ class InferenceServer:
         The model only reaches the table once it has started, so a half-built model is never
         reachable by an inference — a failed load leaves the server exactly as it was.
 
-        **The publish is gated on the generation**, and is the third of the three guards that
-        keep a start which lost the server away from the run that replaced it (see
-        :meth:`start`). Without it the losing start's last act is
-        ``self._models[name] = model``, over the *new* run's entry: the new run's model is
-        then live, with worker threads and a device context, and unreachable through the
-        server that owns it. The gate and the table write are one transition under the
-        lifecycle lock — a check and an act with the table lock between them is the same bug
-        one level down.
+        **The publish is gated on the generation**, the third of the three guards that keep a start
+        which lost the server away from the run that replaced it (see :meth:`start`). Without it
+        the losing start's last act is ``self._models[name] = model`` over the *new* run's entry:
+        the new run's model is then live, with worker threads and a device context, and unreachable
+        through the server that owns it. The gate and the table write are one transition under the
+        lifecycle lock — a check and an act with the table lock between them is the same bug one
+        level down.
 
         Args:
             name: The model to build.
-            generation: The run this build belongs to. The publish happens only while that
-                run still owns the server.
-            abort: Polled by ``Model.start`` between instances; answers the reason this
-                start should give up, or None. Defaults to :meth:`_stop_abort`, which is
-                what :meth:`load_model` wants — it is not a run, so it aborts on the server
-                stopping and on nothing else.
-            traces: The sink to hand the model. Defaults to ``self._traces``, the installed
-                sink, which is again what :meth:`load_model` wants.
+            generation: The run this build belongs to. The publish happens only while that run
+                still owns the server.
+            abort: Polled by ``Model.start`` between instances; answers the reason this start
+                should give up, or None. Defaults to :meth:`_stop_abort`, which is what
+                :meth:`load_model` wants — it is not a run, so it aborts on the server stopping
+                and on nothing else.
+            traces: The sink to hand the model. Defaults to ``self._traces``, again what
+                :meth:`load_model` wants.
 
         Returns:
-            The started model. It is the table's entry for ``name`` unless the publish was
-            refused, in which case it is started but unreachable and the caller must stop
-            it. Only :meth:`start`'s unwind can see that case: :meth:`load_model` holds the
-            control lock, and a new generation cannot be claimed while the barrier a running
-            server holds clear stays clear.
+            The started model. It is the table's entry for ``name`` unless the publish was refused,
+            in which case it is started but unreachable and the caller must stop it. Only
+            :meth:`start`'s unwind can see that case.
         """
         assert self._repository is not None
         artifact = self._repository.resolve(name)
@@ -817,50 +781,44 @@ class InferenceServer:
     def stop(self) -> None:
         """Drain and release. Never raises.
 
-        Safe to call twice, on a server that was never started, and — the case that matters
-        — on one whose :meth:`start` raised half-way. It used to return early on
-        ``not self._started``, which is exactly false for a partial start: the flag is only
-        set once every model is up, so the one situation in which models were running and
-        unreachable was the one situation ``stop()`` refused to handle.
-
-        Every step is guarded, because this runs on the failure path of :meth:`start` and a
-        teardown error there would replace the load error the operator needs to read.
+        Safe to call twice, on a server that was never started, and — the case that matters — on
+        one whose :meth:`start` raised half-way. It used to return early on ``not self._started``,
+        which is exactly false for a partial start: the flag is only set once every model is up, so
+        the one situation in which models were running and unreachable was the one situation
+        ``stop()`` refused to handle. Every step is guarded, because this runs on :meth:`start`'s
+        failure path and a teardown error there would replace the load error the operator needs.
 
         **The teardown runs under the control lock**, so it cannot interleave with a
-        :meth:`load_model` that is in progress. Without that, the two overlap in exactly the
-        way that leaks: a load passes its started check, spends seconds building a backend
-        and starting worker threads, and publishes the model into a table this method has
-        already drained — a running model, with live threads, on a server that reports
-        itself stopped and holds no reference to stop it. Taking the lock makes the two
-        orderings the only two: the load finishes first and this drains it, or it finds
-        ``_started`` false under the lock and is refused. The cost is that a stop arriving
-        mid-load waits for that load to finish, which is bounded by model start-up and is
-        the right trade against dropping a GPU context on the floor.
+        :meth:`load_model` in progress. Without that the two overlap in exactly the way that leaks:
+        a load passes its started check, spends seconds building a backend and starting worker
+        threads, and publishes into a table this method has already drained — a running model, with
+        live threads, on a server that reports itself stopped and holds no reference to stop it.
+        The lock leaves only two orderings: the load finishes first and this drains it, or it finds
+        ``_started`` false under the lock and is refused. The cost is that a stop arriving mid-load
+        waits for that load, bounded by model start-up.
 
-        **The entry is one atomic transition**, under ``_lifecycle_lock``, so exactly one
-        caller ever moves this server from started to stopping and every other one waits on
-        the barrier. That used to be a check and an act with a log emit between them; see
-        the comment below for what the two stops that both won the check went on to do.
+        **The entry is one atomic transition**, under ``_lifecycle_lock``, so exactly one caller
+        ever moves this server from started to stopping and every other waits on the barrier. That
+        used to be a check and an act with a log emit between them; the comment below says what the
+        two stops that both won the check went on to do.
         """
         self._stop_run(None)
 
     def _stop_run(self, generation: int | None) -> None:
         """:meth:`stop`, optionally bound to one run.
 
-        ``None`` is the public :meth:`stop`: an operator, a supervisor or a ``__exit__``
-        asking for *this server* to go down, whichever run happens to be up.
+        ``None`` is the public :meth:`stop`: an operator, a supervisor or a ``__exit__`` asking for
+        *this server* to go down, whichever run happens to be up.
 
-        :meth:`start`'s failure path passes its own generation, and the difference is not
-        cosmetic. That path is also how a start that lost the claim unwinds — its models poll
-        an abort that fires on the generation, so losing the server is *the* common way for
-        it to be taken — and everything below is a whole-server teardown: the table drained,
-        the trace sink closed, the memory pool closed. Run unconditionally there, it lands on
-        the run that replaced this one, which is the failure the run binding exists to
-        prevent, arriving one method to the left of :meth:`_abandon_start`.
+        :meth:`start`'s failure path passes its own generation, and the difference is not cosmetic.
+        That path is also how a start that lost the claim unwinds — its models poll an abort that
+        fires on the generation — and everything below is a whole-server teardown: the table
+        drained, the trace sink closed, the memory pool closed. Run unconditionally there, it lands
+        on the run that replaced this one.
 
-        The check is inside the same locked transition that clears the flags, not in front of
-        it, so it is a decision rather than a hint: a start cannot read "still mine", lose the
-        server to a claim on another thread, and then tear that claim down.
+        The check is inside the same locked transition that clears the flags, not in front of it, so
+        it is a decision rather than a hint: a start cannot read "still mine", lose the server to a
+        claim on another thread, and then tear that claim down.
 
         Args:
             generation: The run this teardown belongs to, or None for "whatever is up".
@@ -870,16 +828,16 @@ class InferenceServer:
                 # Nothing below is this run's to release. What it *did* build is released by
                 # `_abandon_start`, by identity, on the caller's next line.
                 return
-            # Read and cleared as one step, because a second stop that also reads "started"
-            # here is a second *teardown*. The two used to be separated by the `_LOG.info`
-            # below -- an emit that formats its arguments, may take a handler lock and may
-            # write to a file, which is a guaranteed GIL switch point rather than a couple
-            # of bytecodes. Both threads then fell through, both cleared the flags, and both
-            # ran `_teardown` -> `_release` in turn: the second `_release` re-read the trace
-            # totals from the null sink the first had just installed and published
-            # `recorded: 0` for a run that traced thousands of requests, and `_torn_down`
-            # was set by the first while the second was still releasing, so a third `stop()`
-            # returned claiming a teardown that was still running.
+            # Read and cleared as one step, because a second stop that also reads
+            # "started" here is a second *teardown*. The two used to be separated by the
+            # `_LOG.info` below — an emit that formats its arguments, may take a handler
+            # lock and may write to a file, which is a guaranteed GIL switch point. Both
+            # threads then fell through, both cleared the flags, and both ran `_teardown`
+            # -> `_release` in turn: the second `_release` re-read the trace totals from
+            # the null sink the first had just installed and published `recorded: 0` for a
+            # run that traced thousands of requests, and `_torn_down` was set by the first
+            # while the second was still releasing, so a third `stop()` returned claiming a
+            # teardown that was still running.
             already_stopped = not (self._started or self._starting)
             # Read with the flags, and handed to the teardown: it identifies the run being
             # released, so a teardown that falls behind a newer one can tell and stand down.
@@ -910,31 +868,25 @@ class InferenceServer:
     def _await_teardown(self) -> None:
         """Block until whoever is tearing down has finished, or the grace period expires.
 
-        Bounded by ``shutdown_grace_s`` — the same budget the teardown grants each instance
-        to drain — because ``stop()`` is also what a supervisor calls on its own deadline,
-        and a wait that could not expire would turn one wedged instance into a shard that is
-        SIGKILLed instead of drained.
+        Bounded by ``shutdown_grace_s`` — the same budget the teardown grants each instance to
+        drain — because ``stop()`` is also what a supervisor calls on its own deadline, and a wait
+        that could not expire would turn one wedged instance into a shard that is SIGKILLed instead
+        of drained.
 
-        Expiry is logged, not raised: :meth:`stop` never raises (it runs on
-        :meth:`start`'s failure path, where a teardown error would replace the load error the
-        operator needs to read), so the honest signal is a WARNING naming the thread that is
-        still inside the teardown -- ``_teardown`` records its own name on the way in, which
-        is what makes the log line point at a thread an operator can find in a stack dump.
-        An owner still queued on the control lock has not reached the teardown yet and has
-        no name to give, so the message says "another thread" for that case rather than
-        inventing one.
+        Expiry is logged, not raised: :meth:`stop` never raises, so the honest signal is a WARNING
+        naming the thread still inside the teardown — ``_teardown`` records its own name on the way
+        in, which is what makes the line point at a thread an operator can find in a stack dump. An
+        owner still queued on the control lock has not reached the teardown and has no name to give,
+        so the message says "another thread" rather than inventing one.
 
-        **What the expiry now costs.** It used to be a silent downgrade: this returned, the
-        caller took that for "released", and a :meth:`start` on the other side of it re-armed
-        the barrier and got the still-queued teardown landing on the fresh server — its
-        models drained, its sink closed, under a server that reported itself ready.
-        :meth:`_begin_start` closes that door. A start that arrives while a teardown is in
-        flight waits on the same barrier and then **refuses**, typed, instead of proceeding;
-        and a teardown that finishes after a newer run began stands down at the generation
-        check in :meth:`_release` rather than releasing that run's state. So an expiry here
-        now means "the shutdown is still running and this server is unusable until it
-        finishes", which is the honest reading of the warning below, and the ``do not
-        start() this instance again`` it asks for is enforced rather than requested.
+        **What the expiry now costs.** It used to be a silent downgrade: this returned, the caller
+        took that for "released", and a :meth:`start` on the other side re-armed the barrier and got
+        the still-queued teardown landing on the fresh server. :meth:`_begin_start` closes that
+        door — a start that arrives while a teardown is in flight waits on the same barrier and then
+        **refuses**, typed — and a teardown that finishes after a newer run began stands down at
+        :meth:`_release`'s generation check. So an expiry now means "the shutdown is still running
+        and this server is unusable until it finishes", and the ``do not start() this instance
+        again`` the warning asks for is enforced rather than requested.
         """
         if self._torn_down.wait(self._settings.shutdown_grace_s):
             return
@@ -949,22 +901,19 @@ class InferenceServer:
     def _teardown(self, generation: int) -> None:
         """Release everything the server holds. Called by :meth:`stop`, under the lock.
 
-        Sets ``_torn_down`` on the way out, in a ``finally``: a concurrent second
-        :meth:`stop` is blocked on that barrier, and a teardown that raised something this
-        method deliberately does not catch must still release it rather than hang the
-        caller for its whole grace period. So the barrier means "the teardown returned" and
-        not "nobody is holding this server" — including for a teardown that stood down at
-        :meth:`_release`'s generation check without releasing anything. See ``__init__``
-        for why that is now harmless and what keeps it so.
+        Sets ``_torn_down`` on the way out, in a ``finally``: a concurrent second :meth:`stop` is
+        blocked on that barrier, and a teardown that raised something this method deliberately does
+        not catch must still release it rather than hang the caller for its whole grace period. So
+        the barrier means "the teardown returned" and not "nobody is holding this server" —
+        including for a teardown that stood down at :meth:`_release`'s generation check. See
+        ``__init__`` for why that is harmless and what keeps it so.
 
-        :meth:`_release` records the running thread's name once it knows it is the one doing
-        the releasing, so a waiter whose grace period expires can name whoever it gave up
-        on instead of logging an anonymous warning.
+        :meth:`_release` records the running thread's name once it knows it is the one releasing, so
+        a waiter whose grace period expires can name whoever it gave up on.
 
         Args:
             generation: The run :meth:`stop` read off the flags it cleared. Carried straight
-                through to :meth:`_release`, which will not touch a server that has moved on
-                to a later one.
+                through to :meth:`_release`, which will not touch a server that has moved on.
         """
         try:
             self._release(generation)
@@ -991,15 +940,15 @@ class InferenceServer:
         self._leave_service_tier()
         self._drain_models()
         # After the models, so a trace written by a worker finishing its last batch still
-        # has somewhere to go; closing it flushes whatever the sink had buffered. The totals
-        # are read *first*, while the sink is still live — see `stats()`.
+        # has somewhere to go; closing it flushes whatever the sink had buffered. The
+        # totals are read *first*, while the sink is still live — see `stats()`.
         #
         # Re-checked here and again at the publish below rather than trusted from the entry
         # check, because `_drain_models` joins every instance's worker thread and a wedged
-        # one can sit there for the whole grace period — long enough for the waiter to give
-        # up and a new run to claim the server underneath this one. Both are covered by
-        # `TestATeardownOvertakenPartWayThrough`, which bumps the generation in each of the
-        # two gaps in turn; the entry check alone left them as assertions nothing ran.
+        # one can sit there for the whole grace period — long enough for a new run to claim
+        # the server underneath this one. Both gaps are covered by
+        # `TestATeardownOvertakenPartWayThrough`; the entry check alone left them as
+        # assertions nothing ran.
         with self._lifecycle_lock:
             sink = self._traces if self._generation == generation else None
         if sink is None:
@@ -1007,38 +956,36 @@ class InferenceServer:
             return
         totals = self._sink_stats(sink)
         with self._lifecycle_lock:
-            # The totals and the swap are published as one transition, so no scrape can land
-            # between them. Split, they are the wrong answer this pair exists to remove: a
-            # scrape that read `_last_trace_stats` as None and then found the null sink
-            # already installed reports `{"sink": "none", "recorded": 0}` for a run that
-            # traced thousands of requests — and a scrape does not stop when the server does,
-            # so that zero is the last sample a dashboard takes.
+            # The totals and the swap are published as one transition, so no scrape can
+            # land between them. Split, a scrape that read `_last_trace_stats` as None and
+            # then found the null sink already installed reports
+            # `{"sink": "none", "recorded": 0}` for a run that traced thousands of
+            # requests — and a scrape does not stop when the server does, so that zero is
+            # the last sample a dashboard takes.
             #
             # Back to the null sink, rather than leaving the field pointing at a closed one.
             #
             # Not because a reader would fail: no sink in this tree reads its stream to
-            # answer `stats()` (the counters are plain ints on the base class), and `start()`
-            # rebinds this field unconditionally, so a restart does not inherit anything
-            # either. The reason is narrower and it is enough: `traces` is a public property
-            # and `self._traces` is what every model built in this run was handed, so leaving
-            # a closed object there publishes a handle whose every `record()` silently
-            # increments `failed` instead of writing. A field must not point at a closed
-            # object once the owner is done with it.
+            # answer `stats()` (the counters are plain ints on the base class), and
+            # `start()` rebinds this field unconditionally. The reason is narrower and it
+            # is enough: `traces` is a public property and `self._traces` is what every
+            # model in this run was handed, so leaving a closed object there publishes a
+            # handle whose every `record()` silently increments `failed` instead of
+            # writing. A field must not point at a closed object once the owner is done.
             #
-            # The cost of the reset is that the run's totals go with it — a scrape after the
-            # shutdown would read the fresh null sink's zeros, and "0 traces recorded" is a
-            # different claim from "we did not measure any more". `_last_trace_stats` keeps
-            # them, and `stats()` reports those while the server is stopped.
+            # The cost is that the run's totals go with it — a scrape after the shutdown
+            # would read the fresh null sink's zeros, and "0 traces recorded" is a
+            # different claim from "we did not measure any more". `_last_trace_stats`
+            # keeps them, and `stats()` reports those while the server is stopped.
             current = self._generation == generation
             if current:
                 # Not the null sink's zeros, though. `_traces` holds a `NullTraceSink`
-                # between runs — it is what `__init__` starts with and what the previous
-                # release installed — so a run that never got as far as `_finish_start`
-                # finds one here, and publishing its zeros would throw away the totals of
-                # the run before it. "0 traces recorded" is a claim; "we stopped measuring"
-                # is the truth, and `_trace_stats` says the second by keeping the last real
-                # numbers. Nothing is lost when the sink is configured as `none`: the
-                # fallback then reads the fresh null sink and answers identically.
+                # between runs, so a run that never reached `_finish_start` finds one here
+                # and publishing its zeros would throw away the previous run's totals.
+                # "0 traces recorded" is a claim; "we stopped measuring" is the truth, and
+                # `_trace_stats` says the second by keeping the last real numbers. Nothing
+                # is lost when the sink is configured as `none`: the fallback then reads
+                # the fresh null sink and answers identically.
                 if totals is not None and not isinstance(sink, NullTraceSink):
                     self._last_trace_stats = totals
                 self._traces = NullTraceSink()
@@ -1121,25 +1068,24 @@ class InferenceServer:
         """Load one model into a running server — Triton's ``/v2/repository/models/*/load``.
 
         The repository index is **re-scanned first**, which is what makes this useful for a
-        repository that grows: a model copied in after start-up is found. That is not the
-        polling mode Triton also offers and this server does not — the difference is that an
-        operator asked at this moment, so a half-written config fails their call immediately
-        with the file named, rather than being picked up by a timer minutes later with
-        nothing pointing at the edit.
+        repository that grows: a model copied in after start-up is found. Not the polling mode
+        Triton also offers and this server does not — the difference is that an operator asked at
+        this moment, so a half-written config fails their call immediately with the file named,
+        rather than being picked up by a timer minutes later with nothing pointing at the edit.
 
-        Loading a model that is already loaded is **refused**, not treated as a reload. A
-        reload has to stop the running copy before it can build the new one (two copies of a
-        detector do not fit on one GPU), so a reload that failed halfway would take a working
-        model down. ``unload`` then ``load`` says the same thing and says it deliberately.
+        Loading a model that is already loaded is **refused**, not treated as a reload. A reload
+        has to stop the running copy before building the new one (two copies of a detector do not
+        fit on one GPU), so a reload that failed halfway would take a working model down.
+        ``unload`` then ``load`` says the same thing and says it deliberately.
 
         Raises:
-            ModelControlError: when the server was not started with
-                ``model_control='explicit'``, or the model is already loaded.
-            ModelNotFoundError: when the repository has no such model.
-            ServerStateError: before :meth:`start`, and when :meth:`stop` ran between this
-                call's started check and the lock — see the re-check below.
-            ConfigurationError: when the model's config or artefacts are wrong. The server
-                keeps serving everything else.
+            ModelControlError: the server was not started with ``model_control='explicit'``, or
+                the model is already loaded.
+            ModelNotFoundError: the repository has no such model.
+            ServerStateError: before :meth:`start`, and when :meth:`stop` ran between this call's
+                started check and the lock — see the re-check below.
+            ConfigurationError: the model's config or artefacts are wrong. The server keeps
+                serving everything else.
         """
         self._require_control("load", name)
         with self._control_lock:
@@ -1176,23 +1122,20 @@ class InferenceServer:
     def unload_model(self, name: str) -> None:
         """Unload one model — Triton's ``/v2/repository/models/*/unload``.
 
-        Drains and releases it. In-flight requests are resolved or failed by the instances'
-        own shutdown path, which is the same one :meth:`stop` uses, so unloading is not a
-        second way for a request to disappear.
+        Drains and releases it. In-flight requests are resolved or failed by the instances' own
+        shutdown path, the same one :meth:`stop` uses, so unloading is not a second way for a
+        request to disappear.
 
         Raises:
-            ModelControlError: when explicit control is off, or a loaded ensemble still
-                composes this model. Unloading a step out from under an ensemble would turn
-                every one of its requests into a ``ModelNotFoundError`` from inside the DAG,
-                which is a much worse way to find out.
-            ModelNotFoundError: when it is not loaded.
-            ServerStateError: when :meth:`stop` ran between this call's started check and
-                the lock — the same window :meth:`load_model` re-checks for, and the same
-                reason. Without it the wait ends at ``self.model(name)`` against a table
-                ``_teardown`` has just cleared, so the caller is told "no such model" —
-                which reads as "you asked for something that does not exist" and sends an
-                operator to check their spelling, when what happened is that the server
-                stopped underneath them and the model was drained on the way out.
+            ModelControlError: explicit control is off, or a loaded ensemble still composes this
+                model. Unloading a step out from under an ensemble would turn every one of its
+                requests into a ``ModelNotFoundError`` from inside the DAG.
+            ModelNotFoundError: it is not loaded.
+            ServerStateError: :meth:`stop` ran between this call's started check and the lock — the
+                same window :meth:`load_model` re-checks for. Without it the wait ends at
+                ``self.model(name)`` against a table ``_teardown`` has just cleared, so the caller
+                is told "no such model" — which sends an operator to check their spelling when what
+                happened is that the server stopped underneath them.
         """
         self._require_control("unload", name)
         with self._control_lock:
@@ -1337,44 +1280,34 @@ class InferenceServer:
         }
 
     def _trace_stats(self) -> dict[str, Any]:
-        """The live sink's numbers while a run is up; the totals the last run finished with
-        once it is down.
+        """The live sink's numbers while a run is up; the last run's totals once it is down.
 
-        Both reads are under ``_lifecycle_lock``, and so is the teardown's swap, because
-        this is a check *and* an act on state another thread rewrites. Unlocked it was two
-        bytecodes with a window between them: a scrape that found ``_last_trace_stats`` still
-        None and then loaded ``_traces`` after `_release` had installed the null sink reports
-        ``{"sink": "none", "recorded": 0}`` for a run that traced thousands of requests. A
-        scrape does not stop when the server does, so that zero is the last sample a
-        dashboard takes of the shard — the exact wrong answer `_last_trace_stats` was added
-        to remove, arriving by the door the fix left open.
+        Both reads are under ``_lifecycle_lock``, and so is the teardown's swap, because this is a
+        check *and* an act on state another thread rewrites. Unlocked it was two bytecodes with a
+        window between them: a scrape that found ``_last_trace_stats`` still None and then loaded
+        ``_traces`` after ``_release`` had installed the null sink reports
+        ``{"sink": "none", "recorded": 0}`` for a run that traced thousands of requests — and a
+        scrape does not stop when the server does, so that zero is a dashboard's last sample.
 
-        What is *not* under the lock is the sink's own ``stats()``. Both in-tree sinks
-        answer it from five ints on the base class, but ``TRACE_SINKS`` is a registry: a
-        third-party sink that touched a file there would hold, for the length of that I/O,
-        the one lock :meth:`stop`'s entry transition and :meth:`_begin_start`'s claim both
-        need — a scrape able to stall a shutdown. So the *pair* is snapshotted atomically
-        and the call is made outside.
+        What is *not* under the lock is the sink's own ``stats()``. ``TRACE_SINKS`` is a registry:
+        a third-party sink that touched a file there would hold, for the length of that I/O, the
+        one lock :meth:`stop`'s entry and :meth:`_begin_start`'s claim both need — a scrape able to
+        stall a shutdown. So the *pair* is snapshotted atomically and the call made outside.
 
-        Nor is it called bare. ``TRACE_SINKS`` is a registry, so ``stats()`` here is
-        third-party code on the *scrape* path — the KServe stats route and the metrics
-        exporter — and a sink that raised there turned a monitoring poll into a 500. The
-        teardown had guarded its own call since the beginning; :meth:`_sink_stats` is that
-        guard, shared, so the two paths cannot drift apart again.
+        Nor is it called bare: that is third-party code on the *scrape* path, and a sink that
+        raised turned a monitoring poll into a 500. :meth:`_sink_stats` is the teardown's own guard,
+        shared, so the two paths cannot drift apart again.
 
-        That leaves exactly one thing to handle, and the sink's own ``is_closed`` handles it:
-        a scrape that snapshotted the live sink just before :meth:`_release`'s swap will find
-        it closed a moment later. ``_release`` publishes the totals and installs the null
-        sink as one locked transition and only *then* closes, so a closed snapshot proves the
-        totals are already published — re-read them under the lock and report those. The
-        window the lock closed stays closed: the snapshot is either wholly in front of the
-        transition (an open, live sink) or wholly behind it (``last`` is the run's totals),
-        and ``{"sink": "none", "recorded": 0}`` is neither.
+        That leaves one case, and the sink's ``is_closed`` handles it: a scrape that snapshotted the
+        live sink just before ``_release``'s swap finds it closed a moment later. ``_release``
+        publishes the totals and installs the null sink as one locked transition and only *then*
+        closes, so a closed snapshot proves the totals are already published. The snapshot is either
+        wholly in front of the transition or wholly behind it, and
+        ``{"sink": "none", "recorded": 0}`` is neither.
 
         Returns:
-            A **copy**. The stored totals are handed to a metrics exporter and to the KServe
-            stats route; returning the dict itself lets either of them mutate what every
-            later scrape reports.
+            A **copy**. The stored totals go to a metrics exporter and the KServe stats route;
+            returning the dict itself lets either mutate what every later scrape reports.
         """
         with self._lifecycle_lock:
             last = self._last_trace_stats
