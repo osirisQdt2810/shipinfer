@@ -2431,8 +2431,13 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `pytest benchmarks/tests/test_parity_ingest.py` before pushing any ledger change.
 - [x] **V145-W1 · trim wave 1 — MERGED as #103 (35381fda). Took the tree 1031 -> 1012 violations; 49 remain in the touched files, none marked `# doc: long`.** Original scope — `engine`, `runtime`, `ingest`, `launch`, `scheduling`, `api`,
       `cli`, `core`, `backends`, `repository`. Built and verified (`docs/trim-wave-1`).
-- [~] **V145-W2 · IN PROGRESS. elements/pool.py OPEN as PR #113 (1697 -> 1551, ratio 1.67 -> 1.38, five
-      docstrings incl. the 71-line module one). NEAR-MISS CAUGHT: that branch was cut from origin/main
+- [~] **V145-W2 · IN PROGRESS. elements/pool.py MERGED as PR #113 (e07dbf2, APPROVE, 1697 -> 1551, ratio
+      1.67 -> 1.38, five docstrings incl. the 71-line module one) after ONE round-trip that was not a
+      review round: the `PR description` check failed because the body had no `### Test Details` heading.
+      The template check is a separate job from the review; a missing heading cancels the review leg and
+      auto-merge SKIPs, and it does not look like a BLOCKING verdict. Fixed the body, toggled the label,
+      merged. track.py + barrier.py IN PROGRESS on refactor/track-barrier-prose (1.43 -> 1.32, 1.37 ->
+      1.20; docs-only by AST; -91 lines). Earlier NEAR-MISS CAUGHT: that branch was cut from origin/main
       BEFORE #112 merged, so `git diff origin/main` showed base.py at +278/-148 -- exactly the inverse of
       #112, i.e. pushing would have REVERTED it inside a PR titled pool.py. Spotted because the docs-only
       script printed "checked 2 python files" when I had edited one. RULE: a tool counting more files than
