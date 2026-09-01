@@ -2431,7 +2431,13 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `pytest benchmarks/tests/test_parity_ingest.py` before pushing any ledger change.
 - [x] **V145-W1 · trim wave 1 — MERGED as #103 (35381fda). Took the tree 1031 -> 1012 violations; 49 remain in the touched files, none marked `# doc: long`.** Original scope — `engine`, `runtime`, `ingest`, `launch`, `scheduling`, `api`,
       `cli`, `core`, `backends`, `repository`. Built and verified (`docs/trim-wave-1`).
-- [~] **V145-W2 · IN PROGRESS. base.py MERGED as PR #112 (743c2f89, APPROVE, 4.22 -> 3.07); elements/pool.py next; runners/inprocess.py already done by
+- [~] **V145-W2 · IN PROGRESS. elements/pool.py OPEN as PR #113 (1697 -> 1551, ratio 1.67 -> 1.38, five
+      docstrings incl. the 71-line module one). NEAR-MISS CAUGHT: that branch was cut from origin/main
+      BEFORE #112 merged, so `git diff origin/main` showed base.py at +278/-148 -- exactly the inverse of
+      #112, i.e. pushing would have REVERTED it inside a PR titled pool.py. Spotted because the docs-only
+      script printed "checked 2 python files" when I had edited one. RULE: a tool counting more files than
+      you touched is a stale branch until proven otherwise. Rebased; diff is now one file.
+      base.py MERGED as PR #112 (743c2f89, APPROVE, 4.22 -> 3.07); elements/pool.py next; runners/inprocess.py already done by
       V149 steps 2-3 (#110, #111).** topology/ measured per file: base.py **4.22** (the worst file in the
       tree), registry.py 2.07, elements/pool.py 1.67 (1697 lines, 559 code -- the next real target),
       elements/track.py 1.43, barrier.py 1.37, chain.py 1.15. Package total 10204 lines / 1.40.
