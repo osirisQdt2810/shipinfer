@@ -2443,9 +2443,41 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
 
 ## Z · Final gate
 
-- [ ] **Z1 · Re-read `docs/qa/user.md` end to end** and check every request — verbatim sections
-      included, not just the standing-rules index — against the repository. Result into
-
+- [x] **Z1 · RE-AUDITED 1 Sep for V143-V150 (the previous pass, 28 Aug, covered V1-V142).** Checked against
+      the code, not the ledger's own word. DELIVERED and verified by inspection:
+        * V145.1 one logger -- `core/logging.get_logger(area)` puts all **53** area names under one
+          `_ROOT` logger configured once, so it IS one log with one sink, filterable by area. The 63
+          `_LOG =` assignments the complaint pointed at are children of that root, not rival loggers.
+        * V145.2 doc cap -- `scripts/hooks/check_docs.py` exists (NOT armed; V145-ARM still open).
+        * V145.3 envs.py omnia style -- `envs.SHIPINFER_INGEST_BACKEND` *is* the parsed value, one entry
+          per knob in `environment_variables`, no per-knob globals. Exactly what was asked.
+        * V145.4 rebase-on-main rule -- followed all session.
+        * V146 `mtmc/core` -> `matchers` -- done in BOTH planes (`csrc/.../mtmc/matchers/`,
+          `shipvision/mtmc/matchers/`), rode in with the pointer bump #102.
+        * V148 -- `git grep -ri mock origin/main -- src/` = 0; the real-chain system test is #98; replay
+          (video/frame-dir) is the input, no camera URL needed.
+        * V149/V150 -- docs/system-design.md merged (3f72506); V149 step 1 open as #107.
+      NOTE ON METHOD: `git branch -r --contains` says refactor/one-logger, refactor/envs-lazy and
+      docs/writing-rules are NOT in main -- they were squash-merged, so the tip is not an ancestor. Content
+      is what counts and the content is present; those worktrees are leftovers, not gaps. Do not audit
+      squash-merged work with `--contains`.
+      **TWO REAL GAPS FOUND (new items below).**
+- [ ] **V146b · shipvision mtmc exposes a tracker in Python but NOT in C++.** The operator's V146 was two
+      things: rename `core` -> `matchers` (done, both planes) AND *"expose interface là tracker - implement
+      các loại tracker chứ không phải implement các loại matcher"*. Python has it:
+      `shipvision/mtmc/tracker.py`, `shipvision/mtmc/trackers/` (cluster), `tests/mtmc/test_tracker.py`.
+      C++ does NOT: `csrc/shipvision/mtmc/` holds `matcher.h`, `matcher.cpp`, `matchers/{appearance,gated,
+      spatial}` and no Tracker class anywhere (`grep -rl "class.*Tracker" csrc/shipvision/mtmc/` -> empty).
+      Under the two-planes rule the request is half-done. shipvision's own repo, so its lane.
+- [ ] **V147b · the control-plane transport is still gRPC-specific; no seam to swap an RPC behind.** V147
+      asked to (a) check what vLLM uses and (b) abstract it OOP if different. (a) IS done and recorded --
+      ledger B3b: vLLM's `MultiprocExecutor` spawns `context.Process` per GPU worker and talks **ZMQ**,
+      not gRPC. (b) is NOT: `launch/control.py` holds the vocabulary as frozen dataclasses with no
+      transport in it (half the abstraction, and the good half), but `launch/client.py`'s `ShardClient` is
+      gRPC end to end -- no Protocol/ABC, so ZMQ or anything else cannot be substituted. Decide: build a
+      `Transport` seam, or record in an ADR that gRPC is the single transport and why (the committed stubs
+      and the optional-extra refusal are real arguments for staying put). Either answer closes it; silence
+      does not.
 - [!] **GPU7-DEGRADED · OPERATOR: the box's GPU tier is DOWN, 1 Sep ~16:0x. GPU 7 needs a reset.**
       `nvidia-smi -i 7` returns `[Unknown Error]` for temperature and `[N/A]` for power, utilisation and
       ECC; `nvidia-smi --query-compute-apps` lists a row it cannot attribute (`[N/A], [N/A]`). Memory still
