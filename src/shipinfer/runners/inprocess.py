@@ -379,32 +379,17 @@ class InprocessRunner(Runner):
         return self._metrics
 
     def element_context(self) -> ElementContext:
-        """The base runner's context, plus the two things only this runner knows.
+        """The base context plus the three things only an in-process runner knows.
 
-        ``metrics`` is **this runner's registry**, not a fresh one, for the reason
-        ``_ingest`` gives about the ingest plane's handles: one exporter has to carry both
-        halves of a dropped frame. An element that minted its own registry would publish
-        counters nothing scrapes, which reads as evidence and is worse than silence.
+        * ``metrics`` is **this** runner's registry, so one exporter carries both halves of a
+          dropped frame; a fresh one would publish counters nothing scrapes.
+        * ``workers`` is the thread count actually started, not ``settings.pipeline.workers``.
+          An MTMC barrier told "four" on a one-worker runner parks the only thread there is.
+        * ``waiter_budget`` is one shared pool, not one per element: each element counts only
+          its own waiters, so two waiting elements would each admit ``workers - 1``.
 
-        ``workers`` is :attr:`workers` — the number of threads that will actually walk this
-        chain — and not ``settings.pipeline.workers``, which is only the default the
-        constructor may have been given an override for. The element that needs it needs the
-        real number: an MTMC barrier waiting for other cameras' frames must leave one worker
-        free, and a barrier told "four" on a runner started with one would park the only
-        thread there is and close its instant by timeout for the rest of the deployment.
-
-        ``waiter_budget`` is the *shared* permit pool those waits draw from, and it is one
-        object for the whole runner rather than one per element. ``workers`` alone is not
-        enough: each element counts only its own waiters, so a chain with two waiting elements
-        would have each of them admit ``workers - 1`` and park every worker between them —
-        bounded by the window rather than a hang, and therefore exactly the stall dressed as a
-        wait the guard exists to prevent.
-
-        All three are left ``None`` by :meth:`Runner.element_context` rather than defaulted
-        there, because a runner that does not execute a chain in this process has none of them
-        to promise — the fleet runner's elements live in its children, each of which builds
-        its own. ``ops`` is not one of them: it arrives at construction like ``models``, so the
-        base class already put it on the context.
+        :meth:`Runner.element_context` leaves all three ``None`` because a runner that does not
+        execute the chain here has none of them to promise.
         """
         return replace(
             super().element_context(),
@@ -488,39 +473,25 @@ class InprocessRunner(Runner):
     def add_camera(self, camera: CameraSpec) -> None:
         """Start one camera on this runner.
 
-        Nothing is caught, and that includes the *type*. ``IngestManager.add_camera``
-        raises exactly two things and both are answers a launcher acts on: a duplicate id is
-        a :class:`~shipinfer.core.errors.DuplicateCameraError`, and a camera the fleet forgot
-        between the insert and the start is a :class:`~shipinfer.core.errors.ServerStateError`
-        -- ``runners/service.py`` maps each to ``accepted=False`` with its reason, and
-        swallowing either would have the launcher mark a camera placed that nobody is reading.
-        The duplicate is deliberately *not* re-raised as a plain ``ConfigurationError`` here:
-        ``POST /streams`` re-mints a server-chosen id on that one refusal and on no other
-        (``api/streams.py``), so flattening it would put the unregistered-source case below
-        through the whole add twice.
+        Nothing is caught, including the *type*: ``IngestManager.add_camera`` raises a
+        ``DuplicateCameraError`` or a ``ServerStateError`` and ``runners/service.py`` maps each
+        to ``accepted=False`` with its reason. The duplicate is deliberately not flattened to
+        ``ConfigurationError`` -- ``POST /streams`` re-mints an id on that refusal and no
+        other.
 
-        The state check and the add are **one atomic step**, which is the whole reason this
-        method holds :attr:`_lifecycle`: this is the one camera method that can *build* an
-        ingest manager (:meth:`_ingest`), so a check that passed and an add that ran either
-        side of a ``stop()`` left a brand-new manager, with a live decoder thread in it, on a
-        runner that had already been torn down. Nothing stops that thread afterwards.
+        The state check and the add are **one atomic step**, which is why this holds
+        :attr:`_lifecycle`: it is the one camera method that can *build* an ingest manager, so
+        a check and an add either side of a ``stop()`` left a live decoder thread on a runner
+        already torn down.
 
-        **A refusal leaves the priority table exactly as it found it.** The launcher's band
-        has to be recorded before :meth:`_camera_config` reads it back, so it is recorded and
-        then rolled back by :meth:`_restore_band` if the add raises -- every refusal below
-        arrives after that write, and :meth:`_priority_for` is consulted per frame, so a band
-        left behind by a refused add would re-lane a camera that is already running.
+        **A refusal leaves the priority table as it found it.** The band must be recorded
+        before :meth:`_camera_config` reads it back, so it is rolled back by
+        :meth:`_restore_band` if the add raises; :meth:`_priority_for` is consulted per frame.
 
         Raises:
-            ServerStateError: this runner is not running -- before the first ``start()``, or
-                because a ``stop()`` on another thread got here first -- or the fleet forgot
-                the camera while it was starting. Refused rather than implicitly started: the
-                chain's elements are not open, so the first frame would meet a typed refusal
-                from the element rather than from here.
+            ServerStateError: not running, or the fleet forgot the camera while starting.
             DuplicateCameraError: a camera with this id is already running.
-            ConfigurationError: the source the chain names is not registered. Deliberately
-                the base type and not the duplicate one -- a second attempt under a different
-                name would be refused for the same reason.
+            ConfigurationError: the source the chain names is not registered.
         """
         with self._lifecycle:
             if not self._running:
@@ -641,31 +612,22 @@ class InprocessRunner(Runner):
     def _announce(self, hook: Callable[[Element, str], None], camera_id: str) -> None:
         """Tell every element that a camera arrived or left. Best-effort, never fatal.
 
-        The shape :meth:`_do_stop` uses to close the chain, for the same reason: one element
-        that raises must not take the operation with it. A tracker that fails to drop a shard
-        is a leak worth a log line; a tracker that fails to drop a shard *and* keeps the camera
-        from being removed is a shard that cannot be recovered, and ADR-018 names remove + add
-        as the only recovery there is. So the failure is logged with the element's name -- the
-        one thing that says which implementation to go and read -- and the loop continues.
+        One element that raises must not take the operation with it: a tracker that fails to
+        drop a shard *and* blocks the removal is a shard that cannot be recovered, and ADR-018
+        names remove + add as the only recovery there is. Logged with the element's name; the
+        loop continues.
 
-        Called with :attr:`Runner._lifecycle` held, by all three camera methods, so an element
-        sees the announcements for one camera in order and never sees an add racing a remove.
-        That lock orders the announcements against *each other* and against ``start``/``stop``
-        -- and against nothing else. It is not taken by ``submit`` or by the walk, so this
-        runs concurrently with :meth:`Element.process` on every worker thread, for the same
-        camera included; :meth:`Element.camera_removed` states the contract that follows from
-        that, and an element that keeps a per-camera table needs its own lock.
+        Called under :attr:`Runner._lifecycle` by all three camera methods, so an element sees
+        one camera's announcements in order. That lock orders them against each other and
+        against ``start``/``stop`` -- and nothing else: this runs concurrently with
+        :meth:`Element.process`, so an element with a per-camera table needs its own lock.
 
-        In topological order for both directions, unlike ``close``, which unwinds in reverse.
-        There is nothing to unwind: an element's per-camera state is its own and no element
-        holds another's, so the two orders would differ only in the sequence of log lines, and
-        one order is easier to reason about than two.
+        Topological order both ways, unlike ``close``: there is nothing to unwind, so two
+        orders would differ only in log sequence.
 
         Args:
-            hook: the :class:`~shipinfer.topology.base.Element` method to call, named through
-                the ABC so the call site reads ``self._announce(Element.camera_added, id)``
-                and a typo is a ``NameError`` at import rather than a silently missing
-                announcement -- which is all a bare string would have given.
+            hook: the :class:`~shipinfer.topology.base.Element` method, named through the ABC
+                so a typo is a ``NameError`` at import rather than a missing announcement.
         """
         for node in self._topology.nodes:
             # Resolved on the *instance*, not called as `hook(node.element, ...)`.
@@ -691,35 +653,22 @@ class InprocessRunner(Runner):
     def _head(self) -> _Head:
         """What the chain says frames entering it are, and which source produces them.
 
-        Read off the **loader's** answers: the cap comes from
-        :attr:`~shipinfer.topology.chain.Topology.edges` and never from the root element's own
-        ``produces``, because a cap belongs to an edge and not to an element
-        (``topology/chain.py::Edge``). The source comes from the decode slot's ``params:``
-        first and its class's :attr:`~shipinfer.topology.elements.decode._IngestDecode.source`
-        second, the same precedence an element uses for everything else it can be told twice.
+        Read off the **loader's** answers: the cap comes from ``Topology.edges``, never from
+        the root element's ``produces``, because a cap belongs to an edge. The source comes
+        from the decode slot's ``params:`` first, its class's ``source`` second.
 
-        A decode root that declares **more than one** cap is refused here rather than read.
-        Every decode element that exists hands the frame on untouched
-        (``elements/decode.py::_IngestDecode._do_process``), so the cap the frame sink stamps
-        on the way in is a claim about a buffer nothing converts: with one declaration that
-        claim is the element's own and true, and with two the loader would pick whichever the
-        consumer preferred and the sink would stamp it on the same unconverted array. The
-        refusal is what makes reading the edge *safe* as well as correct -- for every chain
-        that loads, the two now agree, and the case where they would not is a converting
-        decode, which is phase D.
+        A decode root declaring **more than one** cap is refused rather than read. Every
+        decode element hands the frame on untouched, so the cap the sink stamps is a claim
+        about a buffer nothing converts: with two declarations the loader would pick the
+        consumer's preference and the sink would stamp it on the same unconverted array. A
+        converting decode is phase D.
 
-        Resolved once and kept: a topology is immutable once built.
+        Resolved once and kept; a topology is immutable once built.
 
         Raises:
-            ConfigurationError: the chain has roots that disagree -- on the cap they emit, or
-                on the source that feeds them. One ingest manager publishes into one sink and
-                every root sees that one item, so there is no answer to give; a root with
-                no successor at all, which the loader cannot produce but this would otherwise
-                read as "no cap"; a root declaring two caps, above; and a root that is not a
-                decode element, which
-                :func:`~shipinfer.topology.chain._check_structure` also refuses -- said again
-                here because a ``Topology`` may be constructed directly from parts, and the
-                alternative is reading a ``source`` off an element that never promised one.
+            ConfigurationError: roots disagree on the cap or the source; a root with no
+                successor; a root declaring two caps; or a root that is not a decode element
+                (said again here because a ``Topology`` may be built directly from parts).
         """
         if self._head_resolved is not None:
             return self._head_resolved
@@ -790,37 +739,17 @@ class InprocessRunner(Runner):
     def _camera_config(self, camera: CameraSpec) -> CameraConfig:
         """The launcher's five-field :class:`CameraSpec` as an ingest camera.
 
-        Every other field is left ``None`` on purpose, which in
-        :class:`~shipinfer.core.settings.ingest.CameraConfig` means *inherit*: codec,
-        transport, hardware decode, jitter buffer and the reconnect schedule are **deployment**
-        settings and a shard resolves them from the tree it loaded (CONVENTIONS 2.6). What only
-        the launcher knows is which camera goes where, and that is what the spec carries.
+        Every other field stays ``None``, which means *inherit*: codec, transport, hardware
+        decode, jitter buffer and the reconnect schedule are **deployment** settings a shard
+        resolves from its own tree (CONVENTIONS 2.6). Three exceptions ride the spec:
 
-        ``source`` is the exception, because it is neither: it is what the *chain* asked for,
-        and it is the one line that makes ``decode: {impl: replay}`` mean anything at all.
-        ``None`` leaves ``ingest.backend`` and then the environment to decide, which is what a
-        chain that did not say should get (``ingest/resolve.py``).
-
-        ``loop`` is the second exception, and it is the launcher's for a duller reason: it is
-        the only per-camera field that decides whether the camera *ends*. ``shipinfer run
-        --inputs clip.mp4`` used to replay that file forever with no knob anywhere -- the
-        ``--inputs`` camera is minted here and never appears in ``ingest.cameras``, so the
-        setting the help text named was unreachable for exactly the cameras that needed it.
-        It rides on the spec so that ``--no-loop`` reaches a shard too.
-
-        ``priority`` is the third, and it is read back out of :meth:`_priority_for` rather
-        than off the spec. ``camera.priority or Priority.NORMAL`` would pass every test that
-        only inspects the record, and be wrong twice: it demotes ``tracking_critical``, which
-        is ``0`` and therefore falsy, and it answers ``normal`` for a spec with no band on a
-        single-process deployment whose ``ingest.cameras`` names a band for that very camera
-        -- while the queue, which asks :meth:`_priority_for`, admits its frames into the
-        operator's lane. The record and the lane must be one resolution, because they are one
-        claim. :meth:`add_camera` calls :meth:`_admit_at` before this for that reason: the
-        placement's band has to be recorded before the record that reports it is built.
-
-        Nothing in ``shipinfer.ingest`` reads the field — a frame is data and a band is
-        policy — but a health report that named a lane this runner does not use would be a lie
-        an operator has no way to check, which is what makes the read-back worth the coupling.
+        * ``source`` — what the *chain* asked for, and the line that makes
+          ``decode: {impl: replay}`` mean anything. ``None`` lets ``ingest.backend`` decide.
+        * ``loop`` — the only per-camera field that decides whether the camera *ends*. The
+          ``--inputs`` camera never appears in ``ingest.cameras``, so without this the setting
+          the help text names is unreachable for exactly the cameras that need it.
+        * ``priority`` — read back from :meth:`_priority_for`, never ``camera.priority or
+          NORMAL``: ``TRACKING_CRITICAL`` is ``0`` and therefore falsy, so ``or`` demotes it.
         """
         return CameraConfig(
             camera_id=camera.camera_id,
@@ -832,26 +761,19 @@ class InprocessRunner(Runner):
         )
 
     def _admit_at(self, camera: CameraSpec) -> None:
-        """Record the band the *launcher* chose for this camera, outranking the config.
+        """Record the band the *launcher* chose, outranking the config.
 
-        The launcher wins because on a fleet shard it is the only one who knows. A shard's
-        ingest config is deliberately stripped (:meth:`_ingest`), so ``configured_cameras``
-        there is empty and every band an operator wrote would resolve to
-        :attr:`~shipinfer.core.request.Priority.NORMAL`; ``cli/commands/run.py`` reads the
-        fleet config in the launching process and copies each camera's band onto its spec, and
-        this is where that arrives.
+        The launcher wins because on a fleet shard it is the only one who knows: a shard's
+        ingest config is stripped (:meth:`_ingest`), so every band an operator wrote would
+        resolve to ``NORMAL``.
 
-        A spec with no band (``None``) **erases** any band a previous placement of the same id
-        left behind and falls back to :attr:`_configured` -- the shard's own table, which is
-        the right answer in a single-process deployment because it is the operator's own. It
-        erases rather than merely declining to write because these are two independent
-        sources and not one dict: ``None`` on a spec is a caller saying "leave the band to the
-        deployment", and the only way to honour that after a ``DELETE`` and a re-``POST`` is to
-        drop what the dead placement said. :meth:`remove_camera` already popped it; this is
-        the same guarantee for the door that re-places a camera without removing it first.
+        A spec with no band **erases** any band a previous placement of the same id left, and
+        falls back to :attr:`_configured`. Two independent sources, not one dict: ``None``
+        means "leave it to the deployment", and after a DELETE and a re-POST the only way to
+        honour that is to drop what the dead placement said.
 
-        Under :attr:`_priority_lock` rather than the lifecycle lock it is already inside,
-        because :meth:`_priority_for` runs on the submit path and reads the same tables.
+        Under :attr:`_priority_lock` because :meth:`_priority_for` reads the same tables on
+        the submit path.
         """
         with self._priority_lock:
             if camera.priority is None:
@@ -873,20 +795,12 @@ class InprocessRunner(Runner):
     def _restore_band(self, camera_id: str, previous: Priority | None) -> None:
         """Put :attr:`_placed_bands` back the way :meth:`_placed_band` found it.
 
-        The undo half of :meth:`_admit_at`, and the reason :meth:`add_camera` can record a
-        band before the placement exists. ``IngestManager.add_camera`` refuses a duplicate id
-        and a camera the fleet forgot while it was starting, and both refusals arrive *after*
-        the band was written -- so without this a ``POST /streams`` naming a camera that is
-        already running would answer ``400`` and still move that camera's lane for the rest
-        of its life, and an id-less ``POST`` that lost the minting race would silently re-band
-        a camera belonging to somebody else behind a ``201`` (``api/streams.py`` re-mints on
-        exactly that refusal). Restoring is what keeps :meth:`_do_submit`'s "the answer cannot
-        change under a running camera" true.
+        The undo half of :meth:`_admit_at`. ``IngestManager.add_camera`` refuses a duplicate
+        id *after* the band was written, so without this a rejected ``POST /streams`` would
+        answer 400 and still move that camera's lane for the rest of its life.
 
-        ``previous is None`` means the camera had no placed band, so the entry is popped
-        rather than written: :attr:`_placed_bands` never stores ``None``, because
-        :meth:`_admit_at` pops for a spec that carries no band. Never ``if previous:`` --
-        :attr:`~shipinfer.core.request.Priority.TRACKING_CRITICAL` is ``0`` (ADR-005).
+        ``previous is None`` pops rather than writes, because :attr:`_placed_bands` never
+        stores ``None``. Never ``if previous:`` -- ``TRACKING_CRITICAL`` is ``0`` (ADR-005).
         """
         with self._priority_lock:
             if previous is None:
@@ -898,20 +812,13 @@ class InprocessRunner(Runner):
         """This cycle's ingest manager, built on first use.
 
         **The import is inside this method and that is load-bearing.** ``shipinfer.ingest``
-        reaches a decode runtime through its source registry and ``shipinfer.runtime`` through
-        that, so naming it at module scope would put ``shipinfer.runtime`` -- and, through it,
-        torch on any host where a device source is importable -- behind ``import
-        shipinfer.runners``, which ``tests/test_architecture.py`` refuses, because it is what
-        lets a chain be
-        started on a host with no driver and what lets ``tests/runners/``
-        run in the offline tier at all. The layering hook allows the edge; this method is the
-        half that keeps it free.
+        reaches ``shipinfer.runtime`` through its source registry, so naming it at module
+        scope would put torch behind ``import shipinfer.runners`` -- which
+        ``tests/test_architecture.py`` refuses, because it is what lets a chain start on a
+        host with no driver.
 
-        The ingest plane's metric handles go on **this runner's** registry, so one exporter
-        carries both halves of a dropped frame: the camera's
-        ``shipinfer_ingest_frames_dropped_total{camera,reason}`` and the admission door's
-        ``shipinfer_runner_items_dropped_total{camera}`` (``runners/frames.py`` explains why
-        both exist).
+        The ingest plane's metric handles go on **this** runner's registry, so one exporter
+        carries both halves of a dropped frame: the camera's and the admission door's.
         """
         manager = self._ingest_manager
         if manager is not None:
@@ -968,23 +875,15 @@ class InprocessRunner(Runner):
     def _priority_for(self, camera_id: str) -> Priority:
         """The lane band this camera's items are admitted into.
 
-        Three sources, in this precedence: the band the launcher put on the
-        :class:`~shipinfer.launch.control.CameraSpec` of the placement this camera is running
-        under (:attr:`_placed_bands`), then this process's own ``ingest.cameras``
-        (:attr:`_configured`), then :attr:`Priority.NORMAL` (:meth:`_learn_priority`).
+        Three sources in precedence: the launcher's placement (:attr:`_placed_bands`), this
+        process's ``ingest.cameras`` (:attr:`_configured`), then ``NORMAL``.
 
-        Precedence is expressed as *lookups* and not as write order into one dict, which is
-        what it was. Write order made the answer depend on the sequence of two statements in
-        :meth:`add_camera`, and -- worse -- made a placement's band impossible to un-say: a
-        camera removed and posted again with no band inherited the removed one's lane, so
-        ``tracking_critical`` -> ``DELETE`` -> ``POST {"url": ...}`` still admitted at
-        ``tracking_critical``. Two dicts have two lifetimes and can disagree honestly. The
-        cost on the submit path is one extra ``dict.get`` on a miss, both O(1) and neither
-        allocating (CONVENTIONS 2.5).
+        Expressed as *lookups*, not write order into one dict: two dicts have two lifetimes
+        and can disagree honestly, so a placement's band can be un-said. Write order meant a
+        camera removed and re-posted with no band inherited the dead placement's lane.
 
-        ``is not None`` and never ``or``: :attr:`Priority.TRACKING_CRITICAL` is ``0`` and
-        therefore falsy, so the shorter spelling would silently demote the one camera whose
-        priority was the point of having priorities (ADR-005).
+        ``is not None`` and never ``or``: ``TRACKING_CRITICAL`` is ``0`` and therefore falsy,
+        so the shorter spelling demotes the one camera priorities exist for (ADR-005).
         """
         placed = self._placed_bands.get(camera_id)
         if placed is not None:
@@ -1028,26 +927,20 @@ class InprocessRunner(Runner):
     def _do_start(self) -> None:
         """Open every element in topological order, then start the workers.
 
-        Elements first and workers last: a worker that woke before the chain was open would
-        meet :class:`~shipinfer.core.errors.ServerStateError` from
-        :meth:`~shipinfer.topology.base.Element.process` on a real item, which is a refusal
-        the runner caused and the operator would have to diagnose.
+        Elements first: a worker that woke before the chain was open would meet a
+        ``ServerStateError`` from ``Element.process`` on a real item -- a refusal the runner
+        caused and the operator has to diagnose.
 
-        An element that fails at position five must leave one through four *closed* rather
-        than holding a decoder thread, a socket or a CUDA context on a shared box — and that
-        unwind is :meth:`Runner.start`'s, which calls :meth:`_do_stop` on the way out for
-        exactly this. There is deliberately no second unwind loop here: two paths that close
-        the same elements in the same order are one path that can be fixed in one place and
-        one that cannot, and ``Element.close`` is idempotent and a no-op on an element that
-        never opened, so the shared path covers the partial case exactly.
+        An element failing at position five must leave one through four *closed*, and that
+        unwind is :meth:`Runner.start`'s, which calls :meth:`_do_stop` on the way out. No
+        second unwind loop here: ``Element.close`` is idempotent and a no-op on an element
+        that never opened, so the shared path covers the partial case exactly.
 
         Raises:
             ServerStateError: the runner was given a queue that is already closed. Only
-                reachable for an *injected* queue: a queue built here is rebuilt on a
-                restart, but replacing the caller's object would silently ignore the capacity
-                and overflow policy they chose.
-            ShipInferError: whatever an element raises from ``open()`` — a model that is not
-                in the pool, a camera that will not open.
+                reachable for an *injected* queue -- replacing the caller's object would
+                silently ignore the capacity and policy they chose.
+            ShipInferError: whatever an element raises from ``open()``.
         """
         # Before anything is opened, because it is the one start-up refusal that costs
         # nothing to check and everything to discover late: a chain whose roots disagree
@@ -1121,57 +1014,29 @@ class InprocessRunner(Runner):
     def _do_stop(self, timeout_s: float) -> None:
         """Release the cameras, close the queue, join the workers, close the chain.
 
-        The order is the reverse of :meth:`_do_start` and each step earns its place. The
-        cameras go first because they are the *producers*: joining workers while frames keep
-        arriving is a shutdown racing its own input, and every frame admitted after the
-        decision to stop is one more future the join has to outlast. They get a share of the
-        budget rather than all of it (:data:`_INGEST_STOP_SHARE`), measured against the same
-        single deadline as the join, so one decoder wedged inside a blocking read cannot spend
-        the time the workers need to resolve what is already in flight. Then closing
-        the queue *fails* everything still waiting with a typed error rather than dropping it
-        silently, and it is also how a worker blocked in ``get_batch`` learns to exit without
-        a second sentinel. One deadline for every worker, not one each — everybody was
-        signalled at the same instant, so a worker still running at the deadline is genuinely
-        stuck and thirty-two consecutive waits would only delay the shutdown.
+        The reverse of :meth:`_do_start`, and the order earns its place. Cameras first because
+        they are the producers: joining while frames still arrive is a shutdown racing its own
+        input. They get a share of the budget (:data:`_INGEST_STOP_SHARE`) against the same
+        deadline, so one wedged decoder cannot spend the time the workers need. Closing the
+        queue then *fails* what is still waiting with a typed error, and is how a worker
+        blocked in ``get_batch`` learns to exit. One deadline for all workers, not one each.
+        Elements close last, in reverse topological order, each guarded.
 
-        Elements are closed last and in reverse topological order, each one guarded: a sink
-        that fails to flush must not leave the decoder upstream of it open.
-
-        The queue is left alone when no worker was ever started, which is the unwind path of
-        a failed :meth:`Runner.start`. Nothing can have been submitted then — ``submit``
-        refuses before ``start`` returns — so closing it would buy nothing and would poison
-        an injected queue for the restart that follows the fix.
+        The queue is left alone when no worker ever started -- the unwind of a failed
+        ``start`` -- since nothing can have been submitted and closing would poison an
+        injected queue.
 
         **An abandoned worker's items are failed, not forgotten.** Closing the queue resolves
-        what is still *queued*; the wake-up batch a worker took off it is not in the queue any
-        more, and a worker still stuck at the deadline will never resolve any of it — not the
-        item it is wedged inside, and not the ``frames_per_wakeup - 1`` behind that one.
-        Leaving them is the one case where this runner would break the promise ``submit``
-        makes — a future that never completes, on a producer that is waiting for it — so every
-        in-flight slot is drained here and each item failed with the same typed cancellation
-        the queue uses. The race with a worker that finishes a microsecond later is benign
-        because :meth:`~shipinfer.runners.walk.ChainWalk.fail` and
-        :meth:`~shipinfer.runners.walk.ChainWalk.finish` both refuse a future that is already
-        resolved, whichever of the two got there first.
+        what is still queued; the wake-up batch a wedged worker already took is not, and it
+        will never resolve any of it. Leaving them would break the promise ``submit`` makes,
+        so every in-flight slot is drained here.
 
-        The signal and the queue are **this cycle's** too, and that is load-bearing rather
-        than tidy. Setting an event that no later start will clear, and closing a queue that no
-        later start will hand out again, is what makes a worker abandoned here *terminal*: it
-        wakes from whatever wedged it, sees a set event and a closed queue, and exits. While
-        those two came off ``self``, a restart handed the stale thread a live event and the new
-        cycle's queue, and it went back to work — taking cycle two's items and publishing them
-        into cycle one's slot list, which no shutdown drains. Every one of those futures was
-        lost after ``stop()`` had returned.
-
-        The slots drained are this cycle's for the same reason: :attr:`_inflight` holds the
-        list handed to the workers by the matching :meth:`_do_start`, a worker abandoned here
-        goes on writing into that same list, and the next start publishes a different one.
-        That list is also *replaced* here rather than only drained, because "goes on writing
-        into it" is not hypothetical: an abandoned worker's ``finally`` republishes the
-        remainder of its wake-up batch the moment it wakes, and while :attr:`_inflight` still
-        pointed at that object ``stats()["items"]["in_flight"]`` came back up after the stop
-        and stayed up forever — a stopped runner reporting work in flight that no shutdown
-        would ever resolve, because every one of those futures had already been failed here.
+        The event, the queue and the slot list are **this cycle's**, which is what makes an
+        abandoned worker terminal: it wakes to a set event and a closed queue and exits. While
+        they came off ``self``, a restart handed the stale thread the new cycle's queue and it
+        went back to work, publishing into a slot list no shutdown drains. The list is
+        replaced rather than only drained, because an abandoned worker republishes its
+        remainder on waking -- which left ``stats()["in_flight"]`` up forever after a stop.
         """
         deadline = time.monotonic() + timeout_s
         self._stop_ingest(timeout_s * _INGEST_STOP_SHARE)
@@ -1264,21 +1129,12 @@ class InprocessRunner(Runner):
     def _close_queue(self) -> int:
         """Close the admission queue and charge every item it failed. Returns how many.
 
-        The close and the count are one call because they were two, and the counter is only
-        true if nothing can close the queue here without it: ``close`` resolves what is still
-        queued with a typed error, and an outcome with no counter is precisely the gap
-        ``stats()`` exists to close — ``accepted`` outran the sum of every outcome by exactly
-        the number of items a shutdown caught in the lane.
+        One call, not two, because the counter is only true if nothing can close the queue
+        here without it: an outcome with no counter is the gap ``stats()`` exists to close.
 
-        **An injected queue that its owner closes is its owner's to count.** The runner counts
-        the items *it* failed; a caller who passes a queue in keeps the right to close it (and
-        :meth:`_do_start` refuses to replace it for exactly that reason), and that close
-        happens where this runner cannot see it — no callback, no drained list, and the queue's
-        own ``stats()`` does not separate "failed by close" from the rest. Attributing it from
-        a stats delta would be a guess, and a guessed counter is worse than an absent one, so
-        the honest split is: the runner owns the closes it performs, the queue's owner owns
-        the closes they perform. It costs nothing in the shape this runner ships with, where
-        the queue it built is the queue it closes.
+        **A queue its owner closes is its owner's to count.** That close happens where this
+        runner cannot see it, and attributing it from a stats delta would be a guess — a
+        guessed counter being worse than an absent one.
         """
         drained = self._queue.close()
         for item in drained:
@@ -1313,31 +1169,20 @@ class InprocessRunner(Runner):
     def _do_submit(self, item: ChainItem) -> ResponseFuture:
         """Wrap the item in a work item and enqueue it.
 
-        The request built here is a **carrier**, not a model call: it exists so the fair
-        queue can read the camera id, the priority band and the deadline it already knows how
-        to read. No model ever sees it — a ``pool`` element builds its own request from the
-        item it is handed, out of the payload
-        :class:`~shipinfer.runners.frames.ChainFrameSink` put on it.
+        The request built here is a **carrier**: it exists so the fair queue can read the
+        camera id, band and deadline it already knows how to read. No model sees it -- a
+        ``pool`` element builds its own from the item it is handed.
 
-        **The band is resolved per camera, here, and it is the only reason a priority lane
-        does anything on this runner.** It used to be left at the default, so every camera
-        shared one lane and ``priority:`` in the ingest config applied to nothing: a camera
-        watching a restricted area queued behind an idle one, which is the exact customisation
-        ADR-005 says a generic server cannot express. One dict lookup per item, no allocation,
-        and the answer cannot change under a running camera -- :meth:`add_camera` rolls its
-        band write back when the placement is refused, so the only things that move a band are
-        a placement that took and the removal that ends it.
+        **The band is resolved per camera here**, and it is the only reason a priority lane
+        does anything on this runner. It used to be left at the default, so every camera
+        shared one lane and ``priority:`` applied to nothing.
 
         Raises:
-            QueueFullError: this camera's lane is full and the policy rejects. Propagated
-                untouched, and counted against **this** camera on the way past (ADR-005): the
-                number worth paging on is which camera flooded, not the shard total. The
-                counter is ``items_dropped``, which this is the only writer of — the item was
-                refused at the door and never became one of ``accepted``, so it is not an
-                outcome the ``stats()`` ledger has to name. A model queue refusing an item
-                already inside the chain is ``items_backpressure``; see
-                :meth:`~shipinfer.runners.walk.ChainWalk.count_failure`.
-            RequestCancelledError: the queue is closed — the runner is shutting down.
+            QueueFullError: this camera's lane is full. Propagated untouched and counted
+                against **this** camera (ADR-005) as ``items_dropped`` -- refused at the door,
+                so never one of ``accepted`` and not a term the ``stats()`` ledger names. A
+                model queue refusing an item already inside the chain is ``items_backpressure``.
+            RequestCancelledError: the queue is closed -- the runner is shutting down.
         """
         context = item.context
         request = InferenceRequest(
@@ -1371,47 +1216,20 @@ class InprocessRunner(Runner):
     ) -> None:
         """Drain the admission queue and walk one item at a time.
 
-        ``get_batch`` returning an empty list means the queue closed, which is how a worker
-        learns to exit without a separate sentinel. The batch here is a *wakeup* batch
-        (``pipeline.frames_per_wakeup``), not an inference batch: batching for a GPU is the
-        engine's job, and a worker walks its items one after another.
+        An empty batch means the queue closed, which is how a worker learns to exit. The batch
+        is a *wakeup* batch (``pipeline.frames_per_wakeup``), not an inference batch: batching
+        for a GPU is the engine's job.
 
-        **The stop signal is checked in front of every item, not only every wake-up.** A
-        worker holds a whole ``frames_per_wakeup`` batch, so a check at the top of the outer
-        loop alone let a worker abandoned at a shutdown deadline finish its *entire* batch when
-        whatever wedged it finally let go — up to ``frames_per_wakeup - 1`` further items,
-        walked through elements the runner had closed and emitted through a sink a restart had
-        re-opened. Breaking here instead leaves the remainder in the slot, which is precisely
-        where :meth:`_fail_in_flight` has already found it: those futures were failed at the
-        stop, so the item that is skipped is one whose producer has its answer.
+        **The stop signal is checked in front of every item**, not only every wake-up: a
+        worker holds a whole batch, so a top-of-loop check alone let a worker abandoned at a
+        shutdown deadline walk the rest of it through elements the runner had closed. The
+        remainder is left in the slot, where :meth:`_fail_in_flight` has already failed it.
 
-        **Every piece of per-cycle state is an argument, and none of it is read off**
-        ``self``. A worker abandoned at a shutdown deadline outlives its cycle — it is parked
-        inside ``element.process()``, not gone — so whatever it reads from the runner it reads
-        from whichever cycle is current when it finally wakes. All three attributes had to
-        move for that to be safe, and each one cost a different bug:
-
-        * ``self._stopping`` was *cleared* by the next :meth:`_do_start`, so the stale
-          thread's loop condition came back true;
-        * ``self._queue`` was rebuilt by that same start, so the stale thread called
-          ``get_batch`` on the **new** cycle's queue and took real work off it;
-        * ``self._inflight`` was rebound, so what it published landed in the new cycle's slot
-          list — under the *live* worker's index, at the same slot number.
-
-        Together those made an abandoned worker a second, untracked consumer: it drained cycle
-        two's items into cycle one's slot list, which no shutdown drains, and their futures
-        were lost after ``stop()`` had returned. It also walked those items through elements
-        cycle one had closed. Bound to its own cycle's event and queue, it instead finds an
-        event set forever and a queue closed forever, and exits on its next turn.
-
-        Args:
-            slot: this worker's index into ``inflight``. Owned exclusively by this thread,
-                which is what lets the publish be a plain store: :meth:`_do_stop` reads the
-                slots only after its join deadline has passed.
-            stopping: this cycle's stop signal. Set by the matching :meth:`_do_stop` and never
-                cleared again.
-            queue: this cycle's admission queue, closed by that same :meth:`_do_stop`.
-            inflight: this cycle's slot list, drained by that same :meth:`_do_stop`.
+        **Every piece of per-cycle state is an argument, never read off** ``self``. An
+        abandoned worker outlives its cycle, so what it reads from the runner belongs to
+        whichever cycle is current when it wakes: ``_stopping`` was cleared by the next start,
+        ``_queue`` was rebuilt so the stale thread took work off the new one, and ``_inflight``
+        was rebound so what it published landed in the live worker's slot.
         """
         while not stopping.is_set():
             items = queue.get_batch(self._window, poll_s=0.05)
@@ -1469,36 +1287,12 @@ class InprocessRunner(Runner):
         """Queue, workers and one entry per camera.
 
         The camera map is **not optional decoration**: ``runners/service.py`` derives a
-        shard's state from it, so a runner that manages cameras and reports none is a shard
-        that answers ``ready`` forever and never ``running``, however many cameras it is
-        reading. An empty map is the honest answer for a runner with no cameras; a *missing*
-        one is a runner lying about what it is.
+        shard's state from it, so a runner that manages cameras and reports none answers
+        ``ready`` forever and never ``running``. An empty map is honest; a missing one is a
+        runner lying about what it is.
 
-        Keyed by camera id and carrying
-        :meth:`~shipinfer.ingest.CameraHealth.as_dict`, because the interesting answer is
-        never the count -- it is which camera is CONNECTING, which is EXHAUSTED at the end of
-        its file, and which is dropping frames the pool refused.
-
-        Plus one field the ingest plane does not have: ``priority``, the band this runner
-        admits that camera's items into. It is stamped here rather than added to
-        :class:`~shipinfer.ingest.CameraHealth` because a frame is data and a band is policy
-        -- ``shipinfer.ingest`` neither reads nor resolves one (:meth:`_camera_config`) --
-        and it is reported at all because otherwise nothing does. A band reaches a camera
-        from a launcher's :class:`~shipinfer.launch.control.CameraSpec` or from
-        ``ingest.cameras``, and on a fleet shard the second of those is stripped (#71), so
-        ``priority: tracking_critical`` on a placement was a claim an operator had no way to
-        check. ``GET /streams`` echoes this field (``api/streams.py``), and it crosses to a
-        launcher untouched because ``HealthReply.cameras`` is a ``google.protobuf.Struct``
-        that ``runners/service.py`` fills with this dict.
-
-        The value comes from :meth:`_priority_for` and never from a table read directly,
-        which is the same rule :meth:`_camera_config` follows and for the same reason: the
-        report and the lane are one resolution or they are two claims that can disagree. It
-        is a read on the submit path's tables, so it is O(1) and allocates nothing beyond the
-        report itself; it can in principle memoise a band through
-        :meth:`_learn_priority`, but not in practice -- every camera in this map was either
-        placed through :meth:`_camera_config`, which resolves it first, or named in
-        ``ingest.cameras``, which is where :attr:`_configured` came from.
+        Carries :meth:`~shipinfer.ingest.CameraHealth.as_dict` plus one field ingest does not
+        have: ``priority``, stamped here because a frame is data and a band is policy.
         """
         manager = self._ingest_manager
         return {
@@ -1523,49 +1317,18 @@ class InprocessRunner(Runner):
     def _do_stats(self) -> dict[str, Any]:
         """Every outcome an accepted item can reach, including the queue's own.
 
-        ``items`` used to be :meth:`~shipinfer.runners.metrics.RunnerMetrics.totals` alone, and
-        that under-reported: an item the *queue* resolved — failed by ``close()`` at shutdown,
-        dropped at the drain because its deadline had passed, evicted to make room under
-        ``DROP_OLDEST`` — got a typed future and no counter, so ``accepted`` outran the sum of
-        every outcome and the difference was indistinguishable from work still in flight. The
-        three ``queue_*`` terms and ``in_flight`` are here so that it adds up::
+        The three ``queue_*`` terms and ``in_flight`` are here so that it adds up::
 
             accepted == walked + failed + expired + timed_out + backpressure
                         + queue_closed + queue_evicted + queue_expired + in_flight
 
-        ``dropped`` is deliberately *not* a term: it counts the submissions this runner's own
-        lane refused at the door, and those were never ``accepted``, so adding it would make
-        the right-hand side over-count by exactly ``queue["rejected"]``. It used to be one
-        counter with the mid-walk refusals, which is why that correction term used to be
-        written down here instead; :attr:`~shipinfer.runners.metrics.RunnerMetrics.
-        items_backpressure` is the half that *was* accepted, and both remain per camera because
-        the camera lost a frame to backpressure either way (ADR-005).
+        ``dropped`` is deliberately not a term: those submissions were never ``accepted``, so
+        including it would over-count by exactly ``queue["rejected"]``.
 
-        That identity holds within one start cycle on a runner that abandoned no worker. The
-        two ways it does not are both deliberate, and naming them is cheaper than a term that
-        pretends they are not there:
-
-        * **an abandoned worker is counted twice** when it finishes its walk after
-          :meth:`_do_stop` failed its items: once as ``failed``, once as ``walked``. See
-          :meth:`_fail_in_flight`.
-        * **the ``queue_*`` terms read from the queue reset on a restart** and the runner's
-          counters do not — a queue this runner built is rebuilt by :meth:`_do_start`. So
-          ``queue_evicted`` and ``queue_expired`` describe the current cycle while ``accepted``
-          describes every cycle. ``queue_closed`` is a runner counter for exactly that reason:
-          it is the outcome a *previous* cycle's shutdown earned, and it has to survive.
-
-        ``in_flight`` is the queue's depth plus what **the current cycle's** workers have
-        published: a gauge, read without a lock, and wrong by at most one wake-up batch in
-        either direction. Short, for the two stores between a drain returning and
-        :meth:`_work` publishing the batch; long, for the ones between an item's future being
-        resolved at the end of its walk and the ``finally`` that narrows the slot. Poll it to
-        zero before reading the ledger as an identity, which is what
-        ``tests/runners/test_inprocess.py::settled`` does.
-
-        *Current cycle's* is the load-bearing word. A worker abandoned at a shutdown deadline
-        keeps writing into the slot list it was handed, and after :meth:`_do_stop` that list is
-        no longer the one this reads — so a stopped runner reports zero even while a stale
-        thread is still republishing a batch whose futures the stop already failed.
+        The identity holds within one start cycle on a runner that abandoned no worker. Two
+        deliberate exceptions, named because a term pretending they are absent is worse: an
+        abandoned worker finishing after :meth:`_do_stop` counts twice (failed and walked),
+        and the ``queue_*`` terms reset on a restart while the runner's counters do not.
         """
         queue = self._queue.stats()
         items = self._metrics.totals()
