@@ -1,73 +1,46 @@
+# doc: long the wildcard-cap rule and the two-hooks split are both load-bearing and unobvious
 """The ``pool`` elements: a chain step that submits to the model pool and waits.
 
-Four kinds run a model from the repository — ``detect``, ``segment``, ``embed``,
-``recognize`` — and for all four the default implementation is the same one: build one
-request, hand it to the engine, sleep until the answer arrives, add the outputs to the item's
-metadata. That is what arch.md §1 calls "a thin client of the engine" and §5③ calls "submit
-to the pool → wait (sleeping)". The alternatives behind the same four kinds (``nvinfer``,
-``nvinferserver``) run the model somewhere else entirely, which is exactly why this is a
-registry and not a base class with a flag.
+Four kinds run a model from the repository -- ``detect``, ``segment``, ``embed``,
+``recognize`` -- and for all four the default implementation is this one: build a request,
+hand it to the engine, sleep until the answer arrives, add the outputs to the item's meta.
+The alternatives behind the same kinds (``nvinfer``, ``nvinferserver``) run the model
+elsewhere entirely, which is why this is a registry and not a base class with a flag.
 
-**Why this file can live in a pure layer.** It never imports the engine. The model pool
-arrives as :attr:`~shipinfer.topology.base.ElementContext.models`, a
-:class:`~shipinfer.topology.base.ModelResolver` — one method, ``get(name)`` — which the
-engine satisfies structurally and a test satisfies with a dict. So
-``import shipinfer.topology`` still costs no torch and a chain naming ``impl: pool`` is still
-*validatable* on a laptop: the name is data, and only ``open()`` needs the pool to exist.
+**Why this lives in a pure layer.** It never imports the engine: the pool arrives as
+:class:`~shipinfer.topology.base.ModelResolver` -- one method, ``get(name)`` -- which the
+engine satisfies structurally and a test satisfies with a dict. The name is resolved once at
+``open``, not per frame: ``get`` takes a lock, and a missing model must stop the deploy rather
+than fail on the first frame (CONVENTIONS 2.6).
 
-**The name is resolved once, at open, not per frame.** ``get(name)`` on the engine takes a
-lock and can raise; doing it per frame would put a lock acquisition and a dictionary lookup
-on the path of every one of a thousand frames a second, and — worse — would turn a
-misconfigured chain into a failure that appears on the first frame of a deploy instead of at
-start-up. A model that is not in the pool must stop the deploy (§2.6: validate at start-up,
-not at first use).
+**It hands on the caps it was handed.** Accepts ``nv12@gpu``, then ``tensor@gpu``, then
+``bgr@cpu``; *produces* ``*@*``, which is a precise claim rather than vagueness: this element
+adds a meta key and passes the payload through **unchanged**, so its outbound cap is its
+negotiated inbound one. Declaring a concrete ``produces: nv12@gpu`` -- which this file did --
+was a **relabelling**: fed ``bgr@cpu`` it told the loader host memory was device memory, and
+the download that arch.md section 8 exists to refuse went invisible one element later with
+every edge reported valid. The corollary: :meth:`_PoolElement._do_process` must not stamp a
+cap on the item it derives, because a cap belongs to the edge and the edge is the loader's.
 
-**The caps: it hands on what it was handed.** It *accepts* ``nv12@gpu`` first because the
-device path is the default end to end (§8), then ``tensor@gpu`` for a producer that already
-cropped, then ``bgr@cpu`` for the host fallback. It *produces* ``*@*``, which is not vagueness
-but the precise claim: this element reads the payload, adds a metadata key and hands the
-payload on **unchanged**, so its outbound cap is its negotiated inbound cap and the loader
-resolves it as such (:func:`~shipinfer.topology.chain._resolve_produced`; the wildcard's
-refusal half is pinned by
-``test_chain.py::TestRefusals::test_a_wildcard_element_cannot_launder_a_device_frame_to_a_host_sink``).
+**Two of the four read pixels; two forward.** A detector must letterbox and then undo exactly
+that transform to put boxes back in source pixels; an embedder must cut the frame into one
+crop per detection and put the vectors back on the rows they came from. Both replace
+``_prepare`` and ``_finish`` and declare ``needs_image_ops``. That split -- rather than a flag
+or an ``isinstance`` inside one method -- is what keeps the per-frame geometry on the walking
+worker's stack: one element instance is shared by every worker, so an attribute would let two
+frames overwrite each other's scale, or each other's row indices, which is an appearance
+vector attached to the wrong object.
 
-Declaring a concrete ``produces: nv12@gpu`` instead — which this file did until the wildcard
-went in — is a **relabelling**: fed ``bgr@cpu`` it told the loader host memory was device
-memory, so the device-to-host download §8 exists to refuse became invisible one element
-further down, with every edge reported valid. The wildcard is why a ``bgr@cpu`` decoder in
-front of a ``pool`` element and an ``nv12@gpu``-only tracker behind it is now refused at load.
-The corollary is that :meth:`_PoolElement._do_process` must not stamp a cap on the item it
-derives: the cap on an item is the cap of the edge it is travelling, and the edge is the
-loader's (:class:`~shipinfer.topology.chain.Edge`).
+**The embedder is where the chain's cardinality changes**: one frame in, N crops at the
+model, N vectors back. It answers two questions no forwarding element has to -- *which rows*
+(its own ``params: classes:``, because ``when:`` decides frames, not rows) and *how many
+requests* (``max_batch_size``, because a crowded frame outgrows a fixed plan).
 
-**Two of the four read the frame's pixels; two hand the payload on untouched.** A detector has
-to *transform* the frame — letterbox it to the model's input and then undo exactly that
-transform to put the boxes back in source pixels — and an embedder has to *cut it up*, one crop
-per detection, and put the vectors back on the rows the crops came from. Both replace the two
-hooks ``_do_process`` calls, ``_prepare`` and ``_finish``, and both declare
-``needs_image_ops``; :class:`PoolSegment` and :class:`PoolRecognize` keep the forwarding
-default. That split, rather than a flag or an ``isinstance`` inside the shared method, is what
-keeps the per-frame geometry on the walking worker's stack: one element instance is shared by
-every worker, so an attribute would let two frames overwrite each other's scale — or, at the
-embedder, each other's row indices, which is an appearance vector attached to the wrong object.
-
-**The embedder is also where the chain's cardinality changes.** One frame in, N crops at the
-model, N vectors back — arch.md §5's "branch on class → crop batch → submit crops". That is
-:class:`_PoolCropElement`, and the two questions it answers that no forwarding element has to
-are *which rows* (its own ``params: classes:``, because a ``when:`` guard decides frames, not
-rows) and *how many requests* (``max_batch_size``, because a crowded frame is bigger than a
-plan built at a fixed batch).
-
-**Two knobs, and where each one comes from.** The wait and the input tensor name are resolved
-at :meth:`~shipinfer.topology.base.Element.open`, in a fixed precedence: this slot's
-``params:`` first, then the runner's :class:`~shipinfer.topology.base.ElementContext`
-(``stage_timeout_s`` from ``pipeline.stage_timeout_ms``, ``input_name`` from
-``ingest.input_name``), then the module default below. Params win because a tensor name
-belongs to the *model* and one slot may need a longer wait than the rest of the chain; the
-context wins over the default because an operator who lowers ``stage_timeout_ms`` to 500 ms
-means it — before the context carried the value, every ``pool`` element still waited 5 s and
-the settings key applied to nothing. The default is the floor for an element opened outside a
-runner, which is what a chain-validation test does.
+**Two knobs**, resolved at ``open`` in a fixed precedence: this slot's ``params:``, then the
+runner's context (``stage_timeout_s``, ``input_name``), then the module default. Params win
+because a tensor name belongs to the model; the context wins over the default because an
+operator who lowers ``stage_timeout_ms`` means it -- before the context carried it, every
+``pool`` element still waited 5 s and the settings key applied to nothing.
 """
 
 from __future__ import annotations
@@ -261,61 +234,26 @@ class _PoolElement(Element):
     def _do_process(self, item: ChainItem) -> ChainItem:
         """Submit one request for this item and file what the model said on the successor.
 
-        The three steps this walk is made of are here — build the request, wait on the bound,
-        propagate every refusal as itself. The two hooks a subclass replaces are
-        :meth:`_prepare` and :meth:`_finish`, and a detector replaces both: it letterboxes the
-        frame on the way in and un-letterboxes the boxes on the way out.
+        Build the request, wait on the bound, propagate every refusal as itself. The two hooks a
+        subclass replaces are :meth:`_prepare` and :meth:`_finish`; a detector replaces both.
 
-        A subclass may also replace this method, and exactly one does:
-        :class:`_PoolCropElement` submits *no* request on a frame with nothing to crop and
-        more than one on a frame crowded past the model's ``max_batch_size``. Both still go
-        through :meth:`_submit`, which is where the wait, the tag and the timeout message
-        live, so the bound has one definition however many requests a frame costs.
+        Exactly one subclass replaces this method: :class:`_PoolCropElement` submits *no* request
+        on a frame with nothing to crop and more than one on a frame past ``max_batch_size``. Both
+        still go through :meth:`_submit`, so the wait has one definition however many requests a
+        frame costs.
 
-        The request carries the item's :class:`~shipinfer.core.request.RequestContext`
-        **by identity**, not a copy: that tag is what reassembly, tracing and every log line
-        group on (ADR-002), and a copy would let the two drift the moment anything stamped a
-        timestamp on one of them.
+        The request carries the item's ``RequestContext`` **by identity**, not a copy: that tag is
+        what reassembly, tracing and every log line group on (ADR-002).
 
-        **A timeout abandons the request; it does not cancel it.** There is no cancellation
-        path to call: :class:`~shipinfer.core.request.ResponseFuture` is a plain
-        :class:`concurrent.futures.Future` and neither
-        :class:`~shipinfer.scheduling.queues.base.RequestQueue` nor the engine's model exposes
-        a "remove this one" — an item that has been queued is dequeued, assembled and executed
-        whatever its future says, and only the *result* is discarded
-        (``engine/instance.py::_complete``'s ``set_running_or_notify_cancel``). So a frame that
-        times out here still costs the instance slot that made it late, and under sustained
-        overload that compounds: every timed-out frame keeps consuming the capacity that caused
-        the timeout, which is a queue that never drains rather than one that sheds. The bound
-        is still worth having — it frees the *worker* — and phase B adds the real cancellation
-        path (a queue-side removal plus a pre-dispatch check) once its bench has measured how
-        much of the overload this accounts for. It is deliberately not guessed at here.
+        **A timeout abandons the request; it does not cancel it.** There is no cancellation path to
+        call -- an item that has been queued is dequeued, assembled and executed whatever its future
+        says, and only the *result* is discarded. So a timed-out frame still costs the instance slot
+        that made it late, and under sustained overload that compounds into a queue that never
+        drains rather than one that sheds. The bound is still worth having, because it frees the
+        *worker*; real cancellation needs a queue-side removal and is deliberately not guessed here.
 
         Returns:
-            The successor item — same tag, same payload, and whatever :meth:`_finish` added.
-
-        **Every one of these is raised as itself and reaches the submitter as itself.** The
-        runner that walks this element re-raises a
-        :class:`~shipinfer.core.errors.ShipInferError` unchanged into the item's future
-        and wraps only a foreign exception, because "the detector's queue is full", "the
-        detector never answered" and "the detector has a bug" are three events a caller
-        responds to in three different ways. It charges them to three different counters too,
-        so an overloaded shard does not read as a shard full of bugs.
-
-        Raises:
-            ValidationError: :meth:`_prepare` could not make a submittable tensor out of the
-                payload. A device-resident frame handle becomes one with the DataPool
-                (arch.md §3, phase D); until then the chain in front of a pool element has to
-                hand over a host-resident :class:`~shipinfer.core.types.Tensor`.
-            InferenceError: :meth:`_finish` could not read the model's answer — a detector
-                whose output name or layout is not what the chain was told.
-            QueueFullError: the pool is saturated. Propagated untouched — it is backpressure,
-                and the runner turns it into a counted, per-camera drop (ADR-005) whose depth
-                and capacity name the queue that refused. It must never become a ``None``:
-                "no ships in this frame" and "the detector is full" demand opposite responses.
-            RequestTimeoutError: the pool did not answer within ``timeout_s``. A saturation
-                signal, not a fault: counted apart from ``items_failed`` for that reason.
-            ServerStateError: called before :meth:`Element.open` — the base class's refusal.
+            The successor item -- same tag, same payload, and whatever :meth:`_finish` added.
         """
         tensor, carried = self._prepare(item)
         return self._finish(item, self._submit(item, tensor), carried)
@@ -526,48 +464,32 @@ class _Letterbox:
 class PoolDetect(_PoolElement):
     """Detection through the model pool: letterbox, submit, decode into source pixels.
 
-    The only one of the four ``pool`` elements that transforms its payload, and it does the
-    two halves of that transform in one place because they have to agree exactly. Pre-process
-    scales and pads the frame to the model's input; the decode subtracts *those* pads and
-    divides by *that* scale. Split across two elements, or recomputed from the shapes, and
-    every published box drifts.
+    The only one of the four that transforms its payload, and it does both halves of the
+    transform in one place because they must agree exactly: pre-process scales and pads the
+    frame to the model's input, and the decode subtracts *those* pads and divides by *that*
+    scale. Split across two elements, or recomputed from shapes, and every published box drifts.
 
-    This is the proven arithmetic from ``pipeline/graph/detect.py`` moved onto the chain, not
-    a second implementation of it: the same
-    :class:`~shipinfer.topology.elements.detections.decode_detections`, the same
-    ``ImageOps.letterbox_batch``, the same order of operations. What is new is where the
-    configuration comes from.
+    This is the proven arithmetic from ``pipeline/graph/detect.py`` moved onto the chain rather
+    than reimplemented -- the same ``decode_detections``, the same ``letterbox_batch``, the same
+    order. What is new is where the configuration comes from.
 
-    **Why this element exists at all.** Before it, ``detect`` filed ``response.outputs`` raw
-    under ``meta["boxes"]`` and nothing in the chain letterboxed anything — ``ChainFrameSink``
-    submits the full-size frame as it was decoded (``runners/frames.py``). So the rows a
-    detector returned were in the pixels of an input nobody had produced, and there was no key
-    a tracker could read. ``meta["boxes"]`` is **gone** rather than kept beside
-    ``meta["detections"]``: nothing in ``src/`` read it, and keeping it would pin the raw
-    output tensor alive for the rest of the walk so that a future consumer could re-do
-    arithmetic this element has already done correctly.
-
-    **Where each knob comes from, in this order.** The model's ``config.yaml`` is the source
-    of truth for anything the artefact knows — the input extent and the output tensor names —
-    and this slot's ``params: {decode: {...}}`` overrides it for a deployment that knows
-    better. Nothing is guessed: a model that declares neither a usable input shape nor a
-    ``dst_size`` stops the deploy, because the alternative is a letterbox to the wrong size
-    and a whole shard's boxes silently wrong.
+    **Nothing is guessed.** The model's ``config.yaml`` is the source of truth for what the
+    artefact knows -- input extent, output tensor names -- and this slot's
+    ``params: {decode: {...}}`` overrides it for a deployment that knows better. A model that
+    declares neither a usable input shape nor a ``dst_size`` stops the deploy, because the
+    alternative is a letterbox to the wrong size and a whole shard's boxes silently wrong.
 
     ``params: {decode: {...}}`` takes:
 
-    * ``dst_size: [height, width]`` — the model input. Default: the declared input spec.
-    * ``pad_value`` — the letterbox bar fill. Default 114, the YOLO grey; a detector trained
-      with it and served without it is a silent accuracy loss.
-    * ``normalize: {mean: [...], std: [...], swap_rb: bool}`` — see
-      :class:`~shipinfer.topology.elements.detections.Normalization`.
-    * ``score_threshold``, ``max_detections``, ``class_labels: {id: name}`` — see
-      :class:`~shipinfer.topology.elements.detections.DecodeParams`.
-    * ``boxes_output`` / ``count_output`` — the detector's output tensor names. Default: the
-      model's single declared output, and ``num_detections`` only when the model *declares*
-      it. Guessing a count name and finding nothing is indistinguishable from a model that
-      reports no count, and the difference matters — the trailing rows of a padded output are
-      undefined, not zero.
+    * ``dst_size: [height, width]`` -- the model input. Default: the declared input spec.
+    * ``pad_value`` -- letterbox fill, default 114 (the YOLO grey; trained with it and served
+      without it is a silent accuracy loss).
+    * ``normalize``, ``score_threshold``, ``max_detections``, ``class_labels`` -- see
+      :mod:`~shipinfer.topology.elements.detections`.
+    * ``boxes_output`` / ``count_output`` -- default to the model's declared output, and
+      ``num_detections`` only when the model *declares* it. Guessing a count name and finding
+      nothing is indistinguishable from a model that reports no count, and the trailing rows of
+      a padded output are undefined rather than zero.
     """
 
     kind: ClassVar[ElementKind] = ElementKind.DETECT
@@ -1047,76 +969,30 @@ class _CropMetrics:
 
 
 class _PoolCropElement(_PoolElement):
-    """A ``pool`` element that runs its model on **one crop per detection**, not on the frame.
+    """A ``pool`` element that runs its model on **one crop per detection**, not the frame.
 
-    The second element in the chain that transforms its payload, and the one that changes
-    cardinality: one frame in, N rows at the model, N vectors back, scattered onto the rows
-    they came from. That is arch.md section 5's "branch on class -> crop batch -> submit
-    crops", and it is the proven fan-out of ``pipeline/graph/crop.py`` +
-    ``pipeline/graph/objects.py`` moved onto the chain rather than a second implementation of
-    it -- the same single ``crop_batch`` call for all N boxes, the same chunking at the
-    model's ``max_batch_size``, the same rule that every row knows which detection it came
-    from.
+    The element that changes cardinality: one frame in, N rows at the model, N vectors back,
+    scattered onto the rows they came from -- arch.md section 5's "branch on class -> crop
+    batch -> submit crops". The same single ``crop_batch`` call for all N boxes, the same
+    chunking at ``max_batch_size``, the same rule that every row knows its detection.
 
-    **Why the whole frame is not submitted.** Before this element, ``embed`` handed the
-    detector's letterboxed frame to a re-identification model whose input is 3x256x128 and
-    filed the raw ``response.outputs`` under ``meta["vectors"]`` -- a ``{name: Tensor}`` dict,
-    which is the exact form
-    :meth:`~shipinfer.topology.elements.track.ShipvisionTrack._embeddings` refuses ("an
-    embedder's raw output tensors are not an attribution"). So the chain could not reach
-    ``track`` with appearance at all. What was missing is this element.
+    **Why not the whole frame.** ``embed`` used to hand the detector's letterboxed frame to a
+    re-identification model whose input is 3x256x128, and file the raw ``response.outputs``
+    under ``meta['vectors']`` -- which ``track`` refuses, because an embedder's raw output
+    tensors are not an attribution. So the chain could not reach ``track`` with appearance.
 
-    **The scatter-back is a mapping, and that is the load-bearing choice.** ``track`` accepts
-    two forms: one row per detection, or ``{detection index: vector}``. A per-row array would
-    need a filler for the rows this slot did not embed -- and the sizing puts two embedders
-    side by side (``ship_embedder`` on the ship rows, ``person_embedder`` on the person
-    rows), which is the shape C8b gives ``topology/ship_person.yaml`` and is what the
-    two-branch fixture in ``tests/topology/test_pool_embed_crops.py`` declares today. So
-    *partial coverage is the normal case*, not the exception. The mapping
-    says exactly which rows were covered and stays legal when two of these elements merge
-    their answers into one frame's metadata (it is filed as a
-    :class:`~shipinfer.topology.base.RowIndexed`, which is what makes that merge legal at a
-    rejoin -- see :meth:`_scatter`); a NaN row would have to be recognised as absence
-    by every consumer, and the first one that forgot would match a track against a vector of
-    NaNs and never say so. ``track``'s own docstring names partial coverage as the thing the
-    mapping form was written for.
+    **The scatter-back is a mapping, and that is load-bearing.** ``track`` accepts one row per
+    detection or ``{detection index: vector}``. A per-row array would need a filler for the rows
+    this slot did not embed -- and the sizing puts two embedders side by side, so *partial
+    coverage is the normal case*. The mapping says exactly which rows were covered and stays
+    legal when two of these merge into one frame's meta; a NaN row would have to be recognised
+    as absence by every consumer, and the first one that forgot would match a track against a
+    vector of NaNs and never say so.
 
-    **Which rows this element embeds is its own ``params: classes:``, not the chain's
-    ``when:``.** A ``when:`` guard is evaluated once per *item* against ``item.meta``
-    (:meth:`~shipinfer.topology.chain.ElementNode.admits`), and an item is a whole frame --
-    so ``when: class == ship`` can only decide whether the element runs on this frame at all,
-    and it reads ``meta["class"]``, a key nothing in the chain sets today. A frame holds ships
-    *and* people, and the question this element has to answer is per row. So the row filter
-    is ``params: {classes: [ship]}``, resolved from ``Detections.labels`` exactly as
-    :meth:`~shipinfer.topology.elements.track.ShipvisionTrack._selected` does it, and the two
-    mechanisms compose without overlapping: ``when:`` skips frames, ``classes:`` selects rows.
-    Declaring no ``classes:`` embeds every detection, which is what a single-embedder chain
-    wants.
-
-    ``params:`` this class reads, on top of :class:`_PoolElement`'s ``input`` and ``timeout_s``:
-
-    * ``classes: [ship]`` -- the detection labels to crop. Default: every row.
-    * ``crop: {size: [height, width]}`` -- one crop's extent. Default: the model's declared
-      input, which for ``person_embedder`` is ``[3, 256, 128]`` and therefore ``[256, 128]``.
-    * ``crop: {normalize: {mean, std, swap_rb}}`` -- see
-      :class:`~shipinfer.topology.elements.detections.Normalization`.
-    * ``output: embedding`` -- which response output holds one row per crop. Default: the
-      model's single declared output.
-
-    **What allocates per frame** (CONVENTIONS 2.5), because a fan-out element is where that
-    question is asked: the crop batch itself (``(N, 3, h, w)`` float32, the thing being
-    submitted and unavoidable), one :class:`~shipinfer.core.types.Tensor` wrapper around it,
-    one :class:`~shipinfer.core.request.InferenceRequest` per chunk -- which is one, except on
-    a frame crowded past ``max_batch_size`` -- and the ``{row: vector}`` mapping, whose values
-    are numpy *views* into the response rather than copies. Selecting a subset of rows adds an
-    index tuple and one ``(N, 4)`` gather of the boxes; declaring no ``classes:`` adds no index
-    tuple, because :meth:`~shipinfer.topology.elements.detections.Detections.boxes_at`
-    recognises the whole frame and answers with one flat ``(N, 4)`` copy rather than a fancy
-    gather (it never aliases the live array). A frame with no rows to embed submits nothing — it never reaches
-    :meth:`~shipinfer.topology.base.Element.process`'s model call — and costs one
-    :meth:`~shipinfer.topology.base.ChainItem.derive`, for the empty mapping that records that
-    this element ran; on a chain that puts a second embedder *in series* ahead of this one, a
-    peer's mapping is already there and not even that (:meth:`_scatter`).
+    **Which rows is its own ``params: classes:``, not the chain's ``when:``.** A ``when:`` guard
+    is evaluated once per *item*, and an item is a whole frame -- so it can only decide whether
+    the element runs at all. A frame holds ships and people at once, which is why row selection
+    cannot be a frame guard.
     """
 
     #: A crop element scatters its response back onto the rows it cropped, so its key is
@@ -1545,65 +1421,27 @@ class _PoolCropElement(_PoolElement):
     def _scatter(self, item: ChainItem, covered: dict[int, Any]) -> ChainItem:
         """File ``covered`` under this element's key, **merged** with what is already there.
 
-        Additive, and that is not a nicety. The sizing runs two of these over disjoint rows --
-        ``embed_ship`` over the ship rows and ``embed_person`` over the person rows, both
-        filing ``meta["vectors"]`` -- and :meth:`~shipinfer.topology.base.ChainItem.derive`
-        merges metadata *by key*, so a plain assignment by the second one would replace the
-        first one's mapping wholesale. Every ship in the frame would then reach ``track`` with
-        ``embedding=None``, on a chain whose logs, metrics and per-element counters all say
-        both embedders ran. That is the exact failure the mapping form was chosen to make
-        expressible, thrown away one line before the finish.
+        Additive, and not a nicety. The sizing runs two of these over disjoint rows --
+        ``embed_ship`` and ``embed_person``, both filing ``meta["vectors"]`` -- and ``derive``
+        merges meta *by key*, so a plain assignment by the second would replace the first
+        wholesale. Every ship would then reach ``track`` with ``embedding=None`` on a chain
+        whose logs and counters all say both embedders ran.
 
-        **Two of them meet in one of two ways, and this method is one half of one rule.**
-        In *series* -- both on one branch, the second declared ``after:`` the first -- the
-        second one finds the first one's mapping in ``item.meta`` and merges into it here. In
-        *parallel* -- the shape ``topology/ship_person_cpu.yaml`` declares: both slots on
-        ``after: detect`` with ``params: classes:`` picking their rows, rejoining at ``track``
-        -- neither ever sees the other's item, and the union is taken at the rejoin instead
-        (:meth:`~shipinfer.runners.walk.ChainWalk.inbound`). Both compositions
-        are legal today and neither may lose half the frame. What the *shipped* file declares
-        is neither of them yet: ``topology/ship_person.yaml``'s embedders still carry
-        ``when: class == ...`` and no ``classes:``, which the loader now refuses outright --
-        that file waits on phase D's decoder and is converted with it (ledger
-        SHIP-PERSON-ROW-GUARDS). The runnable sibling is ``ship_person_cpu.yaml``.
+        Two of them meet in one of two ways. In **series** the second finds the first's mapping
+        here and merges into it. In **parallel** neither sees the other's item and the union is
+        taken at the rejoin (:meth:`~shipinfer.runners.walk.ChainWalk.inbound`). Both are legal
+        and neither may lose half the frame.
 
-        **What is filed is a** :class:`~shipinfer.topology.base.RowIndexed`, and that is not
-        decoration: it is what tells the fan-in that this value is keyed by detection row and
-        may therefore be unioned with a peer's. A bare ``dict`` filed here would still reach
-        ``track`` correctly and would simply not union at a rejoin -- which is the right
-        default for a value nobody declared, and the reason the two ``segment`` slots that
-        file raw ``response.outputs`` under ``meta["masks"]`` are left alone by the merge.
-        Merging into a peer therefore keeps the *peer's* declaration: a plain dict stays plain.
+        What is filed is a :class:`~shipinfer.topology.base.RowIndexed`, which is what tells the
+        fan-in the value is keyed by detection row and may be unioned. A bare dict still reaches
+        ``track`` and simply does not union -- the right default for a value nobody declared, and
+        why the ``segment`` slots filing raw outputs are left alone. Merging into a peer keeps the
+        peer's declaration: a plain dict stays plain.
 
-        **Both halves answer an overlap the same way: they refuse it.** Disjoint rows union;
-        a row two elements both cover is an :class:`~shipinfer.core.errors.InferenceError`
-        here just as it is at the fan-in, because "two elements covering one detection means
-        the chain file asked both of them for it" is a property of the chain file and not of
-        the wiring, and is therefore exactly as true in series as in parallel. Letting
-        ``{**existing, **covered}`` decide it would make a ``classes:`` overlap that a deploy
-        catches loudly on ``ship_person.yaml`` into a silently wrong appearance vector on the
-        same two slots written ``after:`` one another. There is no identity exemption in this
-        half, unlike at the fan-in: without a fork there is no pre-computed mapping riding two
-        paths, so an entry that is already here was computed by a *different* element.
-
-        Nothing to add is not nothing to say: with no peer under the key, the empty mapping
-        is still filed, because "this element ran and covered no rows" and "this element never
-        ran" are different facts and only the first is evidence the chain is wired the way the
-        operator thinks. It is when a peer has already filed a mapping that there is genuinely
-        nothing to do, and then the item is handed on unchanged rather than copied -- the
-        series composition again, so a quiet frame on the shipped chain costs the one
-        ``derive`` and not zero.
-
-        Raises:
-            ValidationError: something that is not a mapping is already filed under this key.
-                An element that files raw model outputs there is a scatter-back that never
-                happened, and merging into it is not possible; overwriting it would hide the
-                producer that needs fixing.
-            InferenceError: an earlier slot on this branch already filed one of these rows.
-                Names the key, the row and *this* slot; the earlier one is "an earlier slot"
-                and not a name, because ``item.meta`` records what was filed and never who
-                filed it. The fix is in the chain file either way -- two slots sharing this
-                key with overlapping ``classes:`` -- and there are two of them to look at.
+        **Both halves refuse an overlap.** Disjoint rows union; a row two elements both cover is an
+        :class:`~shipinfer.core.errors.InferenceError` here exactly as at the fan-in, because two
+        elements covering one detection is a property of the chain file, equally true in series and
+        in parallel. ``{**existing, **covered}`` would turn that into a silently wrong vector.
         """
         existing = item.meta.get(self.meta_key)
         if existing is None:
