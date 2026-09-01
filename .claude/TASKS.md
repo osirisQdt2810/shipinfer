@@ -1315,7 +1315,7 @@ that exposes the four attributes a policy reads.
       default policy `locality_spillover`. (c) Reassembly waits on remote results; camera id rides
       with the request so the fair queue stays per-camera across processes. (d) A closed ring drops
       its proxy from the candidate set. Gate: same skew bench as T2, B against C, on a quiet box.
-- [!] **T3b · THE PREMISE IS FALSE — MEASURED ON THE REAL ENGINE 29 Aug, and it inverts the item.**
+- [!] **T3b · MERGED as PR #106 (f6629d1, 1 Sep) after FIVE review rounds; the keep-or-drop question below is STILL OWED by the operator. Original: THE PREMISE IS FALSE — MEASURED ON THE REAL ENGINE 29 Aug, and it inverts the item.**
       **OPEN as PR #106 (31 Aug), and the operator decision is the blocker on this line:** keep the composer
       or drop it? Its stated purpose is gone, but it is still the only deterministic source of per-frame load
       VARIATION in the bench. (1) keep it with the docstring saying plainly it does not raise
@@ -2477,8 +2477,26 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       violation count only 1031 -> 1012. The fix is fewer, smaller files with less prose in them.
       **DECIDED (asked, 31 Aug): all three, SEQUENTIALLY, one package per PR** -- split the oversized file,
       cut prose in the files touched, delete the superfluous helpers there. Order: runners/ first.
-- [ ] **V149-runners · split runners/inprocess.py (2121) + fleet.py (1060) + service.py (859), cut prose
-      (1.77 -> ~0.3), inline the one-use helpers there.** First PR of V149.
+- [~] **V149-runners · STEP 1 DONE (the frame walk), 3 steps left. The cut order is chosen by measured
+      coupling, not by my sketch.**
+      Step 1: `runners/walk.py` — `ChainWalk` + `ChainWork`, 11 methods needing only 3 inputs
+      (topology, metrics, edge_caps). inprocess.py 2121 -> 1608; walk.py 308 lines at **0.48** prose/code
+      against 2.26 for what remains and 0.86 for the tree; net -205 lines, -241 of them prose. The seam was
+      declared by the file itself (`_walk`'s docstring: above = work items and queues, below = chain items
+      and elements), and `tests/runners/test_walk.py` already existed for a class that did not. No
+      delegating wrappers: one public collaborator, `self._walker`; 11 test call sites updated instead.
+      docs/system-design.md updated IN THE SAME COMMIT so the map never lags the code.
+      COUPLING MEASURED for the remaining cuts, which changed the plan:
+        * **placement = 4 methods, 3 attrs** (`_priority_for`, `_learn_priority`, `_placed_band`,
+          `_restore_band`; needs `_placed_bands`, `_priority_lock`, `_configured`) -> AS CLEAN AS THE WALK,
+          so this is step 2.
+        * camera lifecycle = 14 methods but **17 attrs** (drags in `_queue`, `_running`, `_lifecycle`,
+          `_settings`, and placement itself) -> NOT a separate responsibility yet; do it after placement
+          leaves, and re-measure.
+        * start/stop = 11 methods, 19 attrs -> the runner's own job; probably stays.
+        * stats+health = 4 methods, 9 attrs -> depends on placement; re-measure after step 2.
+      Also worth doing on its own: the file is now 29 methods with **code 536 / docstrings 581** -- still
+      more prose than code, worst offenders `element_context` 6/27, `_camera_config` 8/34, `_do_stats` 28/46.
 - [ ] **V149-topology · same for topology/ (1.40; elements/pool.py 1697, chain.py 1077, recognize.py 1031,
       track.py 945, barrier.py 900, base.py 852, mtmc.py 847).**
 - [ ] **V149-engine · same for engine/ (pool.py 1421, ensemble.py 828, spill/remote_instance.py 747).**
