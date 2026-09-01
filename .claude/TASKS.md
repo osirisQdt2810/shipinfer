@@ -2605,7 +2605,23 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       more prose than code, worst offenders `element_context` 6/27, `_camera_config` 8/34, `_do_stats` 28/46.
 - [ ] **V149-topology · same for topology/ (1.40; elements/pool.py 1697, chain.py 1077, recognize.py 1031,
       track.py 945, barrier.py 900, base.py 852, mtmc.py 847).**
-- [ ] **V149-engine · same for engine/ (pool.py 1421, ensemble.py 828, spill/remote_instance.py 747).**
+- [~] **V149-engine · OPEN as PR #116 (d1332af), and it is ONE FILE: pool.py is the only file in
+      engine/ whose prose outweighs its code (1.75 vs ensemble.py 0.58, model.py 0.59, instance.py 0.52,
+      spill/remote_instance.py 0.39).** 1421 -> 1354 lines, ratio 1.75 -> 1.60, check_docs excess
+      358 -> 291; docs-only proved by AST PER FILE (the branch's other two files are code by design, so
+      a whole-diff proof would say "code changed" and mean nothing). #116 also takes #115's five review
+      findings on run.py: _serve gets `out` passed in rather than building a second console, takes
+      `cameras: Sequence[CameraSpec]` rather than the whole _Plan, the four new over-cap docstrings get
+      `# doc: long <reason>` (run.py excess 163 -> 127, items 20 -> 16), and the test module docstring
+      stops claiming every test stops at --dry-run. Finding 5 needed no change and the body says so.
+      TWO SELF-INFLICTED ERRORS, both invisible to 246 green engine tests: a range edit that stopped one
+      line short left a dangling half-sentence (caught by reading the diff), and a replacement that
+      re-emitted the surrounding code DUPLICATED `self._traces = NullTraceSink()` -- idempotent, so the
+      suite could not see it, and only the AST docs-only proof did. /tmp/cutlines.py now anchors BOTH
+      ends of a range AND refuses any comment-block edit whose old or new text contains a code line.
+      RULE for every future prose wave: a test suite cannot distinguish a duplicated idempotent
+      statement from none; the per-file AST proof is the check.
+      Original: same for engine/ (pool.py 1421, ensemble.py 828, spill/remote_instance.py 747).**
 - [~] **V149-cli · OPEN as PR #115 (0102bcf). run() 272 lines -> 110, 97 code lines -> 53.** Five named
       steps: require_container / refuse_flags / _resolve / _bring_up / _serve, plus `_Plan`, a frozen
       dataclass holding what one run resolved BEFORE any device was touched -- which makes the ordering
