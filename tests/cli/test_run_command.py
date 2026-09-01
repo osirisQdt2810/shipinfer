@@ -161,3 +161,53 @@ class TestWhoAnswersWhichDevices:
 
         assert "3 shard(s)" in capsys.readouterr().out
         assert len(calls) == 1, "the driver was asked more than once"
+
+
+class TestTheOrderOfTheStepsIsPartOfTheOutput:
+    """What the operator has already read when a step refuses is a fact about the sequence.
+
+    :func:`~shipinfer.cli.commands.run.run` reads as five named steps, and each one's position
+    is load-bearing rather than tidy. Two positions are asserted here because they are the two
+    a refactor can move without turning anything else red.
+    """
+
+    def test_the_chain_is_reported_before_the_camera_list_is_read_off_disk(
+        self, chain_file: Path, capsys, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A mistyped chain and an unreadable ``camera_db`` are told apart by what was printed.
+
+        ``_resolve`` prints the topology line the moment the chain parses and *then* reads
+        ``ingest.camera_db``. Moving the print below the camera list — the obvious tidy-up
+        when the two are extracted together — leaves an operator staring at a stack trace
+        with nothing on screen to say the chain was fine.
+        """
+        monkeypatch.setenv("SHIPINFER_INGEST__CAMERA_DB", str(tmp_path / "not-there.yaml"))
+
+        with pytest.raises(ConfigurationError, match="does not exist"):
+            run(chain_file, runner="inprocess", dry_run=True)
+
+        assert "topology: mock_chain (3 element(s))" in capsys.readouterr().out
+
+    def test_the_container_gate_is_asked_before_anything_is_resolved(
+        self, chain_file: Path, monkeypatch
+    ) -> None:
+        """A refusal must not have queried the hardware it is refusing to use.
+
+        ``_fill_in_gpus`` is the one thing in the resolution that can touch the driver, so the
+        gate sits above it. Pinned by counting: a gate that ran after ``_resolve`` would let
+        ``device_count()`` be called on the way to being refused.
+        """
+        asked: list[int] = []
+        monkeypatch.delenv("SHIPINFER_DEVICES__VISIBLE_GPUS", raising=False)
+        monkeypatch.setattr(
+            "shipinfer.runtime.platform.device_count", lambda: asked.append(1) or 2
+        )
+        monkeypatch.setattr(
+            "shipinfer.runtime.containment.require_container",
+            lambda what: (_ for _ in ()).throw(ConfigurationError(f"{what} needs a container")),
+        )
+
+        with pytest.raises(ConfigurationError, match="needs a container"):
+            run(chain_file, runner="inprocess", dry_run=False)
+
+        assert asked == [], "the driver was asked on the way to a refusal"

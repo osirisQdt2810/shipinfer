@@ -261,6 +261,7 @@ class _PoolElement(Element):
             ValidationError: from :meth:`_prepare` or :meth:`_finish`; a mis-wired chain.
             InferenceError: the model answered and the answer cannot be attributed to rows.
 
+        Note:
             All four propagate **as themselves**, and that is the contract:
             :meth:`~shipinfer.runners.walk.ChainWalk.count_failure` sorts them into three
             counters — backpressure, timed-out, failed — so collapsing them into one type here
