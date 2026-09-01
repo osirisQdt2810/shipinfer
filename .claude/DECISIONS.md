@@ -804,3 +804,63 @@ Three reasons, in the order they decide it:
   that decides today's placements. Not `PlacementPolicy` itself: that contract is typed for
   `Placeable` instances and an `InferenceRequest`, and a shard is neither. This ADR is then
   superseded by the one that adds it, not edited.
+
+---
+
+## ADR-019 — gRPC is the control plane's one transport; the vocabulary is what stays portable
+
+**Status:** Accepted · 2026-09-01 · answers V147 (`docs/qa/user.md`), which asked what RPC vLLM
+uses and whether ours could be abstracted OOP. Builds on ADR-014 (the control plane stays
+Python) and arch.md §2.
+
+**Context.** vLLM's `MultiprocExecutor` spawns one `context.Process` per GPU worker and talks
+**ZMQ**; shipinfer's launcher talks **gRPC** with committed stubs (`launch/proto/`). CLAUDE.md's
+reference-implementation rule says a departure from their shape is fine *when it is stated with
+its reason*, and unexplained departures are reinventions. So the difference is real and owes an
+answer.
+
+The obvious answer is a `Transport` protocol with a gRPC implementation and room for a ZMQ one.
+Before writing it, the coupling was measured rather than assumed:
+
+| file | lines | mentioning grpc/protobuf |
+|---|---|---|
+| `launch/supervisor.py` | 330 | **0 (0%)** |
+| `launch/client.py` | 382 | 41 (11%) |
+| `launch/control.py` | 370 | 34 (9%) |
+| `runners/service.py` | 859 | 39 (5%) |
+
+**Decision.** **Keep gRPC as the single transport. Do not add a `Transport` seam yet.** Three
+reasons, in order of weight:
+
+1. **The valuable half of the abstraction already exists.** `launch/control.py` holds the
+   control vocabulary as frozen dataclasses with no transport in it, and `supervisor.py` —
+   process spawn, all-or-nothing start, the drain — is **0% gRPC**. The half that would have
+   been hard to retrofit is already done, and it is the half that would be reused by a second
+   transport.
+2. **One implementation.** An ABC with a single implementor is speculative generality: it adds
+   a layer to read through without removing a decision from anywhere. That is precisely the
+   surplus V149 asked us to delete, and adding it in the same breath would be incoherent.
+3. **The residual coupling is a codec, not a design.** What is left is `to_pb`/`from_pb` on the
+   dataclasses and six methods on `ShardClient` (`ready`, `update_topology`, `add_camera`,
+   `remove_camera`, `health`, `stop`). Moving that is cheap **when a second transport exists**
+   and guesswork before then.
+
+**What the seam would be, recorded so it is not re-derived.** If ZMQ (or anything else) is ever
+wanted:
+
+- `ShardClient`'s six methods are the `Transport` protocol, verbatim — they already take and
+  return `control.py` dataclasses, not messages.
+- `to_pb`/`from_pb` move off the dataclasses into a `launch/codec_grpc.py`, leaving `control.py`
+  pure. That is the only edit to the vocabulary.
+- `supervisor.py` needs no change at all, which is the measurement above saying the split is in
+  the right place.
+
+**Consequences.** A second transport costs one protocol, one codec module and one client — but
+not a rewrite of the vocabulary or the supervisor. Until then the reader sees one path with no
+indirection. The cost of being wrong is bounded and known; the cost of being early is a layer
+every reader pays for and nobody uses.
+
+**What this does not say.** It does not claim gRPC is better than ZMQ for this job. ZMQ is
+lighter for a same-box control plane — no HTTP/2, no codegen, no version pins of the kind
+`pyproject.toml` carries for `grpcio-tools`. If the pins or the generated-stub check become a
+recurring tax, that is the signal to revisit, and this ADR is the thing to supersede.

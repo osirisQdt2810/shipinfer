@@ -2468,15 +2468,19 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       C++ does NOT: `csrc/shipvision/mtmc/` holds `matcher.h`, `matcher.cpp`, `matchers/{appearance,gated,
       spatial}` and no Tracker class anywhere (`grep -rl "class.*Tracker" csrc/shipvision/mtmc/` -> empty).
       Under the two-planes rule the request is half-done. shipvision's own repo, so its lane.
-- [ ] **V147b · the control-plane transport is still gRPC-specific; no seam to swap an RPC behind.** V147
-      asked to (a) check what vLLM uses and (b) abstract it OOP if different. (a) IS done and recorded --
-      ledger B3b: vLLM's `MultiprocExecutor` spawns `context.Process` per GPU worker and talks **ZMQ**,
-      not gRPC. (b) is NOT: `launch/control.py` holds the vocabulary as frozen dataclasses with no
-      transport in it (half the abstraction, and the good half), but `launch/client.py`'s `ShardClient` is
-      gRPC end to end -- no Protocol/ABC, so ZMQ or anything else cannot be substituted. Decide: build a
-      `Transport` seam, or record in an ADR that gRPC is the single transport and why (the committed stubs
-      and the optional-extra refusal are real arguments for staying put). Either answer closes it; silence
-      does not.
+- [x] **V147b · ANSWERED with ADR-019 (1 Sep): gRPC stays the one transport; no seam yet, and the reason
+      is written down.** V147 asked (a) what RPC vLLM uses and (b) whether ours could be abstracted OOP.
+      (a) was already recorded (B3b: vLLM's MultiprocExecutor talks ZMQ). (b) is now decided rather than
+      left silent, and decided from a MEASUREMENT rather than taste:
+        supervisor.py 330 lines / **0%** grpc | client.py 382 / 11% | control.py 370 / 9% | service.py 859 / 5%
+      The valuable half of the abstraction already exists -- control.py is transport-free frozen dataclasses
+      and supervisor.py mentions grpc zero times -- so what remains is a CODEC (`to_pb`/`from_pb`) plus six
+      client methods, not a design. An ABC with one implementor is the surplus V149 asked us to delete, so
+      adding it in the same session would be incoherent. ADR-019 records what the seam WOULD be
+      (ShardClient's six methods verbatim as the protocol; to_pb/from_pb move to launch/codec_grpc.py;
+      supervisor.py needs no change) so nobody re-derives it, and names the signal to revisit: if the
+      grpcio-tools pin and the generated-stub check become a recurring tax. #109 was one instance of that
+      tax, so the signal is not hypothetical -- worth watching.
 - [!] **GPU7-DEGRADED · OPERATOR: the box's GPU tier is DOWN, 1 Sep ~16:0x. GPU 7 needs a reset.**
       `nvidia-smi -i 7` returns `[Unknown Error]` for temperature and `[N/A]` for power, utilisation and
       ECC; `nvidia-smi --query-compute-apps` lists a row it cannot attribute (`[N/A], [N/A]`). Memory still
