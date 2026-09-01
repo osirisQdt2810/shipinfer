@@ -1560,7 +1560,7 @@ class _PoolCropElement(_PoolElement):
         *parallel* -- the shape ``topology/ship_person_cpu.yaml`` declares: both slots on
         ``after: detect`` with ``params: classes:`` picking their rows, rejoining at ``track``
         -- neither ever sees the other's item, and the union is taken at the rejoin instead
-        (:meth:`~shipinfer.runners.inprocess.InprocessRunner._merge_meta`). Both compositions
+        (:meth:`~shipinfer.runners.walk.ChainWalk.inbound`). Both compositions
         are legal today and neither may lose half the frame. What the *shipped* file declares
         is neither of them yet: ``topology/ship_person.yaml``'s embedders still carry
         ``when: class == ...`` and no ``classes:``, which the loader now refuses outright --

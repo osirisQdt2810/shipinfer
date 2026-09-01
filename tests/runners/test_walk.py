@@ -406,7 +406,7 @@ class TestTwoBranchesFilingTheSameMapping:
     ) -> None:
         """The refusal names the two slots at fault, and not the innocent third.
 
-        This is what :meth:`~shipinfer.runners.inprocess.InprocessRunner._collision`'s re-scan
+        This is what :class:`~shipinfer.runners.walk.ChainWalk`'s collision re-scan
         exists for, and with two branches it is untestable because the two the merge is
         holding are always the two at fault. With three it is not: ``embed_ship`` covers row 0
         and ``embed_person`` covers row 1, they union cleanly, and then ``embed_vehicle``

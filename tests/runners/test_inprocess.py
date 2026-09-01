@@ -16,6 +16,7 @@ metadata, not ``_Probe`` counters: plain ints drop updates under four workers.
 
 from __future__ import annotations
 
+import logging
 import textwrap
 import threading
 import time
@@ -1046,6 +1047,30 @@ class TestBackpressureAndFailure:
         assert "detect" in str(error) and "cam-1" in str(error) and "7" in str(error)
         assert "something nobody typed" in str(error), "the original is not lost either"
         assert runner.metrics.items_failed.value(camera="cam-1") == 1
+
+    def test_a_foreign_element_failure_is_logged_with_its_traceback(
+        self, running, caplog
+    ) -> None:
+        """The frames are the whole point for a bug, and nothing else carries them.
+
+        ``ChainWalk.typed`` *builds* an ``InferenceError`` rather than raising it, so
+        ``__cause__``/``__traceback__`` are unset on what the submitter receives: if the log
+        record does not carry ``exc_info`` the stack is gone from every channel. Pinned
+        because a refactor unified the two failure exits onto one ``_LOG.error`` and silently
+        dropped it -- 3251 green tests did not notice, because no test read a log record.
+        """
+        chain = load(detect="runner-typed", params="{class: ship, raises: foreign}")
+        runner = running(chain, settings(workers=1))
+
+        with caplog.at_level(logging.ERROR, logger="shipinfer.runners.walk"):
+            runner.submit(item("cam-1", 7)).exception(timeout=10.0)
+
+        blamed = [r for r in caplog.records if "failed on" in r.getMessage()]
+        assert blamed, f"no element-failure record: {[r.getMessage() for r in caplog.records]}"
+        assert blamed[-1].exc_info is not None, (
+            "the element failure was logged without exc_info, so the traceback naming the "
+            "element's own line is unrecoverable"
+        )
 
     def test_an_item_past_its_deadline_never_reaches_the_chain(self, running) -> None:
         """Spending a GPU on a frame that is already too late to act on is pure waste.

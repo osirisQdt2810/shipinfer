@@ -4,7 +4,7 @@ The seam this file *is*: above it a runner deals in work items, queues and threa
 everything is a :class:`ChainItem` and an element. A runner owns the queue and the workers and
 calls :meth:`ChainWalk.run` once per item; nothing in this file knows a thread exists.
 
-Three rules, all the loader's and none re-decided per runner:
+Four rules, all the loader's and none re-decided per runner:
 
 * an element whose ``when:`` rejects the item is **skipped**, and its successors receive the
   item it was given, unchanged;
@@ -93,7 +93,12 @@ class ChainWalk:
             try:
                 incoming = item if node.is_root else self.inbound(node, produced)
             except InferenceError as exc:
-                self._blame(work, exc, f"fan-in {node.name} could not be merged")
+                self._blame(
+                    work,
+                    exc,
+                    f"fan-in {node.name} could not be merged",
+                    with_traceback=False,
+                )
                 return
             if incoming is None:
                 continue
@@ -108,7 +113,12 @@ class ChainWalk:
             try:
                 result = node.element.process(incoming)
             except Exception as exc:
-                self._blame(work, exc, f"element {node.name!r} failed on {incoming.key}")
+                self._blame(
+                    work,
+                    exc,
+                    f"element {node.name!r} failed on {incoming.key}",
+                    with_traceback=True,
+                )
                 return
             produced[node.name] = result
             if result is not None:
@@ -205,17 +215,29 @@ class ChainWalk:
             else InferenceError(f"{context}: {error}")
         )
 
-    def _blame(self, work: WorkItem, error: Exception, context: str) -> None:
+    def _blame(
+        self, work: WorkItem, error: Exception, context: str, *, with_traceback: bool
+    ) -> None:
         """Count, log with the ``(camera, frame)`` tag, and fail — the one exit for a bad item.
 
         Walking on would produce a plausible event with no boxes in it, which is worse than a
         reported failure.
+
+        Args:
+            with_traceback: whether to log ``exc_info``. **Not** inferable from the error:
+                :meth:`typed` *builds* a fresh error rather than raising, so nothing chains a
+                traceback onto what the submitter receives, and if this frame does not carry it
+                the frames are gone from every channel. An element failure asks for it (the
+                bug is inside somebody else's ``process``); a fan-in failure does not, because
+                the walk raised that :class:`InferenceError` itself and its message is the
+                whole story.
         """
         self.count_failure(work, error)
         _LOG.error(
             "%s: %s",
             context,
             error,
+            exc_info=with_traceback,
             extra=log_context(
                 camera_id=work.request.context.camera_id,
                 frame_id=work.request.context.frame_id,

@@ -294,14 +294,13 @@ class InprocessRunner(Runner):
         #: slot, `frames_per_wakeup: 4` and a worker wedged on item 0, closing the queue would
         #: resolve nothing and three producers would wait forever on futures nobody owns.
         self._inflight: list[tuple[WorkItem, ...]] = [()] * self._wanted_workers
-        #: The cap the loader negotiated per edge, read by :meth:`_inbound` when a fan-in has
-        #: to substitute for a donor that produced nothing. Snapshotted here because a
-        #: topology is immutable once built, and the alternative is a dict comprehension per
-        #: fan-in per frame.
-        self._edge_caps = {(edge.producer, edge.consumer): edge.caps for edge in topology.edges}
         #: The bottom half: everything from here down is chain items and elements. See
         #: `runners/walk.py`, which is where the per-frame loop lives.
-        self._walker = ChainWalk(topology, self._metrics, self._edge_caps)
+        self._walker = ChainWalk(
+            topology,
+            self._metrics,
+            {(edge.producer, edge.consumer): edge.caps for edge in topology.edges},
+        )
         #: The cameras, or ``None`` when this runner has none: before the first start, after
         #: a stop released them, and on a started runner that has not been given one yet.
         #: Built on **first use** and never here, because constructing it imports the whole

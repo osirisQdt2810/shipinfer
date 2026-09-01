@@ -143,7 +143,7 @@ class RowIndexed(dict):  # type: ignore[type-arg]
     it (:meth:`~shipinfer.topology.elements.track.ShipvisionTrack._embeddings`).
 
     **Why a type and not a sniff.** The fan-in
-    (:meth:`~shipinfer.runners.inprocess.InprocessRunner._merge_meta`) has to tell "two
+    (:meth:`~shipinfer.runners.walk.ChainWalk.inbound`) has to tell "two
     branches each covered half the rows, union them" from "two branches disagree about one
     value, take the first". It used to answer that with ``isinstance(value, Mapping)``, and a
     mapping is exactly what it cannot distinguish on: ``_PoolElement._finish`` files a
