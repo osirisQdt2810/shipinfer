@@ -2437,7 +2437,8 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       review round: the `PR description` check failed because the body had no `### Test Details` heading.
       The template check is a separate job from the review; a missing heading cancels the review leg and
       auto-merge SKIPs, and it does not look like a BLOCKING verdict. Fixed the body, toggled the label,
-      merged. track.py + barrier.py OPEN as PR #114 (3fb909e): track 1.43 -> 1.32, barrier 1.37 ->
+      merged. track.py + barrier.py MERGED as PR #114 (b6989fc, APPROVE round 1, all five checks green):
+      track 1.43 -> 1.32, barrier 1.37 ->
       1.20, docs-only by AST, 3 files / 1 commit, tier 3257+1skip (= main's 3258; the worktree has no
       references/ checkout), topology 766, pre-commit all Passed, tree clean. #114 also TAKES #113's
       two non-blocking review findings on pool.py -- _PoolCropElement's params: key list restored
@@ -2452,7 +2453,13 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       four spaces and I copied them); the docs-only script caught a stale branch for the SECOND wave
       running, this time because I pushed a ledger commit to main from the other checkout and
       worktrees share refs, so TASKS.md appeared in the diff as its own inverse; and the dash
-      over-reach. Earlier NEAR-MISS CAUGHT: that branch was cut from origin/main
+      over-reach. #114's own review verified the docs-only claim independently AND checked the class of
+      change the AST proof cannot see -- DIRECTIVE COMMENTS (`# noqa`, `# type: ignore`, `# pragma`,
+      `# fmt:`), which are invisible to the AST and load-bearing to the tooling; counts preserved per
+      file. Worth carrying into every future prose wave. ONE non-blocking finding left OPEN by #114
+      and taken in the next PR: pool.py's "All four propagate as themselves" paragraph sits at
+      item-continuation depth inside `Raises:`, so Napoleon folds it into InferenceError's description
+      instead of rendering it as a remark. Earlier NEAR-MISS CAUGHT: that branch was cut from origin/main
       BEFORE #112 merged, so `git diff origin/main` showed base.py at +278/-148 -- exactly the inverse of
       #112, i.e. pushing would have REVERTED it inside a PR titled pool.py. Spotted because the docs-only
       script printed "checked 2 python files" when I had edited one. RULE: a tool counting more files than
