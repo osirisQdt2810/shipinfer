@@ -105,6 +105,7 @@ def pytest_configure(config) -> None:
     pin_intra_op_threads()
 
 
+# doc: long the leak it prevents is three steps long and invisible from the call site
 @pytest.fixture(autouse=True)
 def _logging_state_is_not_shared_between_tests():
     """Give every test the ``shipinfer`` logger back the way it found it.
@@ -120,11 +121,17 @@ def _logging_state_is_not_shared_between_tests():
     A whole-state snapshot rather than the one flag: handlers and level leak the same way, and
     a fixture that fixes the symptom it happened to be debugged from is how the next one hides.
     """
+    from shipinfer.core.logging import reset_for_tests
+
     logger = logging.getLogger("shipinfer")
     propagate, level, handlers = logger.propagate, logger.level, list(logger.handlers)
     try:
         yield
     finally:
+        # The logger is not the only thing `configure` writes to: `_active_sink` and
+        # `_prior_propagate` are module globals, and leaving them set makes the NEXT test's
+        # `configure` restore a previous test's propagate value over the one it just set.
+        reset_for_tests()
         for handler in list(logger.handlers):
             if handler not in handlers:
                 logger.removeHandler(handler)

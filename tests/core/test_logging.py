@@ -30,6 +30,28 @@ def _leave_logging_as_we_found_it():
         logger.addHandler(handler)
 
 
+class TestTheIsolationFixtureClearsWhatConfigureRemembers:
+    """The module globals, not just the logger — the half the first fixture stopped short of.
+
+    A test reaching `cli.common.build_settings` calls `configure(force=True)` and never
+    `shutdown()`, so `_prior_propagate` survives it; the next `configure`'s leading `shutdown`
+    then restores THAT value over the one the current test just set. Asserted rather than
+    trusted, because the fixture is autouse and so invisible from here.
+    """
+
+    def test_no_test_starts_with_state_left_by_a_previous_one(self) -> None:
+        from shipinfer.core import logging as core_logging
+
+        assert core_logging._prior_propagate is None, (
+            "a previous test left _prior_propagate set; configure() will restore its value "
+            "over this test's own"
+        )
+        assert core_logging._active_sink is None, (
+            "a previous test left _active_sink set; configure() without force early-returns "
+            "and attaches no handler at all"
+        )
+
+
 class TestShutdownGivesPropagationBack:
     def test_configure_turns_it_off_and_shutdown_turns_it_on(self) -> None:
         logger = logging.getLogger(_ROOT)
@@ -66,9 +88,9 @@ class TestShutdownGivesPropagationBack:
         with caplog.at_level(logging.ERROR, logger=f"{_ROOT}.runners.walk"):
             get_logger("runners.walk").error("a record a test would assert on")
 
-        assert [r for r in caplog.records if "would assert on" in r.getMessage()], (
-            "caplog saw nothing: records are neither handled here nor propagated up"
-        )
+        assert [
+            r for r in caplog.records if "would assert on" in r.getMessage()
+        ], "caplog saw nothing: records are neither handled here nor propagated up"
 
     def test_shutdown_without_configure_is_safe(self) -> None:
         """It is documented as safe to call when nothing is configured, and it must not

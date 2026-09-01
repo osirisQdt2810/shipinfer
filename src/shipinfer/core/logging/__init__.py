@@ -126,3 +126,18 @@ def shutdown() -> None:
     if _active_sink is not None:
         _active_sink.close()
         _active_sink = None
+
+
+def reset_for_tests() -> None:
+    """Forget everything :func:`configure` remembers, without touching the logger.
+
+    The state this module owns is not all on the logger: :data:`_active_sink` and
+    :data:`_prior_propagate` are module globals. A fixture that restores the logger but not
+    these leaves :func:`configure` reading the previous test's answer — its leading
+    :func:`shutdown` then overwrites the propagate value the current test just set. Kept here
+    rather than reached into from ``conftest.py`` so a new global is reset beside where it is
+    added.
+    """
+    global _active_sink, _prior_propagate
+    _active_sink = None
+    _prior_propagate = None
