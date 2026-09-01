@@ -116,11 +116,25 @@ exec docker run --rm --pid=host --device nvidia.com/gpu=all \
   -w /work "$IMAGE" \
   bash -c '
     set -e
+    # Two groups, and the split matters. The single list this replaced fell back to a
+    # minimal set when ANY package in it was unavailable, so one missing wheel silently
+    # dropped fastapi, opencv and scipy as well -- and the tests needing them skipped, which
+    # looks identical to passing. Required fails loudly; optional is installed one at a time
+    # so a gap costs exactly that package and SAYS SO.
     pip install -q --root-user-action=ignore --no-index --find-links=/wheels \
-      pydantic pydantic-settings typer pyyaml pytest pytest-timeout pytest-asyncio \
-      fastapi httpx starlette uvicorn anyio opencv-python-headless scipy >/dev/null 2>&1 || \
-      pip install -q --root-user-action=ignore --no-index --find-links=/wheels \
-        pydantic pydantic-settings typer pyyaml pytest pytest-timeout pytest-asyncio
+      pydantic pydantic-settings typer pyyaml pytest pytest-timeout pytest-asyncio
+    # grpcio/protobuf are here because without them 150 tests (tests/launch, the shard
+    # service, test_priority) never COLLECT in the container, so the container tier was not a
+    # superset of the host tier and nobody could see the difference.
+    # grpcio-tools is listed even though no wheel is staged today: tests/launch/
+    # test_proto_is_current.py importorskips `grpc_tools`, so its 7 tests are the last of the
+    # host tier the container cannot run, and listing it means they start running the moment
+    # the wheel is staged rather than waiting for someone to notice the gap again.
+    for package in fastapi httpx starlette uvicorn anyio opencv-python-headless scipy \
+                   grpcio protobuf grpcio-tools; do
+      pip install -q --root-user-action=ignore --no-index --find-links=/wheels "$package" \
+        >/dev/null 2>&1 || echo "NOTE: $package is not in /wheels; tests needing it will skip" >&2
+    done
     python -c "import tensorrt" 2>/dev/null || \
       pip install -q --root-user-action=ignore --no-index --find-links=/wheels tensorrt \
         >/dev/null 2>&1 || true
