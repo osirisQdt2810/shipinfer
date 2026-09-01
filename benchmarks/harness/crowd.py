@@ -1,15 +1,15 @@
 # doc: long the container-hook reasoning is why this is a library and not a `-m` entry point
 """Compose crowd frames: an N x N mosaic of the single-person bench JPEGs.
 
-**Measured before you reach for this** — the numbers live in ONE place,
-``benchmarks/tests/test_crowd_yield.py``, which asserts them against a real engine; this is a
-pointer to that table, not a second copy of it. In short: a single stock ``person`` photo
-already yields 9-19 PEOPLE per frame (mean 15.2), which is the 10-20 the sizing assumes, so
-this tool is **not** the way to raise detections per frame. A 4x4 mosaic yields 4-6, three
-times *worse*, because the detector's input is a fixed 640x640 and sixteen photos land in
-~160px cells whose people fall under the model's minimum size. A 2x2 (15-23) is modestly
-better than a single photo, so the cliff is a function of cell size rather than of mosaicing
-as such -- which is why the CLI defaults to 2 and why 4 is a footgun.
+**Measured before you reach for this**, and the numbers live in exactly one place —
+``benchmarks/tests/test_crowd_yield.py``, which asserts them against a real engine. Restating
+them here would give a re-measurement two places to go stale, so this says only what stays
+true: **a single stock photo already carries the 10-20 people the sizing assumes, and a 4x4
+mosaic yields several times FEWER.** This tool is not the way to raise detections per frame.
+
+The cliff is cell size, not mosaicing: the detector's input is a fixed 640x640, so sixteen
+photos land in ~160px cells whose people fall under the model's minimum size. A 2x2 is
+modestly better than a single photo, which is why the CLI defaults to 2 and why 4 is a footgun.
 
 What it is genuinely for: deterministic variation in per-frame load, generated from real data,
 which is what the no-fake rule permits (generated is fine; random is not). Point the bench at

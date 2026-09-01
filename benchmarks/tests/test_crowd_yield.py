@@ -34,6 +34,7 @@ represents the fan-out case, and a mosaic is not the way to get more of it.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -187,13 +188,23 @@ class TestTheBenchDataAlreadyRepresentsTheFanOutCase:
         the model's minimum size. This is the measurement that stops a bench run from citing
         mosaics as the fan-out source.
         """
-        composed = compose_crowd_frames(PHOTOS, tmp_path / "crowd", grid=4, frames=FRAMES)
         singles = sorted(PHOTOS.glob("*.jpg"))[:FRAMES]
+        # Both sides drawn from the SAME four photos. `compose_crowd_frames` otherwise reads
+        # every .jpg/.jpeg/.png in the directory, so the mosaic could be built from sources the
+        # single side never saw and the comparison would carry a second variable.
+        same = tmp_path / "same_sources"
+        same.mkdir()
+        for photo in singles:
+            shutil.copy2(photo, same / photo.name)
+        composed = compose_crowd_frames(same, tmp_path / "crowd", grid=4, frames=FRAMES)
 
         mosaic = [_count(server, path) for path in composed]
         single = [_count(server, path) for path in singles]
 
+        # One variable is left and is not worth removing: the mosaic is re-encoded at
+        # _JPEG_QUALITY while the singles are the original files. The measured effect is ~3x,
+        # far outside anything JPEG quality accounts for.
         assert np.mean(mosaic) < np.mean(single), (
             f"mosaic {mosaic} vs single {single}: if this ever passes the other way, the "
-            "detector's input size changed and the docstring's table needs re-measuring"
+            "detector's input size changed and the module docstring needs re-measuring"
         )
