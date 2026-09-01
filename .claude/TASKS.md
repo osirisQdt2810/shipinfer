@@ -2333,7 +2333,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       tier 3177 passed/1 skipped/69 deselected. GPU 5 back to 15 MiB after. pre-commit all Passed on the
       COMMITTED tree with git status clean. Body written from the diff and claim-checked: 9/9 names in
       diff, 3/3 referenced-but-not-in-diff files confirmed on main.
-- [~] **CONTAINER-TIER-15-RED · ROOT-CAUSED AND FIXED, open as PR #108. Container offline tier 15 -> 7 -> 0.**
+- [x] **CONTAINER-TIER-15-RED · FIXED and MERGED as PR #108 (9387cc63, 1 Sep), VERDICT: APPROVE after 1 round (the fixture itself had the same order-dependence; fixed with core.logging.reset_for_tests). Container offline tier 15 -> 7 -> 0.**
       One line explains all of it. `cli.common.build_settings` calls `core.logging.configure(force=True)`,
       which sets `propagate = False` on the `shipinfer` logger (so an embedder's root does not double-print).
       **Nothing calls `shutdown()`**, so the flag stays off for the process -- and with it off records reach
