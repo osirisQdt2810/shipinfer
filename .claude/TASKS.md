@@ -2508,7 +2508,17 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       violation count only 1031 -> 1012. The fix is fewer, smaller files with less prose in them.
       **DECIDED (asked, 31 Aug): all three, SEQUENTIALLY, one package per PR** -- split the oversized file,
       cut prose in the files touched, delete the superfluous helpers there. Order: runners/ first.
-- [~] **V149-runners · STEP 1 MERGED as PR #107 (bccc9811, 1 Sep), VERDICT: APPROVE after 3 rounds. 3 steps left. Step 1 detail: (9cec066, 5 files, +352/-555), 3 steps left. The cut order is chosen by measured
+- [~] **V149-runners · STEP 2 OPEN as PR #110 (the prose cut). Steps 3-4 left.**
+      Step 2: 13 docstrings in inprocess.py rewritten -- 1608 -> 1360 lines, prose 1005 -> 766, ratio
+      **2.26 -> 1.66**. Worst: _do_stop 54->26, _do_stats 46->15, _work 44->17, add_camera 36->22.
+      Archaeology went ("this used to be X and Y broke"); the reasons stayed (TRACKING_CRITICAL is 0 so
+      `or` demotes it; an abandoned worker's items are failed not forgotten; the ingest import is inside
+      the method so torch stays out of `import shipinfer.runners`). Docs-only PROVED by AST, tier 3257.
+      STILL NOT GOOD ENOUGH, and the body says so: 1.66 vs the tree's 0.86 and walk.py's 0.48, and **298
+      of the 766 remaining prose lines are inline COMMENTS** rather than docstrings -- a different job,
+      and step 3's. Step 4 is placement (4 methods / 3 attrs = a clean cut, but only ~26 lines of code,
+      so possibly not worth its own module -- decide with the numbers in front of us).
+      Step 1 detail: MERGED as PR #107 (bccc9811, 1 Sep), VERDICT: APPROVE after 3 rounds. 3 steps left. Step 1 detail: (9cec066, 5 files, +352/-555), 3 steps left. The cut order is chosen by measured
       coupling, not by my sketch.**
       Step 1: `runners/walk.py` — `ChainWalk` + `ChainWork`, 11 methods needing only 3 inputs
       (topology, metrics, edge_caps). inprocess.py 2121 -> 1608; walk.py 308 lines at **0.48** prose/code
