@@ -121,17 +121,18 @@ exec docker run --rm --pid=host --device nvidia.com/gpu=all \
     # dropped fastapi, opencv and scipy as well -- and the tests needing them skipped, which
     # looks identical to passing. Required fails loudly; optional is installed one at a time
     # so a gap costs exactly that package and SAYS SO.
+    # The control plane is REQUIRED, not optional. Without grpcio/protobuf, 119 tests --
+    # tests/launch, the shard service, core/test_priority -- never COLLECT here, and a
+    # superset that degrades to a subset on a missing wheel is not a superset. grpcio-tools
+    # brings the 7 tests in test_proto_is_current.py. Specifiers come from pyproject.toml
+    # container never installs shipinfer (it runs off PYTHONPATH), so no extra is resolved and
+    # nothing else applies them. grpcio-tools is PINNED there for a reason that bites exactly
+    # here -- 1.83 emits a different `shard_pb2_grpc.py` for the same .proto, so an unpinned
+    # protoc turns the regeneration guard red on an unmodified tree.
     pip install -q --root-user-action=ignore --no-index --find-links=/wheels \
-      pydantic pydantic-settings typer pyyaml pytest pytest-timeout pytest-asyncio
-    # grpcio/protobuf are here because without them 150 tests (tests/launch, the shard
-    # service, test_priority) never COLLECT in the container, so the container tier was not a
-    # superset of the host tier and nobody could see the difference.
-    # grpcio-tools is listed even though no wheel is staged today: tests/launch/
-    # test_proto_is_current.py importorskips `grpc_tools`, so its 7 tests are the last of the
-    # host tier the container cannot run, and listing it means they start running the moment
-    # the wheel is staged rather than waiting for someone to notice the gap again.
-    for package in fastapi httpx starlette uvicorn anyio opencv-python-headless scipy \
-                   grpcio protobuf grpcio-tools; do
+      pydantic pydantic-settings typer pyyaml pytest pytest-timeout pytest-asyncio \
+      "grpcio>=1.71.2,<2" "protobuf>=5.29,<6" "grpcio-tools==1.71.2"
+    for package in fastapi httpx starlette uvicorn anyio opencv-python-headless scipy; do
       pip install -q --root-user-action=ignore --no-index --find-links=/wheels "$package" \
         >/dev/null 2>&1 || echo "NOTE: $package is not in /wheels; tests needing it will skip" >&2
     done
