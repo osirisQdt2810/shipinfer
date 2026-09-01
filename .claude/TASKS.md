@@ -2606,7 +2606,27 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
 - [ ] **V149-topology · same for topology/ (1.40; elements/pool.py 1697, chain.py 1077, recognize.py 1031,
       track.py 945, barrier.py 900, base.py 852, mtmc.py 847).**
 - [ ] **V149-engine · same for engine/ (pool.py 1421, ensemble.py 828, spill/remote_instance.py 747).**
-- [ ] **V149-cli · cli/commands/run.py 694 -> a thin composition root.**
+- [~] **V149-cli · OPEN as PR #115 (0102bcf). run() 272 lines -> 110, 97 code lines -> 53.** Five named
+      steps: require_container / refuse_flags / _resolve / _bring_up / _serve, plus `_Plan`, a frozen
+      dataclass holding what one run resolved BEFORE any device was touched -- which makes the ordering
+      invariant visible rather than remembered (every refusal that reads a _Plan is by construction one
+      that can be made above InferenceServer's ~200 MiB-per-GPU constructor). Nothing moved across a step
+      boundary; run()'s signature is unchanged (ast.dump of its `arguments` node equals main's) and the
+      import footprint is identical (591 sys.modules entries on both, no torch/tensorrt/fastapi).
+      run.py ratio 2.24 -> 1.54, standalone comments 154 -> 56, check_docs excess 227 -> 163; the FILE
+      grows 694 -> 734 and that is the trade -- four signatures and a dataclass cost more than the prose
+      saves, and what shrank is the function a reader has to read. Also takes #114's open Napoleon
+      finding on pool.py. Tier 3259+1skip; +2 proved by DIFFING COLLECTED IDS against a clean
+      `git archive origin/main` extraction rather than comparing counts (main 3258 -> 3260, both names
+      listed, nothing removed). Two ordering tests, each revert-checked against ITS OWN mutation --
+      and the second is deliberately a CALL COUNT on device_count, not an output assertion, because an
+      output assertion still passes when the gate moves (the topology line prints either way).
+      NEAR-MISS: `git stash -q -u` on an already-clean tree stashes NOTHING, so the
+      `git checkout origin/main -- .` behind it overwrote the worktree and `git stash pop` had nothing
+      to restore; `git checkout -- .` then restored from the INDEX (still main's content). Recovered
+      with `git reset --hard HEAD` because the work was committed. RULE: never chain a destructive
+      checkout behind a stash you have not confirmed non-empty -- and commit before any experiment.
+      Original: cli/commands/run.py 694 -> a thin composition root.**
 - [x] **CONTAINER-TIER-COLLECTION · MERGED as PR #109 (7e24cee, 1 Sep), VERDICT: APPROVE after 1 round. Container now collects 3258 = EXACTLY the host count; gap 119 -> 0 (the review was right that grpcio-tools is a PyPI wheel, closing the last 7). Round 1 caught two of my errors: wheels.sh never staged the wheels so the fix was a no-op off this box, and bare package names bypassed pyproject's constraints -- protobuf had resolved to 7.36.0, two majors outside the declared <6, and an unpinned grpcio-tools would have turned test_proto_is_current red on a clean tree. Also self-inflicted: an apostrophe in a comment closed the `bash -c '...'` string and the outer shell ran the backticks (`bash -n` still passes -- the file stays valid, it just means something else). (1 file, +18/-4). The other half of the container
       problem: the tier was not a SUPERSET of the host tier and nothing said so. grpcio/protobuf were absent
       from test.sh's pip list, so tests/launch, the shard service and core/test_priority never COLLECTED
