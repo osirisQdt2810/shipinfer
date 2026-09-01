@@ -2532,6 +2532,22 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       track.py 945, barrier.py 900, base.py 852, mtmc.py 847).**
 - [ ] **V149-engine · same for engine/ (pool.py 1421, ensemble.py 828, spill/remote_instance.py 747).**
 - [ ] **V149-cli · cli/commands/run.py 694 -> a thin composition root.**
+- [~] **CONTAINER-TIER-COLLECTION · OPEN as PR #109** (1 file, +18/-4). The other half of the container
+      problem: the tier was not a SUPERSET of the host tier and nothing said so. grpcio/protobuf were absent
+      from test.sh's pip list, so tests/launch, the shard service and core/test_priority never COLLECTED
+      there. MEASURED same-worktree, same commit, only test.sh differing: **3139 -> 3251** collected against
+      a host of 3258, so the gap goes 119 -> 7. The residual 7 are test_proto_is_current.py, which
+      importorskips grpc_tools; no grpcio-tools wheel is staged, which is a host artefact not a repo one --
+      it is listed anyway so those tests start working the moment the wheel appears.
+      Also removed a silent fallback: the single install list fell back to a minimal set when ANY package
+      was unavailable, dropping fastapi/opencv/scipy too, and the tests needing them then SKIPPED, which
+      looks exactly like passing. Required now fails loudly; optional installs one at a time and NAMES what
+      is missing -- verified live: `NOTE: grpcio-tools is not in /wheels; tests needing it will skip`.
+      Container full tier **3059 passed, 0 failed** with 112 more tests running; host 3257 passed.
+      METHOD NOTE: my first before/after used `git stash` to remove the change, but the fix was COMMITTED
+      not staged, so the stash was a no-op and both runs printed the same number. Redone with
+      `git checkout origin/main -- deploy/rootless/test.sh`. A before/after that prints the same number
+      twice is a measurement bug, not a null result.
 - [!] **V124a · OPERATOR DECISION OWED (phase 2) before phase 3 can build — the crop-sampling convention.**
       Question for the operator: crops at box edges — adopt shipvision's frame-clamp convention (recommended: its
       oracle, parity suite AND native kernels all implement it) or keep shipinfer #30's patch-clamp (exists only in
