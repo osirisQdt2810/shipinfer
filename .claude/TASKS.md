@@ -2512,7 +2512,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       violation count only 1031 -> 1012. The fix is fewer, smaller files with less prose in them.
       **DECIDED (asked, 31 Aug): all three, SEQUENTIALLY, one package per PR** -- split the oversized file,
       cut prose in the files touched, delete the superfluous helpers there. Order: runners/ first.
-- [~] **V149-runners · STEP 3 OPEN as PR #111 (comments + the module/class docstrings). Step 4 left.**
+- [~] **V149-runners · STEP 3 MERGED as PR #111 (f0348ae3, APPROVE). inprocess.py 2121 -> 1242 (-41%), ratio 2.27 -> 1.39. Step 4 (placement, ~26 lines of code) left and may not warrant its own module.**  Original: STEP 3 OPEN as PR #111 (comments + the module/class docstrings). Step 4 left.**
       inprocess.py across all three steps: **2121 -> 1242 lines (-41%)**, ratio 2.27 -> **1.39**, plus a
       308-line walk.py at 0.48. Step 3 took the 298 comment lines step 2 left, and the two docstrings a
       reader meets FIRST -- module 67 lines (cap 15) and the class 39 (cap 10), i.e. 106 lines of prose
