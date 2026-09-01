@@ -157,8 +157,9 @@ def run(
         out.print(built.describe_plan())
         return 0
     return _serve(
+        out,
         built,
-        plan,
+        plan.cameras,
         engine=engine,
         http=http,
         host=_DEFAULT_HOST if host is None else host,
@@ -194,6 +195,7 @@ class _Plan:
     configured: int
 
 
+# doc: long the ordering the print sits at is only true if it is written down
 def _resolve(
     out: Console,
     topology: Path,
@@ -255,6 +257,7 @@ def _resolve(
     )
 
 
+# doc: long three race windows, each with a leak nothing else in the tree records
 def _bring_up(plan: _Plan, *, dry_run: bool) -> tuple[InferenceServer | None, Runner]:
     """Build the dependencies the chain cannot build for itself, then start everything.
 
@@ -315,6 +318,7 @@ def _bring_up(plan: _Plan, *, dry_run: bool) -> tuple[InferenceServer | None, Ru
     return engine, built
 
 
+# doc: long the founding bug's neighbourhood; the fallback's limits must be stated
 def _image_ops_for(plan: _Plan, engine: InferenceServer | None) -> ImageOps:
     """The other dependency an element cannot resolve for itself: one image-ops delegate.
 
@@ -349,9 +353,11 @@ def _image_ops_for(plan: _Plan, engine: InferenceServer | None) -> ImageOps:
     )
 
 
+# doc: long the teardown order is a correctness argument, not a description
 def _serve(
+    out: Console,
     built: Runner,
-    plan: _Plan,
+    cameras: Sequence[CameraSpec],
     *,
     engine: InferenceServer | None,
     http: bool,
@@ -376,9 +382,8 @@ def _serve(
         ``0``, or ``1`` when a shard exited under the fleet: an operator-facing failure with
         its own message, not a traceback.
     """
-    out = console()
     try:
-        place_cameras(built, plan.cameras)
+        place_cameras(built, cameras)
         _wait(built, http=http, host=host, port=port, log_level=log_level)
     except ShardExitedError as exc:
         out.print(f"[red]{exc}[/red]")

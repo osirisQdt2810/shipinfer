@@ -1,7 +1,9 @@
 """``shipinfer run``: what it resolves, what it refuses, and what it prints before spawning.
 
-Offline throughout — every test here stops at ``--dry-run``, which returns before the
-container gate and before a process exists. What is asserted is the wiring: the chain is read
+Offline throughout. Almost every test stops at ``--dry-run``, which returns before the
+container gate and before a process exists; the one that does not
+(``test_the_container_gate_is_asked_before_anything_is_resolved``) patches the gate to refuse,
+so it still spawns nothing. What is asserted is the wiring: the chain is read
 *once* and both halves of it reach the runner, the two placement flags land in the settings
 tree rather than in a runner-specific keyword, and a flag that does nothing yet says so
 instead of being ignored.
