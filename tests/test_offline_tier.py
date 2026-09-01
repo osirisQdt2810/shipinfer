@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -76,3 +77,69 @@ class TestAskingTheDriverCannotAbortCollection:
         assert count == 0
         assert failure is not None and "CUDA driver initialization failed" in failure
         assert probe_device_count(lambda: 4) == (4, None)
+
+
+class TestEveryDeviceTierTestSitsUnderTheGate:
+    """A `mark.gpu` module in a directory whose conftest chain lacks the guards runs the
+    device tier with no container gate and no no-device skip.
+
+    `benchmarks/tests/test_crowd_yield.py` was the first such module, and the invocation its
+    own test plan documented — `pytest -m gpu benchmarks/tests/test_crowd_yield.py` — loaded
+    neither guard, because `tests/conftest.py` is directory-scoped and `tests/` was not among
+    the collected paths.
+    """
+
+    #: The hooks that carry `containment.require_container` and the no-device skip.
+    GUARDS = ("pytest_configure", "pytest_collection_modifyitems")
+
+    def _gpu_modules(self) -> list[Path]:
+        root = Path(__file__).resolve().parents[1]
+        return [
+            path
+            for path in root.rglob("test_*.py")
+            if "3rdparty" not in path.parts
+            and ".venv" not in path.parts
+            and "mark.gpu" in path.read_text(encoding="utf-8")
+        ]
+
+    def test_the_benchmarks_conftest_re_exports_the_very_same_hooks(self) -> None:
+        """Re-exported, not reimplemented, so the two directories cannot drift apart.
+
+        Identity and not equality: a copy that merely behaves the same today is the thing this
+        asserts against.
+        """
+        import benchmarks.tests.conftest as bench_conftest
+        import tests.conftest as root_conftest
+
+        for guard in self.GUARDS:
+            assert getattr(bench_conftest, guard) is getattr(root_conftest, guard), (
+                f"benchmarks/tests/conftest.py provides its own {guard} instead of the one in "
+                f"tests/conftest.py; the two gates will drift"
+            )
+
+    def test_there_is_at_least_one_to_check(self) -> None:
+        """Without this the next test passes on an empty sweep."""
+        assert self._gpu_modules(), "found no `mark.gpu` module; the sweep is broken"
+
+    def test_each_one_has_an_ancestor_conftest_providing_the_guards(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        unguarded = []
+        for module in self._gpu_modules():
+            guarded = False
+            for parent in [module.parent, *module.parent.parents]:
+                conftest = parent / "conftest.py"
+                if conftest.is_file():
+                    text = conftest.read_text(encoding="utf-8")
+                    if all(guard in text for guard in self.GUARDS):
+                        guarded = True
+                        break
+                if parent == root:
+                    break
+            if not guarded:
+                unguarded.append(str(module.relative_to(root)))
+
+        assert not unguarded, (
+            f"these `mark.gpu` modules have no ancestor conftest providing {self.GUARDS}, so "
+            f"a targeted `pytest -m gpu <path>` on them runs the device tier ungated: "
+            f"{unguarded}"
+        )
