@@ -27,7 +27,8 @@ echo "==> downloading ${ABI} wheels into $DEST"
   pydantic pydantic-settings typer pyyaml numpy scipy \
   pytest pytest-timeout pytest-asyncio \
   fastapi httpx starlette uvicorn anyio \
-  opencv-python-headless
+  opencv-python-headless \
+  "grpcio>=1.71.2,<2" "protobuf>=5.29,<6" "grpcio-tools==1.71.2"
 
 # TensorRT is not on PyPI for this platform, but the host install ships the wheels it was
 # built with, so copy the one matching the container's interpreter.
