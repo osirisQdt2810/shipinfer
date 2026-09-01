@@ -1,32 +1,22 @@
 """The element contract: one processing step with declared caps and a lifecycle.
 
-An **element** is the first of arch.md's three concepts (§1): one step of the perception
-chain — ``decode``, ``detect``, ``segment``, ``embed``, ``recognize``, ``track``, ``mtmc``,
-``output`` — with interchangeable implementations behind a registry, in the same shape the
-ingest sources already use.
+An **element** is the first of arch.md's three concepts: one step of the chain -- ``decode``,
+``detect``, ``segment``, ``embed``, ``recognize``, ``track``, ``mtmc``, ``output`` -- with
+interchangeable implementations behind a registry.
 
-Three deliberate absences, because each one is what keeps this package pure and testable
-with no driver installed:
+Three deliberate absences, each keeping this package pure and testable with no driver:
 
-1. **No engine import.** A ``pool`` element submits to the model pool, but it receives that
-   pool through the :class:`ElementContext` handed to :meth:`Element.open`. Dependencies
-   arrive; they are never imported. That inversion is the only reason ``topology`` can sit
-   directly on ``core``.
-2. **No batching.** :meth:`Element.process` takes **one** :class:`ChainItem`. Batching is
-   the engine's job (arch.md §5④), where a batch is assembled across cameras from the
-   per-model queue; a pipeline worker walks a single frame through the chain (§5③). An
-   element that batched internally would be a second, invisible scheduler.
-3. **No placement.** Which GPU, which shard and which process is the runner's business
-   (§1). An element is told, via :class:`ElementContext`, and does not choose.
+1. **No engine import.** A ``pool`` element receives the pool through :class:`ElementContext`
+   at :meth:`Element.open`. Dependencies arrive; they are never imported. That inversion is
+   why ``topology`` can sit directly on ``core``.
+2. **No batching.** :meth:`Element.process` takes **one** :class:`ChainItem`; batching is the
+   engine's job. An element that batched internally would be a second, invisible scheduler.
+3. **No placement.** Which GPU, which shard, which process is the runner's business.
 
-``open`` / ``process`` / ``close`` are **template methods**, exactly as
-:class:`~shipinfer.ingest.base.FrameSource` does it, and for the same reason: the
-invariants below would otherwise be re-implemented — and eventually mis-implemented — once
-per implementation.
-
-* ``open`` is idempotent and unwinds a partial failure before re-raising;
-* ``close`` is idempotent, so a restart path and a shutdown path can both call it;
-* ``process`` before ``open`` is a typed refusal, not undefined behaviour.
+``open`` / ``process`` / ``close`` are **template methods**, so the invariants are written
+once rather than re-implemented per element: ``open`` is idempotent and unwinds a partial
+failure before re-raising, ``close`` is idempotent, and ``process`` before ``open`` is a
+typed refusal rather than undefined behaviour.
 """
 
 from __future__ import annotations
@@ -134,44 +124,21 @@ _KEEP: Final[Any] = object()
 class RowIndexed(dict):  # type: ignore[type-arg]
     """A ``meta`` value that is a **scatter-back**: ``{detection row: that row's result}``.
 
-    A plain ``dict`` in every respect that matters at runtime — the type *is* the payload of
-    this class, and it carries no behaviour. What it carries is a **declaration**: the value
-    under this metadata key is keyed by *detection row index* and is therefore partial by
-    design, so two elements that both filed one over disjoint rows describe one frame between
-    them and their answers compose. ``PoolEmbed`` files one per frame
-    (:meth:`~shipinfer.topology.elements.pool._PoolCropElement._scatter`) and ``track`` reads
-    it (:meth:`~shipinfer.topology.elements.track.ShipvisionTrack._embeddings`).
+    A plain ``dict`` at runtime; what it adds is a **declaration** -- the value under this key
+    is keyed by detection row and therefore partial by design, so two elements that each
+    filed one over disjoint rows compose into one frame.
 
     **Why a type and not a sniff.** The fan-in
-    (:meth:`~shipinfer.runners.walk.ChainWalk.inbound`) has to tell "two
-    branches each covered half the rows, union them" from "two branches disagree about one
-    value, take the first". It used to answer that with ``isinstance(value, Mapping)``, and a
-    mapping is exactly what it cannot distinguish on: ``_PoolElement._finish`` files a
-    model's raw ``response.outputs`` — a ``{output name: Tensor}`` dict — under its own
-    ``meta_key``, and ``segment`` and ``recognize`` both keep that default. Sniffed, two
-    rejoining segmenters either refuse every frame (engines that name their output the same
-    collide on the *name*) or silently fabricate a composite ``{'ship_masks': …,
-    'person_masks': …}`` that no engine emitted. Neither mapping says what shape it is, so
-    the merge guessed — and this class is the shape saying so itself. Declaring it costs the
-    writer one constructor call and buys the reader a total answer.
+    (:meth:`~shipinfer.runners.walk.ChainWalk.inbound`) must tell "two branches covered half
+    the rows each, union them" from "two branches disagree, take the first". It used to ask
+    ``isinstance(value, Mapping)`` -- and a mapping is exactly what it cannot decide on, since
+    ``_PoolElement._finish`` files a model's raw ``{output name: Tensor}`` under its own
+    ``meta_key``. Sniffed, two rejoining segmenters either refuse every frame or fabricate a
+    composite no engine emitted. So **only a** ``RowIndexed`` **unions**; any other mapping
+    keeps first-writer-wins, which is what a value with no declared attribution should get.
 
-    So: **only a** ``RowIndexed`` **unions at a fan-in.** Any other mapping keeps the
-    first-writer-wins rule that predates the union, which is what an undeclared value should
-    get — it is a value the runner has no attribution rule for, not one it may invent one for.
-
-    Being a ``dict`` subclass is the other half of the design. Every consumer that tests
-    ``isinstance(..., Mapping)``, iterates it, or does ``dict(...)`` on it keeps working
-    unchanged, so nothing downstream had to learn the name; and a chain that files a bare
-    ``{row: vector}`` still reaches ``track`` correctly, it merely does not get the union it
-    never asked for.
-
-    It lives here, next to :class:`ChainItem`, because it is a statement about ``ChainItem.
-    meta`` — the only place these values exist — and because ``topology`` is the deepest
-    layer both sides of the contract may import: the elements that write it are
-    ``topology.elements``, the fan-in that reads it is ``runners``, and ``runners`` imports
-    ``topology`` (``scripts/hooks/check_layers.py``). ``core`` is the other layer both may
-    reach, and it is the wrong one: ``core`` has no word for a chain item and must not gain a
-    vocabulary for one metadata dict's conventions.
+    Subclassing ``dict`` is the other half: every consumer that iterates it or calls
+    ``dict(...)`` keeps working, so nothing downstream had to learn the name.
     """
 
     __slots__ = ()
@@ -181,25 +148,21 @@ class RowIndexed(dict):  # type: ignore[type-arg]
 class ChainItem:
     """One unit of work travelling along the chain, and the tag that identifies it.
 
-    The invariant this type exists to hold is ADR-002's: **the ``(camera_id, frame_id)``
-    tag rides untouched from ingest to the last element**. Every element derives its output
-    from its input with :meth:`derive` rather than constructing a fresh item, so a new
-    implementation cannot forget to carry the tag forward — the mistake that makes a
-    reassembled frame mix two cameras.
+    Holds ADR-002's invariant: **the ``(camera_id, frame_id)`` tag rides untouched from ingest
+    to the last element**. Elements derive their output with :meth:`derive` rather than
+    constructing a fresh item, so a new implementation cannot forget to carry it -- the
+    mistake that makes a reassembled frame mix two cameras.
 
-    ``slots=True`` and not frozen: one of these exists per frame per element — at 1000 fps
-    through a nine-element chain, nine thousand a second — and the mutable ``meta`` dict is
-    the point, not an oversight.
+    ``slots=True`` and not frozen: one exists per frame per element -- nine thousand a second
+    on a nine-element chain at 1000 fps -- and the mutable ``meta`` is the point.
 
     Args:
         context: the tag. Never replaced, only carried.
-        caps: what ``payload`` currently is. Set by the producing element to the cap the
-            loader negotiated for the edge, so a consumer never has to guess.
-        payload: the frame, the crops, the tensor — whatever this element's caps describe.
-            Typed ``object`` because ``core`` has no word for a device buffer and topology
-            must not learn one; the caps are the contract, not the Python type.
-        meta: accumulated results — boxes, classes, vectors, track ids. Additive: an
-            element adds keys and does not remove another's.
+        caps: what ``payload`` currently is, set by the producing element to the cap the
+            loader negotiated, so a consumer never guesses.
+        payload: frame, crops or tensor. Typed ``object`` because ``core`` has no word for a
+            device buffer and topology must not learn one; the caps are the contract.
+        meta: accumulated results. Additive: an element adds keys, never removes another's.
     """
 
     context: RequestContext
@@ -269,23 +232,15 @@ class ImageOpsLike(Protocol):
     """The preprocessing an element needs, as a shape rather than an import.
 
     :class:`shipinfer.runtime.ops.base.ImageOps` satisfies this, and ``topology`` may not say
-    so: ``runtime`` is the accelerator seam and a pure layer that named it would put torch
-    behind ``import shipinfer.topology``. The same inversion as :class:`ModelResolver` — the
-    runner is handed an ops implementation, resolves it once and puts it on
-    :attr:`ElementContext.ops`; the element calls it and never learns where it came from.
+    so: naming ``runtime`` would put torch behind ``import shipinfer.topology``. Same
+    inversion as :class:`ModelResolver` -- the runner resolves an implementation once and puts
+    it on :attr:`ElementContext.ops`.
 
-    Deliberately **narrower** than ``ImageOps``. Two members are here, because two are what
-    the elements call: ``letterbox_batch`` for the detector (``pipeline/graph/detect.py`` is
-    the proven path it follows: one letterbox per frame, its ``scales``/``pads``/``extents``
-    stored and handed to the decode) and ``crop_batch`` for the embedder
-    (``pipeline/graph/crop.py``: one call for all N boxes of a frame, never a Python loop
-    around a kernel launch). ``nms`` and ``letterbox_to_device`` are real and are absent on
-    purpose — a protocol member nobody calls is a coupling nobody needs, and the element that
-    needs one adds it with a test, which is exactly how ``crop_batch`` arrived.
-
-    ``params`` and ``dst_size`` are the caller's business: an element is *told* what the model
-    wants, through its own ``params:`` or the runner's context. Typing ``params`` as ``Any``
-    rather than importing ``NormalizeParams`` is the same purity argument one member down.
+    Deliberately **narrower** than ``ImageOps``: two members, because two are what elements
+    call -- ``letterbox_batch`` for the detector and ``crop_batch`` for the embedder. ``nms``
+    and ``letterbox_to_device`` are absent on purpose; a protocol member nobody calls is a
+    coupling nobody needs, and the element that needs one adds it with a test, which is how
+    ``crop_batch`` arrived.
     """
 
     def letterbox_batch(
@@ -316,27 +271,21 @@ class ImageOpsLike(Protocol):
     ) -> Any:
         """Cut N boxes out of one frame and resize them into one ``(N, C, h, w)`` tensor.
 
-        The mirror of :meth:`letterbox_batch` for the fan-out: one frame in, one row per
-        detection out. **One call for all N boxes** — the signature is batched precisely so
-        that a per-crop Python loop around a kernel launch is hard to write (CONVENTIONS 2.5),
-        and at 10-20 people a frame across a thousand frames a second that loop is the
-        difference between a shard that keeps up and one that does not.
+        The mirror of :meth:`letterbox_batch` for the fan-out. **One call for all N boxes** --
+        the signature is batched so a per-crop Python loop around a kernel launch is hard to
+        write (CONVENTIONS 2.5); at 10-20 people a frame and a thousand frames a second that
+        loop is the difference between a shard that keeps up and one that does not.
 
         The rows come back in the order the boxes went in, which is the whole basis of the
-        scatter-back: the element that called this holds the detection index of every box and
-        pairs it with the row at the same position. Losing that order is how an embedding ends
-        up attached to the wrong object — a corruption with no exception and no symptom short
-        of a tracker that swaps identities.
+        scatter-back. Losing that order attaches an embedding to the wrong object -- a
+        corruption with no exception and no symptom short of a tracker swapping identities.
 
         Args:
-            image: the ``(H, W, 3)`` uint8 source frame, in **source** pixels — not the
-                letterboxed one the detector submitted. Cropping from the full-resolution
-                frame is both cheaper and sharper than cropping the letterbox and resizing
-                again (``pipeline/graph/crop.py``).
-            boxes: ``(N, 4)`` float32 ``[x1, y1, x2, y2]`` in ``image`` pixel coordinates —
-                the layout :class:`~shipinfer.topology.elements.detections.Detections` stores.
-            dst_size: ``(height, width)`` of one crop, matching the consuming model's declared
-                input.
+            image: the ``(H, W, 3)`` uint8 **source** frame, not the letterboxed one -- from
+                full resolution is both cheaper and sharper than cropping the letterbox.
+            boxes: ``(N, 4)`` float32 ``[x1, y1, x2, y2]`` in ``image`` pixels, the layout
+                :class:`~shipinfer.topology.elements.detections.Detections` stores.
+            dst_size: ``(height, width)`` of one crop, matching the consuming model's input.
             params: normalisation and channel order, as for :meth:`letterbox_batch`.
         """
         ...
@@ -347,20 +296,18 @@ class CameraGroup:
     """Cameras that have to be placed on one runner, and the name they are grouped under.
 
     What :meth:`Element.camera_group` answers. A cross-camera element associates one group
-    against one identity space, and that state lives in one process: split the group across
-    two shards and each half runs its own tracker, so one object is given two ids, both of
-    them plausible, and nothing in the metrics disagrees (``docs/arch.md`` §4).
+    against one identity space living in one process: split the group across two shards and
+    each half runs its own tracker, giving one object two plausible ids with nothing in the
+    metrics disagreeing (arch.md section 4).
 
-    The element declares the membership; **the runner decides the placement**, because only
-    the runner knows where any camera is. This object is the whole of what crosses between
-    them, which is what keeps the fleet from having to know that ``mtmc`` exists.
+    The element declares membership; **the runner decides placement**, because only the runner
+    knows where a camera is. This object is all that crosses between them, which is what keeps
+    the fleet from having to know ``mtmc`` exists.
 
     Args:
-        name: what to call the group in a refusal — the element's ``params: group:``, or its
-            slot name when the chain did not say.
-        cameras: the declared roster. Never empty: an element with nothing to declare answers
-            ``None`` rather than an empty group, so "this chain does not group cameras" and
-            "this chain groups them into nothing" cannot be the same value.
+        name: what to call the group in a refusal -- ``params: group:``, or the slot name.
+        cameras: the declared roster. Never empty, so "does not group cameras" and "groups
+            them into nothing" cannot be the same value.
     """
 
     name: str
@@ -372,69 +319,40 @@ class ElementContext:
     """Everything the surrounding runner tells an element at :meth:`Element.open`.
 
     Frozen: this is what the runner *decided*, and an element that could edit it would be
-    choosing its own placement. Every field is optional so that a chain can be loaded,
-    validated and walked before any of the three exist — which is what the offline tier
-    does.
+    choosing its own placement. Every field is optional so a chain can be loaded, validated
+    and walked before any of them exist -- which is what the offline tier does.
 
     Args:
-        shard_id: which shard process this element belongs to (arch.md §2). Stateful
-            elements key their per-camera state on the camera id, never on this; it is for
-            logs, metrics and the one decision ``scope: global`` needs.
-        device: the GPU this shard owns, or ``None`` on a host with no accelerator.
+        shard_id: which shard process this element belongs to (arch.md section 2). For logs,
+            metrics and ``scope: global``; stateful elements key on the camera id.
+        device: the GPU this shard owns, or ``None``.
         models: the model pool, for elements of kind ``pool``.
-        stage_timeout_s: how long an element may wait for one model call, resolved by the
-            runner from ``pipeline.stage_timeout_ms``. ``None`` means the runner did not say,
-            and an element falls back to its own module default.
-        input_name: the input tensor name a decoded frame is submitted under, resolved by the
-            runner from ``ingest.input_name``. ``None`` means the runner did not say.
-        metrics: the registry an element records its own counters on, so that one exporter
-            carries the runner's numbers and the chain's rather than two halves of a dropped
-            frame living in different places. ``None`` means the runner offered none, and an
-            element must then count nothing rather than mint a private registry nobody
-            scrapes — a metric on a registry no exporter reads is worse than an absent one,
-            because it reads as evidence.
-        workers: how many pipeline workers will walk this chain concurrently. The number an
-            element needs to know it must not block *all* of them: the walk is synchronous,
-            so an element that waits for other cameras' frames — an MTMC barrier is the
-            standing case — can close its instant only by timeout once every worker is parked
-            inside it. ``None`` means the runner did not say, and an element that needs the
-            number must then refuse to wait at all rather than guess one.
-        waiter_budget: the permits those waits are drawn from, **shared by every element in
-            this process**. ``workers`` alone is not enough, because each element counts only
-            its own waiters: a chain with two ``mtmc`` slots would have each barrier admit
-            ``workers - 1`` and park every worker between them. One
-            :class:`~shipinfer.topology.barrier.WaiterBudget` with ``workers - 1`` permits,
-            built by the runner, makes the invariant hold however many waiting elements there
-            are. ``None`` means the runner did not say, and an element that waits then falls
-            back to a private budget sized from ``workers`` — correct when it is the only
-            such element, which is what the offline tier builds.
-        ops: batched image preprocessing, bound to this shard's device, in the same shape
-            ``models=`` already has -- ``shipinfer run`` (``cli/commands/run.py``) or the
-            shard process (``cli/shard.py``) resolves one implementation from ``runtime.ops``,
-            the layer that may import torch, and hands it to the runner, which puts it here.
-            What arrives is a ``ThreadLocalImageOps``, because a chain is walked by
-            ``pipeline.workers`` threads over one shared element and an ``ImageOps`` belongs
-            to one thread. ``None`` means the runner resolved none, which is the normal answer
-            for a chain no element of which declares
-            :attr:`~shipinfer.topology.base.Element.needs_image_ops`; an element that needs it
-            and finds ``None`` must raise, rather than falling back to a per-image loop in
-            Python.
+        stage_timeout_s: how long an element may wait for one model call. ``None`` means the
+            runner did not say, and the element falls back to its module default.
+        input_name: the input tensor name a decoded frame is submitted under.
+        metrics: the registry an element records on, so one exporter carries both the
+            runner's numbers and the chain's. ``None`` means count nothing rather than mint a
+            private registry -- a metric no exporter reads is worse than none, because it
+            reads as evidence.
+        workers: how many workers will walk this chain concurrently. The number an element
+            needs to know it must not block *all* of them: the walk is synchronous, so an
+            element that waits for other cameras (an MTMC barrier) closes its instant only by
+            timeout once every worker is parked in it. ``None`` means refuse to wait.
+        waiter_budget: the permits those waits draw from, **shared by every element in this
+            process**. ``workers`` alone is not enough: each element counts only its own
+            waiters, so two ``mtmc`` slots would each admit ``workers - 1`` and park every
+            worker between them.
+        ops: batched image preprocessing bound to this shard's device, in the shape
+            ``models=`` has. What arrives is a ``ThreadLocalImageOps``, because one shared
+            element is walked by many threads. An element that needs it and finds ``None``
+            must raise rather than fall back to a per-image Python loop.
 
-    The last five are **resolved settings, not settings**. ``topology`` is a pure package and
-    must not import :mod:`shipinfer.core.settings`, :mod:`shipinfer.runners` or
-    :mod:`shipinfer.runtime` — an element that read the settings tree itself would also be
-    choosing its own configuration, which is the thing this frozen object exists to prevent,
-    and one that imported the ops registry would put torch behind ``import
-    shipinfer.topology``. So the runner resolves each of them once and hands over what an
-    element cannot otherwise know, and an element resolves the two it can also be told twice
-    with a fixed precedence: its own ``params:``, then this context, then its module default.
-    Without them the two settings keys mirrored in ``topology/elements/pool.py`` would apply
-    to nothing.
-
-    ``metrics`` and ``ops`` are the two that arrive as **objects rather than numbers**, and
-    both are typed structurally for the reason above: ``MetricsRegistry`` lives in ``core``,
-    which this layer may import, and an ops implementation does not, which is why
-    :class:`ImageOpsLike` exists.
+    The last five are **resolved settings, not settings**. ``topology`` is pure and must not
+    import ``core.settings``, ``runners`` or ``runtime``: an element that read the settings
+    tree would be choosing its own configuration, and one that imported the ops registry
+    would put torch behind ``import shipinfer.topology``. So the runner resolves each once,
+    and an element resolves what it can be told twice in a fixed precedence -- its own
+    ``params:``, then this context, then its module default.
     """
 
     shard_id: int = 0
@@ -451,28 +369,21 @@ class ElementContext:
 class Element(abc.ABC):
     """One step of the chain. Subclass, declare caps, register, done.
 
-    Subclasses declare four class attributes and implement two hooks. The class attributes
-    are read by the loader *before* anything is instantiated, which is what lets a chain be
-    validated end to end without opening a camera or a CUDA context.
+    Subclasses declare four class attributes and implement two hooks. The attributes are read
+    by the loader *before* anything is instantiated, which is what lets a chain be validated
+    end to end without opening a camera or a CUDA context.
 
     Args:
-        name: the slot this element fills in the chain (``embed_ship``), not its
-            implementation name. Two embedders differ by this and by their params.
+        name: the slot this element fills (``embed_ship``), not its implementation name.
         params: implementation-specific settings, straight from the chain's ``params:``.
-        model: the repository model this element runs, from the chain's ``model:``, or
-            ``None`` for the four kinds that have no model (``decode``, ``track``, ``mtmc``,
-            ``output``). Keyword-only, and a plain string: an element resolves it to a
-            handle through :attr:`ElementContext.models` at ``open``, because a *name* is
-            data the loader can validate on a laptop and a *handle* is not.
+        model: the repository model this element runs, or ``None`` for the four kinds that
+            have none. A plain string, not a handle: a *name* is data the loader can validate
+            on a laptop, and an element resolves it through :attr:`ElementContext.models` at
+            ``open``. An implementation overriding ``__init__`` must accept and forward it.
 
-    An implementation that overrides ``__init__`` must accept ``model`` and forward it --
-    :func:`~shipinfer.topology.registry.create_element` always passes it, so a two-argument
-    constructor is a ``TypeError`` at load time.
-
-    ``__init__`` must be **cheap and hardware-free**. The loader instantiates every element
-    in the chain to read its caps, so a constructor that opened a stream or a CUDA context
-    would make ``shipinfer`` unable to *validate* a topology on a laptop. Acquire resources
-    in ``_do_open``; that is what it is for.
+    ``__init__`` must be **cheap and hardware-free**: the loader instantiates every element to
+    read its caps, so a constructor that opened a stream or a CUDA context would make it
+    impossible to *validate* a topology on a laptop. Acquire in ``_do_open``.
     """
 
     #: Which kind of step this is. Left ``None`` on the ABC so that the registry can refuse
@@ -704,68 +615,38 @@ class Element(abc.ABC):
     def camera_added(self, camera_id: str) -> None:
         """A camera is now placed on this element's runner. Reset any state held for its id.
 
-        Called **after** the ingest actor exists, so a refused placement — a duplicate id, a
-        stopped runner, a source nobody registered — announces nothing. That order costs a
-        window: the actor is started before this returns, so on a camera that opens instantly
-        a frame can reach ``process`` before this hook does. The window is worth it, because
-        the alternative is telling every element about a camera that was refused, and an
-        element cannot tell that apart from one that was placed and never sent a frame. What
-        it costs is bounded and local: an element that meets an unexpected camera id builds
-        its state lazily, and at worst the first frame of a *re-added* camera is refused by
-        state this call was about to clear.
+        Called **after** the ingest actor exists, so a refused placement announces nothing.
+        That costs a window -- on a camera that opens instantly a frame can reach ``process``
+        before this hook does -- and the window is worth it, because an element cannot tell a
+        refused placement from one that was placed and never sent a frame.
 
         **This is not serialised against the walk. Guard your own state.** The hook runs on
-        the thread that called ``add_camera``, holding the runner's ``_lifecycle`` lock -- the
-        ``RLock`` that serialises ``start``, ``stop``, ``add_camera``, ``remove_camera`` and
-        ``drain``, and nothing else. The walk takes no lock at all (``runners/base.py``:
-        ``_lifecycle`` is "deliberately *not* taken by ``submit``"), so up to
-        :attr:`ElementContext.workers` worker threads can be inside *this element's*
-        :meth:`process` -- including for *this camera* -- while this call is running. An
-        implementation must therefore hold its own lock around its per-camera table;
-        ``pipeline/graph/tracking.py``'s ``_admit`` is the shape (one lock around insertion
-        into the map, never held across the work itself, so one slow camera cannot stall the
-        other forty-nine).
+        the caller's thread holding the runner's ``_lifecycle`` lock, which orders the
+        lifecycle operations against each other and *nothing else*. The walk takes no lock, so
+        up to :attr:`ElementContext.workers` threads can be inside this element's
+        :meth:`process` -- for this camera -- while this runs. Hold your own lock around the
+        per-camera table (``pipeline/graph/tracking.py``'s ``_admit`` is the shape), never
+        across the work itself, so one slow camera cannot stall the other forty-nine.
 
-        **Return promptly.** Every lifecycle operation on this runner queues behind this
-        call, so a hook that waits on a model, a socket or another camera's frame stalls the
-        shard's whole control plane -- including the ``stop`` that would end the wait.
-
-        Called only between :meth:`open` and :meth:`close`, so an implementation may assume
-        its resources exist.
+        **Return promptly**: every lifecycle operation queues behind this call, including the
+        ``stop`` that would end a wait. Called only between :meth:`open` and :meth:`close`.
         """
 
     def camera_removed(self, camera_id: str) -> None:
         """A camera is gone from this element's runner. Drop everything held for its id.
 
-        Called **after** the ingest actor is stopped, which is the safe order and the reason
-        it is worth stating: dropping per-camera state while a decoder is still publishing
-        would let the very next frame rebuild it, and the element would end up holding state
-        for a camera nobody is reading — the leak this hook exists to close, reintroduced by
-        the order it was closed in.
+        Called **after** the ingest actor is stopped: dropping state while a decoder is still
+        publishing would let the next frame rebuild it, reintroducing the leak this hook
+        closes.
 
-        **"After the actor is stopped" is not "after the last frame", and this hook is not
-        serialised against the walk.** It runs on the thread that called ``remove_camera``
-        (or ``drain``), holding the runner's ``_lifecycle`` lock -- which serialises the
-        lifecycle operations against each other and nothing else. The walk takes no lock
-        (``runners/base.py``: ``_lifecycle`` is "deliberately *not* taken by ``submit``"), so
-        a worker can be inside *this element's* :meth:`process` for *this very camera* at the
-        moment this is called, and up to :attr:`ElementContext.workers` of them can be at
-        once. A removal racing an in-flight frame is ordinary rather than a bug to assert
-        against, and it has two consequences an implementation has to be written for: state
-        this call drops can be rebuilt by a frame that was already in the lane, and
-        ``remove_camera`` answering ``False`` means the decoder thread was abandoned at its
-        deadline rather than joined, so a late item can arrive well after that. So: hold the
-        element's own lock around its per-camera table (``pipeline/graph/tracking.py``'s
-        ``_admit`` is the shape), make the drop idempotent, and handle a late item as a first
-        frame rather than as an impossibility.
+        Same threading contract as :meth:`camera_added` -- not serialised against the walk,
+        so guard your own table and return promptly. Two consequences specific to removal:
+        state this drops can be rebuilt by a frame already in the lane, and ``remove_camera``
+        answering ``False`` means the decoder was abandoned at its deadline rather than
+        joined, so a late item can arrive well after. Make the drop idempotent and treat a
+        late item as a first frame.
 
-        **Return promptly.** ``_lifecycle`` serialises ``start``, ``stop``, ``add_camera``,
-        ``remove_camera`` and ``drain``, so a hook that waits holds up every one of them --
-        including the ``stop`` that would end the wait.
-
-        Called only between :meth:`open` and :meth:`close`. Shutdown does **not** call it for
-        every camera — :meth:`close` releases everything, per camera or not, and announcing
-        fifty removals on the way out would only be a slower spelling of that.
+        Shutdown does **not** call this per camera: :meth:`close` releases everything.
         """
 
     # -- what a runner may ask of any element -------------------------------------------
@@ -773,29 +654,18 @@ class Element(abc.ABC):
     def camera_group(self) -> CameraGroup | None:
         """The cameras this element must see **together**, or ``None``. Default: ``None``.
 
-        Asked by a runner that places cameras across processes, once, when it is built. An
-        element that associates across cameras — ``mtmc`` is the standing case — holds one
-        identity space for a group, and that state lives in one process; a runner that split
-        the group would give each half its own tracker and one object two ids, both plausible
-        (``docs/arch.md`` §4). So the element declares the membership and the runner enforces
-        the placement, which is the only split that works: the element is told
-        :attr:`ElementContext.shard_id` and nothing about where any *camera* is, and it opens
-        before a single camera has been placed, so it cannot see a split; the runner owns
+        Asked once by a runner that places cameras across processes. An element that
+        associates across cameras -- ``mtmc`` is the standing case -- holds one identity space
+        for a group, and that state lives in one process; a runner that split the group would
+        give one object two ids (arch.md section 4).
+
+        The element declares membership and the runner enforces placement, which is the only
+        split that works: the element knows its ``shard_id`` and nothing about where any
+        camera is, and it opens before any camera is placed; the runner owns
         ``{camera_id: shard_id}`` and cannot know which cameras belong together.
 
-        **A hook and not a kind test**, deliberately. A runner asking every node
-        ``node.element.camera_group()`` needs no ``ElementKind`` switch, no import of an
-        element implementation module, and no second parse of a ``params:`` key the element
-        has already read — which is the ``if/elif`` per implementation that ADR-017 §2's
-        registry exists to delete.
-
-        Called on an element that may not be open, so answer from ``params:`` alone.
-
-        Returns:
-            The group, or ``None`` for the ordinary element that does not constrain
-            placement — including one that *is* cross-camera but whose chain declared no
-            roster, because "the chain did not say" and "the chain grouped nothing" are
-            different facts and only the first one lets the runner balance by load.
+        **A hook, not a kind test**: asking every node needs no ``ElementKind`` switch and no
+        second parse of a ``params:`` key the element has already read.
         """
         return None
 
