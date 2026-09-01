@@ -66,16 +66,19 @@ implementation). `when:` guards a whole **frame**; `params: {classes: [...]}` se
 ### Step 3 — how it executes: `src/shipinfer/runners/`
 
 - `base.py` — the `Runner` contract. Read this before either implementation.
-- `inprocess.py` — `InprocessRunner`: the whole chain on a thread pool in this process. **The
-  per-frame loop is `_walk`**, and the seam is stated in its own docstring: above it,
-  everything deals in work items and queues; below it, chain items and elements.
+- `walk.py` — `ChainWalk`: **the per-frame loop**, `run()`. Read this to see what happens to
+  one frame. Above it a runner deals in work items, queues and threads; here everything is a
+  `ChainItem` and an element, and nothing knows a thread exists.
+- `inprocess.py` — `InprocessRunner`: the whole chain on a thread pool in this process. It owns
+  the queue and the workers and calls `ChainWalk.run` once per item.
 - `fleet.py` — `FleetRunner`: one shard process per GPU, driven over gRPC. **The default for
   deployment.**
 - `service.py` — the shard's own half: it holds a runner and answers the control RPCs.
 
-> **Known problem:** `inprocess.py` is 2 121 lines with eight responsibilities in one class, and
-> `_walk` sits at line 1487. This is item `V149-runners` below, and it is the single biggest
-> reason the code does not read top-down today.
+> **Known problem, being worked:** `inprocess.py` was 2 121 lines with eight responsibilities
+> in one class and the per-frame loop at line 1487. Step 1 of `V149-runners` took the walk out
+> to `walk.py`, leaving 1 608 — still too big, still holding camera lifecycle, priority
+> learning, fps probing and stop-unwinding. Steps 2–4 are listed below.
 
 ### Step 4 — spawning and supervising shards: `src/shipinfer/launch/`
 
@@ -302,7 +305,7 @@ in the files touched, delete the superfluous helpers there.
 
 | Item | Scope |
 |---|---|
-| `V149-runners` | `inprocess.py` (2 121) → runner / frame-walk / camera lifecycle / placement; `fleet.py` (1 060); `service.py` (859) |
+| `V149-runners` | **step 1 done**: the frame walk → `walk.py` (2 121 → 1 608). Left: camera lifecycle, placement, the prose in what remains, then `fleet.py` (1 060) and `service.py` (859) |
 | `V149-topology` | `elements/pool.py` (1 697), `chain.py` (1 077), `recognize.py` (1 031), `track.py` (945), `barrier.py` (900), `base.py` (852), `mtmc.py` (847) |
 | `V149-engine` | `pool.py` (1 421), `ensemble.py` (828), `spill/remote_instance.py` (747) |
 | `V149-cli` | `cli/commands/run.py` (694) → a thin composition root |
