@@ -1,45 +1,41 @@
 """The ``track`` element: one stateful tracker per camera, and the plane change.
 
-This is arch.md §5⑥ on the chain — the step where a frame stops being pixels and becomes
+This is arch.md section 5(6) on the chain — where a frame stops being pixels and becomes
 identities. Two things live here, and the split is deliberate:
 
-* :class:`TrackerShard` is the **per-camera table**: one tracker instance per camera, one
-  lock per camera, one high-water mark per camera. It was proven in
-  ``pipeline/graph/tracking.py`` and is *moved* here rather than rewritten, so the chain and
-  the counting-simulation pipeline share one implementation of an invariant that has no
-  symptom when it breaks (that module now imports it back — the coexistence arch.md §9
-  describes).
+* :class:`TrackerShard` is the **per-camera table**: one tracker, one lock and one
+  high-water mark per camera. It was proven in ``pipeline/graph/tracking.py`` and is
+  *moved* here rather than rewritten, so the chain and the counting-simulation pipeline
+  share one implementation of an invariant that has no symptom when it breaks (that module
+  imports it back — the coexistence arch.md section 9 describes).
 * :class:`ShipvisionTrack` is the element: it turns a :class:`ChainItem` into the tracker's
   vocabulary, calls the shard, and turns the answer back into metadata.
 
 **Why the sharding is a correctness constraint and not a scaling one.** Kalman state, track
 ids and ageing all belong to one camera's view. Two cameras on one tracker associate one
 camera's objects with the other's, and the output is not degraded tracking — it is a real
-identity reported somewhere nothing happened. ``shipvision``'s ``BaseTracker.begin`` refuses
-a camera change as a second line of defence, and that belt-and-braces is deliberate because
-the failure is invisible.
+identity reported somewhere nothing happened. ``shipvision``'s ``BaseTracker.begin``
+refuses a camera change as a second line of defence, because the failure is invisible.
 
-**Why the ordering guard is here and not upstream.** The fair lane preserves a camera's frame
-order (one FIFO deque per fairness key), but the *workers* do not: with more than one pipeline
-worker, two of a camera's frames are walked concurrently and the later one can reach this
-element first. Feeding a tracker a frame it has already passed double-ages every track and
-double-counts the hit that promotes one, so the frame that lost the race is refused — and the
-refusal is **caught here**, counted, and the item emitted with ``track`` in
-``missing_stages``. An element that raised would cost the frame its whole event (the runner
-fails the item's future and stops the walk), and a frame with an honest gap is worth more than
-no frame at all (arch.md §5⑤).
+**Why the ordering guard is here and not upstream.** The fair lane preserves a camera's
+frame order (one FIFO deque per key), but the *workers* do not: with more than one pipeline
+worker, two of a camera's frames are walked concurrently and the later one can arrive
+first. Feeding a tracker a frame it has already passed double-ages every track and
+double-counts the hit that promotes one, so the frame that lost the race is refused — and
+the refusal is **caught here**, counted, and the item emitted with ``track`` in
+``missing_stages``. An element that raised would cost the frame its whole event, and a
+frame with an honest gap is worth more than no frame at all (arch.md section 5(5)).
 
 **Why the payload is dropped.** ``produces`` is ``meta@cpu`` and exactly one entry, so this
-element stamps its own cap on the item it derives — the one place in the chain where that is
-right, because this is the plane change the caps vocabulary exists to describe. Stamping
-``meta@cpu`` while carrying a device handle would relabel VRAM as host metadata, which is the
-laundering ``_substitute_donor`` refuses and the download arch.md §8 exists to make visible.
-So the payload goes with the label.
+element stamps its own cap — the one place in the chain where that is right, because this
+is the plane change the caps vocabulary exists to describe. Stamping ``meta@cpu`` while
+carrying a device handle would relabel VRAM as host metadata, which is the laundering
+``_substitute_donor`` refuses. So the payload goes with the label.
 
 **Where shipvision is named.** Nowhere at module scope. Every symbol comes from
 :mod:`shipinfer.topology.bridge` inside a function, so ``import shipinfer.topology`` stays
-free of the submodule and a chain naming ``impl: shipvision`` is still *validatable* on a host
-that never checked it out — it fails at ``open()``, with the command that fixes it.
+free of the submodule and a chain naming ``impl: shipvision`` is still *validatable* on a
+host that never checked it out — it fails at ``open()``, with the command that fixes it.
 """
 
 from __future__ import annotations
@@ -83,28 +79,23 @@ DEFAULT_ALGORITHM = "bytetrack"
 #: How far a camera's ``frame_id`` may go *backwards* before this element stops calling it a
 #: reordering and starts calling it a restarted stream.
 #:
-#: Two populations have to be told apart with no lifecycle event to help. A **reorder** is
-#: bounded by the number of pipeline workers — at most that many of a camera's frames are in
-#: flight at once (arch.md §5③ sizes it at ~32), so a handful of frames' worth of regression is
-#: ordinary and must be refused, not absorbed. A **restart** is an ingest actor that minted a
-#: fresh ``FrameCounter`` without anybody calling ``remove_camera`` + ``add_camera``: the ids
-#: drop from tens of thousands to zero, and refusing those means refusing every frame of that
-#: camera for the process's life — the failure ADR-018 names remove+add as the recovery for,
-#: with nobody left to make the two calls.
+#: Two populations, with no lifecycle event to tell them apart. A **reorder** is bounded by
+#: the number of pipeline workers — at most that many of a camera's frames are in flight
+#: (arch.md 5(3) sizes it at ~32) — so a handful of frames' regression is ordinary and must
+#: be refused, not absorbed. A **restart** is an ingest actor that minted a fresh
+#: ``FrameCounter`` without anybody calling ``remove_camera`` + ``add_camera``: the ids drop
+#: from tens of thousands to zero, and refusing those means refusing every frame of that
+#: camera for the process's life. 64 is comfortably above the first and far below the second.
+#: ``0`` disables the recovery, which is the old behaviour.
 #:
-#: 64 is comfortably above the first and far below the second. ``0`` disables the recovery and
-#: refuses every regression, which is the old behaviour and what a deployment that would
-#: rather see the frames stop than see the ids restart should set.
-#:
-#: **The recovery has a window it does not cover, and it is this many frames wide.** A restart
-#: is only recognised once the new stream's id is this far *below* the old high-water mark, so
-#: a camera that ran to frame 39 and restarts at 0 has every one of its first 40 frames refused
-#: — the regression is real but too small to call — and the frame that finally passes 39 then
-#: continues the **old** tracker's identities straight across the discontinuity, with no reset
-#: counted (measured). A short-lived stream can therefore be refused wholesale and a long one
-#: can carry a dead stream's ids. Both are strictly better than refusing the camera for the
-#: process's life, and neither is as good as the announced ``remove_camera`` + ``add_camera``
-#: ADR-018 names: this is the floor under a deployment that never sends it, not a substitute.
+#: **The recovery has a window it does not cover, this many frames wide.** A restart is only
+#: recognised once the new id is this far *below* the old high-water mark, so a camera that
+#: ran to frame 39 and restarts at 0 has its first 40 frames refused — the regression is real
+#: but too small to call — and the frame that passes 39 then continues the **old** tracker's
+#: identities across the discontinuity, with no reset counted (measured). Both failures are
+#: strictly better than refusing the camera for the process's life, and neither is as good as
+#: the announced remove+add ADR-018 names: this is the floor under a deployment that never
+#: sends it, not a substitute.
 DEFAULT_REGRESSION_RESET = 64
 
 #: Minimum IoU between a published track's box and a detection's before the two are called the
@@ -139,24 +130,22 @@ class _CameraShard:
 class TrackerShard:
     """One tracker per camera, built lazily and never shared.
 
-    The sharding is a correctness constraint, not a scaling one — see this module's
-    docstring. Everything else here exists to make that constraint hold under the pipeline's
-    worker threads.
+    The sharding is a correctness constraint, not a scaling one — see this module's docstring.
+    Everything else here exists to make that constraint hold under the pipeline's workers.
 
     Args:
-        algorithm: a name registered in ``shipvision.mot.TRACKERS`` (``sort``,
-            ``bytetrack``, ``ocsort``, ``botsort``, ``deepsortv2``). Resolved through that
-            registry, so adding a tracker there needs no edit here — an ``if/elif`` on this
-            string is exactly what the registry exists to replace.
+        algorithm: a name registered in ``shipvision.mot.TRACKERS`` (``sort``, ``bytetrack``,
+            ``ocsort``, ``botsort``, ``deepsortv2``). Resolved through that registry, so adding
+            a tracker there needs no edit here.
         options: constructor keyword arguments for that tracker.
         backend: pin ``python`` or ``native``. ``None`` takes the fastest one this host can
-            actually build, which is the registry's documented behaviour and the numpy floor
-            every caller in this tree wants.
+            build, which is the registry's documented behaviour and the numpy floor every
+            caller in this tree wants.
 
     Raises:
         ConfigurationError: the library is absent, the algorithm is unknown, or ``options``
             holds a key the tracker's constructor does not accept. Raised **at construction**
-            — one throwaway tracker is built here for no other reason — because a typo in a
+            — one throwaway tracker is built for no other reason — because a typo in a
             deployment's tracking options must stop the deploy rather than surface identically
             on every frame from inside a worker thread.
     """
@@ -246,30 +235,25 @@ class TrackerShard:
     ) -> list[Any]:
         """Advance one camera by one frame and return its publishable tracks.
 
-        The first argument is a ``shipvision.types.Detections``, tag included, so the camera
-        and the frame cannot be passed separately and cannot disagree with the boxes.
+        The first argument is a ``shipvision.types.Detections``, tag included, so the camera and
+        the frame cannot be passed separately and cannot disagree with the boxes.
 
         **The invariant.** A camera's tracker sees that camera's frames one at a time and in
         strictly increasing ``frame_id`` order. The per-camera lock gives the first half; the
-        per-camera high-water mark gives the second, and it has to, because reassembly does
-        not order anything: two of one camera's frames can be in flight at once and the later
-        one can reach this method first.
+        per-camera high-water mark gives the second, and it has to, because reassembly orders
+        nothing: two of one camera's frames can be in flight and the later one can arrive first.
 
-        **What a violation costs, and why it is refused rather than absorbed.** Feeding a
-        tracker a frame it has already passed advances every filter a second time, ages every
-        track a second time, and double-counts the hit that promotes a tentative track — so a
-        replayed or reordered frame silently changes *which identities exist* downstream. The
-        frame that lost the race is therefore refused: the caller emits it with its detections,
-        its embeddings and its masks intact and with no track ids, naming ``track`` in
-        ``missing_stages``. A frame with an honest gap is worth more than a fleet-wide identity
-        built on a double-counted hit.
+        **What a violation costs.** Feeding a tracker a frame it has already passed advances every
+        filter a second time, ages every track a second time, and double-counts the hit that
+        promotes a tentative track — so a replayed frame silently changes *which identities exist*
+        downstream. The frame that lost the race is refused: the caller emits it with detections,
+        embeddings and masks intact and no track ids, naming ``track`` in ``missing_stages``.
 
-        **Not silently reordered, either.** A reorder buffer would have to wait for a frame
-        that may never arrive — the ingest queue drops on overflow and on an expired deadline
-        — so it needs a timeout, and that timeout is latency paid by every frame of every
-        camera to rescue the few that raced. If the refusal rate is high enough to matter,
-        the fix is upstream (fewer of one camera's frames in flight at once), and
-        ``stats()["out_of_order"]`` is the number that says so.
+        **Not silently reordered, either.** A reorder buffer would wait for a frame that may never
+        arrive — ingest drops on overflow and on an expired deadline — so it needs a timeout, and
+        that timeout is latency paid by every frame of every camera to rescue the few that raced.
+        If the refusal rate matters, the fix is upstream (fewer of one camera's frames in flight),
+        and ``stats()["out_of_order"]`` is the number that says so.
 
         Args:
             detections: this frame's detections and its tag.
@@ -277,22 +261,18 @@ class TrackerShard:
             regression_reset: how far ``frame_id`` may go backwards before this is read as a
                 restarted stream rather than a reordering — see
                 :data:`DEFAULT_REGRESSION_RESET`. ``None`` (the default, and what the
-                counting-simulation pipeline passes) refuses every regression.
-
-                The decision is taken **here**, under the camera's lock, rather than by the
-                caller reading :attr:`last_frame_id` and calling :meth:`reset`: those are three
-                steps, and between any two of them another worker can advance the same camera.
-                Read-decide-reset-update has to be one step for the same reason
-                check-set-update does.
-            on_implicit_reset: called with the camera id when that recovery fires, from inside
-                the camera's lock. A callback rather than a return value or a counter the
-                caller polls, because the event is rare and the alternatives both put work on
-                the frames where nothing happened. It must not block — a counter increment is
-                what it is for — since it is holding one camera's tracker while it runs.
+                counting-simulation pipeline passes) refuses every regression. The decision is
+                taken **here**, under the camera's lock, rather than by the caller reading
+                :attr:`last_frame_id` and calling :meth:`reset`: those are three steps, and between
+                any two another worker can advance the same camera.
+            on_implicit_reset: called with the camera id when that recovery fires, from inside the
+                camera's lock. A callback rather than a return value or a polled counter, because
+                the event is rare and the alternatives put work on the frames where nothing
+                happened. It must not block — it is holding one camera's tracker while it runs.
 
         Raises:
-            TrackingError: the frame does not advance this camera's stream, and the regression
-                is small enough to be a reordering.
+            TrackingError: the frame does not advance this camera's stream, and the regression is
+                small enough to be a reordering.
         """
         tag = detections.tag
         shard = self._shard(tag.camera_id)
@@ -333,25 +313,20 @@ class TrackerShard:
         """:meth:`reset`, but never *builds* a tracker for a camera that has none.
 
         What a lifecycle hook wants. ``camera_added`` fires for every camera on the shard,
-        including the forty-nine that were never on this element, and :meth:`reset` would mint
-        a tracker for each of them — a Kalman filter, a track pool and a registry build for a
-        camera that may never send a frame, done on the thread holding the runner's lifecycle
-        lock.
+        including the forty-nine that were never on this element, and :meth:`reset` would mint a
+        tracker for each — a Kalman filter, a track pool and a registry build for a camera that
+        may never send a frame, on the thread holding the runner's lifecycle lock.
 
-        The table is read under :attr:`_admit` and the lock is **released before** the camera's
-        own lock is taken. Holding both would make every other camera's first frame queue
-        behind this one camera's in-flight update; a shard dropped in the window is reset for
-        nothing, which costs nothing.
+        The table is read under :attr:`_admit` and the lock is **released before** the camera's own
+        lock is taken. Holding both would make every other camera's first frame queue behind this
+        one camera's in-flight update.
 
-        **It can still wait, on one camera, for one frame.** That is the residual and it is
-        accepted deliberately: if a worker is inside ``tracker.update`` for *this* camera, the
-        reset queues behind that update (measured at 0.40 s against a tracker made artificially
-        slow; tens of microseconds in the ordinary case). :meth:`drop` has no such wait because
-        unlinking a table entry needs no agreement with the frame in flight — a **reset** does,
-        since resetting a tracker mid-update is the half-forgotten state the per-camera lock
-        exists to prevent. The wait is bounded by one update on one camera, and the caller
-        (``camera_added``) is holding the runner's ``_lifecycle`` while it happens, so the cost
-        is one lifecycle call delayed by one frame rather than a stall that can grow.
+        **It can still wait, on one camera, for one frame.** If a worker is inside
+        ``tracker.update`` for *this* camera the reset queues behind that update (measured 0.40 s
+        against an artificially slow tracker; tens of microseconds ordinarily). :meth:`drop` has no
+        such wait because unlinking a table entry needs no agreement with the frame in flight — a
+        **reset** does, since resetting mid-update is the half-forgotten state the per-camera lock
+        prevents. The wait is bounded by one update on one camera.
 
         Returns:
             Whether there was a tracker to reset.
@@ -489,40 +464,38 @@ class ShipvisionTrack(Element):
     Reads ``meta["detections"]`` — the decoded, source-pixel
     :class:`~shipinfer.topology.elements.detections.Detections` a ``pool`` detector files —
     and optionally ``meta["vectors"]``, and writes ``meta["tracks"]`` plus
-    ``meta["track_rows"]`` — the detection row each of those tracks came from, which is what
-    lets an ``output`` element put a track id on the object it belongs to.
+    ``meta["track_rows"]``, the detection row each track came from, which is what lets an
+    ``output`` element put a track id on the object it belongs to.
 
     **The caps.** ``accepts`` lists ``meta@cpu`` first because a tracker wants boxes and not
-    pixels: fed by another metadata element it never touches a frame at all. ``bgr@cpu`` and
-    ``nv12@gpu`` follow because today's chain is host memory end to end and phase D's is
-    device memory end to end, and in both cases this element is where the chain leaves the
-    frame behind. ``produces`` is one entry, so this element **does** stamp its own cap and
-    clear the payload — the one place in the chain where that is right, because it is the
-    plane change and not a relabelling.
+    pixels: fed by another metadata element it never touches a frame. ``bgr@cpu`` and
+    ``nv12@gpu`` follow because today's chain is host memory end to end and phase D's is device
+    memory end to end, and in both this element is where the chain leaves the frame behind.
+    ``produces`` is one entry, so this element **does** stamp its own cap and clear the payload.
 
     **What it never does is fail a frame for a tracking refusal.** An out-of-order frame is
     counted and emitted with ``track`` in ``missing_stages``; so is a frame the detector never
-    answered for. Anything the runner sees raised from here is a genuine fault — a malformed
-    payload, a broken configuration — and costs that one item.
+    answered for. Anything raised from here is a genuine fault — a malformed payload, a broken
+    configuration — and costs that one item.
 
     ``params:`` takes:
 
     * ``algorithm`` — a name in ``shipvision.mot.TRACKERS``. Default
       :data:`DEFAULT_ALGORITHM`.
     * ``options: {...}`` — constructor keyword arguments for that tracker (``max_age``,
-      ``min_hits``, ``track_threshold``, …). A key the tracker does not accept stops the
+      ``min_hits``, ``track_threshold``, ...). A key the tracker does not accept stops the
       deploy at ``open()`` rather than on the first frame.
     * ``classes: [ship, person]`` — the detection labels to track. Default: every label the
       detector produced. Names and not ids, because
       :class:`~shipinfer.topology.elements.detections.Detections` resolves the id table once
-      and a second copy of it here is a second thing to get wrong.
+      and a second copy here is a second thing to get wrong.
     * ``regression_reset`` — see :data:`DEFAULT_REGRESSION_RESET`.
 
     There is deliberately **no ``backend:``**. ``TRACKERS.build`` with no backend resolves the
-    fastest one this host can actually build with a numpy floor, which is what every caller
-    here wants; naming ``native`` would make a chain that loads on the build machine refuse on
-    a machine without the extension, for a tracker whose cost is tens of microseconds against a
-    frame budget of milliseconds.
+    fastest one this host can build with a numpy floor, which is what every caller here wants;
+    naming ``native`` would make a chain that loads on the build machine refuse on a machine
+    without the extension, for a tracker costing tens of microseconds against a millisecond
+    frame budget.
     """
 
     kind: ClassVar[ElementKind] = ElementKind.TRACK
@@ -660,20 +633,18 @@ class ShipvisionTrack(Element):
     def camera_added(self, camera_id: str) -> None:
         """Restart this camera's tracker if it already had one.
 
-        A re-added camera is a camera whose ingest actor minted a fresh ``FrameCounter``, so
-        its next frame is ``frame_id = 0`` — below the high-water mark the previous run left
-        behind, and refused forever without this. ADR-018 names remove + add as the recovery
-        for a lost camera, so this state has to be one the chain can be in.
+        A re-added camera is one whose ingest actor minted a fresh ``FrameCounter``, so its next
+        frame is ``frame_id = 0`` — below the high-water mark the previous run left, and refused
+        forever without this. ADR-018 names remove + add as the recovery for a lost camera, so this
+        state has to be one the chain can be in.
 
-        Never *builds* a tracker: this fires for every camera placed on the shard, and minting
-        a Kalman filter for forty-nine cameras that are not on this element — on the thread
-        holding the runner's lifecycle lock — is work for nothing.
+        Never *builds* a tracker: this fires for every camera placed on the shard, and minting a
+        Kalman filter for forty-nine cameras that are not on this element is work for nothing.
 
-        Unlike :meth:`camera_removed`, this one **can wait** — for one in-flight frame on this
-        one camera, while holding the runner's ``_lifecycle``. See
-        :meth:`TrackerShard.reset_if_present` for why that residual is accepted rather than
-        engineered away: a reset has to agree with the update it interrupts, and a drop does
-        not.
+        Unlike :meth:`camera_removed`, this one **can wait** — for one in-flight frame on this one
+        camera, while holding the runner's ``_lifecycle``. See
+        :meth:`TrackerShard.reset_if_present` for why that residual is accepted: a reset has to
+        agree with the update it interrupts, and a drop does not.
         """
         if self._shard is not None:
             self._shard.reset_if_present(camera_id)
@@ -695,25 +666,22 @@ class ShipvisionTrack(Element):
 
         Returns:
             The successor item: same tag, ``caps`` = ``meta@cpu``, ``payload`` cleared, and
-            ``meta["tracks"]`` holding this frame's publishable tracks and
-            ``meta["track_rows"]`` holding the detection row each one came from.
-            ``meta["frame_hw"]`` rides along from the detector, because the boxes are in that
-            extent's pixels and the payload that could have said so is gone.
+            ``meta["tracks"]`` / ``meta["track_rows"]`` holding this frame's publishable tracks
+            and the detection row each came from. ``meta["frame_hw"]`` rides along from the
+            detector, because the boxes are in that extent's pixels and the payload that could have
+            said so is gone.
 
-            A frame the detector never answered for, and a frame that lost the ordering race,
-            come back with the same shape and ``track`` in ``meta["missing_stages"]`` — never
-            as ``None`` and never as an exception, because "no ships in this frame", "the
-            detector is dead" and "this frame arrived late" are three events and only one of
-            them is a fault (arch.md §5⑤).
+            A frame the detector never answered for, and a frame that lost the ordering race, come
+            back with the same shape and ``track`` in ``meta["missing_stages"]`` — never as
+            ``None`` and never as an exception, because "no ships in this frame", "the detector is
+            dead" and "this frame arrived late" are three events and only one is a fault
+            (arch.md section 5(5)).
 
         Raises:
             ValidationError: ``meta["detections"]`` is not a
-                :class:`~shipinfer.topology.elements.detections.Detections`, or
-                ``meta["vectors"]`` is present in a form that cannot be attributed to
-                detections, or the item carries no frame id. All three are a mis-wired chain
-                rather than a late frame, and a tracker that silently ran without the
-                appearance vectors a deployment paid a re-ID network for would be the
-                empty-result-means-failure this codebase refuses.
+                :class:`~shipinfer.topology.elements.detections.Detections`, ``meta["vectors"]``
+                cannot be attributed to detections, or the item carries no frame id. All three are
+                a mis-wired chain rather than a late frame.
             ServerStateError: called before :meth:`Element.open`.
         """
         detections = item.meta.get("detections")
@@ -745,21 +713,20 @@ class ShipvisionTrack(Element):
             self._metrics.out_of_order_frame(camera_id)
             return self._untracked(item)
         self._note_cameras()
-        # `tracks` is handed on as shipvision's own `Track` objects, deliberately. They are
-        # exactly what the cross-camera tier consumes (`mtmc.CameraTracks(tag, tracks, h, w)`),
-        # so a pure record here would be a shape `mtmc` converts straight back — losing the
-        # embedding, the state and the tag on the way.
+        # `tracks` is handed on as shipvision's own `Track` objects, deliberately: they
+        # are exactly what the cross-camera tier consumes
+        # (`mtmc.CameraTracks(tag, tracks, h, w)`), so a pure record here would be a shape
+        # `mtmc` converts straight back, losing the embedding, the state and the tag.
         #
-        # Buffering them past the camera's next frame is safe on **both** pool backends, for
-        # two different reasons, and a reader who changes either one has to keep the property:
-        # the python pool (`TrackPool.output`) mutates its `Track` objects in place and hands
-        # back `dataclasses.replace` copies; the native pool — which is what `backend=None`
-        # resolves to on any host with `shipvision._C` built, so it is the path this element
-        # usually takes — hands back the live list uncopied, and is safe because
-        # `_NativePool.decode` mints fresh `Track`s off a freshly allocated array every frame,
-        # leaving nothing in flight to mutate. The property itself is pinned by
-        # `test_the_published_tracks_are_not_rewritten_by_the_next_frame`, on whichever backend
-        # this host built, rather than either mechanism.
+        # Buffering them past the camera's next frame is safe on **both** pool backends,
+        # for two different reasons, and a reader who changes either has to keep the
+        # property: the python pool mutates its `Track`s in place and hands back
+        # `dataclasses.replace` copies; the native pool — what `backend=None` resolves to
+        # wherever `shipvision._C` is built, so usually this one — hands back the live
+        # list uncopied, and is safe because `_NativePool.decode` mints fresh `Track`s off
+        # a freshly allocated array every frame. The property is pinned by
+        # `test_the_published_tracks_are_not_rewritten_by_the_next_frame`, on whichever
+        # backend this host built, rather than by either mechanism.
         return item.derive(
             caps=self.output_caps[0],
             payload=None,
@@ -775,25 +742,23 @@ class ShipvisionTrack(Element):
     ) -> tuple[int, ...]:
         """Which detection row each published track came from. Aligned with ``tracks``.
 
-        The library returns tracks, not row indices, and it is right not to: a track's box is
-        the *filtered* estimate, and which detection fed it is the tracker's business rather
-        than its output. But an emitted event is per detection — ``det_id``, ``bbox``,
-        ``embedding`` and the identity fields are all one row — so the mapping has to be
-        recovered, and a published track is by construction the corrected state of one of this
-        frame's detections, which makes the recovery an assignment over IoU rather than a
-        guess.
+        The library returns tracks, not row indices, and it is right not to: a track's box is the
+        *filtered* estimate, and which detection fed it is the tracker's business. But an emitted
+        event is per detection — ``det_id``, ``bbox``, ``embedding`` and the identity fields are
+        one row — so the mapping has to be recovered, and a published track is by construction the
+        corrected state of one of this frame's detections, which makes the recovery an assignment
+        over IoU rather than a guess.
 
-        One-to-one and globally optimal, through the same solver the trackers themselves use
+        One-to-one and globally optimal, through the same solver the trackers use
         (``shipvision.mot.association.associate``) — this is
-        ``pipeline/graph/tracking.py::_attribute``'s algorithm, in the chain's vocabulary.
-        Greedy per-track argmax is the obvious alternative and is wrong in exactly the case
-        that matters: two people walking close together each overlap the other's box, and a
-        greedy pass can give both track ids to one detection and none to the other, which
-        reads downstream as one person who teleported and one who never existed.
+        ``pipeline/graph/tracking.py::_attribute``'s algorithm in the chain's vocabulary. Greedy
+        per-track argmax is wrong in exactly the case that matters: two people walking close
+        together each overlap the other's box, and a greedy pass can give both track ids to one
+        detection and none to the other, which reads downstream as one person who teleported and
+        one who never existed.
 
-        A track that matches nothing above the threshold gets ``-1``. Dropped rather than
-        forced onto its nearest box: the threshold exists to refuse an answer, not to tune one,
-        and a ``null`` track id in the event is the honest form of "we could not say".
+        A track that matches nothing above the threshold gets ``-1``. Dropped rather than forced
+        onto its nearest box: the threshold exists to refuse an answer, not to tune one.
 
         Args:
             keep: the rows that were fed to the tracker, so a slot with ``classes:`` maps its
@@ -900,16 +865,15 @@ class ShipvisionTrack(Element):
     def _embeddings(self, item: ChainItem, detections: Detections) -> Any:
         """``meta["vectors"]`` as one appearance vector per detection row, or ``None``.
 
-        The attribution rule itself is
-        :func:`~shipinfer.topology.elements.detections.per_row`, because the ``output``
-        element reads the same key under the same rule and two copies of it would be two
+        The attribution rule is :func:`~shipinfer.topology.elements.detections.per_row`, because
+        the ``output`` element reads the same key under the same rule and two copies would be two
         places for "a mapping that covers no row is an off-by-N" to drift — a drift with no
         symptom, since both readers fail by quietly attaching nothing.
 
-        What is local to *this* element is why the refusal matters here: appearance is what
-        carries an identity through the frames where geometry alone is ambiguous, so a tracker
-        that quietly ran without the vectors a deployment paid a re-ID network for is a
-        measurable accuracy loss reported as a healthy chain.
+        What is local to *this* element is why the refusal matters here: appearance carries an
+        identity through the frames where geometry alone is ambiguous, so a tracker that quietly
+        ran without the vectors a deployment paid a re-ID network for is a measurable accuracy loss
+        reported as a healthy chain.
 
         Returns:
             Something indexable by detection row, or ``None`` when the chain filed no vectors.
