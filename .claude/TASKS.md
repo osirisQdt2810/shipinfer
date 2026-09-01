@@ -2509,7 +2509,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       violation count only 1031 -> 1012. The fix is fewer, smaller files with less prose in them.
       **DECIDED (asked, 31 Aug): all three, SEQUENTIALLY, one package per PR** -- split the oversized file,
       cut prose in the files touched, delete the superfluous helpers there. Order: runners/ first.
-- [~] **V149-runners · STEP 1 OPEN as PR #107 (9cec066, 5 files, +352/-555), 3 steps left. The cut order is chosen by measured
+- [~] **V149-runners · STEP 1 MERGED as PR #107 (bccc9811, 1 Sep), VERDICT: APPROVE after 3 rounds. 3 steps left. Step 1 detail: (9cec066, 5 files, +352/-555), 3 steps left. The cut order is chosen by measured
       coupling, not by my sketch.**
       Step 1: `runners/walk.py` — `ChainWalk` + `ChainWork`, 11 methods needing only 3 inputs
       (topology, metrics, edge_caps). inprocess.py 2121 -> 1608; walk.py 308 lines at **0.48** prose/code
