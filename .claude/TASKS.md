@@ -2512,7 +2512,19 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       violation count only 1031 -> 1012. The fix is fewer, smaller files with less prose in them.
       **DECIDED (asked, 31 Aug): all three, SEQUENTIALLY, one package per PR** -- split the oversized file,
       cut prose in the files touched, delete the superfluous helpers there. Order: runners/ first.
-- [~] **V149-runners · STEP 2 MERGED as PR #110 (9abf4367, 1 Sep), APPROVE first round. Steps 3-4 left.**
+- [~] **V149-runners · STEP 3 OPEN as PR #111 (comments + the module/class docstrings). Step 4 left.**
+      inprocess.py across all three steps: **2121 -> 1242 lines (-41%)**, ratio 2.27 -> **1.39**, plus a
+      308-line walk.py at 0.48. Step 3 took the 298 comment lines step 2 left, and the two docstrings a
+      reader meets FIRST -- module 67 lines (cap 15) and the class 39 (cap 10), i.e. 106 lines of prose
+      before any code, which is literally the V149 complaint. Docs-only proved by AST; tier 3257.
+      **FEEDS V145-ARM, and the body says so:** 43 check_docs violations remain in this file, 24 of them
+      COMMENT BLOCKS against a cap of 4. Halving them did not get them under 4 and will not -- at four
+      lines a comment states what but not why, and the why is what V149 asked to keep. Getting to zero
+      means deleting reasons or marking two dozen blocks `# doc: long`, which makes the marker meaningless.
+      So V145-ARM must first choose: raise COMMENT_MAX (8-10 on this evidence), keep 4 and accept the
+      escape at scale, or arm for docstrings only and leave comment blocks advisory. Not my call to make --
+      it changes a convention the operator set -- but the numbers are now in front of it.
+      Step 2 detail: MERGED as PR #110 (9abf4367, 1 Sep), APPROVE first round. Steps 3-4 left.**
       Step 2: 13 docstrings in inprocess.py rewritten -- 1608 -> 1360 lines, prose 1005 -> 766, ratio
       **2.26 -> 1.66**. Worst: _do_stop 54->26, _do_stats 46->15, _work 44->17, add_camera 36->22.
       Archaeology went ("this used to be X and Y broke"); the reasons stayed (TRACKING_CRITICAL is 0 so
