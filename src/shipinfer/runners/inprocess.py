@@ -17,7 +17,8 @@ Five choices, each with a simpler-looking alternative that is wrong:
   queues puts eight hand-offs in every frame's path, and the loader already proved the order
   legal (ADR-017).
 * **Fan-in merges deterministically or not at all** -- "whichever finished last" is no answer
-  when the branches carry different metadata (:meth:`~shipinfer.runners.walk.ChainWalk.inbound`).
+  when the branches carry different metadata
+  (:meth:`~shipinfer.runners.walk.ChainWalk.inbound`).
 * **An element that raises loses one item, not the worker**, which would stop serving every
   camera on the shard.
 * **A batch is as wide as the worker pool.** The walk is synchronous, so at
@@ -112,15 +113,15 @@ class _Head:
 
     Resolved once per runner from the *loader's* answers, and both fields refuse a chain
     whose roots disagree: one ingest manager publishes into one sink, every root of the walk
-    sees that one item (:meth:`~shipinfer.runners.walk.ChainWalk.run`), so two roots wanting different
-    payloads or different decoders is a chain this runner cannot honour. Refusing at start
-    beats stamping one root's answer on the other's frames.
+    sees that one item (:meth:`~shipinfer.runners.walk.ChainWalk.run`), so two roots wanting
+    different payloads or different decoders is a chain this runner cannot honour. Refusing at
+    start beats stamping one root's answer on the other's frames.
 
     Args:
         caps: the negotiated cap of the edges leaving the roots -- read from
-            :attr:`~shipinfer.topology.chain.Topology.edges`, never from the root element's
-            own ``produces``. A cap belongs to an edge, and an element with two ``produces``
-            hands a different one to each consumer (``topology/chain.py::Edge``).
+            :attr:`~shipinfer.topology.chain.Topology.edges`, never from the root element's own
+            ``produces``. A cap belongs to an edge, and an element with two ``produces`` hands a
+            different one to each consumer (``topology/chain.py::Edge``).
         source: the name of an ingest source in :data:`shipinfer.ingest.SOURCES`, or ``None``
             when the chain did not say and ``ingest.backend`` (then the environment) decides.
     """
@@ -136,8 +137,8 @@ class InprocessRunner(Runner):
 
     Args:
         topology: the validated chain.
-        settings: deployment settings; ``pipeline.workers``, ``queue_type``,
-            ``queue_capacity``, ``overflow_policy`` and ``frames_per_wakeup`` are read here.
+        settings: deployment settings; ``pipeline.workers``, ``queue_type``, ``queue_capacity``,
+            ``overflow_policy`` and ``frames_per_wakeup`` are read here.
         shard_id: passed to every element (arch.md section 2).
         device: the GPU this runner owns, or ``None``.
         models: the model pool for ``pool`` elements.
@@ -146,14 +147,14 @@ class InprocessRunner(Runner):
             :meth:`_do_start` for what that means for a restart.
         workers: override the worker count; ``None`` takes ``pipeline.workers``.
         metrics: share a registry with the rest of the process. ``None`` mints a private one.
-            The ingest plane's handles go on the *same* registry, so one exporter carries
-            both halves of a dropped frame.
+            The ingest plane's handles go on the *same* registry, so one exporter carries both
+            halves of a dropped frame.
         source_factory: overrides how every camera's source is built. The seam a test uses to
             run the camera lifecycle against a fake camera.
 
     Raises:
-        ConfigurationError: ``workers`` below one -- a runner that accepts items and walks
-            none of them looks exactly like a hung chain.
+        ConfigurationError: ``workers`` below one -- a runner that accepts items and walks none
+            of them looks exactly like a hung chain.
 
     **Not honoured yet: ``per:`` and ``scope:``.** One element instance is shared by every
     worker, so at ``workers > 1`` two frames of one camera can be inside a ``per: camera``
@@ -550,8 +551,8 @@ class InprocessRunner(Runner):
         orders would differ only in log sequence.
 
         Args:
-            hook: the :class:`~shipinfer.topology.base.Element` method, named through the ABC
-                so a typo is a ``NameError`` at import rather than a missing announcement.
+            hook: the :class:`~shipinfer.topology.base.Element` method, named through the ABC so
+                a typo is a ``NameError`` at import rather than a missing announcement.
         """
         for node in self._topology.nodes:
             # Resolved on the *instance*, not called as `hook(node.element, ...)`.
@@ -1083,10 +1084,10 @@ class InprocessRunner(Runner):
         shared one lane and ``priority:`` applied to nothing.
 
         Raises:
-            QueueFullError: this camera's lane is full. Propagated untouched and counted
-                against **this** camera (ADR-005) as ``items_dropped`` -- refused at the door,
-                so never one of ``accepted`` and not a term the ``stats()`` ledger names. A
-                model queue refusing an item already inside the chain is ``items_backpressure``.
+            QueueFullError: this camera's lane is full. Propagated untouched and counted against
+                **this** camera (ADR-005) as ``items_dropped`` -- refused at the door, so never
+                one of ``accepted`` and not a term the ``stats()`` ledger names. A model queue
+                refusing an item already inside the chain is ``items_backpressure``.
             RequestCancelledError: the queue is closed -- the runner is shutting down.
         """
         context = item.context
@@ -1142,8 +1143,8 @@ class InprocessRunner(Runner):
                 if queue.is_closed:
                     return
                 continue
-            # Published before the first walk and narrowed in a `finally` after each item, so every
-            # item this worker owes an answer for has an owner a shutdown can find. The
+            # Published before the first walk and narrowed in a `finally` after each item, so
+            # every item this worker owes an answer for has an owner a shutdown can find. The
             # *remainder*, not the current item: the ones behind it left the queue in the same
             # drain. Both slices are free at the default `frames_per_wakeup = 1`.
             batch = tuple(items)

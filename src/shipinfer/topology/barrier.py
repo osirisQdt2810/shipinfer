@@ -168,8 +168,8 @@ class WaiterBudget:
     counter is kept beside it and the over-release is re-raised as :class:`ServerStateError`.
 
     Args:
-        permits: how many waiters may be outstanding. ``0`` is legitimate and means "never
-            wait" — a single-worker runner, or one that did not say how many workers it has.
+        permits: how many waiters may be outstanding. ``0`` is legitimate and means "never wait"
+            — a single-worker runner, or one that did not say how many workers it has.
 
     Raises:
         ConfigurationError: a negative number of permits.
@@ -216,10 +216,10 @@ class WaiterBudget:
         """Give a permit back.
 
         Raises:
-            ServerStateError: more releases than acquires. Acquire and release are paired by
-                one ``try``/``finally`` in :meth:`InstantBarrier.submit`, so this cannot
-                happen from a correct caller and a silent decrement past zero would hand out
-                permits that do not exist. The refusal is the semaphore's, re-raised typed.
+            ServerStateError: more releases than acquires. Acquire and release are paired by one
+                ``try``/``finally`` in :meth:`InstantBarrier.submit`, so this cannot happen from
+                a correct caller and a silent decrement past zero would hand out permits that do
+                not exist. The refusal is the semaphore's, re-raised typed.
         """
         with self._lock:
             try:
@@ -348,7 +348,8 @@ class InstantBarrier:
         max_instants: how many buckets may be open before the oldest is evicted.
         on_event: called once per *instant-level* event, under the lock, so it must be a counter
             increment and nothing else. Frame-level outcomes are not reported here — one closed
-            instant resolves many frames, so counting instants per frame reports the wrong number.
+            instant resolves many frames, so counting instants per frame reports the wrong
+            number.
         clock: where "now" comes from. A seam because expiry is this class's only dependence on
             wall time, and a test that cannot control it is a test whose verdict is partly the
             host's.
@@ -463,7 +464,10 @@ class InstantBarrier:
 
     @property
     def live(self) -> frozenset[str]:
-        """The cameras a bucket waits for. See :meth:`camera_added` for why it is not the roster."""
+        """The cameras a bucket waits for.
+
+        See :meth:`camera_added` for why it is the announced set and not the roster.
+        """
         with self._cond:
             return self._live_set
 
@@ -503,14 +507,15 @@ class InstantBarrier:
         """A camera is live on this shard: instants now wait for it.
 
         **The live set is the announced set, not the configured roster.** A group's roster names
-        every camera in it; a shard runs only the ones placed on it. A barrier that waited for the
-        roster would time out on every instant for the life of the process, and report it as a
-        healthy chain running one window slower.
+        every camera in it; a shard runs only the ones placed on it. A barrier that waited for
+        the roster would time out on every instant for the life of the process, and report it as
+        a healthy chain running one window slower.
 
-        Before the *first* announcement it falls back to the cameras it has seen traffic from, so a
-        runner that never drives the lifecycle hooks degrades to a one-instant warm-up rather than
-        to per-camera MTMC. The fallback latches off for good at the first announcement: a set that
-        came back after ``camera_removed`` emptied it would resurrect the camera this hook forgets.
+        Before the *first* announcement it falls back to the cameras it has seen traffic from,
+        so a runner that never drives the lifecycle hooks degrades to a one-instant warm-up
+        rather than to per-camera MTMC. The fallback latches off for good at the first
+        announcement: a set that came back after ``camera_removed`` emptied it would resurrect
+        the camera this hook forgets.
 
         Takes only this barrier's lock and does no work under it. It can still queue behind an
         association in progress, bounded by one :meth:`submit` — which is why the ABC asks for
@@ -527,11 +532,13 @@ class InstantBarrier:
         The second half is the point. Dropping it from the live set alone would leave every
         *currently open* bucket still counting it, so each would sit out its full window before
         closing — at 20 fps, a permanent tax for a camera that will never report again. So the
-        open buckets are re-checked here and any now complete has its waiters woken with ``ready``.
+        open buckets are re-checked here and any now complete has its waiters woken with
+        ``ready``.
 
         Woken rather than closed, because this thread must not run an association: it holds the
         runner's lifecycle lock, behind which every ``add_camera``, ``remove_camera``, ``drain``
-        and ``stop`` is queued. The waiter it wakes already has the association callback in hand.
+        and ``stop`` is queued. The waiter it wakes already has the association callback in
+        hand.
 
         A bucket with no waiters is left alone: every frame in it was already emitted by the
         never-starve guard, so nobody is owed an answer, and its own deadline will retire it.
@@ -566,16 +573,16 @@ class InstantBarrier:
         """Put one camera's frame into its instant and come back with the group's answer.
 
         Args:
-            camera_id: which camera. Two frames of one camera in one instant is a refusal,
-                not a merge; a *later* frame from a camera already in the open instant seals
-                that instant and opens the next one with this frame.
+            camera_id: which camera. Two frames of one camera in one instant is a refusal, not a
+                merge; a *later* frame from a camera already in the open instant seals that
+                instant and opens the next one with this frame.
             capture_s: when the frame was **captured**, in seconds. Not when it arrived.
             payload: whatever the caller wants handed to ``associate`` for this camera.
-            associate: called by whichever thread closes the bucket, with every entry in it,
-                and must return a mapping from a caller-chosen key to a caller-chosen result.
-                Called with this barrier's lock held (see the class docstring). If it raises,
-                every waiter is released with :data:`DROPPED_FAILED` and the exception reaches
-                the closing thread — one frame carries the failure and the rest carry a gap.
+            associate: called by whichever thread closes the bucket, with every entry in it, and
+                must return a mapping from a caller-chosen key to a caller-chosen result. Called
+                with this barrier's lock held (see the class docstring). If it raises, every
+                waiter is released with :data:`DROPPED_FAILED` and the exception reaches the
+                closing thread — one frame carries the failure and the rest carry a gap.
 
         Returns:
             An :class:`InstantOutcome`. ``results`` is the association's mapping when this
@@ -710,7 +717,7 @@ class InstantBarrier:
         return None
 
     def _open(self, capture_s: float, now: float) -> _Bucket:
-        """Start a new instant anchored on this capture, evicting the oldest if the map is full."""
+        """Open an instant anchored on this capture, evicting the oldest if the map is full."""
         self._evict()
         self._next_instant += 1
         bucket = _Bucket(
@@ -790,16 +797,18 @@ class InstantBarrier:
     def _retire(self, now: float) -> None:
         """Discard instants that ran out of time with nobody waiting on them.
 
-        Such a bucket holds only frames the never-starve guard already emitted, so no association
-        would have a reader — running one would cost a tracker call and a global-id assignment for
-        nothing, and *not* running one would leave the bucket to be evicted later and read as clock
-        skew. It is discarded and counted under the reason it was **sealed** with, because "a
-        camera moved on" is what happened to that instant and :data:`CLOSED_ADVANCED` is the share
-        an operator reads before touching ``sync_window_ms``.
+        Such a bucket holds only frames the never-starve guard already emitted, so no
+        association would have a reader — running one would cost a tracker call and a global-id
+        assignment for nothing, and *not* running one would leave the bucket to be evicted later
+        and read as clock skew. It is discarded and counted under the reason it was **sealed**
+        with, because "a camera moved on" is what happened to that instant and
+        :data:`CLOSED_ADVANCED` is the share an operator reads before touching
+        ``sync_window_ms``.
 
-        Runs on every :meth:`submit` and almost always finds nothing. The map is insertion-ordered
-        by instant id and every deadline is one window after its bucket opened, so the front bucket
-        has the earliest deadline of all: if *it* has not expired, none has.
+        Runs on every :meth:`submit` and almost always finds nothing. The map is
+        insertion-ordered by instant id and every deadline is one window after its bucket
+        opened, so the front bucket has the earliest deadline of all: if *it* has not expired,
+        none has.
         """
         if not self._buckets:
             return
