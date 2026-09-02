@@ -2658,7 +2658,32 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       RULE for every future prose wave: a test suite cannot distinguish a duplicated idempotent
       statement from none; the per-file AST proof is the check.
       Original: same for engine/ (pool.py 1421, ensemble.py 828, spill/remote_instance.py 747).**
-- [~] **V149-api · OPEN as PR #117 (cef9301), 9 files / 2 commits. api/ is the worst PACKAGE in the tree (1.39); its two heavy
+- [~] **V149-api · OPEN as PR #117, ROUND 1 CAME BACK BLOCKING AND IT WAS RIGHT. 11 files / 3 commits.
+      THE FINDING, worth carrying into every future prose wave: my re-wrapper reflowed
+      `Args:`/`Raises:` entries even though the body claimed it left them alone, and a field entry's
+      continuation that loses four spaces STOPS BEING A CONTINUATION -- Sphinx reads
+      `...a teardown is` / `still` as a parameter named "still". EIGHT shipped. Root cause: a field
+      continuation lives at `item indent + 4`, so gathering a paragraph by "same leading whitespace"
+      stops after the entry's first line; the lone over-long line was then wrapped on its own and the
+      overflow emitted at the ITEM indent. NOTHING SEES THIS -- black does not touch prose, ruff's
+      E501 is off, check_docs' caps do not fire (the lines are short), the AST docs-only proof passes
+      (it strips docstrings), and every test passes.
+      FIXED: found the eight MECHANICALLY rather than from the review's list (an independent detector
+      agreed on exactly those eight, which is also what says the list was complete; the same detector
+      reports 0 on main, so it is entirely this PR's regression), rejoined each entry, token multiset
+      unchanged for all eight files. Plus one of the same shape outside a field list in _stop_run --
+      the FIRST, buggier run of the re-wrapper made it and the second never revisited it because by
+      then the line was short.
+      THE CHECK: scripts/hooks/check_napoleon.py + TestNapoleonFieldListsStayIndented, ZERO tolerance
+      rather than a ratchet because main was already at zero. Revert-checked against the exact orphan
+      this PR shipped; the width and caps ratchets stay GREEN through that mutation, which
+      demonstrates the reviewer's point that neither could catch it.
+      DETOUR WORTH REMEMBERING: before/after copies named `/tmp/pre-nap-$(basename $f)` COLLIDE --
+      engine/pool.py and topology/elements/pool.py share a basename, so one overwrote the other and
+      the token check reported a huge false DIFFERS. Compare against `git show HEAD:<path>`.
+      All three non-blocking findings taken too, incl. the body's overstated token-multiset claim
+      (it holds for six of eight files, not all).
+      Original: OPEN as PR #117 (cef9301), 9 files / 2 commits. api/ is the worst PACKAGE in the tree (1.39); its two heavy
       files are streams.py (2.42 over 160 code lines) and schemas.py (1.75), the rest already fine
       (routes.py 0.40, app.py 0.73, __init__.py 0.65).** streams.py 2.42 -> 2.21, schemas.py
       1.75 -> 1.66, docs-only by AST. streams.py does NOT come down further and the reason is
