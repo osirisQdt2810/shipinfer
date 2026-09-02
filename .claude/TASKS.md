@@ -2482,12 +2482,43 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       closing triple-quote, swallowing its Args block into an unterminated string. The Args had to be
       recovered from `git show HEAD:`. A docstring rewrite can silently delete adjacent content.
       Original scope: topology/, runners/inprocess.py, pipeline/.
-- [ ] **V145-W3 · trim wave 3** — `tests/`, and the Markdown the tool cannot see
-      (`FEATURE_LOG.md` entries ≤ 15 lines, ADRs ≤ 30 — forward-only, accepted ADRs stay).
-- [ ] **V145-ARM · wire `check_docs.py` into `.pre-commit-config.yaml`** once the waves have
-      taken the count to zero. Until this line is `[x]` the cap is a convention, not a gate —
-      and the waves must take symbols *under* their caps, not merely shorten them: wave 1
-      removes 357 lines of prose and moves the count only 1022 → 1002.
+- [~] **V145-W3 · MEASURED FIRST, and the measurement changed the work. On branch
+      chore/docs-caps-ratchet, opens after #117.**
+      `tests/` NEEDS NO WAVE: the whole tree is **0.37** prose-to-code (docs 10626 + comments
+      1466 over code 32669) and exactly ONE file of 60+ code lines is above 1.0
+      (test_model_requirement.py 1.45). A suite at 0.37 is not the problem V149 described;
+      trimming it would be work for its own sake. RECORDED so nobody re-opens it.
+      `pipeline/` likewise: every file under 0.9 (runner.py 0.59, deepstream/configs.py 0.63,
+      graph/graph.py 0.60), so V145-W2's third package needed nothing either.
+      THE MARKDOWN HALF IS REAL and is where the prose actually is: FEATURE_LOG.md is 2331
+      lines / 38 entries with **35 over the 15-line cap** (worst 183), DECISIONS.md 867 lines /
+      19 ADRs with **10 over 30**. But the item says forward-only and it is right to: both are
+      append-only records of what was decided when, and an accepted ADR edited later stops
+      being the thing it records. So the deliverable is a RATCHET, not a rewrite.
+- [~] **V145-ARM · ANSWERED DIFFERENTLY FROM HOW IT WAS FRAMED, with the reason. Same branch.**
+      The item says "wire it in once the waves have taken the count to zero". MEASURED: five
+      trim PRs moved the tree 1022 -> **989** over-cap items (src/shipinfer 689, tests 203,
+      benchmarks 58, scripts 39), and 6880 lines of excess. The premise is unreachable -- the
+      caps are tighter than most of this codebase's reasoning fits in, and taking 989 symbols
+      under them would rewrite most of the prose in the tree. A hard pre-commit gate therefore
+      cannot be armed at all.
+      DELIVERED INSTEAD: `TestDocumentationCapsOnlyGetTighter`, a per-root ratchet on the
+      count. Costs nothing to satisfy, fails the moment a PR adds over-cap prose with no
+      `# doc: long <reason>`, and needs no decision about the cap VALUES first -- whatever they
+      are, the tree can only improve. Per root so a regression in src/ cannot be masked by a
+      trim in tests/ on the same branch. Plus `TestTheProjectsMarkdownKeepsItsCaps` for the
+      feature log and the ADRs. FIVE revert-checks, each against its own mutation and only its
+      own; the fourth is the one to remember -- my first probe put `# doc: long` above the
+      DOCSTRING and it exempted nothing. The hook looks above the `def`/`class` line, which is
+      where every existing marker in the tree sits. A marker in the wrong place looks exactly
+      like a broken escape hatch.
+      **STILL OWED BY THE OPERATOR and now NON-BLOCKING:** raise COMMENT_MAX from 4, keep 4 and
+      accept `# doc: long` at scale, or arm for docstrings only. The ratchet does not answer
+      that and does not pretend to; it just stops the count going up while it is undecided.
+      Original: wire `check_docs.py` into `.pre-commit-config.yaml` once the waves have taken
+      the count to zero. Until this line is `[x]` the cap is a convention, not a gate — and the
+      waves must take symbols *under* their caps, not merely shorten them: wave 1 removes 357
+      lines of prose and moves the count only 1022 → 1002.
 
 ## Z · Final gate
 
