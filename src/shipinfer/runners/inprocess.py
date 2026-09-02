@@ -17,7 +17,8 @@ Five choices, each with a simpler-looking alternative that is wrong:
   queues puts eight hand-offs in every frame's path, and the loader already proved the order
   legal (ADR-017).
 * **Fan-in merges deterministically or not at all** -- "whichever finished last" is no answer
-  when the branches carry different metadata (:meth:`~shipinfer.runners.walk.ChainWalk.inbound`).
+  when the branches carry different metadata
+  (:meth:`~shipinfer.runners.walk.ChainWalk.inbound`).
 * **An element that raises loses one item, not the worker**, which would stop serving every
   camera on the shard.
 * **A batch is as wide as the worker pool.** The walk is synchronous, so at
@@ -112,9 +113,9 @@ class _Head:
 
     Resolved once per runner from the *loader's* answers, and both fields refuse a chain
     whose roots disagree: one ingest manager publishes into one sink, every root of the walk
-    sees that one item (:meth:`~shipinfer.runners.walk.ChainWalk.run`), so two roots wanting different
-    payloads or different decoders is a chain this runner cannot honour. Refusing at start
-    beats stamping one root's answer on the other's frames.
+    sees that one item (:meth:`~shipinfer.runners.walk.ChainWalk.run`), so two roots wanting
+    different payloads or different decoders is a chain this runner cannot honour. Refusing at
+    start beats stamping one root's answer on the other's frames.
 
     Args:
         caps: the negotiated cap of the edges leaving the roots -- read from
@@ -1142,8 +1143,8 @@ class InprocessRunner(Runner):
                 if queue.is_closed:
                     return
                 continue
-            # Published before the first walk and narrowed in a `finally` after each item, so every
-            # item this worker owes an answer for has an owner a shutdown can find. The
+            # Published before the first walk and narrowed in a `finally` after each item, so
+            # every item this worker owes an answer for has an owner a shutdown can find. The
             # *remainder*, not the current item: the ones behind it left the queue in the same
             # drain. Both slices are free at the default `frames_per_wakeup = 1`.
             batch = tuple(items)

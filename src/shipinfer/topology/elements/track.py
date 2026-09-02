@@ -243,17 +243,18 @@ class TrackerShard:
         per-camera high-water mark gives the second, and it has to, because reassembly orders
         nothing: two of one camera's frames can be in flight and the later one can arrive first.
 
-        **What a violation costs.** Feeding a tracker a frame it has already passed advances every
-        filter a second time, ages every track a second time, and double-counts the hit that
-        promotes a tentative track — so a replayed frame silently changes *which identities exist*
-        downstream. The frame that lost the race is refused: the caller emits it with detections,
-        embeddings and masks intact and no track ids, naming ``track`` in ``missing_stages``.
+        **What a violation costs.** Feeding a tracker a frame it has already passed advances
+        every filter a second time, ages every track a second time, and double-counts the hit
+        that promotes a tentative track — so a replayed frame silently changes *which identities
+        exist* downstream. The frame that lost the race is refused: the caller emits it with
+        detections, embeddings and masks intact and no track ids, naming ``track`` in
+        ``missing_stages``.
 
-        **Not silently reordered, either.** A reorder buffer would wait for a frame that may never
-        arrive — ingest drops on overflow and on an expired deadline — so it needs a timeout, and
-        that timeout is latency paid by every frame of every camera to rescue the few that raced.
-        If the refusal rate matters, the fix is upstream (fewer of one camera's frames in flight),
-        and ``stats()["out_of_order"]`` is the number that says so.
+        **Not silently reordered, either.** A reorder buffer would wait for a frame that may
+        never arrive — ingest drops on overflow and on an expired deadline — so it needs a
+        timeout, and that timeout is latency paid by every frame of every camera to rescue the
+        few that raced. If the refusal rate matters, the fix is upstream (fewer of one camera's
+        frames in flight), and ``stats()["out_of_order"]`` is the number that says so.
 
         Args:
             detections: this frame's detections and its tag.
@@ -263,15 +264,18 @@ class TrackerShard:
                 :data:`DEFAULT_REGRESSION_RESET`. ``None`` (the default, and what the
                 counting-simulation pipeline passes) refuses every regression. The decision is
                 taken **here**, under the camera's lock, rather than by the caller reading
-                :attr:`last_frame_id` and calling :meth:`reset`: those are three steps, and between
-                any two another worker can advance the same camera.
-            on_implicit_reset: called with the camera id when that recovery fires, from inside the
-                camera's lock. A callback rather than a return value or a polled counter, because
-                the event is rare and the alternatives put work on the frames where nothing
-                happened. It must not block — it is holding one camera's tracker while it runs.
+                :attr:`last_frame_id` and calling :meth:`reset`: those are three steps, and
+                between any two another worker can advance the same camera.
+            on_implicit_reset: called with the camera id when that recovery fires, from inside
+            the
+                camera's lock. A callback rather than a return value or a polled counter,
+                because the event is rare and the alternatives put work on the frames where
+                nothing happened. It must not block — it is holding one camera's tracker while
+                it runs.
 
         Raises:
-            TrackingError: the frame does not advance this camera's stream, and the regression is
+            TrackingError: the frame does not advance this camera's stream, and the regression
+            is
                 small enough to be a reordering.
         """
         tag = detections.tag
@@ -317,16 +321,16 @@ class TrackerShard:
         tracker for each — a Kalman filter, a track pool and a registry build for a camera that
         may never send a frame, on the thread holding the runner's lifecycle lock.
 
-        The table is read under :attr:`_admit` and the lock is **released before** the camera's own
-        lock is taken. Holding both would make every other camera's first frame queue behind this
-        one camera's in-flight update.
+        The table is read under :attr:`_admit` and the lock is **released before** the camera's
+        own lock is taken. Holding both would make every other camera's first frame queue behind
+        this one camera's in-flight update.
 
         **It can still wait, on one camera, for one frame.** If a worker is inside
-        ``tracker.update`` for *this* camera the reset queues behind that update (measured 0.40 s
-        against an artificially slow tracker; tens of microseconds ordinarily). :meth:`drop` has no
-        such wait because unlinking a table entry needs no agreement with the frame in flight — a
-        **reset** does, since resetting mid-update is the half-forgotten state the per-camera lock
-        prevents. The wait is bounded by one update on one camera.
+        ``tracker.update`` for *this* camera the reset queues behind that update (measured 0.40
+        s against an artificially slow tracker; tens of microseconds ordinarily). :meth:`drop`
+        has no such wait because unlinking a table entry needs no agreement with the frame in
+        flight — a **reset** does, since resetting mid-update is the half-forgotten state the
+        per-camera lock prevents. The wait is bounded by one update on one camera.
 
         Returns:
             Whether there was a tracker to reset.
@@ -635,14 +639,14 @@ class ShipvisionTrack(Element):
 
         A re-added camera is one whose ingest actor minted a fresh ``FrameCounter``, so its next
         frame is ``frame_id = 0`` — below the high-water mark the previous run left, and refused
-        forever without this. ADR-018 names remove + add as the recovery for a lost camera, so this
-        state has to be one the chain can be in.
+        forever without this. ADR-018 names remove + add as the recovery for a lost camera, so
+        this state has to be one the chain can be in.
 
         Never *builds* a tracker: this fires for every camera placed on the shard, and minting a
         Kalman filter for forty-nine cameras that are not on this element is work for nothing.
 
-        Unlike :meth:`camera_removed`, this one **can wait** — for one in-flight frame on this one
-        camera, while holding the runner's ``_lifecycle``. See
+        Unlike :meth:`camera_removed`, this one **can wait** — for one in-flight frame on this
+        one camera, while holding the runner's ``_lifecycle``. See
         :meth:`TrackerShard.reset_if_present` for why that residual is accepted: a reset has to
         agree with the update it interrupts, and a drop does not.
         """
@@ -668,20 +672,20 @@ class ShipvisionTrack(Element):
             The successor item: same tag, ``caps`` = ``meta@cpu``, ``payload`` cleared, and
             ``meta["tracks"]`` / ``meta["track_rows"]`` holding this frame's publishable tracks
             and the detection row each came from. ``meta["frame_hw"]`` rides along from the
-            detector, because the boxes are in that extent's pixels and the payload that could have
-            said so is gone.
+            detector, because the boxes are in that extent's pixels and the payload that could
+            have said so is gone.
 
-            A frame the detector never answered for, and a frame that lost the ordering race, come
-            back with the same shape and ``track`` in ``meta["missing_stages"]`` — never as
-            ``None`` and never as an exception, because "no ships in this frame", "the detector is
-            dead" and "this frame arrived late" are three events and only one is a fault
+            A frame the detector never answered for, and a frame that lost the ordering race,
+            come back with the same shape and ``track`` in ``meta["missing_stages"]`` — never as
+            ``None`` and never as an exception, because "no ships in this frame", "the detector
+            is dead" and "this frame arrived late" are three events and only one is a fault
             (arch.md section 5(5)).
 
         Raises:
             ValidationError: ``meta["detections"]`` is not a
                 :class:`~shipinfer.topology.elements.detections.Detections`, ``meta["vectors"]``
-                cannot be attributed to detections, or the item carries no frame id. All three are
-                a mis-wired chain rather than a late frame.
+                cannot be attributed to detections, or the item carries no frame id. All three
+                are a mis-wired chain rather than a late frame.
             ServerStateError: called before :meth:`Element.open`.
         """
         detections = item.meta.get("detections")
@@ -742,12 +746,12 @@ class ShipvisionTrack(Element):
     ) -> tuple[int, ...]:
         """Which detection row each published track came from. Aligned with ``tracks``.
 
-        The library returns tracks, not row indices, and it is right not to: a track's box is the
-        *filtered* estimate, and which detection fed it is the tracker's business. But an emitted
-        event is per detection — ``det_id``, ``bbox``, ``embedding`` and the identity fields are
-        one row — so the mapping has to be recovered, and a published track is by construction the
-        corrected state of one of this frame's detections, which makes the recovery an assignment
-        over IoU rather than a guess.
+        The library returns tracks, not row indices, and it is right not to: a track's box is
+        the *filtered* estimate, and which detection fed it is the tracker's business. But an
+        emitted event is per detection — ``det_id``, ``bbox``, ``embedding`` and the identity
+        fields are one row — so the mapping has to be recovered, and a published track is by
+        construction the corrected state of one of this frame's detections, which makes the
+        recovery an assignment over IoU rather than a guess.
 
         One-to-one and globally optimal, through the same solver the trackers use
         (``shipvision.mot.association.associate``) — this is
@@ -866,14 +870,14 @@ class ShipvisionTrack(Element):
         """``meta["vectors"]`` as one appearance vector per detection row, or ``None``.
 
         The attribution rule is :func:`~shipinfer.topology.elements.detections.per_row`, because
-        the ``output`` element reads the same key under the same rule and two copies would be two
-        places for "a mapping that covers no row is an off-by-N" to drift — a drift with no
+        the ``output`` element reads the same key under the same rule and two copies would be
+        two places for "a mapping that covers no row is an off-by-N" to drift — a drift with no
         symptom, since both readers fail by quietly attaching nothing.
 
         What is local to *this* element is why the refusal matters here: appearance carries an
         identity through the frames where geometry alone is ambiguous, so a tracker that quietly
-        ran without the vectors a deployment paid a re-ID network for is a measurable accuracy loss
-        reported as a healthy chain.
+        ran without the vectors a deployment paid a re-ID network for is a measurable accuracy
+        loss reported as a healthy chain.
 
         Returns:
             Something indexable by detection row, or ``None`` when the chain filed no vectors.

@@ -237,20 +237,21 @@ class _PoolElement(Element):
         Build the request, wait on the bound, propagate every refusal as itself. The two hooks a
         subclass replaces are :meth:`_prepare` and :meth:`_finish`; a detector replaces both.
 
-        Exactly one subclass replaces this method: :class:`_PoolCropElement` submits *no* request
-        on a frame with nothing to crop and more than one on a frame past ``max_batch_size``. Both
-        still go through :meth:`_submit`, so the wait has one definition however many requests a
-        frame costs.
+        Exactly one subclass replaces this method: :class:`_PoolCropElement` submits *no*
+        request on a frame with nothing to crop and more than one on a frame past
+        ``max_batch_size``. Both still go through :meth:`_submit`, so the wait has one
+        definition however many requests a frame costs.
 
-        The request carries the item's ``RequestContext`` **by identity**, not a copy: that tag is
-        what reassembly, tracing and every log line group on (ADR-002).
+        The request carries the item's ``RequestContext`` **by identity**, not a copy: that tag
+        is what reassembly, tracing and every log line group on (ADR-002).
 
-        **A timeout abandons the request; it does not cancel it.** There is no cancellation path to
-        call — an item that has been queued is dequeued, assembled and executed whatever its future
-        says, and only the *result* is discarded. So a timed-out frame still costs the instance slot
-        that made it late, and under sustained overload that compounds into a queue that never
-        drains rather than one that sheds. The bound is still worth having, because it frees the
-        *worker*; real cancellation needs a queue-side removal and is deliberately not guessed here.
+        **A timeout abandons the request; it does not cancel it.** There is no cancellation path
+        to call — an item that has been queued is dequeued, assembled and executed whatever its
+        future says, and only the *result* is discarded. So a timed-out frame still costs the
+        instance slot that made it late, and under sustained overload that compounds into a
+        queue that never drains rather than one that sheds. The bound is still worth having,
+        because it frees the *worker*; real cancellation needs a queue-side removal and is
+        deliberately not guessed here.
 
         Returns:
             The successor item — same tag, same payload, and whatever :meth:`_finish` added.
@@ -300,7 +301,9 @@ class _PoolElement(Element):
     # -- what the artefact says, and what the payload holds ----------------------------
 
     def _declared(self, attribute: str) -> dict[str, Any]:
-        """The model's declared ``input_specs``/``output_specs`` by name, ``{}`` if it says none.
+        """The model's declared ``input_specs``/``output_specs`` by name.
+
+        ``{}`` when the artefact declares none.
 
         Read off the handle with :func:`getattr` rather than imported: the pool arrives as the
         structural :class:`~shipinfer.topology.base.ModelResolver`, so this layer never learns
@@ -629,8 +632,8 @@ class PoolDetect(_PoolElement):
         raise ConfigurationError(
             f"detect element {self.name!r} cannot tell how big model {self.model!r} wants its "
             f"input: its declared inputs are {sorted(specs) or 'none'} and the one named "
-            f"{self._input!r} is {shape or 'absent'}, which is not a static (3, H, W). Give the "
-            "model a `config.yaml` that declares it, or say so on the slot: "
+            f"{self._input!r} is {shape or 'absent'}, which is not a static (3, H, W). Give "
+            "the model a `config.yaml` that declares it, or say so on the slot: "
             "`params: {decode: {dst_size: [640, 640]}}`"
         )
 
@@ -790,8 +793,8 @@ class PoolDetect(_PoolElement):
         Raises:
             ValidationError: the payload is not a host-resident ``(1, H, W, 3)`` or
                 ``(H, W, 3)`` **uint8** frame. A device-resident handle is refused by name
-                rather than downloaded: an implicit device-to-host copy per frame is exactly the cost
-                arch.md section 8 makes the caps refuse at load time, and it becomes a real
+                rather than downloaded: an implicit device-to-host copy per frame is exactly the
+                cost arch.md section 8 makes the caps refuse at load time, and it becomes a real
                 submission with the DataPool (phase D).
         """
         image = self._frame_of(item)
@@ -1370,10 +1373,10 @@ class _PoolCropElement(_PoolElement):
         objects.py`` serialises the same way) and K is small on a *batching* model: 25 objects
         against a plan built at batch 16 is K=2. On ``max_batch_size: 0`` it is not — the
         engine's bound is then one row, K == N, and a 15-person frame is 15 round trips, so
-        declare a ``max_batch_size`` on a model a crop element feeds. Submitting all K first and then collecting
-        the futures would cost one round trip instead of K, at the price of K requests in
-        flight per worker against a bound the scheduler sizes for one; that trade belongs
-        with the asynchronous walk (arch.md section 5, item 5) and not here.
+        declare a ``max_batch_size`` on a model a crop element feeds. Submitting all K first and
+        then collecting the futures would cost one round trip instead of K, at the price of K
+        requests in flight per worker against a bound the scheduler sizes for one; that trade
+        belongs with the asynchronous walk (arch.md section 5, item 5) and not here.
 
         Raises:
             InferenceError: a chunk came back without the declared output.
@@ -1460,13 +1463,14 @@ class _PoolCropElement(_PoolElement):
         What is filed is a :class:`~shipinfer.topology.base.RowIndexed`, which is what tells the
         fan-in the value is keyed by detection row and may be unioned. A bare dict still reaches
         ``track`` and simply does not union — the right default for a value nobody declared, and
-        why the ``segment`` slots filing raw outputs are left alone. Merging into a peer keeps the
-        peer's declaration: a plain dict stays plain.
+        why the ``segment`` slots filing raw outputs are left alone. Merging into a peer keeps
+        the peer's declaration: a plain dict stays plain.
 
-        **Both halves refuse an overlap.** Disjoint rows union; a row two elements both cover is an
-        :class:`~shipinfer.core.errors.InferenceError` here exactly as at the fan-in, because two
-        elements covering one detection is a property of the chain file, equally true in series and
-        in parallel. ``{**existing, **covered}`` would turn that into a silently wrong vector.
+        **Both halves refuse an overlap.** Disjoint rows union; a row two elements both cover is
+        an :class:`~shipinfer.core.errors.InferenceError` here exactly as at the fan-in, because
+        two elements covering one detection is a property of the chain file, equally true in
+        series and in parallel. ``{**existing, **covered}`` would turn that into a silently
+        wrong vector.
 
         Raises:
             ValidationError: something upstream filed a non-mapping under this key, so there is

@@ -627,7 +627,8 @@ def place_cameras(runner: Runner, cameras: Sequence[CameraSpec]) -> None:
             url, because ``ingest/manager.py``'s message names only the id — which for an
             ``--inputs`` camera is minted from its position and appears nowhere in what the
             operator typed.
-        NoShardAvailableError: a fleet whose shards all refused. Deliberately **not** re-labelled
+        NoShardAvailableError: a fleet whose shards all refused. Deliberately **not**
+        re-labelled
             with the input path: the camera is fine and there is nowhere to put it, and wrapping
             it in a ``ConfigurationError`` would turn a 503 into a 400 for the same condition
             reached over ``POST /streams`` (``api/errors.py``).
