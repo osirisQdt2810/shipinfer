@@ -41,15 +41,14 @@ __all__ = [
 class RequestTag(BaseModel):
     """The provenance tag, carried in KServe's request-level ``parameters`` object.
 
-    In ``parameters`` rather than as new top-level fields, so the server stays wire
-    compatible with a stock Triton client — an unknown top-level key would be rejected by
-    one, while ``parameters`` is exactly the extension point the protocol provides.
+    In ``parameters`` rather than as new top-level fields, so the server stays wire compatible
+    with a stock Triton client — an unknown top-level key would be rejected by one, while
+    ``parameters`` is exactly the extension point the protocol provides.
 
-    Both fields are optional, and a request without them is legitimate. But it is worth
-    knowing what it costs: every untagged request shares the fairness key ``"-"``, so they
-    all queue in one lane. That is the honest default (the server cannot invent a camera
-    id), not a recommendation — a multi-camera client that omits the tag gets FIFO and
-    the starvation ADR-005 exists to prevent.
+    Both fields are optional, and a request without them is legitimate — but every untagged
+    request shares the fairness key ``"-"``, so they all queue in one lane. That is the honest
+    default (the server cannot invent a camera id), not a recommendation: a multi-camera client
+    that omits the tag gets FIFO and the starvation ADR-005 exists to prevent.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -155,20 +154,17 @@ BAND_NAMES: Final[tuple[str, ...]] = tuple(band.name.lower() for band in Priorit
 
 #: The wire type of :attr:`StreamRequest.priority`: the band *names*, never the numbers.
 #:
-#: A ``Literal`` rather than ``Priority`` itself, because the annotation is what the schema is
-#: generated from and ``Priority`` is an ``IntEnum``: FastAPI published
+#: A ``Literal`` rather than ``Priority`` itself, because the annotation is what the schema
+#: is generated from and ``Priority`` is an ``IntEnum``: FastAPI published
 #: ``{"enum": [0, 1, 2, 3], "type": "integer"}`` on ``/openapi.json`` while the validator
 #: refused every one of those integers, so a generated client did exactly what the document
-#: told it to and got a 422. The names are the only thing that was ever accepted, and now they
-#: are the only thing advertised.
+#: told it to and got a 422. The names are the only thing that was ever accepted.
 #:
 #: Subscripted with the derived tuple and not with four spelled-out strings, so the document
 #: and the enum cannot drift apart; ``Literal[t]`` for a tuple ``t`` is the same type as
-#: ``Literal[*t]`` at runtime, which static tooling cannot see -- hence the ignore.
-#:
-#: Matched case-insensitively, by :meth:`StreamRequest._band_name_is_case_insensitive`
-#: normalising the input first; what is *published* is the lower-cased spelling, because a
-#: document has to offer one.
+#: ``Literal[*t]`` at runtime, which static tooling cannot see — hence the ignore. Matched
+#: case-insensitively, by :meth:`StreamRequest._band_name_is_case_insensitive` normalising
+#: the input first; what is *published* is the lower-cased spelling.
 BandName = Literal[BAND_NAMES]  # type: ignore[valid-type]
 
 
@@ -176,33 +172,31 @@ class StreamRequest(BaseModel):
     """One camera, as a client asks for it: ``{"url": "rtsp://..."}`` and little else.
 
     Deliberately :class:`~shipinfer.launch.control.CameraSpec`'s fields and not
-    :class:`~shipinfer.core.settings.ingest.CameraConfig`'s twenty. Codec, transport and
-    decode size are *deployment* settings that the shard resolves from its own tree
-    (CONVENTIONS 2.6); what only the caller knows is which video it wants read, and — since a
-    fleet shard has no camera table to resolve a band from — which lane it wants it read in.
+    :class:`~shipinfer.core.settings.ingest.CameraConfig`'s twenty. Codec, transport and decode
+    size are *deployment* settings the shard resolves from its own tree (CONVENTIONS 2.6); what
+    only the caller knows is which video it wants read, and — since a fleet shard has no camera
+    table to resolve a band from — which lane it wants it read in.
 
     ``extra="forbid"`` is the load-bearing line. A client that posts ``{"uri": ...}`` or
-    ``{"framerate": 30}`` against a server that silently drops what it does not recognise
-    gets a 201 and a camera reading nothing, or a camera at the wrong rate -- and finds out
-    from a dashboard rather than from the response. A 422 naming the field is the cheaper
-    failure.
+    ``{"framerate": 30}`` against a server that silently drops what it does not recognise gets
+    a 201 and a camera reading nothing, and finds out from a dashboard rather than from the
+    response. A 422 naming the field is the cheaper failure.
 
     **The field constraints make the same argument about values, and they are not cosmetic.**
     The next thing to inspect a ``url`` or an ``fps`` is
     :class:`~shipinfer.core.settings.ingest.CameraConfig`, a layer below the router, and its
-    refusal is a *pydantic* ``ValidationError`` -- a ``ValueError``, and not a
-    :class:`~shipinfer.core.errors.ShipInferError`, so the handler's typed mapping does not
-    see it. Unconstrained here, ``{"url": ""}`` from a deploy script whose variable did not
-    expand answered **500** in process and, over gRPC, a refusal from every shard -> a
+    refusal is a *pydantic* ``ValidationError`` — a ``ValueError``, not a
+    :class:`~shipinfer.core.errors.ShipInferError`, so the handler's typed mapping does not see
+    it. Unconstrained here, ``{"url": ""}`` from a deploy script whose variable did not expand
+    answered **500** in process and, over gRPC, a refusal from every shard -> a
     ``NoShardAvailableError`` -> a **retryable 503** for a request that can never succeed.
-    Declared here, FastAPI answers 422 naming the field before the handler is entered, so
-    both runners give the caller the same terminal answer. The constraints are not a mirror
-    of ``CameraConfig``'s (``core/settings/ingest.py``) but the *same rule applied earlier*:
-    non-empty ``uri``, ``fps >= 0``, ``priority`` by name, and -- through
-    :func:`~shipinfer.core.settings.ingest.usable_camera_id`, which both models call -- a
-    ``camera_id`` with no whitespace in it. A mirror would have drifted, and it did:
-    ``camera_id`` was the field this argument was written for and the field it was first
-    missing.
+    Declared here, FastAPI answers 422 naming the field before the handler is entered.
+
+    The constraints are not a mirror of ``CameraConfig``'s but the *same rule applied earlier*:
+    non-empty ``uri``, ``fps >= 0``, ``priority`` by name, and — through
+    :func:`~shipinfer.core.settings.ingest.usable_camera_id`, which both models call — a
+    ``camera_id`` with no whitespace. A mirror would have drifted, and it did: ``camera_id`` was
+    the field this argument was written for and the field it was first missing.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -220,25 +214,23 @@ class StreamRequest(BaseModel):
     fps: float = Field(default=0.0, ge=0.0)
     #: ``replay`` sources only: restart the file at EOF. Exposed because it is the one field
     #: of :class:`~shipinfer.launch.control.CameraSpec` that decides whether *this* camera
-    #: ever ends, and it is not a deployment default -- ``shipinfer run --inputs`` has
-    #: ``--no-loop`` for exactly this, and without it here a client that posts a finite video
-    #: file gets it replayed forever with no way to ask otherwise. Ignored by a live source,
-    #: which has no end to reach.
+    #: ever ends, and it is not a deployment default — ``shipinfer run --inputs`` has
+    #: ``--no-loop`` for exactly this, and without it here a client that posts a finite file
+    #: gets it replayed forever. Ignored by a live source, which has no end to reach.
     loop: bool = True
     #: Optional scheduler lane, **by name**: ``tracking_critical``, ``high``, ``normal`` or
-    #: ``background`` (:data:`BAND_NAMES`). ``None`` -- the default -- leaves the band to the
-    #: deployment, which is what a caller who has no opinion should send.
+    #: ``background`` (:data:`BAND_NAMES`). ``None`` — the default — leaves the band to the
+    #: deployment, which is what a caller with no opinion should send.
     #:
     #: Names and never numbers, which is why the type is :data:`BandName` and not
-    #: :class:`~shipinfer.core.request.Priority`. ``Priority`` is an ``IntEnum``, so accepting
-    #: it on the wire would also accept ``{"priority": 0}`` --
-    #: :attr:`~shipinfer.core.request.Priority.TRACKING_CRITICAL`, one keystroke away from a
+    #: :class:`~shipinfer.core.request.Priority`. ``Priority`` is an ``IntEnum``, so
+    #: accepting it on the wire would also accept ``{"priority": 0}`` —
+    #: :attr:`~shipinfer.core.request.Priority.TRACKING_CRITICAL`, one keystroke from a
     #: caller who meant "unset" and got the highest lane on the deployment. A name cannot be
-    #: misread that way, and it is what the operator wrote in ``ingest.cameras`` anyway --
+    #: misread that way, and it is what the operator wrote in ``ingest.cameras`` anyway —
     #: literally so: :class:`~shipinfer.core.settings.ingest.CameraConfig` resolves that
-    #: field through :meth:`~shipinfer.core.request.Priority.parse` too.
-    #: An unknown name is a 422 naming the field, which FastAPI answers before the handler
-    #: runs -- the same answer an unknown key gets, for the same reason.
+    #: field through :meth:`~shipinfer.core.request.Priority.parse` too. An unknown name is
+    #: a 422 naming the field, which FastAPI answers before the handler runs.
     priority: BandName | None = None
 
     @field_validator("camera_id")
@@ -246,17 +238,17 @@ class StreamRequest(BaseModel):
     def _camera_id_is_usable(cls, value: str) -> str:
         """``""`` means "name it for me"; anything else must be an id a camera can carry.
 
-        The empty string is the one value this validator lets past, because it is not an id
-        at all -- it is the request to mint one, and :func:`shipinfer.api.streams._mint`
-        answers it with a name that is legal by construction. Everything else is checked by
+        The empty string is the one value this validator lets past, because it is not an id at
+        all — it is the request to mint one, and :func:`shipinfer.api.streams._mint` answers it
+        with a name that is legal by construction. Everything else is checked by
         :func:`~shipinfer.core.settings.ingest.usable_camera_id`, the same function
         ``CameraConfig`` uses, so the door and the record cannot disagree.
 
         Without this, ``{"camera_id": "quay 1"}`` reached the runner and was refused a layer
-        down -- a 400 in process, and on a fleet a **retryable 503** for a request that can
-        never succeed, because the launcher sees only that every shard said no. That is the
-        exact 400-vs-503 conflation ``url`` and ``fps`` were constrained to remove, on the
-        third field, which is why the rule is now shared code rather than a copy.
+        down — a 400 in process, and on a fleet a **retryable 503** for a request that can never
+        succeed, because the launcher sees only that every shard said no. That is the exact
+        400-vs-503 conflation ``url`` and ``fps`` were constrained to remove, on the third
+        field, which is why the rule is now shared code rather than a copy.
         """
         return value if not value else usable_camera_id(value)
 
@@ -279,28 +271,26 @@ class StreamRequest(BaseModel):
     def _band_name_is_case_insensitive(cls, value: object) -> object:
         """``TRACKING_CRITICAL`` and ``tracking_critical`` name the same lane.
 
-        The band is a member *name*, and that name is written upper-case everywhere it comes
-        from -- :class:`~shipinfer.core.request.Priority` in Python, ``Priority.BACKGROUND``
-        in a gRPC client's generated enum -- while this schema publishes it lower-cased. A
-        client that sent the spelling its own stub gave it would otherwise get a 422 for
-        naming the right lane, which is a document disagreeing with itself rather than a
-        caller making a mistake. ``api/streams.py`` already looks the member up with
-        ``Priority[name.upper()]``, so the case was never what it was checking.
+        The band is a member *name*, written upper-case everywhere it comes from —
+        :class:`~shipinfer.core.request.Priority` in Python, ``Priority.BACKGROUND`` in a gRPC
+        client's generated enum — while this schema publishes it lower-cased. A client that sent
+        the spelling its own stub gave it would otherwise get a 422 for naming the right lane,
+        which is a document disagreeing with itself rather than a caller making a mistake.
 
-        The *acceptance* test is :meth:`~shipinfer.core.request.Priority.parse`, the same
-        call :class:`~shipinfer.core.settings.ingest.CameraConfig` makes, so a client and an
-        operator who name a band this deployment does not have are told so in one set of
-        words. What is *published* stays :data:`BandName`: the parsed band is deliberately
-        thrown away and the lower-cased string returned, because ``parse`` also accepts the
-        numbers and this door must not -- returning ``Priority.TRACKING_CRITICAL`` for
-        ``{"priority": "0"}`` would smuggle the falsy-zero trap back in through a string.
+        The *acceptance* test is :meth:`~shipinfer.core.request.Priority.parse`, the same call
+        :class:`~shipinfer.core.settings.ingest.CameraConfig` makes, so a client and an operator
+        who name a band this deployment does not have are told so in one set of words. What is
+        *published* stays :data:`BandName`: the parsed band is deliberately thrown away and the
+        lower-cased string returned, because ``parse`` also accepts the numbers and this door
+        must not — returning ``Priority.TRACKING_CRITICAL`` for ``{"priority": "0"}`` would
+        smuggle the falsy-zero trap back in through a string.
 
-        Only ``str`` is touched, and only its case. Everything the field refused before it
-        still refuses: ``{"priority": 0}`` is an ``int`` and passes through untouched to be
-        rejected by the :data:`BandName` literal (ADR-005), ``"0"`` survives ``parse`` and is
-        then rejected by that same literal, ``"tracking-critical"`` is not a member name in
-        any case, and ``""`` is not one either. This normalises a spelling and refuses an
-        unknown one; it does not widen the vocabulary.
+        Only ``str`` is touched, and only its case. Everything the field refused before it still
+        refuses: ``{"priority": 0}`` is an ``int`` and passes through untouched to be rejected
+        by the :data:`BandName` literal (ADR-005), ``"0"`` survives ``parse`` and is then
+        rejected by that same literal, and ``"tracking-critical"`` is not a member name in any
+        case. This normalises a spelling and refuses an unknown one; it does not widen the
+        vocabulary.
         """
         if not isinstance(value, str):
             return value
@@ -342,18 +332,16 @@ class StreamInfo(BaseModel):
     #: a death by up to the launcher's supervision poll.
     lost: bool = False
     #: Which scheduler lane this camera's frames are admitted into, as the lower-cased band
-    #: name :attr:`StreamRequest.priority` is posted in -- so the request that placed a
+    #: name :attr:`StreamRequest.priority` is posted in — so the request that placed a
     #: camera and the listing that confirms it are written in one vocabulary, and an
     #: operator can check over HTTP that ``priority: tracking_critical`` actually took
     #: effect. That check is the point: a fleet shard's ingest config is stripped (#71), so
-    #: the band on the placement is the only thing that decides the lane and nothing else
-    #: reports what it resolved to.
+    #: the band on the placement is the only thing that decides the lane.
     #:
-    #: ``None`` is "the controller did not say", and it is deliberately not ``normal``.
-    #: A default here would answer *middle lane* for a camera on an unreachable shard or
-    #: behind a runner whose health carries no band, which is the confidently-wrong shape
-    #: `url` and `loop` are optional to avoid -- and the misconfiguration it would hide is
-    #: exactly the one being looked for (ADR-005).
+    #: ``None`` is "the controller did not say", and deliberately not ``normal``. A default
+    #: would answer *middle lane* for a camera on an unreachable shard, which is the
+    #: confidently-wrong shape `url` and `loop` are optional to avoid — and the
+    #: misconfiguration it would hide is exactly the one being looked for (ADR-005).
     priority: BandName | None = None
 
     # `loop` is deliberately absent, for the reason `url` is optional-shaped: no runner's
