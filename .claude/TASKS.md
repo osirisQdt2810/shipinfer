@@ -2482,6 +2482,28 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       closing triple-quote, swallowing its Args block into an unterminated string. The Args had to be
       recovered from `git show HEAD:`. A docstring rewrite can silently delete adjacent content.
       Original scope: topology/, runners/inprocess.py, pipeline/.
+- [~] **HANDOFF-V151 · SESSION HANDED OVER 2 Sep ~02:3x. `.claude/JOURNAL.md`'s RESUME HERE entry is
+      the single instruction; a new session typing "tiep tuc" needs nothing else.** Both branches below
+      are PUSHED, REBASED on main and GREEN on both tiers; neither has a PR yet, because the queue is
+      one PR at a time. Open `chore/docs-caps-ratchet` first, then `fix/source-unavailable-redaction`.
+      Body from `git diff origin/main`, every template heading incl. `### Test Details` (a missing one
+      fails the `PR description` check and silently SKIPS auto-merge -- that cost a round on #113).
+      ENV: the venv is not on PATH after a restart --
+      `export PATH="/home/dungha15/workspaces/shipinfer/.venv/bin:$PATH"` before any pytest.
+- [~] **REDACTION · pushed as `fix/source-unavailable-redaction` (a070479), no PR yet. A REAL DEFECT,
+      found while reading both planes for P6-D1 rather than trusting the ledger.**
+      `core/errors/ingest.py` states the rule -- the message becomes `CameraHealth.last_error`, which
+      the health API serves -- and applies it to SourceOpenError and FrameDecodeError but NOT to
+      SourceUnavailableError, on EITHER plane, and that is the error the fatal-open path stores. So a
+      `rtsp://admin:s3cret@host` that cannot be opened was served verbatim to every reader of
+      `GET /streams`. C++ was saved only downstream by record_failure's own redact_in, so every future
+      call site had to remember; SourceOpenError deliberately does not rely on that. FIXED ON BOTH
+      PLANES per the sync rule (redact the source, redact_in the hint, message only, members intact so
+      a retry still has the real URI). Six tests, RED FIRST and parameterised over all three ingest
+      errors, so the two that already redacted stayed green -- which is what says the test
+      distinguishes the broken sibling rather than asserting a tautology. Tier 3268 + C++ 395 checks.
+      DOES NOT CLOSE P6-D1: the type-prefix question is untouched and `last_error_type_prefix` still
+      explains the remaining difference (test_ingest_parity still prints it).
 - [~] **V145-W3 · MEASURED FIRST, and the measurement changed the work. On branch
       chore/docs-caps-ratchet, opens after #117.**
       `tests/` NEEDS NO WAVE: the whole tree is **0.37** prose-to-code (docs 10626 + comments
@@ -2658,7 +2680,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       RULE for every future prose wave: a test suite cannot distinguish a duplicated idempotent
       statement from none; the per-file AST proof is the check.
       Original: same for engine/ (pool.py 1421, ensemble.py 828, spill/remote_instance.py 747).**
-- [~] **V149-api · OPEN as PR #117, ROUND 1 CAME BACK BLOCKING AND IT WAS RIGHT. 11 files / 3 commits.
+- [x] **V149-api · MERGED as PR #117 (5bc21bc) on ROUND 2. Round 1 came back BLOCKING and it was right. 11 files / 3 commits.
       THE FINDING, worth carrying into every future prose wave: my re-wrapper reflowed
       `Args:`/`Raises:` entries even though the body claimed it left them alone, and a field entry's
       continuation that loses four spaces STOPS BEING A CONTINUATION -- Sphinx reads
