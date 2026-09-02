@@ -627,10 +627,10 @@ def place_cameras(runner: Runner, cameras: Sequence[CameraSpec]) -> None:
             url, because ``ingest/manager.py``'s message names only the id — which for an
             ``--inputs`` camera is minted from its position and appears nowhere in what the
             operator typed.
-        NoShardAvailableError: a fleet whose shards all refused. Deliberately **not** re-labelled
-            with the input path: the camera is fine and there is nowhere to put it, and wrapping
-            it in a ``ConfigurationError`` would turn a 503 into a 400 for the same condition
-            reached over ``POST /streams`` (``api/errors.py``).
+        NoShardAvailableError: a fleet whose shards all refused. Deliberately **not**
+            re-labelled with the input path: the camera is fine and there is nowhere to put it,
+            and wrapping it in a ``ConfigurationError`` would turn a 503 into a 400 for the same
+            condition reached over ``POST /streams`` (``api/errors.py``).
     """
     refuse_if_it_manages_no_cameras(runner, cameras)
     for camera in cameras:
@@ -709,9 +709,9 @@ def _wait(
 
     Raises:
         ShardExitedError: a shard exited; the fleet is already stopped.
-        ConfigurationError: ``--http`` was asked for and FastAPI or uvicorn is not installed,
-            or the server could not bind ``host:port``. The first is the last line of defence
-            and not where an operator meets it — :func:`run` probes the import before starting
+        ConfigurationError: ``--http`` was asked for and FastAPI or uvicorn is not installed, or
+            the server could not bind ``host:port``. The first is the last line of defence and
+            not where an operator meets it — :func:`run` probes the import before starting
             anything — and stays for a caller that reached here directly. The second cannot be
             probed early (a port is free until it is not), so ``start()`` raises it *before*
             ``supervise()`` is entered and therefore before the deployment looks healthy. Both

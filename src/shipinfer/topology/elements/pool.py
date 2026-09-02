@@ -130,11 +130,11 @@ class _PoolElement(Element):
         name: the chain slot.
         params: ``input`` (the model's input tensor name) and ``timeout_s``. Both override
             whatever the runner resolved from the settings — see the module docstring for the
-            precedence. :class:`PoolDetect` reads a third, ``decode``, which is a mapping and
-            is documented on that class.
+            precedence. :class:`PoolDetect` reads a third, ``decode``, which is a mapping and is
+            documented on that class.
         model: the repository model to run. Required — the loader refuses an element whose
-            :attr:`~shipinfer.topology.base.Element.requires_model_name` is set and names
-            none, so a missing one here is a programming error and says so.
+            :attr:`~shipinfer.topology.base.Element.requires_model_name` is set and names none,
+            so a missing one here is a programming error and says so.
     """
 
     accepts: ClassVar[tuple[str, ...]] = ("nv12@gpu", "tensor@gpu", "bgr@cpu")
@@ -206,11 +206,11 @@ class _PoolElement(Element):
 
         Raises:
             ConfigurationError: the runner handed no model pool, or this element carries no
-                model name. Both are wiring mistakes in the process that built the runner,
-                not in the operator's chain file, and the message says which.
+                model name. Both are wiring mistakes in the process that built the runner, not
+                in the operator's chain file, and the message says which.
             ModelNotFoundError: the pool has no such model — the resolver's own typed error,
-                raised here rather than caught, because it already names the model and lists
-                the ones that exist.
+                raised here rather than caught, because it already names the model and lists the
+                ones that exist.
         """
         if not self.model:
             raise ConfigurationError(
@@ -237,20 +237,21 @@ class _PoolElement(Element):
         Build the request, wait on the bound, propagate every refusal as itself. The two hooks a
         subclass replaces are :meth:`_prepare` and :meth:`_finish`; a detector replaces both.
 
-        Exactly one subclass replaces this method: :class:`_PoolCropElement` submits *no* request
-        on a frame with nothing to crop and more than one on a frame past ``max_batch_size``. Both
-        still go through :meth:`_submit`, so the wait has one definition however many requests a
-        frame costs.
+        Exactly one subclass replaces this method: :class:`_PoolCropElement` submits *no*
+        request on a frame with nothing to crop and more than one on a frame past
+        ``max_batch_size``. Both still go through :meth:`_submit`, so the wait has one
+        definition however many requests a frame costs.
 
-        The request carries the item's ``RequestContext`` **by identity**, not a copy: that tag is
-        what reassembly, tracing and every log line group on (ADR-002).
+        The request carries the item's ``RequestContext`` **by identity**, not a copy: that tag
+        is what reassembly, tracing and every log line group on (ADR-002).
 
-        **A timeout abandons the request; it does not cancel it.** There is no cancellation path to
-        call — an item that has been queued is dequeued, assembled and executed whatever its future
-        says, and only the *result* is discarded. So a timed-out frame still costs the instance slot
-        that made it late, and under sustained overload that compounds into a queue that never
-        drains rather than one that sheds. The bound is still worth having, because it frees the
-        *worker*; real cancellation needs a queue-side removal and is deliberately not guessed here.
+        **A timeout abandons the request; it does not cancel it.** There is no cancellation path
+        to call — an item that has been queued is dequeued, assembled and executed whatever its
+        future says, and only the *result* is discarded. So a timed-out frame still costs the
+        instance slot that made it late, and under sustained overload that compounds into a
+        queue that never drains rather than one that sheds. The bound is still worth having,
+        because it frees the *worker*; real cancellation needs a queue-side removal and is
+        deliberately not guessed here.
 
         Returns:
             The successor item — same tag, same payload, and whatever :meth:`_finish` added.
@@ -300,7 +301,9 @@ class _PoolElement(Element):
     # -- what the artefact says, and what the payload holds ----------------------------
 
     def _declared(self, attribute: str) -> dict[str, Any]:
-        """The model's declared ``input_specs``/``output_specs`` by name, ``{}`` if it says none.
+        """The model's declared ``input_specs``/``output_specs`` by name.
+
+        ``{}`` when the artefact declares none.
 
         Read off the handle with :func:`getattr` rather than imported: the pool arrives as the
         structural :class:`~shipinfer.topology.base.ModelResolver`, so this layer never learns
@@ -563,11 +566,11 @@ class PoolDetect(_PoolElement):
         """Resolve the pool, the ops and the geometry — all three now, none per frame.
 
         Raises:
-            ConfigurationError: no model pool (the base class's refusal), no image ops, a
-                model whose declared input does not say how big its input is and a slot that
-                does not either, or a resolved letterbox the artefact contradicts
-                (:meth:`_refuse_a_letterbox_the_model_disagrees_with`). Every one of them
-                names what to pass.
+            ConfigurationError: no model pool (the base class's refusal), no image ops, a model
+                whose declared input does not say how big its input is and a slot that does not
+                either, or a resolved letterbox the artefact contradicts
+                (:meth:`_refuse_a_letterbox_the_model_disagrees_with`). Every one of them names
+                what to pass.
             ModelNotFoundError: the pool has no such model.
         """
         super()._do_open(context)
@@ -610,10 +613,10 @@ class PoolDetect(_PoolElement):
         """The letterbox target: this slot's ``dst_size``, else the model's declared input.
 
         Raises:
-            ConfigurationError: neither says, or either says something that is not two
-                positive integers. Refused rather than defaulted to 640x640, because a
-                letterbox to the wrong extent produces a frame the backend accepts on a
-                dynamic-shape engine and boxes that are wrong on every camera.
+            ConfigurationError: neither says, or either says something that is not two positive
+                integers. Refused rather than defaulted to 640x640, because a letterbox to the
+                wrong extent produces a frame the backend accepts on a dynamic-shape engine and
+                boxes that are wrong on every camera.
         """
         declared = self._decode_params.get("dst_size")
         if declared is not None:
@@ -629,8 +632,8 @@ class PoolDetect(_PoolElement):
         raise ConfigurationError(
             f"detect element {self.name!r} cannot tell how big model {self.model!r} wants its "
             f"input: its declared inputs are {sorted(specs) or 'none'} and the one named "
-            f"{self._input!r} is {shape or 'absent'}, which is not a static (3, H, W). Give the "
-            "model a `config.yaml` that declares it, or say so on the slot: "
+            f"{self._input!r} is {shape or 'absent'}, which is not a static (3, H, W). Give "
+            "the model a `config.yaml` that declares it, or say so on the slot: "
             "`params: {decode: {dst_size: [640, 640]}}`"
         )
 
@@ -788,9 +791,9 @@ class PoolDetect(_PoolElement):
         over a 1080p frame (``runtime/ops/base.py``).
 
         Raises:
-            ValidationError: the payload is not a host-resident ``(1, H, W, 3)`` or
-                ``(H, W, 3)`` **uint8** frame. A device-resident handle is refused by name
-                rather than downloaded: an implicit device-to-host copy per frame is exactly the cost
+            ValidationError: the payload is not a host-resident ``(1, H, W, 3)`` or ``(H, W,
+                3)`` **uint8** frame. A device-resident handle is refused by name rather than
+                downloaded: an implicit device-to-host copy per frame is exactly the cost
                 arch.md section 8 makes the caps refuse at load time, and it becomes a real
                 submission with the DataPool (phase D).
         """
@@ -1075,10 +1078,10 @@ class _PoolCropElement(_PoolElement):
         ``max_batch_size`` is read here rather than at the first crowded frame.
 
         Raises:
-            ConfigurationError: no model pool (the base class's refusal), no image ops, a
-                model whose declared input does not say how big a crop it wants and a slot
-                that does not either, a crop extent the artefact contradicts, or an output
-                this element cannot identify. Every one of them names what to pass.
+            ConfigurationError: no model pool (the base class's refusal), no image ops, a model
+                whose declared input does not say how big a crop it wants and a slot that does
+                not either, a crop extent the artefact contradicts, or an output this element
+                cannot identify. Every one of them names what to pass.
             ModelNotFoundError: the pool has no such model.
         """
         super()._do_open(context)
@@ -1127,11 +1130,11 @@ class _PoolCropElement(_PoolElement):
         """One crop's ``(height, width)``: this slot's ``crop.size``, else the model's input.
 
         Raises:
-            ConfigurationError: neither says, or either says something that is not two
-                positive integers. Refused rather than defaulted, for the reason
-                :meth:`PoolDetect._resolve_dst_size` is: a crop resized to the wrong extent
-                is a frame a dynamic-shape engine accepts and answers with vectors that are
-                wrong for every object on every camera.
+            ConfigurationError: neither says, or either says something that is not two positive
+                integers. Refused rather than defaulted, for the reason
+                :meth:`PoolDetect._resolve_dst_size` is: a crop resized to the wrong extent is a
+                frame a dynamic-shape engine accepts and answers with vectors that are wrong for
+                every object on every camera.
         """
         declared = self._crop_params.get("size")
         if declared is not None:
@@ -1265,10 +1268,10 @@ class _PoolCropElement(_PoolElement):
             empty batch that is never submitted.
 
         Raises:
-            ValidationError: the chain filed no ``detections`` (no detector ran in front of
-                this element, or its ``when:`` skipped one), the payload is not a host
-                ``(H, W, 3)`` uint8 frame (:meth:`_PoolElement._frame_of`), or the frame this
-                element holds is not the frame the boxes were measured in.
+            ValidationError: the chain filed no ``detections`` (no detector ran in front of this
+                element, or its ``when:`` skipped one), the payload is not a host ``(H, W, 3)``
+                uint8 frame (:meth:`_PoolElement._frame_of`), or the frame this element holds is
+                not the frame the boxes were measured in.
         """
         detections = item.meta.get("detections")
         if not isinstance(detections, Detections):
@@ -1370,10 +1373,10 @@ class _PoolCropElement(_PoolElement):
         objects.py`` serialises the same way) and K is small on a *batching* model: 25 objects
         against a plan built at batch 16 is K=2. On ``max_batch_size: 0`` it is not — the
         engine's bound is then one row, K == N, and a 15-person frame is 15 round trips, so
-        declare a ``max_batch_size`` on a model a crop element feeds. Submitting all K first and then collecting
-        the futures would cost one round trip instead of K, at the price of K requests in
-        flight per worker against a bound the scheduler sizes for one; that trade belongs
-        with the asynchronous walk (arch.md section 5, item 5) and not here.
+        declare a ``max_batch_size`` on a model a crop element feeds. Submitting all K first and
+        then collecting the futures would cost one round trip instead of K, at the price of K
+        requests in flight per worker against a bound the scheduler sizes for one; that trade
+        belongs with the asynchronous walk (arch.md section 5, item 5) and not here.
 
         Raises:
             InferenceError: a chunk came back without the declared output.
@@ -1426,10 +1429,10 @@ class _PoolCropElement(_PoolElement):
         which is why its ``produces`` stays ``*@*``.
 
         Raises:
-            InferenceError: no such output, or a row count that is not the crop count.
-                Refused rather than zipped to the shorter of the two, because a scatter-back
-                that silently drops the last object attaches every remaining vector correctly
-                and loses one identity per frame with no counter anywhere.
+            InferenceError: no such output, or a row count that is not the crop count. Refused
+                rather than zipped to the shorter of the two, because a scatter-back that
+                silently drops the last object attaches every remaining vector correctly and
+                loses one identity per frame with no counter anywhere.
         """
         rows: range | tuple[int, ...] = carried
         vectors = self._rows_of(response).numpy()
@@ -1460,13 +1463,14 @@ class _PoolCropElement(_PoolElement):
         What is filed is a :class:`~shipinfer.topology.base.RowIndexed`, which is what tells the
         fan-in the value is keyed by detection row and may be unioned. A bare dict still reaches
         ``track`` and simply does not union — the right default for a value nobody declared, and
-        why the ``segment`` slots filing raw outputs are left alone. Merging into a peer keeps the
-        peer's declaration: a plain dict stays plain.
+        why the ``segment`` slots filing raw outputs are left alone. Merging into a peer keeps
+        the peer's declaration: a plain dict stays plain.
 
-        **Both halves refuse an overlap.** Disjoint rows union; a row two elements both cover is an
-        :class:`~shipinfer.core.errors.InferenceError` here exactly as at the fan-in, because two
-        elements covering one detection is a property of the chain file, equally true in series and
-        in parallel. ``{**existing, **covered}`` would turn that into a silently wrong vector.
+        **Both halves refuse an overlap.** Disjoint rows union; a row two elements both cover is
+        an :class:`~shipinfer.core.errors.InferenceError` here exactly as at the fan-in, because
+        two elements covering one detection is a property of the chain file, equally true in
+        series and in parallel. ``{**existing, **covered}`` would turn that into a silently
+        wrong vector.
 
         Raises:
             ValidationError: something upstream filed a non-mapping under this key, so there is

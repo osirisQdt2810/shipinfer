@@ -2,28 +2,27 @@
 
 The other half of this package's job, and the half that is not KServe. ``routes.py`` is the
 *tensor* side-door: a caller who already has pixels posts them to
-``/v2/models/{model}/infer``. This is the *camera* door: ``POST /streams {"url": "rtsp://..."}``
-and the runner starts reading it, ``DELETE /streams/{id}`` and it stops.
+``/v2/models/{model}/infer``. This is the *camera* door: ``POST /streams`` with a url and
+the runner starts reading it, ``DELETE /streams/{id}`` and it stops.
 
-**It is served by ``shipinfer run --http``, not by ``shipinfer serve``.** ``run`` is the
-composition root that owns a runner, and a runner is the only thing in this system that owns
-cameras (``runners/base.py``); ``serve`` builds an engine and no runner, so on that command
-there would be nothing behind these routes to talk to.
+**Served by ``shipinfer run --http``, not by ``shipinfer serve``.** ``run`` is the
+composition root that owns a runner, and a runner is the only thing here that owns cameras;
+``serve`` builds an engine and no runner, so there would be nothing behind these routes.
 
 **What this module may not do is build a runner.** It is handed one, through
-:class:`CameraController` — a five-member ``Protocol`` that :class:`shipinfer.runners.base.Runner`
-happens to satisfy structurally. ``api`` may name ``launch`` (``CameraSpec`` is the launcher's
-vocabulary and is what ``add_camera`` takes) and may **not** name ``runners``, which is what
-keeps an HTTP handler from constructing an executor, choosing a placement or deciding what to
-batch — that would be the dispatch layer wearing a router (arch.md section 6). The Protocol
-is the whole seam, and it is deliberately small enough to write a fake for in ten lines,
-which is what ``tests/api/test_streams.py`` does for every status code below.
+:class:`CameraController` — a five-member ``Protocol`` that
+:class:`shipinfer.runners.base.Runner` happens to satisfy structurally. ``api`` may name
+``launch`` (``CameraSpec`` is the launcher's vocabulary) and may **not** name ``runners``,
+which is what keeps an HTTP handler from constructing an executor, choosing a placement or
+deciding what to batch — the dispatch layer wearing a router (arch.md section 6). The
+Protocol is the whole seam, small enough to write a fake for in ten lines, which is what
+``tests/api/test_streams.py`` does for every status code below.
 
 **No authentication, and the default bind is loopback.** These routes start and stop video
-decoding on a GPU box; exposing them on ``0.0.0.0`` puts that behind no credential at all.
-``shipinfer run --http`` therefore defaults ``--host`` to ``127.0.0.1``, the same choice the
-gRPC control plane makes for a shard, and a deployment that needs it reachable puts an
-authenticating proxy in front rather than changing the default here (phase B has no auth).
+decoding on a GPU box. ``shipinfer run --http`` defaults ``--host`` to ``127.0.0.1``, the
+same choice the gRPC control plane makes for a shard, and a deployment that needs it
+reachable puts an authenticating proxy in front rather than changing the default (phase B
+has no auth).
 """
 
 from __future__ import annotations
@@ -54,20 +53,17 @@ __all__ = ["CameraController", "build_streams_router"]
 
 _LOG = get_logger("api")
 
-#: Ceiling on how long ``POST /streams`` may hold a request open waiting for a runner to take
-#: the camera. Mirrors ``routes.py``'s ``_INFER_TIMEOUT_S`` and for the same reason: an
-#: unbounded wait hands a wedged runner — a fleet whose shard is paging in an engine, an
-#: ingest manager blocked behind a stop — the power to hold HTTP workers forever, and enough
-#: of those and the server stops answering its own health check. The two constants are equal
-#: today and are deliberately separate: one bounds an inference, this bounds a placement, and
-#: the day one of them needs tuning it is not the other.
+#: Ceiling on how long ``POST /streams`` may hold a request open waiting for a runner to
+#: take the camera. Mirrors ``routes.py``'s ``_INFER_TIMEOUT_S`` and for the same reason: an
+#: unbounded wait hands a wedged runner the power to hold HTTP workers forever, and enough
+#: of those and the server stops answering its own health check. The two are equal today and
+#: deliberately separate: one bounds an inference, this bounds a placement.
 _ADD_TIMEOUT_S = 120.0
 
-#: Ceiling on ``POST /streams/drain?timeout_s=``. Five minutes is far past any honest drain --
-#: a decoder that has not stopped in that long is not going to -- and the number exists to bound
-#: the *thread*, not the drain: the handler is synchronous, so the caller's deadline is how long
-#: it holds one of anyio's forty shared workers. Without a ceiling one request parks a worker
-#: for as long as it likes and forty of them stop the server answering anything at all.
+#: Ceiling on ``POST /streams/drain?timeout_s=``. Five minutes is far past any honest drain,
+#: and the number bounds the *thread*, not the drain: the handler is synchronous, so the
+#: caller's deadline is how long it holds one of anyio's forty shared workers. Without a
+#: ceiling, forty requests stop the server answering anything at all.
 _MAX_DRAIN_S = 300.0
 
 #: What a camera's decoder gets to stop in on ``DELETE``. The same default
@@ -79,22 +75,21 @@ _REMOVE_TIMEOUT_S = 5.0
 class CameraController(Protocol):
     """What ``/streams`` needs from whatever is behind it. Five members, no more.
 
-    ``stats()`` was a sixth and is gone: no route called it, and a protocol member that
-    nothing uses is a requirement placed on every future controller for nothing -- the
-    opposite of the claim this docstring makes. Per-camera counters are the metrics
-    exporter's job (``core/metrics``); if a ``GET /stats`` is ever wanted, the member comes
-    back with the route that needs it.
+    ``stats()`` was a sixth and is gone: no route called it, and a protocol member nothing uses
+    is a requirement placed on every future controller for nothing. Per-camera counters are the
+    metrics exporter's job (``core/metrics``); if a ``GET /stats`` is ever wanted, the member
+    comes back with the route that needs it.
 
-    Structural rather than an import of :class:`shipinfer.runners.base.Runner`, and that is
-    the point rather than a convenience: ``api`` must be *unable* to build a runner, so the
-    only way one gets behind these routes is that ``cli/commands/run.py`` — the composition
-    root — hands it over. Both shipped runners satisfy this by having been written to the
-    control plane's own vocabulary (arch.md section 2), so there is no adapter to keep in step.
+    Structural rather than an import of :class:`shipinfer.runners.base.Runner`, and that is the
+    point rather than a convenience: ``api`` must be *unable* to build a runner, so the only way
+    one gets behind these routes is that ``cli/commands/run.py`` hands it over. Both shipped
+    runners satisfy this by having been written to the control plane's own vocabulary (arch.md
+    section 2), so there is no adapter to keep in step.
 
-    :attr:`manages_cameras` is part of the contract because "no" is a real answer here and it
-    is not an error: a runner that executes a chain but owns no ingest plane (``deepstream``,
-    phase E) is correctly configured and simply cannot take a camera. That is a 501, which
-    tells an operator to change ``--runner`` rather than to retry.
+    :attr:`manages_cameras` is part of the contract because "no" is a real answer and not an
+    error: a runner that executes a chain but owns no ingest plane (``deepstream``, phase E) is
+    correctly configured and simply cannot take a camera. That is a 501, which tells an operator
+    to change ``--runner`` rather than to retry.
     """
 
     @property
@@ -152,19 +147,16 @@ def build_streams_router(cameras: CameraController) -> Any:
         """The controller's health report, or an honest stand-in — unless it is *needed*.
 
         Lenient by default, and that is right for every read: a listing that 500s because one
-        shard is unreachable is a listing that is useless exactly when it is needed, and the
-        fleet's own report already carries an ``unreachable`` entry per shard for that case
-        rather than omitting it (``runners/fleet.py``).
+        shard is unreachable is useless exactly when it is needed, and the fleet's own report
+        already carries an ``unreachable`` entry per shard for that case.
 
         ``needed=True`` is the one place the same failure is not cosmetic. :func:`_mint` reads
-        the taken ids *out of this report* and picks the lowest free one, so a stand-in with
-        no ``cameras`` key does not mean "no cameras are running" — it means nothing is known
-        — and minting from it hands out ``cam-000`` on a deployment that has been running
-        fifty cameras all morning. The caller then gets a **400 naming an id they never
-        supplied**, which reports a control-plane fault as their mistake and is terminal, so a
-        client that believes the status code stops retrying something that would work in a
-        minute. Raised, it is a ``ServerStateError`` -> 503 (``api/errors.py``), which says
-        what is actually true: the server could not find out, ask again.
+        the taken ids *out of this report*, so a stand-in with no ``cameras`` key does not mean
+        "no cameras are running" — it means nothing is known — and minting from it hands out
+        ``cam-000`` on a deployment that has run fifty cameras all morning. The caller then gets
+        a **400 naming an id they never supplied**, which reports a control-plane fault as their
+        mistake and is terminal. Raised, it is a ``ServerStateError`` -> 503, which says what is
+        true: the server could not find out, ask again.
 
         The distinction is *which read*, not which route. ``add_stream``'s read **after** a
         successful placement is deliberately lenient: the camera is placed by then, and a
@@ -188,18 +180,16 @@ def build_streams_router(cameras: CameraController) -> Any:
     async def _report(*, needed: bool = False) -> Mapping[str, Any]:
         """The same report, fetched off the event loop. For the ``async`` handler only.
 
-        ``health()`` is blocking work on every runner and *serial* blocking work on a fleet --
-        one gRPC ``Health`` per shard, each with its own deadline -- so an ``async`` handler
-        that called it directly would park the event loop for the sum of them, and one wedged
-        shard would freeze every request this process is answering, ``GET /health`` included.
-        That is exactly what :data:`_ADD_TIMEOUT_S` exists to prevent, so the read goes to a
-        worker thread; the plain ``def`` handlers below get the same treatment for free,
-        because that is where FastAPI runs them.
+        ``health()`` is blocking work on every runner and *serial* blocking work on a fleet —
+        one gRPC ``Health`` per shard, each with its own deadline — so an ``async`` handler
+        calling it directly would park the event loop for the sum of them, and one wedged shard
+        would freeze every request this process is answering. So the read goes to a worker
+        thread; the plain ``def`` handlers below get the same treatment for free, because that
+        is where FastAPI runs them.
 
-        ``abandon_on_cancel`` for :func:`add_stream`'s reason: without it the cancel scope
-        waits for the very thread it is cancelling, and a wedged report would hold the socket
-        open past the deadline. Letting this one finish alone is safe -- :func:`_health`
-        changes nothing, whichever way it answers.
+        ``abandon_on_cancel`` for :func:`add_stream`'s reason: without it the cancel scope waits
+        for the very thread it is cancelling. Letting this one finish alone is safe —
+        :func:`_health` changes nothing, whichever way it answers.
 
         ``needed`` is passed straight through; see :func:`_health` for which read sets it.
 
@@ -257,26 +247,22 @@ def build_streams_router(cameras: CameraController) -> Any:
     def _spec(body: StreamRequest, camera_id: str) -> CameraSpec:
         """The posted camera as the launcher's vocabulary, under the id it will be placed at.
 
-        One function for the two constructions in :func:`add_stream` -- the provisional spec
-        the timeout message names and the named one that is actually placed. They were two
-        argument lists, which is how ``priority`` would have reached the runner on one path
-        and not the other, and the path it would have missed is the one that places cameras.
+        One function for the two constructions in :func:`add_stream` — the provisional spec the
+        timeout message names and the named one that is actually placed. They were two argument
+        lists, which is how ``priority`` would have reached the runner on one path and not the
+        other, and the path it would have missed is the one that places cameras.
 
-        The band arrives as a *name* (:data:`~shipinfer.api.schemas.BandName`) and is turned
-        into a :class:`~shipinfer.core.request.Priority` here, at the one place the wire
-        vocabulary meets the launcher's -- by :meth:`~shipinfer.core.request.Priority.parse`,
-        which is the same call the schema's validator and
-        :class:`~shipinfer.core.settings.ingest.CameraConfig` make. One rule for what a band
-        is, owned in ``core``, rather than a third spelling of ``Priority[name.upper()]``
-        living here: a band added, renamed or aliased there reaches this door with no edit,
-        and cannot reach it *differently*.
+        The band arrives as a *name* (:data:`~shipinfer.api.schemas.BandName`) and becomes a
+        :class:`~shipinfer.core.request.Priority` here, at the one place the wire vocabulary
+        meets the launcher's — by :meth:`~shipinfer.core.request.Priority.parse`, the same call
+        the schema's validator and :class:`~shipinfer.core.settings.ingest.CameraConfig` make.
+        One rule for what a band is, owned in ``core``: a band added, renamed or aliased there
+        reaches this door with no edit, and cannot reach it *differently*.
 
-        The call cannot fail: the schema already refused every string that is not a member
-        name -- in any case, having lower-cased it first
-        (:meth:`~shipinfer.api.schemas.StreamRequest._band_name_is_case_insensitive`) -- which
-        is what makes an unknown band a 422 rather than a 500. That the validator has already
-        narrowed the input is also why ``parse`` taking the numbers too is not a widening
-        here: ``{"priority": 0}`` and ``{"priority": "0"}`` never reach this function.
+        The call cannot fail: the schema already refused every string that is not a member name,
+        having lower-cased it first, which is what makes an unknown band a 422 rather than a
+        500. That the validator has already narrowed the input is also why ``parse`` taking the
+        numbers too is not a widening here: ``{"priority": 0}`` never reaches this function.
         """
         return CameraSpec(
             camera_id=camera_id,
@@ -313,47 +299,43 @@ def build_streams_router(cameras: CameraController) -> Any:
     async def add_stream(body: StreamRequest) -> StreamInfo:
         """Start reading one camera. 201 with where it landed.
 
-        ``async`` for one reason: the deadline. Everything this handler does is blocking work
-        -- a health report per name, a lock, a thread start, an ``AddCamera`` RPC per shard --
-        so **every one of those calls goes to a worker thread**, and none of them runs here.
-        A plain ``def`` handler would reach the same pool with *no* bound on how long it holds
-        a thread; an ``async`` one that called a controller method directly would be worse
-        still, because it would park the event loop for the whole call and freeze every other
-        request in the process, ``GET /health`` first among them. ``abandon_on_cancel=True``
+        ``async`` for one reason: the deadline. Everything this handler does is blocking work —
+        a health report per name, a lock, a thread start, an ``AddCamera`` RPC per shard — so
+        **every one of those calls goes to a worker thread**. A plain ``def`` handler would
+        reach the same pool with *no* bound on how long it holds a thread; an ``async`` one
+        calling a controller method directly would park the event loop for the whole call and
+        freeze every other request, ``GET /health`` first among them. ``abandon_on_cancel=True``
         is what makes the bound real: without it the cancel scope waits for the very thread it
-        is cancelling and the timeout is decorative. The abandoned call still finishes on its
-        thread -- a placement half-made is worse than one that completes late.
+        is cancelling.
 
         **What the deadline buys is the socket, not the thread.** A cancelled ``run_sync``
         returns to the caller and leaves the worker where it was, and the workers come from
-        anyio's default limiter -- 40 of them, shared with every plain ``def`` route in this
-        app. So forty simultaneously wedged adds still stop the server answering, and the
-        limit on that is the controller's own per-call deadline (``launch/client.py``), not
-        this one. What this bound does guarantee is that no *caller* waits forever and that a
-        wedged runner cannot accumulate held connections.
+        anyio's default limiter — 40 of them, shared with every plain ``def`` route in this app.
+        So forty simultaneously wedged adds still stop the server answering, and the limit on
+        that is the controller's own per-call deadline (``launch/client.py``), not this one.
+        What this bound does guarantee is that no *caller* waits forever.
 
         The retry is :func:`_mint`'s: a minted id is read from one report and acted on in a
         later call, so two concurrent id-less POSTs can pick the same name and the loser is
-        refused. It is refused with a message about an id the caller never supplied, so the
-        name is minted once more against a fresh report. An id the *caller* chose is never
-        retried -- that duplicate is their 400 and it will be a duplicate on the next try too.
+        refused — with a message about an id the caller never supplied, so the name is minted
+        once more against a fresh report. An id the *caller* chose is never retried: that
+        duplicate is their 400 and it will be a duplicate on the next try too.
 
-        The retry is keyed on :class:`~shipinfer.core.errors.DuplicateCameraError` and on
-        nothing wider. ``add_camera`` refuses for other configuration reasons too -- an
-        in-process runner whose chain names an unregistered source raises a plain
-        ``ConfigurationError`` (``runners/inprocess.py``) -- and re-minting on those did the
-        entire add a second time, a second health report and a second placement attempt, for
-        a request that was a 400 either way.
+        The retry is keyed on :class:`~shipinfer.core.errors.DuplicateCameraError` and nothing
+        wider. ``add_camera`` refuses for other configuration reasons too — an in-process runner
+        whose chain names an unregistered source raises a plain ``ConfigurationError`` — and
+        re-minting on those did the entire add a second time for a request that was a 400 either
+        way.
 
         Raises:
             HTTPException: 501 if this runner manages no cameras; 400 for a duplicate id
                 (``DuplicateCameraError``), any other configuration refusal, or a value the
-                schema did not constrain that a layer below rejected (a ``ValueError``, which
-                is what a pydantic ``ValidationError`` is); 503 for a runner that is not
-                running, a fleet with no room, or a controller that could not report which ids
-                are taken when one had to be minted (all ``ServerStateError``, and
-                ``NoShardAvailableError`` is one — see ``api/errors.py``); 504 if the
-                placement outran ``_ADD_TIMEOUT_S``.
+                schema did not constrain that a layer below rejected (a ``ValueError``, which is
+                what a pydantic ``ValidationError`` is); 503 for a runner that is not running, a
+                fleet with no room, or a controller that could not report which ids are taken
+                when one had to be minted (all ``ServerStateError``, and
+                ``NoShardAvailableError`` is one — see ``api/errors.py``); 504 if the placement
+                outran ``_ADD_TIMEOUT_S``.
         """
         _refuse_if_it_manages_no_cameras()
         # The request as posted, so a timeout taken before the server has named anything still
@@ -384,24 +366,21 @@ def build_streams_router(cameras: CameraController) -> Any:
         except ShipInferError as exc:
             raise http_error(exc) from exc
         except ValueError as exc:
-            # A value this router did not think to constrain, refused a layer down. Pydantic's
-            # own `ValidationError` is a `ValueError` and is NOT a `ShipInferError`, so
-            # `CameraConfig`'s refusal used to fall past the clause above into a 500 -- and
-            # over gRPC into a refusal from every shard, which is a retryable 503 for a
-            # request that can never succeed. `StreamRequest` now rejects the three values a
-            # client actually gets wrong before this handler runs; this is the net under
-            # everything else the settings tree validates (a codec name, a decode size), and
-            # it is a 400 because the caller sent it and a retry will send it again.
+            # A value this router did not think to constrain, refused a layer down.
+            # Pydantic's own `ValidationError` is a `ValueError` and is NOT a
+            # `ShipInferError`, so `CameraConfig`'s refusal used to fall past the clause
+            # above into a 500 — and over gRPC into a refusal from every shard, a retryable
+            # 503 for a request that can never succeed. `StreamRequest` now rejects the
+            # three values a client actually gets wrong before this handler runs; this is
+            # the net under everything else the settings tree validates.
             #
             # The net is wider than that, and the trade is accepted knowingly: a genuine
-            # internal `ValueError` out of a runner -- a bug here, not a bad request -- is
-            # relabelled as the caller's mistake, and they will retry it once and stop. The
-            # alternative is to catch pydantic's `ValidationError` by name, which would put
-            # pydantic's exception type in an HTTP handler and *still* 500 on the settings
-            # tree's own plain `ValueError`s, which are about the posted values and are the
-            # common case. The message travels either way, and the traceback that says which
-            # it really was is written here -- an `HTTPException` is handled by starlette and
-            # would otherwise leave no trace on the server at all.
+            # internal `ValueError` out of a runner is relabelled as the caller's mistake.
+            # The alternative is to catch pydantic's `ValidationError` by name, which would
+            # put pydantic's exception type in an HTTP handler and *still* 500 on the
+            # settings tree's own plain `ValueError`s, which are the common case. The
+            # traceback that says which it really was is written here — an `HTTPException`
+            # is handled by starlette and would leave no trace on the server at all.
             _LOG.exception(
                 "POST /streams refused a value the schema did not constrain",
                 extra=log_context(camera_id=camera.camera_id),
@@ -423,10 +402,10 @@ def build_streams_router(cameras: CameraController) -> Any:
         caller a 404 and the impression that something worse happened.
 
         Raises:
-            HTTPException: 501 if this runner manages no cameras; 404 for a camera nobody
-                holds — the shared mapping's 400 is deliberately overridden here, because the
-                resource is named in the URL and "there is no such camera" is what 404 says;
-                503 for a fleet that is not running.
+            HTTPException: 501 if this runner manages no cameras; 404 for a camera nobody holds
+                — the shared mapping's 400 is deliberately overridden here, because the resource
+                is named in the URL and "there is no such camera" is what 404 says; 503 for a
+                fleet that is not running.
         """
         _refuse_if_it_manages_no_cameras()
         try:
@@ -455,22 +434,19 @@ def build_streams_router(cameras: CameraController) -> Any:
         """Stop reading every camera and let what is in flight finish.
 
         One deadline for the whole camera set, not one per camera — everyone is signalled at
-        once, so a camera still unfinished at it is genuinely stuck and charging the budget
-        per camera would turn one stuck decoder into fifty consecutive waits
-        (``ingest/manager.py``). The chain, its workers and the queue stay up: a drain is how
-        a deployment is emptied without being torn down.
+        once, so a camera still unfinished at it is genuinely stuck, and charging the budget per
+        camera would turn one stuck decoder into fifty consecutive waits. The chain, its workers
+        and the queue stay up: a drain is how a deployment is emptied without being torn down.
 
         The deadline is bounded at both ends. This is a plain ``def`` handler, so it holds one
-        of anyio's forty shared worker threads for as long as the drain takes, and a caller
-        who asks for ``timeout_s=1e9`` parks that thread for thirty-one years -- forty such
-        requests and the app answers nothing, health check included. 422 with a ceiling is a
-        better answer than a server that stops replying, and an operator who genuinely wants
-        longer has ``shipinfer run``'s own shutdown for it.
+        of anyio's forty shared worker threads for as long as the drain takes, and a caller who
+        asks for ``timeout_s=1e9`` parks that thread for thirty-one years — forty such requests
+        and the app answers nothing, health check included.
 
         Raises:
-            HTTPException: 501 if this runner manages no cameras; 503 if it is not running;
-                422 for a deadline outside ``[0, _MAX_DRAIN_S]``, which FastAPI answers before
-                this function is entered.
+            HTTPException: 501 if this runner manages no cameras; 503 if it is not running; 422
+                for a deadline outside ``[0, _MAX_DRAIN_S]``, which FastAPI answers before this
+                function is entered.
         """
         _refuse_if_it_manages_no_cameras()
         try:
@@ -492,21 +468,19 @@ def _placed_from(health: Mapping[str, Any], camera: CameraSpec) -> StreamInfo:
 
     A pure function of a report rather than a call that fetches its own, because the caller is
     an ``async`` handler and ``health()`` blocks: the report is read once, on a worker thread,
-    inside the deadline that handler owns (:func:`build_streams_router`). Taking it here would
-    put a serial per-shard RPC back on the event loop, which is the one thing ``POST /streams``
-    is arranged to avoid.
+    inside the deadline that handler owns. Taking it here would put a serial per-shard RPC back
+    on the event loop, the one thing ``POST /streams`` is arranged to avoid.
 
-    The report is consulted at all so the answer carries where the camera landed -- the
-    interesting fact on a fleet -- and the posted ``url`` is filled in because the caller
-    supplied it and no runner's health carries one (:class:`StreamInfo`). A camera missing
-    from the report is still a 201: the add returned success, and reporting a failure would
-    earn a retry and a duplicate.
+    The report is consulted so the answer carries where the camera landed — the interesting fact
+    on a fleet — and the posted ``url`` is filled in because no runner's health carries one. A
+    camera missing from the report is still a 201: the add returned success, and reporting a
+    failure would earn a retry and a duplicate.
 
-    ``priority`` is deliberately *not* filled in from ``camera`` the way ``url`` is. The band
-    on the spec is what was asked for; the field reports what the controller resolved, and on
-    a camera the report does not mention nothing has resolved anything yet -- so a 201 whose
-    body echoed the request would confirm a placement in a lane no runner has agreed to. It
-    reads ``null`` there, and the ``GET`` that follows says what actually happened.
+    ``priority`` is deliberately *not* filled in from ``camera`` the way ``url`` is. The band on
+    the spec is what was asked for; the field reports what the controller resolved, and on a
+    camera the report does not mention nothing has resolved anything yet — so a 201 echoing the
+    request would confirm a placement in a lane no runner has agreed to. It reads ``null``, and
+    the ``GET`` that follows says what actually happened.
     """
     for info in _streams(health):
         if info.camera_id == camera.camera_id:
@@ -517,20 +491,18 @@ def _placed_from(health: Mapping[str, Any], camera: CameraSpec) -> StreamInfo:
 def _mint(taken: Container[str]) -> str:
     """The lowest free ``cam-<n>``, so a POST with no id cannot collide with ``--inputs``.
 
-    :func:`~shipinfer.launch.control.mint_camera_id` is the CLI's helper too, and "lowest
-    free" rather than "one past the highest" is what makes a deployment that has removed
-    ``cam-001`` reuse the name instead of drifting to ``cam-137`` — the ids are labels on
-    every metric and log line, and unbounded drift makes them unreadable.
+    :func:`~shipinfer.launch.control.mint_camera_id` is the CLI's helper too, and "lowest free"
+    rather than "one past the highest" is what makes a deployment that has removed ``cam-001``
+    reuse the name instead of drifting to ``cam-137`` — the ids are labels on every metric and
+    log line, and unbounded drift makes them unreadable.
 
     **This is read-then-act and it is not atomic.** ``taken`` comes from a health report that
-    was true when it was fetched; the id is handed to ``add_camera`` afterwards, and the only
-    thing that decides a name is unique is the controller (an ingest manager's lock, or a
-    shard's). Two concurrent id-less POSTs therefore read the same report and mint the same
-    ``cam-000``, and one of them is refused -- with a message about an id its caller never
-    supplied. There is nothing to lock here that would help, because the winner is decided a
-    layer down; the answer is that :func:`build_streams_router`'s ``add_stream`` re-mints
-    against a fresh report once when the id was the server's own, and never when it was the
-    caller's.
+    was true when it was fetched; the only thing that decides a name is unique is the controller
+    (an ingest manager's lock, or a shard's). Two concurrent id-less POSTs therefore mint the
+    same ``cam-000`` and one is refused, with a message about an id its caller never supplied.
+    There is nothing to lock here that would help, because the winner is decided a layer down;
+    the answer is that ``add_stream`` re-mints against a fresh report once when the id was the
+    server's own, and never when it was the caller's.
     """
     index = 0
     while mint_camera_id(index) in taken:
@@ -541,30 +513,26 @@ def _mint(taken: Container[str]) -> str:
 def _streams(health: Mapping[str, Any]) -> list[StreamInfo]:
     """A runner's health report as a list of cameras, whichever runner wrote it.
 
-    The two shapes are both honest and neither is a superset of the other
-    (``runners/inprocess.py`` and ``runners/fleet.py``):
+    The two shapes are both honest and neither is a superset of the other:
 
     * in-process — ``cameras: {id: CameraHealth.as_dict()}``, so the ingest ``state`` is right
       there and the shard is the runner's own ``shard_id``;
     * fleet — ``cameras: {id: {"shard": n, "pending": True}}`` with the per-camera detail one
       level down in ``shards[n]["cameras"][id]``, because that is the shard's own report and
-      the launcher passes it through rather than re-deriving it, plus a top-level
-      ``lost: {id: shard}`` naming the cameras of shards that have exited (ADR-018). ``lost``
-      is read from *there* rather than from the per-camera entry because it is a fact about
-      the shard, not about the camera: one dead process makes a dozen cameras lost at once,
-      and a runner that had to stamp each entry would be keeping a derived flag in step with
-      a poll.
+      the launcher passes it through, plus a top-level ``lost: {id: shard}`` naming the cameras
+      of shards that have exited (ADR-018). ``lost`` is read from *there* rather than from the
+      per-camera entry because it is a fact about the shard, not the camera: one dead process
+      makes a dozen cameras lost at once.
 
-    ``state`` and ``priority`` are read from the per-camera entry first and from the shard's
-    own entry second, because that is where each of them exists on each runner: in process
-    both are inline, on a fleet the launcher's map carries neither and the shard's report
-    carries both. The two are the same join and are taken together (:func:`_on_shard`), so a
-    listing cannot say a camera is streaming on one shard and banded on another.
+    ``state`` and ``priority`` are read from the per-camera entry first and the shard's own
+    entry second, because that is where each exists on each runner. The two are the same join
+    and are taken together (:func:`_on_shard`), so a listing cannot say a camera is streaming on
+    one shard and banded on another.
 
     Read defensively — ``.get`` and an ``isinstance`` per level — because a health report is a
     ``dict`` by design (``launch/control.py`` explains why it is not a wire message) and a
-    listing that raises on an unreachable shard's entry is a listing that fails exactly when
-    it is being read to find out what is wrong.
+    listing that raises on an unreachable shard's entry is one that fails exactly when it is
+    being read to find out what is wrong.
     """
     entries = health.get("cameras")
     if not isinstance(entries, Mapping):
