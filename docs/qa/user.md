@@ -939,6 +939,15 @@ the bloat is INSIDE the source. Nine files over 850 lines, worst `runners/inproc
 prose in the source), plus the code changes V149 already agreed. This doc is the map; V149's
 splits are what make the territory match it.
 
+### V151 · 2 Sep 2026, ~01:5x UTC — chuyển sang session mới; để lại trạng thái đủ để chỉ gõ "tiếp tục"
+
+> tôi muốn đổi qua 1 session mới, bạn hãy làm gì đó để ở session mới tôi chỉ việc gõ tiếp tục
+
+**A handoff request, not a work request.** What it asks for is that no state lives only in a
+session's head: every in-flight branch pushed, every decision written down, and the next action
+named in the two files a session reads at start-up (`.claude/JOURNAL.md`, `.claude/TASKS.md`).
+Answered by RESUME-HERE at the top of the journal plus a `[~]` ledger line per open branch.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken

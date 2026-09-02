@@ -1,5 +1,67 @@
 # Journal
 
+## RESUME HERE — 2 Sep 2026, ~02:3x UTC (V151: session handed over)
+
+**Typing "tiếp tục" is enough. Do this, in this order:**
+
+1. `gh pr list --state open` — if a shipinfer PR is open, carry it to merged first (one PR at
+   a time). On BLOCKING, check each finding against the code before fixing it.
+2. If none is open, open the next branch below (they are pushed, rebased and green).
+3. Then take the next `[~]`/`[ ]` item in `.claude/TASKS.md`.
+
+**Two branches are pushed and ready to open, in this order:**
+
+| branch | what | state |
+|---|---|---|
+| `chore/docs-caps-ratchet` | V145-W3 + V145-ARM: the docs-cap and Markdown ratchets | rebased on main, tier green, pre-commit clean |
+| `fix/source-unavailable-redaction` | a credential leak in `SourceUnavailableError`, both planes | rebased on main, both tiers green |
+
+Open them with the template (`.github/pull_request_template.md`, every heading, `### Test
+Details` included — a missing heading fails the `PR description` check and silently skips
+auto-merge), label `automerge`, and write the body **from `git diff origin/main`**.
+
+**`fix/source-unavailable-redaction` is the one to explain carefully.** It is a real defect
+found by reading both planes rather than the ledger: `core/errors/ingest.py` states the rule
+("the message becomes `CameraHealth.last_error`, which the health API serves") and applies it
+to `SourceOpenError` and `FrameDecodeError` — but not to `SourceUnavailableError`, on either
+plane, and that is the error the fatal-open path stores. A `rtsp://admin:s3cret@host` that
+cannot be opened was served verbatim to every reader of `GET /streams`. Fixed on both planes
+per the sync rule; six tests, red-first, parameterised so the two siblings that already
+redacted stayed green. It does **not** close P6-D1 — the type-prefix question is untouched and
+`last_error_type_prefix` still explains the remaining difference.
+
+**Where V149 got to.** `runners/`, `topology/`, `cli/`, `engine/` and `api/` are all trimmed and
+merged (#107, #110–#117). The two files that stop high — `topology/base.py` 3.07 and
+`api/streams.py` 2.23 — stop for a structural reason recorded in the ledger: an ABC's remaining
+prose is contract text and a router's is the status-code argument, and ~150 lines of code cannot
+carry either at a low ratio. Do not re-open them.
+
+**Three checks were added this session and all three are ratchets or zero-tolerance gates**, so
+a new PR that regresses prose hygiene now fails in CI rather than merging green:
+`TestProseKeepsTheProjectsLineWidth` (96 columns, allowance 48),
+`TestNapoleonFieldListsStayIndented` (zero — main had none),
+and on the waiting branch `TestDocumentationCapsOnlyGetTighter` + `TestTheProjectsMarkdownKeepsItsCaps`.
+
+**The next real work after those two PRs** is P6-D1/D2/D3, and the reading is already done:
+
+* **P6-D1** (`last_error` spelling) — Python prefixes `"{type}: "`, C++ has only `what()`.
+  Converging means dropping the prefix on the Python plane or inventing type names in C++.
+  Deleting the `last_error_type_prefix` entry from `benchmarks/parity/known.py` is part of the fix.
+* **P6-D2** (`consecutive_failures` after a fatal open: 0 py / 1 cpp) — **Python is internally
+  inconsistent**, which decides it: `_record_failure` computes `failures = attempts + 1` for the
+  *state* decision but `health()` reports `backoff.attempts`, and the fatal path never calls
+  `next_delay()`. So the state says a failure happened and the count says none did. C++ keeps its
+  own `consecutive_failures_` and is coherent. Fix: Python counts failures itself.
+* **P6-D3** (`stop()` fate stickiness) — documentary. C++ latches `thread_abandoned_` because a
+  detach is irreversible; Python re-reads `is_alive()`. Decide whether Python latches too.
+
+Each is a two-plane change, so the C++ side needs `python scripts/build_csrc.py --offline` and
+the five `csrc/build/test_*` binaries (395 checks, all green as of this handoff).
+
+**Environment note:** this shell had no venv on PATH after the restart —
+`export PATH="/home/dungha15/workspaces/shipinfer/.venv/bin:$PATH"` before any `pytest`.
+Work happens in the worktree `/tmp/vw`; the primary checkout stays on `main`.
+
 ## 2026-08-27 (evening) — A2 begins: PR-0…PR-2 landed; main's CI had been silent after every auto-merge
 
 - **A2 PR-0 (#54), PR-0b (#55), PR-0c (#56):** workflow-only prerequisites. #55's glob for the
