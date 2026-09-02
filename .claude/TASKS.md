@@ -2603,9 +2603,14 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
         * stats+health = 4 methods, 9 attrs -> depends on placement; re-measure after step 2.
       Also worth doing on its own: the file is now 29 methods with **code 536 / docstrings 581** -- still
       more prose than code, worst offenders `element_context` 6/27, `_camera_config` 8/34, `_do_stats` 28/46.
-- [ ] **V149-topology · same for topology/ (1.40; elements/pool.py 1697, chain.py 1077, recognize.py 1031,
+- [x] **V149-topology · DONE across #112 (base.py 4.22 -> 3.07), #113 (elements/pool.py 1.67 -> 1.38)
+      and #114 (track.py 1.43 -> 1.32, barrier.py 1.37 -> 1.20).** Package 1.40 -> ~1.29. base.py stops
+      at 3.07 for a structural reason worth keeping: it is an ABC plus frozen dataclasses, so what is
+      left is Args blocks and contract text an implementer must read, and 147 lines of code cannot
+      carry a layer's vocabulary at a low ratio. Same shape as api/streams.py (see V149-api).
+      Original: same for topology/ (1.40; elements/pool.py 1697, chain.py 1077, recognize.py 1031,
       track.py 945, barrier.py 900, base.py 852, mtmc.py 847).**
-- [~] **V149-engine · OPEN as PR #116 (d1332af), and it is ONE FILE: pool.py is the only file in
+- [x] **V149-engine · MERGED as PR #116 (93a8574, APPROVE round 1), and it is ONE FILE: pool.py is the only file in
       engine/ whose prose outweighs its code (1.75 vs ensemble.py 0.58, model.py 0.59, instance.py 0.52,
       spill/remote_instance.py 0.39).** 1421 -> 1354 lines, ratio 1.75 -> 1.60, check_docs excess
       358 -> 291; docs-only proved by AST PER FILE (the branch's other two files are code by design, so
@@ -2622,6 +2627,28 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       RULE for every future prose wave: a test suite cannot distinguish a duplicated idempotent
       statement from none; the per-file AST proof is the check.
       Original: same for engine/ (pool.py 1421, ensemble.py 828, spill/remote_instance.py 747).**
+- [~] **V149-api · OPEN as PR #117-to-be. api/ is the worst PACKAGE in the tree (1.39); its two heavy
+      files are streams.py (2.42 over 160 code lines) and schemas.py (1.75), the rest already fine
+      (routes.py 0.40, app.py 0.73, __init__.py 0.65).** streams.py 2.42 -> 2.21, schemas.py
+      1.75 -> 1.66, docs-only by AST. streams.py does NOT come down further and the reason is
+      structural: it is a router with eight handlers, each a few lines of code and a paragraph arguing
+      which status code the failure below deserves (400-vs-503, why _mint is read-then-act, why _health
+      is lenient on every read but one). Same shape as topology/base.py at 3.07 -- 160 lines of code
+      cannot carry that argument at a low ratio. RECORD IT so the next wave does not chase it.
+- [x] **PROSE-WIDTH · #116's review found a regression I introduced across the WHOLE V149 wave and it
+      is now fixed AND checked.** My docstring rewraps ran to ~99 columns against the project's
+      black line-length of 96; nothing caught it, because black reformats code and leaves prose alone
+      and ruff's E501 is deliberately off ("line length is black's job"), so 195 over-width lines
+      merged green across engine/pool.py 83, api/streams.py 37, track.py 29, barrier.py 16,
+      elements/pool.py 15, schemas.py 12, inprocess.py 3, run.py 1. All -> 0, reflowed mechanically
+      with bullets/tables/Args blocks/code fences left alone and every file's TOKEN MULTISET proved
+      unchanged. Four pre-existing one-liners fixed by hand; one splits an f-string and the
+      concatenated message is proved byte-identical to main's rather than assumed.
+      THE CHECK IS THE POINT (memory item 37: when a trap recurs, write the check):
+      `TestProseKeepsTheProjectsLineWidth` in tests/test_architecture.py is a RATCHET on how many
+      over-width lines src/shipinfer may carry (48 today, over 29 files no current change touches),
+      plus a staleness test that fires if the allowance drifts >10 above the real count. Both
+      revert-checked against their own mutation and only their own.
 - [~] **V149-cli · OPEN as PR #115 (0102bcf). run() 272 lines -> 110, 97 code lines -> 53.** Five named
       steps: require_container / refuse_flags / _resolve / _bring_up / _serve, plus `_Plan`, a frozen
       dataclass holding what one run resolved BEFORE any device was touched -- which makes the ordering
