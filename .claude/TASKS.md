@@ -2627,7 +2627,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       RULE for every future prose wave: a test suite cannot distinguish a duplicated idempotent
       statement from none; the per-file AST proof is the check.
       Original: same for engine/ (pool.py 1421, ensemble.py 828, spill/remote_instance.py 747).**
-- [~] **V149-api · OPEN as PR #117-to-be. api/ is the worst PACKAGE in the tree (1.39); its two heavy
+- [~] **V149-api · OPEN as PR #117 (cef9301), 9 files / 2 commits. api/ is the worst PACKAGE in the tree (1.39); its two heavy
       files are streams.py (2.42 over 160 code lines) and schemas.py (1.75), the rest already fine
       (routes.py 0.40, app.py 0.73, __init__.py 0.65).** streams.py 2.42 -> 2.21, schemas.py
       1.75 -> 1.66, docs-only by AST. streams.py does NOT come down further and the reason is
