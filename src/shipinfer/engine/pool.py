@@ -271,9 +271,8 @@ class InferenceServer:
 
         Raises:
             ServerStateError: another thread is already starting this server, a teardown is
-            still
-                in flight after ``shutdown_grace_s``, or a :meth:`stop` took the server over
-                while this start was loading.
+                still in flight after ``shutdown_grace_s``, or a :meth:`stop` took the server
+                over while this start was loading.
         """
         if self._started:
             return self
@@ -365,8 +364,8 @@ class InferenceServer:
         fresh server, draining its models and closing its sink.
 
         Raises:
-            ServerStateError: when another start is already in progress, and when a teardown
-                is still running after the grace period.
+            ServerStateError: when another start is already in progress, and when a teardown is
+                still running after the grace period.
         """
         waited = False
         while True:
@@ -421,8 +420,7 @@ class InferenceServer:
         Args:
             generation: The run this start claimed.
             sink: The sink this start built, or None when it never got that far. Installed only
-            on
-                success; the caller closes it otherwise.
+                on success; the caller closes it otherwise.
             mesh: The service tier this start joined, or None — the ordinary case, since only a
                 shard of a service tier joins one. Installed on success; the caller stops it
                 otherwise.
@@ -647,13 +645,13 @@ class InferenceServer:
 
         Args:
             name: The model to load.
-            generation: The run doing the loading; the publish is refused once it has moved
-                on. See :meth:`_build_and_start`.
-            abort: This run's abort, from :meth:`_start_abort` — the reason it has lost
-                the server, or None. Polled by ``Model.start`` between instances, and by
-                the non-strict skip below, which is the same question.
-            traces: The sink this run built, handed down rather than read off
-                ``self._traces`` — which a start does not own until :meth:`_finish_start`.
+            generation: The run doing the loading; the publish is refused once it has moved on.
+                See :meth:`_build_and_start`.
+            abort: This run's abort, from :meth:`_start_abort` — the reason it has lost the
+                server, or None. Polled by ``Model.start`` between instances, and by the
+                non-strict skip below, which is the same question.
+            traces: The sink this run built, handed down rather than read off ``self._traces`` —
+                which a start does not own until :meth:`_finish_start`.
 
         Returns:
             The model this call started, so :meth:`start` can keep it in the run's ledger,
@@ -816,9 +814,8 @@ class InferenceServer:
     def _stop_run(self, generation: int | None) -> None:
         """:meth:`stop`, optionally bound to one run.
 
-        ``None`` is the public :meth:`stop`: an operator, a supervisor or a ``__exit__`` asking
-        for
-        *this server* to go down, whichever run happens to be up.
+        ``None`` is the public :meth:`stop`: an operator, a supervisor or a ``__exit__``
+        asking for *this server* to go down, whichever run happens to be up.
 
         :meth:`start`'s failure path passes its own generation, and the difference is not
         cosmetic. That path is also how a start that lost the claim unwinds — its models poll an
@@ -1095,8 +1092,7 @@ class InferenceServer:
                 the model is already loaded.
             ModelNotFoundError: the repository has no such model.
             ServerStateError: before :meth:`start`, and when :meth:`stop` ran between this
-            call's
-                started check and the lock — see the re-check below.
+                call's started check and the lock — see the re-check below.
             ConfigurationError: the model's config or artefacts are wrong. The server keeps
                 serving everything else.
         """
@@ -1145,8 +1141,7 @@ class InferenceServer:
                 requests into a ``ModelNotFoundError`` from inside the DAG.
             ModelNotFoundError: it is not loaded.
             ServerStateError: :meth:`stop` ran between this call's started check and the lock —
-            the
-                same window :meth:`load_model` re-checks for. Without it the wait ends at
+                the same window :meth:`load_model` re-checks for. Without it the wait ends at
                 ``self.model(name)`` against a table ``_teardown`` has just cleared, so the
                 caller is told "no such model" — which sends an operator to check their spelling
                 when what happened is that the server stopped underneath them.
@@ -1253,9 +1248,9 @@ class InferenceServer:
         """Submit one request. Returns immediately with a future.
 
         Raises:
-            ServerStateError: before :meth:`start`. Checked here rather than in the model
-                so the error says what is actually wrong — "the server is not started"
-                rather than "no such model", which is what an empty model table looks like.
+            ServerStateError: before :meth:`start`. Checked here rather than in the model so the
+                error says what is actually wrong — "the server is not started" rather than "no
+                such model", which is what an empty model table looks like.
         """
         if not self._started:
             raise ServerStateError(

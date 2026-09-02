@@ -119,9 +119,9 @@ class _Head:
 
     Args:
         caps: the negotiated cap of the edges leaving the roots -- read from
-            :attr:`~shipinfer.topology.chain.Topology.edges`, never from the root element's
-            own ``produces``. A cap belongs to an edge, and an element with two ``produces``
-            hands a different one to each consumer (``topology/chain.py::Edge``).
+            :attr:`~shipinfer.topology.chain.Topology.edges`, never from the root element's own
+            ``produces``. A cap belongs to an edge, and an element with two ``produces`` hands a
+            different one to each consumer (``topology/chain.py::Edge``).
         source: the name of an ingest source in :data:`shipinfer.ingest.SOURCES`, or ``None``
             when the chain did not say and ``ingest.backend`` (then the environment) decides.
     """
@@ -137,8 +137,8 @@ class InprocessRunner(Runner):
 
     Args:
         topology: the validated chain.
-        settings: deployment settings; ``pipeline.workers``, ``queue_type``,
-            ``queue_capacity``, ``overflow_policy`` and ``frames_per_wakeup`` are read here.
+        settings: deployment settings; ``pipeline.workers``, ``queue_type``, ``queue_capacity``,
+            ``overflow_policy`` and ``frames_per_wakeup`` are read here.
         shard_id: passed to every element (arch.md section 2).
         device: the GPU this runner owns, or ``None``.
         models: the model pool for ``pool`` elements.
@@ -147,14 +147,14 @@ class InprocessRunner(Runner):
             :meth:`_do_start` for what that means for a restart.
         workers: override the worker count; ``None`` takes ``pipeline.workers``.
         metrics: share a registry with the rest of the process. ``None`` mints a private one.
-            The ingest plane's handles go on the *same* registry, so one exporter carries
-            both halves of a dropped frame.
+            The ingest plane's handles go on the *same* registry, so one exporter carries both
+            halves of a dropped frame.
         source_factory: overrides how every camera's source is built. The seam a test uses to
             run the camera lifecycle against a fake camera.
 
     Raises:
-        ConfigurationError: ``workers`` below one -- a runner that accepts items and walks
-            none of them looks exactly like a hung chain.
+        ConfigurationError: ``workers`` below one -- a runner that accepts items and walks none
+            of them looks exactly like a hung chain.
 
     **Not honoured yet: ``per:`` and ``scope:``.** One element instance is shared by every
     worker, so at ``workers > 1`` two frames of one camera can be inside a ``per: camera``
@@ -551,8 +551,8 @@ class InprocessRunner(Runner):
         orders would differ only in log sequence.
 
         Args:
-            hook: the :class:`~shipinfer.topology.base.Element` method, named through the ABC
-                so a typo is a ``NameError`` at import rather than a missing announcement.
+            hook: the :class:`~shipinfer.topology.base.Element` method, named through the ABC so
+                a typo is a ``NameError`` at import rather than a missing announcement.
         """
         for node in self._topology.nodes:
             # Resolved on the *instance*, not called as `hook(node.element, ...)`.
@@ -1084,10 +1084,10 @@ class InprocessRunner(Runner):
         shared one lane and ``priority:`` applied to nothing.
 
         Raises:
-            QueueFullError: this camera's lane is full. Propagated untouched and counted
-                against **this** camera (ADR-005) as ``items_dropped`` -- refused at the door,
-                so never one of ``accepted`` and not a term the ``stats()`` ledger names. A
-                model queue refusing an item already inside the chain is ``items_backpressure``.
+            QueueFullError: this camera's lane is full. Propagated untouched and counted against
+                **this** camera (ADR-005) as ``items_dropped`` -- refused at the door, so never
+                one of ``accepted`` and not a term the ``stats()`` ledger names. A model queue
+                refusing an item already inside the chain is ``items_backpressure``.
             RequestCancelledError: the queue is closed -- the runner is shutting down.
         """
         context = item.context

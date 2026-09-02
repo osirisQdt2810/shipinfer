@@ -402,10 +402,10 @@ def build_streams_router(cameras: CameraController) -> Any:
         caller a 404 and the impression that something worse happened.
 
         Raises:
-            HTTPException: 501 if this runner manages no cameras; 404 for a camera nobody
-                holds — the shared mapping's 400 is deliberately overridden here, because the
-                resource is named in the URL and "there is no such camera" is what 404 says;
-                503 for a fleet that is not running.
+            HTTPException: 501 if this runner manages no cameras; 404 for a camera nobody holds
+                — the shared mapping's 400 is deliberately overridden here, because the resource
+                is named in the URL and "there is no such camera" is what 404 says; 503 for a
+                fleet that is not running.
         """
         _refuse_if_it_manages_no_cameras()
         try:
@@ -445,8 +445,7 @@ def build_streams_router(cameras: CameraController) -> Any:
 
         Raises:
             HTTPException: 501 if this runner manages no cameras; 503 if it is not running; 422
-            for
-                a deadline outside ``[0, _MAX_DRAIN_S]``, which FastAPI answers before this
+                for a deadline outside ``[0, _MAX_DRAIN_S]``, which FastAPI answers before this
                 function is entered.
         """
         _refuse_if_it_manages_no_cameras()

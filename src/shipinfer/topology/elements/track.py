@@ -139,13 +139,13 @@ class TrackerShard:
             a tracker there needs no edit here.
         options: constructor keyword arguments for that tracker.
         backend: pin ``python`` or ``native``. ``None`` takes the fastest one this host can
-            build, which is the registry's documented behaviour and the numpy floor every
-            caller in this tree wants.
+            build, which is the registry's documented behaviour and the numpy floor every caller
+            in this tree wants.
 
     Raises:
         ConfigurationError: the library is absent, the algorithm is unknown, or ``options``
-            holds a key the tracker's constructor does not accept. Raised **at construction**
-            — one throwaway tracker is built for no other reason — because a typo in a
+            holds a key the tracker's constructor does not accept. Raised **at construction** —
+            one throwaway tracker is built for no other reason — because a typo in a
             deployment's tracking options must stop the deploy rather than surface identically
             on every frame from inside a worker thread.
     """
@@ -267,16 +267,14 @@ class TrackerShard:
                 :attr:`last_frame_id` and calling :meth:`reset`: those are three steps, and
                 between any two another worker can advance the same camera.
             on_implicit_reset: called with the camera id when that recovery fires, from inside
-            the
-                camera's lock. A callback rather than a return value or a polled counter,
+                the camera's lock. A callback rather than a return value or a polled counter,
                 because the event is rare and the alternatives put work on the frames where
                 nothing happened. It must not block — it is holding one camera's tracker while
                 it runs.
 
         Raises:
             TrackingError: the frame does not advance this camera's stream, and the regression
-            is
-                small enough to be a reordering.
+                is small enough to be a reordering.
         """
         tag = detections.tag
         shard = self._shard(tag.camera_id)
@@ -566,8 +564,8 @@ class ShipvisionTrack(Element):
         """The overlap below which a track is not attributed to a detection row.
 
         Raises:
-            ConfigurationError: not a number, or outside ``(0, 1]``. ``0`` would attribute
-                every track to whatever box it overlapped least badly, which is the guess this
+            ConfigurationError: not a number, or outside ``(0, 1]``. ``0`` would attribute every
+                track to whatever box it overlapped least badly, which is the guess this
                 threshold exists to refuse.
         """
         try:
@@ -605,11 +603,11 @@ class ShipvisionTrack(Element):
         """Build the per-camera table and resolve the vocabulary — both now, neither per frame.
 
         Raises:
-            ConfigurationError: ``3rdparty/shipvision`` is not checked out or not installed
-                (the bridge's refusal, carrying the command that fixes it), the algorithm is
-                unknown, or ``options`` holds a key the tracker's constructor does not accept.
-                All three stop the deploy rather than surfacing identically on every frame from
-                inside a worker thread.
+            ConfigurationError: ``3rdparty/shipvision`` is not checked out or not installed (the
+                bridge's refusal, carrying the command that fixes it), the algorithm is unknown,
+                or ``options`` holds a key the tracker's constructor does not accept. All three
+                stop the deploy rather than surfacing identically on every frame from inside a
+                worker thread.
         """
         types = load_types()
         self._Detection = types.Detection
@@ -809,9 +807,8 @@ class ShipvisionTrack(Element):
                 attributed to detection rows. The frame-id check is here rather than left to
                 ``FrameTag`` because ``FrameTag`` refuses it with
                 ``shipvision.errors.ConfigurationError`` — a foreign class, from the one
-                hand-over where this element speaks another library's vocabulary, and the
-                only place in the chain a caller could be handed somebody else's exception
-                type.
+                hand-over where this element speaks another library's vocabulary, and the only
+                place in the chain a caller could be handed somebody else's exception type.
         """
         frame_id = item.context.frame_id
         if frame_id < 0:

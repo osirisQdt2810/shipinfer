@@ -168,8 +168,8 @@ class WaiterBudget:
     counter is kept beside it and the over-release is re-raised as :class:`ServerStateError`.
 
     Args:
-        permits: how many waiters may be outstanding. ``0`` is legitimate and means "never
-            wait" — a single-worker runner, or one that did not say how many workers it has.
+        permits: how many waiters may be outstanding. ``0`` is legitimate and means "never wait"
+            — a single-worker runner, or one that did not say how many workers it has.
 
     Raises:
         ConfigurationError: a negative number of permits.
@@ -216,10 +216,10 @@ class WaiterBudget:
         """Give a permit back.
 
         Raises:
-            ServerStateError: more releases than acquires. Acquire and release are paired by
-                one ``try``/``finally`` in :meth:`InstantBarrier.submit`, so this cannot
-                happen from a correct caller and a silent decrement past zero would hand out
-                permits that do not exist. The refusal is the semaphore's, re-raised typed.
+            ServerStateError: more releases than acquires. Acquire and release are paired by one
+                ``try``/``finally`` in :meth:`InstantBarrier.submit`, so this cannot happen from
+                a correct caller and a silent decrement past zero would hand out permits that do
+                not exist. The refusal is the semaphore's, re-raised typed.
         """
         with self._lock:
             try:
@@ -573,16 +573,16 @@ class InstantBarrier:
         """Put one camera's frame into its instant and come back with the group's answer.
 
         Args:
-            camera_id: which camera. Two frames of one camera in one instant is a refusal,
-                not a merge; a *later* frame from a camera already in the open instant seals
-                that instant and opens the next one with this frame.
+            camera_id: which camera. Two frames of one camera in one instant is a refusal, not a
+                merge; a *later* frame from a camera already in the open instant seals that
+                instant and opens the next one with this frame.
             capture_s: when the frame was **captured**, in seconds. Not when it arrived.
             payload: whatever the caller wants handed to ``associate`` for this camera.
-            associate: called by whichever thread closes the bucket, with every entry in it,
-                and must return a mapping from a caller-chosen key to a caller-chosen result.
-                Called with this barrier's lock held (see the class docstring). If it raises,
-                every waiter is released with :data:`DROPPED_FAILED` and the exception reaches
-                the closing thread — one frame carries the failure and the rest carry a gap.
+            associate: called by whichever thread closes the bucket, with every entry in it, and
+                must return a mapping from a caller-chosen key to a caller-chosen result. Called
+                with this barrier's lock held (see the class docstring). If it raises, every
+                waiter is released with :data:`DROPPED_FAILED` and the exception reaches the
+                closing thread — one frame carries the failure and the rest carry a gap.
 
         Returns:
             An :class:`InstantOutcome`. ``results`` is the association's mapping when this

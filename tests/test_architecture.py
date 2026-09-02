@@ -753,3 +753,28 @@ class TestProseKeepsTheProjectsLineWidth:
             f"only {len(found)} lines are over {self._WIDTH} columns but the allowance is "
             f"{self._ALLOWED}: lower `_ALLOWED` to {len(found)} so the next regression is caught"
         )
+
+
+# doc: long the failure mode is invisible to every other tool, so it has to be described here
+class TestNapoleonFieldListsStayIndented:
+    """No `Args:`/`Raises:` continuation may sit at the item indent. Zero, not a ratchet.
+
+    A continuation that loses four spaces becomes a *field* — Sphinx renders a re-wrapped
+    `…a teardown is` / `still` as a parameter named "still". Nothing else looks: black does
+    not touch prose, ruff's E501 is off, and `check_docs.py`'s caps do not fire because these
+    lines are short. #117's review found eight of them, all introduced by that PR's own
+    re-wrapper.
+
+    Zero rather than a ratchet, because `main` was already at zero: this is a defect with no
+    legacy population to grandfather, unlike the caps and the line width.
+    """
+
+    def test_no_orphaned_field_continuations(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        done = subprocess.run(
+            [sys.executable, str(repo / "scripts" / "hooks" / "check_napoleon.py")],
+            capture_output=True,
+            text=True,
+            env=checkout_env(),
+        )
+        assert done.returncode == 0, f"orphaned Napoleon continuations:\n{done.stdout}"

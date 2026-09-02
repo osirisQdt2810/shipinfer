@@ -61,9 +61,9 @@ class RequestTag(BaseModel):
         """Read the tag out of a request's ``parameters``.
 
         Raises:
-            ValidationError: for a frame_id that is not an integer. Coercing it to the
-                default would silently merge that client's frames into the untagged lane,
-                which is precisely the bug this tag exists to make impossible.
+            ValidationError: for a frame_id that is not an integer. Coercing it to the default
+                would silently merge that client's frames into the untagged lane, which is
+                precisely the bug this tag exists to make impossible.
         """
         try:
             return cls(
