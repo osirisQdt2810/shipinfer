@@ -129,9 +129,19 @@ def load_record_scenario(path: Path) -> RecordScenario:
                 raise ConfigurationError(
                     f"{where}: expected `det <index> <class_id> <score> <x1> <y1> <x2> <y2>`"
                 )
+            # The index must BE the position: `Detections` numbers its rows by iteration
+            # order here, while the C++ loader stores what the line says -- so `det 5` first
+            # would give `<cam>_<frame>_5` there and `..._0` here, and the gate would call
+            # that a builder divergence.
+            index = _int(words[0], where)
+            if index != len(detections):
+                raise ConfigurationError(
+                    f"{where}: `det {index}` is the {len(detections)}th detection; an index "
+                    f"is its position, because the Python plane cannot express anything else"
+                )
             detections.append(
                 DetectionSpec(
-                    index=_int(words[0], where),
+                    index=index,
                     class_id=_int(words[1], where),
                     score=_number(words[2], where),
                     box=(

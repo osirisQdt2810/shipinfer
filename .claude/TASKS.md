@@ -2475,7 +2475,12 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       golden. 26 files, so it may need splitting at the Python/C++ line when it opens.
 
 - [x] **RECORDS-CLASS-PREMISE · DECIDED and GATED 4 Sep: the FIRST candidate wins, on both
-      planes, and a fourth parity seam pins it.** `build_records` documented its candidates as
+      planes, a fifth parity seam pins it, and BOTH premise comments now say so.** The item
+      named two comments and #135's reviewer was right that the first push left them
+      unchanged -- `records.h:28`'s "so they cannot collide" and the same sentence 29 lines
+      above the new guard in `build_records`'s own docstring, which is the reasoning that
+      produced the overwrite in the first place. Both rewritten; the still-true paragraph
+      about an earlier version picking `class_name == "ship"` is kept. `build_records` documented its candidates as
       being "in priority order" and then overwrote, so the LAST batch to mention a row set the
       field -- on both planes, so no cross-plane divergence, but wrong against the stated
       contract and undecided where it matters. `records.h` justified having no class check

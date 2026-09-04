@@ -1,7 +1,12 @@
 # The ordinary shape, and the parts of the builder a collision case does not reach: a class
-# id with no label (published as `unknown` rather than silently relabelled), a row index past
-# the detection list (which must fill nothing rather than reach out of bounds), an empty
-# batch, and every field a float batch can carry.
+# id with no label, a row index past the detection list (which must fill nothing rather than
+# reach out of bounds), an empty batch, and every field a float batch can carry.
+#
+# What the BYTES prove about the unnamed class is narrower than "published as `unknown`":
+# `as_det2mot` partitions objects by `person` and `ship`, so an `unknown` record appears in
+# neither vector and is absent from the golden entirely. That still catches a RELABEL to
+# person or ship, which is the half that matters. The label itself is asserted directly, on
+# both planes -- `test_record_parity.cpp` and `test_record_collisions.py`.
 scenario scattered_frame
 camera cau-01
 frame 41
@@ -19,7 +24,8 @@ label 8 ship
 
 det 0 8 0.75 1 2 3 4
 det 1 0 0.5 10 20 30 40
-# A class the table does not name: `unknown`, on both planes.
+# A class the table does not name. It reaches neither `*_vec`, which is what the
+# golden shows; that it is named `unknown` is asserted directly on both planes.
 det 2 3 0.25 100 200 300 400
 
 batch ship_embed_out 2

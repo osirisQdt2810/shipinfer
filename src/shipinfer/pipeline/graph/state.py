@@ -131,9 +131,10 @@ def build_records(
 
     Args:
         field_map: ``ObjectRecord`` field -> the batch names that can fill it, in priority
-            order. Two names per field is normal: ``embedding`` comes from ``ship_embedding``
-            for a ship and ``person_embedding`` for a person, and a batch only ever holds the
-            rows of its own class, so they cannot collide.
+            order -- and the priority is real: two candidates CAN cover one detection, once a
+            crop slot declares no ``classes:`` and therefore every row, so the first one that
+            mentions a row wins. Two names per field is the ordinary case (``embedding`` from
+            the ship embedder for a ship and the person embedder for a person).
 
     A field left unset means the stage that fills it did not run — which is exactly what the
     emitted event should say, and is distinguishable from a zero.
@@ -156,12 +157,11 @@ def build_records(
                 continue
             for index, row in batch.scatter():
                 # doc: long the rule was undocumented and the docstring said the opposite
-                # FIRST candidate wins -- what "in priority order" above says, and what this
-                # loop did NOT do: it overwrote, so the last batch to mention a row set the
-                # field. `records.h` justified having no class check with "a batch only ever
-                # holds rows of ITS OWN class"; a resolved plan can carry a slot with no
-                # `classes:`, which is every row, so that premise needs a stated rule behind
-                # it. Deterministic and identical on both planes now.
+                # FIRST candidate wins -- what "in priority order" says, and what this loop
+                # did NOT do: it overwrote, so the last batch to mention a row set the field.
+                # This is the ONLY guard: nothing refuses an ambiguous chain at load, and
+                # `RECORDS-CLASS-PREMISE` records why that refusal was deferred. So this
+                # clause is not defensive code on an impossible state.
                 if 0 <= index < len(fields) and name not in fields[index]:
                     fields[index][name] = convert(row)
     return tuple(

@@ -24,10 +24,15 @@ namespace shipinfer::pipeline::events {
     // entry here and a field there.
     //
     // Two candidates per field is normal, and it is what removes the class check: a ship's
-    // embedding comes from the ship embedder and a person's from the person embedder, and a
-    // batch only ever holds rows of ITS OWN class, so they cannot collide. An earlier version
-    // picked the embedder with `class_name == "ship"` -- a second spelling of "which class is
-    // this row", which is exactly how a ship's embedding ends up on a person.
+    // embedding comes from the ship embedder and a person's from the person embedder. An
+    // earlier version picked the embedder with `class_name == "ship"` -- a second spelling of
+    // "which class is this row", which is exactly how a ship's embedding ends up on a person.
+    //
+    // They CAN collide, and this comment said they could not. A resolved chain plan may carry
+    // a crop slot with no `classes:`, which is every row, so two candidates can cover one
+    // detection. The rule is in `build_records`: the FIRST candidate that mentions a row
+    // wins, in the order given here. Nothing refuses such a chain at load yet --
+    // `RECORDS-CLASS-PREMISE` in the ledger records what that would cost.
     using FieldMap = std::map<std::string, std::vector<std::string>>;
 
     //: The labels a class id maps to (`pipeline.class_labels`). Passed in, never hard-coded:

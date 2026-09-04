@@ -26,10 +26,10 @@ from .record_scenario import RecordScenario, load_record_scenario
 SCENARIOS = Path(__file__).resolve().parent / "scenarios" / "records"
 GOLDEN = Path(__file__).resolve().parent / "golden" / "records"
 
-__all__ = ["GOLDEN", "SCENARIOS", "load", "render"]
+__all__ = ["GOLDEN", "SCENARIOS", "batches_of", "detections_of", "load", "render"]
 
 
-def _detections(scenario: RecordScenario) -> Detections:
+def detections_of(scenario: RecordScenario) -> Detections:
     """The scenario's rows as the detector would have left them.
 
     Labels resolved HERE from the scenario's table, because that is what the Python plane
@@ -49,7 +49,7 @@ def _detections(scenario: RecordScenario) -> Detections:
     )
 
 
-def _batches(scenario: RecordScenario) -> dict[str, ObjectBatch]:
+def batches_of(scenario: RecordScenario) -> dict[str, ObjectBatch]:
     """Each `batch`/`row` block as an `ObjectBatch`, keyed by name as the graph keys it."""
     built: dict[str, ObjectBatch] = {}
     for spec in scenario.batches:
@@ -73,8 +73,8 @@ def render(scenario: RecordScenario) -> str:
     records = build_records(
         scenario.camera,
         scenario.frame,
-        _detections(scenario),
-        _batches(scenario),
+        detections_of(scenario),
+        batches_of(scenario),
         dict(scenario.fields),
     )
     event = PerceptionEvent(

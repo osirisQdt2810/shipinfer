@@ -66,14 +66,19 @@ namespace shipinfer::pipeline::events {
         // fill rather than reaching out of bounds.
         // FIRST candidate wins, matching `build_records`'s own "in priority order" -- which
         // neither plane did: both overwrote, so the LAST batch to mention a row set the
-        // field. Two batches covering one row is meant to be impossible (a batch holds the
-        // rows of its own class), and the resolved chain plan can now make it possible, so
-        // `Topology.from_spec` refuses such a chain at load. This is the rule for whatever
-        // gets past it: deterministic, and the same on both planes.
-        std::vector<std::vector<bool>> filled(resolved.size(),
-                                              std::vector<bool>(records.size(), false));
-        for (size_t slot = 0; slot < resolved.size(); ++slot) {
-            const auto& [field, candidates] = resolved[slot];
+        // field. A resolved chain plan may carry a crop slot with no `classes:`, which is
+        // every row, so two batches can cover one detection.
+        //
+        // This is the ONLY guard. Nothing refuses such a chain at load -- that refusal is
+        // the better one and `RECORDS-CLASS-PREMISE` records what it would cost -- so this
+        // bookkeeping is live, not defensive code on a state the loader prevents.
+        // ONE bitmap, cleared per field rather than one per field: the outer loop is
+        // sequential and only ever touches the current field's flags, so a 2-D vector was
+        // `resolved.size()` heap allocations per frame on the emission path -- about five, at
+        // 1000 frames/s, for nothing (P5-A-ALLOC's whole subject).
+        std::vector<bool> filled(records.size(), false);
+        for (const auto& [field, candidates] : resolved) {
+            filled.assign(records.size(), false);
             for (const std::string& candidate : *candidates) {
                 const auto found = inputs.batches.find(candidate);
                 if (found == inputs.batches.end() || found->second.empty()) continue;
@@ -81,10 +86,10 @@ namespace shipinfer::pipeline::events {
                 for (size_t row = 0; row < batch.rows(); ++row) {
                     const int index = batch.object_indices[row];
                     if (index < 0 || static_cast<size_t>(index) >= records.size()) continue;
-                    if (filled[slot][static_cast<size_t>(index)]) continue;
+                    if (filled[static_cast<size_t>(index)]) continue;
                     set_field(records[static_cast<size_t>(index)], field, batch.row(row),
                               batch.width);
-                    filled[slot][static_cast<size_t>(index)] = true;
+                    filled[static_cast<size_t>(index)] = true;
                 }
             }
         }

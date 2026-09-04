@@ -11,15 +11,26 @@ So the rule is FIRST candidate wins, on both planes, and it is asserted three wa
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import numpy as np
 import pytest
 
-from benchmarks.parity.drive_records import GOLDEN, SCENARIOS, load, render
+from benchmarks.parity.drive_records import (
+    GOLDEN,
+    SCENARIOS,
+    batches_of,
+    detections_of,
+    load,
+    render,
+)
 from shipinfer.pipeline.graph.objects import ObjectBatch
 from shipinfer.pipeline.graph.state import build_records
 from shipinfer.topology.elements.detections import Detections
 
 SCENARIO_NAMES = ("first_candidate_wins", "scattered_frame")
+CPP_GATE = Path(__file__).resolve().parents[2] / "csrc" / "tests" / "test_record_parity.cpp"
 
 
 def _detections(count: int = 2) -> Detections:
@@ -99,6 +110,42 @@ class TestTheFirstCandidateWins:
         assert records[0].embedding == (1.0, 2.0), "an empty first candidate claims nothing"
 
 
+class TestTheEdgesOfTheScatter:
+    """What the byte compare cannot say, asserted on this plane as the C++ gate asserts it.
+
+    An `unknown` record reaches neither `*_vec` -- `as_det2mot` partitions by `person` and
+    `ship` -- so the golden is silent about the label itself. It catches a RELABEL, which is
+    the expensive half, and this catches the rest.
+    """
+
+    def test_a_class_the_table_does_not_name_is_unknown(self) -> None:
+        scenario = load("scattered_frame")
+        records = build_records(
+            scenario.camera,
+            scenario.frame,
+            detections_of(scenario),
+            batches_of(scenario),
+            dict(scenario.fields),
+        )
+
+        assert [record.class_name for record in records] == ["ship", "person", "unknown"]
+        assert records[0].det_id == "cau-01_41_0", "`<camera>_<frame>_<index>`"
+
+    def test_a_row_past_the_detection_list_fills_nothing(self) -> None:
+        """`ship_embed_out` carries a row for index 9 and there are three detections."""
+        scenario = load("scattered_frame")
+        records = build_records(
+            scenario.camera,
+            scenario.frame,
+            detections_of(scenario),
+            batches_of(scenario),
+            dict(scenario.fields),
+        )
+
+        assert records[0].embedding == (0.5, 0.875), "index 0 is filled"
+        assert all(not record.embedding for record in records[1:]), "and nothing else is"
+
+
 class TestTheCommittedGoldensAreWhatThisPlaneBuilds:
     """The Python half of the byte compare, so a divergence names the plane that moved.
 
@@ -122,6 +169,25 @@ class TestTheCommittedGoldensAreWhatThisPlaneBuilds:
         """Non-vacuity: a missing pair would make the check above pass by not running."""
         assert (SCENARIOS / f"{name}.scn").is_file()
         assert (GOLDEN / f"{name}.jsonl").is_file()
+
+    def test_every_scenario_on_disk_is_in_both_gates(self) -> None:
+        """A scenario nothing runs is a golden nobody compares.
+
+        The event seam already asserts this (`benchmarks/tests/test_parity_events.py`), and
+        the reason is that the list is hard-coded twice -- here and in the C++ gate -- so a
+        third scenario plus its golden can be added and cross-plane compared by neither.
+        """
+        on_disk = {path.stem for path in SCENARIOS.glob("*.scn")}
+        in_cpp = set(
+            re.findall(
+                r'"(\w+)"', re.search(r"kScenarios = \{([^}]*)\}", CPP_GATE.read_text())[1]
+            )
+        )
+
+        assert on_disk == set(SCENARIO_NAMES) == in_cpp
+        assert {
+            path.stem for path in GOLDEN.glob("*.jsonl")
+        } == on_disk, "every scenario has a golden and every golden has a scenario"
 
     def test_the_contested_row_is_visible_in_the_golden(self) -> None:
         """The golden alone cannot say WHICH batch won -- unless the two batches carry
