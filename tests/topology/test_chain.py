@@ -463,6 +463,24 @@ class TestLoadingAValidChain:
 
         assert "when=class == ship" in described
 
+    def test_describe_prints_which_rows_a_slot_selects(self) -> None:
+        """`when=` without `classes=` answers half the question.
+
+        Since C8b a slot picks objects with `params: {classes: [...]}` and frames with
+        `when:`; a description that showed only the second let an operator read a chain and
+        see no sign of the row filter that decides what the GPU is spent on.
+        """
+        described = load(
+            "name: rows\nelements:\n"
+            "  decode: {impl: replay}\n"
+            "  detect: {impl: pool, model: d}\n"
+            "  embed:  {impl: pool, model: e, params: {classes: [ship]}}\n"
+            "  output: {impl: none}\n"
+        ).describe()
+
+        assert "classes=['ship']" in described
+        assert "embed: embed/pool" in described
+
     def test_the_element_is_told_which_model_it_runs(self) -> None:
         """``model:`` reaches the element, not only the node's spec beside it.
 
