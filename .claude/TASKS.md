@@ -2052,6 +2052,17 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
             header promises "by ANY stopper"). Fix: `thread_abandoned_` as
             `std::atomic<bool>` so the lockless self-stop path can read it; + a line
             keeping the header honest either way.
+- [ ] **CSRC-BENCH-UNCOMPILED · `cli/bench.cpp` is compiled by NOTHING in CI, and it took a
+      reviewer reading a diff to find that out (#129 round 4).** Its include closure reaches
+      `core/platform.h`, so `build_csrc.py --offline` excludes it and `ci.yml`'s `cpp-offline`
+      job is the only C++ job there is -- so a `std::mutex` used without being declared merged
+      through four review rounds of green tests. #129 adds
+      `tests/test_cuda_reaching_apps_compile.py`, which `g++ -fsyntax-only`s every app
+      `--offline` refuses, but it SKIPS where the CUDA/TensorRT headers are absent, which is
+      exactly CI. THE CI HALF IS STILL OPEN: either the offline job gains the two header sets
+      (they are headers, not a driver -- no GPU needed for `-fsyntax-only`), or a second job
+      does. Until then the guard protects the dev box and not the merge.
+
 - [ ] **P5-A-ALLOC · Two follow-ups #129's review raised and I deliberately did NOT take in a
       fix round, both with the reviewer's own analysis.** (1) ALLOCATION on the emission path:
       every scalar in `csrc/.../events/schema.cpp` is a `std::string` returned by value, and
