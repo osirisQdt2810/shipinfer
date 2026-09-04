@@ -1,0 +1,10 @@
+# A frame with nothing in it. Every `*_vec` is `[]` and `partial` is false -- the v1 shape a
+# consumer must still parse, and the case where an empty complete frame and a partial one
+# look identical unless `missing_stages` and `partial` are both written.
+scenario empty_frame
+camera cam9
+frame 0
+source shard-0
+size 640 480
+fps 1.0
+reason complete

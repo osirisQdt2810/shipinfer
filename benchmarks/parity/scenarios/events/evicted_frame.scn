@@ -1,0 +1,16 @@
+# ADR-005's backpressure signal, on the wire. `finished evicted` names the collector's
+# FinishReason and lets each plane derive its own word -- which is the only way this gate can
+# catch a plane that invents a different one. It could not before: `reason` STATES the string,
+# so both planes echoed it unchanged and the C++ mapping was never exercised. That mapping
+# wrote `failed` for this outcome, so a consumer alarming on an eviction saw nothing from a
+# C++ shard.
+scenario evicted_frame
+camera cam_loud
+frame 41
+source shard-3
+size 1920 1080
+fps 20.0
+missing person_embedder ship_embedder
+finished evicted
+
+person cam_loud_41_0 0.5 10 20 30 40

@@ -25,6 +25,7 @@
 #include "shipinfer/ingest/sink.h"
 #include "shipinfer/ingest/sources/replay.h"
 #include "shipinfer/obs/sampler.h"
+#include "shipinfer/pipeline/events/records.h"
 #include "shipinfer/pipeline/graph/dag.h"
 #include "shipinfer/pipeline/graph/shapes.h"
 #include "shipinfer/pipeline/graph/stages.h"
@@ -303,12 +304,75 @@ int main(int argc, char** argv) {
 
         std::atomic<uint64_t> emitted{0};
         std::atomic<uint64_t> complete{0};
+        std::atomic<uint64_t> event_bytes{0};
+        //: Events the writer refused -- a non-finite score or mask area, which has no valid
+        //: JSON spelling. Counted rather than thrown, and reported beside the totals: an
+        //: event lost silently is the failure this whole pipeline was rebuilt to remove.
+        std::atomic<uint64_t> unwritable{0};
+        //: Per camera as well as in total, which is ADR-005's own argument: the total says
+        //: events were lost and only the breakdown says WHOSE. The mutex costs nothing --
+        //: this path runs only on a refusal, which on a healthy fleet is never.
+        std::mutex unwritable_lock;
+        std::map<std::string, uint64_t> unwritable_by_camera;
+        // The labels a class id maps to, in the demo repository's order. Config on the Python
+        // plane (`pipeline.class_labels`); argv-only here until P5-C reads the settings tree,
+        // and stated rather than assumed because a raw class index is a property of the
+        // checkpoint and changes when the model is retrained.
+        const pipeline::events::ClassLabels labels = {{0, "person"}, {1, "ship"}};
+        // The batch names, from the stages built below -- an `ObjectBatch` is keyed by a
+        // stage's OUTPUT name and not its own (`graph/stages.cpp`: `out.name = output_`), and
+        // looking it up by the stage name found nothing on every frame. Stated here rather
+        // than defaulted in the converter, because these names are the graph's config and
+        // P5-D is the item that will read them from a chain file.
+        const pipeline::events::FieldMap event_fields = {
+            {"embedding", {"ship_embedder_out", "person_embedder_out"}},
+            {"mask_area_px", {"ship_segmenter_out"}},
+        };
         FrameCollector collector(
-            [&emitted, &complete](FrameResult&& result) {
-                // The null sink: the event is built (the records are the expensive part and
-                // they are built here, outside the collector's lock, deliberately) and
-                // discarded. Same choice the Python driver makes, so neither side is being
-                // measured with a sink the other does not have.
+            [&emitted, &complete, &event_bytes, &unwritable, &unwritable_lock,
+             &unwritable_by_camera, &labels, &event_fields, &options](FrameResult&& result) {
+                // The null sink: the event is built -- REALLY built since P5-A; this comment
+                // used to claim it while the body only counted -- and then discarded. Same
+                // choice the Python driver makes, so neither side is measured with a sink the
+                // other does not have, and the records are the expensive part and are built
+                // here, outside the collector's lock, deliberately.
+                //
+                // `event_bytes` is what makes the building unskippable: an optimiser may
+                // delete work whose result nothing reads, and a benchmark measuring a deleted
+                // event writer is the shape of fault `tests/test_support_models.py` exists for.
+                //
+                // CAUGHT HERE, and that is not defensive habit: `json_number` refuses a
+                // non-finite double -- a NaN score off an fp16 engine is the input its own
+                // comment names -- and neither path that reaches this lambda is
+                // exception-safe. `collector.seal()` sits outside the worker's per-frame
+                // catch, so a throw would end that worker for the rest of the run and the
+                // per-device table would report a dead device as a slow one; and
+                // `collector.sweep()` runs on a bare `std::thread`, where an escaping
+                // exception is `std::terminate`. Refusing to write invalid JSON stays right;
+                // what was missing was anything between that refusal and the thread.
+                try {
+                    const std::string line =
+                        pipeline::events::event_of(result.inputs, result.reason, result.missing,
+                                                   options.source, labels, event_fields)
+                            .to_json();
+                    event_bytes.fetch_add(line.size(), std::memory_order_relaxed);
+                } catch (const std::exception& error) {
+                    // Counted per camera, beside `evicted_by_camera`'s reasoning: the total
+                    // says events were lost and only the breakdown says WHOSE, which is the
+                    // difference between "the writer refused 4000 events" and "camera 17's
+                    // engine is emitting NaNs".
+                    unwritable.fetch_add(1, std::memory_order_relaxed);
+                    {
+                        std::lock_guard<std::mutex> lock(unwritable_lock);
+                        ++unwritable_by_camera[result.inputs.tag.camera_id];
+                    }
+                    static std::atomic<int> shouted{0};
+                    if (shouted.fetch_add(1) < 5) {
+                        std::cerr << "camera " << result.inputs.tag.camera_id << " frame "
+                                  << result.inputs.tag.frame_id
+                                  << ": event not writable: " << error.what() << "\n";
+                    }
+                }
                 // Counted apart, because "emitted" and "emitted complete" are different
                 // numbers and quoting the first as throughput while most events are
                 // Incomplete is not a like-for-like comparison.
@@ -577,6 +641,16 @@ int main(int argc, char** argv) {
         }
         std::cout << "events_complete " << complete.load() << "\n";
         std::cout << "events_incomplete " << (emitted.load() - complete.load()) << "\n";
+        // Reported unconditionally, zero included: a number that appears only when it is
+        // non-zero is a number a reader does not know to look for.
+        std::cout << "events_unwritable " << unwritable.load() << "\n";
+        {
+            std::lock_guard<std::mutex> lock(unwritable_lock);
+            for (const auto& [camera, count] : unwritable_by_camera) {
+                std::cout << "events_unwritable_camera " << camera << " " << count << "\n";
+            }
+        }
+        std::cout << "event_bytes " << event_bytes.load() << "\n";
         // Requests executed per model per device — the per-device breakdown a PR needs
         // (ADR-006), now read from the instances themselves.
         for (const auto& [name, model] : models) {
