@@ -32,8 +32,10 @@ namespace shipinfer::pipeline::events {
     // a crop slot with no `classes:`, which is every row, so two candidates can cover one
     // detection. This list is therefore a COVERAGE UNION and not a priority list: a row two
     // of them cover is REFUSED by `build_records`, which is the decision
-    // `PoolEmbed._scatter` and `ChainWalk.inbound` already made on the other plane. Nothing
-    // refuses such a chain at LOAD yet -- `RECORDS-COLLISION-AT-LOAD` says what that costs.
+    // `PoolEmbed._scatter` and `ChainWalk.inbound` already made on the other plane.
+    // `Topology.from_spec::_check_one_filler_per_row` refuses most such chains at LOAD, so
+    // what reaches this refusal is the documented gap (`PoolSegment.selects_rows`) and a row
+    // contested at run time despite disjoint declarations.
     using FieldMap = std::map<std::string, std::vector<std::string>>;
 
     //: The labels a class id maps to (`pipeline.class_labels`). Passed in, never hard-coded:

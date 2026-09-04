@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from shipinfer.core.errors import ConfigurationError
 
 from .base import ElementKind
-from .chain import Topology
+from .chain import ROW_FIELD_KINDS, Topology
 
 __all__ = [
     "PLAN_VERSION",
@@ -39,9 +39,9 @@ __all__ = [
 #: a plan silently half-understood is a chain running something other than what was declared.
 PLAN_VERSION = 1
 
-#: Which event field a kind's outputs fill. The event schema's business, stated here so the
-#: C++ builder needs no copy of the rule (`pipeline/events/records.h` reads it as a FieldMap).
-_EVENT_FIELD = {ElementKind.EMBED: "embedding", ElementKind.SEGMENT: "mask_area_px"}
+#: Which event field a kind's outputs fill -- `chain.py`'s table, imported rather than
+#: repeated: the loader refuses a chain whose two slots could fill one of these for one row,
+#: and a second copy would let the two disagree about which kinds those are.
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,7 +202,7 @@ def resolve_plan(
                 scope=node.spec.scope,
             )
         )
-        if (event_field := _EVENT_FIELD.get(node.kind)) is not None:
+        if (event_field := ROW_FIELD_KINDS.get(node.kind)) is not None:
             fields.setdefault(event_field, []).append(node.name)
 
     return ResolvedPlan(
