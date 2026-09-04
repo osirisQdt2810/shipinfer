@@ -77,6 +77,19 @@ def build_app() -> typer.Typer:
         """List the models in a repository."""
         raise typer.Exit(commands.repo_list(repository))
 
+    @app.command()
+    def plan(
+        topology: Path = typer.Option(
+            ..., "--topology", "-t", help="The chain file to resolve."
+        ),
+        repository: Path = repo_option,
+        out: Path | None = typer.Option(
+            None, "--out", "-o", help="Write the plan here instead of to stdout."
+        ),
+    ) -> None:
+        """Resolve a chain into the plan the C++ data plane reads (`--plan`)."""
+        raise typer.Exit(commands.plan(topology, repository, out))
+
     @repo_app.command("show")
     def repo_show(name: str, repository: Path = repo_option) -> None:
         """Print one model's resolved configuration."""

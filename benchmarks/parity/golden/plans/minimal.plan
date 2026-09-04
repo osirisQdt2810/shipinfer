@@ -1,0 +1,8 @@
+# A RESOLVED chain, written by `shipinfer plan` -- do not hand-edit.
+plan 1 minimal
+
+node decode decode replay
+
+node output output jsonlines
+
+edge decode output bgr@cpu

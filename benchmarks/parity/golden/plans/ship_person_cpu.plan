@@ -1,0 +1,45 @@
+# A RESOLVED chain, written by `shipinfer plan` -- do not hand-edit.
+plan 1 ship_person_cpu
+label 0 person
+label 8 ship
+
+node decode decode replay
+
+node detect detect pool
+model ship_detector
+letterbox 640 640
+score 0.25
+max_detections 300
+
+node segment segment pool
+model ship_segmenter
+crop 640 640
+
+node embed_person embed pool
+model person_embedder
+classes person
+crop 256 128
+
+node embed_ship embed pool
+model ship_embedder
+classes ship
+crop 256 128
+
+node track track shipvision
+per camera
+
+node mtmc mtmc shipvision
+scope global
+
+node output output jsonlines
+
+edge decode detect bgr@cpu
+edge detect segment bgr@cpu
+edge detect embed_person bgr@cpu
+edge segment embed_ship bgr@cpu
+edge embed_person track bgr@cpu
+edge embed_ship track bgr@cpu
+edge track mtmc meta@cpu
+edge mtmc output meta@cpu
+field embedding embed_person embed_ship
+field mask_area_px segment

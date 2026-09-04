@@ -864,3 +864,36 @@ every reader pays for and nobody uses.
 lighter for a same-box control plane — no HTTP/2, no codegen, no version pins of the kind
 `pyproject.toml` carries for `grpcio-tools`. If the pins or the generated-stub check become a
 recurring tax, that is the signal to revisit, and this ADR is the thing to supersede.
+
+---
+
+## ADR-020 — The chain stays a Python declaration; the C++ plane receives a resolved plan
+
+**Status:** Accepted · 2026-09-04 · answers `CSRC-TOPOLOGY-Q` · scopes ADR-014 and ADR-017 ·
+the emitter and the format land first, the C++ reader and `bench --plan` in the PR after it
+
+**Context.** `topology/` had no C++ counterpart and `tests/test_two_planes.py` recorded it —
+and `runners/` — as *undecided*. Meanwhile this plane's chain was hard-coded in `cli/bench.cpp`:
+a `models.count(...)` ladder holding crop extents, payload names, output names, class ids and a
+label table as literals its own comments called "the graph's config". One was wrong — the table
+said a ship was class 1 while the crop specs used 8 (`pipeline.class_labels` says 8), so it
+cropped the right rows and handed the event writer an id its table did not know: every ship
+`unknown`, in the one file nothing in CI compiles.
+
+**Decision.** **No `csrc/topology/`, no `csrc/runners/`.** The chain is validated once, in
+Python, and this plane receives a **resolved plan**: the slots with kind, impl, model, row
+selection, resolved geometry, runner hints, negotiated edge caps, the label table, and which
+event field each slot fills. Three reasons, none new — ADR-014 already says Python "hands this
+plane a resolved configuration"; ADR-017 §4 makes `Topology.from_spec` the one door, and a
+second loader is a second door whose failure is one plane accepting a chain the other refuses
+at deploy time; and vLLM does this (`VllmConfig` resolved in Python, handed to the engine-core
+process), which CLAUDE.md makes the default shape. Choosing *where* a chain runs is control
+plane too, and this plane's one execution loop is its binary's composition root under
+`csrc/shipinfer/cli/`, which `cli` already mirrors.
+
+**Line-oriented, not JSON:** `csrc` has a JSON writer only, the convention is already lines
+(`parity_files.h`), and a plan is a flat list, not a tree. `score` uses `json_number`, because
+`std::to_string(0.25)` is `0.250000` and the gate is a byte compare. What crosses *is* the
+golden, so both halves can be automatic: `tests/topology/test_plan.py` holds the emitter to
+the committed goldens, and the C++ gate re-serialises them. The shared refusal table earned
+itself while the reader was being written -- C++ refused `crop 0 128` and Python did not.

@@ -2377,10 +2377,51 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
 - [!] **PHASE-D-NV12 · OPERATOR (when phase D opens): rebuild `shipinfer-gst:jammy` with `libgstreamer-plugins-bad1.0-dev` (gstcuda headers)? This box cannot `docker build` — the documented run+commit dance needs your go.** NVDEC-into-VRAM decode (both planes) — needs the DataPool carrier (arch.md §3/§8) AND an image
       rebuild: `shipinfer-gst:jammy` lacks `libgstreamer-plugins-bad1.0-dev` (gstcuda/GstCudaMemory headers), and this
       box can't `docker build` (the documented run+commit dance). Do not start before phase D opens.**
-- [!] **CSRC-TOPOLOGY-Q · Operator question (planner, 28 Aug): should csrc grow a `topology/` mirror at all, or does the
+- [x] **CSRC-TOPOLOGY-Q · ANSWERED 4 Sep as ADR-020, by me, under V154 ("làm theo hướng bạn
+      nghĩ là tốt nhất"). NO `csrc/topology/` and no `csrc/runners/`: the chain stays a Python
+      declaration and the C++ plane receives a RESOLVED PLAN.** Three reasons, none of them
+      mine: ADR-014 says in as many words that Python "hands this plane a resolved
+      configuration"; ADR-017 §4 makes `Topology.from_spec` the *single door* a chain becomes
+      trustworthy through, and a second YAML loader in C++ is a second door -- the failure mode
+      being one plane accepting a chain the other refuses, at deploy time; and vLLM's shape is
+      exactly this (`VllmConfig` resolved in Python, handed to the engine-core process), which
+      CLAUDE.md's reference-implementations rule makes the default. Delivered by P6-PLAN below,
+      so the answer is code and a gate rather than a sentence.
+      Original: should csrc grow a `topology/` mirror at all, or does the
       chain stay a Python-side declaration handing the C++ plane a resolved element list? arch.md §1 calls the chain
       data; ADR-014 puts data-driven config in Python — which argues for the resolved-list answer, but it is a design
-      call for the operator.**
+      call for the operator.
+
+- [~] **P6-PLAN · SPLIT at the plane boundary, 27 files being over the ~25 cap: PR-A is the
+      Python emitter + the format + ADR-020, PR-B the C++ reader, `from_plan` and `bench
+      --plan`. PR-B is the half that makes the decision real, so P6-PLAN stays [~] until it
+      merges -- CLAUDE.md's sync rule, stated in PR-A's body.**
+      The C++ plane stops hard-coding its chain: `topology/plan.py` flattens the validated
+      chain to a line-oriented plan, `shipinfer plan -t <chain.yaml>` is the hand-over,
+      `csrc/.../graph/plan.{h,cpp}` reads it back byte-identically and `from_plan.{h,cpp}`
+      turns it into the Dag plus the label table and field map. `bench.cpp --plan <file>`, with
+      its defaults going through the same struct so there is ONE construction path.
+      **A live defect fixed on the way:** `bench.cpp`'s label table said a ship was class 1
+      while its own crop specs said 8 (`pipeline.class_labels` says 8), so it cropped the right
+      rows and handed the event writer an id its table did not know -- every ship `unknown`, in
+      the one file nothing in CI compiles. EVIDENCE: `test_plan_parity` 46 checks / 0 failures,
+      527 across all nine offline binaries; 37 new Python tests; the fourth parity seam and the
+      first with BOTH halves automatic (the Python test holds the emitter to the committed
+      goldens). Two divergences the shared refusal table caught before merge: C++ refused
+      `crop 0 128` and Python did not, and `*.plan` in `.gitignore` would have swallowed every
+      golden. 26 files, so it may need splitting at the Python/C++ line when it opens.
+
+- [ ] **P6-SEGMENT-CROP · A pre-existing cross-plane divergence the plan made visible.**
+      `segment` CROPS on the C++ plane (`ship_crops_640`, 640x640, one crop per ship row) and
+      letterboxes the WHOLE FRAME on the Python one (`elements/pool.py`: "Whole-frame today: a
+      YOLO-seg engine emits detection rows and a bank of mask prototypes, and the fold that
+      turns those into one area per object is not a per-row scatter-back"). So `mask_area_px`
+      is computed from different pixels on the two planes. Not caused by ADR-020 -- the plan
+      carries what the C++ plane already did -- but now stated in one file rather than implied
+      by two. Decide which is right (the chain file's comment says `segment` "gains
+      `params: {classes: [ship]}` like the two embedders below" when its crop half lands, which
+      points at the C++ shape being the destination) and converge, with the register entry if
+      it cannot be converged at once.
 
 - [x] **HOOK-FP · MERGED as PR #104 (31 Aug 13:54), VERDICT: APPROVE.** (was OPEN as PR #104) (2 commits, 2 files, +89/-1, rebased onto 9d315da). 82 hook tests; full
       tier 3232 passed; pre-commit all Passed; clean. BOTH revert-checks reproduced on this tip: formatter
