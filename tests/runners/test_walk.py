@@ -54,8 +54,15 @@ name: two_embedders
 elements:
   decode:       {impl: replay}
   detect:       {impl: pool, model: ship_detector}
-  embed_ship:   {impl: pool, kind: embed, model: ship_embedder,   after: detect}
-  embed_person: {impl: pool, kind: embed, model: person_embedder, after: detect}
+  # Disjoint `classes:`, which the loader now requires of two slots filling one event field
+  # (`_check_one_filler_per_row`): two batches covering one detection is refused per frame by
+  # both planes' record builders, so a chain that guarantees it is refused at load. The
+  # fixture's subject is the MERGE of two scatter-backs, which is unchanged -- these tests
+  # hand `inbound` its mappings directly.
+  embed_ship:   {impl: pool, kind: embed, model: ship_embedder,   after: detect,
+                 params: {classes: [ship]}}
+  embed_person: {impl: pool, kind: embed, model: person_embedder, after: detect,
+                 params: {classes: [person]}}
   track:        {impl: shipvision, kind: track, after: [embed_ship, embed_person]}
   output:       {impl: none}
 """
@@ -68,10 +75,15 @@ THREE_EMBEDDERS = """
 name: three_embedders
 elements:
   decode:        {impl: replay}
-  detect:        {impl: pool, model: ship_detector}
-  embed_ship:    {impl: pool, kind: embed, model: ship_embedder,    after: detect}
-  embed_person:  {impl: pool, kind: embed, model: person_embedder,  after: detect}
-  embed_vehicle: {impl: pool, kind: embed, model: vehicle_embedder, after: detect}
+  # A third label on the detector, so the third branch can declare a disjoint selection.
+  detect:        {impl: pool, model: ship_detector,
+                  params: {decode: {class_labels: {0: person, 3: vehicle, 8: ship}}}}
+  embed_ship:    {impl: pool, kind: embed, model: ship_embedder,    after: detect,
+                  params: {classes: [ship]}}
+  embed_person:  {impl: pool, kind: embed, model: person_embedder,  after: detect,
+                  params: {classes: [person]}}
+  embed_vehicle: {impl: pool, kind: embed, model: vehicle_embedder, after: detect,
+                  params: {classes: [vehicle]}}
   track:         {impl: shipvision, kind: track, after: [embed_ship, embed_person, embed_vehicle]}
   output:        {impl: none}
 """

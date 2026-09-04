@@ -2491,25 +2491,23 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `test_record_parity`), which is also P5-A-ALLOC's second half: the contested case is a
       scenario with NO golden, because what both planes must do is refuse it.
 
-- [ ] **RECORDS-COLLISION-AT-LOAD · The refusal belongs at LOAD as well, and three comments
-      now point here for what that costs.** `state.py`, `records.cpp` and `records.h` all say
-      "nothing refuses such a chain at load yet -- see this item", so it needs to stay open.
-      `Topology.from_spec` can express it: two slots of a field-filling kind
-      (`_ROW_FIELD_KINDS`) whose `declared_classes()` intersect, or either of which selects
-      every row, with `selects_rows` deciding which elements can collide per row at all. I
-      built it and reverted it inside #135: it breaks **60 tests**, because
-      `tests/runners/test_walk.py`'s `TWO_EMBEDDERS`/`THREE_EMBEDDERS` and
-      `test_inprocess.py`'s chain declare two `pool` embedders with NO `classes:` on purpose
-      -- and one of those fixtures exists to test `ChainWalk.inbound`'s own contested-row
-      refusal. Those chains are genuinely ambiguous in production, so the work is the guard
-      PLUS giving those fixtures disjoint selections; a refusal at deploy time beats one in
-      the middle of a frame, which is the whole argument for doing it.
-      ONE MORE REASON, from #135 round 3: the per-frame refusal is logged by
-      `pipeline/runner.py`'s `_LOG.exception` with NO rate limit (unlike `bench.cpp`, which
-      counts and shouts once), so an overlapping chain is a total outage AND a log flood at
-      1000 fps. Pre-existing for any build failure, and this item is the real fix -- which
-      argues for doing it next rather than later.
-
+- [x] **RECORDS-COLLISION-AT-LOAD · DONE 4 Sep. `Topology.from_spec` refuses two
+      row-selecting slots that fill one event field and can cover one detection.** So the
+      state both planes' `build_records` refuse PER FRAME -- a total outage for the chain plus
+      an unrate-limited `_LOG.exception` at ~1000/s on the Python plane -- is now a refusal at
+      deploy, naming both slots and the overlapping classes.
+      The 60-test blast radius from the first attempt turned out to be 7, all in
+      `tests/runners/test_walk.py`, once the check asks `selects_rows` rather than the kind:
+      `test_inprocess.py`'s chain is `runner-embed` doubles, which do not scatter per row.
+      `TWO_EMBEDDERS`/`THREE_EMBEDDERS` gained disjoint `classes:` (and a third label on the
+      detector), which is what those chains meant all along -- their comment already said
+      "each covers its own classes" while the YAML said nothing.
+      ONE GAP, deliberate and documented in the check itself: `PoolSegment` parses `classes:`
+      (the resolved plan needed it) while its Python half is whole-frame, so it declares
+      `selects_rows = False` and two overlapping SEGMENT slots are still caught per frame.
+      `P6-SEGMENT-CROP` is the item that makes it a real row-selector, and this check starts
+      covering it that day. Flipping the flag now would refuse `when: class == ...` on every
+      segment slot, which is four other tests' subject and a change that belongs with it.
 - [ ] **P6-SEGMENT-CROP · A pre-existing cross-plane divergence the plan made visible, and
       the direction is already DECIDED -- by `PoolSegment`'s own docstring, read 4 Sep.**
       `segment` CROPS on the C++ plane (`ship_crops_640`, 640x640, one crop per ship row) and
@@ -2528,7 +2526,14 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       frame of reassembly memory for pixels nobody reads).
       SO: the work is `PoolSegment` gaining `_PoolCropElement` as its base PLUS its own
       `_finish` doing the fold, in the slice the docstring already reserves for it -- not a
-      design question. Then `params: {classes: [ship]}` on the slot, and the two planes agree.
+      design question.
+      WHAT IT WILL ALSO COST, measured 4 Sep so the next slice does not discover it midway:
+      `PoolSegment` must declare `selects_rows = True` (it parses `classes:` since #132 but
+      does not declare it), and that flip (a) makes `_check_one_filler_per_row` cover segment
+      slots, which stops `tests/runners/test_walk.py`'s `TWO_SEGMENTERS` loading -- two
+      `segment` slots with no `classes:` -- and (b) makes `when: class == ...` on a segment
+      slot a refusal, which is four tests' subject in `tests/topology/test_chain.py`. Both
+      are the correct behaviour and both belong in that slice. Then `params: {classes: [ship]}` on the slot, and the two planes agree.
       Until then the divergence is real and stated in both places.
 
 - [x] **HOOK-FP · MERGED as PR #104 (31 Aug 13:54), VERDICT: APPROVE.** (was OPEN as PR #104) (2 commits, 2 files, +89/-1, rebased onto 9d315da). 82 hook tests; full

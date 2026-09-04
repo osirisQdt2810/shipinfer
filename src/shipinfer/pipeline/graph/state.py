@@ -165,8 +165,10 @@ def build_records(
                 # `ChainWalk.inbound` raise when a second slot files a row an earlier one
                 # covered, because "there is no answer to 'which of these two vectors is this
                 # object's'" (`tests/runners/test_walk.py`). Candidates are a COVERAGE union,
-                # not a priority list. A refusal at LOAD would be better still and nothing
-                # does it yet -- `RECORDS-COLLISION-AT-LOAD` records what it would cost.
+                # not a priority list. `Topology.from_spec::_check_one_filler_per_row` refuses
+                # most such chains at LOAD; what still reaches here is a slot whose element
+                # declares `selects_rows = False` (`PoolSegment`, until P6-SEGMENT-CROP) and a
+                # row contested at run time despite disjoint declarations.
                 if name in fields[index]:
                     raise InferenceError(
                         f"two batches cover detection row {index} for the event's {name!r}: "
