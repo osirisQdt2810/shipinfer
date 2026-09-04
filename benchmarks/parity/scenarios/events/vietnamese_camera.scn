@@ -1,0 +1,16 @@
+# A camera id in Vietnamese, which is ordinary input for this deployment and used to unwind
+# the sink out of a worker thread. `json.dumps` has `ensure_ascii=True`, so both planes must
+# write `\uXXXX` -- and this is the scenario that proves the C++ escaper matches rather than
+# only its unit check.
+scenario vietnamese_camera
+camera cầu-cảng-01
+frame 3
+source shard-2
+size 640 480
+# 12.5 is a real camera rate and the one place the two rounding rules differ: Python's
+# `round` is half TO EVEN (12) while `llround` is half away from zero (13). The gate
+# carries it so the boundary is compared and not merely unit-checked.
+fps 12.5
+reason complete
+
+person cầu-cảng-01_3_0 0.5 10 20 30 40 track 1 confirmed

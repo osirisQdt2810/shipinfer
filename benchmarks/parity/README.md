@@ -175,3 +175,40 @@ Each scenario carries one invariant and the golden *shows* it:
 Each seam's goldens live under its own root -- `golden/` and `golden/queues/` -- because the
 scenario namespaces are already split and this seam *is* backpressure: a queue scenario named
 `backpressure` would otherwise have `--emit-golden --force` overwrite the ingest golden.
+
+## The third seam: the perception event
+
+Not a trace this time — an **event is one value**, and what the two planes must agree on is
+its bytes.
+
+```
+benchmarks/parity/scenarios/events/<name>.scn   one event's constructor arguments
+benchmarks/parity/golden/events/<name>.jsonl    the line it serialises to, from Python
+benchmarks/tests/test_parity_events.py          the Python plane against it + the key order
+csrc/tests/test_event_parity.cpp                the C++ plane against the same line
+```
+
+`pytest benchmarks/tests/test_parity_events.py`, and
+`python scripts/build_csrc.py --offline && ./csrc/build/test_event_parity`. Emit a golden with
+`python scripts/emit_parity_golden.py --kind event --scenario <name> --emit-golden`.
+
+**A byte compare, and it has to be.** The event is a wire format a deployed `motservice`
+parses; key order is part of the contract (`docs/design/event-schema.md`); and the C++ plane
+writes JSON without ever reading it, so the comparison cannot be structural. Two consequences:
+
+* **The number writer is the interesting part.** `std::to_chars` gives the shortest
+  round-tripping form as Python's `repr` does, but writes `1` where Python writes `1.0`;
+  `std::to_string` writes `0.500000` for `0.5`. `core/events/json.h` appends the `.0` and is
+  checked against `json.dumps` on nine values, `1e+20` and `-0.0` included.
+* **A scenario may only use floats both planes spell identically** (`FLOATS` in
+  `event_scenario.py`), and anything else is refused at load with the reason. Otherwise the
+  gate would fail on formatting rather than on the schema.
+
+`emitted_unix_ns` and `captured_ns` are **stated by the scenario**, not read from a clock:
+what is compared is the schema — key order, types, null handling — and not two wall clocks.
+`build()`'s own clock arithmetic is checked separately, inside the C++ gate.
+
+| scenario | what it holds shut |
+|---|---|
+| `mixed_frame` | both classes, and a null in every optional vector — the half of the schema a happy path never reaches |
+| `empty_frame` | every `*_vec` empty and `partial` false: the v1 shape a consumer must still parse |

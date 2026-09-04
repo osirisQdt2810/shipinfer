@@ -123,7 +123,10 @@ class PerceptionEvent:
     latency_us: int = 0
     #: Stages that never delivered. Empty for a complete frame.
     missing_stages: tuple[str, ...] = ()
-    #: Why this event was emitted: ``complete``, ``timeout``, ``failed`` or ``shutdown``.
+    #: Why this event was emitted, in the collector's own five words: ``complete``,
+    #: ``incomplete``, ``timeout``, ``shutdown``, ``evicted``, passed through verbatim by
+    #: ``pipeline/runner.py``. It used to say ``failed``, which nothing emits -- and the C++
+    #: port read this line and wrote it for two of the five (fixed with P5-A).
     reason: str = "complete"
     schema_version: int = SCHEMA_VERSION
     type: str = MESSAGE_TYPE

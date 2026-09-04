@@ -1,0 +1,20 @@
+# One frame carrying both classes and every optional field the schema has, so the gate
+# compares nulls, embeddings, tracklets and the cross-camera id rather than a happy path.
+scenario mixed_frame
+camera cam0
+frame 7
+source shard-1
+size 1920 1080
+# 19.6 rounds to 20 -- `img_fps` is an int on the wire and truncating differs from rounding.
+fps 19.6
+captured_ns 0
+captured_unix_ns 1700000000000000000
+emitted_unix_ns 1700000001000000000
+missing ship_segmenter
+reason timeout
+
+person cam0_7_0 0.5 10 20 30 40 track 3 confirmed global 11 emb 0.25 0.5
+# No track, no global id, no embedding: three nulls and an empty vector, which is the half
+# of the schema a happy-path golden never reaches.
+person cam0_7_1 0.75 1 2 3 4
+ship cam0_7_2 0.875 100 200 300 400 ship 0 0.75 mask 100 track 5 tentative
