@@ -2451,7 +2451,9 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `pytest benchmarks/tests/test_parity_ingest.py` before pushing any ledger change.
 - [x] **V145-W1 · trim wave 1 — MERGED as #103 (35381fda). Took the tree 1031 -> 1012 violations; 49 remain in the touched files, none marked `# doc: long`.** Original scope — `engine`, `runtime`, `ingest`, `launch`, `scheduling`, `api`,
       `cli`, `core`, `backends`, `repository`. Built and verified (`docs/trim-wave-1`).
-- [~] **V145-W2 · IN PROGRESS. elements/pool.py MERGED as PR #113 (e07dbf2, APPROVE, 1697 -> 1551, ratio
+- [x] **V145-W2 · DONE: #113 (pool.py) and #114 (track.py + barrier.py) merged, and the third
+      package needed nothing (V145-W3 measured `pipeline/` at every file under 0.9). Original:
+      IN PROGRESS. elements/pool.py MERGED as PR #113 (e07dbf2, APPROVE, 1697 -> 1551, ratio
       1.67 -> 1.38, five docstrings incl. the 71-line module one; ratio re-measured 1.35 -> 1.42 once
       #114 restored what the review asked for) after ONE round-trip that was not a
       review round: the `PR description` check failed because the body had no `### Test Details` heading.
@@ -2502,7 +2504,11 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       closing triple-quote, swallowing its Args block into an unterminated string. The Args had to be
       recovered from `git show HEAD:`. A docstring rewrite can silently delete adjacent content.
       Original scope: topology/, runners/inprocess.py, pipeline/.
-- [~] **HANDOFF-V151 · SESSION HANDED OVER 2 Sep ~02:3x. `.claude/JOURNAL.md`'s RESUME HERE entry is
+- [x] **HANDOFF-V151 · DISCHARGED 4 Sep: the new session typed "tiep tuc", read RESUME HERE and
+      carried both branches to merged (#118 two rounds, #119 one) plus P6-D as #120. The handoff
+      worked as written; the one thing it did not warn about is that a git worktree's editable
+      install resolves `shipinfer` to the PRIMARY checkout, which is a real trap for anything run
+      outside pytest. Original: SESSION HANDED OVER 2 Sep ~02:3x. `.claude/JOURNAL.md`'s RESUME HERE entry is
       the single instruction; a new session typing "tiep tuc" needs nothing else.** Both branches below
       are PUSHED, REBASED on main and GREEN on both tiers; neither has a PR yet, because the queue is
       one PR at a time. Open `chore/docs-caps-ratchet` first, then `fix/source-unavailable-redaction`.
@@ -2767,7 +2773,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       over-width lines src/shipinfer may carry (48 today, over 29 files no current change touches),
       plus a staleness test that fires if the allowance drifts >10 above the real count. Both
       revert-checked against their own mutation and only their own.
-- [~] **V149-cli · OPEN as PR #115 (0102bcf). run() 272 lines -> 110, 97 code lines -> 53.** Five named
+- [x] **V149-cli · MERGED as PR #115 (f22523e). run() 272 lines -> 110, 97 code lines -> 53.** Five named
       steps: require_container / refuse_flags / _resolve / _bring_up / _serve, plus `_Plan`, a frozen
       dataclass holding what one run resolved BEFORE any device was touched -- which makes the ordering
       invariant visible rather than remembered (every refusal that reads a _Plan is by construction one
