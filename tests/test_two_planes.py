@@ -13,10 +13,20 @@ register does, so "we have not decided yet" cannot quietly become "we decided no
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+
+#: `git` is absent from `pytorch/pytorch:*-runtime`, which is the image
+#: `deploy/rootless/test.sh` collects the offline tier in. One honest skip rather than seven
+#: errors about a missing binary: what these tests read is the TREE, which is identical on
+#: the host and in the container, and the host and CI both have git.
+pytestmark = pytest.mark.skipif(
+    shutil.which("git") is None,
+    reason="git is not on PATH (the test image has none); the inventory is checked on the host",
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 LEDGER = ROOT / ".claude" / "TASKS.md"
@@ -54,20 +64,24 @@ CPP_ONLY = {
 }
 
 
-def _packages(root: str) -> set[str]:
+# doc: long the two flags and the one skip are each a defect this file already caused
+def _packages(root: str, repo: Path = ROOT) -> set[str]:
     """Package directories under ``root``, from git rather than the filesystem.
 
     `git ls-files`, not `iterdir`: `src/shipinfer/server/` still exists on a long-lived
-    checkout as three `__pycache__` directories left by the #57 rename, and a filesystem
-    walk reports it as a package that no longer has a single tracked file in it. The same
-    reason `scripts/hooks/_paths.py` asks git (#124).
+    checkout as three `__pycache__` directories left by the #57 rename, and a filesystem walk
+    calls that a package with no tracked file in it. The same reason
+    `scripts/hooks/_paths.py` asks git (#124).
+
+    ``--cached --others --exclude-standard``, which is the rest of that lesson and not
+    decoration: `--cached` alone lists the INDEX, so a package added but not yet `git add`ed
+    is invisible exactly while adding its row is cheap. `--exclude-standard` is what keeps
+    `__pycache__` out, so the phantom stays filtered.
     """
-    done = subprocess.run(
-        ["git", "-C", str(ROOT), "ls-files", "-z", "--", root],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    # `--others --exclude-standard` beside `--cached`: an unstaged package is still one.
+    argv = ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", root]
+    done = subprocess.run(["git", "-C", str(repo), *argv], capture_output=True, text=True)
+    assert done.returncode == 0, f"git ls-files failed in {repo}: {done.stderr[:300]}"
     prefix = f"{root}/"
     return {
         name.removeprefix(prefix).split("/", 1)[0]
@@ -126,22 +140,48 @@ class TestTheUndecidedRowsAreSomebodysWork:
         assert deferred == set(OWED_BY), sorted(deferred ^ set(OWED_BY))
 
 
+# doc: long why this builds a throwaway repository instead of touching the real tree
 class TestTheInventoryComesFromGit:
-    """Not from the filesystem, which still carries a package the rename deleted."""
+    """Not from the filesystem, which still carries a package the #57 rename deleted.
+
+    Built in ``tmp_path`` as a real git repository, and NOT by making a directory under the
+    checkout: `deploy/rootless/test.sh` mounts the repo `-v "$REPO:/work:ro"` and says why
+    right above the mount, so a test that writes into the source tree is red in the container
+    for ever while passing on the host. The first version of this test did exactly that.
+    """
+
+    @staticmethod
+    def _repo(tmp_path: Path) -> Path:
+        """A checkout with one tracked package and one that is only `__pycache__`."""
+        for command in (
+            ["init", "-q"],
+            ["config", "user.email", "t@t"],
+            ["config", "user.name", "t"],
+        ):
+            subprocess.run(["git", "-C", str(tmp_path), *command], check=True)
+        (tmp_path / "src" / "shipinfer" / "core").mkdir(parents=True)
+        (tmp_path / "src" / "shipinfer" / "core" / "__init__.py").write_text('"""Short."""\n')
+        (tmp_path / "src" / "shipinfer" / "server" / "__pycache__").mkdir(parents=True)
+        (
+            tmp_path / "src" / "shipinfer" / "server" / "__pycache__" / "x.cpython-310.pyc"
+        ).touch()
+        (tmp_path / ".gitignore").write_text("__pycache__/\n")
+        subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+        return tmp_path
 
     def test_a_directory_with_no_tracked_file_is_not_a_package(self, tmp_path: Path) -> None:
-        """`src/shipinfer/server/` is the live example: three `__pycache__` dirs and no file.
+        found = _packages("src/shipinfer", repo=self._repo(tmp_path))
 
-        A filesystem walk reports it as a fourteenth package, which would either fail the
-        tier on a developer checkout or -- worse -- be "fixed" by adding a row for a package
-        that does not exist. Same lesson as #124, one directory up.
-        """
-        phantom = ROOT / "src" / "shipinfer" / "__inventory_probe__" / "__pycache__"
-        phantom.mkdir(parents=True)
-        try:
-            found = _packages("src/shipinfer")
-        finally:
-            phantom.rmdir()
-            phantom.parent.rmdir()
+        assert "core" in found, "a package with a tracked file is one"
+        assert "server" not in found, (
+            "a directory that is only `__pycache__` is not a package; a filesystem walk calls "
+            "it one and the inventory would then grow a row for something that does not exist"
+        )
 
-        assert "__inventory_probe__" not in found
+    def test_a_package_that_is_not_yet_staged_is_still_a_package(self, tmp_path: Path) -> None:
+        """`--cached` alone would miss it exactly while adding its row is cheap."""
+        repo = self._repo(tmp_path)
+        (repo / "src" / "shipinfer" / "newseam").mkdir()
+        (repo / "src" / "shipinfer" / "newseam" / "__init__.py").write_text('"""Short."""\n')
+
+        assert "newseam" in _packages("src/shipinfer", repo=repo)
