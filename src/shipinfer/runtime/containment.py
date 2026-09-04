@@ -162,7 +162,7 @@ def require_container(what: str) -> None:
         f"describe the deployment.\n"
         f"  deploy/rootless/test.sh -m gpu     the GPU tier\n"
         f"  deploy/rootless/bench.sh           the benchmark\n"
-        f"  make shell                         an interactive shell\n"
+        f"  deploy/rootless/run.sh <cmd>       one command, or a shell\n"
         f"If the operator has agreed this one may run on the host, set "
         f"{ALLOW_HOST_RUN_ENV}=1 and say so in the report."
     )

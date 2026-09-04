@@ -11,7 +11,9 @@
 #
 #   docker compose -f deploy/compose/docker-compose.yml up -d dev
 #   docker compose -f deploy/compose/docker-compose.yml exec dev bash
-# or, from the repository root, just `make shell`.
+# There is no `make shell` and no Makefile: this kernel refuses `docker build` from an
+# unprivileged user namespace, so the rootless scripts replaced this file's path --
+# `deploy/rootless/run.sh <cmd>` is the door.
 
 name: shipinfer
 

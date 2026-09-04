@@ -30,12 +30,10 @@ import pytest
 from shipinfer.core.errors import ServerStateError
 from shipinfer.core.settings import ServerSettings
 from shipinfer.engine import InferenceServer
+from tests.support.devices import a_test_device
 
 REPO = Path(__file__).resolve().parents[2]
 PLAN = REPO / "model_repository" / "ship_detector" / "1" / "model.plan"
-#: Physical ordinal. Any device works; 5 is the one this box's operator keeps free for tests.
-DEVICE = 5
-
 _CONFIG = """
 name: ship_detector
 platform: tensorrt
@@ -83,7 +81,7 @@ def _server(root: Path) -> InferenceServer:
     return InferenceServer(
         ServerSettings(
             model_repository=root,
-            devices={"visible_gpus": [DEVICE]},
+            devices={"visible_gpus": [a_test_device()]},
             execution={"warmup_iterations": 0},
         )
     )

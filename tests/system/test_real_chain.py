@@ -27,6 +27,8 @@ from typing import Any
 
 import pytest
 
+from tests.support.devices import a_test_device
+
 REPO = Path(__file__).resolve().parents[2]
 PLAN = REPO / "model_repository" / "ship_detector" / "1" / "model.plan"
 
@@ -41,9 +43,6 @@ DEFAULT_VIDEO = (
 )
 VIDEO = Path(os.environ.get("SHIPINFER_SYSTEM_VIDEO") or DEFAULT_VIDEO)
 
-#: Physical ordinal, matching ``tests/engine/test_warmup_on_a_real_engine.py``: any device
-#: works, and 5 is the one this box's operator keeps free for tests.
-DEVICE = 5
 
 #: How many frames the chain must publish before the run is stopped. Eight is enough for the
 #: tracker to confirm a track (it withholds one until it has earned confirmation) and to show
@@ -186,7 +185,7 @@ def run_the_chain(out: Path) -> RealRun:
         model_repository=REPO / "model_repository",
         load_all_models=False,
         startup_models=["ship_detector"],
-        devices={"visible_gpus": [DEVICE]},
+        devices={"visible_gpus": [a_test_device()]},
         pipeline={"workers": 1},
     )
     assert model_pool_is_needed("inprocess", chain), "a `pool` detector needs a model pool"

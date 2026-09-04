@@ -12,6 +12,7 @@ import ast
 import functools
 import importlib.util
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -44,6 +45,18 @@ def _modules_imported_by(path: Path) -> set[str]:
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             found.add(node.module)
     return found
+
+
+# doc: long nineteen tests were red on main in the container and the reason is not obvious
+#: No `git` in `pytorch/pytorch:*-runtime` -- the image `test.sh` runs the OFFLINE tier in, its
+#: documented default. Nineteen tests here were red there on main, unnoticed: `_paths.py` falls
+#: back from `git ls-files` to `rglob`, which walks gitignored trees, so the ratchet counted a
+#: different set of files. What they read is the TREE, identical either way; same guard as
+#: `tests/test_two_planes.py`.
+_NEEDS_GIT = pytest.mark.skipif(
+    shutil.which("git") is None,
+    reason="git is not on PATH (the test image has none); the tree is scanned on the host",
+)
 
 
 class TestPureLayersAreAcceleratorFree:
@@ -136,8 +149,12 @@ def _checker():
 class TestEnforcementAgrees:
     """The pre-commit hook and this suite check the same rule, so neither can drift alone."""
 
+    @_NEEDS_GIT
     def test_layer_check_hook_passes(self) -> None:
-        """The pre-commit hook and this test must agree; run the hook itself."""
+        """The pre-commit hook and this test must agree; run the hook itself.
+
+        Needs git for the same reason the three classes below do: with none, the hook's
+        enumerator falls back to `rglob` and walks trees this repository does not own."""
         hook = Path(__file__).resolve().parents[1] / "scripts" / "hooks" / "check_layers.py"
         result = subprocess.run(
             [sys.executable, str(hook)], capture_output=True, text=True, env=checkout_env()
@@ -757,6 +774,7 @@ class TestProseKeepsTheProjectsLineWidth:
 
 
 # doc: long the failure mode is invisible to every other tool, so it has to be described here
+@_NEEDS_GIT
 class TestNapoleonFieldListsStayIndented:
     """No `Args:`/`Raises:` continuation may sit at the item indent. Zero, not a ratchet.
 
@@ -797,6 +815,7 @@ def _submodule_paths() -> list[str]:
 
 
 # doc: long why a submodule's source must not be scanned, and how the guard stays non-vacuous
+@_NEEDS_GIT
 class TestTheHooksScanOnlyThisRepositorysSource:
     """No hook may descend into a submodule, and one sits under a root they scan.
 
@@ -932,6 +951,7 @@ def _over_cap(root: str) -> tuple[str, ...]:
 
 
 # doc: long why this is a ratchet and not the gate V145-ARM asked for
+@_NEEDS_GIT
 class TestDocumentationCapsOnlyGetTighter:
     """`check_docs.py` as a ratchet, because "the count reaches zero" is not going to happen.
 

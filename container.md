@@ -106,9 +106,10 @@ the modern form rather than the deprecated `runtime: nvidia`.
 ## What to do, in order
 
 1. `sudo usermod -aG docker $USER && newgrp docker`
-2. `cd deploy && make shell` (or `docker compose -f compose/docker-compose.yml build dev`) —
-   this is the first real test of the Dockerfile and will probably need fixes; it has never
-   been built.
+2. **SUPERSEDED.** This said `cd deploy && make shell`, and there is no Makefile: this kernel
+   refuses `docker build` from an unprivileged user namespace (`deploy/rootless/setup.sh`,
+   KERNEL LIMIT), so the compose path was replaced by the scripts in `deploy/rootless/`. The
+   door for one command inside the tier's container is `deploy/rootless/run.sh <cmd>`.
 3. Re-run the offline suite **inside** the container and confirm the same counts.
 4. Install TensorRT in the image, build one engine, and run `pytest -m gpu`. That is the
    first moment the production path has GPU evidence.

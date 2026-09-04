@@ -184,7 +184,7 @@ class TestTheCarveOutIsNarrow:
             "deploy/rootless/prove.sh",
             "docker run --rm --device nvidia.com/gpu=all img pytest -m gpu",
             "podman run --rm img pytest -m gpu",
-            "make shell",
+            "deploy/rootless/run.sh python scripts/build_engines.py",
         ],
     )
     def test_an_already_containerised_command_passes(self, command: str) -> None:

@@ -4,8 +4,11 @@
 #   deploy/rootless/test.sh                    # the offline tier
 #   deploy/rootless/test.sh -m gpu             # the GPU tier
 #   deploy/rootless/test.sh -m multigpu
-#   SHIPINFER_TEST_GPUS=3,4 deploy/rootless/test.sh -m multigpu   # which physical GPUs a
-#                                              # multi-process test may take (default 0,1)
+#   SHIPINFER_TEST_GPUS=0,1 deploy/rootless/test.sh -m multigpu   # which of the CONTAINER's
+#                                              # devices a test may take. Unset means EVERY
+#                                              # device this container has. Not physical
+#                                              # ordinals: SHIPINFER_GPUS decides which cards
+#                                              # are here, renumbered from 0 inside.
 #   deploy/rootless/test.sh tests/ingest -q    # any pytest arguments
 #   SHIPINFER_SYSTEM_VIDEO=references/.../clip.mp4 deploy/rootless/test.sh -m gpu tests/system
 #                                              # the real chain, decode to output, on real
@@ -44,104 +47,22 @@
 # outbound network. `deploy/rootless/wheels.sh` populates it.
 set -euo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# READ-ONLY, pinned here rather than left to `_container.sh`'s default: `CONTAINER_MOUNT`
+# carries no `SHIPINFER_` prefix, so an ambient `CONTAINER_MOUNT=rw` in the environment would
+# otherwise mount the source tree writable under the one runner documented not to. A test that
+# writes into the tree pollutes the next run, and `tmp_path` exists so it need not.
+CONTAINER_MOUNT=ro
 
-# Which GPUs this container may see, and why one degraded card is not a dead tier.
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_gpus.sh"
-IMAGE="${SHIPINFER_TEST_IMAGE:-pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime}"
-WHEELS="${SHIPINFER_WHEELS:-/tmp/wheels-py311}"
-export DOCKER_HOST="${DOCKER_HOST:-unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock}"
+# The container every runner here starts, defined once -- image, wheels, socket, GPU knob,
+# TensorRT mount, PYTHONPATH, the repo and any footage.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_container.sh"
 
-if ! docker info >/dev/null 2>&1; then
-  echo "docker daemon unreachable at $DOCKER_HOST — run deploy/rootless/setup.sh first" >&2
-  exit 1
-fi
-if [ ! -d "$WHEELS" ] || [ -z "$(ls -A "$WHEELS" 2>/dev/null)" ]; then
-  echo "no wheels at $WHEELS — run deploy/rootless/wheels.sh first" >&2
-  exit 1
-fi
-
-# Default to the offline tier, matching scripts/run_tests.sh, unless the caller passes -m.
 args=("$@")
-if ! printf '%s\n' "${args[@]}" | grep -q '^-m$'; then
-  args=(-m "not gpu and not multigpu" "${args[@]}")
-fi
 
-# The repository is mounted READ-ONLY on purpose: a test that writes into the source tree is
-# a test that pollutes the next run, and `tmp_path` exists precisely so it does not have to.
-# TensorRT is mounted from the host. No image here carries it, and without it the GPU tier
-# silently reduces to "the tests that do not need an engine" — which is most of the value
-# missing, since the accelerator seam this tier exists to cover is the TensorRT path. The
-# host is jammy like the image, so its libraries load; same arrangement as bench.sh.
-TRT_DIR="${SHIPINFER_TENSORRT_DIR:-/usr/local/TensorRT}"
-# The system tier (`-m gpu tests/system`) runs the real chain on real footage, and footage is
-# not in the repository: `references/` is gitignored, and committing frames of real people to
-# make a test runnable is the wrong trade. So the operator points at a video or a frame
-# directory and it is mounted read-only; unset, the tier skips itself and says what is missing.
-video_mount=()
-if [ -n "${SHIPINFER_SYSTEM_VIDEO:-}" ]; then
-  if [ ! -e "$SHIPINFER_SYSTEM_VIDEO" ]; then
-    echo "SHIPINFER_SYSTEM_VIDEO=$SHIPINFER_SYSTEM_VIDEO does not exist" >&2
-    exit 1
-  fi
-  video_mount=(-v "$(cd "$(dirname "$SHIPINFER_SYSTEM_VIDEO")" && pwd)/$(basename "$SHIPINFER_SYSTEM_VIDEO"):/footage:ro")
-fi
-
-trt_mount=()
-trt_path=""
-if [ -d "$TRT_DIR/lib" ]; then
-  trt_mount=(-v "$TRT_DIR:/tensorrt:ro")
-  trt_path=":/tensorrt/lib"
-fi
-
-# The tracking plane is the one part of the system whose correctness argument is about
-# *threads*, and its tests were skipping in every tier that runs: the image does not install
-# the submodule and CI deliberately does not check it out (ADR-001). Putting it on PYTHONPATH
-# — pure Python, no build, no install — is enough for `shipvision.tracking`, so those tests
-# run here even though the compiled `_C` is absent.
-#
-# Read-only and additive on purpose: the submodule not being checked out is still a supported
-# state, and then this is an empty string and nothing changes. ADR-001's promise is that a
-# plain `pytest` needs no GPU, not that it needs no submodule.
-shipvision_path=""
-if [ -f "$REPO/3rdparty/shipvision/pyproject.toml" ]; then
-  shipvision_path=":/work/3rdparty/shipvision"
-fi
-
-exec docker run --rm --pid=host "${GPU_DEVICES[@]}" \
-  -e LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu${trt_path}" \
-  -e PYTHONDONTWRITEBYTECODE=1 \
-  -e PYTHONPATH="/work/src${shipvision_path}" \
-  -e SHIPINFER_TEST_GPUS \
-  -e SHIPINFER_SYSTEM_VIDEO="${SHIPINFER_SYSTEM_VIDEO:+/footage}" \
-  -v "$REPO:/work:ro" \
-  -v "$WHEELS:/wheels:ro" \
-  "${trt_mount[@]}" "${video_mount[@]}" \
+exec docker run --rm "${DOCKER_ARGV[@]}" \
   -w /work "$IMAGE" \
   bash -c '
     set -e
-    # Two groups, and the split matters. The single list this replaced fell back to a
-    # minimal set when ANY package in it was unavailable, so one missing wheel silently
-    # dropped fastapi, opencv and scipy as well -- and the tests needing them skipped, which
-    # looks identical to passing. Required fails loudly; optional is installed one at a time
-    # so a gap costs exactly that package and SAYS SO.
-    # The control plane is REQUIRED, not optional. Without grpcio/protobuf, 119 tests --
-    # tests/launch, the shard service, core/test_priority -- never COLLECT here, and a
-    # superset that degrades to a subset on a missing wheel is not a superset. grpcio-tools
-    # brings the 7 tests in test_proto_is_current.py. Specifiers come from pyproject.toml
-    # container never installs shipinfer (it runs off PYTHONPATH), so no extra is resolved and
-    # nothing else applies them. grpcio-tools is PINNED there for a reason that bites exactly
-    # here -- 1.83 emits a different `shard_pb2_grpc.py` for the same .proto, so an unpinned
-    # protoc turns the regeneration guard red on an unmodified tree.
-    pip install -q --root-user-action=ignore --no-index --find-links=/wheels \
-      pydantic pydantic-settings typer pyyaml pytest pytest-timeout pytest-asyncio \
-      "grpcio>=1.71.2,<2" "protobuf>=5.29,<6" "grpcio-tools==1.71.2"
-    for package in fastapi httpx starlette uvicorn anyio opencv-python-headless scipy; do
-      pip install -q --root-user-action=ignore --no-index --find-links=/wheels "$package" \
-        >/dev/null 2>&1 || echo "NOTE: $package is not in /wheels; tests needing it will skip" >&2
-    done
-    python -c "import tensorrt" 2>/dev/null || \
-      pip install -q --root-user-action=ignore --no-index --find-links=/wheels tensorrt \
-        >/dev/null 2>&1 || true
+    . /work/deploy/rootless/_inside.sh
     exec python -m pytest -ra --strict-markers -p no:cacheprovider "$@"
   ' bash "${args[@]}"
