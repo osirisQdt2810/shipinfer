@@ -2673,7 +2673,12 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       fresh worktrees. LESSON: a worktree is not the same environment as the operator's
       checkout -- submodules are the difference, and they are where the third-party code is.
 
-- [~] **FLAKY-COST-TEST · OPEN as PR #125 (4 Sep). Fixed the ESTIMATOR, not the bound:
+- [x] **FLAKY-COST-TEST · MERGED as PR #125 (4 Sep) after two rounds. Round 1 found the
+      asymmetry I had introduced -- `_milliseconds` became a minimum while `unit_cost_ms`
+      stayed a mean, which is the MORE dangerous half: an inflated calibration sizes every
+      declared latency too small and is cached per process, so one poisoned window mis-sizes
+      the fixtures the rate-limiter and write-race tests rest on. Both sides use the minimum
+      now. Original: OPEN as PR #125 (4 Sep). Fixed the ESTIMATOR, not the bound:
       `_milliseconds` now returns the CHEAPEST of five runs instead of their mean, because a
       stall can only ADD time -- and that makes the file's two lower-bound assertions STRICTER
       rather than looser, which is why it is the right direction. HONEST LIMIT, stated in the
