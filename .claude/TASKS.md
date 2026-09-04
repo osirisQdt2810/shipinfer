@@ -506,7 +506,10 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 5 · Everything else still owed
 
-- [!] **C4 · BLOCKED on GPU7-DEGRADED (re-confirmed 4 Sep: `nvidia-smi -i 7` still returns
+- [~] **C4 · UNBLOCKED by #128 (the GPU tier runs again with `SHIPINFER_GPUS=0,1,2,3`). The
+      remaining gate is an ENGINE: `model_repository/ship_detector/1` has no `.plan` and no
+      `.onnx` to build one from, so the bench and the system tier skip themselves by name.
+      That is the next step and it is reachable. Original: BLOCKED on GPU7-DEGRADED (re-confirmed 4 Sep: `nvidia-smi -i 7` still returns
       `[Unknown Error]` for temperature and `[N/A]` for power/utilisation/ECC, so every `-m gpu`
       test errors at CUDA init and no bench run can produce a per-device table). Nothing to do
       here until the operator resets GPU 7. Original: RTSP in the benchmark** (R55) — wired and tested offline; measured 26 Aug. **(RUNBOOK: scratchpad/plan-phase-e-bench.md, run 3.) RE-SCOPED 28 Aug: the harness
@@ -914,7 +917,8 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 6 · The final goal (V49)
 
-- [!] **C1 · BLOCKED on GPU7-DEGRADED (re-confirmed 4 Sep, see C4) as well as on Phase C+D.
+- [~] **C1 · UNBLOCKED by #128 for the GPU half; the engine gate above (C4) and Phase D
+      remain. Original: BLOCKED on GPU7-DEGRADED (re-confirmed 4 Sep, see C4) as well as on Phase C+D.
       A bench run with a per-device breakdown is the whole deliverable and the GPU tier is down.**
       Original: >=5x counting-simulation, whole system.** (RUNBOOK: scratchpad/plan-phase-e-bench.md — run 4 of the consolidated Phase-E matrix; gated on Phase C+D per arch.md §10.) Measured: baseline 868.2 img/s against the
       C++ plane's 390.5 → **0.45×**. The interpreter is no longer the wall *inside a process*;
@@ -2765,7 +2769,16 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       supervisor.py needs no change) so nobody re-derives it, and names the signal to revisit: if the
       grpcio-tools pin and the generated-stub check become a recurring tax. #109 was one instance of that
       tax, so the signal is not hypothetical -- worth watching.
-- [!] **GPU7-DEGRADED · OPERATOR: the box's GPU tier is DOWN, 1 Sep ~16:0x. GPU 7 needs a reset.
+- [x] **GPU7-DEGRADED · THE TIER WAS NEVER DOWN, and this was my misdiagnosis for three days.
+      Fixed as PR #128.** The operator asked the question that broke it open -- "we only need 4
+      GPUs, why do we still need GPU 7?" -- and the answer is that we never did. Every script
+      in `deploy/rootless/` hard-coded `--device nvidia.com/gpu=all`, so torch's queued
+      `_check_capability` walked a card no test asked for. `SHIPINFER_GPUS=0,1,2,3` and the
+      tier is green: **54 passed / 16 skipped / 0 failed** on `-m gpu`, 1 passed on
+      `-m multigpu`, VRAM back to idle. GPU 7 is still faulted and that no longer matters.
+      LESSON: "the hardware is broken" is a diagnosis that must be tested against our own
+      plumbing before it goes in this file as an operator blocker. Original text below.
+      OPERATOR: the box's GPU tier is DOWN, 1 Sep ~16:0x. GPU 7 needs a reset.
       STILL DOWN 4 Sep: temperature `[Unknown Error]`, power/util/ECC `[N/A]`, while GPUs 0-6 read
       28-31 C normally. C1 and C4 are blocked behind it.**
       `nvidia-smi -i 7` returns `[Unknown Error]` for temperature and `[N/A]` for power, utilisation and
