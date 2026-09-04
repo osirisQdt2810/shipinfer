@@ -180,7 +180,10 @@ namespace shipinfer {
             std::vector<float> boxes;
             std::vector<int> indices;
             for (const Detection& det : state.detections()) {
-                if (det.class_id != spec.class_id) continue;
+                // A negative id is EVERY row, which is what a crop element with no
+                // `classes:` means on the Python plane ("Default: every row",
+                // `elements/pool.py`). Nothing constructed one before the plan did.
+                if (spec.class_id >= 0 && det.class_id != spec.class_id) continue;
                 boxes.insert(boxes.end(), {det.x1, det.y1, det.x2, det.y2});
                 indices.push_back(det.index);
             }

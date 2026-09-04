@@ -2392,10 +2392,16 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       data; ADR-014 puts data-driven config in Python — which argues for the resolved-list answer, but it is a design
       call for the operator.
 
-- [~] **P6-PLAN · SPLIT at the plane boundary, 27 files being over the ~25 cap: PR-A is the
-      Python emitter + the format + ADR-020, PR-B the C++ reader, `from_plan` and `bench
-      --plan`. PR-B is the half that makes the decision real, so P6-PLAN stays [~] until it
-      merges -- CLAUDE.md's sync rule, stated in PR-A's body.**
+- [~] **P6-PLAN · SPLIT at the plane boundary, 27 files being over the ~25 cap. PR-A is
+      **MERGED as #131** (the Python emitter, the format, ADR-020, after three rounds);
+      THIS is PR-B, the C++ reader, `from_plan` and `bench --plan` -- the half that makes
+      the decision real, so P6-PLAN stays [~] until it merges (CLAUDE.md's sync rule,
+      stated in both bodies).**
+      PR-B carries every format change those three rounds made: the reader takes the rest of
+      the line for `plan` and `label`, splits `classes` on commas, tells a DECLARED empty
+      selection (`classes -`, `kNoClass`) from no selection at all (`kAnyClass`), and its
+      refusal table carries the same rows. A plan one plane reads and the other rejects is
+      what the shared table exists to prevent, and all three rounds proved it earns its keep.
       The C++ plane stops hard-coding its chain: `topology/plan.py` flattens the validated
       chain to a line-oriented plan, `shipinfer plan -t <chain.yaml>` is the hand-over,
       `csrc/.../graph/plan.{h,cpp}` reads it back byte-identically and `from_plan.{h,cpp}`
@@ -2411,17 +2417,26 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `crop 0 128` and Python did not, and `*.plan` in `.gitignore` would have swallowed every
       golden. 26 files, so it may need splitting at the Python/C++ line when it opens.
 
-- [ ] **P6-SEGMENT-CROP · A pre-existing cross-plane divergence the plan made visible.**
+- [ ] **P6-SEGMENT-CROP · A pre-existing cross-plane divergence the plan made visible, and
+      the direction is already DECIDED -- by `PoolSegment`'s own docstring, read 4 Sep.**
       `segment` CROPS on the C++ plane (`ship_crops_640`, 640x640, one crop per ship row) and
-      letterboxes the WHOLE FRAME on the Python one (`elements/pool.py`: "Whole-frame today: a
-      YOLO-seg engine emits detection rows and a bank of mask prototypes, and the fold that
-      turns those into one area per object is not a per-row scatter-back"). So `mask_area_px`
-      is computed from different pixels on the two planes. Not caused by ADR-020 -- the plan
-      carries what the C++ plane already did -- but now stated in one file rather than implied
-      by two. Decide which is right (the chain file's comment says `segment` "gains
-      `params: {classes: [ship]}` like the two embedders below" when its crop half lands, which
-      points at the C++ shape being the destination) and converge, with the register entry if
-      it cannot be converged at once.
+      letterboxes the WHOLE FRAME on the Python one, so `mask_area_px` is computed from
+      different pixels. Not caused by ADR-020 -- the plan carries what the C++ plane already
+      did -- but now stated in one file rather than implied by two.
+      **The C++ shape is the destination and the Python side is the one that moves**, in as
+      many words: *"the demo repository's `ship_segmenter` is fed crops in the proven pipeline
+      (`pipeline/graph/graph.py` cuts a `ship_mask_crops` set at 640x640 and hands it to an
+      `ObjectStage`), so the FIRST half of this element is exactly `_PoolCropElement`'s and
+      adopting it is a one-line change of base class."* What blocks it is the second half: a
+      YOLO-seg engine emits rows plus a bank of mask prototypes and the mask for one crop is
+      the two multiplied and reduced to an area (`pipeline/graph/masks.py::InstanceMaskArea`)
+      -- a fold over two outputs that a per-row scatter-back cannot express, and filing the
+      raw rows instead would pin a `(32, 160, 160)` prototype tensor per frame alive (~3 MB a
+      frame of reassembly memory for pixels nobody reads).
+      SO: the work is `PoolSegment` gaining `_PoolCropElement` as its base PLUS its own
+      `_finish` doing the fold, in the slice the docstring already reserves for it -- not a
+      design question. Then `params: {classes: [ship]}` on the slot, and the two planes agree.
+      Until then the divergence is real and stated in both places.
 
 - [x] **HOOK-FP · MERGED as PR #104 (31 Aug 13:54), VERDICT: APPROVE.** (was OPEN as PR #104) (2 commits, 2 files, +89/-1, rebased onto 9d315da). 82 hook tests; full
       tier 3232 passed; pre-commit all Passed; clean. BOTH revert-checks reproduced on this tip: formatter

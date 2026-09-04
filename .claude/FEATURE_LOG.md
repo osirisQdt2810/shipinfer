@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-04 — The resolved chain plan: the C++ plane stops hard-coding its graph (ADR-020)
+
+`CSRC-TOPOLOGY-Q` answered: no `csrc/topology/` mirror. Python validates the chain and hands
+this plane a line-oriented **plan** (#131: `shipinfer plan -t <chain.yaml> -o <f>`), and this
+half reads it: `from_plan.cpp` turns it into the Dag, the stage names, the label table and the
+event field map — one source where four hand-kept lists used to disagree.
+
+Fixed on the way: the ladder's label table said a ship was class 1 while its crop specs said 8,
+so the C++ bench labelled every ship `unknown`. Two behaviour changes it forced —
+`CropSpec.class_id = -1` now means *every row* (what no `classes:` means in Python), and the
+plan reader refuses a non-positive extent on **both** planes, a divergence the shared refusal
+table found before merge. The plan is the fourth parity seam and the first with both halves
+automatic: the Python test holds the emitter to the committed goldens, the C++ gate
+re-serialises them and compares bytes (46 checks, and CI runs it in the offline lane).
+
 ## 2026-08-28 — The ingest parity harness: one scenario, two planes, one committed golden (P6 PR-A)
 
 **What.** CLAUDE.md's sync rule says a change to a Python data-plane seam is not finished

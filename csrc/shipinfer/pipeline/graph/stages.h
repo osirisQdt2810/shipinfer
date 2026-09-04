@@ -105,9 +105,16 @@ namespace shipinfer {
     };
 
     struct CropSpec {
+        //: Every row -- what a crop element with no `classes:` means on the Python plane.
+        static constexpr int kAnyClass = -1;
+        //: No row: a DECLARED empty selection (`classes -` in a plan). An id no detector
+        //: emits, so the payload is produced with zero rows and the branch is skipped, which
+        //: is what "select nothing" has to mean on this side too.
+        static constexpr int kNoClass = -2;
+
         std::string name;        // the payload's name, e.g. "person_crops"
         std::string class_name;  // "person" / "ship", for the event builder
-        int class_id = 0;
+        int class_id = kAnyClass;
         int height = 256;
         int width = 128;
     };
