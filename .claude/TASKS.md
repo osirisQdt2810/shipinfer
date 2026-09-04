@@ -2677,7 +2677,14 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       LEFT ALONE: tts26's two training processes on GPUs 0-1 (13.5 GB each, ~48 min elapsed) are live work.
       UNTIL FIXED: no GPU-tier evidence can be produced, so anything needing `-m gpu` is blocked -- that
       includes the V148 system test, the crowd yield measurement, and any Phase D/E bench work.
-- [~] **V149 · READABILITY: main cannot be read top-down against docs/arch.md. THE PRIORITY NOW; PR queue paused.**
+- [x] **V149 · DONE 4 Sep. Every package the item named is trimmed and merged: runners/ (#107,
+      #110, #111, #121), topology/ (#113, #114), cli/ (#115), engine/ (#116), api/ (#117), plus
+      the three CI ratchets that stop it regressing (#117's 96-column and Napoleon checks,
+      #118's cap ratchets). `topology/base.py` (3.07) and `api/streams.py` (2.23) stop high for
+      the structural reason recorded below -- an ABC's remaining prose is contract text and a
+      router's is the status-code argument, and ~150 lines of code cannot carry either at a low
+      ratio. DO NOT RE-OPEN THEM. Original: READABILITY: main cannot be read top-down against
+      docs/arch.md. THE PRIORITY NOW; PR queue paused.**
       Operator, 31 Aug: cannot map remote main onto the architecture doc; too many docs, too many
       superfluous functions, no idea where to start reading top layer -> bottom layer. MEASURED, and the
       complaint is correct on every count (baseline b450acc):
@@ -2694,7 +2701,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       violation count only 1031 -> 1012. The fix is fewer, smaller files with less prose in them.
       **DECIDED (asked, 31 Aug): all three, SEQUENTIALLY, one package per PR** -- split the oversized file,
       cut prose in the files touched, delete the superfluous helpers there. Order: runners/ first.
-- [~] **V149-runners · STEP 4 OPEN as PR #121 (3637a61). The ledger was right that PLACEMENT
+- [x] **V149-runners · DONE. STEP 4 MERGED as PR #121, APPROVE round 1 (one non-blocking nit: three spellings of "erase a placement", kept because each names its intent at the call site). The ledger was right that PLACEMENT
       alone does not warrant a module -- `_priority_lock` guards `_placed_bands` AND
       `_configured`, and `_priority_for` reads both, so splitting the placement half would
       export the lock. The seam is "which band, and who said so", so all of it moved:
