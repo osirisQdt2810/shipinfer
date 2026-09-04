@@ -98,6 +98,29 @@ class TestTwoSlotsCoveringOneRow:
 
         assert len(chain) == 5
 
+    def test_a_slot_that_selects_NOTHING_cannot_contest_a_row(self) -> None:
+        """`classes: []` is "select nothing", explicitly not `None` -- so it cannot collide
+        with a slot that selects everything, however degenerate the pair is."""
+        chain = load(
+            "a: {impl: pool, kind: embed, model: ship_embedder, after: detect,"
+            " params: {classes: []}}",
+            "b: {impl: pool, kind: embed, model: person_embedder, after: detect}",
+        )
+
+        assert chain.node("a").element.declared_classes() == ()
+        assert chain.node("b").element.declared_classes() is None
+
+    def test_a_frame_guard_does_not_excuse_an_overlap(self) -> None:
+        """Deliberate: `when:` is a runtime fact about a frame and this is a statement about
+        the file, so two slots that could never run together are still refused."""
+        with pytest.raises(ChainStructureError, match="both fill the event's 'embedding'"):
+            load(
+                "a: {impl: pool, kind: embed, model: ship_embedder, after: detect,"
+                " params: {classes: [ship]}, when: fps == 20}",
+                "b: {impl: pool, kind: embed, model: person_embedder, after: detect,"
+                " params: {classes: [ship]}, when: fps == 10}",
+            )
+
     def test_an_element_that_does_not_select_rows_is_not_considered(self) -> None:
         """`selects_rows` is the question, not the kind: a frame-level element cannot contest
         a row, and a mock chain of them must still load -- `test_inprocess.py`'s chain is two

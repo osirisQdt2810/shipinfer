@@ -968,10 +968,10 @@ def _check_row_selection(nodes: Sequence[ElementNode]) -> None:
             )
 
 
-#: Which event field a kind's rows fill. The same table `topology/plan.py` writes into a
-#: plan's `field` lines -- stated twice on purpose, because this is a LOAD-TIME check and
-#: `topology/` may not import `pipeline/` to ask the record builder.
-_ROW_FIELD_KINDS = {ElementKind.EMBED: "embedding", ElementKind.SEGMENT: "mask_area_px"}
+#: Which event field a kind's rows fill. ONE definition -- `plan.py` imports it from here and
+#: writes the same table into a plan's `field` lines. Two copies would decide different things
+#: the day a kind is added: only in `plan.py` and the plan emits candidates this check ignores.
+ROW_FIELD_KINDS = {ElementKind.EMBED: "embedding", ElementKind.SEGMENT: "mask_area_px"}
 
 
 # doc: long the same state is refused per frame today, which is an outage and a log flood
@@ -994,19 +994,30 @@ def _check_one_filler_per_row(nodes: Sequence[ElementNode]) -> None:
     ``P6-SEGMENT-CROP`` is the item that makes it a real row-selector, and this check starts
     covering it for free on the day it does.
 
+    A ``when:`` guard is deliberately NOT considered. Two slots with the same ``classes:`` and
+    mutually exclusive frame guards (``when: fps > 10`` / ``when: fps < 5``) can never both
+    run, and are refused anyway: the guard is a runtime fact about a frame, this is a
+    statement about the file, and refusing a chain that could be spelled unambiguously is the
+    safe direction.
+
     Raises:
         ChainStructureError: two such slots of one field-filling kind whose row selections
             intersect -- or either of which declares none, which is every row.
     """
     by_field: dict[str, list[ElementNode]] = {}
     for node in nodes:
-        field = _ROW_FIELD_KINDS.get(node.kind)
+        field = ROW_FIELD_KINDS.get(node.kind)
         if field is not None and node.element.selects_rows:
             by_field.setdefault(field, []).append(node)
     for field, fillers in by_field.items():
         for first, second in itertools.combinations(fillers, 2):
             left = first.element.declared_classes()
             right = second.element.declared_classes()
+            # `()` is a DECLARED empty selection -- "select nothing", explicitly not `None`
+            # (`parse_classes`). A slot that selects no rows cannot contest one, even beside
+            # a slot that selects every row, so it is not a collision.
+            if left == () or right == ():
+                continue
             shared = None if left is None or right is None else set(left) & set(right)
             if shared == set():
                 continue

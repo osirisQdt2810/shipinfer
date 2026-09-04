@@ -93,8 +93,10 @@ namespace shipinfer::pipeline::events {
         // So the candidate list is a COVERAGE union, not a priority list: two slots covering
         // one detection means the chain file asked both of them for it, and both paid a GPU
         // for it. Per frame, and `cli/bench.cpp`'s sink counts it per camera -- which is why
-        // this may throw at all (#129 round 2: nothing may throw past `seal()`). A refusal at
-        // LOAD would be better; `RECORDS-COLLISION-AT-LOAD` records what it would cost.
+        // this may throw at all (#129 round 2: nothing may throw past `seal()`).
+        // `Topology.from_spec::_check_one_filler_per_row` refuses most such chains at LOAD;
+        // what reaches here is a slot declaring `selects_rows = false` (`PoolSegment`, until
+        // P6-SEGMENT-CROP) and a row contested at run time despite disjoint declarations.
         // Sized once, cleared per field. `assign` on the first iteration does the fill,
         // so the vector is constructed empty rather than filled twice.
         std::vector<bool> filled;

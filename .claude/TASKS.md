@@ -2526,7 +2526,14 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       frame of reassembly memory for pixels nobody reads).
       SO: the work is `PoolSegment` gaining `_PoolCropElement` as its base PLUS its own
       `_finish` doing the fold, in the slice the docstring already reserves for it -- not a
-      design question. Then `params: {classes: [ship]}` on the slot, and the two planes agree.
+      design question.
+      WHAT IT WILL ALSO COST, measured 4 Sep so the next slice does not discover it midway:
+      `PoolSegment` must declare `selects_rows = True` (it parses `classes:` since #132 but
+      does not declare it), and that flip (a) makes `_check_one_filler_per_row` cover segment
+      slots, which stops `tests/runners/test_walk.py`'s `TWO_SEGMENTERS` loading -- two
+      `segment` slots with no `classes:` -- and (b) makes `when: class == ...` on a segment
+      slot a refusal, which is four tests' subject in `tests/topology/test_chain.py`. Both
+      are the correct behaviour and both belong in that slice. Then `params: {classes: [ship]}` on the slot, and the two planes agree.
       Until then the divergence is real and stated in both places.
 
 - [x] **HOOK-FP · MERGED as PR #104 (31 Aug 13:54), VERDICT: APPROVE.** (was OPEN as PR #104) (2 commits, 2 files, +89/-1, rebased onto 9d315da). 82 hook tests; full
