@@ -506,7 +506,10 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 5 · Everything else still owed
 
-- [~] **C4 · UNBLOCKED by #128 (the GPU tier runs again with `SHIPINFER_GPUS=0,1,2,3`). The
+- [~] **C4 · IN PROGRESS 4 Sep. Chain: a container DOOR (there is none -- CLAUDE.md and
+      container.md both document `make shell` and there is no Makefile anywhere, so an engine
+      build has no sanctioned home) -> build the engines from the ONNX already in `models/`
+      -> the bench -> C1's number. Original: UNBLOCKED by #128 (the GPU tier runs again with `SHIPINFER_GPUS=0,1,2,3`). The
       remaining gate is an ENGINE: `model_repository/ship_detector/1` has no `.plan` and no
       `.onnx` to build one from, so the bench and the system tier skip themselves by name.
       That is the next step and it is reachable. Original: BLOCKED on GPU7-DEGRADED (re-confirmed 4 Sep: `nvidia-smi -i 7` still returns
