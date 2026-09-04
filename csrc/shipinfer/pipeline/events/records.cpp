@@ -64,7 +64,16 @@ namespace shipinfer::pipeline::events {
         // By detection INDEX, because that is what a batch scatters against -- and sized from
         // the same capture, so a batch whose index runs past this list simply has nothing to
         // fill rather than reaching out of bounds.
-        for (const auto& [field, candidates] : resolved) {
+        // FIRST candidate wins, matching `build_records`'s own "in priority order" -- which
+        // neither plane did: both overwrote, so the LAST batch to mention a row set the
+        // field. Two batches covering one row is meant to be impossible (a batch holds the
+        // rows of its own class), and the resolved chain plan can now make it possible, so
+        // `Topology.from_spec` refuses such a chain at load. This is the rule for whatever
+        // gets past it: deterministic, and the same on both planes.
+        std::vector<std::vector<bool>> filled(resolved.size(),
+                                              std::vector<bool>(records.size(), false));
+        for (size_t slot = 0; slot < resolved.size(); ++slot) {
+            const auto& [field, candidates] = resolved[slot];
             for (const std::string& candidate : *candidates) {
                 const auto found = inputs.batches.find(candidate);
                 if (found == inputs.batches.end() || found->second.empty()) continue;
@@ -72,8 +81,10 @@ namespace shipinfer::pipeline::events {
                 for (size_t row = 0; row < batch.rows(); ++row) {
                     const int index = batch.object_indices[row];
                     if (index < 0 || static_cast<size_t>(index) >= records.size()) continue;
+                    if (filled[slot][static_cast<size_t>(index)]) continue;
                     set_field(records[static_cast<size_t>(index)], field, batch.row(row),
                               batch.width);
+                    filled[slot][static_cast<size_t>(index)] = true;
                 }
             }
         }

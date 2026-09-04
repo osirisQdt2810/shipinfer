@@ -155,7 +155,14 @@ def build_records(
             if batch is None or batch.is_empty:
                 continue
             for index, row in batch.scatter():
-                if 0 <= index < len(fields):
+                # doc: long the rule was undocumented and the docstring said the opposite
+                # FIRST candidate wins -- what "in priority order" above says, and what this
+                # loop did NOT do: it overwrote, so the last batch to mention a row set the
+                # field. `records.h` justified having no class check with "a batch only ever
+                # holds rows of ITS OWN class"; a resolved plan can carry a slot with no
+                # `classes:`, which is every row, so that premise needs a stated rule behind
+                # it. Deterministic and identical on both planes now.
+                if 0 <= index < len(fields) and name not in fields[index]:
                     fields[index][name] = convert(row)
     return tuple(
         ObjectRecord(

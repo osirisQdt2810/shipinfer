@@ -1,0 +1,47 @@
+# The ordinary shape, and the parts of the builder a collision case does not reach: a class
+# id with no label (published as `unknown` rather than silently relabelled), a row index past
+# the detection list (which must fill nothing rather than reach out of bounds), an empty
+# batch, and every field a float batch can carry.
+scenario scattered_frame
+camera cau-01
+frame 41
+source shard-3
+size 640 480
+fps 12.5
+captured_ns 0
+captured_unix_ns 1700000000000000000
+emitted_unix_ns 1700000002000000000
+missing ship_segmenter person_embedder
+finished timeout
+
+label 0 person
+label 8 ship
+
+det 0 8 0.75 1 2 3 4
+det 1 0 0.5 10 20 30 40
+# A class the table does not name: `unknown`, on both planes.
+det 2 3 0.25 100 200 300 400
+
+batch ship_embed_out 2
+row 0 0.5 0.875
+# Index 9 owns no detection here: scattered against a shorter list, it fills nothing.
+row 9 1.0 2.0
+
+batch mask_out 1
+row 0 100.0
+
+# One batch per field, deliberately: a converter reads element [0] of the row on both
+# planes, so two fields pointed at one batch would both read the same number.
+batch ident_out 1
+row 0 4.0
+
+batch similarity_out 1
+row 0 0.75
+
+# An empty batch is not a missing one: it must be skipped without becoming a null field.
+batch person_embed_out 2
+
+field embedding ship_embed_out person_embed_out
+field mask_area_px mask_out
+field ship_id ident_out
+field similarity similarity_out

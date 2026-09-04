@@ -2474,18 +2474,28 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `crop 0 128` and Python did not, and `*.plan` in `.gitignore` would have swallowed every
       golden. 26 files, so it may need splitting at the Python/C++ line when it opens.
 
-- [ ] **RECORDS-CLASS-PREMISE · `records.h`'s "a batch only ever holds rows of ITS OWN
-      class" is no longer guaranteed, on BOTH planes** -- found by #132's reviewer. With a
-      crop slot that declares no `classes:` (every row) beside a per-class one, two batches
-      legitimately hold the same object index, and `records.cpp`'s last-candidate-wins fills
-      `embedding` twice. The comment at `records.h:26-30` justifies dropping the class check
-      on a premise the resolved plan can now make untrue -- and the Python plane's
-      `_vectors`/`output` pair has the same shape, so this is not a C++ defect. Decide the
-      rule (last wins, first wins, or refuse two slots that can cover one row at load time --
-      the loader already refuses a lot less than this) and apply it to both planes with a
-      cross-plane case in the event seam. Left out of #132 deliberately: it is a data-plane
-      rule change, not a reader fix, and it belongs with its own parity case.
-
+- [x] **RECORDS-CLASS-PREMISE · DECIDED and GATED 4 Sep: the FIRST candidate wins, on both
+      planes, and a fourth parity seam pins it.** `build_records` documented its candidates as
+      being "in priority order" and then overwrote, so the LAST batch to mention a row set the
+      field -- on both planes, so no cross-plane divergence, but wrong against the stated
+      contract and undecided where it matters. `records.h` justified having no class check
+      with "a batch only ever holds rows of ITS OWN class"; a resolved plan can carry a crop
+      slot with no `classes:`, which is every row, so the premise needed a rule behind it.
+      Delivered with the RECORD parity seam (`scenarios/records/` -> `golden/records/` ->
+      `test_record_parity`, 17 checks, byte-identical on the first comparison), which is also
+      P5-A-ALLOC's second half: the event seam compares the two JSON writers on records a
+      scenario STATES, and this one compares the two BUILDERS by stating what the graph leaves
+      behind. Revert-checks: last-wins on the Python plane turns 3 of 9 tests red, and on the
+      C++ plane 3 of 17 checks including the byte compare at column 387.
+      NOT taken, and stated because it was tried: a LOAD-TIME refusal of two slots that can
+      cover one row. It is the better guard -- a refusal at deploy beats a rule in the middle
+      of a frame -- and `Topology.from_spec` can express it (`declared_classes()` +
+      `selects_rows`). It breaks 60 existing tests, because `tests/runners/test_walk.py`'s
+      `TWO_EMBEDDERS`/`THREE_EMBEDDERS` and `test_inprocess.py`'s chain declare two `pool`
+      embedders with NO `classes:` on purpose (the fixtures' subject is the merge of two
+      scatter-backs, and one of them tests the runner's own contested-row refusal). Those
+      fixtures are relying on a chain that is genuinely ambiguous in production, which is
+      worth fixing -- as its own change, with the fixtures, not inside a rule PR.
 - [ ] **P6-SEGMENT-CROP · A pre-existing cross-plane divergence the plan made visible, and
       the direction is already DECIDED -- by `PoolSegment`'s own docstring, read 4 Sep.**
       `segment` CROPS on the C++ plane (`ship_crops_640`, 640x640, one crop per ship row) and
