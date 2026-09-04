@@ -2075,6 +2075,15 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
         * golden emitted once by the Python plane through `scripts/emit_parity_golden.py`
           (which now reads THIS checkout -- see #120), diffed by a new
           `csrc/tests/test_scheduling_parity.cpp`.
+      GROUPING -- the one design question the ingest harness does NOT answer, worked out
+      4 Sep and recorded so it is not re-discovered: `diff.by_camera` splits a trace into one
+      sequence PER CAMERA because thread interleaving is nondeterministic, and for scheduling
+      that is exactly backwards -- WHICH camera's item comes out next IS the invariant. A
+      scheduling run is single-threaded with an injected clock, so its whole trace is one
+      deterministic sequence. Spell every scheduling kind as a FLEET kind (`FLEET_KINDS` in
+      trace.py) and carry the item's camera in `t[]`: `TraceWriter.record` already refuses a
+      camera on a fleet kind and demands one on every other, `by_camera` puts them all in the
+      `""` bucket in emission order, and diff.py needs NO change.
       FIRST SCENARIOS, one invariant each: fair-queue eviction picks the GREEDIEST camera (the
       inherited starvation bug); a full queue REJECTS rather than evicting under the default
       policy; priority lanes drain TRACKING_CRITICAL first; expiry drops on take, not on put.
