@@ -14,7 +14,6 @@
 // Offline: g++ alone, no CUDA, no GStreamer, and it must not include
 // `ingest/sources/{gstreamer,replay}.h`.
 
-#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -100,44 +99,6 @@ namespace {
 
     // -- the register's other half ----------------------------------------------------------
 
-    // Python's `str.isidentifier()`, which is what the other plane's entry is written
-    // against: a leading digit is NOT an identifier there, so accepting one here would let
-    // this plane excuse a difference the Python differ would report.
-    bool is_identifier(const std::string& value) {
-        if (value.empty() || std::isdigit(static_cast<unsigned char>(value[0]))) return false;
-        for (char c : value) {
-            if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') return false;
-        }
-        return true;
-    }
-
-    // `last_error_type_prefix`: the Python actor stores f"{type(error).__name__}: {error}"
-    // (`ingest/camera/actor.py::_record_failure`); this plane stores redact_in(what())
-    // (`ingest/camera/actor.cpp::record_failure`), which carries no type in front of it.
-    bool only_the_exception_type_prefix(const ParityRecord& python, const ParityRecord& mine) {
-        if (python.text.size() < 2 || mine.text.size() < 2) return false;
-        const size_t at = python.text[1].find(": ");
-        return at != std::string::npos && python.text[1].substr(at + 2) == mine.text[1] &&
-               is_identifier(python.text[1].substr(0, at));
-    }
-
-    // `fatal_consecutive_failures`: the Python health reads `backoff.attempts`, and the fatal
-    // SourceUnavailableError path never calls next_delay(), so it stays 0; this plane
-    // increments `consecutive_failures_` inside record_failure, so it reads 1.
-    //
-    // Keyed on the error's own words and not on the counts alone, because 0-against-1 is a
-    // shape a future unrelated divergence could also have. "is unavailable" is the message
-    // BOTH planes build a SourceUnavailableError from, so this key survives the fix for
-    // `last_error_type_prefix` — keying on the type name would tie the two entries together.
-    bool fatal_open_charges_one_failure(const ParityRecord& python, const ParityRecord& mine) {
-        if (python.numbers.size() < 7 || mine.numbers.size() < 7 || python.text.size() < 2) {
-            return false;
-        }
-        return python.numbers[6] == 0 && mine.numbers[6] == 1 &&
-               python.text[0] == "unhealthy" &&
-               python.text[1].find("is unavailable") != std::string::npos;
-    }
-
     // The register's other half, as a table rather than a chain of `if`s: `main` walks it to
     // fail when a registered divergence fired in NO scenario, and
     // `test_parity_ingest.py::TestKnownDivergences` regexes the ids out of this file and out
@@ -150,12 +111,11 @@ namespace {
         bool (*matches)(const ParityRecord& python, const ParityRecord& mine);
     };
 
+    // Empty, and that is the goal state — P6-D1/D2/D3 were closed by converging the planes.
+    // The machinery stays: an entry costs three lines here and one in known.py, and a gate
+    // that has to be rebuilt before it can excuse anything is a gate people work around.
     const std::vector<KnownEntry>& known_register() {
-        static const std::vector<KnownEntry> entries = {
-            {"last_error_type_prefix", "last_error", &only_the_exception_type_prefix},
-            {"fatal_consecutive_failures", "consecutive_failures",
-             &fatal_open_charges_one_failure},
-        };
+        static const std::vector<KnownEntry> entries = {};
         return entries;
     }
 

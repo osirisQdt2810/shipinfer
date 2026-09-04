@@ -108,6 +108,10 @@ class CameraActor:
         self._source: FrameSource | None = None
         self._thread: threading.Thread | None = None
         self._fatal = False
+        # The thread's fate, and STICKY: a thread that had to be abandoned once stays
+        # abandoned, even after it finally exits. Written True and never back, so a plain
+        # attribute is enough where the C++ plane needs an atomic.
+        self._abandoned = False
 
         # Everything below is written by the actor thread and read by anyone; the lock is
         # taken once per frame at most, which at 20 fps per camera is free.
@@ -119,6 +123,10 @@ class CameraActor:
         self._empty_reads = 0
         self._connects = 0
         self._connect_failures = 0
+        # Counted here rather than read off the backoff: a fatal open records a failure and
+        # never asks for a delay, so `backoff.attempts` would report none. The C++ plane
+        # keeps the same counter for the same reason.
+        self._consecutive_failures = 0
         self._consecutive_empty = 0
         self._last_error = ""
         self._last_frame_unix_ns = 0
@@ -200,10 +208,12 @@ class CameraActor:
 
         Returns ``False`` when the thread had to be abandoned, ``True`` on a clean stop —
         the same contract as the C++ plane's ``CameraActor::stop``, so a caller can count
-        its abandonments instead of grepping the log for them.
+        its abandonments instead of grepping the log for them. Sticky, for that reason: the
+        abandonment is an event that happened, and a later call answering ``True`` because
+        the thread has since exited would erase it from that count. "Is it stopped now?" is
+        :attr:`is_running`, which is a different question and has its own answer.
         """
         self.request_stop()
-        abandoned = False
         thread = self._thread
         if (
             thread is not None
@@ -212,7 +222,7 @@ class CameraActor:
         ):
             thread.join(timeout_s)
             if thread.is_alive():
-                abandoned = True
+                self._abandoned = True
                 _LOG.warning(
                     "camera %s did not stop within %.1fs; abandoning the thread",
                     self.camera_id,
@@ -221,7 +231,7 @@ class CameraActor:
                 )
         if not self._state_is_final():
             self._set_state(CameraState.STOPPED)
-        return not abandoned
+        return not self._abandoned
 
     def __enter__(self) -> CameraActor:
         self.start()
@@ -262,7 +272,7 @@ class CameraActor:
                     # The safety net. A bug in a decoder or a sink must degrade one camera,
                     # not kill its thread and leave the fleet quietly 49 cameras wide. The
                     # backoff means a *persistent* bug does not become a hot loop either.
-                    self._record_failure(exc)
+                    self._record_failure(str(exc))
                     _LOG.exception(
                         "camera %s: unexpected ingest failure; backing off",
                         self.camera_id,
@@ -294,7 +304,7 @@ class CameraActor:
             source = self._factory(self.config, self._counter)
             source.open()
         except SourceUnavailableError as exc:
-            self._record_failure(exc)
+            self._record_failure(str(exc))
             self._fatal = True
             self._set_state(CameraState.UNHEALTHY)
             _LOG.error(
@@ -306,7 +316,7 @@ class CameraActor:
             self._stop.set()
             return False
         except Exception as exc:  # a decoder can fail in any number of ways
-            self._record_failure(exc)
+            self._record_failure(str(exc))
             delay = self._backoff.next_delay()
             _LOG.warning(
                 "camera %s: connect attempt %d failed (%s); retrying in %.2fs",
@@ -341,7 +351,7 @@ class CameraActor:
         try:
             frame = source.read()
         except Exception as exc:  # decode failures are the expected case here
-            self._record_failure(exc)
+            self._record_failure(str(exc))
             delay = self._backoff.next_delay()
             _LOG.warning(
                 "camera %s: read failed (%s); reconnecting in %.2fs",
@@ -362,6 +372,7 @@ class CameraActor:
         self._backoff.reset()
         with self._lock:
             self._consecutive_empty = 0
+            self._consecutive_failures = 0
             self._last_error = ""
         self._publish(frame)
         return True
@@ -387,7 +398,7 @@ class CameraActor:
             return False
 
         if consecutive >= self.settings.empty_reads_before_reconnect:
-            self._record_failure(TimeoutError(f"{consecutive} consecutive empty reads"))
+            self._record_failure(f"{consecutive} consecutive empty reads")
             delay = self._backoff.next_delay()
             _LOG.warning(
                 "camera %s: %d consecutive empty read(s); reconnecting in %.2fs",
@@ -480,20 +491,22 @@ class CameraActor:
             self._frames_dropped += 1
         self.metrics.frames_dropped.inc(camera=self.camera_id, reason=reason)
 
-    def _record_failure(self, error: BaseException) -> None:
+    def _record_failure(self, reason: str) -> None:
         """Count a failure and set the state the operator will see.
 
-        Called *before* the backoff advances, so ``attempts + 1`` is the number of
-        consecutive failures including this one.
+        Takes the reason rather than the exception, and redacts it, because what it stores is
+        served to every reader of the health API -- the same signature and the same store as
+        ``CameraActor::record_failure`` on the C++ plane. No exception type in front of it:
+        the type names are the language's, so a prefix cannot converge across the planes.
         """
         with self._lock:
             self._connect_failures += 1
-            self._last_error = f"{type(error).__name__}: {error}"
+            self._consecutive_failures += 1
+            self._last_error = redact_in(reason)
             self._fps = 0.0
-            failures = self._backoff.attempts + 1
             self._state = (
                 CameraState.UNHEALTHY
-                if failures >= self.settings.failures_before_unhealthy
+                if self._consecutive_failures >= self.settings.failures_before_unhealthy
                 else CameraState.DEGRADED
             )
         self.metrics.connect_failures_total.inc(camera=self.camera_id)
@@ -564,7 +577,7 @@ class CameraActor:
                 empty_reads=self._empty_reads,
                 connects=self._connects,
                 connect_failures=self._connect_failures,
-                consecutive_failures=self._backoff.attempts,
+                consecutive_failures=self._consecutive_failures,
                 fps=fps,
                 last_frame_unix_ns=self._last_frame_unix_ns,
                 last_error=self._last_error,
