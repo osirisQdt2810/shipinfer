@@ -1,0 +1,17 @@
+# The default overflow policy REFUSES rather than evicting: backpressure that reaches the
+# producer is a signal, and a silent eviction three stages later is the bug this replaced.
+scenario reject_is_the_default
+records_min 9
+
+queue fair
+capacity 2
+overflow reject
+max_batch_size 2
+max_delay_us 0
+
+put cam_a
+put cam_b
+# Full. Nothing is evicted and nobody's work is lost quietly -- the producer is told.
+put cam_a
+take
+close

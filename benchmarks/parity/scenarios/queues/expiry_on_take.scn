@@ -1,0 +1,17 @@
+# An expired request is dropped where the cost is decided -- on the way OUT, not on the way
+# in. Spending a GPU on a late frame is the waste; refusing it at the door is not the rule.
+scenario expiry_on_take
+records_min 8
+
+queue fair
+capacity 4
+overflow reject
+max_batch_size 4
+max_delay_us 0
+
+# Accepted, deadline already passed. One expired item only: two dropping in one take would
+# compare an order neither queue promises.
+put cam_late 1 normal expired
+put cam_live
+take
+close

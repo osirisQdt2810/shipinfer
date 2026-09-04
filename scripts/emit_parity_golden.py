@@ -29,6 +29,9 @@ for entry in (str(ROOT), str(ROOT / "src")):
     sys.path.insert(0, entry)
 
 from benchmarks.parity.drive_python import GOLDEN, SCENARIOS, run_scenario  # noqa: E402
+from benchmarks.parity.drive_queue import SCENARIOS as QUEUE_SCENARIOS  # noqa: E402
+from benchmarks.parity.drive_queue import run_queue_scenario  # noqa: E402
+from benchmarks.parity.queue_scenario import load_queue_scenario  # noqa: E402
 from benchmarks.parity.scenario import load_scenario  # noqa: E402
 from benchmarks.parity.trace import Trace, TraceWriter  # noqa: E402
 from shipinfer.core.errors import ConfigurationError  # noqa: E402
@@ -38,6 +41,12 @@ def main(argv: list[str] | None = None) -> int:
     """``python scripts/emit_parity_golden.py --scenario reconnect --emit-golden``."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scenario", required=True, help="a name under scenarios/, or a path")
+    parser.add_argument(
+        "--kind",
+        choices=("ingest", "queue"),
+        default="ingest",
+        help="which seam: the camera actors, or the request queue (scenarios/queues/)",
+    )
     parser.add_argument("--out", type=Path, help="write the trace here instead of stdout")
     parser.add_argument(
         "--emit-golden",
@@ -48,10 +57,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--force", action="store_true", help="overwrite an existing golden")
     args = parser.parse_args(argv)
 
+    queues = args.kind == "queue"
+    root = QUEUE_SCENARIOS if queues else SCENARIOS
     named = Path(args.scenario)
-    path = named if named.suffix == ".scn" else SCENARIOS / f"{args.scenario}.scn"
-    scenario = load_scenario(path)
-    trace = run_scenario(scenario)
+    path = named if named.suffix == ".scn" else root / f"{args.scenario}.scn"
+    scenario = load_queue_scenario(path) if queues else load_scenario(path)
+    trace = run_queue_scenario(scenario) if queues else run_scenario(scenario)
     lines = [record.to_line() for record in trace.records]
     if len(lines) < scenario.records_min:
         raise ConfigurationError(
