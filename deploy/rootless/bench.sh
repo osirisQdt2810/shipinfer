@@ -39,6 +39,9 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# Which GPUs this container may see, and why one degraded card is not a dead tier.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_gpus.sh"
 IMAGE="${SHIPINFER_BENCH_IMAGE:-shipinfer-gst:jammy}"
 WHEELS="${SHIPINFER_WHEELS:-/tmp/wheels-py311}"
 LIBS="$REPO/benchmarks/build/baseline-libs"
@@ -116,7 +119,7 @@ fi
 
 # --shm-size: the `service` topology's rings are shared memory, ~0.9 GiB at the defaults for
 # four shards (ADR-015); Docker's 64 MiB default would refuse the second ring.
-exec docker run --rm --pid=host --device nvidia.com/gpu=all --shm-size=2g \
+exec docker run --rm --pid=host "${GPU_DEVICES[@]}" --shm-size=2g \
   -e LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/tensorrt/lib:/baseline-libs" \
   -e PYTHONPATH="/work/src:/work${shipvision_path}" \
   -e PYTHONDONTWRITEBYTECODE=1 \

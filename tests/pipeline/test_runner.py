@@ -720,6 +720,19 @@ class TestInjectedCollaboratorsAreTheOnesUsed:
         assert not sink, "the premise: a sink that has emitted nothing is falsy"
 
 
+#: The engine the one end-to-end test here stands a real server on. A plan is a build
+#: artefact, never vendored, so its absence is a NAMED skip carrying the command that
+#: supplies it -- `test_real_chain.py`'s spelling. It used to be an unconditional
+#: `BackendLoadError`, which said nothing about running the build script.
+_DEMO_PLAN = (
+    Path(__file__).resolve().parents[2]
+    / "model_repository"
+    / "ship_detector"
+    / "1"
+    / "model.plan"
+)
+
+
 class TestEndToEndWithReplayAndJsonLines:
     """A real server on real TorchScript fixtures, the replay source, and a file sink.
 
@@ -747,6 +760,10 @@ class TestEndToEndWithReplayAndJsonLines:
         return directory
 
     @pytest.mark.gpu
+    @pytest.mark.skipif(
+        not _DEMO_PLAN.is_file(),
+        reason=f"no engine at {_DEMO_PLAN}; build one with `python scripts/build_engines.py`",
+    )
     def test_six_frames_in_six_events_out_with_every_tag_accounted_for(
         self, frame_dir: Path, demo_repository_path: Path, tmp_path: Path
     ):

@@ -34,7 +34,8 @@
 #                                 namespace. Reproduce with:
 #                                   unshare --user --map-root-user --mount --pid --fork \
 #                                       sh -c 'mount -t proc proc /proc'
-#   --device nvidia.com/gpu=all   CDI instead of `--gpus all`, because the legacy hook
+#   "${GPU_DEVICES[@]}"          CDI instead of `--gpus all`, because the legacy hook
+#                                 (`SHIPINFER_GPUS`, `_gpus.sh` -- one sick card must not
 #                                 chroots in to refresh the loader cache and hits the same
 #                                 restriction.
 #
@@ -44,6 +45,9 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# Which GPUs this container may see, and why one degraded card is not a dead tier.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_gpus.sh"
 IMAGE="${SHIPINFER_TEST_IMAGE:-pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime}"
 WHEELS="${SHIPINFER_WHEELS:-/tmp/wheels-py311}"
 export DOCKER_HOST="${DOCKER_HOST:-unix://${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock}"
@@ -104,7 +108,7 @@ if [ -f "$REPO/3rdparty/shipvision/pyproject.toml" ]; then
   shipvision_path=":/work/3rdparty/shipvision"
 fi
 
-exec docker run --rm --pid=host --device nvidia.com/gpu=all \
+exec docker run --rm --pid=host "${GPU_DEVICES[@]}" \
   -e LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu${trt_path}" \
   -e PYTHONDONTWRITEBYTECODE=1 \
   -e PYTHONPATH="/work/src${shipvision_path}" \

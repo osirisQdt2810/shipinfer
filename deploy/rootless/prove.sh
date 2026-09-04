@@ -20,6 +20,9 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# Which GPUs this container may see, and why one degraded card is not a dead tier.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_gpus.sh"
 OUT="${1:-$REPO/.artifacts/attestation}"
 GPUS="${SHIPINFER_BENCH_GPUS:-2,3,4,5}"
 HOLD_S="${HOLD_S:-12}"
@@ -50,7 +53,7 @@ ANNOUNCE
 
 printf '\n==> running inside the container now\n\n'
 
-docker run --rm --pid=host --device nvidia.com/gpu=all \
+docker run --rm --pid=host "${GPU_DEVICES[@]}" \
   -e LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu \
   -e CUDA_VISIBLE_DEVICES="$GPUS" \
   -e HOLD_S="$HOLD_S" \
