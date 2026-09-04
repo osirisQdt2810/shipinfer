@@ -9,6 +9,7 @@ to diagnose and a two-line test to prevent.
 from __future__ import annotations
 
 import ast
+import functools
 import importlib.util
 import subprocess
 import sys
@@ -713,13 +714,12 @@ class TestProseKeepsTheProjectsLineWidth:
     """Docstrings and comments obey ``line-length = 96`` too, and nothing else checks it.
 
     `black` reformats code and leaves prose alone; `ruff`'s E501 is deliberately off
-    ("line length is black's job"). So a docstring rewrapped to 99 columns passes every hook
-    the project runs -- which is how one trim commit added 83 over-width lines to a single
-    file, ~36% of the whole tree's total, and merged green.
+    ("line length is black's job"), so a docstring rewrapped to 99 columns passes every hook
+    the project runs -- which is how one trim commit added 83 over-width lines to one file,
+    ~36% of the tree's total, and merged green.
 
-    A **ratchet**, not a clean bill: 48 lines were already over on the day this was written
-    and are spread across 29 files that no current change touches. Lower :data:`_ALLOWED`
-    when you fix some; never raise it.
+    A **ratchet**, not a clean bill: 48 lines were already over when this was written, across
+    29 files no current change touches. Lower :data:`_ALLOWED` when you fix some; never raise.
     """
 
     #: How many over-width lines `src/shipinfer` is allowed to carry. Ratchet downwards only.
@@ -778,3 +778,158 @@ class TestNapoleonFieldListsStayIndented:
             env=checkout_env(),
         )
         assert done.returncode == 0, f"orphaned Napoleon continuations:\n{done.stdout}"
+
+
+# doc: long why every stdout line counts, and not only the `(max N)` ones
+@functools.cache
+def _over_cap(root: str) -> tuple[str, ...]:
+    """`check_docs.py`'s findings for one root -- **every** line it prints, not the caps only.
+
+    A reasonless ``# doc: long`` above a comment block short-circuits the hook before the cap
+    comparison (the block path files `needs a reason` and moves on), so such a block's only
+    finding carries no ``(max N)``. Filtering on that string would let an over-cap block
+    through the one gate the caps have -- the defect #89 took four rounds to close, arriving
+    again through the gate built on top of the hook. Findings go to stdout and the summary to
+    stderr, so every non-blank stdout line is a finding.
+
+    Cached: each root is asked for twice, and one pass over `src/shipinfer` is ~0.7 s.
+    """
+    repo = Path(__file__).resolve().parents[1]
+    done = subprocess.run(
+        [sys.executable, str(repo / "scripts" / "hooks" / "check_docs.py"), str(repo / root)],
+        capture_output=True,
+        text=True,
+        env=checkout_env(),
+    )
+    assert done.returncode in (0, 1), f"check_docs.py failed on {root}: {done.stderr[:400]}"
+    return tuple(line for line in done.stdout.splitlines() if line.strip())
+
+
+# doc: long why this is a ratchet and not the gate V145-ARM asked for
+class TestDocumentationCapsOnlyGetTighter:
+    """`check_docs.py` as a ratchet, because "the count reaches zero" is not going to happen.
+
+    V145-ARM asks for the hook in `.pre-commit-config.yaml` *once the waves have taken the
+    count to zero*. Measured across five trim PRs the count moved 1022 -> 989: the caps are
+    tighter than most of this codebase's reasoning fits in, and taking 989 symbols under them
+    would rewrite most of the prose in the tree. So the gate is a ratchet on the count.
+
+    It costs nothing to satisfy, it fails the moment a PR adds over-cap prose without a
+    `# doc: long <reason>` marker, and it needs no decision about the cap values first --
+    whatever they are, the tree can only improve. It deliberately does **not** stand in for
+    the operator's open question about raising `COMMENT_MAX`; that is a separate line.
+
+    Per root rather than one total, so a regression in `src/` cannot be masked by a trim in
+    `tests/` on the same branch.
+    """
+
+    #: Over-cap symbols and comment blocks per root. Ratchet downwards only.
+    _ALLOWED = {"src/shipinfer": 688, "scripts": 39, "tests": 203, "benchmarks": 58}
+
+    @pytest.mark.parametrize("root", sorted(_ALLOWED))
+    def test_no_new_over_cap_documentation(self, root: str) -> None:
+        found = _over_cap(root)
+        allowed = self._ALLOWED[root]
+        assert len(found) <= allowed, (
+            f"{root}: {len(found)} over-cap docstrings/comment blocks, allowance {allowed}. "
+            f"Shorten them, or mark one `# doc: long <reason>`.\n"
+            + "\n".join(f"  {line}" for line in found[:10])
+        )
+
+    def test_a_reasonless_marker_is_still_counted(self, tmp_path: Path) -> None:
+        """The bypass the counting rule exists for, pinned so the filter cannot re-narrow.
+
+        A `# doc: long` with no reason above a seven-line comment block: the hook files
+        `needs a reason` and never reaches the cap comparison, so the finding carries no
+        ``(max N)`` and a `"(max " in line` filter counts the block as zero.
+        """
+        probe = tmp_path / "probe.py"
+        probe.write_text('"""Short."""\n\n# doc: long\n' + "# line\n" * 6 + "X = 1\n")
+        assert len(_over_cap(str(probe))) == 1, "the reasonless marker was not counted"
+
+    @pytest.mark.parametrize("root", sorted(_ALLOWED))
+    def test_the_allowance_is_not_stale(self, root: str) -> None:
+        """A ratchet nobody tightens is one nobody notices has slipped.
+
+        Deliberately narrow: a trim wave of more than 20 symbols must edit `_ALLOWED` in its
+        own diff, which is also where two parallel lanes will conflict. That is the intended
+        cost -- an allowance left 100 above the count hides a 100-symbol regression -- and
+        the conflict is four constants, resolved by taking the lower number on each line.
+        """
+        found = _over_cap(root)
+        allowed = self._ALLOWED[root]
+        assert len(found) >= allowed - 20, (
+            f"{root} is down to {len(found)} but the allowance is {allowed}: lower it to "
+            f"{len(found)} so the next regression is caught"
+        )
+
+
+def _sections(path: Path, heading: str) -> list[tuple[str, int]]:
+    """``(title, line count)`` per section, split on lines starting with ``heading``."""
+    lines = path.read_text().splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith(heading)]
+    return [
+        (
+            lines[start][: len(heading) + 60],
+            (starts[n + 1] if n + 1 < len(starts) else len(lines)) - start,
+        )
+        for n, start in enumerate(starts)
+    ]
+
+
+# doc: long the forward-only rule and its grandfathered counts have to be written down
+class TestTheProjectsMarkdownKeepsItsCaps:
+    """A `FEATURE_LOG.md` entry is 15 lines and an ADR is 30 — **forward-only**.
+
+    The other half of V145-W3, and the half no tool could see: `check_docs.py` reads Python.
+    Today 35 of 38 feature-log entries are over (the worst is 183 lines) and 10 of 19 ADRs
+    are, and none of that is rewritten: both files are append-only records of what was
+    decided when, and an accepted ADR that is edited later stops being the thing it records.
+
+    So, a ratchet again. The counts below are what the two files carry today; a new entry
+    that lands over the cap pushes one of them up and reddens this. Lower them if an old
+    entry is ever split; never raise them to make a new one fit.
+    """
+
+    _LOG_MAX, _LOG_ALLOWED = 15, 35
+    _ADR_MAX, _ADR_ALLOWED = 30, 10
+
+    @property
+    def _claude(self) -> Path:
+        return Path(__file__).resolve().parents[1] / ".claude"
+
+    def test_no_new_over_length_feature_log_entry(self) -> None:
+        over = [
+            s for s in _sections(self._claude / "FEATURE_LOG.md", "## ") if s[1] > self._LOG_MAX
+        ]
+        assert len(over) <= self._LOG_ALLOWED, (
+            f"{len(over)} feature-log entries over {self._LOG_MAX} lines, allowance "
+            f"{self._LOG_ALLOWED}. A new entry says what changed and why in 15 lines; the "
+            f"argument belongs in the PR body.\n"
+            + "\n".join(f"  {n:4d}  {t}" for t, n in over[:5])
+        )
+
+    def test_no_new_over_length_adr(self) -> None:
+        over = [
+            s
+            for s in _sections(self._claude / "DECISIONS.md", "## ADR-")
+            if s[1] > self._ADR_MAX
+        ]
+        assert len(over) <= self._ADR_ALLOWED, (
+            f"{len(over)} ADRs over {self._ADR_MAX} lines, allowance {self._ADR_ALLOWED}.\n"
+            + "\n".join(f"  {n:4d}  {t}" for t, n in over[:5])
+        )
+
+    def test_the_allowances_are_not_stale(self) -> None:
+        log = [
+            s for s in _sections(self._claude / "FEATURE_LOG.md", "## ") if s[1] > self._LOG_MAX
+        ]
+        adr = [
+            s
+            for s in _sections(self._claude / "DECISIONS.md", "## ADR-")
+            if s[1] > self._ADR_MAX
+        ]
+        assert len(log) >= self._LOG_ALLOWED - 3 and len(adr) >= self._ADR_ALLOWED - 3, (
+            f"feature log {len(log)}/{self._LOG_ALLOWED}, ADRs {len(adr)}/{self._ADR_ALLOWED}: "
+            f"lower the allowance that dropped so the next regression is caught"
+        )
