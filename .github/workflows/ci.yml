@@ -120,6 +120,48 @@ jobs:
             "$binary"
           done
 
+  cpp-syntax:
+    name: C++ apps the offline build cannot reach (headers only, no driver)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # `cli/bench.cpp` reaches `core/platform.h`, so `--offline` refuses it and NOTHING in
+      # this repository ever compiled it — the hole that let a `std::mutex` and a `std::map`
+      # be used in its sink without being declared, found by a reviewer rather than by a
+      # build. `-fsyntax-only` needs the two HEADER sets and no driver, no nvcc and no GPU,
+      # which is why this is an ordinary runner and not the device tier.
+      - name: Install the CUDA and TensorRT headers
+        run: |
+          set -eux
+          codename=$(. /etc/os-release && echo "${VERSION_ID//./}")
+          wget -q "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${codename}/x86_64/cuda-keyring_1.1-1_all.deb"
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -qq
+          # Headers only: `cuda-cudart-dev` brings `cuda_runtime.h` and
+          # `libnvinfer-headers-dev` brings `NvInfer.h`, both onto the default include path.
+          # No runtime, no nvcc, ~40 MB — a fraction of installing the toolkit.
+          sudo apt-get install -y --no-install-recommends cuda-cudart-dev-12-6 libnvinfer-headers-dev
+      - name: Syntax-check every app the offline build refuses
+        # The test skips itself when the headers are missing, which is exactly how this hole
+        # stayed open — so a skip here has to be a failure. `-p no:cacheprovider` keeps the
+        # runner's tree clean; `-rs` prints the reason if it does skip.
+        run: |
+          set -e
+          python -m pytest tests/test_cuda_reaching_apps_compile.py -q -rs \
+            -p no:cacheprovider | tee /tmp/syntax.log
+          grep -q "skipped" /tmp/syntax.log && {
+            echo "the syntax check SKIPPED, which means the headers are not installed --"
+            echo "that skip is the hole this job exists to close (CSRC-BENCH-UNCOMPILED)"
+            exit 1
+          }
+          exit 0
+
   cpp-gst-lane:
     name: C++ gst lane (section O + the pixel)
     runs-on: ubuntu-latest

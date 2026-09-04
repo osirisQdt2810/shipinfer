@@ -2083,7 +2083,18 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
             header promises "by ANY stopper"). Fix: `thread_abandoned_` as
             `std::atomic<bool>` so the lockless self-stop path can read it; + a line
             keeping the header honest either way.
-- [ ] **CSRC-BENCH-UNCOMPILED · `cli/bench.cpp` is compiled by NOTHING in CI, and it took a
+- [!] **CSRC-BENCH-UNCOMPILED · BOTH HALVES BUILT (4 Sep) and OPEN as a PR that needs the
+      OPERATOR'S MANUAL MERGE: it edits `.github/workflows/**`, which CLAUDE.md records as a
+      permanent exception to the review gate.** The host half landed with #129
+      (`tests/test_cuda_reaching_apps_compile.py`) but SKIPPED itself wherever the headers are
+      not at `/usr/local/{cuda,TensorRT}/include` -- and a skip is how the hole stayed open.
+      That guard is a compiler PROBE now, so it runs wherever `NvInfer.h` and `cuda_runtime.h`
+      can be found, including a distribution's default include path. The CI half is a new
+      `cpp-syntax` job: headers only (`cuda-cudart-dev-12-6` + `libnvinfer-headers-dev`, ~40 MB,
+      no nvcc, no driver, ordinary runner) and a step that FAILS on a skip, because a silent
+      skip is the defect. Rehearsed both ways against the real tree: rc=0 with the headers,
+      rc=1 without.
+      Original: `cli/bench.cpp` is compiled by NOTHING in CI, and it took a
       reviewer reading a diff to find that out (#129 round 4).** Its include closure reaches
       `core/platform.h`, so `build_csrc.py --offline` excludes it and `ci.yml`'s `cpp-offline`
       job is the only C++ job there is -- so a `std::mutex` used without being declared merged
