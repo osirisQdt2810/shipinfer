@@ -19,10 +19,15 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    # Run as a path (`python scripts/emit_parity_golden.py`), so the repository root is not
-    # on the path the way `-m` would have put it there.
-    sys.path.insert(0, str(ROOT))
+# Run as a path (`python scripts/emit_parity_golden.py`), so the repository root is not on
+# the path the way `-m` would have put it there -- and `src` before it, because in a git
+# worktree an editable install still points at the PRIMARY checkout. Without that line this
+# script emits a golden from another commit's plane and says nothing about the one in front
+# of you. `pythonpath = [".", "src"]` in pyproject.toml is the same fix for `pytest`.
+for entry in (str(ROOT), str(ROOT / "src")):
+    if entry in sys.path:
+        sys.path.remove(entry)
+    sys.path.insert(0, entry)
 
 from benchmarks.parity.drive_python import GOLDEN, SCENARIOS, run_scenario  # noqa: E402
 from benchmarks.parity.scenario import load_scenario  # noqa: E402
