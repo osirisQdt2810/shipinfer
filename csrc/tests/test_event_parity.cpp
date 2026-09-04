@@ -158,6 +158,23 @@ namespace {
             {1e-5, "1e-05"},
             {1.5e16, "1.5e+16"},
             {123456789012345.0, "123456789012345.0"},
+            // The cases that separate the FIXED-first fast path from the old
+            // scientific-then-fixed one, so a rewrite of `append_number` cannot pass on the
+            // easy values alone. Each spelling is `repr(v)`, checked against CPython.
+            {-1e15, "-1000000000000000.0"},
+            {-1e16, "-1e+16"},
+            {9999999999999998.0, "9999999999999998.0"},
+            {999999999999999.9, "999999999999999.9"},
+            {-1e-4, "-0.0001"},
+            {-1e-5, "-1e-05"},
+            {9.999e-5, "9.999e-05"},
+            {0.00012345, "0.00012345"},
+            // A 64-byte `to_chars` buffer is the exponent test on the fast path: these two
+            // are the ends of the double range, where the fixed form does not fit at all.
+            {5e-324, "5e-324"},
+            {1.7976931348623157e308, "1.7976931348623157e+308"},
+            {1e300, "1e+300"},
+            {1e-300, "1e-300"},
         };
         for (const auto& [value, spelling] : cases) {
             check(
