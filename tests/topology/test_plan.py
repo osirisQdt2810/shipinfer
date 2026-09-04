@@ -130,7 +130,11 @@ class TestWhatTheChainResolvesTo:
 
         assert plan.node("embed_ship").classes == ("ship",)
         assert plan.node("embed_person").classes == ("person",)
-        assert plan.node("segment").classes is None, "no selection declared"
+        # The segmenter declares one too, since #132's review: a `segment` slot with no
+        # selection is EVERY row on the C++ plane, which is the ship segmenter on every
+        # person crop at 640x640 and a `mask_area_px` filed on every person record.
+        assert plan.node("segment").classes == ("ship",)
+        assert plan.node("decode").classes is None, "and a decode declares none at all"
 
     def test_each_event_field_names_the_slots_that_fill_it(
         self, dims: dict[str, tuple[int, int]]
@@ -199,6 +203,7 @@ class TestBothPlanesRefuseTheSameText:
         ("plan 1 x\nnode a b c\nclasses cargo ship,fishing vessel\n", "two labels, not four"),
         ("plan 1 x\nnode a b c\nclasses -\n", "`-` is a DECLARED empty selection"),
         ("plan 1 x\nnode a b c\nscore 1e-05\n", "an exponent-form threshold"),
+        ("plan 1 x\nnode a b c\nscore 5e-324\n", "a subnormal, which `stod` used to refuse"),
         # The READER tolerates a collapsed value because it cannot know one was collapsed;
         # `_speakable` is what refuses to WRITE one, where the slot is still named. Stated
         # here so the asymmetry is deliberate rather than a hole -- and the C++ gate asserts

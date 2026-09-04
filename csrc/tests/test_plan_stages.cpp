@@ -142,7 +142,11 @@ namespace {
     void the_refusals_this_plane_owes_the_operator() {
         // The reader's own refusals (a missing header, an unknown verb) are
         // `test_plan_parity`'s; these are the ones this decision owns.
-        check(refused("plan 1 probe\nnode e embed pool\nmodel ship_embedder\ncrop 256 128\n"),
+        // NO `plan 1 probe` prefix here: `plan_of` prepends the header, and a body carrying
+        // its own was refused on a DUPLICATE HEADER before `plan_stages` ran at all -- three
+        // checks passing for the wrong reason, and "no runnable detect slot" then had no
+        // coverage anywhere (found by #132's round 3).
+        check(refused("node e embed pool\nmodel ship_embedder\ncrop 256 128\n"),
               "no runnable detect slot: everything else consumes its boxes");
         check(refused(kDetect + "node e embed pool\nmodel ship_embedder\nclasses ship\n"),
               "a crop slot with no extent");
@@ -152,15 +156,26 @@ namespace {
         check(refused(kDetect + "node e embed pool\nmodel ship_embedder\nclasses vessel\n"
                                 "crop 256 128\n"),
               "a class the label table does not name");
-        check(refused("plan 1 probe\nnode detect detect pool\nmodel ship_detector\n"
-                      "letterbox 640 480\n"),
+        check(refused("node detect detect pool\nmodel ship_detector\nletterbox 640 480\n"),
               "a non-square letterbox, which DetectConfig cannot express");
         // A cap of `-1` is the same sign class as `kNoClass` one function over: the
         // comparison is `detections.size() < static_cast<size_t>(max_objects)`, so a
         // negative bound is no bound. Refused here rather than surviving to the loop.
-        check(refused("plan 1 probe\nnode detect detect pool\nmodel ship_detector\n"
-                      "max_detections -1\n"),
+        check(refused("node detect detect pool\nmodel ship_detector\nmax_detections -1\n"),
               "a declared cap of -1, which `static_cast<size_t>` turns into no cap");
+        // `kLoaded` has no segmenter, so this one needs its own call: an unrunnable slot
+        // never reaches `class_of` at all, which is how the first version of this check
+        // passed while asserting nothing.
+        bool refused_segment = false;
+        try {
+            plan_stages(plan_of(kDetect + "node segment segment pool\nmodel ship_segmenter\n"
+                                          "crop 640 640\n"),
+                        {"ship_detector", "ship_segmenter"});
+        } catch (const ConfigError&) {
+            refused_segment = true;
+        }
+        check(refused_segment,
+              "a segment slot with no row selection, which would be EVERY row");
     }
 
     // A plan built in CODE never passes through `parse_plan`, so the reader's refusals do

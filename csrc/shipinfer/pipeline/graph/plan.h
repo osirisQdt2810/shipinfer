@@ -63,10 +63,12 @@ namespace shipinfer {
         std::map<int, std::string> labels;                       // class id -> label
         std::map<std::string, std::vector<std::string>> fields;  // event field -> slots
         const PlanNode* node(const std::string& slot) const;
-        // The class id a label was given, or -1. The ids are the CHECKPOINT's: this demo
-        // detector calls a ship 8, and a plane that assumed 1 cropped the right rows and
-        // labelled every ship `unknown` in its events.
-        int class_id(const std::string& label) const;
+        // The class id a label was given, or nothing. An `optional` and not -1, which is a
+        // legal declared id: `class_of` happens to throw on any negative, so the sentinel
+        // was safe by accident rather than by construction. The ids are the CHECKPOINT's --
+        // this demo detector calls a ship 8, and a plane that assumed 1 cropped the right
+        // rows and labelled every ship `unknown` in its events.
+        std::optional<int> class_id(const std::string& label) const;
     };
 
     // The version this reader knows. A plan that says anything else is refused, because a

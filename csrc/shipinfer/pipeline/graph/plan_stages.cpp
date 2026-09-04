@@ -19,21 +19,37 @@ namespace shipinfer {
             // Three states, not two. No `classes` line is EVERY row, which is what a crop
             // element with no `classes:` means on the Python plane. A declared EMPTY
             // selection is no rows.
-            if (!node.classes) return CropSpec::kAnyClass;
+            if (!node.classes) {
+                // ...except for a SEGMENT slot, where "every row" is not a default anybody
+                // chose. `PoolSegment` did not parse `classes:` at all until #132's review,
+                // so the production plan carried no selection and this plane read it as the
+                // ship segmenter on every person crop at 640x640 -- an order of magnitude of
+                // segmenter work, and a `mask_area_px` filed on every person record from a
+                // batch of the wrong class. The chain can say `classes: [ship]` now, so this
+                // asks it to rather than guessing.
+                if (node.kind == "segment") {
+                    throw ConfigError(
+                        "slot '" + node.slot +
+                        "' segments and declares no `classes:`, which this plane would read "
+                        "as every row -- a 640x640 crop per person as well as per ship. Say "
+                        "which rows it segments");
+                }
+                return CropSpec::kAnyClass;
+            }
             if (node.classes->empty()) return CropSpec::kNoClass;
             if (node.classes->size() > 1) {
                 throw ConfigError("slot '" + node.slot + "' selects " +
                                   std::to_string(node.classes->size()) +
                                   " classes and a CropSpec carries one; split the slot");
             }
-            const int id = plan.class_id(node.classes->front());
-            if (id < 0) {
+            const std::optional<int> id = plan.class_id(node.classes->front());
+            if (!id) {
                 throw ConfigError("slot '" + node.slot + "' selects class '" +
                                   node.classes->front() +
                                   "' and the plan's label table does not name it. A label "
                                   "nobody detects selects no rows and reports nothing wrong");
             }
-            return id;
+            return *id;
         }
 
         DetectConfig detect_config(const PlanNode& node) {

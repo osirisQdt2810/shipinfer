@@ -1,6 +1,8 @@
 #include "shipinfer/pipeline/graph/plan.h"
 
+#include <cerrno>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 
@@ -76,12 +78,15 @@ namespace shipinfer {
                 text.find_first_not_of("0123456789+-.eE") == std::string::npos &&
                 text.find_first_of("0123456789") != std::string::npos;
             if (decimal) {
-                try {
-                    size_t used = 0;
-                    const double value = std::stod(text, &used);
-                    if (used == text.size() && std::isfinite(value)) return value;
-                } catch (const std::exception&) {
-                }
+                // `strtod` and not `stod`: libstdc++ throws `out_of_range` whenever `errno`
+                // is ERANGE, which `strtod` sets on UNDERFLOW as well as overflow -- so
+                // `score 5e-324` was refused here while Python's `float()` returns the
+                // subnormal and `_finite` passes it. A plan this plane's own emitter can
+                // write must not be one it refuses to read.
+                errno = 0;
+                char* end = nullptr;
+                const double value = std::strtod(text.c_str(), &end);
+                if (end == text.c_str() + text.size() && std::isfinite(value)) return value;
             }
             throw ConfigError(where + ": '" + text + "' is not a finite decimal number");
         }
@@ -183,11 +188,11 @@ namespace shipinfer {
         return nullptr;
     }
 
-    int ResolvedPlan::class_id(const std::string& label) const {
+    std::optional<int> ResolvedPlan::class_id(const std::string& label) const {
         for (const auto& [index, name] : labels) {
             if (name == label) return index;
         }
-        return -1;
+        return std::nullopt;
     }
 
     ResolvedPlan parse_plan(const std::string& text, const std::string& source) {
@@ -231,8 +236,8 @@ namespace shipinfer {
                 }
                 const int index = as_int(args[0], where);
                 if (plan.labels.count(index) != 0) {
-                    throw ConfigError(where + ": a second `label ` for id " +
-                                      std::to_string(index));
+                    throw ConfigError(where + ": a second `label " + std::to_string(index) +
+                                      "`");
                 }
                 plan.labels[index] = rest_of(line, 2);
             } else if (verb == "node") {
@@ -257,7 +262,8 @@ namespace shipinfer {
                 plan.fields[args[0]] = std::vector<std::string>(args.begin() + 1, args.end());
             } else {
                 if (plan.nodes.empty()) {
-                    throw ConfigError(where + ": `" + verb + "` before any `node`");
+                    throw ConfigError(where + ": unknown verb '" + verb +
+                                      "', or an attribute before any `node`");
                 }
                 apply(plan.nodes.back(), verb, args, where);
             }

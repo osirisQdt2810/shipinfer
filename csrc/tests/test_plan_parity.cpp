@@ -70,7 +70,7 @@ namespace {
         // carries a label table: `bench.cpp` assumed 1 and labelled every ship `unknown`.
         check(plan.class_id("ship") == 8, "ship is class 8");
         check(plan.class_id("person") == 0, "person is class 0");
-        check(plan.class_id("vessel") == -1, "a label nobody declared has no id");
+        check(!plan.class_id("vessel").has_value(), "a label nobody declared has no id");
 
         const PlanNode* detect = plan.node("detect");
         check(detect != nullptr && detect->model == "ship_detector", "detect model");
@@ -173,6 +173,9 @@ namespace {
 
         check(!refused("plan 1 -\n"), "`-` is the empty chain name, and is legal");
         check(!refused("plan 1 x  # trailing comment\n"), "a comment after a directive");
+        check(!refused("plan 1 x\nnode a b c\nscore 5e-324\n"),
+              "a subnormal threshold: `stod` threw on ERANGE-underflow where Python's "
+              "`float()` returns it, so this plane refused a plan the other one writes");
     }
 
     // The multi-word half of the same table. `plan` and `label` take the REST of the line and

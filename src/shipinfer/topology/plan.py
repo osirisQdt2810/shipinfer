@@ -418,7 +418,12 @@ def parse_plan(text: str, *, source: str = "<string>") -> ResolvedPlan:
             fields[args[0]] = tuple(args[1:])
         elif verb in _ATTRIBUTES:
             if not nodes:
-                raise PlanSyntaxError(f"{where}: `{verb}` before any `node`")
+                # Worded as the C++ reader words it: over there one branch answers both
+                # "unknown verb" and "attribute before any node", so a message that named
+                # only one of them drifted from its twin.
+                raise PlanSyntaxError(
+                    f"{where}: unknown verb {verb!r}, or an attribute before any `node`"
+                )
             _ATTRIBUTES[verb](nodes[-1], args, where)
         else:
             raise PlanSyntaxError(

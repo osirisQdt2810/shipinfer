@@ -1545,6 +1545,19 @@ class PoolSegment(_PoolElement):
     kind: ClassVar[ElementKind] = ElementKind.SEGMENT
     meta_key: ClassVar[str] = "masks"
 
+    def declared_classes(self) -> tuple[str, ...] | None:
+        """The row selection this slot declares -- the half of the base-class swap the
+        RESOLVED PLAN needs, ahead of the ``_finish`` fold the rest of it waits on.
+
+        Without this the base returns ``None``, ``params: {classes: [ship]}`` on a
+        ``segment`` slot was neither parsed nor refused, and the plan then carried no
+        selection -- which the C++ plane reads as EVERY row. The ship segmenter would run on
+        every person crop at 640x640 and file a `mask_area_px` on every person record.
+        """
+        return parse_classes(
+            self.params.get("classes"), f"{self.kind.value} element {self.name!r}"
+        )
+
 
 @registry_for(ElementKind.EMBED).register("pool")
 class PoolEmbed(_PoolCropElement):
