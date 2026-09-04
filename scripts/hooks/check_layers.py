@@ -15,6 +15,11 @@ import ast
 import sys
 from pathlib import Path
 
+if str(Path(__file__).parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).parent))
+
+from _paths import python_files
+
 ROOT = Path(__file__).resolve().parents[2]
 ROOT_PACKAGE = "shipinfer"
 SRC = ROOT / "src" / ROOT_PACKAGE
@@ -363,7 +368,7 @@ def check(path: Path) -> list[str]:
 
 
 def main() -> int:
-    problems = [p for path in sorted(SRC.rglob("*.py")) for p in check(path)]
+    problems = [p for path in python_files(SRC) for p in check(path)]
     for problem in problems:
         print(problem, file=sys.stderr)
     if problems:

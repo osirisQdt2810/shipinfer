@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import functools
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -778,6 +779,131 @@ class TestNapoleonFieldListsStayIndented:
             env=checkout_env(),
         )
         assert done.returncode == 0, f"orphaned Napoleon continuations:\n{done.stdout}"
+
+
+def _loaded(path: Path):
+    """One hook module, imported by path -- `scripts/` is not a package."""
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _submodule_paths() -> list[str]:
+    """Every submodule's path, from ``.gitmodules`` -- not a name this test file repeats."""
+    text = (Path(__file__).resolve().parents[1] / ".gitmodules").read_text()
+    return re.findall(r"^\s*path\s*=\s*(\S+)", text, re.M)
+
+
+# doc: long why a submodule's source must not be scanned, and how the guard stays non-vacuous
+class TestTheHooksScanOnlyThisRepositorysSource:
+    """No hook may descend into a submodule, and one sits under a root they scan.
+
+    `benchmarks/baseline` is a submodule of `benchmarks`, and `rglob` walked straight into it:
+    995 cap findings against 58, and 48 Napoleon orphans against zero, on any checkout that
+    has it. CI is green because CI does not check the submodules out -- so the offline tier,
+    whose whole promise is that it passes on any machine, was red exactly on the machines that
+    build the kernels, and nothing in CI could ever have said so.
+
+    Asserted through `.gitmodules` rather than by naming `baseline`, so the next submodule is
+    covered; kept non-vacuous by the first test; and asserted through each HOOK rather than
+    through `_paths.py`, so a hook that goes back to `rglob` on its own is caught too.
+    """
+
+    #: Read from the hook rather than repeated: this PR's thesis is that three copies of one
+    #: answer became one, and a fourth copy here would be the same mistake in a test.
+    _HOOKS = ["check_docs.py", "check_napoleon.py", "check_layers.py"]
+
+    @property
+    def _roots(self) -> tuple[str, ...]:
+        repo = Path(__file__).resolve().parents[1]
+        return tuple(_loaded(repo / "scripts" / "hooks" / "check_docs.py").DEFAULT_ROOTS)
+
+    def test_a_submodule_sits_under_a_root_the_hooks_scan(self) -> None:
+        """Without this, the test below passes by there being nothing to descend into."""
+        inside = [p for p in _submodule_paths() if p.startswith(self._roots)]
+
+        assert inside, f"no submodule under {self._roots}; this guard would be vacuous"
+
+    @pytest.mark.parametrize("hook", _HOOKS)
+    def test_the_hook_enumerates_no_file_inside_a_submodule(self, hook: str) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        module = _loaded(repo / "scripts" / "hooks" / hook)
+        found = [f for root in self._roots for f in module.python_files(repo / root)]
+        vendored = [
+            str(f)
+            for f in found
+            for sub in _submodule_paths()
+            if str(f.relative_to(repo)).startswith(sub + "/")
+        ]
+
+        assert not vendored, f"{hook} scanned vendored source: {vendored[:5]}"
+        assert found, f"{hook} enumerated nothing at all, so it would check nothing"
+
+    @pytest.mark.parametrize("hook", _HOOKS)
+    def test_a_relative_root_is_resolved_before_git_is_asked(self, hook: str) -> None:
+        """`git -C ROOT` resolves a relative pathspec against ROOT, not the caller's cwd.
+
+        So a relative argument from anywhere else matched no index entry -- and git exits 0
+        with no output, which read as "this tree has no Python". Eight real files, zero
+        findings, exit 0. Every way this can report nothing is a bug, not a clean tree.
+        """
+        repo = Path(__file__).resolve().parents[1]
+        module = _loaded(repo / "scripts" / "hooks" / hook)
+
+        assert module.python_files(Path("scripts/hooks")), "a relative root found nothing"
+
+    def test_the_hook_run_from_another_cwd_still_finds_the_files(self) -> None:
+        """The end-to-end half of the case above, on the one hook that takes a path argument.
+
+        `check_layers.py` takes no argument and `check_napoleon.py` is clean on that tree, so
+        neither would print anything either way; `check_docs.py hooks` from `scripts/` is the
+        invocation that reported `rc=0` over eight unread files.
+        """
+        repo = Path(__file__).resolve().parents[1]
+        done = subprocess.run(
+            [sys.executable, "hooks/check_docs.py", "hooks"],
+            capture_output=True,
+            text=True,
+            cwd=repo / "scripts",
+            env=checkout_env(),
+        )
+
+        assert done.stdout.strip(), "check_docs.py run from scripts/ reported nothing at all"
+
+    @pytest.mark.parametrize("hook", _HOOKS)
+    def test_a_file_not_yet_staged_is_still_checked(self, hook: str, tmp_path: Path) -> None:
+        """`git ls-files --cached` lists the INDEX, so a new module was invisible until
+        `git add` -- and `layer-check` runs with `pass_filenames: false`, so its pre-commit
+        invocation goes through this enumerator rather than over named files. The window was
+        a local run before staging, which is exactly "the gate was green because it never
+        looked"."""
+        repo = Path(__file__).resolve().parents[1]
+        module = _loaded(repo / "scripts" / "hooks" / hook)
+        probe = repo / "tests" / f"_unstaged_probe_{hook.replace('.', '_')}.py"
+        probe.write_text('"""Short."""\n')
+        try:
+            found = module.python_files(repo / "tests")
+        finally:
+            probe.unlink()
+
+        assert probe in found, "an unstaged file is this repository's source too"
+
+    @pytest.mark.parametrize("hook", _HOOKS)
+    def test_a_tree_git_cannot_answer_for_is_still_walked(
+        self, hook: str, tmp_path: Path
+    ) -> None:
+        """The fallback, tested: a source tarball must be checked, not silently skipped.
+
+        `git ls-files` refuses a path outside the repository, which is the same refusal a
+        checkout with no `.git` gives. Failing closed there would make the hook report zero
+        findings on a tree it never looked at -- the failure mode this whole file exists for.
+        """
+        module = _loaded(Path(__file__).resolve().parents[1] / "scripts" / "hooks" / hook)
+        (tmp_path / "probe.py").write_text('"""Short."""\n')
+
+        assert module.python_files(tmp_path) == [tmp_path / "probe.py"]
 
 
 # doc: long why every stdout line counts, and not only the `(max N)` ones
