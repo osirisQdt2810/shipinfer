@@ -2504,6 +2504,12 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       refusal. Those chains are genuinely ambiguous in production, so the work is the guard
       PLUS giving those fixtures disjoint selections; a refusal at deploy time beats one in
       the middle of a frame, which is the whole argument for doing it.
+      ONE MORE REASON, from #135 round 3: the per-frame refusal is logged by
+      `pipeline/runner.py`'s `_LOG.exception` with NO rate limit (unlike `bench.cpp`, which
+      counts and shouts once), so an overlapping chain is a total outage AND a log flood at
+      1000 fps. Pre-existing for any build failure, and this item is the real fix -- which
+      argues for doing it next rather than later.
+
 - [ ] **P6-SEGMENT-CROP · A pre-existing cross-plane divergence the plan made visible, and
       the direction is already DECIDED -- by `PoolSegment`'s own docstring, read 4 Sep.**
       `segment` CROPS on the C++ plane (`ship_crops_640`, 640x640, one crop per ship row) and
