@@ -35,10 +35,6 @@
 
 namespace shipinfer {
 
-    enum class FinishReason { Complete, Incomplete, Timeout, Shutdown, Evicted };
-
-    const char* to_string(FinishReason reason);
-
     struct FrameResult {
         EmissionInputs inputs;
         std::vector<std::string> delivered;
