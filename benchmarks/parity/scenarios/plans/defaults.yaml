@@ -1,0 +1,27 @@
+# The three things round 2 of #131's review found, pinned as bytes.
+#
+#   `detect`        declares NOTHING, so the plan must still carry the effective table,
+#                   threshold and cap -- a plan that omits them makes the other plane invent
+#                   its own, which is the literal ADR-020 exists to delete.
+#   `detect_small`  a threshold in EXPONENT form, so the golden pins the spelling both
+#                   writers must produce (`repr` on one side, `json_number` on the other).
+#   `embed_none`    `classes: []` -- a DECLARED empty selection, which is "no rows" and not
+#                   "every row". Written `classes -`, because an absent line is the other
+#                   thing and the two used to be byte-identical.
+name: defaults
+elements:
+  decode: {impl: replay}
+  detect: {impl: pool, model: ship_detector}
+  detect_small:
+    kind: detect
+    impl: pool
+    model: ship_detector
+    params: {decode: {score_threshold: 1.0e-05, max_detections: 7}}
+    after: decode
+  embed_none:
+    kind: embed
+    impl: pool
+    model: ship_embedder
+    params: {classes: []}
+    after: detect
+  output: {impl: jsonlines, after: [detect_small, embed_none]}

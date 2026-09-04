@@ -87,7 +87,7 @@ def build_app() -> typer.Typer:
             None, "--out", "-o", help="Write the plan here instead of to stdout."
         ),
     ) -> None:
-        """Resolve a chain into the plan the C++ data plane reads (`--plan`)."""
+        """Resolve a chain into the plan the C++ data plane reads."""
         raise typer.Exit(commands.plan(topology, repository, out))
 
     @repo_app.command("show")

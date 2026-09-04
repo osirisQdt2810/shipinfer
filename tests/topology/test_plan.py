@@ -38,6 +38,7 @@ REPOSITORY = ROOT / "model_repository"
 CHAINS = {
     "minimal": SCENARIOS / "minimal.yaml",
     "branching": SCENARIOS / "branching.yaml",
+    "defaults": SCENARIOS / "defaults.yaml",
     "ship_person_cpu": ROOT / "topology" / "ship_person_cpu.yaml",
 }
 
@@ -128,7 +129,7 @@ class TestWhatTheChainResolvesTo:
 
         assert plan.node("embed_ship").classes == ("ship",)
         assert plan.node("embed_person").classes == ("person",)
-        assert plan.node("segment").classes == ()
+        assert plan.node("segment").classes is None, "no selection declared"
 
     def test_each_event_field_names_the_slots_that_fill_it(
         self, dims: dict[str, tuple[int, int]]
@@ -180,6 +181,7 @@ class TestBothPlanesRefuseTheSameText:
         ("plan 1 x\nlabel 8 ship\nlabel 8 vessel\n", "a second table row for one id"),
         ("plan 1 x\nnode a b c\nclasses ,ship\n", "an empty label in `classes`"),
         ("plan 1 x\nnode a b c\nscore inf\n", "`inf`, which the writer must never emit"),
+        ("plan 1 x\nnode a b c\nclasses ship,\n", "a trailing comma, so an empty label"),
     )
     ACCEPTED = (
         ("plan 1 -\n", "`-` is the empty chain name"),
@@ -187,6 +189,8 @@ class TestBothPlanesRefuseTheSameText:
         ("plan 1 ship person cpu\n", "a multi-word chain name is the rest of the line"),
         ("plan 1 x\nlabel 8 cargo ship\n", "and so is a multi-word label"),
         ("plan 1 x\nnode a b c\nclasses cargo ship,fishing vessel\n", "two labels, not four"),
+        ("plan 1 x\nnode a b c\nclasses -\n", "`-` is a DECLARED empty selection"),
+        ("plan 1 x\nnode a b c\nscore 1e-05\n", "an exponent-form threshold"),
     )
 
     @pytest.mark.parametrize("text,why", REFUSED, ids=[why for _, why in REFUSED])
@@ -333,6 +337,51 @@ class TestTheFormatRefusesWhatItCannotCarry:
         with pytest.raises(ConfigurationError, match="cannot be written to a plan"):
             resolve_plan(load_topology(chain), dims=dims)
 
+    @pytest.mark.parametrize(
+        "label,what",
+        [
+            ("", "an empty label, which emits `label 8 ` and reads as one argument"),
+            ("ship ", "a padded label, which reads back as different text"),
+        ],
+        ids=["empty", "padded"],
+    )
+    def test_an_empty_or_padded_value_is_refused(
+        self, tmp_path: Path, dims: dict[str, tuple[int, int]], label: str, what: str
+    ) -> None:
+        chain = self._chain(
+            tmp_path,
+            f"""
+            name: padded
+            elements:
+              decode: {{impl: replay}}
+              detect:
+                impl: pool
+                model: ship_detector
+                params: {{decode: {{class_labels: {{8: "{label}"}}}}}}
+              output: {{impl: jsonlines}}
+            """,
+        )
+
+        with pytest.raises(ConfigurationError, match="cannot be written to a plan"):
+            resolve_plan(load_topology(chain), dims=dims)
+
+    def test_a_chain_called_dash_is_refused(
+        self, tmp_path: Path, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """`-` is the writer's spelling for an unnamed chain, so it cannot also be a name."""
+        chain = self._chain(
+            tmp_path,
+            """
+            name: "-"
+            elements:
+              decode: {impl: replay}
+              output: {impl: jsonlines}
+            """,
+        )
+
+        with pytest.raises(ConfigurationError, match="unnamed chain"):
+            resolve_plan(load_topology(chain), dims=dims)
+
     def test_a_non_finite_threshold_is_refused_rather_than_written(
         self, tmp_path: Path, dims: dict[str, tuple[int, int]]
     ) -> None:
@@ -399,3 +448,141 @@ class TestEveryDetectorsLabelsAreCarried:
 
         with pytest.raises(ConfigurationError, match=r"'detect'.*'detect_person'"):
             resolve_plan(load_topology(chain), dims=dims)
+
+
+class TestWhatTheChainWillDoAndNotWhatItWrote:
+    """The plan carries EFFECTIVE decode settings, asked of the element.
+
+    A detect slot that declares nothing still decodes with a table, a threshold and a cap
+    (`elements/detections.py::DecodeParams`). A plan that omitted them made the other plane
+    invent its own -- which is the hard-coded table ADR-020 exists to delete, so the omission
+    undid the decision this format ships with.
+    """
+
+    SILENT = """
+        name: silent
+        elements:
+          decode: {impl: replay}
+          detect: {impl: pool, model: ship_detector}
+          output: {impl: jsonlines}
+    """
+
+    def test_a_slot_that_declares_nothing_still_carries_its_defaults(
+        self, tmp_path: Path, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        path = tmp_path / "silent.yaml"
+        path.write_text(textwrap.dedent(self.SILENT))
+        plan = resolve_plan(load_topology(path), dims=dims)
+
+        assert plan.labels == {
+            0: "person",
+            8: "ship",
+        }, "the effective table, not the written one"
+        assert plan.node("detect").score_threshold == 0.25
+        assert plan.node("detect").max_detections == 100
+
+    def test_the_element_is_the_source_and_not_the_params_dict(
+        self, tmp_path: Path, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """`decode_parameters()` is the hook; re-reading `params` was a second interpretation
+        of one setting, which `base.py` warns against for `detection_labels` already."""
+        path = tmp_path / "silent.yaml"
+        path.write_text(textwrap.dedent(self.SILENT))
+        chain = load_topology(path)
+        node = chain.node("detect")
+
+        assert node.spec.params == {}, "the file really does say nothing"
+        assert node.element.decode_parameters() is not None
+        assert resolve_plan(chain, dims=dims).node("detect").score_threshold is not None
+
+    def test_a_non_detect_slot_has_no_decode_settings(
+        self, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        plan = _plan("branching", dims)
+
+        assert plan.node("embed_ship").score_threshold is None
+        assert plan.node("embed_ship").max_detections is None
+
+    def test_an_inverted_label_table_is_refused_and_typed(self, tmp_path: Path) -> None:
+        """`{person: 0}` used to reach `int('person')` and raise a bare `ValueError` with no
+        slot in it; the element's own resolution types it."""
+        path = tmp_path / "inverted.yaml"
+        path.write_text(textwrap.dedent("""
+                name: inverted
+                elements:
+                  decode: {impl: replay}
+                  detect:
+                    impl: pool
+                    model: ship_detector
+                    params: {decode: {class_labels: {person: 0}}}
+                  output: {impl: jsonlines}
+                """))
+
+        # At `resolve_plan`, because that is when the element resolves its decode params;
+        # the loader builds the element without asking it to.
+        with pytest.raises(ConfigurationError, match="detect element 'detect'"):
+            resolve_plan(load_topology(path), dims={"ship_detector": (640, 640)})
+
+
+class TestSelectNothingIsNotSelectEverything:
+    """`classes: []` and no `classes:` at all used to emit byte-identical plans.
+
+    `elements/detections.py` keeps them apart in a docstring naming this failure:
+    "conflating the two would make a typo silently select everything -- at `track` a wrong
+    answer, at an embedder a doubled GPU bill". The golden could not see it: both plans were
+    the same text.
+    """
+
+    HEAD = """
+        name: selective
+        elements:
+          decode: {impl: replay}
+          detect:
+            impl: pool
+            model: ship_detector
+            params: {decode: {class_labels: {0: person, 8: ship}}}
+    """
+
+    def _chain(self, tmp_path: Path, params: str) -> Path:
+        path = tmp_path / "selective.yaml"
+        path.write_text(
+            textwrap.dedent(self.HEAD)
+            + f"  embed_ship: {{impl: pool, model: ship_embedder{params}}}\n"
+            + "  output: {impl: jsonlines}\n"
+        )
+        return path
+
+    def test_a_declared_empty_selection_is_written_and_read_back(
+        self, tmp_path: Path, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        plan = resolve_plan(
+            load_topology(self._chain(tmp_path, ", params: {classes: []}")), dims=dims
+        )
+        text = plan_text(plan)
+
+        assert plan.node("embed_ship").classes == (), "declared, and empty"
+        assert "classes -" in text
+        assert parse_plan(text).node("embed_ship").classes == ()
+
+    def test_no_selection_at_all_writes_no_line_and_reads_as_none(
+        self, tmp_path: Path, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        plan = resolve_plan(load_topology(self._chain(tmp_path, "")), dims=dims)
+        text = plan_text(plan)
+
+        assert plan.node("embed_ship").classes is None, "no selection declared"
+        assert "classes" not in text
+        assert parse_plan(text).node("embed_ship").classes is None
+
+    def test_the_two_plans_are_not_the_same_text(
+        self, tmp_path: Path, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """The whole point: they were identical, so nothing could tell them apart."""
+        empty = plan_text(
+            resolve_plan(
+                load_topology(self._chain(tmp_path, ", params: {classes: []}")), dims=dims
+            )
+        )
+        absent = plan_text(resolve_plan(load_topology(self._chain(tmp_path, "")), dims=dims))
+
+        assert empty != absent

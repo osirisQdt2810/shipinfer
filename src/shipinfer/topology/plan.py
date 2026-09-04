@@ -52,7 +52,12 @@ class PlanNode:
     kind: str
     impl: str
     model: str | None = None
-    classes: tuple[str, ...] = ()
+    # doc: long the two empty selections mean opposite things, and used to be one spelling
+    #: ``None`` is "no selection declared" -- every row. ``()`` is a DECLARED empty selection
+    #: -- no rows. `elements/detections.py` names the failure: "conflating the two would make
+    #: a typo silently select everything -- at `track` a wrong answer, at an embedder a
+    #: doubled GPU bill." So the format spells both: no line, or `classes -`.
+    classes: tuple[str, ...] | None = None
     crop: tuple[int, int] | None = None
     letterbox: tuple[int, int] | None = None
     score_threshold: float | None = None
@@ -95,6 +100,12 @@ def _speakable(value: str, where: str, *, spaces: bool = False, commas: bool = T
     from the other plane at deploy time.
     """
     refused = []
+    if not value:
+        refused.append("no characters")
+    elif value != value.strip():
+        # A padded value re-reads as its stripped form, so the two planes would publish
+        # `"ship "` and `"ship"` for one label -- the `unknown` defect, one step milder.
+        refused.append("leading or trailing space")
     if not spaces and re.search(r"\s", value):
         refused.append("whitespace")
     if "#" in value:
@@ -104,8 +115,9 @@ def _speakable(value: str, where: str, *, spaces: bool = False, commas: bool = T
     if not refused:
         return value
     raise ConfigurationError(
-        f"{where}: {value!r} cannot be written to a plan -- {' and '.join(refused)} would "
-        f"come back as different text on the other plane. Rename it, or spell it without them"
+        f"{where}: {value!r} cannot be written to a plan -- it holds "
+        f"{' and '.join(refused)}, which comes back as different text on the other plane "
+        f"(or as no text at all). Rename it, or spell it without them"
     )
 
 
@@ -154,7 +166,10 @@ def resolve_plan(
         letterbox = (
             _geometry(params, "decode", where) if node.kind is ElementKind.DETECT else None
         )
-        decode = params.get("decode") if isinstance(params.get("decode"), Mapping) else {}
+        # EFFECTIVE, not declared: a detect slot that writes no `score_threshold` still
+        # decodes at one, and a plan that said nothing made the other plane default -- which
+        # is the literal this whole seam exists to remove.
+        decode = node.element.decode_parameters()
         if node.kind in (ElementKind.EMBED, ElementKind.SEGMENT) and crop is None:
             crop = _model_extent(node.spec.model, dims, where, "crop")
         if node.kind is ElementKind.DETECT and letterbox is None:
@@ -165,14 +180,13 @@ def resolve_plan(
                 kind=node.kind.value,
                 impl=_speakable(node.element.impl, where),
                 model=_speakable(node.spec.model, where) if node.spec.model else None,
-                classes=tuple(
-                    _speakable(label, f"{where}: class", spaces=True, commas=False)
-                    for label in node.element.declared_classes() or ()
-                ),
+                classes=_classes_of(node.element.declared_classes(), where),
                 crop=crop,
                 letterbox=letterbox,
-                score_threshold=_as_float(decode.get("score_threshold"), where),
-                max_detections=_as_int(decode.get("max_detections")),
+                score_threshold=(
+                    None if decode is None else _finite(decode.score_threshold, where)
+                ),
+                max_detections=None if decode is None else int(decode.max_detections),
                 when=(
                     None
                     if node.condition is None
@@ -186,7 +200,7 @@ def resolve_plan(
             fields.setdefault(event_field, []).append(node.name)
 
     return ResolvedPlan(
-        name=_speakable(topology.name, "chain name", spaces=True),
+        name=_chain_name(topology.name),
         nodes=tuple(nodes),
         edges=tuple(
             (edge.producer, edge.consumer, _speakable(str(edge.caps), "edge cap"))
@@ -213,63 +227,67 @@ def _model_extent(
 
 # doc: long two detectors are a supported chain shape, and the ids are the checkpoint's
 def _labels(topology: Topology) -> dict[int, str]:
-    """Every detector's id-to-label map, merged.
+    """Every detector's EFFECTIVE id-to-label table, merged.
 
-    Read off the chain rather than defaulted, because a raw class index is a property of the
-    checkpoint: the demo detector calls a ship **8**, and a plane that assumed 1 labelled
-    every ship `unknown` in its events while cropping the right rows.
+    Asked of the element (``decode_parameters``) and not re-read from ``params``, which is
+    the difference between what a chain file wrote and what the chain will do: a slot that
+    declares no table still decodes with one, and a plan that omitted it made the other plane
+    invent its own -- the hard-coded table ADR-020 exists to delete.
 
     EVERY detector, not the first: `_check_declared_classes` unions the tables of all of
-    them, so a two-detector chain loads -- and returning the first table here would drop the
-    second one's ids, which is the same `unknown` defect one level along.
+    them, so a two-detector chain loads, and returning the first would drop the second's ids.
 
     Raises:
-        ConfigurationError: two detectors give one id different labels, or a table disagrees
-            with what the element itself parsed. Refused rather than resolved to whichever
-            slot the loader ordered first.
+        ConfigurationError: two detectors give one id different labels. Refused rather than
+            resolved to whichever slot the loader ordered first.
     """
     merged: dict[int, str] = {}
     owner: dict[int, str] = {}
     for node in topology.nodes:
-        if node.kind is not ElementKind.DETECT:
+        decode = node.element.decode_parameters()
+        if decode is None:
             continue
-        declared = node.spec.params.get("decode")
-        table = declared.get("class_labels") if isinstance(declared, Mapping) else None
-        if not isinstance(table, Mapping):
-            continue
-        labels = {int(key): str(value) for key, value in table.items()}
-        # The element already parsed this key and applied its own refusals, so it is the
-        # authority on the label VALUES; the ids come from here because nothing exposes them.
-        # A disagreement means the two readings have drifted, which is worth a refusal.
-        parsed = node.element.detection_labels()
-        if parsed is not None and sorted(parsed) != sorted(labels.values()):
-            raise ConfigurationError(
-                f"detect element {node.name!r} declares class_labels {sorted(labels.values())} "
-                f"and its implementation parsed {sorted(parsed)}; the plan cannot say which"
-            )
-        for index, label in labels.items():
-            if index in merged and merged[index] != label:
-                raise ConfigurationError(
-                    f"class id {index} is {merged[index]!r} in {owner[index]!r} and "
-                    f"{label!r} in {node.name!r}; one plan carries one table, and picking "
-                    f"one of two silently is how a class is published under the wrong name"
-                )
-            merged[index] = _speakable(
-                label,
-                f"detect element {node.name!r}: label {index}",
+        for index, label in decode.class_labels.items():
+            speakable = _speakable(
+                str(label),
+                f"{node.kind.value} element {node.name!r}: label {index}",
                 spaces=True,
                 commas=False,
             )
-            owner[index] = node.name
+            if index in merged and merged[index] != speakable:
+                raise ConfigurationError(
+                    f"class id {index} is {merged[index]!r} in {owner[index]!r} and "
+                    f"{speakable!r} in {node.name!r}; one plan carries one table, and picking "
+                    f"one of two silently is how a class is published under the wrong name"
+                )
+            merged[int(index)] = speakable
+            owner[int(index)] = node.name
     return merged
 
 
-def _as_float(value: object, where: str) -> float | None:
-    """A finite float, or nothing. YAML spells `.inf`, and the writer would then emit
-    `score inf` -- which its own reader refuses, so the plan would be unreadable by both
-    planes. Refused here, where the slot can still be named."""
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
+def _chain_name(name: str) -> str:
+    """The chain's name, or ``""``. `-` is the sentinel the writer uses for an empty name, so
+    it cannot also BE a name -- a chain called `-` would come back unnamed."""
+    if name == "-":
+        raise ConfigurationError(
+            "chain name: `-` is the plan's spelling for an unnamed chain, so a chain cannot "
+            "be called that; it would come back with no name at all"
+        )
+    return _speakable(name, "chain name", spaces=True) if name else ""
+
+
+def _classes_of(declared: tuple[str, ...] | None, where: str) -> tuple[str, ...] | None:
+    """The declared row selection, kept distinct from "no selection at all"."""
+    if declared is None:
         return None
+    return tuple(
+        _speakable(label, f"{where}: class", spaces=True, commas=False) for label in declared
+    )
+
+
+def _finite(value: float, where: str) -> float:
+    """A finite threshold. YAML spells `.inf`, and the writer would then emit `score inf` --
+    which its own reader refuses, so the plan would be unreadable by both planes."""
     number = float(value)
     if not math.isfinite(number):
         raise ConfigurationError(
@@ -277,10 +295,6 @@ def _as_float(value: object, where: str) -> float | None:
             f"only, because neither `inf` nor `nan` has a spelling both planes read back"
         )
     return number
-
-
-def _as_int(value: object) -> int | None:
-    return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def plan_text(plan: ResolvedPlan) -> str:
@@ -294,8 +308,10 @@ def plan_text(plan: ResolvedPlan) -> str:
         lines += ["", f"node {node.slot} {node.kind} {node.impl}"]
         if node.model:
             lines.append(f"model {node.model}")
-        if node.classes:
-            lines.append("classes " + ",".join(node.classes))
+        if node.classes is not None:
+            # `-` for a declared-empty selection, which is a slot that selects NO rows. An
+            # absent line is the other thing: no selection declared, so every row.
+            lines.append("classes " + (",".join(node.classes) or "-"))
         if node.crop:
             lines.append(f"crop {node.crop[0]} {node.crop[1]}")
         if node.letterbox:
@@ -478,8 +494,14 @@ def _classes(node: dict[str, object], args: Sequence[str], where: str) -> None:
     which is the silence `_check_declared_classes` exists to prevent.
     """
     if not args:
-        raise PlanSyntaxError(f"{where}: expected `classes <label>[,<label>...]`")
-    labels = tuple(part.strip() for part in " ".join(args).split(","))
+        raise PlanSyntaxError(
+            f"{where}: expected `classes <label>[,<label>...]`, or `classes -` for none"
+        )
+    joined = " ".join(args)
+    if joined == "-":
+        node["classes"] = ()
+        return
+    labels = tuple(part.strip() for part in joined.split(","))
     if not all(labels):
         raise PlanSyntaxError(f"{where}: an empty label in `classes`")
     node["classes"] = labels
