@@ -2119,7 +2119,15 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       FIRST SCENARIOS, one invariant each: fair-queue eviction picks the GREEDIEST camera (the
       inherited starvation bug); a full queue REJECTS rather than evicting under the default
       policy; priority lanes drain TRACKING_CRITICAL first; expiry drops on take, not on put.
-- [~] **P6 · PR-A MERGED as PR #101 (31 Aug), VERDICT: APPROVE. PR-B (scheduling-seam parity) and PR-C (csrc runners re-baseline) still open, so P6 stays [~]. PR-A detail: Rebased onto 8ade925 (#100); 6 commits, 22 files,
+- [~] **P6 · PR-A #101, PR-B #122+#123 MERGED; PR-C OPEN as PR #127 (d5615f1, 4 Sep). Both of
+      PR-C's preconditions were met (Phase C complete, the gate exists on two seams), so the
+      re-baseline was taken -- and the honest form is a TEST, because the old baseline was a
+      sentence ("8 of 11 mirror") measured once on 29 Aug. Measured today: 13 tracked Python
+      packages, 9 C++, 8 mirrored; `api`/`repository`/`launch` Python-only with a decision;
+      `obs` C++-only (its peer is benchmarks/harness/sampler.py). `topology` and `runners` are
+      recorded UNDECIDED and each cites the OPEN `[!]` CSRC-TOPOLOGY-Q, asserted -- the port
+      half of PR-C is the operator's call and P6 stays [~] until they make it.
+      Original: PR-A MERGED as PR #101 (31 Aug), VERDICT: APPROVE. PR-B (scheduling-seam parity) and PR-C (csrc runners re-baseline) still open, so P6 stays [~]. PR-A detail: Rebased onto 8ade925 (#100); 6 commits, 22 files,
       +3450/-2. RE-VERIFIED ON THIS TIP, not carried over from the older base:
       C++ `./csrc/build/test_ingest_parity` -> **45 checks, 0 failure(s)**, with the 2 KNOWN divergences
       reported by name rather than tolerated silently; Python half `41 passed`; all three goldens
@@ -3203,7 +3211,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       that pattern-match as code are all docstring fragments beginning with `for`/`from`/`with`/`if any.` — no
       statement, signature or import changes. Order after #94: elements part1 → part2 → part3 → system-real-chain →
       fleet-repo-flag → P6 → shipvision pointer bump → test-sh-system-tier → trim-wave-1 → crowd-tool → HOOK-FP.
-- [~] **DESCRIBE-CLASSES · OPEN as PR #126 (08ec76d, 4 Sep), automerge on. It sat built on a
+- [x] **DESCRIBE-CLASSES · MERGED as PR #126 (1eabbc7, 4 Sep), APPROVE round 1. It sat built on a
       branch for six days because it was parked behind "do it when a topology PR is already
       open" and no topology PR ever happened to be open -- found by the branch sweep, not by
       the ledger, which had it marked `[x]` while it was unopened. Rebased on cdc8526; tier
