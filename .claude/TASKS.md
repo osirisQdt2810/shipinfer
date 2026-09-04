@@ -2474,33 +2474,36 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `crop 0 128` and Python did not, and `*.plan` in `.gitignore` would have swallowed every
       golden. 26 files, so it may need splitting at the Python/C++ line when it opens.
 
-- [x] **RECORDS-CLASS-PREMISE · DECIDED and GATED 4 Sep: the FIRST candidate wins, on both
-      planes, a fifth parity seam pins it, and BOTH premise comments now say so.** The item
-      named two comments and #135's reviewer was right that the first push left them
-      unchanged -- `records.h:28`'s "so they cannot collide" and the same sentence 29 lines
-      above the new guard in `build_records`'s own docstring, which is the reasoning that
-      produced the overwrite in the first place. Both rewritten; the still-true paragraph
-      about an earlier version picking `class_name == "ship"` is kept. `build_records` documented its candidates as
-      being "in priority order" and then overwrote, so the LAST batch to mention a row set the
-      field -- on both planes, so no cross-plane divergence, but wrong against the stated
-      contract and undecided where it matters. `records.h` justified having no class check
-      with "a batch only ever holds rows of ITS OWN class"; a resolved plan can carry a crop
-      slot with no `classes:`, which is every row, so the premise needed a rule behind it.
-      Delivered with the RECORD parity seam (`scenarios/records/` -> `golden/records/` ->
-      `test_record_parity`, 17 checks, byte-identical on the first comparison), which is also
-      P5-A-ALLOC's second half: the event seam compares the two JSON writers on records a
-      scenario STATES, and this one compares the two BUILDERS by stating what the graph leaves
-      behind. Revert-checks: last-wins on the Python plane turns 3 of 9 tests red, and on the
-      C++ plane 3 of 17 checks including the byte compare at column 387.
-      NOT taken, and stated because it was tried: a LOAD-TIME refusal of two slots that can
-      cover one row. It is the better guard -- a refusal at deploy beats a rule in the middle
-      of a frame -- and `Topology.from_spec` can express it (`declared_classes()` +
-      `selects_rows`). It breaks 60 existing tests, because `tests/runners/test_walk.py`'s
-      `TWO_EMBEDDERS`/`THREE_EMBEDDERS` and `test_inprocess.py`'s chain declare two `pool`
-      embedders with NO `classes:` on purpose (the fixtures' subject is the merge of two
-      scatter-backs, and one of them tests the runner's own contested-row refusal). Those
-      fixtures are relying on a chain that is genuinely ambiguous in production, which is
-      worth fixing -- as its own change, with the fixtures, not inside a rule PR.
+- [x] **RECORDS-CLASS-PREMISE · DECIDED and GATED 4 Sep, and the decision is the one the
+      project ALREADY had: two batches covering one detection is a typed REFUSAL, not a
+      tie-break.** #135's review found the thing that makes this obvious and that I had
+      missed: the chain plane decided it before this seam existed --
+      `PoolEmbed._scatter` (`elements/pool.py`) and `ChainWalk.inbound` (`runners/walk.py`)
+      both raise on exactly this state, and `tests/runners/test_walk.py` states the reasoning
+      almost verbatim: *"there is no answer to 'which of these two vectors is this object's'.
+      Silently keeping one would attach an appearance vector chosen by declaration order."*
+      My first two attempts were last-wins (the original) and then first-wins -- the second of
+      which would have made a Python chain shard REFUSE a frame that a C++ shard published,
+      from one plan file. So `build_records` raises on both planes now, with the message
+      shape `_scatter` uses, and `records.h`/`state.py`'s "they cannot collide" premise is
+      rewritten in both places.
+      GATED by the fifth parity seam (`scenarios/records/` -> `golden/records/` ->
+      `test_record_parity`), which is also P5-A-ALLOC's second half: the contested case is a
+      scenario with NO golden, because what both planes must do is refuse it.
+
+- [ ] **RECORDS-COLLISION-AT-LOAD · The refusal belongs at LOAD as well, and three comments
+      now point here for what that costs.** `state.py`, `records.cpp` and `records.h` all say
+      "nothing refuses such a chain at load yet -- see this item", so it needs to stay open.
+      `Topology.from_spec` can express it: two slots of a field-filling kind
+      (`_ROW_FIELD_KINDS`) whose `declared_classes()` intersect, or either of which selects
+      every row, with `selects_rows` deciding which elements can collide per row at all. I
+      built it and reverted it inside #135: it breaks **60 tests**, because
+      `tests/runners/test_walk.py`'s `TWO_EMBEDDERS`/`THREE_EMBEDDERS` and
+      `test_inprocess.py`'s chain declare two `pool` embedders with NO `classes:` on purpose
+      -- and one of those fixtures exists to test `ChainWalk.inbound`'s own contested-row
+      refusal. Those chains are genuinely ambiguous in production, so the work is the guard
+      PLUS giving those fixtures disjoint selections; a refusal at deploy time beats one in
+      the middle of a frame, which is the whole argument for doing it.
 - [ ] **P6-SEGMENT-CROP · A pre-existing cross-plane divergence the plan made visible, and
       the direction is already DECIDED -- by `PoolSegment`'s own docstring, read 4 Sep.**
       `segment` CROPS on the C++ plane (`ship_crops_640`, 640x640, one crop per ship row) and

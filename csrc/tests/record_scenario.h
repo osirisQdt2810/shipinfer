@@ -76,6 +76,9 @@ namespace shipinfer::parity {
             } else if (directive == "reason") {
                 want(1);
                 scenario.reason = words[1];
+                // LAST directive wins, as the Python loader's `values["reason"] = ...` does.
+                // Preferring `finished` unconditionally made one scenario mean two things.
+                scenario.finished.reset();
             } else if (directive == "finished") {
                 want(1);
                 scenario.finished = detail::finish_reason_of(words[1], where);
@@ -106,7 +109,17 @@ namespace shipinfer::parity {
             } else if (directive == "det") {
                 want(7);
                 Detection detection;
+                // The index must BE the position, which is what `record_scenario.py` refuses
+                // to write: `Detections` numbers its rows by iteration order over there, so
+                // `det 5` first would give two different `det_id`s and the gate would report
+                // a builder divergence. Refused HERE too, so this reader does not accept a
+                // scenario the emitter cannot produce.
                 detection.index = std::stoi(words[1]);
+                if (detection.index != static_cast<int>(scenario.detections.size())) {
+                    throw ConfigError(where + ": `det " + words[1] + "` is detection " +
+                                      std::to_string(scenario.detections.size()) +
+                                      "; an index is its position");
+                }
                 detection.class_id = std::stoi(words[2]);
                 detection.score = std::stof(words[3]);
                 detection.x1 = std::stof(words[4]);

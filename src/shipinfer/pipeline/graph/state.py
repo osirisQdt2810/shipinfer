@@ -26,7 +26,7 @@ from typing import Any
 
 import numpy as np
 
-from shipinfer.core.errors import ValidationError
+from shipinfer.core.errors import InferenceError, ValidationError
 
 # Re-exported, not redefined: the row-to-floats conversion now lives beside the event it
 # feeds (`core/events/convert.py`) because the chain's `output` element needs the same one.
@@ -130,11 +130,12 @@ def build_records(
     """One :class:`ObjectRecord` per detection, from whatever landed.
 
     Args:
-        field_map: ``ObjectRecord`` field -> the batch names that can fill it, in priority
-            order -- and the priority is real: two candidates CAN cover one detection, once a
-            crop slot declares no ``classes:`` and therefore every row, so the first one that
-            mentions a row wins. Two names per field is the ordinary case (``embedding`` from
-            the ship embedder for a ship and the person embedder for a person).
+        field_map: ``ObjectRecord`` field -> the batch names that can fill it. A COVERAGE
+            union, not a priority list: two names per field is the ordinary case
+            (``embedding`` from the ship embedder for a ship and the person embedder for a
+            person) and two of them covering ONE detection is refused, because there is no
+            answer to which vector is that object's -- the same refusal
+            :meth:`PoolEmbed._scatter` and :meth:`ChainWalk.inbound` already make.
 
     A field left unset means the stage that fills it did not run — which is exactly what the
     emitted event should say, and is distinguishable from a zero.
@@ -156,14 +157,25 @@ def build_records(
             if batch is None or batch.is_empty:
                 continue
             for index, row in batch.scatter():
-                # doc: long the rule was undocumented and the docstring said the opposite
-                # FIRST candidate wins -- what "in priority order" says, and what this loop
-                # did NOT do: it overwrote, so the last batch to mention a row set the field.
-                # This is the ONLY guard: nothing refuses an ambiguous chain at load, and
-                # `RECORDS-CLASS-PREMISE` records why that refusal was deferred. So this
-                # clause is not defensive code on an impossible state.
-                if 0 <= index < len(fields) and name not in fields[index]:
-                    fields[index][name] = convert(row)
+                if not 0 <= index < len(fields):
+                    continue
+                # doc: long why a contested row is a refusal and not a tie-break
+                # REFUSED, not picked, and not overwritten either -- which is what this loop
+                # did. The chain plane already decided this: `PoolEmbed._scatter` and
+                # `ChainWalk.inbound` raise when a second slot files a row an earlier one
+                # covered, because "there is no answer to 'which of these two vectors is this
+                # object's'" (`tests/runners/test_walk.py`). Candidates are a COVERAGE union,
+                # not a priority list. A refusal at LOAD would be better still and nothing
+                # does it yet -- `RECORDS-COLLISION-AT-LOAD` records what it would cost.
+                if name in fields[index]:
+                    raise InferenceError(
+                        f"two batches cover detection row {index} for the event's {name!r}: "
+                        f"{candidate!r} and an earlier candidate. Batches sharing a field "
+                        f"merge their coverage rather than one replacing the other, and two "
+                        f"of them covering one detection means the chain asked both for it "
+                        f"-- check their `params: classes:` do not overlap"
+                    )
+                fields[index][name] = convert(row)
     return tuple(
         ObjectRecord(
             det_id=f"{camera_id}_{frame_id}_{detection.index}",

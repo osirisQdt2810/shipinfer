@@ -5,9 +5,10 @@ two BUILDERS -- the translation units that run in production -- by describing wh
 leaves behind and letting each plane turn it into records itself. P5-A-ALLOC's second half,
 unblocked by the resolved chain plan, which is where a real field map now comes from.
 
-Python's `build_records` and the C++ `event_of` are the same function twice, and the whole of
-what they do is: resolve a class id to a label, scatter each batch's rows onto their
-detections, take the FIRST candidate that mentions a row, and compose the `det_id`.
+Python's `build_records` and the C++ one are the same function twice, and the whole of what
+they do is: resolve a class id to a label, scatter each batch's rows onto their detections,
+REFUSE a row two batches cover (the chain plane's own decision -- `PoolEmbed._scatter`,
+`ChainWalk.inbound`), and compose the `det_id`.
 """
 
 from __future__ import annotations

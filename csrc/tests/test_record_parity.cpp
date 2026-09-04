@@ -39,7 +39,11 @@ namespace {
 
     // Listed rather than globbed: a golden that disappears has to fail this gate, and a
     // directory walk would call that "nothing to check" and pass.
-    const std::vector<std::string> kScenarios = {"first_candidate_wins", "scattered_frame"};
+    const std::vector<std::string> kScenarios = {"scattered_frame"};
+
+    // Scenarios with NO golden, because what they describe is a frame both planes must
+    // REFUSE -- the half a byte compare cannot express.
+    const std::vector<std::string> kRefused = {"contested_row_refused"};
 
     pipeline::events::FieldMap field_map_of(const RecordScenario& scenario) {
         pipeline::events::FieldMap fields;
@@ -100,30 +104,32 @@ namespace {
         ++checks;
     }
 
-    // What the byte compare cannot say on its own: WHICH batch filled a contested row. The
-    // golden would look the same if both planes were wrong in the same direction, so the
-    // rule is asserted here too, against the scenario written for it.
-    void the_first_candidate_wins() {
+    // The refusal, which is the decision this seam settles: two batches covering one
+    // detection is a chain-file error the project already had a message for
+    // (`PoolEmbed._scatter`, `ChainWalk.inbound`), and picking one by declaration order
+    // would attach an appearance vector to the wrong reasoning.
+    void a_contested_row_is_refused(const std::string& name) {
         const RecordScenario scenario =
-            load_record_scenario(resolve("scenarios/records/first_candidate_wins.scn"));
+            load_record_scenario(resolve("scenarios/records/" + name + ".scn"));
         EmissionInputs inputs;
         inputs.tag.camera_id = scenario.camera;
         inputs.tag.frame_id = scenario.frame;
         inputs.detections = scenario.detections;
         inputs.batches = scenario.batches;
-        const std::vector<events::ObjectRecord> records =
-            pipeline::events::build_records(inputs, scenario.labels, field_map_of(scenario));
 
-        check(records.size() == 2, "one record per detection");
-        // Row 0 is covered by BOTH batches. `embed_ship_out` is declared first, so its
-        // values win -- the plane used to overwrite, which made the LAST batch win.
-        check(records[0].embedding == std::vector<double>{0.25, 0.5},
-              "the first candidate fills a contested row");
-        check(records[0].embedding != std::vector<double>{0.75, 0.875},
-              "and the second does not overwrite it");
-        // Row 1 is covered only by the second candidate, which must still fill it.
-        check(records[1].embedding == std::vector<double>{2.0, 3.0},
-              "a row only the later candidate covers is still filled");
+        std::string message;
+        try {
+            pipeline::events::build_records(inputs, scenario.labels, field_map_of(scenario));
+        } catch (const InferenceError& error) {
+            message = error.what();
+        }
+        check(!message.empty(), name + ": a contested row is refused, not picked");
+        // The message has to name the row and the field, because an operator reading it has
+        // to find the two slots in the chain file.
+        check(message.find("row 0") != std::string::npos, name + ": it names the row");
+        check(message.find("embedding") != std::string::npos, name + ": and the field");
+        check(message.find("classes") != std::string::npos,
+              name + ": and points at `params: classes:`, which is the fix");
     }
 
     // The parts of the builder a collision case does not reach, asserted rather than left to
@@ -159,7 +165,7 @@ namespace {
 int main() {
     try {
         for (const std::string& name : kScenarios) matches_the_golden(name);
-        the_first_candidate_wins();
+        for (const std::string& name : kRefused) a_contested_row_is_refused(name);
         the_edges_of_the_scatter();
     } catch (const std::exception& error) {
         std::printf("FAIL: unexpected exception: %s\n", error.what());

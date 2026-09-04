@@ -1,12 +1,14 @@
-"""Which batch fills a row two of them mention, and the goldens that pin it on both planes.
+"""What happens when two batches cover one detection, and the goldens for when none do.
 
-`build_records` takes its candidates "in priority order" and did not: it overwrote, so the
-LAST batch to mention a row set the field. `records.h` justified having no class check with
-"a batch only ever holds rows of ITS OWN class" -- true while every crop slot declared
-`classes:`, and a resolved chain plan can now carry a slot with none, which means every row.
+`records.h` justified having no class check with "a batch only ever holds rows of ITS OWN
+class" -- true while every crop slot declared `classes:`, and a resolved chain plan can carry
+a slot with none, which is every row. `build_records` then OVERWROTE, so the last batch to
+mention a row set the field.
 
-So the rule is FIRST candidate wins, on both planes, and it is asserted three ways: here, in
-`csrc/tests/test_record_parity.cpp`, and by the committed goldens both build.
+The answer is the one the chain plane already had: a typed refusal. `PoolEmbed._scatter` and
+`ChainWalk.inbound` raise on exactly this state, so `build_records` does too -- on both
+planes, and asserted here, in `csrc/tests/test_record_parity.cpp`, and by a scenario that
+deliberately has no golden.
 """
 
 from __future__ import annotations
@@ -25,11 +27,17 @@ from benchmarks.parity.drive_records import (
     load,
     render,
 )
+from shipinfer.core.errors import InferenceError
 from shipinfer.pipeline.graph.objects import ObjectBatch
 from shipinfer.pipeline.graph.state import build_records
 from shipinfer.topology.elements.detections import Detections
 
-SCENARIO_NAMES = ("first_candidate_wins", "scattered_frame")
+#: Scenarios with a golden, byte-compared by both planes.
+GOLDEN_NAMES = ("scattered_frame",)
+#: Scenarios with NO golden: a frame both planes must REFUSE, which is the half a byte
+#: compare cannot express.
+REFUSED_NAMES = ("contested_row_refused",)
+SCENARIO_NAMES = GOLDEN_NAMES + REFUSED_NAMES
 CPP_GATE = Path(__file__).resolve().parents[2] / "csrc" / "tests" / "test_record_parity.cpp"
 
 
@@ -52,62 +60,86 @@ def _batch(name: str, indices: tuple[int, ...], rows: list[list[float]]) -> Obje
     )
 
 
-class TestTheFirstCandidateWins:
-    def test_a_contested_row_takes_the_first_batch(self) -> None:
+class TestAContestedRowIsRefused:
+    """Two batches covering one detection is a chain-file error, not a tie to break.
+
+    The chain plane decided this before this seam existed: `PoolEmbed._scatter` and
+    `ChainWalk.inbound` raise when a second slot files a row an earlier one covered, and
+    `tests/runners/test_walk.py` states why -- "there is no answer to 'which of these two
+    vectors is this object's'. Silently keeping one would attach an appearance vector chosen
+    by declaration order." `build_records` overwrote, then briefly took the first; it raises
+    now, like its two neighbours and like the C++ builder.
+    """
+
+    def test_a_row_two_batches_cover_is_refused(self) -> None:
+        with pytest.raises(InferenceError, match="two batches cover detection row 0"):
+            build_records(
+                "cam0",
+                7,
+                _detections(),
+                {
+                    "specific": _batch("specific", (0,), [[0.25, 0.5]]),
+                    "every_row": _batch("every_row", (0, 1), [[0.75, 0.875], [2.0, 3.0]]),
+                },
+                {"embedding": ("specific", "every_row")},
+            )
+
+    def test_the_refusal_names_the_field_the_batch_and_the_fix(self) -> None:
+        """An operator reading it has to find the two slots in the chain file."""
+        with pytest.raises(InferenceError, match=r"'embedding'") as raised:
+            build_records(
+                "cam0",
+                7,
+                _detections(),
+                {"a": _batch("a", (0,), [[1.0]]), "b": _batch("b", (0,), [[2.0]])},
+                {"embedding": ("a", "b")},
+            )
+
+        assert "'b'" in str(raised.value), "the batch that hit the row"
+        assert "classes" in str(raised.value), "and `params: classes:`, which is the fix"
+
+    def test_two_batches_covering_DIFFERENT_rows_is_the_ordinary_case(self) -> None:
+        """The refusal is about the ROW. Two candidates existing is normal -- that is how a
+        ship's embedding comes from the ship embedder and a person's from the person one."""
         records = build_records(
             "cam0",
             7,
             _detections(),
             {
-                "specific": _batch("specific", (0,), [[0.25, 0.5]]),
-                "every_row": _batch("every_row", (0, 1), [[0.75, 0.875], [2.0, 3.0]]),
+                "ships": _batch("ships", (0,), [[0.25, 0.5]]),
+                "people": _batch("people", (1,), [[2.0, 3.0]]),
             },
-            {"embedding": ("specific", "every_row")},
+            {"embedding": ("ships", "people")},
         )
 
-        assert records[0].embedding == (0.25, 0.5), "the first candidate, not the last"
-
-    def test_a_row_only_the_later_candidate_covers_is_still_filled(self) -> None:
-        """First-wins is per ROW, not per batch: the second candidate is not skipped."""
-        records = build_records(
-            "cam0",
-            7,
-            _detections(),
-            {
-                "specific": _batch("specific", (0,), [[0.25, 0.5]]),
-                "every_row": _batch("every_row", (0, 1), [[0.75, 0.875], [2.0, 3.0]]),
-            },
-            {"embedding": ("specific", "every_row")},
-        )
-
+        assert records[0].embedding == (0.25, 0.5)
         assert records[1].embedding == (2.0, 3.0)
 
-    def test_reversing_the_order_reverses_the_answer(self) -> None:
-        """The rule is the DECLARED order, which is what makes it a decision rather than
-        an accident of which batch happens to be iterated last."""
-        batches = {
-            "specific": _batch("specific", (0,), [[0.25, 0.5]]),
-            "every_row": _batch("every_row", (0, 1), [[0.75, 0.875], [2.0, 3.0]]),
-        }
-        records = build_records(
-            "cam0", 7, _detections(), batches, {"embedding": ("every_row", "specific")}
-        )
-
-        assert records[0].embedding == (0.75, 0.875)
-
-    def test_an_empty_batch_is_skipped_rather_than_claiming_the_row(self) -> None:
+    def test_an_empty_batch_does_not_claim_a_row(self) -> None:
         records = build_records(
             "cam0",
             7,
             _detections(),
-            {
-                "empty": _batch("empty", (), []),
-                "real": _batch("real", (0,), [[1.0, 2.0]]),
-            },
+            {"empty": _batch("empty", (), []), "real": _batch("real", (0,), [[1.0, 2.0]])},
             {"embedding": ("empty", "real")},
         )
 
-        assert records[0].embedding == (1.0, 2.0), "an empty first candidate claims nothing"
+        assert records[0].embedding == (1.0, 2.0)
+
+    @pytest.mark.parametrize("name", REFUSED_NAMES)
+    def test_the_scenario_written_for_it_is_refused(self, name: str) -> None:
+        """The same scenario the C++ gate refuses, so the planes agree on the refusal and
+        not only on the successful bytes."""
+        scenario = load(name)
+
+        with pytest.raises(InferenceError, match="two batches cover"):
+            build_records(
+                scenario.camera,
+                scenario.frame,
+                detections_of(scenario),
+                batches_of(scenario),
+                dict(scenario.fields),
+            )
 
 
 class TestTheEdgesOfTheScatter:
@@ -153,7 +185,7 @@ class TestTheCommittedGoldensAreWhatThisPlaneBuilds:
     disagree, and this tells you which one changed.
     """
 
-    @pytest.mark.parametrize("name", SCENARIO_NAMES)
+    @pytest.mark.parametrize("name", GOLDEN_NAMES)
     def test_the_golden_is_reproduced_exactly(self, name: str) -> None:
         expected = (GOLDEN / f"{name}.jsonl").read_text(encoding="ascii").strip()
 
@@ -164,7 +196,7 @@ class TestTheCommittedGoldensAreWhatThisPlaneBuilds:
             f"--force` and say so in the PR"
         )
 
-    @pytest.mark.parametrize("name", SCENARIO_NAMES)
+    @pytest.mark.parametrize("name", GOLDEN_NAMES)
     def test_the_scenario_and_its_golden_both_exist(self, name: str) -> None:
         """Non-vacuity: a missing pair would make the check above pass by not running."""
         assert (SCENARIOS / f"{name}.scn").is_file()
@@ -177,24 +209,31 @@ class TestTheCommittedGoldensAreWhatThisPlaneBuilds:
         the reason is that the list is hard-coded twice -- here and in the C++ gate -- so a
         third scenario plus its golden can be added and cross-plane compared by neither.
         """
-        on_disk = {path.stem for path in SCENARIOS.glob("*.scn")}
-        in_cpp = set(
-            re.findall(
-                r'"(\w+)"', re.search(r"kScenarios = \{([^}]*)\}", CPP_GATE.read_text())[1]
+        gate = CPP_GATE.read_text()
+        # A missing list has to be a readable failure, not a `NoneType` subscript.
+        found = {
+            name: re.search(rf"{name} = \{{([^}}]*)\}}", gate)
+            for name in ("kScenarios", "kRefused")
+        }
+        missing = sorted(name for name, match in found.items() if match is None)
+        assert not missing, f"the C++ gate has no {missing} list any more; this scan needs it"
+        in_cpp = {
+            name: set(re.findall(r'"(\w+)"', match[1]))  # type: ignore[index]
+            for name, match in found.items()
+        }
+
+        assert in_cpp["kScenarios"] == set(GOLDEN_NAMES), "the byte-compared scenarios"
+        assert in_cpp["kRefused"] == set(REFUSED_NAMES), "and the refused ones"
+        assert {path.stem for path in SCENARIOS.glob("*.scn")} == set(SCENARIO_NAMES)
+        assert {path.stem for path in GOLDEN.glob("*.jsonl")} == set(
+            GOLDEN_NAMES
+        ), "every golden has a scenario, and a REFUSED scenario has none by design"
+
+    def test_the_refused_scenario_has_no_golden(self) -> None:
+        """Deliberate, and asserted so a later `--emit-golden --force` cannot quietly turn
+        the refusal into a published event."""
+        for name in REFUSED_NAMES:
+            assert not (GOLDEN / f"{name}.jsonl").exists(), (
+                f"{name} describes a frame both planes must REFUSE; a golden for it would "
+                f"mean one of them published it"
             )
-        )
-
-        assert on_disk == set(SCENARIO_NAMES) == in_cpp
-        assert {
-            path.stem for path in GOLDEN.glob("*.jsonl")
-        } == on_disk, "every scenario has a golden and every golden has a scenario"
-
-    def test_the_contested_row_is_visible_in_the_golden(self) -> None:
-        """The golden alone cannot say WHICH batch won -- unless the two batches carry
-        different numbers, which is what the scenario is built to do."""
-        line = (GOLDEN / "first_candidate_wins.jsonl").read_text(encoding="ascii")
-
-        assert '"ship_feature_vec":[[0.25,0.5]]' in line, "the first candidate's values"
-        # Not `0.875` alone: that is also the ship's SCORE in this scenario. The whole
-        # vector, which only the second candidate could have produced.
-        assert "[[0.75,0.875]]" not in line, "and not the second candidate's"

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from shipinfer.core.errors import ConfigurationError
 
-from .event_scenario import FLOATS, _reason_of
+from .event_scenario import FLOATS, reason_of
 
 __all__ = ["BatchSpec", "DetectionSpec", "RecordScenario", "load_record_scenario"]
 
@@ -111,7 +111,7 @@ def load_record_scenario(path: Path) -> RecordScenario:
         elif directive in ("camera", "source", "reason"):
             values[directive] = words[0]
         elif directive == "finished":
-            values["reason"] = _reason_of(words[0], where)
+            values["reason"] = reason_of(words[0], where)
         elif directive == "frame":
             values["frame"] = _int(words[0], where)
         elif directive == "size":

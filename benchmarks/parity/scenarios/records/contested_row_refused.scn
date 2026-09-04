@@ -1,0 +1,41 @@
+# Two batches mention detection 0, and BOTH planes must refuse the frame.
+#
+# There is no answer to which of two vectors is this object's, and the chain plane decided
+# that before this seam existed: `PoolEmbed._scatter` and `ChainWalk.inbound` raise when a
+# second slot files a row an earlier one covered, and `tests/runners/test_walk.py` says why --
+# "silently keeping one would attach an appearance vector chosen by declaration order".
+#
+# So this scenario has NO golden: what is compared is that both builders raise, which is the
+# half a byte compare cannot express. `records.h` used to say two candidates "cannot collide";
+# a resolved plan can carry a crop slot with no `classes:`, which is every row, so they can --
+# and the answer is the refusal the project already had a message for.
+scenario contested_row_refused
+camera cam0
+frame 7
+source shard-0
+size 1920 1080
+fps 20.0
+captured_unix_ns 1700000000000000000
+emitted_unix_ns 1700000001000000000
+finished complete
+
+# A ship is 8 in this checkout's detector, and a person is 0.
+label 0 person
+label 8 ship
+
+# index class_id score  x1  y1  x2  y2
+det 0 8 0.875 100 200 300 400
+det 1 0 0.5 10 20 30 40
+
+# The per-class batch, covering the ship row only.
+batch embed_ship_out 2
+row 0 0.25 0.5
+
+# The every-row batch, covering both -- so row 0 is claimed twice and the frame is refused.
+# Row 1 is covered only here, which is the ordinary case and is why the refusal has to be
+# about the ROW rather than about two candidates existing.
+batch embed_any_out 2
+row 0 0.75 0.875
+row 1 2.0 3.0
+
+field embedding embed_ship_out embed_any_out
