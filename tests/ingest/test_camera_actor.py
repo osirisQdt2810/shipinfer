@@ -257,6 +257,31 @@ class TestUnhealthyCamera:
             time.sleep(0.002)
         actor.stop()
 
+    def test_the_health_store_redacts_an_error_it_did_not_construct(
+        self, make_camera, fast_settings, scripted_factory, sink
+    ):
+        """A decoder message can carry the URI, and `last_error` is served by the health API.
+
+        The four ingest errors redact inside their own constructors, so the store looked
+        safe. A decoder's own exception is not one of them: it reaches `_record_failure` as
+        whatever the library wrote. The C++ plane has always redacted at the store; this is
+        the Python half of that (P6-D1).
+        """
+        recorder = RecordingSleep(stop_after=1)
+        factory, _ = scripted_factory(
+            open_error=RuntimeError("gst: failed to open rtsp://admin:s3cr3t@cam/stream")
+        )
+        actor = _actor(make_camera("cam0"), sink, fast_settings(), factory, sleep=recorder)
+        recorder.on_stop = actor.request_stop
+        actor.start()
+        assert recorder.wait(), recorder.delays
+        actor.stop()
+
+        assert "s3cr3t" not in actor.health.last_error
+        assert actor.health.last_error == (
+            "gst: failed to open rtsp://admin:***@cam/stream"
+        ), "the host and path must survive, or the line stops being diagnostic"
+
     def test_a_missing_decode_runtime_is_not_retried(
         self, make_camera, fast_settings, scripted_factory, sink
     ):
@@ -273,7 +298,11 @@ class TestUnhealthyCamera:
         assert len(created) == 1, "one attempt, then it gave up"
         assert recorder.delays == []
         assert actor.state is CameraState.UNHEALTHY
-        assert "SourceUnavailableError" in actor.health.last_error
+        # The message, with no exception type in front of it: the type names are the
+        # language's, so a prefix could never agree with the C++ plane (P6-D1).
+        assert actor.health.last_error == (
+            "video source 'gstreamer' is unavailable: PyGObject is not importable"
+        )
 
 
 class TestExhaustedSource:
@@ -357,7 +386,7 @@ class TestShutdown:
         assert actor.is_running is False
 
     def test_the_actor_survives_a_bug_in_the_queue(
-        self, make_camera, fast_settings, scripted_factory
+        self, make_camera, fast_settings, scripted_factory, caplog
     ):
         """A broken consumer must degrade one camera, not kill its thread and go quiet."""
         sink = BoundedSink(capacity=8, name="exploding")
@@ -376,7 +405,11 @@ class TestShutdown:
         actor.stop()
 
         assert len(recorder.delays) == 2, "it backed off instead of hot-looping on the bug"
-        assert "RuntimeError" in actor.health.last_error
+        # `last_error` is the message alone (P6-D1). For an unexpected bug the type is the
+        # useful half, so this checks it is still somewhere: in the traceback the safety net
+        # logs, which is where a reader of a bare "boom" has to go anyway.
+        assert actor.health.last_error == "boom"
+        assert any("RuntimeError" in (r.exc_text or "") for r in caplog.records)
 
 
 class TestTheReconnectDelayIsInterruptible:

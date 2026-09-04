@@ -20,7 +20,7 @@
 {"kind":"state","camera":"cam_fatal","n":[],"t":["idle","connecting"]}
 {"kind":"source_open","camera":"cam_fatal","n":[0],"t":["SourceUnavailableError"]}
 {"kind":"source_close","camera":"cam_fatal","n":[0],"t":[]}
-{"kind":"health","camera":"cam_fatal","n":[0,0,0,0,0,1,0],"t":["unhealthy","SourceUnavailableError: video source 'scripted' is unavailable: no-decoder"]}
+{"kind":"health","camera":"cam_fatal","n":[0,0,0,0,0,1,1],"t":["unhealthy","video source 'scripted' is unavailable: no-decoder"]}
 {"kind":"state","camera":"cam_retry","n":[],"t":["idle","connecting"]}
 {"kind":"source_open","camera":"cam_retry","n":[0],"t":["SourceOpenError"]}
 {"kind":"source_close","camera":"cam_retry","n":[0],"t":[]}

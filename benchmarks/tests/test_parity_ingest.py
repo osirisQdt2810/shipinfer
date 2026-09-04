@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import re
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -21,6 +24,7 @@ import pytest
 
 from benchmarks.parity import KNOWN, Record, compare, load_scenario
 from benchmarks.parity.drive_python import GOLDEN, SCENARIOS, peek_us, run_scenario
+from benchmarks.parity.known import KnownDivergence
 from benchmarks.parity.trace import FIELDS, read_trace
 from shipinfer.core.errors import ConfigurationError, SourceOpenError
 from shipinfer.core.settings.ingest import CameraConfig, IngestSettings
@@ -35,6 +39,7 @@ CPP_TRACE = ROOT / "csrc" / "tests" / "parity_trace.h"
 README = ROOT / "benchmarks" / "parity" / "README.md"
 LEDGER = ROOT / ".claude" / "TASKS.md"
 HOOK = ROOT / "scripts" / "hooks" / "require_container.py"
+EMITTER = ROOT / "scripts" / "emit_parity_golden.py"
 THIS_FILE = Path(__file__)
 
 NAMES = ("reconnect", "backpressure", "fatal_vs_retryable")
@@ -53,12 +58,32 @@ def _write(tmp_path: Path, name: str, lines: list[str]) -> Path:
 
 
 def _fatal_health(lines: list[str]) -> int:
-    """The one health line carrying the type-prefixed error, by content and not by position."""
+    """The fatal camera's health line, by content and not by position."""
     return next(
         i
         for i, line in enumerate(lines)
-        if '"kind":"health"' in line and "SourceUnavailableError: " in line
+        if '"kind":"health"' in line and '"camera":"cam_fatal"' in line
     )
+
+
+#: A register entry with no divergence behind it. The real register is empty -- P6-D1/D2/D3
+#: were closed by converging the planes -- and the differ's accept path still has to be
+#: tested, so the two tests that exercise it bring their own entry and the mutation it
+#: explains. Testing the mechanism against a fabricated entry is what keeps those tests from
+#: needing a real divergence to survive.
+_SYNTHETIC = {
+    "state_case": KnownDivergence(
+        id="state_case",
+        seam="health.state",
+        python="src/shipinfer/ingest/camera/actor.py -- lower-case state names",
+        cpp="csrc/shipinfer/ingest/camera/actor.cpp -- pretend this plane shouts them",
+        decided_in="nowhere: this entry exists only to exercise the differ's accept path",
+        ledger="[ ] not a real item",
+        case="test_the_same_difference_across_planes_is_accepted",
+        explains=lambda python, cpp: str(python.fields()["state"]).upper()
+        == str(cpp.fields()["state"]),
+    )
+}
 
 
 @pytest.fixture(scope="module")
@@ -178,11 +203,12 @@ class TestDifferFindsRealDrift:
     ) -> None:
         lines = list(goldens["fatal_vs_retryable"])
         lines[_fatal_health(lines)] = lines[_fatal_health(lines)].replace(
-            "SourceUnavailableError: ", ""
+            '"unhealthy"', '"UNHEALTHY"'
         )
         report = compare(
             read_trace(GOLDEN / "fatal_vs_retryable.jsonl"),
             read_trace(_write(tmp_path, "fatal_vs_retryable", lines)),
+            known=_SYNTHETIC,
         )
         assert not report.ok and report.accepted == ()
 
@@ -193,14 +219,15 @@ class TestDifferFindsRealDrift:
         lines = list(goldens["fatal_vs_retryable"])
         lines[0] = lines[0].replace('"plane":"python"', '"plane":"cpp"')
         lines[_fatal_health(lines)] = lines[_fatal_health(lines)].replace(
-            "SourceUnavailableError: ", ""
+            '"unhealthy"', '"UNHEALTHY"'
         )
         report = compare(
             read_trace(GOLDEN / "fatal_vs_retryable.jsonl"),
             read_trace(_write(tmp_path, "fatal_vs_retryable", lines)),
+            known=_SYNTHETIC,
         )
         assert report.ok, report.render()
-        assert [a.known_id for a in report.accepted] == ["last_error_type_prefix"]
+        assert [a.known_id for a in report.accepted] == ["state_case"]
 
 
 def _health(name: str, camera: str) -> dict[str, int | str]:
@@ -306,18 +333,14 @@ class TestTheBackoffColumnIsReadFromThePlane:
 class TestKnownDivergences:
     """The register is a register: cited, ledgered, reproduced, and mirrored in C++."""
 
-    @pytest.mark.parametrize("entry_id", sorted(KNOWN))
-    def test_every_entry_cites_a_file_that_exists_on_both_sides(self, entry_id: str) -> None:
-        entry = KNOWN[entry_id]
-        for side, citation in (("python", entry.python), ("cpp", entry.cpp)):
-            path = re.search(r"(?:src|csrc)/[\w./]+\.(?:py|h|cpp)", citation)
-            assert path, f"{entry_id}: the {side} side cites no file: {citation}"
-            assert (ROOT / path.group(0)).is_file(), f"{entry_id}: no {path.group(0)}"
+    def test_every_entry_cites_a_file_that_exists_on_both_sides(self) -> None:
+        for entry_id, entry in sorted(KNOWN.items()):
+            for side, citation in (("python", entry.python), ("cpp", entry.cpp)):
+                path = re.search(r"(?:src|csrc)/[\w./]+\.(?:py|h|cpp)", citation)
+                assert path, f"{entry_id}: the {side} side cites no file: {citation}"
+                assert (ROOT / path.group(0)).is_file(), f"{entry_id}: no {path.group(0)}"
 
-    @pytest.mark.parametrize("entry_id", sorted(KNOWN))
-    def test_every_entry_has_an_open_ledger_line_and_a_reproducing_case(
-        self, entry_id: str
-    ) -> None:
+    def test_every_entry_has_an_open_ledger_line_and_a_reproducing_case(self) -> None:
         """The ledger line is looked UP, not pattern-matched.
 
         Asserting only that the string starts with ``"[ ] "`` checked the shape of a
@@ -326,21 +349,23 @@ class TestKnownDivergences:
         The register's only defence against becoming a suppression list is that each entry
         is somebody's open work.
         """
-        entry = KNOWN[entry_id]
-        assert entry.ledger.startswith("[ ] "), (
-            f"{entry_id}: a known divergence carries an OPEN ledger line naming the fix; a "
-            f"closed one means the entry should have been deleted with the fix"
-        )
-        ledger_id = entry.ledger.split()[2]
-        open_item = re.compile(rf"^\s*-?\s*\[ \]\s+`?{re.escape(ledger_id)}\b", re.M)
-        assert open_item.search(LEDGER.read_text()), (
-            f"{entry_id}: cites ledger item {ledger_id!r}, which is not an open line in "
-            f"{LEDGER.relative_to(ROOT)}. An entry nobody owns the fix for is a suppression"
-        )
-        assert entry.case in THIS_FILE.read_text(), (
-            f"{entry_id}: names case {entry.case!r}, which is in no test here -- an entry "
-            f"nothing reproduces is a suppression, not a decision"
-        )
+        here = THIS_FILE.read_text()
+        ledger = LEDGER.read_text()
+        for entry_id, entry in sorted(KNOWN.items()):
+            assert entry.ledger.startswith("[ ] "), (
+                f"{entry_id}: a known divergence carries an OPEN ledger line naming the fix; "
+                f"a closed one means the entry should have been deleted with the fix"
+            )
+            ledger_id = entry.ledger.split()[2]
+            open_item = re.compile(rf"^\s*-?\s*\[ \]\s+`?{re.escape(ledger_id)}\b", re.M)
+            assert open_item.search(ledger), (
+                f"{entry_id}: cites ledger item {ledger_id!r}, which is not an open line in "
+                f"{LEDGER.relative_to(ROOT)}. An entry nobody owns the fix for is a suppression"
+            )
+            assert entry.case in here, (
+                f"{entry_id}: names case {entry.case!r}, which is in no test here -- an entry "
+                f"nothing reproduces is a suppression, not a decision"
+            )
 
     def test_the_two_halves_of_the_register_name_the_same_ids(self) -> None:
         """Both directions, because only one was guarded and the other was the hole.
@@ -353,9 +378,7 @@ class TestKnownDivergences:
         """
         source = CPP_TEST.read_text()
         table = re.search(
-            r"static const std::vector<KnownEntry> entries = \{(.*?)\n        \};",
-            source,
-            re.DOTALL,
+            r"static const std::vector<KnownEntry> entries = \{(.*?)\};", source, re.DOTALL
         )
         assert table, f"no known_register() table in {CPP_TEST.name}"
         body = re.search(
@@ -374,29 +397,42 @@ class TestKnownDivergences:
         )
 
 
-class TestTheKnownDivergencesAreStillReal:
-    """Each entry, reproduced. When one starts failing, the fix landed -- delete the entry."""
+# doc: long the three closed divergences and what each assertion is holding shut
+class TestTheThreeDivergencesAreClosed:
+    """P6-D1/D2/D3, from the Python side: each was a register entry, each now agrees.
 
-    def test_the_python_plane_still_prefixes_the_exception_type(
+    The register they came out of is empty, so these are the assertions that keep them
+    closed -- the C++ half is `csrc/build/test_ingest_parity`, which now diffs all three
+    scenarios against the golden with no entry excusing anything.
+
+    Each test pins BOTH planes: the Python behaviour, and the line on the C++ side it was
+    converged onto. A one-sided assertion would go green on the day the other plane moved.
+    """
+
+    def test_the_fatal_health_carries_the_message_with_no_type_prefix(
         self, fatal_health: Record
     ) -> None:
-        assert str(fatal_health.fields()["last_error"]).startswith("SourceUnavailableError: ")
-        actor_cpp = (ROOT / "csrc/shipinfer/ingest/camera/actor.cpp").read_text()
-        assert "last_error_ = redact_in(reason);" in actor_cpp, (
-            "the C++ side of last_error_type_prefix has moved; re-read it before trusting "
-            "the entry"
+        """P6-D1. The type names are the language's, so a prefix cannot converge."""
+        assert (
+            fatal_health.fields()["last_error"]
+            == "video source 'scripted' is unavailable: no-decoder"
         )
-
-    def test_a_fatal_open_leaves_the_python_failure_count_at_zero(
-        self, fatal_health: Record
-    ) -> None:
-        assert fatal_health.fields()["consecutive_failures"] == 0
-        assert fatal_health.fields()["connect_failures"] == 1
+        actor_py = (ROOT / "src/shipinfer/ingest/camera/actor.py").read_text()
         actor_cpp = (ROOT / "csrc/shipinfer/ingest/camera/actor.cpp").read_text()
+        assert "self._last_error = redact_in(reason)" in actor_py
+        assert "last_error_ = redact_in(reason);" in actor_cpp
+
+    def test_a_fatal_open_charges_one_consecutive_failure(self, fatal_health: Record) -> None:
+        """P6-D2. A failure that is never retried is still a failure, on both planes."""
+        assert fatal_health.fields()["consecutive_failures"] == 1
+        assert fatal_health.fields()["connect_failures"] == 1
+        actor_py = (ROOT / "src/shipinfer/ingest/camera/actor.py").read_text()
+        actor_cpp = (ROOT / "csrc/shipinfer/ingest/camera/actor.cpp").read_text()
+        assert "self._consecutive_failures += 1" in actor_py
         assert "++consecutive_failures_;" in actor_cpp
 
-    def test_a_second_stop_still_answers_live_on_the_python_plane(self) -> None:
-        """Abandon a thread, let it finish, stop again: Python says clean, C++ says false."""
+    def test_a_second_stop_still_answers_abandoned(self) -> None:
+        """P6-D3. Abandon a thread, let it finish, stop again: both planes still say false."""
         gate, inside = threading.Event(), threading.Event()
         config = CameraConfig(camera_id="cam_block", uri="scripted://cam_block", source="x")
         actor = CameraActor(
@@ -417,7 +453,8 @@ class TestTheKnownDivergencesAreStillReal:
         deadline = time.monotonic() + 5.0
         while actor.is_running and time.monotonic() < deadline:
             time.sleep(0.005)
-        assert actor.stop(timeout_s=1.0) is True
+        assert actor.stop(timeout_s=1.0) is False, "the abandonment did not latch"
+        assert actor.is_running is False, "`stop()` is the fate, `is_running` is the state"
         header = (ROOT / "csrc/shipinfer/ingest/camera/actor.h").read_text()
         assert "STICKY, deliberately" in header, "the C++ header no longer states the rule"
 
@@ -527,6 +564,26 @@ class TestTheDocumentedCommandsRun:
         verdict = self._hook().verdict
         refused = {c: verdict(c, str(ROOT)) for c in self._commands()}
         assert not any(refused.values()), {c: why for c, why in refused.items() if why}
+
+    def test_the_emitter_runs_this_checkouts_plane(self, tmp_path: Path) -> None:
+        """A golden emitted from another commit's plane is worse than no golden at all.
+
+        In a git worktree an editable install still resolves `shipinfer` to the PRIMARY
+        checkout, so the emitter has to put its own `src` first. Asserted positionally
+        rather than by the module it imports: on a single-checkout CI runner the two are
+        the same directory and comparing them would prove nothing.
+        """
+        probe = tmp_path / "probe.py"
+        probe.write_text(
+            "import json, runpy, sys\n"
+            f"runpy.run_path({str(EMITTER)!r}, run_name='probe')\n"
+            "print(json.dumps(sys.path[:2]))\n"
+        )
+        done = subprocess.run(
+            [sys.executable, str(probe)], capture_output=True, text=True, cwd=tmp_path
+        )
+        assert done.returncode == 0, done.stderr[-800:]
+        assert json.loads(done.stdout) == [str(ROOT / "src"), str(ROOT)]
 
 
 class _BlockingSource(FrameSource):
