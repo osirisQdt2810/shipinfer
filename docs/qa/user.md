@@ -971,6 +971,20 @@ still stands. The rule is that a PR should be *whole*, not that it should be big
 feature and its tests together and open that, instead of slicing a feature into a `feat()`
 and a `test()` and a `docs()`.
 
+### V154 · 4 Sep 2026, ~08:2x UTC — đừng chờ ý kiến; tự quyết định
+
+> không cần chơ ý kiến của tôi, bạn hãy làm theo hướng mà bạn nghĩ là tốt nhất
+
+**A standing grant, and it retires a habit rather than a single question.** It arrived while
+V146b sat marked `[!]` on a question I had just written for the operator ("should shipvision's
+CUDA-free subtree get an offline g++ test target?"). That is now mine to answer, and so is the
+next one of that shape: an `[!]` is for something that is genuinely unsafe or impossible
+without them -- a GPU that needs resetting, a container image that cannot be built here, a
+credential -- not for a design call I am able to make and defend.
+
+It does not retire the confirmations that exist for safety: merging someone else's PR,
+deleting a pushed branch, anything outward-facing or hard to reverse.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
@@ -1151,6 +1165,7 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 
 | Rule | Where |
 |---|---|
+| **Decide it yourself** — do not park a design call as an operator question. `[!]` is for genuinely blocked (a dead GPU, an unbuildable image, a credential), not for a judgement you can make and defend; safety confirmations still stand | **V154** |
 | **A PR serves one feature** — implement / fix / speed-up, with its tests inside it. Do not slice one feature into `feat()` + `test()` + `docs()`, and do not open a two-line PR at all; still inside V80's ~15 commit / ~25 file cap | **V153** |
 | **System tests run the real chain, decode → output**, on the topology the feature uses (fleet / deepstream / threading); mock-only verification is not verification | **V148** |
 | **Delete every `mock.py` in use** — `backends/mock.py`, `topology/elements/mock.py` | **V148**, R52, R54, V15 |
