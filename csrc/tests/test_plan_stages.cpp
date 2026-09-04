@@ -155,6 +155,75 @@ namespace {
         check(refused("plan 1 probe\nnode detect detect pool\nmodel ship_detector\n"
                       "letterbox 640 480\n"),
               "a non-square letterbox, which DetectConfig cannot express");
+        // A cap of `-1` is the same sign class as `kNoClass` one function over: the
+        // comparison is `detections.size() < static_cast<size_t>(max_objects)`, so a
+        // negative bound is no bound. Refused here rather than surviving to the loop.
+        check(refused("plan 1 probe\nnode detect detect pool\nmodel ship_detector\n"
+                      "max_detections -1\n"),
+              "a declared cap of -1, which `static_cast<size_t>` turns into no cap");
+    }
+
+    // A plan built in CODE never passes through `parse_plan`, so the reader's refusals do
+    // not protect it -- and `default_bench_plan()` is exactly such a plan. These assert the
+    // DECISION's own guards, which a `refused("...")` above cannot: it would be satisfied by
+    // the reader and stay green if this layer dropped its check.
+    void a_plan_built_in_code_is_still_checked() {
+        ResolvedPlan plan = default_bench_plan();
+        PlanNode* detect = nullptr;
+        for (PlanNode& node : plan.nodes) {
+            if (node.kind == "detect") detect = &node;
+        }
+        check(detect != nullptr, "the default plan has a detect slot");
+
+        const std::set<std::string> loaded = {"ship_detector"};
+        detect->max_detections = -1;
+        bool refused_cap = false;
+        try {
+            plan_stages(plan, loaded);
+        } catch (const ConfigError&) {
+            refused_cap = true;
+        }
+        check(refused_cap, "a cap of -1 in a code-built plan: refused by the decision itself");
+
+        detect->max_detections = 64;
+        detect->letterbox = Extent{640, 480};
+        bool refused_letterbox = false;
+        try {
+            plan_stages(plan, loaded);
+        } catch (const ConfigError&) {
+            refused_letterbox = true;
+        }
+        check(refused_letterbox, "and so is a non-square letterbox");
+    }
+
+    // `bench.cpp` is the file `CSRC-BENCH-UNCOMPILED` is about, so the chain it runs without
+    // a `--plan` used to be "correct by reading" -- and the literal that was WRONG for months
+    // was exactly this table. It is a value now, and these are the assertions.
+    void the_default_bench_chain_is_what_the_ladder_built() {
+        const ResolvedPlan plan = default_bench_plan();
+        const PlanStages built = plan_stages(
+            plan, {"ship_detector", "ship_segmenter", "person_embedder", "ship_embedder"});
+
+        check(plan.class_id("ship") == 8, "a ship is 8 -- the literal that said 1");
+        check(plan.class_id("person") == 0, "and a person is 0");
+        check(built.detect.size == 640, "the letterbox");
+        check(built.crops.size() == 3, "three crop sets, as the ladder built");
+        for (const CropSpec& spec : built.crops) {
+            if (spec.name == "ship_segmenter_crops") {
+                check(spec.height == 640 && spec.width == 640, "the segmenter's crop");
+                check(spec.class_id == 8, "on ships");
+            } else if (spec.name == "person_embedder_crops") {
+                check(spec.height == 256 && spec.width == 128,
+                      "a person crop: tall, not square");
+                check(spec.class_id == 0, "on people");
+            } else {
+                check(spec.name == "ship_embedder_crops", "and the ship embedder's");
+                check(spec.class_id == 8 && spec.height == 256, "on ships, same extent");
+            }
+        }
+        check(built.fields.at("embedding").size() == 2, "both embedders fill `embedding`");
+        check(built.fields.at("mask_area_px").size() == 1, "the segmenter fills mask_area_px");
+        check(built.stage_names.size() == 5, "detect, crop, and one per cropper");
     }
 
     void the_tables_the_event_writer_needs() {
@@ -185,6 +254,8 @@ int main() {
         a_field_naming_an_undeclared_slot_is_refused();
         the_refusals_this_plane_owes_the_operator();
         the_tables_the_event_writer_needs();
+        the_default_bench_chain_is_what_the_ladder_built();
+        a_plan_built_in_code_is_still_checked();
     } catch (const std::exception& error) {
         std::printf("FAIL: unexpected exception: %s\n", error.what());
         ++failures;

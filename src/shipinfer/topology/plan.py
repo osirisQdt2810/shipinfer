@@ -190,7 +190,9 @@ def resolve_plan(
                 score_threshold=(
                     None if decode is None else _finite(decode.score_threshold, where)
                 ),
-                max_detections=None if decode is None else int(decode.max_detections),
+                max_detections=(
+                    None if decode is None else _positive(decode.max_detections, where)
+                ),
                 when=(
                     None
                     if node.condition is None
@@ -293,6 +295,20 @@ def _classes_of(declared: tuple[str, ...] | None, where: str) -> tuple[str, ...]
     return tuple(
         _speakable(label, f"{where}: class", spaces=True, commas=False) for label in declared
     )
+
+
+def _positive(value: int, where: str) -> int:
+    """A cap is a positive count. Nothing between a chain file and the decode loop refused a
+    `-1` -- not `_resolve_decode_params`'s bare `int()`, not the unvalidated `DecodeParams`
+    (the `ge=1` lives on the settings tree, which a pure element does not read) -- and the two
+    planes then disagreed about how many rows to keep."""
+    count = int(value)
+    if count <= 0:
+        raise ConfigurationError(
+            f"{where}: `decode.max_detections` is {count}; a cap is a positive count, and "
+            f"`-1` for `no limit` is not a spelling either plane has"
+        )
+    return count
 
 
 def _finite(value: float, where: str) -> float:
@@ -511,14 +527,25 @@ def _word_attr(key: str) -> _Attribute:
 
 def _score(node: dict[str, object], args: Sequence[str], where: str) -> None:
     _want(args, 1, where, "score <threshold>")
-    if not _NUMBER.match(args[0]):
+    # `_NUMBER` matches `1e400`, which `float()` reads as `inf` -- and an infinite threshold
+    # passes no detection and reports nothing wrong, while the C++ reader refuses it on
+    # `isfinite`. The regex says the SHAPE; this says the value.
+    if not _NUMBER.match(args[0]) or not math.isfinite(float(args[0])):
         raise PlanSyntaxError(f"{where}: {args[0]!r} is not a finite number")
     node["score_threshold"] = float(args[0])
 
 
 def _max_detections(node: dict[str, object], args: Sequence[str], where: str) -> None:
+    """A positive count. `-1` for "no limit" is a widespread convention and neither plane has
+    it: here `keep[: -1]` would drop one row, and on the C++ side
+    `static_cast<size_t>(-1)` is no bound at all -- one plan, two detection sets."""
     _want(args, 1, where, "max_detections <count>")
-    node["max_detections"] = _int(args[0], where)
+    count = _int(args[0], where)
+    if count <= 0:
+        raise PlanSyntaxError(
+            f"{where}: max_detections is {count}; a cap is a positive count on both planes"
+        )
+    node["max_detections"] = count
 
 
 def _classes(node: dict[str, object], args: Sequence[str], where: str) -> None:

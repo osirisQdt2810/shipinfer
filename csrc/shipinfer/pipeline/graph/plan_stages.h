@@ -69,6 +69,16 @@ namespace shipinfer {
     std::string crop_payload_of(const std::string& slot);
     std::string output_of(const std::string& slot);
 
+    // The chain `cli/bench.cpp` runs when it is given no `--plan`, as a VALUE rather than
+    // as code in an app nothing compiles: `bench.cpp` is the file `CSRC-BENCH-UNCOMPILED` is
+    // about, so its label table -- the literal that said a ship was 1 -- would otherwise be
+    // "correct by reading" again. `test_plan_stages.cpp` asserts it instead.
+    //
+    // The ids are `pipeline.class_labels`'s and the extents are `ship_mask_crop` /
+    // `ship_reid_crop` / `person_reid_crop` (`core/settings/pipeline.py`). Slots are named
+    // after their models, which is what the log lines and the collector already expect.
+    ResolvedPlan default_bench_plan();
+
     // Decide, from the plan and the names of the models this process loaded.
     //
     // Throws ConfigError when the plan asks for something this plane cannot express or would

@@ -146,7 +146,15 @@ namespace shipinfer {
                 node.score_threshold = as_double(args[0], where);
             } else if (verb == "max_detections") {
                 want(args, 1, where, "max_detections <count>");
-                node.max_detections = as_int(args[0], where);
+                // A positive count, refused HERE as well as in `detect_config`, because the
+                // Python reader refuses it and the shared table is the contract. `-1` for
+                // "no limit" is no bound at all once it reaches `static_cast<size_t>`.
+                const int count = as_int(args[0], where);
+                if (count <= 0) {
+                    throw ConfigError(where + ": max_detections is " + std::to_string(count) +
+                                      "; a cap is a positive count on both planes");
+                }
+                node.max_detections = count;
             } else if (verb == "when") {
                 if (args.empty()) throw ConfigError(where + ": expected `when <expression>`");
                 std::string joined = args[0];

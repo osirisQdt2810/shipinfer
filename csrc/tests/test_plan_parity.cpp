@@ -156,6 +156,11 @@ namespace {
               "a hex float, which bare `stod` would have read");
         check(refused("plan 1 x\nlabel 99999999999999999999 ship\n"),
               "an id too large for an int, which Python's unbounded `int` used to accept");
+        check(refused("plan 1 x\nnode a b c\nmax_detections -1\n"),
+              "`-1` for `no limit`: no bound here, one row fewer there");
+        check(refused("plan 1 x\nnode a b c\nmax_detections 0\n"), "and zero");
+        check(refused("plan 1 x\nnode a b c\nscore 1e400\n"),
+              "an exponent that overflows to `inf`, which Python's regex alone allowed");
         // The emitter refuses a value holding a tab, a newline or a repeated space, because
         // `split()` collapses them -- and a newline emits an extra LINE, which injected a
         // `node` the chain never declared (#131 round 3). This reader is the other half: it

@@ -187,6 +187,9 @@ class TestBothPlanesRefuseTheSameText:
         ("plan 1 x\nfield embedding nosuch\n", "a `field` naming a slot no `node` declares"),
         ("plan 1 x\nnode a b c\nscore 0x10\n", "a hex float, which `stod` would accept"),
         ("plan 1 x\nlabel 99999999999999999999 ship\n", "an id too large for a C++ int"),
+        ("plan 1 x\nnode a b c\nmax_detections -1\n", "`-1` for `no limit`, which is no cap"),
+        ("plan 1 x\nnode a b c\nmax_detections 0\n", "and zero, for the same reason"),
+        ("plan 1 x\nnode a b c\nscore 1e400\n", "an overflowing exponent, which is `inf`"),
     )
     ACCEPTED = (
         ("plan 1 -\n", "`-` is the empty chain name"),
@@ -398,6 +401,30 @@ class TestTheFormatRefusesWhatItCannotCarry:
         )
 
         with pytest.raises(ConfigurationError, match="unnamed chain"):
+            resolve_plan(load_topology(chain), dims=dims)
+
+    def test_a_non_positive_cap_is_refused_where_the_slot_is_named(
+        self, tmp_path: Path, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """Nothing between a chain file and the decode loop refused `-1`: not the element's
+        bare `int()`, not the unvalidated `DecodeParams`. So `resolve_plan` does, and the C++
+        `detect_config` does -- because `static_cast<size_t>(-1)` is no bound at all there
+        while `keep[: -1]` drops one row here."""
+        chain = self._chain(
+            tmp_path,
+            """
+            name: uncapped
+            elements:
+              decode: {impl: replay}
+              detect:
+                impl: pool
+                model: ship_detector
+                params: {decode: {max_detections: -1}}
+              output: {impl: jsonlines}
+            """,
+        )
+
+        with pytest.raises(ConfigurationError, match="a positive count"):
             resolve_plan(load_topology(chain), dims=dims)
 
     def test_a_non_finite_threshold_is_refused_rather_than_written(

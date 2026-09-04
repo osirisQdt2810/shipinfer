@@ -204,10 +204,15 @@ namespace shipinfer {
                 continue;
             }
             const int count = static_cast<int>(indices.size());
+            // doc: long the ceiling is the plan's now, so the bound is stated in its terms
             // Sized for what was detected, rounded up in steps of eight so the pool reuses a
-            // buffer across frames of similar crowds — not for `max_objects_` every time:
-            // at 64 objects a 640x640 crop set is 64 * 3 * 640^2 * 4 B = 315 MB per buffer
-            // per worker, and the pool may hold a second one under a timeout.
+            // buffer across frames of similar crowds — NOT for `max_objects_` every time.
+            // The worst case is `max_objects_ * 3 * h * w * 4 B` per buffer per worker, and
+            // `max_objects_` comes from the plan now rather than from `DetectConfig`'s old
+            // 64: at 64 and 640x640 that is 315 MB, and the production chain's
+            // `max_detections 300` makes the same crop set ~1.5 GB — against
+            // `WorkerScratch::kMaxHeldPerName == 16`, and the pool may hold a second one
+            // under a timeout. Which is why this sizes for the frame and not for the cap.
             const int rows = std::min(max_objects_, ((count + 7) / 8) * 8);
             std::shared_ptr<DeviceBuffer> owner =
                 scratch_.acquire(spec.name, static_cast<size_t>(std::max(count, rows)) *

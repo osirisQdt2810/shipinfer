@@ -148,53 +148,6 @@ namespace {
         return out;
     }
 
-    // The chain this binary ran before `--plan` existed, as a plan rather than as code. Kept
-    // so a run with no chain file still works, and expressed HERE so it goes through the one
-    // builder: a second construction path is how the label table and the crop specs came to
-    // disagree in the first place.
-    //
-    // The ids are `pipeline.class_labels`'s (`core/settings/pipeline.py`) and the extents are
-    // `ship_mask_crop` / `ship_reid_crop` / `person_reid_crop`. Slots are named after their
-    // models, which is what the log lines and the collector already expect.
-    ResolvedPlan default_plan() {
-        using shipinfer::Extent;
-        using shipinfer::PlanNode;
-        ResolvedPlan plan;
-        plan.version = kPlanVersion;
-        plan.name = "bench-default";
-        plan.labels = {{0, "person"}, {8, "ship"}};
-        PlanNode detect;
-        detect.slot = "detect";
-        detect.kind = "detect";
-        detect.impl = "pool";
-        detect.model = "ship_detector";
-        detect.letterbox = Extent{640, 640};
-        plan.nodes.push_back(detect);
-        const struct {
-            const char* slot;
-            const char* kind;
-            const char* label;
-            Extent crop;
-        } croppers[] = {
-            {"ship_segmenter", "segment", "ship", Extent{640, 640}},
-            {"person_embedder", "embed", "person", Extent{256, 128}},
-            {"ship_embedder", "embed", "ship", Extent{256, 128}},
-        };
-        for (const auto& spec : croppers) {
-            PlanNode node;
-            node.slot = spec.slot;
-            node.kind = spec.kind;
-            node.impl = "pool";
-            node.model = spec.slot;
-            node.classes = {spec.label};
-            node.crop = spec.crop;
-            plan.nodes.push_back(node);
-            plan.fields[spec.kind == std::string("segment") ? "mask_area_px" : "embedding"]
-                .push_back(spec.slot);
-        }
-        return plan;
-    }
-
     Options parse(int argc, char** argv) {
         Options options;
         for (int i = 1; i < argc; ++i) {
@@ -358,7 +311,7 @@ int main(int argc, char** argv) {
         // labels said a ship was class 1 while the crop specs said 8, so every ship left the
         // event writer as `unknown` while the right rows were cropped.
         const ResolvedPlan plan =
-            options.plan_path.empty() ? default_plan() : read_plan(options.plan_path);
+            options.plan_path.empty() ? default_bench_plan() : read_plan(options.plan_path);
         const PlanStages planned = plan_stages(plan, loaded_names(models));
         const std::vector<std::string>& stage_names = planned.stage_names;
         std::cerr << "chain '" << plan.name << "': " << stage_names.size() << " stage(s)";

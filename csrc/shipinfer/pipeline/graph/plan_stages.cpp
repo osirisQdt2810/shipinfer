@@ -50,7 +50,22 @@ namespace shipinfer {
             if (node.score_threshold) {
                 config.score_threshold = static_cast<float>(*node.score_threshold);
             }
-            if (node.max_detections) config.max_objects = *node.max_detections;
+            if (node.max_detections) {
+                // Refused, not taken: `stages.cpp` compares `detections.size() <
+                // static_cast<size_t>(max_objects)`, so a declared -1 becomes
+                // 18446744073709551615
+                // -- no bound at all -- while the Python plane's `keep[: -1]` drops one row.
+                // One plan, two detection sets, and the unbounded one is on the plane whose
+                // numbers are the deployment's. Same sign class as `kNoClass` last round: a
+                // negative int slipping through a comparison never written for it.
+                if (*node.max_detections <= 0) {
+                    throw ConfigError("slot '" + node.slot + "' declares max_detections " +
+                                      std::to_string(*node.max_detections) +
+                                      "; a cap is a positive count on both planes, and `-1` "
+                                      "for `no limit` is not a spelling either one has");
+                }
+                config.max_objects = *node.max_detections;
+            }
             return config;
         }
 
@@ -66,6 +81,43 @@ namespace shipinfer {
         }
 
     }  // namespace
+
+    ResolvedPlan default_bench_plan() {
+        ResolvedPlan plan;
+        plan.version = kPlanVersion;
+        plan.name = "bench-default";
+        plan.labels = {{0, "person"}, {8, "ship"}};
+        PlanNode detect;
+        detect.slot = "detect";
+        detect.kind = "detect";
+        detect.impl = "pool";
+        detect.model = "ship_detector";
+        detect.letterbox = Extent{640, 640};
+        plan.nodes.push_back(detect);
+        const struct {
+            const char* slot;
+            const char* kind;
+            const char* label;
+            Extent crop;
+        } croppers[] = {
+            {"ship_segmenter", "segment", "ship", Extent{640, 640}},
+            {"person_embedder", "embed", "person", Extent{256, 128}},
+            {"ship_embedder", "embed", "ship", Extent{256, 128}},
+        };
+        for (const auto& spec : croppers) {
+            PlanNode node;
+            node.slot = spec.slot;
+            node.kind = spec.kind;
+            node.impl = "pool";
+            node.model = spec.slot;
+            node.classes = std::vector<std::string>{spec.label};
+            node.crop = spec.crop;
+            plan.nodes.push_back(node);
+            plan.fields[spec.kind == std::string("segment") ? "mask_area_px" : "embedding"]
+                .push_back(spec.slot);
+        }
+        return plan;
+    }
 
     std::string crop_payload_of(const std::string& slot) {
         return slot + "_crops";
