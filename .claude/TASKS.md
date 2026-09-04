@@ -3176,11 +3176,20 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       implementation's own claim (`model`, `requires_model_name`), with a docstring pointing at the refusal. Worth
       stating plainly in the part-1 PR body: #93 did not merely discourage `impl: pool` for recognize, it made it
       unreachable — if that is wrong, the fix is `PoolRecognize` gaining a crop/scatter half, its own slice.
-- [~] **TAIL BRANCHES · RE-CHECKED against current main 4 Sep (main has moved from 68ad880 to
-      cd43876 since the 29 Aug check, so the old verdict was stale): `feat/crowd-frames-tool`
-      still merges CLEAN; `chore/test-sh-system-tier` and `docs/trim-wave-1` now CONFLICT and
-      need rebasing. Order: test-sh (2 files) -> crowd-tool (7) -> trim-wave-1 (15, and its
-      value needs re-judging after V149 trimmed five packages properly).
+- [x] **TAIL BRANCHES · SPENT. All three landed long ago and the line was stale:
+      `chore/test-sh-system-tier` = #99 (b57c6de), `docs/trim-wave-1` = #103 (35381fd),
+      `feat/crowd-frames-tool` = #106 (f6629d1).**
+      **LESSON, because I got this wrong first and wrote the wrong answer into this file:**
+      `git merge-tree` against a branch whose content was SQUASH-merged reports CONFLICTS -- the
+      branch tip conflicts with its own already-landed content -- which reads as "needs
+      rebasing" when the truth is "already merged". `git rebase origin/main` then says
+      `skipped previously applied commit`, which is the tell. The decisive check is a subject
+      grep of main's log (`git log --oneline origin/main --fixed-strings --grep="<subject>"`).
+      Swept EVERY local branch that way 4 Sep: 50 merged, and eight genuinely unmerged --
+      `fix/describe-row-selection` (built, tested, never opened -- see DESCRIBE-CLASSES),
+      `chore/shipvision-matchers-pointer`, `refactor/one-logger`, `feat/recognize-element`,
+      and four pre-restructure carcasses (`backup/c8b-pre-split`, `split/server-old`,
+      `feat/cpp-data-plane`, `feat/multi-process-sharding`).
       Original: rebase-checked against current main 29 Aug (merge-tree, no working-tree churn):**
       `docs/trim-wave-1`, `feat/crowd-frames-tool`, `chore/test-sh-system-tier` all merge clean onto 68ad880. test-sh EXERCISED, not just read (29 Aug): `SHIPINFER_SYSTEM_VIDEO=/nonexistent/clip.mp4 deploy/rootless/test.sh -m gpu ...` prints the path and exits **1** before starting a container — the refusal is real rather than decorative.
       trim-wave-1's "prose only, no code change" claim VERIFIED rather than trusted: of 188/-545 lines, the seven
