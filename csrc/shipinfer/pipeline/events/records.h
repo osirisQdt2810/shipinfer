@@ -30,10 +30,10 @@ namespace shipinfer::pipeline::events {
     //
     // They CAN collide, and this comment said they could not. A resolved chain plan may carry
     // a crop slot with no `classes:`, which is every row, so two candidates can cover one
-    // detection. The rule is in `build_records`: the FIRST candidate that mentions a row
-    // coverage union rather than a priority list, and a row two of them cover is REFUSED.
-    // Nothing refuses such a chain at LOAD yet -- `RECORDS-COLLISION-AT-LOAD` in the
-    // ledger records what that would cost.
+    // detection. This list is therefore a COVERAGE UNION and not a priority list: a row two
+    // of them cover is REFUSED by `build_records`, which is the decision
+    // `PoolEmbed._scatter` and `ChainWalk.inbound` already made on the other plane. Nothing
+    // refuses such a chain at LOAD yet -- `RECORDS-COLLISION-AT-LOAD` says what that costs.
     using FieldMap = std::map<std::string, std::vector<std::string>>;
 
     //: The labels a class id maps to (`pipeline.class_labels`). Passed in, never hard-coded:

@@ -35,9 +35,6 @@ namespace shipinfer::pipeline::events {
             }
         }
 
-        // Named rather than skipped, and this is the same refusal the Python plane makes ("no
-        // converter for ObjectRecord field"): a typo in a field map that silently filled
-        // nothing would read as a stage that did not run.
         // The field's own name back, for a refusal that has to name it. A `Field` is an
         // enum so the string is not on it, and a second table is cheaper than carrying the
         // name through every row.
@@ -57,6 +54,9 @@ namespace shipinfer::pipeline::events {
             return "?";
         }
 
+        // Named rather than skipped, and this is the same refusal the Python plane makes ("no
+        // converter for ObjectRecord field"): a typo in a field map that silently filled
+        // nothing would read as a stage that did not run.
         Field field_of(const std::string& name) {
             if (name == "embedding") return Field::Embedding;
             if (name == "ship_id") return Field::ShipId;

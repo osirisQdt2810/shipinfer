@@ -1,13 +1,12 @@
 """One frame's STAGE OUTPUTS, so both planes' record builders run on the same inputs.
 
 The event seam (`event_scenario.py`) states finished `ObjectRecord`s, so it compares the two
-JSON writers and never the two builders. `build_records` -- the translation unit that actually
-runs in production, on both planes -- is covered only by each side's own unit checks, which
-is what P5-A-ALLOC's second half is about.
+JSON writers and never the two builders -- which is P5-A-ALLOC's second half.
 
 So a scenario here describes what the graph LEAVES BEHIND: the detections, the per-object
-batches with their row indices, the label table, and the field map's priority order. Each
-plane then builds its own records and writes its own event, and the gate compares bytes.
+batches with their row indices, the label table, and the field map. Each plane builds its own
+records and writes its own event, and the gate compares bytes -- except for a scenario
+describing a frame both planes must REFUSE, which has no golden at all.
 
 Numbers are restricted to :data:`~benchmarks.parity.event_scenario.FLOATS` for that seam's
 reason: the comparison is a byte compare, so a value the two planes spell differently would
@@ -65,8 +64,14 @@ class RecordScenario:
     labels: dict[int, str] = field(default_factory=dict)
     detections: tuple[DetectionSpec, ...] = ()
     batches: tuple[BatchSpec, ...] = ()
-    #: ``ObjectRecord`` field -> the batch names that can fill it, IN PRIORITY ORDER. The
-    #: first one that mentions a row wins on both planes.
+    # doc: long the order is declaration order, and what it does NOT decide
+    #: ``ObjectRecord`` field -> the batch names that can fill it, in declared order. A
+    #: COVERAGE UNION: a row two candidates cover is REFUSED on both planes, so the order
+    #: does not pick a winner -- do not write a scenario that leans on one.
+    #:
+    #: It does decide which field a *message* names when two fields collide in one frame:
+    #: Python iterates insertion order, the C++ plane a `std::map` sorted by field name. Both
+    #: refuse, so the operational outcome agrees and no gate can see the difference.
     fields: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
