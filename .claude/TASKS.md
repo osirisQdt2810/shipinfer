@@ -2092,8 +2092,17 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       can be found, including a distribution's default include path. The CI half is a new
       `cpp-syntax` job: headers only (`cuda-cudart-dev-12-6` + `libnvinfer-headers-dev`, ~40 MB,
       no nvcc, no driver, ordinary runner) and a step that FAILS on a skip, because a silent
-      skip is the defect. Rehearsed both ways against the real tree: rc=0 with the headers,
-      rc=1 without.
+      skip is the defect -- and it is a pytest FAILURE now rather than a grep on `-q` output
+      inside a `| tee` pipeline whose status was `tee`'s (#133 round 1: the step could not
+      fail for the reason it existed, because `bash -e {0}` has no `pipefail` and pytest was
+      not even installed in the job).
+      SCOPE GREW in round 1, correctly: the check covers the EIGHT implementation units the
+      offline build cannot reach as well as the apps, since `-fsyntax-only` on an app does not
+      parse the `.cpp` files in its closure -- `backends/tensorrt/engine.cpp`, where
+      `initLibNvInferPlugins` lives, was compiled by nothing either. Two of them need an
+      external lane and are skipped where `pkg-config` says it is absent, which is the answer
+      `build_csrc.py` gives. Rehearsed in three states against the real tree: rc=0 with
+      headers and good code, rc=1 with the headers absent, rc=1 on a real compile error.
       Original: `cli/bench.cpp` is compiled by NOTHING in CI, and it took a
       reviewer reading a diff to find that out (#129 round 4).** Its include closure reaches
       `core/platform.h`, so `build_csrc.py --offline` excludes it and `ci.yml`'s `cpp-offline`

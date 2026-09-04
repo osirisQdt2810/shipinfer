@@ -121,7 +121,7 @@ jobs:
           done
 
   cpp-syntax:
-    name: C++ apps the offline build cannot reach (headers only, no driver)
+    name: C++ units nothing else compiles (headers only, no driver)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -131,36 +131,41 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # `cli/bench.cpp` reaches `core/platform.h`, so `--offline` refuses it and NOTHING in
-      # this repository ever compiled it — the hole that let a `std::mutex` and a `std::map`
-      # be used in its sink without being declared, found by a reviewer rather than by a
-      # build. `-fsyntax-only` needs the two HEADER sets and no driver, no nvcc and no GPU,
-      # which is why this is an ordinary runner and not the device tier.
+      # pytest is NOT in this interpreter by default -- it comes from the `dev` extra, which
+      # only the `test` job installs. Without this the step ran `No module named pytest` and,
+      # behind a `| tee`, reported success: the job could never fail for the reason it exists.
+      - name: Install pytest
+        run: pip install pytest
+      # `cli/bench.cpp` reaches `core/platform.h`, so `--offline` refuses it and NOTHING here
+      # compiled it -- the hole that let a `std::mutex` be used in its sink without being
+      # declared, found by a reviewer rather than by a build. Eight implementation units are
+      # in the same position, including `backends/tensorrt/engine.cpp`. `-fsyntax-only` needs
+      # the two HEADER sets and no driver, no nvcc and no GPU, which is why this is an
+      # ordinary runner rather than the device tier.
       - name: Install the CUDA and TensorRT headers
         run: |
-          set -eux
+          set -euxo pipefail
           codename=$(. /etc/os-release && echo "${VERSION_ID//./}")
           wget -q "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${codename}/x86_64/cuda-keyring_1.1-1_all.deb"
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update -qq
-          # Headers only: `cuda-cudart-dev` brings `cuda_runtime.h` and
-          # `libnvinfer-headers-dev` brings `NvInfer.h`, both onto the default include path.
-          # No runtime, no nvcc, ~40 MB — a fraction of installing the toolkit.
-          sudo apt-get install -y --no-install-recommends cuda-cudart-dev-12-6 libnvinfer-headers-dev
-      - name: Syntax-check every app the offline build refuses
-        # The test skips itself when the headers are missing, which is exactly how this hole
-        # stayed open — so a skip here has to be a failure. `-p no:cacheprovider` keeps the
-        # runner's tree clean; `-rs` prints the reason if it does skip.
-        run: |
-          set -e
-          python -m pytest tests/test_cuda_reaching_apps_compile.py -q -rs \
-            -p no:cacheprovider | tee /tmp/syntax.log
-          grep -q "skipped" /tmp/syntax.log && {
-            echo "the syntax check SKIPPED, which means the headers are not installed --"
-            echo "that skip is the hole this job exists to close (CSRC-BENCH-UNCOMPILED)"
-            exit 1
-          }
-          exit 0
+          # Headers only: `cuda-cudart-dev` brings `cuda_runtime.h` and the pinned
+          # `libnvinfer-headers-dev` brings `NvInfer.h`. No runtime, no nvcc, ~40 MB.
+          # PINNED to TensorRT 10: this tree has no `NV_TENSORRT_MAJOR` guard, so an
+          # unpinned major would break main's CI with no commit to blame.
+          sudo apt-get install -y --no-install-recommends \
+            cuda-cudart-dev-12-6 "libnvinfer-headers-dev=10.*"
+      - name: Syntax-check every unit the offline build cannot reach
+        shell: bash          # -> `bash --noprofile --norc -eo pipefail`, so a pipe cannot mask
+        env:
+          # `cuda-cudart-dev-12-6` installs under a versioned prefix, and the test's probe
+          # reads CUDA_HOME exactly as `scripts/build_csrc.py` does.
+          CUDA_HOME: /usr/local/cuda-12.6
+          # A SKIP is the hole this job exists to close, so here it is a FAILURE with a
+          # reason -- asserted by a test rather than by grepping pytest's `-q` summary, whose
+          # shape changes between versions and whose exit status a pipe used to swallow.
+          SHIPINFER_REQUIRE_CSRC_HEADERS: "1"
+        run: python -m pytest tests/test_cuda_reaching_apps_compile.py -q -rs -p no:cacheprovider
 
   cpp-gst-lane:
     name: C++ gst lane (section O + the pixel)
