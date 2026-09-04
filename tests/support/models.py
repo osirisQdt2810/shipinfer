@@ -218,6 +218,10 @@ def unit_cost_ms() -> float:
     Timed through ``optimize_for_inference``, which is what ``TorchScriptBackend`` runs
     (``backends/torch_backend.py``) -- calibrating on the raw traced module measures a
     module the server never executes, and the two differ by several times over.
+
+    The **cheapest** run, the same estimator the assertions use: a mean inflated by a stall
+    reports too large a unit cost, sizes every declared latency too SMALL, and is cached for
+    the process. A min errs the other way, which is the safe one.
     """
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "calibration.pt"
@@ -226,10 +230,11 @@ def unit_cost_ms() -> float:
         sample = torch.zeros(1, 4)
         for _ in range(3):
             module(sample)
-        start = time.perf_counter()
+        elapsed = float("inf")
         for _ in range(_CALIBRATION_RUNS):
+            start = time.perf_counter()
             module(sample)
-        elapsed = (time.perf_counter() - start) * 1000.0 / _CALIBRATION_RUNS
+            elapsed = min(elapsed, (time.perf_counter() - start) * 1000.0)
     return max(elapsed / _CALIBRATION_WORK, 1e-4)
 
 

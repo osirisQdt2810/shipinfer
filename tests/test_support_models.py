@@ -8,7 +8,8 @@ turns those into tests that pass against a deleted limiter.
 So the assertions here are made after ``torch.jit.optimize_for_inference``, which is what
 ``TorchScriptBackend._do_initialize`` applies. Timed on the machine running the suite and
 compared against the fixture's own calibration, never against a hard-coded millisecond
-count, so a slow CI box cannot make this flaky.
+count, so a slow CI box cannot make this flaky -- and timed as the CHEAPEST of several
+runs rather than the mean, so a *busy* one cannot either (see :func:`_milliseconds`).
 """
 
 from __future__ import annotations
@@ -32,14 +33,31 @@ def _through_the_backend(
     return torch.jit.optimize_for_inference(torch.jit.load(str(path)).eval())
 
 
+# doc: long why the minimum and not the mean, and what it cost to find out
 def _milliseconds(module: torch.jit.ScriptModule, runs: int = 5) -> float:
+    """The cheapest of ``runs`` executions, in milliseconds.
+
+    The **minimum**, not the mean, and that is the whole difference between a robust
+    measurement and a flaky one here. A scheduler stall can only ADD time, so the mean of a
+    run that was descheduled measures the machine's load and the model's cost together, while
+    the minimum is the sample least contaminated by it. Every assertion below is a ratio or a
+    lower bound, so a slight under-estimate is harmless and an over-estimate is not:
+    `test_the_cost_is_linear_in_the_declared_work` failed on 4 Sep 2026 with a C++ compile on
+    the same box, because the 200-iteration run caught a stall and the ratio fell under 5.
+
+    The module docstring claimed a slow box could not make this flaky. A slow box cannot -- a
+    ratio is scale-free -- but a *busy* one could, and the offline tier's promise is that it
+    passes anywhere, which includes a loaded CI runner.
+    """
     sample = torch.zeros(1, 4)
     for _ in range(3):
         module(sample)
-    start = time.perf_counter()
+    best = float("inf")
     for _ in range(runs):
+        start = time.perf_counter()
         module(sample)
-    return (time.perf_counter() - start) * 1000.0 / runs
+        best = min(best, (time.perf_counter() - start) * 1000.0)
+    return best
 
 
 class TestTheWorkSurvivesTheBackendsOwnOptimiser:
