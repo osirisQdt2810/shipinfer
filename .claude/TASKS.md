@@ -2057,7 +2057,11 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       (Original: SEQUENCED after C8m moves pipeline/schema.py → core/events — writing it against the moving module is churn; planner 28 Aug.) Resolved config in, same events out.** The binary takes the settings tree and the
       model repository (`config.yaml`) the Python plane reads, not CLI flags; emits the same
       event schema (`pipeline/schema.py`) so one sink serves both planes.
-- [~] **P6-PRB · MERGED as PR #122; the four follow-ups OPEN as PR #123 (4 Sep). One scenario
+- [x] **P6-PRB · DONE. #122 (the gate) and #123 (its four follow-ups) both MERGED, APPROVE
+      round 1 each. The queue seam now has five scenarios, five goldens and a C++ gate at 22
+      checks / 0 failures, with NO known-divergence register -- the planes have never
+      disagreed on it. What is left of P6 is PR-C (csrc runners re-baseline).
+      Original: MERGED as PR #122; the four follow-ups OPEN as PR #123 (4 Sep). One scenario
       closed findings 1+2 -- `fifo_close_drains` -- and the C++ plane reproduced it byte for
       byte (18 checks -> 22, 0 failures), so both holes were coverage and not divergence.
       Findings 5 and 6 deliberately NOT taken, with the reason in the body. Original follow-up

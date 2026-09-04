@@ -1,5 +1,39 @@
 # Journal
 
+## 2026-09-04 (later) — P6 PR-B: the queue seam gets a parity gate, both planes
+
+Six PRs merged today. After V149 closed with #121 the next ledger item was P6 PR-B, and it
+went further than scoped: the gate is built, merged (#122) and its review's four follow-ups
+are merged too (#123).
+
+**The design decision worth remembering is that it is INVERTED from the ingest harness.**
+`diff.by_camera` splits a trace per camera because thread interleaving is nondeterministic.
+For a queue that is backwards: *which* camera's item comes out next **is** the invariant. A
+queue run is single-threaded with no clock in it, so every queue record is a FLEET kind
+carrying the item's camera in its words -- the whole trace is one ordered sequence and
+`diff.py` needed no change at all.
+
+**The two planes matched byte for byte on the first run they were ever compared.** No
+known-divergence register, which is now the default rather than a concession. Five scenarios,
+one invariant each, each asserted against the committed golden so a long-but-vacuous golden
+fails: fair eviction charges the flood and spares the quiet camera; the default policy refuses
+rather than evicting; tracking-critical does not queue behind a background batch; an expired
+request is accepted then dropped on the way out; and `fifo` drops the oldest while a close
+drains the rest in order and charges nobody.
+
+**Two review findings were coverage holes in a gate whose value is having none** -- `fifo` was
+compiled into both halves and never compared, and `DropReason::Closed` was in the vocabulary
+and in no golden, which is the ONE path where the planes are structurally different (Python
+reads what `close()` returns; C++ routes through `on_drop_`). Both closed by one scenario, and
+both turned out to be coverage rather than divergence.
+
+**Also found and recorded, not fixed:** `test_the_cost_is_linear_in_the_declared_work` is a
+wall-clock assertion in the offline tier and fails under load. A tier that fails on a busy
+machine gets re-run until green, which is how a real failure gets ignored. It is its own
+ledger item now (FLAKY-COST-TEST).
+
+**Next:** P6 PR-C (csrc runners re-baseline) is what remains of P6.
+
 ## 2026-09-04 — the V151 handoff, executed: #118–#121, and P6's register emptied
 
 **The handoff worked as written.** "tiep tuc" -> RESUME HERE -> four PRs, three merged.
