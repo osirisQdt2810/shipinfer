@@ -50,12 +50,18 @@ PYTHON_ONLY = {
     "repository": "ADR-014: the model repository is data-driven config, read once at load",
     "launch": "process supervision and the parent half of the shard RPCs -- control plane, and"
     " `launch/signals.py` must not import torch at all, which is a Python constraint",
-    "topology": None,
-    "runners": None,
+    "topology": "ADR-020: the chain is a Python declaration and the C++ plane receives a"
+    " RESOLVED PLAN, which `topology/plan.py` writes. A registry, caps negotiation and a YAML"
+    " loader are load-time control plane, and a second validator is a second door -- the"
+    " failure being one plane accepting a chain the other refuses",
+    "runners": "ADR-020: choosing WHERE a chain executes is control plane, and this plane's"
+    " one execution loop is its binary's composition root under `csrc/shipinfer/cli/` --"
+    " which `cli` already mirrors",
 }
 
-#: The ledger item that owes each undecided row.
-OWED_BY = {"topology": "CSRC-TOPOLOGY-Q", "runners": "CSRC-TOPOLOGY-Q"}
+#: The ledger item that owes each undecided row. Empty since ADR-020 answered both, and
+#: `test_every_deferral_is_in_owed_by` is what keeps it honest in either direction.
+OWED_BY: dict[str, str] = {}
 
 #: C++-only, with where its peer lives instead.
 CPP_ONLY = {
@@ -123,8 +129,10 @@ class TestEveryPackageIsPlaced:
 class TestTheUndecidedRowsAreSomebodysWork:
     """``None`` is a decision deferred, and a deferral with no owner is a decision made."""
 
-    @pytest.mark.parametrize("package", sorted(OWED_BY))
-    def test_an_undecided_row_cites_an_open_ledger_item(self, package: str) -> None:
+    @pytest.mark.parametrize("package", sorted(OWED_BY) or [None])
+    def test_an_undecided_row_cites_an_open_ledger_item(self, package: str | None) -> None:
+        if package is None:
+            pytest.skip("no undecided rows; `test_every_deferral_is_in_owed_by` asserts that")
         assert PYTHON_ONLY[package] is None, f"{package} has a reason now; drop it from OWED_BY"
         item = OWED_BY[package]
         open_line = re.compile(rf"^\s*-?\s*\[!\]\s+\*{{0,2}}{re.escape(item)}\b", re.M)
@@ -135,6 +143,10 @@ class TestTheUndecidedRowsAreSomebodysWork:
         )
 
     def test_every_deferral_is_in_owed_by(self) -> None:
+        """The invariant that survives an EMPTY register, which the parametrize above cannot:
+        an empty parameter set skips, and a skip is indistinguishable from a check that has
+        stopped running. Both tables are empty since ADR-020 answered `topology` and
+        `runners`, so this is the one that still asserts something."""
         deferred = {name for name, why in PYTHON_ONLY.items() if why is None}
 
         assert deferred == set(OWED_BY), sorted(deferred ^ set(OWED_BY))

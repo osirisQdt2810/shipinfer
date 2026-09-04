@@ -31,6 +31,8 @@ for entry in (str(ROOT), str(ROOT / "src")):
 from benchmarks.parity.drive_events import GOLDEN as EVENT_GOLDEN  # noqa: E402
 from benchmarks.parity.drive_events import load as load_event  # noqa: E402
 from benchmarks.parity.drive_events import render as render_event  # noqa: E402
+from benchmarks.parity.drive_plan import GOLDEN as PLAN_GOLDEN  # noqa: E402
+from benchmarks.parity.drive_plan import load_plan_scenario, render_plan  # noqa: E402
 from benchmarks.parity.drive_python import GOLDEN, SCENARIOS, run_scenario  # noqa: E402
 from benchmarks.parity.drive_queue import GOLDEN as QUEUE_GOLDEN  # noqa: E402
 from benchmarks.parity.drive_queue import SCENARIOS as QUEUE_SCENARIOS  # noqa: E402
@@ -47,9 +49,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scenario", required=True, help="a name under scenarios/, or a path")
     parser.add_argument(
         "--kind",
-        choices=("ingest", "queue", "event"),
+        choices=("ingest", "queue", "event", "plan"),
         default="ingest",
-        help="which seam: the camera actors, the request queue (scenarios/queues/), or one\n        perception event (scenarios/events/)",
+        help="which seam: the camera actors, the request queue (scenarios/queues/), one\n        perception event (scenarios/events/), or a resolved chain (scenarios/plans/)",
     )
     parser.add_argument("--out", type=Path, help="write the trace here instead of stdout")
     parser.add_argument(
@@ -60,6 +62,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--force", action="store_true", help="overwrite an existing golden")
     args = parser.parse_args(argv)
+
+    if args.kind == "plan":
+        # A chain file in, the plan text out. No trace and nothing to run: the artefact that
+        # crosses the plane boundary IS the golden, so `records_min` has no meaning here.
+        chain = load_plan_scenario(args.scenario)
+        text = render_plan(chain)
+        destination = PLAN_GOLDEN / f"{chain.stem}.plan" if args.emit_golden else args.out
+        if destination is None:
+            print(text, end="")
+            return 0
+        if args.emit_golden and destination.exists() and not args.force:
+            raise ConfigurationError(
+                f"{destination} already exists. A golden is captured once and committed; "
+                f"pass --force only when the change to the plane IS the decision"
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(text, encoding="utf-8")
+        print(f"wrote {destination} ({len(text.splitlines())} line(s))")
+        return 0
 
     if args.kind == "event":
         # One line, not a trace: an event is a single value and what the planes must agree

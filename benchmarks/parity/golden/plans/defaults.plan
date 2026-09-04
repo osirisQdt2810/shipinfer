@@ -1,0 +1,32 @@
+# A RESOLVED chain, written by `shipinfer plan` -- do not hand-edit.
+plan 1 defaults
+label 0 person
+label 8 ship
+
+node decode decode replay
+
+node detect detect pool
+model ship_detector
+letterbox 640 640
+score 0.25
+max_detections 100
+
+node detect_small detect pool
+model ship_detector
+letterbox 640 640
+score 1e-05
+max_detections 7
+
+node embed_none embed pool
+model ship_embedder
+classes -
+crop 256 128
+
+node output output jsonlines
+
+edge decode detect bgr@cpu
+edge decode detect_small bgr@cpu
+edge detect embed_none bgr@cpu
+edge detect_small output bgr@cpu
+edge embed_none output bgr@cpu
+field embedding embed_none

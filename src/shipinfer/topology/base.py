@@ -26,7 +26,7 @@ import contextlib
 import enum
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Final, Protocol
+from typing import Any, ClassVar, Final, Protocol, runtime_checkable
 
 from shipinfer.core.errors import ServerStateError, UnknownElementKindError
 from shipinfer.core.metrics import MetricsRegistry
@@ -226,6 +226,20 @@ class LetterboxLike(Protocol):
     pads: Any
     #: Per-image ``(out_h, out_w)`` — the extent actually written, before padding.
     extents: Any
+
+
+@runtime_checkable
+class DecodeParamsLike(Protocol):
+    """A detector's resolved decode settings, as a shape rather than an import.
+
+    :class:`shipinfer.topology.elements.detections.DecodeParams` satisfies this, and ``base``
+    may not name it: ``elements`` imports this module, not the other way round. Same
+    inversion as :class:`ImageOpsLike`, one member up.
+    """
+
+    class_labels: Mapping[int, str]
+    score_threshold: float
+    max_detections: int
 
 
 class ImageOpsLike(Protocol):
@@ -700,6 +714,19 @@ class Element(abc.ABC):
             The declared labels, or ``None`` when this element declares no table — in which
             case the loader checks nothing, because a default table is a fallback and not a
             statement about this deployment's model.
+        """
+        return None
+
+    def decode_parameters(self) -> DecodeParamsLike | None:
+        """This element's **effective** decode settings, or ``None`` if it decodes nothing.
+
+        The difference from :meth:`detection_labels` is the point: that answers "what did the
+        FILE declare", for a check that must not fire on a default. This answers "what will
+        this element do", which is what a plan carries -- one that omitted a defaulted
+        threshold made the other plane invent its own, the literal ADR-020 deletes.
+
+        A hook and not a re-read of ``params``, for :meth:`detection_labels`'s reason: the
+        element has parsed the key and applied its own refusals already.
         """
         return None
 

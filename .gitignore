@@ -27,6 +27,10 @@ compile_commands.json
 # both live in the model repository on disk / object storage, never in git.
 *.engine
 *.plan
+# ...except the resolved CHAIN plans, which are committed goldens of a few hundred bytes and
+# have nothing to do with a serialised engine. Narrow on purpose: `*.plan` above is what keeps
+# a ~100 MB engine out of a commit, and it stays.
+!benchmarks/parity/golden/plans/*.plan
 *.onnx
 *.pth
 *.pt
