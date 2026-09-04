@@ -569,6 +569,11 @@ class Topology:
                 marks.append(f"model={node.spec.model}")
             if node.condition is not None:
                 marks.append(f"when={node.condition}")
+            # Row selection, beside the frame guard. Since C8b `params: {classes: [...]}` is
+            # how a slot picks objects, so a description that shows `when=` and not this
+            # answers half the question an operator opens it to ask.
+            if (classes := node.element.declared_classes()) is not None:
+                marks.append(f"classes={list(classes)}")
             if node.is_root:
                 marks.append("root")
             if node.is_sink:
