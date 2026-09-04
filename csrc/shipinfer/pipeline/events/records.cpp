@@ -35,6 +35,25 @@ namespace shipinfer::pipeline::events {
             }
         }
 
+        // The field's own name back, for a refusal that has to name it. A `Field` is an
+        // enum so the string is not on it, and a second table is cheaper than carrying the
+        // name through every row.
+        const char* field_name_of(Field field) {
+            switch (field) {
+                case Field::Embedding:
+                    return "embedding";
+                case Field::ShipId:
+                    return "ship_id";
+                case Field::Similarity:
+                    return "similarity";
+                case Field::MaskArea:
+                    return "mask_area_px";
+                case Field::TrackId:
+                    return "track_id";
+            }
+            return "?";
+        }
+
         // Named rather than skipped, and this is the same refusal the Python plane makes ("no
         // converter for ObjectRecord field"): a typo in a field map that silently filled
         // nothing would read as a stage that did not run.
@@ -64,7 +83,23 @@ namespace shipinfer::pipeline::events {
         // By detection INDEX, because that is what a batch scatters against -- and sized from
         // the same capture, so a batch whose index runs past this list simply has nothing to
         // fill rather than reaching out of bounds.
+        // A contested row is REFUSED, not picked. This is the decision the Python chain
+        // plane already made and tested: `PoolEmbed._scatter` and `ChainWalk.inbound` both
+        // raise when a second slot files a row an earlier one covered, and
+        // `tests/runners/test_walk.py` states the reasoning -- "there is no answer to 'which
+        // of these two vectors is this object's'. Silently keeping one would attach an
+        // appearance vector chosen by declaration order."
+        //
+        // So the candidate list is a COVERAGE union, not a priority list: two slots covering
+        // one detection means the chain file asked both of them for it, and both paid a GPU
+        // for it. Per frame, and `cli/bench.cpp`'s sink counts it per camera -- which is why
+        // this may throw at all (#129 round 2: nothing may throw past `seal()`). A refusal at
+        // LOAD would be better; `RECORDS-COLLISION-AT-LOAD` records what it would cost.
+        // Sized once, cleared per field. `assign` on the first iteration does the fill,
+        // so the vector is constructed empty rather than filled twice.
+        std::vector<bool> filled;
         for (const auto& [field, candidates] : resolved) {
+            filled.assign(records.size(), false);
             for (const std::string& candidate : *candidates) {
                 const auto found = inputs.batches.find(candidate);
                 if (found == inputs.batches.end() || found->second.empty()) continue;
@@ -72,11 +107,22 @@ namespace shipinfer::pipeline::events {
                 for (size_t row = 0; row < batch.rows(); ++row) {
                     const int index = batch.object_indices[row];
                     if (index < 0 || static_cast<size_t>(index) >= records.size()) continue;
-                    set_field(records[static_cast<size_t>(index)], field, batch.row(row),
-                              batch.width);
+                    const size_t at = static_cast<size_t>(index);
+                    if (filled[at]) {
+                        throw InferenceError(
+                            "two batches cover detection row " + std::to_string(index) +
+                            " for the event's '" + field_name_of(field) + "': '" + candidate +
+                            "' and an earlier candidate. Batches sharing a field merge their "
+                            "coverage rather than one replacing the other, and two of them "
+                            "covering one detection means the chain asked both for it -- "
+                            "check their `params: classes:` do not overlap");
+                    }
+                    set_field(records[at], field, batch.row(row), batch.width);
+                    filled[at] = true;
                 }
             }
         }
+
         for (size_t i = 0; i < inputs.detections.size(); ++i) {
             const Detection& detection = inputs.detections[i];
             ObjectRecord& record = records[i];

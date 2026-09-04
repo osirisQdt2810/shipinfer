@@ -24,10 +24,16 @@ namespace shipinfer::pipeline::events {
     // entry here and a field there.
     //
     // Two candidates per field is normal, and it is what removes the class check: a ship's
-    // embedding comes from the ship embedder and a person's from the person embedder, and a
-    // batch only ever holds rows of ITS OWN class, so they cannot collide. An earlier version
-    // picked the embedder with `class_name == "ship"` -- a second spelling of "which class is
-    // this row", which is exactly how a ship's embedding ends up on a person.
+    // embedding comes from the ship embedder and a person's from the person embedder. An
+    // earlier version picked the embedder with `class_name == "ship"` -- a second spelling of
+    // "which class is this row", which is exactly how a ship's embedding ends up on a person.
+    //
+    // They CAN collide, and this comment said they could not. A resolved chain plan may carry
+    // a crop slot with no `classes:`, which is every row, so two candidates can cover one
+    // detection. This list is therefore a COVERAGE UNION and not a priority list: a row two
+    // of them cover is REFUSED by `build_records`, which is the decision
+    // `PoolEmbed._scatter` and `ChainWalk.inbound` already made on the other plane. Nothing
+    // refuses such a chain at LOAD yet -- `RECORDS-COLLISION-AT-LOAD` says what that costs.
     using FieldMap = std::map<std::string, std::vector<std::string>>;
 
     //: The labels a class id maps to (`pipeline.class_labels`). Passed in, never hard-coded:
