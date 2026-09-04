@@ -3190,13 +3190,24 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `chore/shipvision-matchers-pointer`, `refactor/one-logger`, `feat/recognize-element`,
       and four pre-restructure carcasses (`backup/c8b-pre-split`, `split/server-old`,
       `feat/cpp-data-plane`, `feat/multi-process-sharding`).
+      **RESOLVED, each one, 4 Sep -- nothing is owed:** `fix/describe-row-selection` is now
+      PR #126; `feat/recognize-element` is C7 = #85 and `refactor/one-logger` is one of the
+      three Z1 already established as squash-merged with its content present; the four
+      carcasses predate the restructure. `chore/shipvision-matchers-pointer` is the one to
+      DELETE rather than open -- it points the submodule at c779ad7, which is an ANCESTOR of
+      main's 5a5359a, so opening it would regress the pointer past #14 and #15. Left in place
+      rather than deleted, because deleting a pushed branch is the operator's call.
       Original: rebase-checked against current main 29 Aug (merge-tree, no working-tree churn):**
       `docs/trim-wave-1`, `feat/crowd-frames-tool`, `chore/test-sh-system-tier` all merge clean onto 68ad880. test-sh EXERCISED, not just read (29 Aug): `SHIPINFER_SYSTEM_VIDEO=/nonexistent/clip.mp4 deploy/rootless/test.sh -m gpu ...` prints the path and exits **1** before starting a container — the refusal is real rather than decorative.
       trim-wave-1's "prose only, no code change" claim VERIFIED rather than trusted: of 188/-545 lines, the seven
       that pattern-match as code are all docstring fragments beginning with `for`/`from`/`with`/`if any.` — no
       statement, signature or import changes. Order after #94: elements part1 → part2 → part3 → system-real-chain →
       fleet-repo-flag → P6 → shipvision pointer bump → test-sh-system-tier → trim-wave-1 → crowd-tool → HOOK-FP.
-- [x] **DESCRIBE-CLASSES · BUILT and pushed 29 Aug (`fix/describe-row-selection`, fffa0c3, off main): two lines in `describe()` plus one test; revert-check 1 red / 106 green. Joins the tail of the queue. Original: `Topology.describe()` omits `params: {classes: [...]}`.** Found 29 Aug while rewriting a
+- [~] **DESCRIBE-CLASSES · OPEN as PR #126 (08ec76d, 4 Sep), automerge on. It sat built on a
+      branch for six days because it was parked behind "do it when a topology PR is already
+      open" and no topology PR ever happened to be open -- found by the branch sweep, not by
+      the ledger, which had it marked `[x]` while it was unopened. Rebased on cdc8526; tier
+      3340, topology 767, revert-check 1 red. Original: BUILT and pushed 29 Aug (`fix/describe-row-selection`, fffa0c3, off main): two lines in `describe()` plus one test; revert-check 1 red / 106 green. Joins the tail of the queue. Original: `Topology.describe()` omits `params: {classes: [...]}`.** Found 29 Aug while rewriting a
       test that asserted output `describe()` never produced. It prints `[model=…]`, `[root]`, `[sink]` and `when=…`,
       so after C8b a reader of `shipinfer run --describe` sees the frame guards and none of the row selection. One
       line in the element-line builder plus a test; do it when a topology PR is already open, not as a solo round.
