@@ -506,7 +506,10 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 5 · Everything else still owed
 
-- [~] **C4 · RTSP in the benchmark** (R55) — wired and tested offline; measured 26 Aug. **(RUNBOOK: scratchpad/plan-phase-e-bench.md, run 3.) RE-SCOPED 28 Aug: the harness
+- [!] **C4 · BLOCKED on GPU7-DEGRADED (re-confirmed 4 Sep: `nvidia-smi -i 7` still returns
+      `[Unknown Error]` for temperature and `[N/A]` for power/utilisation/ECC, so every `-m gpu`
+      test errors at CUDA init and no bench run can produce a per-device table). Nothing to do
+      here until the operator resets GPU 7. Original: RTSP in the benchmark** (R55) — wired and tested offline; measured 26 Aug. **(RUNBOOK: scratchpad/plan-phase-e-bench.md, run 3.) RE-SCOPED 28 Aug: the harness
       drives the PRE-RESET pipeline; the owed RTSP-vs-replay number should be re-taken through `shipinfer run` once the
       Phase-E bench exists — do not spend container time on the old path.**
       `--source rtsp` points the bench cameras at `scripts/rtsp_serve.py` over a real socket,
@@ -911,7 +914,9 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 6 · The final goal (V49)
 
-- [ ] **C1 · ≥5× counting-simulation, whole system.** (RUNBOOK: scratchpad/plan-phase-e-bench.md — run 4 of the consolidated Phase-E matrix; gated on Phase C+D per arch.md §10.) Measured: baseline 868.2 img/s against the
+- [!] **C1 · BLOCKED on GPU7-DEGRADED (re-confirmed 4 Sep, see C4) as well as on Phase C+D.
+      A bench run with a per-device breakdown is the whole deliverable and the GPU tier is down.**
+      Original: >=5x counting-simulation, whole system.** (RUNBOOK: scratchpad/plan-phase-e-bench.md — run 4 of the consolidated Phase-E matrix; gated on Phase C+D per arch.md §10.) Measured: baseline 868.2 img/s against the
       C++ plane's 390.5 → **0.45×**. The interpreter is no longer the wall *inside a process*;
       the remaining gap is that 390 is one process on a forty-eight-core box. Two halves:
       C1a (profile first, V63) then C1b.
@@ -2735,7 +2740,9 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       supervisor.py needs no change) so nobody re-derives it, and names the signal to revisit: if the
       grpcio-tools pin and the generated-stub check become a recurring tax. #109 was one instance of that
       tax, so the signal is not hypothetical -- worth watching.
-- [!] **GPU7-DEGRADED · OPERATOR: the box's GPU tier is DOWN, 1 Sep ~16:0x. GPU 7 needs a reset.**
+- [!] **GPU7-DEGRADED · OPERATOR: the box's GPU tier is DOWN, 1 Sep ~16:0x. GPU 7 needs a reset.
+      STILL DOWN 4 Sep: temperature `[Unknown Error]`, power/util/ECC `[N/A]`, while GPUs 0-6 read
+      28-31 C normally. C1 and C4 are blocked behind it.**
       `nvidia-smi -i 7` returns `[Unknown Error]` for temperature and `[N/A]` for power, utilisation and
       ECC; `nvidia-smi --query-compute-apps` lists a row it cannot attribute (`[N/A], [N/A]`). Memory still
       reads (15/24564 MiB), so it is a partial fault rather than a missing card.
