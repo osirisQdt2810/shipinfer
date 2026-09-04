@@ -948,6 +948,13 @@ session's head: every in-flight branch pushed, every decision written down, and 
 named in the two files a session reads at start-up (`.claude/JOURNAL.md`, `.claude/TASKS.md`).
 Answered by RESUME-HERE at the top of the journal plus a `[~]` ledger line per open branch.
 
+### V152 · 2 Sep 2026, ~03:2x UTC — tiếp tục (the first message of the handed-over session)
+
+> tiếp tục
+
+**The V151 handoff being exercised.** No new scope: the journal's RESUME HERE entry names the
+order — open `chore/docs-caps-ratchet`, then `fix/source-unavailable-redaction`, then P6-D1/D2/D3.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken

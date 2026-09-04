@@ -2504,8 +2504,21 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       distinguishes the broken sibling rather than asserting a tautology. Tier 3268 + C++ 395 checks.
       DOES NOT CLOSE P6-D1: the type-prefix question is untouched and `last_error_type_prefix` still
       explains the remaining difference (test_ingest_parity still prints it).
-- [~] **V145-W3 · MEASURED FIRST, and the measurement changed the work. On branch
-      chore/docs-caps-ratchet, opens after #117.**
+- [~] **V145-W3 · OPEN as PR #118, round 1 BLOCKING and FIXED at 998258f.** The finding was
+      REAL and I verified it against the hook before fixing: `_over_cap` filtered stdout on
+      `"(max " in line`, and `check_docs.py`'s comment-block path short-circuits on a
+      REASONLESS `# doc: long` before the cap comparison -- so its only finding is
+      ``needs a reason``, with no `(max N)`, and an over-cap block was invisible to the gate.
+      #89's defect arriving through the gate built on top of the hook. Now every non-blank
+      stdout line counts (findings are stdout, the summary stderr), pinned by
+      `test_a_reasonless_marker_is_still_counted` (revert-checked red against the old filter)
+      rather than by a comment. Allowances unchanged: all four roots report 0 reasonless
+      markers. Non-blockers: `functools.cache` on `_over_cap` (8 subprocesses -> 4, file
+      15.82s -> 13.07s); the staleness slack STAYS at 20 with the parallel-lane conflict cost
+      written into the docstring; no `.claude/` skip guard, because
+      benchmarks/tests/test_parity_ingest.py:36 already reads that tree unguarded and one
+      inconsistent skip is how a gate stops being evidence. Full tier 3274 passed / 1 skipped.
+      Original: MEASURED FIRST, and the measurement changed the work.**
       `tests/` NEEDS NO WAVE: the whole tree is **0.37** prose-to-code (docs 10626 + comments
       1466 over code 32669) and exactly ONE file of 60+ code lines is above 1.0
       (test_model_requirement.py 1.45). A suite at 0.37 is not the problem V149 described;
@@ -2517,7 +2530,8 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       19 ADRs with **10 over 30**. But the item says forward-only and it is right to: both are
       append-only records of what was decided when, and an accepted ADR edited later stops
       being the thing it records. So the deliverable is a RATCHET, not a rewrite.
-- [~] **V145-ARM · ANSWERED DIFFERENTLY FROM HOW IT WAS FRAMED, with the reason. Same branch.**
+- [~] **V145-ARM · OPEN as PR #118, same branch as V145-W3.** ANSWERED DIFFERENTLY FROM HOW IT
+      WAS FRAMED, with the reason.**
       The item says "wire it in once the waves have taken the count to zero". MEASURED: five
       trim PRs moved the tree 1022 -> **989** over-cap items (src/shipinfer 689, tests 203,
       benchmarks 58, scripts 39), and 6880 lines of excess. The premise is unreachable -- the
