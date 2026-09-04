@@ -1,0 +1,24 @@
+# The second registered queue, and the one drop path nothing else reaches.
+#
+# `fifo` is compiled into both halves of the gate and no other scenario uses it; and every
+# other scenario drains before it closes, so `DropReason::Closed` -- the path where the two
+# planes are structurally DIFFERENT (Python reads what `close()` returns, C++ routes through
+# `on_drop_`) -- was in the vocabulary and in no golden.
+scenario fifo_close_drains
+records_min 14
+
+queue fifo
+capacity 3
+overflow drop_oldest
+max_batch_size 1
+max_delay_us 0
+
+put cam_a
+put cam_b
+put cam_c
+# Full: fifo drops the OLDEST, which is the whole difference from `fair`.
+put cam_d
+# One item out, three still queued when the close comes -- so the drain order is compared
+# too, not just the reason.
+take
+close

@@ -25,7 +25,13 @@ from shipinfer.core.errors import ConfigurationError
 ROOT = Path(__file__).resolve().parents[2]
 CPP_TRACE = ROOT / "csrc" / "tests" / "parity_trace.h"
 
-NAMES = ("fair_eviction", "reject_is_the_default", "priority_lanes", "expiry_on_take")
+NAMES = (
+    "fair_eviction",
+    "reject_is_the_default",
+    "priority_lanes",
+    "expiry_on_take",
+    "fifo_close_drains",
+)
 
 
 def _records(name: str) -> tuple:
@@ -123,6 +129,34 @@ class TestTheGoldensShowTheirInvariant:
         ]
 
         assert served == ["cam_tc", "cam_hi", "cam_bg", "cam_bg"]
+
+    def test_fifo_drops_the_oldest_where_fair_drops_the_greediest(self) -> None:
+        """The second registered queue, and the only scenario that reaches it."""
+        drops = [r.fields() for r in _records("fifo_close_drains") if r.kind == "qdrop"]
+
+        assert (drops[0]["camera"], drops[0]["reason"]) == ("cam_a", "evicted")
+
+    def test_closing_with_items_queued_drains_them_in_order(self) -> None:
+        """The one path where the planes are structurally different, so the one worth a golden.
+
+        Python reads what ``close()`` returns; C++ routes the same items through ``on_drop_``.
+        The reasons, the order AND the fact that a close feeds no per-camera counter -- ADR-005
+        keeps shutdown loss out of the view an operator uses to find floods.
+        """
+        records = _records("fifo_close_drains")
+        closed = [
+            r.fields()
+            for r in records
+            if r.kind == "qdrop" and r.fields()["reason"] == "closed"
+        ]
+        charged = {r.fields()["camera"]: r.fields() for r in records if r.kind == "qcam"}
+
+        assert [c["camera"] for c in closed] == ["cam_c", "cam_d"]
+        assert all(
+            charged[c][k] == 0
+            for c in ("cam_c", "cam_d")
+            for k in ("rejected", "evicted", "expired")
+        )
 
     def test_an_expired_request_is_dropped_on_the_way_out_not_the_way_in(self) -> None:
         kinds = [(r.kind, r.fields()) for r in _records("expiry_on_take")]

@@ -29,6 +29,7 @@ for entry in (str(ROOT), str(ROOT / "src")):
     sys.path.insert(0, entry)
 
 from benchmarks.parity.drive_python import GOLDEN, SCENARIOS, run_scenario  # noqa: E402
+from benchmarks.parity.drive_queue import GOLDEN as QUEUE_GOLDEN  # noqa: E402
 from benchmarks.parity.drive_queue import SCENARIOS as QUEUE_SCENARIOS  # noqa: E402
 from benchmarks.parity.drive_queue import run_queue_scenario  # noqa: E402
 from benchmarks.parity.queue_scenario import load_queue_scenario  # noqa: E402
@@ -70,7 +71,9 @@ def main(argv: list[str] | None = None) -> int:
             f"{len(lines)}. A vacuous trace is a golden that proves nothing"
         )
     if args.emit_golden:
-        destination = GOLDEN / f"{scenario.name}.jsonl"
+        # Each seam writes under its own root, so a queue scenario and an ingest scenario
+        # of the same name cannot overwrite one another with --force.
+        destination = (QUEUE_GOLDEN if queues else GOLDEN) / f"{scenario.name}.jsonl"
         if destination.exists() and not args.force:
             raise ConfigurationError(
                 f"{destination} already exists. A golden is captured once and committed; "
