@@ -2059,9 +2059,14 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       through four review rounds of green tests. #129 adds
       `tests/test_cuda_reaching_apps_compile.py`, which `g++ -fsyntax-only`s every app
       `--offline` refuses, but it SKIPS where the CUDA/TensorRT headers are absent, which is
-      exactly CI. THE CI HALF IS STILL OPEN: either the offline job gains the two header sets
-      (they are headers, not a driver -- no GPU needed for `-fsyntax-only`), or a second job
-      does. Until then the guard protects the dev box and not the merge.
+      exactly CI. THE CI HALF IS STILL OPEN, and smaller than it looks: `ci.yml:185` ALREADY
+      installs `Jimver/cuda-toolkit@v0.2.19` with `nvcc`+`cudart` for the kernels job, so the
+      CUDA headers are there -- only TensorRT's are missing, and `bench.cpp` is the app that
+      needs them. So: (a) get TensorRT headers into that job, or (b) syntax-check only the
+      CUDA-reaching apps that do NOT include `NvInfer.h` and leave `bench.cpp` to the dev box.
+      (b) would NOT have caught the defect that opened this item, so (a) is the one worth
+      doing. A PR editing `.github/workflows/**` cannot pass the review job (CLAUDE.md), so it
+      needs a hand merge and the body has to say so.
 
 - [ ] **P5-A-ALLOC · Two follow-ups #129's review raised and I deliberately did NOT take in a
       fix round, both with the reviewer's own analysis.** (1) ALLOCATION on the emission path:
