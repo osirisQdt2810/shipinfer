@@ -2143,6 +2143,13 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `bash -e {0}` has no `pipefail` and `pytest` was not installed; r2: the job never
       installed `NvInferPlugin.h`, which `engine.cpp` includes and NVIDIA ships separately, so
       the job would have been red on its first run on main). Original:
+      SCOPE GREW in round 1, correctly: the check covers the EIGHT implementation units the
+      offline build cannot reach as well as the apps, since `-fsyntax-only` on an app does not
+      parse the `.cpp` files in its closure -- `backends/tensorrt/engine.cpp`, where
+      `initLibNvInferPlugins` lives, was compiled by nothing either. Two of them need an
+      external lane and are skipped where `pkg-config` says it is absent, which is the answer
+      `build_csrc.py` gives. Rehearsed in three states against the real tree: rc=0 with
+      headers and good code, rc=1 with the headers absent, rc=1 on a real compile error.
       `cli/bench.cpp` is compiled by NOTHING in CI, and it took a
       reviewer reading a diff to find that out (#129 round 4).** Its include closure reaches
       `core/platform.h`, so `build_csrc.py --offline` excludes it and `ci.yml`'s `cpp-offline`

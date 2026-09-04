@@ -26,14 +26,33 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 CSRC = ROOT / "csrc"
-#: Where this host keeps the two header sets, matching `build_csrc.py`'s own defaults.
-#: `SHIPINFER_TENSORRT_DIR` moves the second, as it does for the build script.
-INCLUDES = (Path("/usr/local/cuda/include"), Path("/usr/local/TensorRT/include"))
 #: A translation unit that needs exactly what these apps need. Probed with `g++` rather than
 #: tested with `is_dir()`, because a distribution's packages put `NvInfer.h` and
 #: `cuda_runtime.h` on the DEFAULT include path (`/usr/include/x86_64-linux-gnu`) where no
 #: `-I` names them -- and the `is_dir()` guard then skipped on the one machine that had them.
 _PROBE = "#include <NvInfer.h>\n#include <cuda_runtime.h>\nint main() { return 0; }\n"
+
+#: Set by CI's `cpp-syntax` job: a SKIP is the hole this check exists to close, so where the
+#: headers are meant to be installed their absence has to be a failure with a reason.
+_REQUIRE = "SHIPINFER_REQUIRE_CSRC_HEADERS"
+
+
+def _include_flags() -> list[str]:
+    """The `-I` flags these apps need, or `[]` when the headers are already on the path.
+
+    `CUDA_HOME` and `SHIPINFER_TENSORRT_DIR` are read exactly as `scripts/build_csrc.py`
+    reads them -- the first version honoured only the second, so a box with CUDA elsewhere
+    skipped silently while `shipinfer bench` built fine. The `targets/<arch>/include` layout
+    is there because that is where `cuda-cudart-dev-12-x` puts the headers on a runner.
+    """
+    cuda = Path(os.environ.get("CUDA_HOME", "/usr/local/cuda"))
+    tensorrt = Path(os.environ.get("SHIPINFER_TENSORRT_DIR", "/usr/local/TensorRT"))
+    candidates = (
+        cuda / "include",
+        cuda / "targets" / "x86_64-linux" / "include",
+        tensorrt / "include",
+    )
+    return [f"-I{path}" for path in candidates if path.is_dir()]
 
 
 def _build_module():
@@ -47,20 +66,44 @@ def _build_module():
     return module
 
 
+def _apps() -> list[Path]:
+    return sorted((CSRC / "shipinfer" / "cli").glob("*.cpp")) + sorted(
+        (CSRC / "tests").glob("*.cpp")
+    )
+
+
 def _cuda_reaching_apps() -> list[Path]:
     """Every app `--offline` refuses, asked of the build script rather than guessed."""
     build = _build_module()
-    apps = sorted((CSRC / "shipinfer" / "cli").glob("*.cpp")) + sorted(
-        (CSRC / "tests").glob("*.cpp")
-    )
-    return [app for app in apps if not build.offline_ready(build.include_closure(app), set())]
+    return [
+        app for app in _apps() if not build.offline_ready(build.include_closure(app), set())
+    ]
 
 
-def _include_flags() -> list[str]:
-    """The `-I` flags these apps need, or `[]` when the headers are already on the path."""
-    tensorrt = Path(os.environ.get("SHIPINFER_TENSORRT_DIR", "/usr/local/TensorRT"))
-    candidates = (Path("/usr/local/cuda/include"), tensorrt / "include")
-    return [f"-I{path}" for path in candidates if path.is_dir()]
+def _lanes_available(build, closure: set[Path]) -> bool:
+    """Whether every external lane this unit needs is installed, asked of `pkg-config`."""
+    for lane in build.lanes_in(closure):
+        try:
+            build.pkg_config_flags(lane)
+        except SystemExit:
+            return False
+    return True
+
+
+def _uncompiled_units() -> list[Path]:
+    """Implementation units nothing in this repository compiles, lanes permitting.
+
+    `-fsyntax-only` on an APP does not parse the `.cpp` files in its closure, so the eight
+    units outside the offline build were covered by nothing even with the apps checked --
+    including `backends/tensorrt/engine.cpp`, where `initLibNvInferPlugins` lives. Two of them
+    need an external lane (opencv, gstreamer) and are skipped where it is not installed, which
+    is the same answer `build_csrc.py` gives.
+    """
+    build = _build_module()
+    apps = set(_apps())
+    units = [p for p in sorted((CSRC / "shipinfer").rglob("*.cpp")) if p not in apps]
+    outside = [u for u in units if not build.offline_ready(build.include_closure(u), set())]
+    return [u for u in outside if _lanes_available(build, build.include_closure(u))]
 
 
 @functools.cache
@@ -77,11 +120,74 @@ def _headers_available() -> bool:
     return done.returncode == 0
 
 
+def _missing_headers_reason() -> str:
+    return (
+        "needs g++ plus the CUDA and TensorRT headers, on the include path or under "
+        "CUDA_HOME / SHIPINFER_TENSORRT_DIR; without them nothing in this repository "
+        "compiles these apps"
+    )
+
+
 pytestmark = pytest.mark.skipif(
-    not _headers_available(),
-    reason="needs g++ plus the CUDA and TensorRT headers, on the include path or under "
-    "SHIPINFER_TENSORRT_DIR; without them nothing in this repository compiles these apps",
+    not _headers_available() and not os.environ.get(_REQUIRE), reason=_missing_headers_reason()
 )
+
+
+def test_the_headers_are_present_where_they_are_required() -> None:
+    """Where CI installs them, a SKIP is the defect -- so it is a FAILURE with a reason.
+
+    The job used to assert this by grepping pytest's `-q` summary for "skipped", which is a
+    string match on output whose shape changes between versions, in a `| tee` pipeline whose
+    status was `tee`'s. A test that fails is the same statement without either problem.
+    """
+    if not os.environ.get(_REQUIRE):
+        pytest.skip(f"{_REQUIRE} is unset; this asserts what CI's cpp-syntax job installs")
+
+    assert _headers_available(), _missing_headers_reason()
+
+
+def _compiles(path: Path, extra: list[str]) -> tuple[bool, str]:
+    """`-fsyntax-only`: no link, no device, no measurement -- just "is this valid C++"."""
+    done = subprocess.run(
+        [
+            "g++",
+            "-std=c++17",
+            "-fsyntax-only",
+            f"-I{CSRC}",
+            *_include_flags(),
+            *extra,
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    errors = [line for line in done.stderr.splitlines() if ": error:" in line][:3]
+    return done.returncode == 0, "\n  ".join(errors)
+
+
+class TestTheUnitsNothingCompiles:
+    """The eight `.cpp` files outside the offline build, which the app check does not reach."""
+
+    def test_there_are_some(self) -> None:
+        assert _uncompiled_units(), "no uncompiled unit found; this guard would be vacuous"
+
+    def test_each_one_compiles(self) -> None:
+        build = _build_module()
+        failures: list[str] = []
+        for unit in _uncompiled_units():
+            lanes = build.lanes_in(build.include_closure(unit))
+            extra = [
+                flag
+                for lane in lanes
+                for flag in build.pkg_config_flags(lane)
+                if flag.startswith("-I")
+            ]
+            ok, errors = _compiles(unit, extra)
+            if not ok:
+                failures.append(f"{unit.relative_to(ROOT)}:\n  {errors}")
+
+        assert not failures, "these do not compile:\n" + "\n".join(failures)
 
 
 class TestTheAppsOfflineCannotBuild:
