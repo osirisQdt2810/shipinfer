@@ -15,7 +15,7 @@ elements:
     impl: pool
     model: ship_segmenter
     when: fps == 20
-    params: {crop: {size: [512, 512]}}
+    params: {classes: [ship], crop: {size: [512, 512]}}
   embed_ship: {impl: pool, model: ship_embedder, params: {classes: [ship]}, after: segment}
   embed_person: {impl: pool, model: person_embedder, params: {classes: [person]}, after: detect}
   track: {impl: shipvision, per: camera, after: [embed_ship, embed_person]}

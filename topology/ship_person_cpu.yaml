@@ -62,13 +62,17 @@ elements:
         score_threshold: 0.25
         max_detections: 300
 
-  # Whole-frame today: a YOLO-seg engine emits detection rows and a bank of mask prototypes,
-  # and the fold that turns those into one area per object is not a per-row scatter-back. It
-  # carries no `classes:` because it does not select rows yet; when its crop half lands it
-  # gains `params: {classes: [ship]}` like the two embedders below.
+  # Whole-frame on the PYTHON plane today: a YOLO-seg engine emits detection rows and a bank
+  # of mask prototypes, and the fold that turns those into one area per object is not a
+  # per-row scatter-back (P6-SEGMENT-CROP). It declares `classes: [ship]` anyway, and that is
+  # not premature: the C++ plane DOES crop per row, so a resolved plan without this line says
+  # "every row" there -- the ship segmenter on every person crop at 640x640, and a
+  # `mask_area_px` filed on every person record.
   segment:
     impl: pool
     model: ship_segmenter
+    params:
+      classes: [ship]
 
   # The fan-out. Both embedders crop from the *source* frame, one call for all N boxes, and
   # file one vector per detection row under `meta["vectors"]` -- so the two of them cover

@@ -2155,8 +2155,22 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       LESSON, and it is the one to carry: every single r1-r3 finding was a place where I ported
       from a DOCSTRING or an assumption instead of from the code. The docstring lied, `to_chars`
       is not `repr`, and `llround` is not `round`. Read the implementation.
-      LEFT: P5-B (repository reader), P5-C (resolved settings), P5-D (data-driven chain), plus
-      P5-A-ALLOC. Original: P5-A DONE and OPEN as PR #129 (4 Sep). The survey's headline finding was right --
+      LEFT, RE-SHAPED 4 Sep by ADR-020 -- read this before starting any of them:
+      * **P5-D (data-driven chain) is DONE** by #131 + #132. `bench.cpp` reads a resolved plan
+        and `graph.cpp`'s hardcoded chain is gone; the label table, the crop extents, the
+        threshold and the cap all arrive in it.
+      * **P5-B is NOT a C++ `config.yaml` reader any more, and building one would be a
+        reinvention.** ADR-020's argument applies unchanged one artefact along: the model
+        repository is control plane (ADR-014 names it), the Python side already validates it,
+        and a second YAML reader in C++ is a second door whose failure is one plane accepting
+        a repository the other refuses. So P5-B is *the plan carrying resolved model config*
+        -- instance counts per device, `max_batch_size`, `max_queue_delay_us`, the input and
+        output names -- which is why `run_cpp_bench.sh:18-21` restates instance counts by hand
+        today. Same format, same gate, probably new verbs (`instances <slot> <device> <n>`).
+      * **P5-C (resolved settings) shrinks to what the plan does not carry**: the queue
+        capacities, the reassembly window, the worker count. Same reasoning -- resolved on the
+        Python side, carried, not re-parsed.
+      Plus P5-A-ALLOC (first half built, queued). Original: P5-A DONE and OPEN as PR #129 (4 Sep). The survey's headline finding was right --
       csrc emitted NO events at all, and `bench.cpp`'s sink comment CLAIMED it built one while
       the body only counted -- so P5-A was writing a writer, not porting one.** Delivered:
       `csrc/shipinfer/core/events/{schema,convert,json}` mirroring `src/shipinfer/core/events/`,
@@ -2408,10 +2422,16 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       data; ADR-014 puts data-driven config in Python — which argues for the resolved-list answer, but it is a design
       call for the operator.
 
-- [~] **P6-PLAN · SPLIT at the plane boundary, 27 files being over the ~25 cap: PR-A is the
-      Python emitter + the format + ADR-020, PR-B the C++ reader, `from_plan` and `bench
-      --plan`. PR-B is the half that makes the decision real, so P6-PLAN stays [~] until it
-      merges -- CLAUDE.md's sync rule, stated in PR-A's body.**
+- [~] **P6-PLAN · SPLIT at the plane boundary, 27 files being over the ~25 cap. PR-A is
+      **MERGED as #131** (the Python emitter, the format, ADR-020, after three rounds);
+      THIS is PR-B, the C++ reader, `from_plan` and `bench --plan` -- the half that makes
+      the decision real, so P6-PLAN stays [~] until it merges (CLAUDE.md's sync rule,
+      stated in both bodies).**
+      PR-B carries every format change those three rounds made: the reader takes the rest of
+      the line for `plan` and `label`, splits `classes` on commas, tells a DECLARED empty
+      selection (`classes -`, `kNoClass`) from no selection at all (`kAnyClass`), and its
+      refusal table carries the same rows. A plan one plane reads and the other rejects is
+      what the shared table exists to prevent, and all three rounds proved it earns its keep.
       The C++ plane stops hard-coding its chain: `topology/plan.py` flattens the validated
       chain to a line-oriented plan, `shipinfer plan -t <chain.yaml>` is the hand-over,
       `csrc/.../graph/plan.{h,cpp}` reads it back byte-identically and `from_plan.{h,cpp}`
@@ -2427,17 +2447,38 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `crop 0 128` and Python did not, and `*.plan` in `.gitignore` would have swallowed every
       golden. 26 files, so it may need splitting at the Python/C++ line when it opens.
 
-- [ ] **P6-SEGMENT-CROP · A pre-existing cross-plane divergence the plan made visible.**
+- [ ] **RECORDS-CLASS-PREMISE · `records.h`'s "a batch only ever holds rows of ITS OWN
+      class" is no longer guaranteed, on BOTH planes** -- found by #132's reviewer. With a
+      crop slot that declares no `classes:` (every row) beside a per-class one, two batches
+      legitimately hold the same object index, and `records.cpp`'s last-candidate-wins fills
+      `embedding` twice. The comment at `records.h:26-30` justifies dropping the class check
+      on a premise the resolved plan can now make untrue -- and the Python plane's
+      `_vectors`/`output` pair has the same shape, so this is not a C++ defect. Decide the
+      rule (last wins, first wins, or refuse two slots that can cover one row at load time --
+      the loader already refuses a lot less than this) and apply it to both planes with a
+      cross-plane case in the event seam. Left out of #132 deliberately: it is a data-plane
+      rule change, not a reader fix, and it belongs with its own parity case.
+
+- [ ] **P6-SEGMENT-CROP · A pre-existing cross-plane divergence the plan made visible, and
+      the direction is already DECIDED -- by `PoolSegment`'s own docstring, read 4 Sep.**
       `segment` CROPS on the C++ plane (`ship_crops_640`, 640x640, one crop per ship row) and
-      letterboxes the WHOLE FRAME on the Python one (`elements/pool.py`: "Whole-frame today: a
-      YOLO-seg engine emits detection rows and a bank of mask prototypes, and the fold that
-      turns those into one area per object is not a per-row scatter-back"). So `mask_area_px`
-      is computed from different pixels on the two planes. Not caused by ADR-020 -- the plan
-      carries what the C++ plane already did -- but now stated in one file rather than implied
-      by two. Decide which is right (the chain file's comment says `segment` "gains
-      `params: {classes: [ship]}` like the two embedders below" when its crop half lands, which
-      points at the C++ shape being the destination) and converge, with the register entry if
-      it cannot be converged at once.
+      letterboxes the WHOLE FRAME on the Python one, so `mask_area_px` is computed from
+      different pixels. Not caused by ADR-020 -- the plan carries what the C++ plane already
+      did -- but now stated in one file rather than implied by two.
+      **The C++ shape is the destination and the Python side is the one that moves**, in as
+      many words: *"the demo repository's `ship_segmenter` is fed crops in the proven pipeline
+      (`pipeline/graph/graph.py` cuts a `ship_mask_crops` set at 640x640 and hands it to an
+      `ObjectStage`), so the FIRST half of this element is exactly `_PoolCropElement`'s and
+      adopting it is a one-line change of base class."* What blocks it is the second half: a
+      YOLO-seg engine emits rows plus a bank of mask prototypes and the mask for one crop is
+      the two multiplied and reduced to an area (`pipeline/graph/masks.py::InstanceMaskArea`)
+      -- a fold over two outputs that a per-row scatter-back cannot express, and filing the
+      raw rows instead would pin a `(32, 160, 160)` prototype tensor per frame alive (~3 MB a
+      frame of reassembly memory for pixels nobody reads).
+      SO: the work is `PoolSegment` gaining `_PoolCropElement` as its base PLUS its own
+      `_finish` doing the fold, in the slice the docstring already reserves for it -- not a
+      design question. Then `params: {classes: [ship]}` on the slot, and the two planes agree.
+      Until then the divergence is real and stated in both places.
 
 - [x] **HOOK-FP · MERGED as PR #104 (31 Aug 13:54), VERDICT: APPROVE.** (was OPEN as PR #104) (2 commits, 2 files, +89/-1, rebased onto 9d315da). 82 hook tests; full
       tier 3232 passed; pre-commit all Passed; clean. BOTH revert-checks reproduced on this tip: formatter

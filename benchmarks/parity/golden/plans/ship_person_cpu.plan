@@ -13,6 +13,7 @@ max_detections 300
 
 node segment segment pool
 model ship_segmenter
+classes ship
 crop 640 640
 
 node embed_person embed pool
