@@ -824,7 +824,7 @@ class TestDocumentationCapsOnlyGetTighter:
     """
 
     #: Over-cap symbols and comment blocks per root. Ratchet downwards only.
-    _ALLOWED = {"src/shipinfer": 688, "scripts": 39, "tests": 203, "benchmarks": 58}
+    _ALLOWED = {"src/shipinfer": 684, "scripts": 39, "tests": 203, "benchmarks": 58}
 
     @pytest.mark.parametrize("root", sorted(_ALLOWED))
     def test_no_new_over_cap_documentation(self, root: str) -> None:
