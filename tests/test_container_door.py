@@ -21,8 +21,9 @@ ROOT = Path(__file__).resolve().parents[1]
 ROOTLESS = ROOT / "deploy" / "rootless"
 RUN = ROOTLESS / "run.sh"
 INSIDE = ROOTLESS / "_inside.sh"
-#: Every doc that tells a reader how to get into the container.
-DOCS = (ROOT / ".claude" / "CLAUDE.md", ROOT / "container.md")
+CONTAINER = ROOTLESS / "_container.sh"
+#: The two runners that start the same container.
+RUNNERS = (ROOTLESS / "test.sh", RUN)
 
 
 class TestTheDoorExists:
@@ -31,10 +32,13 @@ class TestTheDoorExists:
         assert RUN.stat().st_mode & 0o111, "and be executable, like its siblings"
 
     def test_it_takes_the_gpu_knob_like_every_other_runner(self) -> None:
-        """Otherwise a faulted card takes this door down too (#128)."""
-        text = RUN.read_text()
+        """Otherwise a faulted card takes this door down too (#128).
 
-        assert "_gpus.sh" in text and '"${GPU_DEVICES[@]}"' in text
+        Through the shared definition, not a third copy of `_gpus.sh` -- which is the point of
+        `TestTheTwoRunnersCannotDrift` below.
+        """
+        assert "_container.sh" in RUN.read_text()
+        assert "_gpus.sh" in CONTAINER.read_text()
 
     def test_it_asks_for_a_tty_only_when_there_is_one(self) -> None:
         """`-it` unconditionally makes docker refuse in every script, CI job and agent.
@@ -50,10 +54,45 @@ class TestTheDoorExists:
 
 
 class TestTheTwoRunnersCannotDrift:
-    """`test.sh` and `run.sh` differ in one line -- what they `exec`."""
+    """`test.sh` and `run.sh` differ in what they `exec`, and in nothing else.
+
+    Both halves of that are load-bearing, and both were proved by this branch. `_inside.sh`
+    was factored out because two copies of a wheel list is how a container ends up without
+    grpcio while the run still reads as green -- and then `run.sh` copied `test.sh`'s
+    *docker* block and had drifted before review: TensorRT at `/opt/tensorrt` where all four
+    siblings use `/tensorrt`, so a `trtexec` line copied out of `cpp.sh` failed in the one
+    door built to run it.
+    """
+
+    def test_neither_builds_its_own_docker_argv(self) -> None:
+        """The container is defined in `_container.sh` and nowhere else."""
+        for script in RUNNERS:
+            body = script.read_text()
+            assert "_container.sh" in body, f"{script.name} has to source the definition"
+            assert '"${DOCKER_ARGV[@]}"' in body, f"{script.name} has to use it"
+            for own in ('-v "$REPO:/work', '-v "$WHEELS', "--device nvidia.com/gpu"):
+                assert own not in body, f"{script.name} still builds its own argv: {own}"
+
+    def test_the_shared_definition_carries_what_both_need(self) -> None:
+        text = CONTAINER.read_text()
+
+        assert "DOCKER_HOST" in text and "docker info" in text, "the socket, once"
+        # `"/tensorrt:ro" in text` was the first spelling and it is a substring of
+        # `/opt/tensorrt:ro`, so it passed on the very drift it was written to catch.
+        assert '-v "$TRT_DIR:/tensorrt:ro"' in text, "the path every sibling script uses"
+        code = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+        assert not [ln for ln in code if "/opt/tensorrt" in ln], "the drift, back in the argv"
+        assert "_gpus.sh" in text and "SHIPINFER_TEST_GPUS" in text
+        assert 'CONTAINER_MOUNT="${CONTAINER_MOUNT:-ro}"' in text, "read-only by default"
+
+    def test_the_door_mounts_footage_like_the_test_runner(self) -> None:
+        """Otherwise `run.sh python -m pytest -m gpu tests/system` skips the tier silently."""
+        for script in RUNNERS:
+            body = script.read_text()
+            assert "SHIPINFER_SYSTEM_VIDEO" in body and ":/footage:ro" in body, script.name
 
     def test_both_source_the_shared_preamble(self) -> None:
-        for script in (ROOTLESS / "test.sh", RUN):
+        for script in RUNNERS:
             assert "_inside.sh" in script.read_text(), (
                 f"{script.name} installs its own wheels; two copies of that list drift, and "
                 f"a container missing grpcio silently skips 119 tests"
@@ -67,7 +106,7 @@ class TestTheTwoRunnersCannotDrift:
         assert "grpcio-tools==" in text, "pinned -- 1.83 emits a different stub for one .proto"
 
     def test_neither_installs_wheels_itself_any_more(self) -> None:
-        for script in (ROOTLESS / "test.sh", RUN):
+        for script in RUNNERS:
             body = script.read_text()
             assert (
                 "pip install" not in body

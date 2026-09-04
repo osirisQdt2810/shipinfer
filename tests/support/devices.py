@@ -1,14 +1,17 @@
 """Which GPU a device-tier test may take.
 
-Asked of torch rather than written down. Two tests used to carry ``DEVICE = 5`` -- "the one
-this box's operator keeps free" -- and cross-reference each other's copy of it. That broke the
-day the container stopped being handed every card: ``SHIPINFER_GPUS=0,1,2,3`` (#128, which is
-how a partially faulted GPU 7 stops taking the whole tier down) leaves torch reporting
-``[0, 1, 2, 3]`` and the settings correctly refusing ``visible_gpus: [5]``.
+Asked of torch, not written down. Two tests carried ``DEVICE = 5`` -- "the one the operator
+keeps free" -- which broke the day the container stopped being handed every card:
+``SHIPINFER_GPUS=0,1,2,3`` (#128) leaves torch reporting ``[0, 1, 2, 3]``, and the settings
+correctly refuse ``visible_gpus: [5]``.
 
 ``SHIPINFER_TEST_GPUS`` is the knob that already means "which devices a test may take"
-(``deploy/rootless/test.sh`` passes it through and ``test_service_multigpu.py`` reads it), so
-this reads the same one and falls back to whatever the container was actually given.
+(``deploy/rootless/_container.sh`` passes it through), so this is the ONE place that reads
+it -- ``test_service_multigpu.py`` held the second copy, defaulting to ``0,1`` and so asking
+a one-card container for ``cuda:1``.
+
+The name avoids a ``test_`` prefix on purpose: pytest collects such an imported name as a
+test in the importing module.
 """
 
 from __future__ import annotations
@@ -17,10 +20,10 @@ import os
 
 import pytest
 
-__all__ = ["a_test_device", "test_devices"]
+__all__ = ["a_test_device", "visible_devices"]
 
 
-def test_devices() -> list[int]:
+def visible_devices() -> list[int]:
     """Every device this container has, narrowed by ``SHIPINFER_TEST_GPUS`` when it is set.
 
     Container ordinals, not physical ones: `--device nvidia.com/gpu=2` is `cuda:0` inside, so
@@ -52,7 +55,7 @@ def test_devices() -> list[int]:
 
 def a_test_device() -> int:
     """One device to run on, or a named skip when the container was given none."""
-    devices = test_devices()
+    devices = visible_devices()
     if not devices:
         pytest.skip(
             "no CUDA device is visible in this container; run through "

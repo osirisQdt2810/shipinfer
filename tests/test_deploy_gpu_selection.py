@@ -14,6 +14,7 @@ machine with no driver -- which is the only place the rule can be checked cheapl
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -27,6 +28,11 @@ HELPER = ROOTLESS / "_gpus.sh"
 #: to SAY which one is faulted. Every script that does work takes the knob.
 DOCTOR = "setup.sh"
 
+#: Scripts that start a container for a job with no GPU in it. `gst-image.sh` bakes the
+#: GStreamer image with `docker run` + `docker commit` (this kernel refuses `docker build`),
+#: and apt needs no card. Exempt from the knob, and held to asking for no device at all.
+NO_GPU = ("gst-image.sh", "wheels.sh")
+
 
 def _scripts() -> list[Path]:
     return sorted(p for p in ROOTLESS.glob("*.sh") if p.name != HELPER.name)
@@ -34,6 +40,22 @@ def _scripts() -> list[Path]:
 
 def _runs_docker(path: Path) -> bool:
     return "docker run" in path.read_text()
+
+
+def _effective(path: Path, seen: frozenset[str] = frozenset()) -> str:
+    """A script's text plus that of every sibling it sources, recursively.
+
+    The knob became reachable through a shared file rather than directly: `test.sh` and
+    `run.sh` now source `_container.sh`, which sources `_gpus.sh`. Read literally, the
+    original check skipped both -- so the one script written to be a door had no GPU
+    assertion at all while the suite stayed green.
+    """
+    text = path.read_text()
+    parts = [text]
+    for name in re.findall(r"_[a-z]+\.sh", text):
+        if name != path.name and name not in seen and (ROOTLESS / name).is_file():
+            parts.append(_effective(ROOTLESS / name, seen | {path.name, name}))
+    return "\n".join(parts)
 
 
 def _expand(value: str | None) -> subprocess.CompletedProcess[str]:
@@ -64,15 +86,32 @@ class TestEveryRunTakesTheKnob:
             f"SHIPINFER_GPUS can route around a faulted card"
         )
 
-    @pytest.mark.parametrize("script", [p.name for p in _scripts() if _runs_docker(p)])
+    @pytest.mark.parametrize("script", [p.name for p in _scripts()])
     def test_a_script_that_uses_the_array_sources_the_helper(self, script: str) -> None:
-        text = (ROOTLESS / script).read_text()
-        if "${GPU_DEVICES[@]}" not in text:
+        """Every script, not only the ones that `docker run`: `_container.sh` builds the argv."""
+        path = ROOTLESS / script
+        if "${GPU_DEVICES[@]}" not in path.read_text():
             pytest.skip(f"{script} does not use the array")
 
-        assert "_gpus.sh" in text, (
+        assert "_gpus.sh" in _effective(path), (
             f"{script} expands GPU_DEVICES without sourcing _gpus.sh, so it would run with "
             f"no --device flag at all -- which reads exactly like a host with no driver"
+        )
+
+    @pytest.mark.parametrize(
+        "script", [p.name for p in _scripts() if _runs_docker(p) and p.name != DOCTOR]
+    )
+    def test_every_docker_run_reaches_the_knob(self, script: str) -> None:
+        """The positive half, which the skip above cannot give: a runner that never mentions
+        the array is a runner with no `--device` flag, and it skips rather than fails."""
+        text = _effective(ROOTLESS / script)
+        if script in NO_GPU:
+            assert "--device" not in text, f"{script} is exempt and asks for a device anyway"
+            return
+
+        assert "${GPU_DEVICES[@]}" in text and "_gpus.sh" in text, (
+            f"{script} starts a container without reaching SHIPINFER_GPUS, directly or "
+            f"through a file it sources"
         )
 
 
