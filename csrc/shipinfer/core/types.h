@@ -115,7 +115,12 @@ namespace shipinfer {
     // stays UNHEALTHY so a dashboard can tell it from a camera an operator removed.
     struct SourceUnavailableError : IngestError {
         SourceUnavailableError(const std::string& source_, const std::string& hint_)
-            : IngestError("video source '" + source_ + "' is unavailable: " + hint_),
+            // Redacted in the *message*, intact on the members — `SourceOpenError`'s rule,
+            // which this class did not follow. The message becomes
+            // `CameraHealth::last_error`, and the hint is redacted for the same reason that
+            // one redacts its `reason`: a GStreamer hint reads `set location=<uri>`.
+            : IngestError("video source '" + redact_uri(source_) +
+                          "' is unavailable: " + redact_in(hint_)),
               source(source_),
               hint(hint_) {}
         std::string source;

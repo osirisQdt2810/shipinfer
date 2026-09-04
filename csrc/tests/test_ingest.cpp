@@ -1450,6 +1450,32 @@ namespace {
               "only the password is replaced: " + out);
     }
 
+    // The rule `core/errors/ingest.py` states and this header applies: the message is what
+    // gets logged AND what becomes `CameraHealth::last_error`, so a credential in it is
+    // served to every reader of the health payload. `SourceUnavailableError` was the sibling
+    // that did not follow it, on both planes.
+    void test_no_ingest_error_carries_a_credential_in_its_message() {
+        const std::vector<std::pair<std::string, std::string>> messages = {
+            {"unavailable-source", SourceUnavailableError(kUri, "install gstreamer").what()},
+            {"unavailable-hint",
+             SourceUnavailableError("gstreamer", "set location=" + kUri).what()},
+            {"open", SourceOpenError("cam-000", kUri, "connection refused").what()},
+            {"decode",
+             FrameDecodeError("cam-000", "[Errno 111] Connection refused: '" + kUri + "'")
+                 .what()},
+        };
+        for (const auto& [name, message] : messages) {
+            check(!contains(message, kSecret) && contains(message, "***"),
+                  name + ": the password reached the message: " + message);
+        }
+        const SourceUnavailableError unavailable(kUri, "install gstreamer");
+        check(unavailable.source == kUri,
+              "the member keeps the real uri; the actor reconnects with it");
+        const SourceUnavailableError quiet("file:///data/clip.mp4", "install pyav");
+        check(contains(quiet.what(), "file:///data/clip.mp4") && !contains(quiet.what(), "***"),
+              "a message with no credential in it is left alone: " + std::string(quiet.what()));
+    }
+
     void test_a_scheme_behind_a_numeric_prefix_still_redacts() {
         // #33 round 2, the fail-open: the scheme walk-back consumed the digits and dots of
         // "2.rtsp" and then gave up because '2' is not alpha — Python anchors on the first
@@ -2552,6 +2578,7 @@ int main() {
     test_redaction_never_throws_on_hostile_input();
     test_the_passwords_that_break_the_easy_parse();
     test_an_embedded_uri_is_redacted_in_place();
+    test_no_ingest_error_carries_a_credential_in_its_message();
     test_a_scheme_behind_a_numeric_prefix_still_redacts();
     test_config_bounds_match_the_python_plane();
 

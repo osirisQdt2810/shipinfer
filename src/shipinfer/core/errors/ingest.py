@@ -32,7 +32,13 @@ class SourceUnavailableError(IngestError):
     """
 
     def __init__(self, source: str, hint: str) -> None:
-        super().__init__(f"video source {source!r} is unavailable: {hint}")
+        # Redacted in the message, intact on the attributes — `SourceOpenError`'s rule, and
+        # this class was the sibling that did not follow it. The hint too: a GStreamer hint
+        # reads `set location=<uri>`, so redacting only the argument named for a URI leaves
+        # the credential in by the other door.
+        super().__init__(
+            f"video source {redact(source)!r} is unavailable: {redact_in(str(hint))}"
+        )
         self.source = source
         self.hint = hint
 
