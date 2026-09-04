@@ -1,0 +1,15 @@
+{"schema":1,"scenario":"fifo_close_drains","plane":"python"}
+{"kind":"qput","camera":"","n":[1,1],"t":["cam_a","accepted"]}
+{"kind":"qput","camera":"","n":[1,2],"t":["cam_b","accepted"]}
+{"kind":"qput","camera":"","n":[1,3],"t":["cam_c","accepted"]}
+{"kind":"qput","camera":"","n":[1,3],"t":["cam_d","accepted"]}
+{"kind":"qdrop","camera":"","n":[],"t":["cam_a","evicted"]}
+{"kind":"qbatch","camera":"","n":[1,1],"t":[]}
+{"kind":"qserved","camera":"","n":[1],"t":["cam_b"]}
+{"kind":"qdrop","camera":"","n":[],"t":["cam_c","closed"]}
+{"kind":"qdrop","camera":"","n":[],"t":["cam_d","closed"]}
+{"kind":"qstats","camera":"","n":[4,0,1,0,0,3],"t":[]}
+{"kind":"qcam","camera":"","n":[0,0,1,0],"t":["cam_a"]}
+{"kind":"qcam","camera":"","n":[0,0,0,0],"t":["cam_b"]}
+{"kind":"qcam","camera":"","n":[0,0,0,0],"t":["cam_c"]}
+{"kind":"qcam","camera":"","n":[0,0,0,0],"t":["cam_d"]}
