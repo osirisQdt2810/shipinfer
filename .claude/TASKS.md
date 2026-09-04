@@ -2673,7 +2673,14 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       fresh worktrees. LESSON: a worktree is not the same environment as the operator's
       checkout -- submodules are the difference, and they are where the third-party code is.
 
-- [ ] **FLAKY-COST-TEST · `tests/test_support_models.py` `test_the_cost_is_linear_in_the_
+- [~] **FLAKY-COST-TEST · OPEN as PR #125 (4 Sep). Fixed the ESTIMATOR, not the bound:
+      `_milliseconds` now returns the CHEAPEST of five runs instead of their mean, because a
+      stall can only ADD time -- and that makes the file's two lower-bound assertions STRICTER
+      rather than looser, which is why it is the right direction. HONEST LIMIT, stated in the
+      body: twelve busy-loop processes did NOT reproduce the failure with main's mean either
+      (8/8 green), so there is no before/after; the load that broke it was a g++ compile, and
+      the argument is from the estimator's properties plus the one observed failure. Original:
+      `tests/test_support_models.py` `test_the_cost_is_linear_in_the_
       declared_work` failed once on 4 Sep under load** (a `build_csrc.py` compile on the same
       box) and passed on a quiet machine. It is a WALL-CLOCK linearity assertion in the
       offline tier -- the tier whose promise is that it passes anywhere. Either give it a
