@@ -2057,6 +2057,27 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       (Original: SEQUENCED after C8m moves pipeline/schema.py → core/events — writing it against the moving module is churn; planner 28 Aug.) Resolved config in, same events out.** The binary takes the settings tree and the
       model repository (`config.yaml`) the Python plane reads, not CLI flags; emits the same
       event schema (`pipeline/schema.py`) so one sink serves both planes.
+- [~] **P6-PRB · SCOPED 4 Sep, not yet built. The scheduling seam is the EASIEST parity target
+      left, because the two contracts are already a deliberate mirror** -- `csrc/shipinfer/
+      scheduling/queues/base.h` opens with "seam for seam" and spells the item contract
+      (camera/rows/priority/expired), the same three drop reasons, the same PutStatus, the
+      same BatchWindow and the same per-camera stat maps. Both planes have fair/fifo/lanes and
+      the same five policies by name; only `batching/` is Python-only, so keep it out of PR-B.
+      SHAPE (copy the ingest harness, which now runs with an EMPTY register):
+        * a scenario is a script of `put(camera, rows, priority)` / `take(window)` /
+          `advance(ns)` / `close`, driven SINGLE-THREADED with an injected clock -- no threads,
+          because the ingest harness's one flaky risk was interleaving and there is no reason
+          to import it here;
+        * new record kinds in the ONE `FIELDS` table (`trace.py` + `csrc/tests/parity_trace.h`,
+          which `TestTheFieldTablesAgree` already holds equal): `put` (status), `batch`
+          (size, rows + the cameras), `drop` exists already but needs a camera+reason spelling,
+          `qstats` (enqueued/dequeued/rejected/evicted/expired) and its per-camera half;
+        * golden emitted once by the Python plane through `scripts/emit_parity_golden.py`
+          (which now reads THIS checkout -- see #120), diffed by a new
+          `csrc/tests/test_scheduling_parity.cpp`.
+      FIRST SCENARIOS, one invariant each: fair-queue eviction picks the GREEDIEST camera (the
+      inherited starvation bug); a full queue REJECTS rather than evicting under the default
+      policy; priority lanes drain TRACKING_CRITICAL first; expiry drops on take, not on put.
 - [~] **P6 · PR-A MERGED as PR #101 (31 Aug), VERDICT: APPROVE. PR-B (scheduling-seam parity) and PR-C (csrc runners re-baseline) still open, so P6 stays [~]. PR-A detail: Rebased onto 8ade925 (#100); 6 commits, 22 files,
       +3450/-2. RE-VERIFIED ON THIS TIP, not carried over from the older base:
       C++ `./csrc/build/test_ingest_parity` -> **45 checks, 0 failure(s)**, with the 2 KNOWN divergences
