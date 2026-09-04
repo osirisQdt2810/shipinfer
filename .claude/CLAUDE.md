@@ -50,7 +50,8 @@ ever called `cudaSetDevice`.
 tiers (`-m gpu`, `-m multigpu`), every benchmark, `shipinfer bench|serve`, and any engine
 build. `deploy/` holds the recipes: `deploy/rootless/test.sh` for the suite,
 `deploy/rootless/bench.sh` for the benchmark, `deploy/rootless/prove.sh` for the
-container+GPU attestation, `make shell` for an interactive shell.
+container+GPU attestation, `deploy/rootless/run.sh <cmd>` for one command inside that
+container (and with no arguments, an interactive shell).
 
 **The offline tier is exempt, deliberately.** `pytest` with no marker must pass on a machine
 with no driver — that is ADR-001, it is what CI does on a plain runner, and it is the promise

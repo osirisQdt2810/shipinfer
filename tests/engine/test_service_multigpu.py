@@ -37,7 +37,6 @@ CUDA context per shard, nothing else.
 from __future__ import annotations
 
 import json
-import os
 import socket
 import sys
 import threading
@@ -55,6 +54,7 @@ from shipinfer.core.settings.runner import (
 )
 from shipinfer.launch import Fleet
 from shipinfer.scheduling.sharding import plan_shards
+from tests.support.devices import visible_devices
 from tests.support.models import materialise
 
 pytestmark = [
@@ -81,10 +81,14 @@ CAMERAS = [
 
 
 def _gpus() -> list[int]:
-    raw = os.environ.get("SHIPINFER_TEST_GPUS", "0,1")
-    gpus = [int(x) for x in raw.split(",") if x.strip()]
+    """Two devices to shard across. The knob has one reader now: ``tests/support/devices``.
+
+    This was the second, and it took ``SHIPINFER_TEST_GPUS`` at face value with a ``0,1``
+    default -- so a one-card container asked for ``cuda:1`` instead of skipping.
+    """
+    gpus = visible_devices()
     if len(gpus) < 2:
-        pytest.skip("SHIPINFER_TEST_GPUS names fewer than two devices")
+        pytest.skip(f"the two-shard test needs two devices; this container has {gpus}")
     return gpus[:2]
 
 

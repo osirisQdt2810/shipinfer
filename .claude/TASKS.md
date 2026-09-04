@@ -506,6 +506,18 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 5 · Everything else still owed
 
+- [x] **CONTAINER-OFFLINE-RED · FIXED 4 Sep in #130 (round 3). The offline tier was RED inside
+      the container -- 19 failed / 3402 passed on clean `main`** -- and nobody knew, because
+      `deploy/rootless/test.sh` with no arguments is its documented default while the host and
+      CI both have `git` and the tier is normally run there. One cause: no `git` in
+      `pytorch/pytorch:*-runtime`, so `scripts/hooks/_paths.py` falls back from `git ls-files`
+      to `rglob`, which walks `references/`, `.venv` and `csrc/build` -- the doc-cap ratchet
+      then measured a different set of files and reported a stale allowance, and the
+      hook-enumerator tests errored outright. Four classes in `tests/test_architecture.py` now
+      skip when `git` is absent, naming it, exactly as `tests/test_two_planes.py` already did.
+      **3204 passed / 235 skipped / 0 failed** in the container after. Found only by re-running
+      the tiers at HEAD, which is what the review's stale-evidence finding asked for.
+
 - [x] **C4 · DONE 4 Sep, and the premise was wrong twice over. The engines were NEVER missing
       and the tier was never down** -- both readings came from running in a WORKTREE, where
       `models/*` and `model_repository/*/*/*.plan` are gitignored, so the primary checkout has
