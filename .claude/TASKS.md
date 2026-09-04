@@ -2728,7 +2728,24 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       is what counts and the content is present; those worktrees are leftovers, not gaps. Do not audit
       squash-merged work with `--contains`.
       **TWO REAL GAPS FOUND (new items below).**
-- [ ] **V146b · shipvision mtmc exposes a tracker in Python but NOT in C++.** The operator's V146 was two
+- [!] **V146b · SURVEYED 4 Sep, and the survey found a PREREQUISITE that is the operator's
+      call. QUESTION: shipvision's `csrc/` has NO C++ tests at all (`grep -rl "int main"
+      csrc/` is empty) and its CMake REFUSES to configure without a device backend
+      ("Enable exactly one of SHIPVISION_WITH_CUDA / SHIPVISION_WITH_HIP", CMakeLists:116).
+      Its `mtmc/` subtree is CUDA-FREE -- no `.cu`, no cuda includes, pure linear algebra --
+      so it COULD be compiled and tested with g++ alone, exactly the way shipinfer's own
+      `build_csrc.py --offline` does. Do you want shipvision to grow that arrangement (an
+      offline g++ target plus `int main` test binaries for its CUDA-free subtree) as the
+      prerequisite for V146b, or should the port be verified only through a CUDA build inside
+      the container? I am not writing ~900 lines of C++ that this box cannot compile.**
+      SURVEY (measured, not guessed): Python has `mtmc/tracker.py` 233 lines
+      (`ClusterMTMCTracker`, four components: gate -> match -> cluster -> identity, only the
+      fourth stateful), `mtmc/gating.py` 100, `mtmc/identity.py` 572, `mtmc/base.py` 156.
+      C++ has `matcher.h/.cpp`, `matchers/{appearance,gated,spatial}`, `clustering/
+      agglomerative`, `topology/homography`, `frames.h` -- i.e. the MATCH and CLUSTER halves.
+      MISSING: gating, identity, the tracker interface and `trackers/cluster`. Natural split
+      once the prerequisite is answered: harness -> gating -> identity -> tracker.
+      Original: shipvision mtmc exposes a tracker in Python but NOT in C++.** The operator's V146 was two
       things: rename `core` -> `matchers` (done, both planes) AND *"expose interface là tracker - implement
       các loại tracker chứ không phải implement các loại matcher"*. Python has it:
       `shipvision/mtmc/tracker.py`, `shipvision/mtmc/trackers/` (cluster), `tests/mtmc/test_tracker.py`.
