@@ -1,5 +1,58 @@
 # Journal
 
+## 2026-09-04 (night) — the container's own offline tier was red on main
+
+**#130 merged after three rounds** — the container door CLAUDE.md documented as `make shell`
+for months, which never existed. Round 3's finding was the useful one: *every pasted
+measurement predated the commit that rewrote the script producing it.* True, and re-running
+them is what found the next thing.
+
+**`deploy/rootless/test.sh` with no arguments — the offline tier, its documented default —
+was 19 failed / 3402 passed on clean `main`.** Nobody knew, because the host and CI both have
+`git` and that is where the tier is normally run. `pytorch/pytorch:*-runtime` has none, so
+`scripts/hooks/_paths.py` falls back from `git ls-files` to `rglob`, which walks `references/`,
+`.venv` and `csrc/build`: the doc-cap ratchet measured a different set of files and the
+hook-enumerator tests errored outright. Now **3204 passed / 235 skipped / 0 failed** there.
+Three of the branch's own tests had the same fault. **The lesson is not "add a skip" — it is
+that a documented command nobody runs is a command that is broken.**
+
+**CSRC-TOPOLOGY-Q answered as ADR-020, by me, under V154.** No `csrc/topology/` mirror: the
+chain stays a Python declaration and the C++ plane receives a resolved plan. Three reasons and
+none of them new — ADR-014 says Python "hands this plane a resolved configuration", ADR-017 §4
+makes `Topology.from_spec` the one door, and vLLM resolves `VllmConfig` in Python and hands it
+to the engine-core process. The C++ plane's chain had been an `if (models.count(...))` ladder
+whose own comments called its literals "the graph's config", and one was wrong: the label table
+said a ship was class 1 while its crop specs said 8, so every ship left the event writer as
+`unknown` — in the one file nothing in CI compiles.
+
+**A line-oriented format took three review rounds to become as dumb as I claimed it was.**
+Each round found the same shape — a plan that says something different from what the chain
+does — and none of them could be caught by the byte-compare golden, because *the text was
+stable and only its meaning changed*:
+
+* `classes: [cargo ship]` re-read as two labels; a multi-word `label` or chain `name` produced
+  a plan `shipinfer plan` had just written and neither reader could parse. Multi-word labels
+  are the NORMAL case here (COCO's `traffic light`), so the format carries them.
+* the plan carried *declared* values, so `detect: {impl: pool, model: ship_detector}` emitted
+  no label table, no threshold and no cap — while the element decodes with all three. That
+  omission undid the ADR the PR shipped with, and the fix was an `Element.decode_parameters()`
+  hook, because re-reading `params` was a second interpretation of one setting.
+* `spaces=True` meant *unvalidated* rather than *multi-word*, so a newline in a label emitted
+  an extra LINE and injected a `node` slot the operator never wrote.
+
+**The event writer is 2.4x faster and emits identical bytes** (P5-A-ALLOC's first half, ready
+to open). One `to_chars` instead of two, one reserved buffer instead of ~35 temporaries, and
+`snprintf` gone from the escape path. Measured in the container, three A/B pairs: 7645.8 ->
+3223.5 µs/event, 3.7 -> 9.1 M numbers/s, and the same checksum every run. The measurement is
+committed as `cli/bench_events.cpp`, because the ledger item said to do it with one.
+
+**Four self-inflicted git mistakes, all one shape: a command I ran to clean up ate work.**
+`git checkout -- <file>` and `git reset --hard` after a probe discarded uncommitted edits
+three times (run.sh's rewire, and a whole ledger entry twice), and a round-2 commit landed on
+the wrong branch of a stack, so a reply to a reviewer named a sha the PR did not have. All
+four are now in memory with the same rule: **keep a `cp` copy before probing, and check a
+pushed sha with `gh pr view --json headRefOid` rather than local `git log`.**
+
 ## 2026-09-04 (evening) — the GPU tier was never down, and P5-A took five rounds
 
 **Twelve PRs merged today** (#118-#129). Two things happened in the second half that are worth
