@@ -2052,6 +2052,21 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
             header promises "by ANY stopper"). Fix: `thread_abandoned_` as
             `std::atomic<bool>` so the lockless self-stop path can read it; + a line
             keeping the header honest either way.
+- [ ] **P5-A-ALLOC · Two follow-ups #129's review raised and I deliberately did NOT take in a
+      fix round, both with the reviewer's own analysis.** (1) ALLOCATION on the emission path:
+      every scalar in `csrc/.../events/schema.cpp` is a `std::string` returned by value, and
+      `json_number` runs `to_chars` TWICE (scientific to read the exponent, then fixed) plus up
+      to three allocations per number -- at the design load, ~15 000 objects/s each carrying a
+      256/512-float embedding, that is millions of small allocations a second, and the bench
+      numbers P5-A makes real will be dominated by it. The fix is appending into a
+      `std::string&` behind one `reserve` and reading the exponent off the fixed form, which
+      changes every writer signature; do it WITH a measurement, because otherwise there is no
+      way to know it helped. (2) The event gate compares HAND-ASSEMBLED events, so
+      `build_records` -- the translation unit that actually runs in production -- is covered by
+      `test_event_records`'s unit checks and is NOT cross-plane compared. The field map is the
+      seam such a comparison needs, and P5-D is what makes it data-driven; say so in the
+      P5-B/C body rather than leaving it implied. Land before P5 closes.
+
 - [~] **P5 · P5-A DONE and OPEN as PR #129 (4 Sep). The survey's headline finding was right --
       csrc emitted NO events at all, and `bench.cpp`'s sink comment CLAIMED it built one while
       the body only counted -- so P5-A was writing a writer, not porting one.** Delivered:
