@@ -955,6 +955,22 @@ Answered by RESUME-HERE at the top of the journal plus a `[~]` ledger line per o
 **The V151 handoff being exercised.** No new scope: the journal's RESUME HERE entry names the
 order — open `chore/docs-caps-ratchet`, then `fix/source-unavailable-redaction`, then P6-D1/D2/D3.
 
+### V153 · 4 Sep 2026, ~08:0x UTC — PR quá ngắn là tốn kém; một PR phải phục vụ một feature
+
+> hạn chế đẩy các PR quá ngắn, quá ít content và nội dung. Ví dụ hiện tại bạn đẩy các PR đều là tests(), tại sao không gộp lại làm 1. 1 PR được tạo ra có nghĩa là nó phục vụ cho 1 feature nào đó, có thể là implement, fix bug, increase perf... 1 PR quá ngắn thực sự gây tốt
+
+**Aimed at three PRs from this session and it lands.** #125 was one test helper, #126 was two
+lines of production code, #127 was a single test file — three separate review cycles, three
+bodies, three merges, for what one feature-shaped PR would have carried. The unit is a
+**feature**: an implementation, a bug fix, a measured speed-up. "It is green and it is small"
+is not a reason to open one; a review round costs the reviewer and the operator more than the
+change is worth at that size.
+
+Not a licence to go back to 100-commit PRs either — the ~15 commit / ~25 file cap from V80
+still stands. The rule is that a PR should be *whole*, not that it should be big: build the
+feature and its tests together and open that, instead of slicing a feature into a `feat()`
+and a `test()` and a `docs()`.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
@@ -1135,6 +1151,7 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 
 | Rule | Where |
 |---|---|
+| **A PR serves one feature** — implement / fix / speed-up, with its tests inside it. Do not slice one feature into `feat()` + `test()` + `docs()`, and do not open a two-line PR at all; still inside V80's ~15 commit / ~25 file cap | **V153** |
 | **System tests run the real chain, decode → output**, on the topology the feature uses (fleet / deepstream / threading); mock-only verification is not verification | **V148** |
 | **Delete every `mock.py` in use** — `backends/mock.py`, `topology/elements/mock.py` | **V148**, R52, R54, V15 |
 | Test input is a **video file**, not a camera URL — there is no camera to reach | **V148** |
