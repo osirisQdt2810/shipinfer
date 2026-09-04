@@ -85,11 +85,25 @@ class TestTheTwoRunnersCannotDrift:
         assert "_gpus.sh" in text and "SHIPINFER_TEST_GPUS" in text
         assert 'CONTAINER_MOUNT="${CONTAINER_MOUNT:-ro}"' in text, "read-only by default"
 
-    def test_the_door_mounts_footage_like_the_test_runner(self) -> None:
-        """Otherwise `run.sh python -m pytest -m gpu tests/system` skips the tier silently."""
+    def test_the_footage_mount_is_shared_and_absent_when_unset(self) -> None:
+        """`run.sh` forwarded neither the variable nor the mount, so a `tests/system` run
+        through the door silently used whatever `DEFAULT_VIDEO` resolved to instead of the
+        footage the operator named. Defined once now, in the file both runners source."""
+        text = CONTAINER.read_text()
+
+        assert '-e SHIPINFER_SYSTEM_VIDEO=/footage -v "$_footage:/footage:ro"' in text
+        assert 'if [ -n "${SHIPINFER_SYSTEM_VIDEO:-}" ]; then' in text, "conditional"
         for script in RUNNERS:
-            body = script.read_text()
-            assert "SHIPINFER_SYSTEM_VIDEO" in body and ":/footage:ro" in body, script.name
+            # Comments kept out of it: `test.sh`'s header shows the variable in a usage line.
+            code = [
+                ln for ln in script.read_text().splitlines() if not ln.lstrip().startswith("#")
+            ]
+            for line in code:
+                assert "/footage" not in line, f"{script.name} mounts footage of its own again"
+                assert "SHIPINFER_SYSTEM_VIDEO=" not in line, (
+                    f"{script.name} passes the variable itself; `-e VAR=` with nothing set is "
+                    f"the EMPTY string, which the next reader will not treat as absent"
+                )
 
     def test_both_source_the_shared_preamble(self) -> None:
         for script in RUNNERS:

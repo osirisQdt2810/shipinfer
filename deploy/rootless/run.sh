@@ -37,17 +37,6 @@ CONTAINER_MOUNT="${SHIPINFER_RUN_MOUNT:-rw}"
 # TensorRT at `/tensorrt`, PYTHONPATH.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_container.sh"
 
-# Forwarded so `run.sh python -m pytest -m gpu tests/system` reaches the same footage
-# `test.sh` would mount, instead of skipping the tier for a reason the caller cannot see.
-video_mount=()
-if [ -n "${SHIPINFER_SYSTEM_VIDEO:-}" ]; then
-  if [ ! -e "$SHIPINFER_SYSTEM_VIDEO" ]; then
-    echo "SHIPINFER_SYSTEM_VIDEO=$SHIPINFER_SYSTEM_VIDEO does not exist" >&2
-    exit 1
-  fi
-  video_mount=(-v "$(cd "$(dirname "$SHIPINFER_SYSTEM_VIDEO")" && pwd)/$(basename "$SHIPINFER_SYSTEM_VIDEO"):/footage:ro")
-fi
-
 # `bash -l` and not `bash`, so an interactive shell gets a prompt and history rather than a
 # bare `sh`-like one that looks broken.
 if [ "$#" -eq 0 ]; then
@@ -64,8 +53,6 @@ if [ -t 0 ] && [ -t 1 ]; then
 fi
 
 exec docker run --rm "${tty[@]}" "${DOCKER_ARGV[@]}" \
-  -e SHIPINFER_SYSTEM_VIDEO="${SHIPINFER_SYSTEM_VIDEO:+/footage}" \
-  "${video_mount[@]}" \
   -w /work "$IMAGE" \
   bash -c '
     set -e

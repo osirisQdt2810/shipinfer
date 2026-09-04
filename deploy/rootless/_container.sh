@@ -81,3 +81,20 @@ DOCKER_ARGV=(
   -v "$WHEELS:/wheels:ro"
   "${_trt_mount[@]}"
 )
+
+# Optional footage for the system tier, at a fixed path so both runners agree. It cannot live
+# in the repository -- `references/` is gitignored and committing frames of identifiable people
+# to make a test runnable is the wrong trade -- so the operator points at a video file or a
+# frame directory and it is mounted read-only.
+#
+# Added to the argv rather than passed as a bare `-e`: unset has to stay UNSET. `-e VAR=` sets
+# the empty string, which today's two readers happen to treat as absent and the next one will
+# not.
+if [ -n "${SHIPINFER_SYSTEM_VIDEO:-}" ]; then
+  if [ ! -e "$SHIPINFER_SYSTEM_VIDEO" ]; then
+    echo "SHIPINFER_SYSTEM_VIDEO=$SHIPINFER_SYSTEM_VIDEO does not exist" >&2
+    exit 1
+  fi
+  _footage="$(cd "$(dirname "$SHIPINFER_SYSTEM_VIDEO")" && pwd)/$(basename "$SHIPINFER_SYSTEM_VIDEO")"
+  DOCKER_ARGV+=(-e SHIPINFER_SYSTEM_VIDEO=/footage -v "$_footage:/footage:ro")
+fi

@@ -52,25 +52,9 @@ set -euo pipefail
 # pollutes the next run, and `tmp_path` exists precisely so it does not have to.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_container.sh"
 
-# The one mount only this runner needs. The system tier (`-m gpu tests/system`) runs the real
-# chain on real footage, and footage is not in the repository: `references/` is gitignored, and
-# committing frames of real people to make a test runnable is the wrong trade. So the operator
-# points at a video or a frame directory and it is mounted read-only; unset, the tier skips
-# itself and says what is missing.
-video_mount=()
-if [ -n "${SHIPINFER_SYSTEM_VIDEO:-}" ]; then
-  if [ ! -e "$SHIPINFER_SYSTEM_VIDEO" ]; then
-    echo "SHIPINFER_SYSTEM_VIDEO=$SHIPINFER_SYSTEM_VIDEO does not exist" >&2
-    exit 1
-  fi
-  video_mount=(-v "$(cd "$(dirname "$SHIPINFER_SYSTEM_VIDEO")" && pwd)/$(basename "$SHIPINFER_SYSTEM_VIDEO"):/footage:ro")
-fi
-
 args=("$@")
 
 exec docker run --rm "${DOCKER_ARGV[@]}" \
-  -e SHIPINFER_SYSTEM_VIDEO="${SHIPINFER_SYSTEM_VIDEO:+/footage}" \
-  "${video_mount[@]}" \
   -w /work "$IMAGE" \
   bash -c '
     set -e
