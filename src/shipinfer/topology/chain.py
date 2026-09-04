@@ -45,6 +45,7 @@ device-to-host copy is the worst thing this file could do.
 
 from __future__ import annotations
 
+import itertools
 import re
 from collections import deque
 from collections.abc import Iterator, Mapping, Sequence
@@ -493,6 +494,7 @@ class Topology:
         _check_structure(nodes)
         _check_row_selection(nodes)
         _check_row_indexed_meta(nodes)
+        _check_one_filler_per_row(nodes)
         edges = _negotiate_edges(nodes)
         return cls(spec.name, nodes, edges)
 
@@ -963,6 +965,62 @@ def _check_row_selection(nodes: Sequence[ElementNode]) -> None:
                 f"{sorted(emitters)} emit(s) {sorted(known)} "
                 "(`params: {decode: {class_labels: ...}}`). A label nobody detects selects no "
                 "rows, so this element would run on nothing and report nothing wrong"
+            )
+
+
+#: Which event field a kind's rows fill. The same table `topology/plan.py` writes into a
+#: plan's `field` lines -- stated twice on purpose, because this is a LOAD-TIME check and
+#: `topology/` may not import `pipeline/` to ask the record builder.
+_ROW_FIELD_KINDS = {ElementKind.EMBED: "embedding", ElementKind.SEGMENT: "mask_area_px"}
+
+
+# doc: long the same state is refused per frame today, which is an outage and a log flood
+def _check_one_filler_per_row(nodes: Sequence[ElementNode]) -> None:
+    """Refuse a chain where two slots could fill one event field for one detection.
+
+    Both planes' ``build_records`` already refuse this per FRAME, and so do
+    :meth:`PoolEmbed._scatter` and :meth:`ChainWalk.inbound` -- because there is no answer to
+    which of two vectors is an object's. Refusing it at LOAD is strictly better: the per-frame
+    refusal is a total outage for the chain plus, on the Python plane, an unrate-limited
+    ``_LOG.exception`` per frame (~1000/s at the design load).
+
+    Only elements that :attr:`~shipinfer.topology.base.Element.selects_rows` are considered:
+    an element that does not scatter per row cannot collide per row, and the loader must not
+    carry a list of implementation names that do.
+
+    That leaves one gap on purpose. ``PoolSegment`` parses ``classes:`` since the resolved
+    plan needed it, but still declares ``selects_rows = False`` because its Python half is
+    whole-frame -- so two overlapping segment slots are caught per frame rather than here.
+    ``P6-SEGMENT-CROP`` is the item that makes it a real row-selector, and this check starts
+    covering it for free on the day it does.
+
+    Raises:
+        ChainStructureError: two such slots of one field-filling kind whose row selections
+            intersect -- or either of which declares none, which is every row.
+    """
+    by_field: dict[str, list[ElementNode]] = {}
+    for node in nodes:
+        field = _ROW_FIELD_KINDS.get(node.kind)
+        if field is not None and node.element.selects_rows:
+            by_field.setdefault(field, []).append(node)
+    for field, fillers in by_field.items():
+        for first, second in itertools.combinations(fillers, 2):
+            left = first.element.declared_classes()
+            right = second.element.declared_classes()
+            shared = None if left is None or right is None else set(left) & set(right)
+            if shared == set():
+                continue
+            overlap = (
+                "every row, because one of them declares no `classes:`"
+                if shared is None
+                else f"the class(es) {sorted(shared)}"
+            )
+            raise ChainStructureError(
+                f"elements {first.name!r} and {second.name!r} both fill the event's "
+                f"{field!r} and both cover {overlap}. Two batches covering one detection is "
+                f"refused per frame by both planes' record builders, because there is no "
+                f"answer to which vector is that object's -- give them disjoint "
+                f"`params: {{classes: [...]}}`"
             )
 
 
