@@ -9,6 +9,7 @@ to diagnose and a two-line test to prevent.
 from __future__ import annotations
 
 import ast
+import functools
 import importlib.util
 import subprocess
 import sys
@@ -779,8 +780,20 @@ class TestNapoleonFieldListsStayIndented:
         assert done.returncode == 0, f"orphaned Napoleon continuations:\n{done.stdout}"
 
 
-def _over_cap(root: str) -> list[str]:
-    """`check_docs.py`'s findings for one root, as its own lines."""
+# doc: long why every stdout line counts, and not only the `(max N)` ones
+@functools.cache
+def _over_cap(root: str) -> tuple[str, ...]:
+    """`check_docs.py`'s findings for one root -- **every** line it prints, not the caps only.
+
+    A reasonless ``# doc: long`` above a comment block short-circuits the hook before the cap
+    comparison (the block path files `needs a reason` and moves on), so such a block's only
+    finding carries no ``(max N)``. Filtering on that string would let an over-cap block
+    through the one gate the caps have -- the defect #89 took four rounds to close, arriving
+    again through the gate built on top of the hook. Findings go to stdout and the summary to
+    stderr, so every non-blank stdout line is a finding.
+
+    Cached: each root is asked for twice, and one pass over `src/shipinfer` is ~0.7 s.
+    """
     repo = Path(__file__).resolve().parents[1]
     done = subprocess.run(
         [sys.executable, str(repo / "scripts" / "hooks" / "check_docs.py"), str(repo / root)],
@@ -789,7 +802,7 @@ def _over_cap(root: str) -> list[str]:
         env=checkout_env(),
     )
     assert done.returncode in (0, 1), f"check_docs.py failed on {root}: {done.stderr[:400]}"
-    return [line for line in done.stdout.splitlines() if "(max " in line]
+    return tuple(line for line in done.stdout.splitlines() if line.strip())
 
 
 # doc: long why this is a ratchet and not the gate V145-ARM asked for
@@ -823,9 +836,26 @@ class TestDocumentationCapsOnlyGetTighter:
             + "\n".join(f"  {line}" for line in found[:10])
         )
 
+    def test_a_reasonless_marker_is_still_counted(self, tmp_path: Path) -> None:
+        """The bypass the counting rule exists for, pinned so the filter cannot re-narrow.
+
+        A `# doc: long` with no reason above a seven-line comment block: the hook files
+        `needs a reason` and never reaches the cap comparison, so the finding carries no
+        ``(max N)`` and a `"(max " in line` filter counts the block as zero.
+        """
+        probe = tmp_path / "probe.py"
+        probe.write_text('"""Short."""\n\n# doc: long\n' + "# line\n" * 6 + "X = 1\n")
+        assert len(_over_cap(str(probe))) == 1, "the reasonless marker was not counted"
+
     @pytest.mark.parametrize("root", sorted(_ALLOWED))
     def test_the_allowance_is_not_stale(self, root: str) -> None:
-        """A ratchet nobody tightens is one nobody notices has slipped."""
+        """A ratchet nobody tightens is one nobody notices has slipped.
+
+        Deliberately narrow: a trim wave of more than 20 symbols must edit `_ALLOWED` in its
+        own diff, which is also where two parallel lanes will conflict. That is the intended
+        cost -- an allowance left 100 above the count hides a 100-symbol regression -- and
+        the conflict is four constants, resolved by taking the lower number on each line.
+        """
         found = _over_cap(root)
         allowed = self._ALLOWED[root]
         assert len(found) >= allowed - 20, (
