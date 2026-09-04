@@ -1,6 +1,51 @@
 # Journal
 
-## RESUME HERE — 2 Sep 2026, ~02:3x UTC (V151: session handed over)
+## 2026-09-04 — the V151 handoff, executed: #118–#121, and P6's register emptied
+
+**The handoff worked as written.** "tiep tuc" -> RESUME HERE -> four PRs, three merged.
+
+- **#118 (docs-caps ratchet, V145-W3 + V145-ARM)** — merged after ONE round. The review's
+  BLOCKING was real and I checked it against the hook before fixing: `_over_cap` filtered
+  stdout on `"(max "`, and `check_docs.py`'s comment-block path short-circuits on a
+  REASONLESS `# doc: long` *before* the cap comparison, so its only finding says
+  `needs a reason` and carried no `(max N)`. An over-cap comment block was therefore invisible
+  to the gate — #89's defect arriving through the gate built on top of the hook. Fixed by
+  counting every non-blank stdout line, and PINNED by a probe test rather than a comment.
+- **#119 (SourceUnavailableError redaction)** — merged round 1. Found by reading both planes,
+  not the ledger. Before opening, two things the branch was missing: a C++ test (the sync rule
+  — the Python half had six checks and the C++ half none), and a comment cut to four lines
+  because **#118's own ratchet caught it within the hour**.
+- **#120 (P6-D1/D2/D3)** — merged round 1. All three went the same way: the C++ plane was
+  already right and Python moved, so `csrc/` carries only comment repairs. The register in
+  `benchmarks/parity/known.py` is now **empty**, and `test_ingest_parity` reports
+  `41 checks, 0 failure(s)` with no `KNOWN:` line at all.
+- **#121 (PriorityBands, V149-runners step 4)** — open. The ledger's "may not warrant its own
+  module" was right about *placement*; the seam is "which band, and who said so", because one
+  lock guards both tables.
+
+**Three traps worth carrying forward.**
+
+1. **A git worktree's editable install resolves `shipinfer` to the PRIMARY checkout.**
+   `pyproject.toml`'s `pythonpath = [".", "src"]` protects `pytest`; nothing protected
+   `scripts/emit_parity_golden.py`, which was emitting parity goldens from `main`'s plane.
+   Caught only because three scenarios came back byte-identical after a deliberate behaviour
+   change. Fixed in #120 and pinned by a test that asserts `sys.path[:2]` positionally —
+   comparing the imported module would be vacuous on a single-checkout CI runner.
+2. **`git checkout -- <file>` after an uncommitted revert-probe eats the work.** Lost four
+   edits that way on #118. Commit first, then probe.
+3. **Two "already passing" gates disagree.** `Auto-merge` shows SKIPPED (not failed) when a
+   review comes back BLOCKING, and the `PR description` check is a separate job whose failure
+   also silently skips auto-merge. Neither looks like a verdict.
+
+**Where things stand.** V149 is complete once #121 merges: `runners/`, `topology/`, `cli/`,
+`engine/` and `api/` are all trimmed, and `topology/base.py` (3.07) and `api/streams.py`
+(2.23) stop high for the structural reason already in the ledger — do not re-open them.
+P6's remaining work is PR-B (scheduling-seam parity) and PR-C (csrc runners re-baseline).
+
+**Environment:** `export PATH="/home/dungha15/workspaces/shipinfer/.venv/bin:$PATH"` before
+any pytest — the venv is not on PATH after a restart.
+
+## RESUME HERE — 2 Sep 2026, ~02:3x UTC (V151: session handed over) — DISCHARGED 4 Sep, see above
 
 **Typing "tiếp tục" is enough. Do this, in this order:**
 
