@@ -12,7 +12,9 @@ dishonesty the rule prevents.
 
 **How to apply:**
 - `deploy/rootless/test.sh [pytest args]` for the suite, `deploy/rootless/prove.sh` for the
-  container+GPU attestation, `make shell` for an interactive shell.
+  container+GPU attestation, `deploy/rootless/run.sh <cmd>` for one command inside that
+  container (no arguments = a shell). There is no Makefile; `make shell` was a compose
+  path this kernel cannot build.
 - Enforced, not remembered: `scripts/hooks/require_container.py` is a `PreToolUse` hook on
   `Bash` in `.claude/settings.json` and **denies** a host pytest / benchmark / device run.
   The hook exists because this rule was documented first and then quietly broken — the host

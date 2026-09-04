@@ -47,13 +47,18 @@ CONTAINERISED = (
     "podman exec",
     "nerdctl run",
     "deploy/rootless/test.sh",
+    "deploy/rootless/run.sh",
+    "deploy/rootless/bench.sh",
+    "deploy/rootless/cpp.sh",
+    "deploy/rootless/profile.sh",
     "deploy/rootless/prove.sh",
     "deploy/rootless/gst-image.sh",
     "deploy/rootless/wheels.sh",
-    "make shell",
-    "make test",
-    "make bench",
 )
+# `make shell|test|bench` were here and there is no Makefile (the compose path they came from
+# was replaced by the scripts above -- `setup.sh`, KERNEL LIMIT). Allowing a command that
+# cannot run is worse than refusing it: the developer is handed it, gets "no makefile found",
+# and reaches for SHIPINFER_ALLOW_HOST_RUN -- the outcome this hook exists to prevent.
 
 # --- what must not run on the host ----------------------------------------
 
@@ -659,7 +664,7 @@ def main() -> int:
         "Run it in the container instead:\n"
         "  deploy/rootless/test.sh [pytest args]      # the suite\n"
         "  deploy/rootless/prove.sh                   # container + GPU attestation\n"
-        "  make shell                                 # interactive\n\n"
+        "  deploy/rootless/run.sh <cmd>               # one command, or a shell\n\n"
         "If the operator has agreed this one may run on the host, prefix the "
         "command with SHIPINFER_ALLOW_HOST_RUN=1 and say so in the report."
     )
