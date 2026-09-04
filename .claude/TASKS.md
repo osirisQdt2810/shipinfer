@@ -2057,7 +2057,16 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       (Original: SEQUENCED after C8m moves pipeline/schema.py → core/events — writing it against the moving module is churn; planner 28 Aug.) Resolved config in, same events out.** The binary takes the settings tree and the
       model repository (`config.yaml`) the Python plane reads, not CLI flags; emits the same
       event schema (`pipeline/schema.py`) so one sink serves both planes.
-- [~] **P6-PRB · BUILT AND OPEN as PR #122 (ea21541, 4 Sep), automerge on. The two planes
+- [~] **P6-PRB · MERGED as PR #122 (4 Sep), APPROVE round 1. FOLLOW-UP OWED (the review's
+      non-blockers 1-4, all real): (1) `fifo` is wired into both parsers and NO scenario uses
+      it -- the second registered production queue is compiled into the gate and never
+      compared; (2) `DropReason::Closed` is in the vocabulary but no golden carries a
+      `qdrop ... closed`, and that is the one path where the planes are structurally different
+      (Python reads `close()`'s RETURN, C++ routes through `on_drop_`); one scenario closes
+      both. (3) goldens are a flat namespace while scenarios are not, so a queue scenario named
+      `backpressure` would have `--force` overwrite the INGEST golden. (4) `drive_queue.GOLDEN`
+      re-derives the same path from a different anchor than `drive_python.GOLDEN`.
+      Original: BUILT AND OPEN as PR #122 (ea21541, 4 Sep), automerge on. The two planes
       matched on the FIRST run they were ever compared -- 18 checks, 0 failures, and no
       known-divergence register, which is now the default rather than a concession.** Four
       scenarios (fair_eviction / reject_is_the_default / priority_lanes / expiry_on_take), one
