@@ -5,10 +5,10 @@
 #   deploy/rootless/test.sh -m gpu             # the GPU tier
 #   deploy/rootless/test.sh -m multigpu
 #   SHIPINFER_TEST_GPUS=0,1 deploy/rootless/test.sh -m multigpu   # which of the CONTAINER's
-#                                              # devices a test may take (default 0,1). Not
-#                                              # physical ordinals: SHIPINFER_GPUS decides
-#                                              # which cards are here, and they are renumbered
-#                                              # from 0 inside.
+#                                              # devices a test may take. Unset means EVERY
+#                                              # device this container has. Not physical
+#                                              # ordinals: SHIPINFER_GPUS decides which cards
+#                                              # are here, renumbered from 0 inside.
 #   deploy/rootless/test.sh tests/ingest -q    # any pytest arguments
 #   SHIPINFER_SYSTEM_VIDEO=references/.../clip.mp4 deploy/rootless/test.sh -m gpu tests/system
 #                                              # the real chain, decode to output, on real
@@ -47,9 +47,14 @@
 # outbound network. `deploy/rootless/wheels.sh` populates it.
 set -euo pipefail
 
+# READ-ONLY, pinned here rather than left to `_container.sh`'s default: `CONTAINER_MOUNT`
+# carries no `SHIPINFER_` prefix, so an ambient `CONTAINER_MOUNT=rw` in the environment would
+# otherwise mount the source tree writable under the one runner documented not to. A test that
+# writes into the tree pollutes the next run, and `tmp_path` exists so it need not.
+CONTAINER_MOUNT=ro
+
 # The container every runner here starts, defined once -- image, wheels, socket, GPU knob,
-# TensorRT mount, PYTHONPATH, and a READ-ONLY repo. A test that writes into the source tree
-# pollutes the next run, and `tmp_path` exists precisely so it does not have to.
+# TensorRT mount, PYTHONPATH, the repo and any footage.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_container.sh"
 
 args=("$@")

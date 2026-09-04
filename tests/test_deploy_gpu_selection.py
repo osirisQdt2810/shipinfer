@@ -28,10 +28,11 @@ HELPER = ROOTLESS / "_gpus.sh"
 #: to SAY which one is faulted. Every script that does work takes the knob.
 DOCTOR = "setup.sh"
 
-#: Scripts that start a container for a job with no GPU in it. `gst-image.sh` bakes the
+#: Scripts that start a container for a job with no GPU in it: `gst-image.sh` bakes the
 #: GStreamer image with `docker run` + `docker commit` (this kernel refuses `docker build`),
-#: and apt needs no card. Exempt from the knob, and held to asking for no device at all.
-NO_GPU = ("gst-image.sh", "wheels.sh")
+#: and apt needs no card. Exempt from the knob, held to asking for no device at all. One
+#: entry: `wheels.sh` runs no container, so an entry for it would assert nothing.
+NO_GPU = ("gst-image.sh",)
 
 
 def _scripts() -> list[Path]:

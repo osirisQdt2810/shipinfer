@@ -31,6 +31,10 @@ set -euo pipefail
 # `git worktree` has neither the ONNX to build from nor a plan already built --
 # `build_engines.py --check` there reports every ONNX MISSING and is telling the truth about
 # that tree. Engine work runs in the primary checkout.
+# `SHIPINFER_RUN_MOUNT=ro` for a job that should not write -- and worth doing for a pytest
+# run, which is the one case where `rw` costs something: `test.sh` mounts `:ro` precisely so a
+# test cannot leave a file behind, and this door is allowlisted by the container hook, so
+# `run.sh python -m pytest -m gpu` would otherwise be a sanctioned writable-tree tier.
 CONTAINER_MOUNT="${SHIPINFER_RUN_MOUNT:-rw}"
 
 # The container every runner here starts, defined once -- image, wheels, socket, GPU knob,

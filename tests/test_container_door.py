@@ -14,8 +14,11 @@ by the runs in the PR body, not here.
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 ROOTLESS = ROOT / "deploy" / "rootless"
@@ -127,6 +130,18 @@ class TestTheTwoRunnersCannotDrift:
             ), f"{script.name} should install through _inside.sh, not inline"
 
 
+# doc: long the skip is a defect this file caused, and the reason it was invisible
+#: `git` is absent from `pytorch/pytorch:*-runtime`, the image `test.sh` runs the OFFLINE tier
+#: in -- its documented default -- so these three ERRORED there while passing on the host and
+#: in CI. What they read is the TREE, which is identical either way. Same guard and reason as
+#: `tests/test_two_planes.py`; found by running the offline tier through the container, which
+#: is the only place it shows.
+_NEEDS_GIT = pytest.mark.skipif(
+    shutil.which("git") is None,
+    reason="git is not on PATH (the test image has none); the tree is scanned on the host",
+)
+
+
 # doc: long the scan is over the TRACKED tree, and why a mention needs a marker
 class TestTheDocsNameACommandThatExists:
     """Nothing tells a developer to run `make shell`, and there is no Makefile to run.
@@ -144,8 +159,18 @@ class TestTheDocsNameACommandThatExists:
 
     #: A line may mention it only while saying it is gone.
     MARKERS = ("no Makefile", "SUPERSEDED", "does not exist", "never did", "was a compose")
-    #: The ledger is a record of what happened, not instructions.
-    EXEMPT = (".claude/TASKS.md", ".claude/JOURNAL.md", "tests/test_container_door.py")
+    #: Records of what happened, not instructions -- and three of them are append-only or
+    #: verbatim, so the "fix" for a mention would be editing a file that must not be edited:
+    #: `docs/qa/user.md` is the operator's own words, `FEATURE_LOG.md` is append-only, and
+    #: `DECISIONS.md` is history. The ledger and the journal were already here.
+    EXEMPT = (
+        ".claude/TASKS.md",
+        ".claude/JOURNAL.md",
+        ".claude/FEATURE_LOG.md",
+        ".claude/DECISIONS.md",
+        "docs/qa/user.md",
+        "tests/test_container_door.py",
+    )
 
     @staticmethod
     def _tracked() -> list[str]:
@@ -158,6 +183,7 @@ class TestTheDocsNameACommandThatExists:
         )
         return [name for name in done.stdout.split("\0") if name]
 
+    @_NEEDS_GIT
     def test_no_tracked_file_hands_anybody_make_shell(self) -> None:
         offending: list[str] = []
         for name in self._tracked():
@@ -178,6 +204,7 @@ class TestTheDocsNameACommandThatExists:
             + "\n".join(offending)
         )
 
+    @_NEEDS_GIT
     def test_the_scan_reaches_the_places_that_print_it(self) -> None:
         """Non-vacuity: the two paths a refusal actually shows a developer are in the scan."""
         tracked = set(self._tracked())
@@ -185,6 +212,7 @@ class TestTheDocsNameACommandThatExists:
         assert "src/shipinfer/runtime/containment.py" in tracked
         assert "scripts/hooks/require_container.py" in tracked
 
+    @_NEEDS_GIT
     def test_there_really_is_no_makefile(self) -> None:
         """Tracked paths only. `ROOT.glob("**/Makefile")` walked into `references/`, the
         submodule and any local `.venv` -- so a bare `pytest` would fail on a file no commit

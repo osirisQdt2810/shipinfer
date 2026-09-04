@@ -253,8 +253,10 @@ def _is_containerised(tokens: list[str]) -> bool:
         if (exe == first or tokens[0].endswith(marker.split("/")[-1])) and head.startswith(
             (marker, exe)
         ):
-            if marker.startswith(("docker", "podman", "nerdctl", "make")):
-                # `docker run …`, `make test`: the operands matter, so compare the prefix.
+            if marker.startswith(("docker", "podman", "nerdctl")):
+                # `docker run …`: the operands matter, so compare the whole prefix. `make`
+                # was here too and no `make` entry survives in CONTAINERISED -- there is no
+                # Makefile in this repository and never was.
                 return head.startswith(marker)
             return True
     return False
