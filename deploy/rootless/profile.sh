@@ -24,6 +24,9 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# Which GPUs this container may see, and why one degraded card is not a dead tier.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_gpus.sh"
 IMAGE="${SHIPINFER_BENCH_IMAGE:-shipinfer-gst:jammy}"
 TRT_DIR="${SHIPINFER_TENSORRT_DIR:-/usr/local/TensorRT}"
 WHEELS="${SHIPINFER_WHEELS:-/tmp/wheels-py311}"
@@ -78,7 +81,7 @@ if [ -d "$LIBS" ]; then
   path_libs=":/baseline-libs"
 fi
 
-exec docker run --rm --pid=host --device nvidia.com/gpu=all \
+exec docker run --rm --pid=host "${GPU_DEVICES[@]}" \
   -e LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/tensorrt/lib:/usr/local/cuda-12.6/lib64${path_libs}" \
   -e PYTHONPATH=/work/src:/work \
   -e SHIPINFER_IN_CONTAINER=1 \

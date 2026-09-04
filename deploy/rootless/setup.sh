@@ -112,10 +112,37 @@ sleep 5
 log "Verify"
 # ---------------------------------------------------------------------------------------
 docker version --format '  daemon {{.Server.Version}} (rootless)'
+# `all` here and nowhere else: this is the doctor, and it is meant to enumerate every card.
+# The runs that do work take `SHIPINFER_GPUS` (see `_gpus.sh`) so one sick card cannot take
+# the tier down.
 docker run --rm --pid=host --device nvidia.com/gpu=all \
   -e LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu \
   nvidia/cuda:12.6.3-base-ubuntu22.04 \
   nvidia-smi --query-gpu=index,name --format=csv,noheader | sed 's/^/  gpu /'
+
+# A card can enumerate and still be unopenable, and that is not a corner case: on 1 Sep GPU 7
+# answered `[Unknown Error]` for temperature while `nvidia-smi -L` still listed it, so the
+# driver reported 8 devices, CUDA could open 7, and torch's `_check_capability` asserted on
+# the eighth -- taking down every `-m gpu` test for three days. A partial fault is invisible
+# to `index,name`, so it is asked for by name here and the knob that routes around it is
+# printed rather than left to be discovered.
+sick=$(docker run --rm --pid=host --device nvidia.com/gpu=all \
+  -e LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu \
+  nvidia/cuda:12.6.3-base-ubuntu22.04 \
+  nvidia-smi --query-gpu=index,temperature.gpu --format=csv,noheader \
+  | awk -F', ' '$2 !~ /^[0-9]+$/ { printf "%s%s", (n++ ? "," : ""), $1 }')
+if [ -n "$sick" ]; then
+  healthy=$(docker run --rm --pid=host --device nvidia.com/gpu=all \
+    -e LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu \
+    nvidia/cuda:12.6.3-base-ubuntu22.04 \
+    nvidia-smi --query-gpu=index,temperature.gpu --format=csv,noheader \
+    | awk -F', ' '$2 ~ /^[0-9]+$/ { printf "%s%s", (n++ ? "," : ""), $1 }')
+  printf '  WARNING gpu %s enumerates but reports no temperature -- a partial fault.\n' "$sick"
+  printf '          Every -m gpu test would fail at CUDA init on it. Route around it with:\n'
+  printf '            export SHIPINFER_GPUS=%s\n' "$healthy"
+else
+  printf '  every gpu answers for its temperature, so none is partially faulted\n'
+fi
 
 cat <<'NOTE'
 
@@ -126,6 +153,8 @@ cat <<'NOTE'
     Every `docker run` needs two flags on this host:
         --pid=host                       (see KERNEL LIMIT)
         --device nvidia.com/gpu=all      (instead of --gpus all)
+                                     ... or SHIPINFER_GPUS=0,1,2,3 for the scripts here,
+                                     which is how you route around a faulted card
 
 ==> KERNEL LIMIT — why --pid=host, and why `docker build` does not work
 
