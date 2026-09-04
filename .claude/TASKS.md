@@ -2075,7 +2075,8 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       scripts/emit_parity_golden.py) and states that this tip's re-derivation used NO override.
       Body also describes the .claude/TASKS.md part of the diff (P6-D1/D2/D3 opened), which the sync rule
       requires and which my first draft had omitted.
-- [~] **P6-D1/D2/D3 · OPEN as PR #120 (3dcb323, 4 Sep), automerge on.** Rebased past #118 and
+- [x] **P6-D1/D2/D3 · MERGED as PR #120 (b478336, 4 Sep), APPROVE round 1. The register is
+      empty and the two ingest planes now agree with no exception at all.** Rebased past #118 and
       #119; tier 3278 (main 3280; collection 3279 vs 3281, measured), five C++ binaries green
       (397 checks), all three goldens re-derive byte-identically.** Every one went the same way -- the C++
       plane was already right and Python moved -- so `csrc` carries only comment repairs and
@@ -2095,18 +2096,21 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       on `sys.path` -- so in a worktree an editable install won and it emitted a golden from
       `main`'s plane. Caught because three scenarios came back identical after a deliberate
       behaviour change.
-- [ ] P6-D1 `CameraHealth.last_error`: pick one spelling across the planes. Python stores
+- [x] P6-D1 CLOSED in #120 — the message alone, redacted at the store. Original: pick one
+      spelling across the planes. Python stores
       f"{type(error).__name__}: {error}" (`src/shipinfer/ingest/camera/actor.py`
       `_record_failure`); C++ stores `redact_in(reason)`, i.e. `what()` with no type in front
       (`csrc/shipinfer/ingest/camera/actor.cpp` `record_failure`). The field is served by the
       health API on both planes. Registered as `last_error_type_prefix` in
       `benchmarks/parity/known.py`; deleting the entry is part of the fix.
-- [ ] P6-D2 `CameraHealth.consecutive_failures` after a FATAL open: 0 (py) vs 1 (cpp).
+- [x] P6-D2 CLOSED in #120 — the actor counts its own failures; a fatal open charges one.
+      Original: `CameraHealth.consecutive_failures` after a FATAL open: 0 (py) vs 1 (cpp).
       Python's health reads `backoff.attempts`, and the `SourceUnavailableError` path never
       calls `next_delay()`; C++ increments `consecutive_failures_` inside `record_failure`.
       Decide whether a failure that is never retried counts as one. Registered as
       `fatal_consecutive_failures`.
-- [ ] P6-D3 `CameraActor.stop()` fate stickiness: C++ latches `thread_abandoned_` and answers
+- [x] P6-D3 CLOSED in #120 — Python latches too; `is_running` answers the other question.
+      Original: `CameraActor.stop()` fate stickiness: C++ latches `thread_abandoned_` and answers
       false for ever (`csrc/shipinfer/ingest/camera/actor.h:139-145`, decided in #39 round 4);
       Python re-reads `thread.is_alive()`, so a second `stop()` after the abandoned thread
       exits answers True. Decide whether Python latches too, or the C++ header stays the
@@ -2660,7 +2664,15 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       violation count only 1031 -> 1012. The fix is fewer, smaller files with less prose in them.
       **DECIDED (asked, 31 Aug): all three, SEQUENTIALLY, one package per PR** -- split the oversized file,
       cut prose in the files touched, delete the superfluous helpers there. Order: runners/ first.
-- [~] **V149-runners · STEP 3 MERGED as PR #111 (f0348ae3, APPROVE). inprocess.py 2121 -> 1242 (-41%), ratio 2.27 -> 1.39. Step 4 (placement, ~26 lines of code) left and may not warrant its own module.**  Original: STEP 3 OPEN as PR #111 (comments + the module/class docstrings). Step 4 left.**
+- [~] **V149-runners · STEP 4 OPEN as PR #121 (3637a61). The ledger was right that PLACEMENT
+      alone does not warrant a module -- `_priority_lock` guards `_placed_bands` AND
+      `_configured`, and `_priority_for` reads both, so splitting the placement half would
+      export the lock. The seam is "which band, and who said so", so all of it moved:
+      `runners/bands.py::PriorityBands`, inprocess.py 1243 -> 1135, ratio 1.39 -> 1.32, eight
+      `with self._priority_lock:` blocks -> five calls, and 14 unit tests for cases that
+      previously needed a whole runner (three revert-checked; one honestly recorded as NOT
+      discriminating). src/shipinfer cap allowance ratcheted 688 -> 684.
+      Original: STEP 3 MERGED as PR #111 (f0348ae3, APPROVE). inprocess.py 2121 -> 1242 (-41%), ratio 2.27 -> 1.39.**  Original: STEP 3 OPEN as PR #111 (comments + the module/class docstrings). Step 4 left.**
       inprocess.py across all three steps: **2121 -> 1242 lines (-41%)**, ratio 2.27 -> **1.39**, plus a
       308-line walk.py at 0.48. Step 3 took the 298 comment lines step 2 left, and the two docstrings a
       reader meets FIRST -- module 67 lines (cap 15) and the class 39 (cap 10), i.e. 106 lines of prose
