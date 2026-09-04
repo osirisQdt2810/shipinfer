@@ -2189,7 +2189,10 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       FIRST SCENARIOS, one invariant each: fair-queue eviction picks the GREEDIEST camera (the
       inherited starvation bug); a full queue REJECTS rather than evicting under the default
       policy; priority lanes drain TRACKING_CRITICAL first; expiry drops on take, not on put.
-- [~] **P6 · PR-A #101, PR-B #122+#123 MERGED; PR-C OPEN as PR #127 (d5615f1, 4 Sep). Both of
+- [~] **P6 · PR-A #101, PR-B #122+#123, PR-C #127 ALL MERGED (4 Sep). What remains is only
+      PR-C's PORT half, which is the operator's open `CSRC-TOPOLOGY-Q` -- the seam inventory
+      asserts that `topology` and `runners` are undecided and cites that item, so P6 stays [~]
+      until it is answered rather than until anything is built. Original: PR-A #101, PR-B #122+#123 MERGED; PR-C OPEN as PR #127 (d5615f1, 4 Sep). Both of
       PR-C's preconditions were met (Phase C complete, the gate exists on two seams), so the
       re-baseline was taken -- and the honest form is a TEST, because the old baseline was a
       sentence ("8 of 11 mirror") measured once on 29 Aug. Measured today: 13 tracked Python

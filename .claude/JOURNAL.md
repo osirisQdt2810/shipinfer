@@ -1,5 +1,45 @@
 # Journal
 
+## 2026-09-04 (evening) — the GPU tier was never down, and P5-A took five rounds
+
+**Twelve PRs merged today** (#118-#129). Two things happened in the second half that are worth
+more than the code.
+
+**The operator asked why we need GPU 7 when we only run four GPUs, and the answer was that we
+never did.** The tier had been recorded as DOWN since 1 Sep, blocking C1 and C4 for three days.
+Every script in `deploy/rootless/` hard-coded `--device nvidia.com/gpu=all`, and this box has
+one partially faulted card: the driver enumerates 8, CUDA can open 7, and
+`torch.cuda.__init__`'s queued `_check_capability` walks EVERY visible device — so a test that
+wanted GPUs 0-3 died at CUDA init over a card it never asked for. `SHIPINFER_GPUS=0,1,2,3` and
+the tier is green: **54 passed / 16 skipped / 0 failed** (#128). I had marked it `[!]` on the
+operator. **"The hardware is broken" is a diagnosis that has to be tested against our own
+plumbing before it goes in the ledger as an operator blocker.** `setup.sh`'s doctor now finds a
+partially faulted card and prints the knob that routes around it.
+
+**P5-A (#129) took five review rounds and every single r1-r3 finding was the same mistake:
+I ported from a docstring or an assumption instead of from the code.**
+
+* `core/events/schema.py`'s `reason` docstring said `failed`. Nothing emits `failed` —
+  `runner.py` passes the collector's five words through verbatim. So the C++ plane published
+  `failed` where Python publishes `evicted`, in the one field the byte gate was added to
+  protect, and a consumer alarming on ADR-005's eviction signal saw nothing from a C++ shard.
+* `std::to_chars` is shortest-round-trip "like Python's `repr`" — and also switches to
+  scientific whenever that is shorter, so `100000.0` became `1e+05`.
+* `std::llround` is half-away-from-zero; Python's `round` is half-to-even. 12.5 published `13`
+  on one plane and `12` on the other, and 12.5 is an ordinary camera rate.
+
+The gate could not see the first one at all, because the scenario STATED the word and both
+planes echoed it. It now names the *enum* and lets each plane derive its own word.
+
+**And r4 found that my own fix-round edit used a `std::mutex` without declaring it** — because
+`cli/bench.cpp` is compiled by nothing in CI (its closure reaches `core/platform.h`, and
+`--offline` excludes it), so four rounds of green tests merged a file that would not build.
+There is a guard now; its CI half is a ledger item.
+
+**Where things stand.** V149 done. P6 done except its operator-gated port half. P5-A done, with
+P5-B/C/D and P5-A-ALLOC left. C1/C4 are unblocked on the GPU side and now gated on an engine
+build, which is reachable.
+
 ## 2026-09-04 (last) — the offline tier was RED on this box and green on CI
 
 **Seven PRs merged today. The last one is the one to remember.** After #123 I ran the tier in
