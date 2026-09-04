@@ -10,6 +10,7 @@ the other rejects is the worst outcome this seam has, and no golden can express 
 
 from __future__ import annotations
 
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -175,10 +176,17 @@ class TestBothPlanesRefuseTheSameText:
         ("plan 1 x\nedge a b\n", "an edge with no cap"),
         ("plan 1 x\nfield embedding\n", "a field with no slot"),
         ("plan 1_0 x\n", "an integer `int()` accepts and `std::stoi` does not"),
+        ("plan 1 x\nnode a b c\nnode a b c\n", "a second block for one slot"),
+        ("plan 1 x\nlabel 8 ship\nlabel 8 vessel\n", "a second table row for one id"),
+        ("plan 1 x\nnode a b c\nclasses ,ship\n", "an empty label in `classes`"),
+        ("plan 1 x\nnode a b c\nscore inf\n", "`inf`, which the writer must never emit"),
     )
     ACCEPTED = (
         ("plan 1 -\n", "`-` is the empty chain name"),
         ("plan 1 x  # trailing comment\n", "a comment after a directive"),
+        ("plan 1 ship person cpu\n", "a multi-word chain name is the rest of the line"),
+        ("plan 1 x\nlabel 8 cargo ship\n", "and so is a multi-word label"),
+        ("plan 1 x\nnode a b c\nclasses cargo ship,fishing vessel\n", "two labels, not four"),
     )
 
     @pytest.mark.parametrize("text,why", REFUSED, ids=[why for _, why in REFUSED])
@@ -223,3 +231,171 @@ class TestTheWriterIsDeterministic:
 
         assert parse_plan(text) == plan, "the writer and the reader are inverses"
         assert plan_text(parse_plan(text)) == text
+
+
+class TestTheFormatRefusesWhatItCannotCarry:
+    """A value holding one of the format's own delimiters, refused where the slot is known.
+
+    The golden cannot catch this: `classes cargo ship` is STABLE text -- write, read, write,
+    identical -- and only its meaning changed, from one label to two. Multi-word labels are
+    normal here (COCO's `traffic light`, a `cargo ship`), so the format carries them and
+    refuses commas and `#` instead.
+    """
+
+    @staticmethod
+    def _chain(tmp_path: Path, body: str) -> Path:
+        path = tmp_path / "chain.yaml"
+        path.write_text(textwrap.dedent(body))
+        return path
+
+    #: A detector whose own table names the multi-word labels below, because
+    #: `_check_declared_classes` refuses a `classes:` naming a label nobody detects -- which
+    #: is the loader working, and the reason these chains declare both halves.
+    HEAD = """
+        name: guarded
+        elements:
+          decode: {impl: replay}
+          detect:
+            impl: pool
+            model: ship_detector
+            params: {decode: {class_labels: {8: cargo ship, 9: fishing vessel}}}
+    """
+
+    def test_a_multi_word_class_survives_the_round_trip(
+        self, tmp_path: Path, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """The case the review reproduced: space-delimited, it came back as two labels."""
+        chain = self._chain(
+            tmp_path,
+            self.HEAD + """      embed_ship:
+            impl: pool
+            model: ship_embedder
+            params: {classes: [cargo ship, fishing vessel]}
+          output: {impl: jsonlines}
+        """,
+        )
+        text = plan_text(resolve_plan(load_topology(chain), dims=dims))
+
+        assert "classes cargo ship,fishing vessel" in text
+        assert parse_plan(text).node("embed_ship").classes == ("cargo ship", "fishing vessel")
+
+    def test_a_multi_word_label_and_chain_name_survive(
+        self, tmp_path: Path, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        chain = self._chain(
+            tmp_path,
+            """
+            name: ship person cpu
+            elements:
+              decode: {impl: replay}
+              detect:
+                impl: pool
+                model: ship_detector
+                params: {decode: {class_labels: {0: person, 8: cargo ship}}}
+              output: {impl: jsonlines}
+            """,
+        )
+        text = plan_text(resolve_plan(load_topology(chain), dims=dims))
+        back = parse_plan(text)
+
+        assert back.name == "ship person cpu"
+        assert back.labels == {0: "person", 8: "cargo ship"}
+
+    @pytest.mark.parametrize(
+        "params,what",
+        [
+            ("a,b", "a comma in a label, which is the `classes` delimiter"),
+            ("a#b", "a `#` in a label, which starts a comment"),
+        ],
+        ids=["comma", "hash"],
+    )
+    def test_a_delimiter_inside_a_value_is_refused_by_name(
+        self, tmp_path: Path, dims: dict[str, tuple[int, int]], params: str, what: str
+    ) -> None:
+        chain = self._chain(
+            tmp_path,
+            f"""
+            name: hostile
+            elements:
+              decode: {{impl: replay}}
+              detect:
+                impl: pool
+                model: ship_detector
+                params: {{decode: {{class_labels: {{0: "{params}"}}}}}}
+              embed_ship:
+                impl: pool
+                model: ship_embedder
+                params: {{classes: ["{params}"]}}
+              output: {{impl: jsonlines}}
+            """,
+        )
+
+        with pytest.raises(ConfigurationError, match="cannot be written to a plan"):
+            resolve_plan(load_topology(chain), dims=dims)
+
+    def test_a_non_finite_threshold_is_refused_rather_than_written(
+        self, tmp_path: Path, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """`plan_text` used to emit `score inf`, which `parse_plan` then refused -- a plan
+        `shipinfer plan` wrote and neither plane could read."""
+        chain = self._chain(
+            tmp_path,
+            """
+            name: infinite
+            elements:
+              decode: {impl: replay}
+              detect:
+                impl: pool
+                model: ship_detector
+                params: {decode: {score_threshold: .inf}}
+              output: {impl: jsonlines}
+            """,
+        )
+
+        with pytest.raises(ConfigurationError, match="finite numbers only"):
+            resolve_plan(load_topology(chain), dims=dims)
+
+
+class TestEveryDetectorsLabelsAreCarried:
+    """Two detectors is a supported chain shape, and the plan carries ONE table.
+
+    `_check_declared_classes` unions every detector's labels, so returning the first table
+    dropped the second one's ids -- and the C++ event writer meeting an id its table does not
+    know labels the row `unknown`, which is the defect ADR-020 cites as its motivation.
+    """
+
+    @staticmethod
+    def _two(tmp_path: Path, second: str) -> Path:
+        path = tmp_path / "two.yaml"
+        path.write_text(textwrap.dedent(f"""
+                name: two
+                elements:
+                  decode: {{impl: replay}}
+                  detect:
+                    impl: pool
+                    model: ship_detector
+                    params: {{decode: {{class_labels: {{8: ship}}}}}}
+                  detect_person:
+                    kind: detect
+                    impl: pool
+                    model: ship_detector
+                    params: {{decode: {{class_labels: {second}}}}}
+                    after: decode
+                  output: {{impl: jsonlines, after: [detect, detect_person]}}
+                """))
+        return path
+
+    def test_both_tables_are_merged(
+        self, tmp_path: Path, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        chain = self._two(tmp_path, "{0: person}")
+
+        assert resolve_plan(load_topology(chain), dims=dims).labels == {0: "person", 8: "ship"}
+
+    def test_two_detectors_disagreeing_on_an_id_is_refused_naming_both(
+        self, tmp_path: Path, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        chain = self._two(tmp_path, "{8: person}")
+
+        with pytest.raises(ConfigurationError, match=r"'detect'.*'detect_person'"):
+            resolve_plan(load_topology(chain), dims=dims)

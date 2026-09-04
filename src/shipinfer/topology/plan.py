@@ -15,6 +15,7 @@ the model repository by the CALLER and handed in as ``dims``.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -24,7 +25,15 @@ from shipinfer.core.errors import ConfigurationError
 from .base import ElementKind
 from .chain import Topology
 
-__all__ = ["PLAN_VERSION", "PlanNode", "ResolvedPlan", "parse_plan", "resolve_plan"]
+__all__ = [
+    "PLAN_VERSION",
+    "PlanNode",
+    "PlanSyntaxError",
+    "ResolvedPlan",
+    "parse_plan",
+    "plan_text",
+    "resolve_plan",
+]
 
 #: Bumped when a verb changes meaning. A reader refuses a version it does not know, because
 #: a plan silently half-understood is a chain running something other than what was declared.
@@ -71,6 +80,35 @@ class ResolvedPlan:
         raise KeyError(slot)
 
 
+# doc: long the delimiters, and why a byte-compare golden cannot catch a value holding one
+def _speakable(value: str, where: str, *, spaces: bool = False, commas: bool = True) -> str:
+    """Refuse a value the format would reinterpret, naming the slot it came from.
+
+    ``#`` starts a comment on both readers and a comma delimits ``classes``, so a value
+    holding one comes back as different text -- which the byte-compare golden cannot catch,
+    because the text is stable and only its MEANING changed. Multi-word labels ARE carried
+    (COCO's ``traffic light``, a ``cargo ship``): ``plan`` and ``label`` take the rest of the
+    line and ``classes`` is comma-delimited.
+
+    In ``resolve_plan`` rather than the writer, because here the slot is still known: the
+    operator reads ``embed element 'embed_ship': class 'a,b' ...`` and not a parse error
+    from the other plane at deploy time.
+    """
+    refused = []
+    if not spaces and re.search(r"\s", value):
+        refused.append("whitespace")
+    if "#" in value:
+        refused.append("`#`")
+    if not commas and "," in value:
+        refused.append("`,`")
+    if not refused:
+        return value
+    raise ConfigurationError(
+        f"{where}: {value!r} cannot be written to a plan -- {' and '.join(refused)} would "
+        f"come back as different text on the other plane. Rename it, or spell it without them"
+    )
+
+
 def _extent(value: object, where: str) -> tuple[int, int]:
     """``[h, w]``, both positive. Refused rather than defaulted, as ``pool.py`` refuses it."""
     pair = tuple(value) if isinstance(value, (list, tuple)) else ()
@@ -110,7 +148,12 @@ def resolve_plan(
         where = f"{node.kind.value} element {node.name!r}"
         params = node.spec.params
         crop = _geometry(params, "crop", where)
-        letterbox = _geometry(params, "decode", where)
+        # `decode.dst_size` is the DETECTOR's letterbox target. Read for every kind, an
+        # `embed` slot carrying the key would get one -- harmless today, and the plan is
+        # where it stops being obvious.
+        letterbox = (
+            _geometry(params, "decode", where) if node.kind is ElementKind.DETECT else None
+        )
         decode = params.get("decode") if isinstance(params.get("decode"), Mapping) else {}
         if node.kind in (ElementKind.EMBED, ElementKind.SEGMENT) and crop is None:
             crop = _model_extent(node.spec.model, dims, where, "crop")
@@ -118,16 +161,23 @@ def resolve_plan(
             letterbox = _model_extent(node.spec.model, dims, where, "letterbox")
         nodes.append(
             PlanNode(
-                slot=node.name,
+                slot=_speakable(node.name, where),
                 kind=node.kind.value,
-                impl=node.element.impl,
-                model=node.spec.model or None,
-                classes=tuple(node.element.declared_classes() or ()),
+                impl=_speakable(node.element.impl, where),
+                model=_speakable(node.spec.model, where) if node.spec.model else None,
+                classes=tuple(
+                    _speakable(label, f"{where}: class", spaces=True, commas=False)
+                    for label in node.element.declared_classes() or ()
+                ),
                 crop=crop,
                 letterbox=letterbox,
-                score_threshold=_as_float(decode.get("score_threshold")),
+                score_threshold=_as_float(decode.get("score_threshold"), where),
                 max_detections=_as_int(decode.get("max_detections")),
-                when=None if node.condition is None else str(node.condition),
+                when=(
+                    None
+                    if node.condition is None
+                    else _speakable(str(node.condition), f"{where}: `when`", spaces=True)
+                ),
                 per=node.spec.per,
                 scope=node.spec.scope,
             )
@@ -136,9 +186,12 @@ def resolve_plan(
             fields.setdefault(event_field, []).append(node.name)
 
     return ResolvedPlan(
-        name=topology.name,
+        name=_speakable(topology.name, "chain name", spaces=True),
         nodes=tuple(nodes),
-        edges=tuple((edge.producer, edge.consumer, str(edge.caps)) for edge in topology.edges),
+        edges=tuple(
+            (edge.producer, edge.consumer, _speakable(str(edge.caps), "edge cap"))
+            for edge in topology.edges
+        ),
         labels=_labels(topology),
         fields={name: tuple(slots) for name, slots in fields.items()},
     )
@@ -158,23 +211,72 @@ def _model_extent(
     return _extent(list(extent), f"{where}: repository dims for {model!r}")
 
 
+# doc: long two detectors are a supported chain shape, and the ids are the checkpoint's
 def _labels(topology: Topology) -> dict[int, str]:
-    """The detector's id-to-label map, from the slot that emits detections.
+    """Every detector's id-to-label map, merged.
 
     Read off the chain rather than defaulted, because a raw class index is a property of the
     checkpoint: the demo detector calls a ship **8**, and a plane that assumed 1 labelled
     every ship `unknown` in its events while cropping the right rows.
+
+    EVERY detector, not the first: `_check_declared_classes` unions the tables of all of
+    them, so a two-detector chain loads -- and returning the first table here would drop the
+    second one's ids, which is the same `unknown` defect one level along.
+
+    Raises:
+        ConfigurationError: two detectors give one id different labels, or a table disagrees
+            with what the element itself parsed. Refused rather than resolved to whichever
+            slot the loader ordered first.
     """
+    merged: dict[int, str] = {}
+    owner: dict[int, str] = {}
     for node in topology.nodes:
+        if node.kind is not ElementKind.DETECT:
+            continue
         declared = node.spec.params.get("decode")
-        if isinstance(declared, Mapping) and isinstance(declared.get("class_labels"), Mapping):
-            return {int(key): str(value) for key, value in declared["class_labels"].items()}
-    return {}
+        table = declared.get("class_labels") if isinstance(declared, Mapping) else None
+        if not isinstance(table, Mapping):
+            continue
+        labels = {int(key): str(value) for key, value in table.items()}
+        # The element already parsed this key and applied its own refusals, so it is the
+        # authority on the label VALUES; the ids come from here because nothing exposes them.
+        # A disagreement means the two readings have drifted, which is worth a refusal.
+        parsed = node.element.detection_labels()
+        if parsed is not None and sorted(parsed) != sorted(labels.values()):
+            raise ConfigurationError(
+                f"detect element {node.name!r} declares class_labels {sorted(labels.values())} "
+                f"and its implementation parsed {sorted(parsed)}; the plan cannot say which"
+            )
+        for index, label in labels.items():
+            if index in merged and merged[index] != label:
+                raise ConfigurationError(
+                    f"class id {index} is {merged[index]!r} in {owner[index]!r} and "
+                    f"{label!r} in {node.name!r}; one plan carries one table, and picking "
+                    f"one of two silently is how a class is published under the wrong name"
+                )
+            merged[index] = _speakable(
+                label,
+                f"detect element {node.name!r}: label {index}",
+                spaces=True,
+                commas=False,
+            )
+            owner[index] = node.name
+    return merged
 
 
-def _as_float(value: object) -> float | None:
-    numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
-    return float(value) if numeric else None
+def _as_float(value: object, where: str) -> float | None:
+    """A finite float, or nothing. YAML spells `.inf`, and the writer would then emit
+    `score inf` -- which its own reader refuses, so the plan would be unreadable by both
+    planes. Refused here, where the slot can still be named."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    number = float(value)
+    if not math.isfinite(number):
+        raise ConfigurationError(
+            f"{where}: `decode.score_threshold` is {value!r}; a plan carries finite numbers "
+            f"only, because neither `inf` nor `nan` has a spelling both planes read back"
+        )
+    return number
 
 
 def _as_int(value: object) -> int | None:
@@ -193,7 +295,7 @@ def plan_text(plan: ResolvedPlan) -> str:
         if node.model:
             lines.append(f"model {node.model}")
         if node.classes:
-            lines.append("classes " + " ".join(node.classes))
+            lines.append("classes " + ",".join(node.classes))
         if node.crop:
             lines.append(f"crop {node.crop[0]} {node.crop[1]}")
         if node.letterbox:
@@ -245,14 +347,23 @@ def parse_plan(text: str, *, source: str = "<string>") -> ResolvedPlan:
         if verb == "plan":
             if name is not None:
                 raise PlanSyntaxError(f"{where}: a second `plan` header")
-            version, name = _header(args, where)
+            version, name = _header(line, args, where)
         elif name is None:
             raise PlanSyntaxError(f"{where}: `{verb}` before the `plan` header")
         elif verb == "label":
-            _want(args, 2, where, "label <id> <name>")
-            labels[_int(args[0], where)] = args[1]
+            if len(args) < 2:
+                raise PlanSyntaxError(f"{where}: expected `label <id> <name>`")
+            index = _int(args[0], where)
+            if index in labels:
+                raise PlanSyntaxError(f"{where}: a second `label {index}`")
+            labels[index] = line.split(maxsplit=2)[2]
         elif verb == "node":
             _want(args, 3, where, "node <slot> <kind> <impl>")
+            # A repeat is refused rather than appended or last-wins: two blocks for one slot
+            # is a plan whose meaning depends on which reader you ask, and the C++ table
+            # carries the same row.
+            if any(node["slot"] == args[0] for node in nodes):
+                raise PlanSyntaxError(f"{where}: a second `node {args[0]}`")
             nodes.append({"slot": args[0], "kind": args[1], "impl": args[2]})
         elif verb == "edge":
             _want(args, 3, where, "edge <producer> <consumer> <format@location>")
@@ -283,15 +394,22 @@ def parse_plan(text: str, *, source: str = "<string>") -> ResolvedPlan:
     )
 
 
-def _header(args: Sequence[str], where: str) -> tuple[int, str]:
-    _want(args, 2, where, "plan <version> <name>")
+def _header(line: str, args: Sequence[str], where: str) -> tuple[int, str]:
+    """``plan <version> <name>``, where the name is the REST of the line.
+
+    Free text, because a chain may be called `ship person cpu` and a fixed arity would then
+    refuse a plan `shipinfer plan` had just written -- one of three such holes the review of
+    this format found. `label` reads its name the same way.
+    """
+    if len(args) < 2:
+        raise PlanSyntaxError(f"{where}: expected `plan <version> <name>`")
     version = _int(args[0], where)
     if version != PLAN_VERSION:
         raise PlanSyntaxError(
             f"{where}: plan version {version}, and this reader knows {PLAN_VERSION}. "
             "A plan half understood is a chain running something other than what was declared"
         )
-    return version, args[1]
+    return version, line.split(maxsplit=2)[2]
 
 
 def _want(args: Sequence[str], count: int, where: str, form: str) -> None:
@@ -353,9 +471,18 @@ def _max_detections(node: dict[str, object], args: Sequence[str], where: str) ->
 
 
 def _classes(node: dict[str, object], args: Sequence[str], where: str) -> None:
+    """Comma-delimited, so `classes cargo ship,fishing vessel` is two labels and not four.
+
+    Space-delimited was the first spelling and it re-read `[cargo ship]` as two labels that
+    no detector emits -- selecting no rows, running no model and reporting nothing wrong,
+    which is the silence `_check_declared_classes` exists to prevent.
+    """
     if not args:
-        raise PlanSyntaxError(f"{where}: expected `classes <label>...`")
-    node["classes"] = tuple(args)
+        raise PlanSyntaxError(f"{where}: expected `classes <label>[,<label>...]`")
+    labels = tuple(part.strip() for part in " ".join(args).split(","))
+    if not all(labels):
+        raise PlanSyntaxError(f"{where}: an empty label in `classes`")
+    node["classes"] = labels
 
 
 def _when(node: dict[str, object], args: Sequence[str], where: str) -> None:
