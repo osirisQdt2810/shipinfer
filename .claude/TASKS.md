@@ -2649,7 +2649,16 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       waves must take symbols *under* their caps, not merely shorten them: wave 1 removes 357
       lines of prose and moves the count only 1022 → 1002.
 
-- [~] **HOOKS-SUBMODULE · OPEN as PR #124 (4 Sep). A REAL DEFECT, and CI could never have seen
+- [x] **HOOKS-SUBMODULE · MERGED as PR #124 (4 Sep) after TWO rounds. Round 1's BLOCKING found
+      two MORE ways the enumerator could report nothing, both real: `git -C ROOT` resolves a
+      relative pathspec against ROOT while `p.exists()` resolved it against the CWD, so
+      `cd scripts && python hooks/check_docs.py hooks` matched no index entry and exited 0 over
+      eight unread files; and `--cached` lists the INDEX, so a file not yet `git add`ed was
+      invisible to all three gates -- which matters most for `check_layers.py`, whose
+      pre-commit entry is `pass_filenames: false`, so it goes through the enumerator. Fixed
+      with `root.resolve()` + `--cached --others --exclude-standard`, a test per branch, and
+      `exists()` for a tracked file deleted from the worktree. The primary checkout's tier is
+      now GREEN with the submodule present: 3340 passed. Original: OPEN as PR #124 (4 Sep). A REAL DEFECT, and CI could never have seen
       it: `check_docs.py` and `check_napoleon.py` walked `benchmarks/` with `rglob`, which
       descends into the `benchmarks/baseline` SUBMODULE -- 995 cap findings against 58 and 48
       Napoleon orphans against zero on any checkout that has it.** Napoleon is a

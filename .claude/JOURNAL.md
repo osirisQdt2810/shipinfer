@@ -1,5 +1,33 @@
 # Journal
 
+## 2026-09-04 (last) — the offline tier was RED on this box and green on CI
+
+**Seven PRs merged today. The last one is the one to remember.** After #123 I ran the tier in
+the PRIMARY checkout for the first time all session -- everything before that ran in fresh
+worktrees -- and it failed twice. `check_docs.py` and `check_napoleon.py` walk `benchmarks/`
+with `rglob`, which descends into the **`benchmarks/baseline` submodule**: 995 cap findings
+against 58, and 48 orphaned Napoleon continuations against zero. Napoleon is a zero-tolerance
+gate. So `pytest` was red on exactly the machines that build the kernels, and green on CI,
+which deliberately does not check the submodules out. **Nothing in CI could ever have said
+so** -- and both of those checks were written by me, this week and last.
+
+Fixed with `git ls-files` (a submodule is ONE entry; `rglob` cannot see that and a name-based
+skip list would miss the next submodule), shared across all three walking hooks. Round 1's
+review then found two more ways the same function could report nothing: a relative pathspec
+resolved against ROOT rather than the caller's cwd, and `--cached` listing only the index, so
+an unstaged file was invisible to `check_layers.py` -- whose pre-commit entry is
+`pass_filenames: false`, so it goes through the enumerator rather than over named filenames.
+Both fixed, both tested. #124.
+
+**Two lessons, and the second is the general one.**
+
+1. **A worktree is not the operator's environment.** Submodules are the difference, and they
+   are where the third-party code is. Run the tier in the primary checkout before believing
+   it.
+2. **A gate that reports nothing looks exactly like a clean tree.** Three of the four defects
+   in #124 were that shape. When writing an enumerator, enumerate the ways it can return an
+   empty list and close each one -- and test each branch, because none of them fails loudly.
+
 ## 2026-09-04 (later) — P6 PR-B: the queue seam gets a parity gate, both planes
 
 Six PRs merged today. After V149 closed with #121 the next ledger item was P6 PR-B, and it
