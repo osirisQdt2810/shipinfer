@@ -2139,8 +2139,22 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       LESSON, and it is the one to carry: every single r1-r3 finding was a place where I ported
       from a DOCSTRING or an assumption instead of from the code. The docstring lied, `to_chars`
       is not `repr`, and `llround` is not `round`. Read the implementation.
-      LEFT: P5-B (repository reader), P5-C (resolved settings), P5-D (data-driven chain), plus
-      P5-A-ALLOC. Original: P5-A DONE and OPEN as PR #129 (4 Sep). The survey's headline finding was right --
+      LEFT, RE-SHAPED 4 Sep by ADR-020 -- read this before starting any of them:
+      * **P5-D (data-driven chain) is DONE** by #131 + #132. `bench.cpp` reads a resolved plan
+        and `graph.cpp`'s hardcoded chain is gone; the label table, the crop extents, the
+        threshold and the cap all arrive in it.
+      * **P5-B is NOT a C++ `config.yaml` reader any more, and building one would be a
+        reinvention.** ADR-020's argument applies unchanged one artefact along: the model
+        repository is control plane (ADR-014 names it), the Python side already validates it,
+        and a second YAML reader in C++ is a second door whose failure is one plane accepting
+        a repository the other refuses. So P5-B is *the plan carrying resolved model config*
+        -- instance counts per device, `max_batch_size`, `max_queue_delay_us`, the input and
+        output names -- which is why `run_cpp_bench.sh:18-21` restates instance counts by hand
+        today. Same format, same gate, probably new verbs (`instances <slot> <device> <n>`).
+      * **P5-C (resolved settings) shrinks to what the plan does not carry**: the queue
+        capacities, the reassembly window, the worker count. Same reasoning -- resolved on the
+        Python side, carried, not re-parsed.
+      Plus P5-A-ALLOC (first half built, queued). Original: P5-A DONE and OPEN as PR #129 (4 Sep). The survey's headline finding was right --
       csrc emitted NO events at all, and `bench.cpp`'s sink comment CLAIMED it built one while
       the body only counted -- so P5-A was writing a writer, not porting one.** Delivered:
       `csrc/shipinfer/core/events/{schema,convert,json}` mirroring `src/shipinfer/core/events/`,
