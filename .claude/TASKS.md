@@ -506,7 +506,23 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 5 · Everything else still owed
 
-- [~] **C4 · IN PROGRESS 4 Sep. Chain: a container DOOR (there is none -- CLAUDE.md and
+- [x] **C4 · DONE 4 Sep, and the premise was wrong twice over. The engines were NEVER missing
+      and the tier was never down** -- both readings came from running in a WORKTREE, where
+      `models/*` and `model_repository/*/*/*.plan` are gitignored, so the primary checkout has
+      had all four plans since 23 Aug. Delivered as PR #130: `deploy/rootless/run.sh` (the door
+      CLAUDE.md documented as `make shell`, which never existed), and the two hard-coded
+      `DEVICE = 5` ordinals that #128's device subset correctly refused.
+      **GPU tier 54 passed/16 skipped -> 69 passed/1 skipped/0 failed**, system tier included --
+      the real chain, decode to output, on a real engine, running for the first time since
+      1 Sep. **AND THE BENCH RAN, with the per-device table C4 exists for:**
+      `--cameras 20 --fps 4 --gpus 0,1,2,3`, 79.6 of 80 img/s offered (99%),
+      ship_detector cuda:0=292 cuda:1=294 cuda:2=312 cuda:3=277 (~12% spread on the hot path),
+      every engine stage SUSTAINED, `pipeline` SATURATED at 54.2 (the reassembly queue is the
+      honest bottleneck at this load). TWO REFUSALS worth keeping: `--gpus` is a device LIST not
+      a count (`--gpus 4` asks for physical GPU 4, which a 4-device container lacks), and at
+      8x20 the in-process generator delivered 81 of 160 img/s and the harness ABORTED rather
+      than report it -- its own message says use `benchmarks/harness/shards.py` and "Do not
+      raise the tolerance". Original: IN PROGRESS 4 Sep. Chain: a container DOOR (there is none -- CLAUDE.md and
       container.md both document `make shell` and there is no Makefile anywhere, so an engine
       build has no sanctioned home) -> build the engines from the ONNX already in `models/`
       -> the bench -> C1's number. Original: UNBLOCKED by #128 (the GPU tier runs again with `SHIPINFER_GPUS=0,1,2,3`). The
