@@ -17,6 +17,13 @@ import re
 import sys
 from pathlib import Path
 
+if str(Path(__file__).parent) not in sys.path:
+    # `python3 scripts/hooks/<hook>.py` puts this directory first; a test that loads
+    # the hook by path does not, so it is named rather than assumed.
+    sys.path.insert(0, str(Path(__file__).parent))
+
+from _paths import python_files
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ROOTS = ("src/shipinfer", "scripts", "tests", "benchmarks")
 
@@ -102,7 +109,7 @@ def main(argv: list[str]) -> int:
     if missing := [p for p in given if not p.exists()]:
         print(f"no such path: {', '.join(str(p) for p in missing)}", file=sys.stderr)
         return 2
-    paths = [f for p in given for f in (sorted(p.rglob("*.py")) if p.is_dir() else [p])]
+    paths = [f for p in given for f in (python_files(p) if p.is_dir() else [p])]
     bad = [line for path in paths if path.suffix == ".py" for line in check(path)]
     for line in bad:
         print(line)
