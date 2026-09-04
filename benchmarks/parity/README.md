@@ -131,7 +131,7 @@ The same shape, one directory down, and **one design decision inverted**.
 
 ```
 benchmarks/parity/scenarios/queues/<name>.scn   what the queue is told to do, call by call
-benchmarks/parity/golden/<name>.jsonl           the trace, emitted once by the Python plane
+benchmarks/parity/golden/queues/<name>.jsonl    the trace, emitted once by the Python plane
 benchmarks/tests/test_parity_queues.py          the Python plane against it + the vacuity guard
 csrc/tests/test_queue_parity.cpp                the C++ plane against the same file
 ```
@@ -170,3 +170,8 @@ Each scenario carries one invariant and the golden *shows* it:
 | `reject_is_the_default` | a full queue refuses; backpressure reaches the producer |
 | `priority_lanes` | tracking-critical does not queue behind a background batch |
 | `expiry_on_take` | an expired request is accepted, then dropped on the way **out** |
+| `fifo_close_drains` | `fifo` drops the **oldest**, and a close drains the rest in order |
+
+Each seam's goldens live under its own root -- `golden/` and `golden/queues/` -- because the
+scenario namespaces are already split and this seam *is* backpressure: a queue scenario named
+`backpressure` would otherwise have `--emit-golden --force` overwrite the ingest golden.

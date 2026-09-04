@@ -12,6 +12,8 @@ from pathlib import Path
 
 import numpy as np
 
+from benchmarks.parity.drive_python import GOLDEN as INGEST_GOLDEN
+from benchmarks.parity.drive_python import SCENARIOS as INGEST_SCENARIOS
 from benchmarks.parity.queue_scenario import Op, QueueScenario, load_queue_scenario
 from benchmarks.parity.trace import Trace, TraceWriter
 from shipinfer.core.errors import ConfigurationError, QueueFullError, RequestCancelledError
@@ -24,9 +26,11 @@ from shipinfer.scheduling.work import WorkItem
 
 __all__ = ["GOLDEN", "SCENARIOS", "run_queue_scenario"]
 
-ROOT = Path(__file__).resolve().parents[2]
-SCENARIOS = ROOT / "benchmarks" / "parity" / "scenarios" / "queues"
-GOLDEN = ROOT / "benchmarks" / "parity" / "golden"
+#: Under `golden/queues/`, and derived from the ingest roots rather than re-anchored so the
+#: two cannot drift: a queue scenario named `backpressure` -- entirely plausible, since this
+#: seam IS backpressure -- would otherwise have `--force` overwrite the ingest golden.
+SCENARIOS = INGEST_SCENARIOS / "queues"
+GOLDEN = INGEST_GOLDEN / "queues"
 
 #: A deadline one nanosecond into the monotonic epoch: in the past on any machine, on either
 #: plane, without a clock seam in the queue. Expiry is then a property of the item and not of

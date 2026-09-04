@@ -160,7 +160,7 @@ namespace {
         const QueueScenario scenario =
             load_queue_scenario(resolve("scenarios/queues/" + name + ".scn"));
         const std::vector<std::string> golden =
-            read_lines(resolve("golden/" + name + ".jsonl"));
+            read_lines(resolve("golden/queues/" + name + ".jsonl"));
         const std::vector<std::string> mine = run_scenario(scenario);
         check(static_cast<int>(mine.size()) - 1 >= scenario.records_min,
               name + ": produced at least the " + std::to_string(scenario.records_min) +
@@ -223,7 +223,7 @@ namespace {
     void test_a_missing_golden_is_a_failure_and_never_a_skip() {
         bool refused = false;
         try {
-            (void)read_lines(resolve("golden/no_such_scenario.jsonl"));
+            (void)read_lines(resolve("golden/queues/no_such_scenario.jsonl"));
         } catch (const ConfigError& error) {
             refused = std::string(error.what()).find("cannot find") != std::string::npos;
         }
@@ -240,6 +240,7 @@ int main() {
         test_this_plane_matches_the_golden("reject_is_the_default");
         test_this_plane_matches_the_golden("priority_lanes");
         test_this_plane_matches_the_golden("expiry_on_take");
+        test_this_plane_matches_the_golden("fifo_close_drains");
     } catch (const std::exception& error) {
         // A missing golden or an unreadable scenario is a HARD failure, never a skip: a gate
         // that fails open is worse than no gate, because it reads as evidence.
