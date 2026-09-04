@@ -2099,7 +2099,23 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       doing. A PR editing `.github/workflows/**` cannot pass the review job (CLAUDE.md), so it
       needs a hand merge and the body has to say so.
 
-- [ ] **P5-A-ALLOC · Two follow-ups #129's review raised and I deliberately did NOT take in a
+- [~] **P5-A-ALLOC · FIRST HALF BUILT and pushed as `perf/event-writer-allocations`, queued
+      behind #132 (one PR at a time). 2.37x, and the emitted bytes are identical.** The
+      allocation half is done: `append_number`/`append_string` write into a caller's buffer,
+      ONE `to_chars` on the common path (fixed first, and the 64-byte buffer IS the exponent
+      test), `to_json` reserves once, and `snprintf` is gone from the `\uXXXX` escape.
+      MEASURED in the container, three A/B pairs at 400 events x 15 objects x 2048 floats:
+      7645.8 / 7951.0 / 7494.3 -> 4134.9 / 3223.5 / 3189.2 us per event, 3.7 -> 9.1 M
+      numbers/s, same checksum every run. `cli/bench_events.cpp` is that measurement,
+      committed, because the item said to do it with one. Also: the double spellings became a
+      SHARED table (`benchmarks/parity/golden/number_spellings.tsv`, 571 rows emitted by
+      CPython, read by the C++ gate, held to by `tests/test_number_spellings.py`) -- so
+      `test_event_parity` is 40 -> 616 checks and the boundaries are checked on every push
+      rather than once by hand. The body is drafted at `<scratchpad>/perf-pr-body.md`.
+      SECOND HALF STILL OPEN: cross-plane comparing `build_records` rather than
+      hand-assembled events, which needs the data-driven field map ADR-020's plan provides
+      (#131 merged, #132 open) -- open it once #132 lands.
+      Original: Two follow-ups #129's review raised and I deliberately did NOT take in a
       fix round, both with the reviewer's own analysis.** (1) ALLOCATION on the emission path:
       every scalar in `csrc/.../events/schema.cpp` is a `std::string` returned by value, and
       `json_number` runs `to_chars` TWICE (scientific to read the exponent, then fixed) plus up
