@@ -2075,6 +2075,25 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       scripts/emit_parity_golden.py) and states that this tip's re-derivation used NO override.
       Body also describes the .claude/TASKS.md part of the diff (P6-D1/D2/D3 opened), which the sync rule
       requires and which my first draft had omitted.
+- [~] **P6-D1/D2/D3 · ALL THREE DECIDED AND BUILT on `fix/ingest-parity-divergences`
+      (0b24fbf), waiting on #119 to free the queue.** Every one went the same way -- the C++
+      plane was already right and Python moved -- so `csrc` carries only comment repairs and
+      the register `benchmarks/parity/known.py` is now EMPTY, which is the register working.
+      D1: a type prefix cannot converge (the type names are the language's, and the safety net
+      catches anything), so `last_error` is the message alone; `_record_failure` takes a reason
+      string like `CameraActor::record_failure` and REDACTS IT -- a second leak, found on the
+      way: a decoder's own exception is not one of the four self-redacting ingest errors and
+      reached `GET /streams` as the library wrote it. D2: Python's `health()` reported
+      `backoff.attempts` while `_record_failure` decided the state from `attempts + 1`, so a
+      fatal open said UNHEALTHY and "no failures"; the actor keeps its own counter now.
+      D3: `stop()` latches, so an abandonment stays counted; `is_running` is the other question.
+      EVIDENCE: `./csrc/build/test_ingest_parity` 41 checks / 0 failures with NO `KNOWN:` line
+      printed (was 45 with two); goldens re-derived, `fatal_vs_retryable` changed on exactly
+      one line and the other two byte-identical; full tier 3272 (main 3274, net -2); five
+      revert-checks, one per fix. Also fixes the golden EMITTER, which put only the repo root
+      on `sys.path` -- so in a worktree an editable install won and it emitted a golden from
+      `main`'s plane. Caught because three scenarios came back identical after a deliberate
+      behaviour change.
 - [ ] P6-D1 `CameraHealth.last_error`: pick one spelling across the planes. Python stores
       f"{type(error).__name__}: {error}" (`src/shipinfer/ingest/camera/actor.py`
       `_record_failure`); C++ stores `redact_in(reason)`, i.e. `what()` with no type in front
@@ -2490,7 +2509,11 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       fails the `PR description` check and silently SKIPS auto-merge -- that cost a round on #113).
       ENV: the venv is not on PATH after a restart --
       `export PATH="/home/dungha15/workspaces/shipinfer/.venv/bin:$PATH"` before any pytest.
-- [~] **REDACTION · pushed as `fix/source-unavailable-redaction` (a070479), no PR yet. A REAL DEFECT,
+- [~] **REDACTION · OPEN as PR #119 (4fd96d5, 4 Sep), automerge on.** Rebased on #118's main;
+      the C++ HALF WAS MISSING A TEST and now has one (`test_no_ingest_error_carries_a_
+      credential_in_its_message`, +6 checks, test_ingest 220 -> 226); the constructor comment
+      cut to 4 lines because #118's own ratchet caught it. Full tier 3280 passed / 1 skipped;
+      five C++ binaries green; red-probed on BOTH planes and reverted. Original: A REAL DEFECT,
       found while reading both planes for P6-D1 rather than trusting the ledger.**
       `core/errors/ingest.py` states the rule -- the message becomes `CameraHealth.last_error`, which
       the health API serves -- and applies it to SourceOpenError and FrameDecodeError but NOT to
@@ -2504,7 +2527,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       distinguishes the broken sibling rather than asserting a tautology. Tier 3268 + C++ 395 checks.
       DOES NOT CLOSE P6-D1: the type-prefix question is untouched and `last_error_type_prefix` still
       explains the remaining difference (test_ingest_parity still prints it).
-- [~] **V145-W3 · OPEN as PR #118, round 1 BLOCKING and FIXED at 998258f.** The finding was
+- [x] **V145-W3 · MERGED as PR #118 (4c6a5dc, 4 Sep), APPROVE round 2 after one BLOCKING.** The finding was
       REAL and I verified it against the hook before fixing: `_over_cap` filtered stdout on
       `"(max " in line`, and `check_docs.py`'s comment-block path short-circuits on a
       REASONLESS `# doc: long` before the cap comparison -- so its only finding is
@@ -2530,8 +2553,10 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       19 ADRs with **10 over 30**. But the item says forward-only and it is right to: both are
       append-only records of what was decided when, and an accepted ADR edited later stops
       being the thing it records. So the deliverable is a RATCHET, not a rewrite.
-- [~] **V145-ARM · OPEN as PR #118, same branch as V145-W3.** ANSWERED DIFFERENTLY FROM HOW IT
-      WAS FRAMED, with the reason.**
+- [x] **V145-ARM · MERGED as PR #118, same branch as V145-W3.** ANSWERED DIFFERENTLY FROM HOW
+      IT WAS FRAMED, with the reason. The ratchet earned itself twice within the hour: it
+      caught an over-cap comment block on #119 and another on the P6-D branch, both cut
+      before opening.**
       The item says "wire it in once the waves have taken the count to zero". MEASURED: five
       trim PRs moved the tree 1022 -> **989** over-cap items (src/shipinfer 689, tests 203,
       benchmarks 58, scripts 39), and 6880 lines of excess. The premise is unreachable -- the
