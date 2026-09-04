@@ -2052,7 +2052,21 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
             header promises "by ANY stopper"). Fix: `thread_abandoned_` as
             `std::atomic<bool>` so the lockless self-stop path can read it; + a line
             keeping the header honest either way.
-- [~] **P5 · UNBLOCKED (C8m merged as #92) and SCOPED 29 Aug — plan at scratchpad/plan-p5-config-and-events.md.**
+- [~] **P5 · P5-A DONE and OPEN as PR #129 (4 Sep). The survey's headline finding was right --
+      csrc emitted NO events at all, and `bench.cpp`'s sink comment CLAIMED it built one while
+      the body only counted -- so P5-A was writing a writer, not porting one.** Delivered:
+      `csrc/shipinfer/core/events/{schema,convert,json}` mirroring `src/shipinfer/core/events/`,
+      the third parity seam (scenarios/events -> golden/events -> `test_event_parity`, 18
+      checks / 0 failures BYTE-IDENTICAL on the first comparison), and the bench sink now
+      really builds the event with an `event_bytes` accumulator so an optimiser cannot delete
+      it. THE HARD PART was float formatting: `std::to_chars` writes `1` where Python writes
+      `1.0` and `std::to_string` writes `0.500000` for 0.5, so `json_number` appends the `.0`
+      -- checked against `json.dumps` on nine values incl. `1e+20` and `-0.0`. Key order is
+      asserted from BOTH sides (the golden's first ten keys are v1's, and the C++ writer's keys
+      are regexed out of schema.cpp), which is why `to_json` writes them one at a time instead
+      of assembling a map. Two revert-checks red. LEFT: P5-B (repository reader), P5-C (resolved
+      settings -- the class labels are stated at the bench call site with a comment naming it),
+      P5-D (data-driven chain). Original: UNBLOCKED (C8m merged as #92) and SCOPED 29 Aug.**
       Survey finding that changes the shape of the work: **csrc emits no perception events at all** — `bench.cpp:183-196`
       takes `FrameResult&&`, counts it and discards it, and the only JSON in the tree is the occupancy log. So "same
       events out" is a writer that does not exist, not a port of one. Also: no `model_repository/*/config.yaml` reader
