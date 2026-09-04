@@ -206,6 +206,33 @@ namespace shipinfer::parity {
         return line.substr(start, end - start);
     }
 
+    // Which named fields two records disagree on -- the names, not "index 3", because a
+    // failing gate is read by a person. Shared by every parity binary: two copies would name
+    // the same difference differently.
+    inline std::vector<std::string> differing_fields(const ParityRecord& left,
+                                                     const ParityRecord& right) {
+        if (left.kind != right.kind) return {"kind"};
+        if (left.camera != right.camera) return {"camera"};
+        const auto entry = kFields().find(left.kind);
+        if (entry == kFields().end())
+            throw ConfigError("unknown record kind '" + left.kind + "'");
+        const FieldNames& names = entry->second;
+        std::vector<std::string> differ;
+        for (size_t i = 0; i < names.numbers.size(); ++i) {
+            if (i >= left.numbers.size() || i >= right.numbers.size() ||
+                left.numbers[i] != right.numbers[i]) {
+                differ.push_back(names.numbers[i]);
+            }
+        }
+        for (size_t i = 0; i < names.text.size(); ++i) {
+            if (i >= left.text.size() || i >= right.text.size() ||
+                left.text[i] != right.text[i]) {
+                differ.push_back(names.text[i]);
+            }
+        }
+        return differ;
+    }
+
     inline ParityRecord parse_line(const std::string& line) {
         ParityRecord record;
         record.kind = quoted_field(line, "kind");

@@ -124,3 +124,49 @@ which matches a golden it did not produce.
 duplication is this harness's own risk. It is contained by emitting `source_open`,
 `source_read` and `source_close` for every call: the two scripts drifting apart shows up in
 the source-event stream first, where it cannot be mistaken for a divergence in the actor.
+
+## The second seam: the request queue
+
+The same shape, one directory down, and **one design decision inverted**.
+
+```
+benchmarks/parity/scenarios/queues/<name>.scn   what the queue is told to do, call by call
+benchmarks/parity/golden/<name>.jsonl           the trace, emitted once by the Python plane
+benchmarks/tests/test_parity_queues.py          the Python plane against it + the vacuity guard
+csrc/tests/test_queue_parity.cpp                the C++ plane against the same file
+```
+
+Run them: `pytest benchmarks/tests/test_parity_queues.py`, and
+`python scripts/build_csrc.py --offline && ./csrc/build/test_queue_parity`. Emit a golden
+with `python scripts/emit_parity_golden.py --kind queue --scenario <name> --emit-golden`.
+
+**Every queue record is a fleet record, and the item's camera travels in its words.** The
+ingest gate groups per camera because thread interleaving is nondeterministic; here that is
+exactly backwards — *which* camera's item comes out next **is** the invariant. A queue run is
+single-threaded with no clock in it, so the whole trace is one ordered sequence and `diff.py`
+needs no change to compare it. `kFleetKinds()` is a set on the C++ side for the same reason
+the field names are a table: so a test can compare the two spellings.
+
+| kind | n[] | t[] |
+|---|---|---|
+| `qput` | `rows`, `depth` | `camera`, `status` |
+| `qbatch` | `items`, `rows` | — |
+| `qserved` | `rows` | `camera` |
+| `qdrop` | — | `camera`, `reason` |
+| `qstats` | `accepted`, `rejected`, `evicted`, `expired`, `depth`, `capacity` | — |
+| `qcam` | `depth`, `rejected`, `evicted`, `expired` | `camera` |
+
+Two things the drivers **refuse** rather than compare, because neither queue promises them:
+a `take` from an open empty queue (`get_batch` blocks there by contract, and a scenario that
+hangs one plane is not a gate), and more than one drop in a single operation — the order of
+several simultaneous drops is each queue's internal order. `close` is the exception: it
+returns its drained items in order, so those are emitted from that sequence.
+
+Each scenario carries one invariant and the golden *shows* it:
+
+| scenario | what it holds shut |
+|---|---|
+| `fair_eviction` | a flood evicts **its own** oldest frames; the quiet camera's survives |
+| `reject_is_the_default` | a full queue refuses; backpressure reaches the producer |
+| `priority_lanes` | tracking-critical does not queue behind a background batch |
+| `expiry_on_take` | an expired request is accepted, then dropped on the way **out** |

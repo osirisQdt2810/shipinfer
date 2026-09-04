@@ -29,6 +29,7 @@
 #include "shipinfer/ingest/camera/health.h"
 #include "shipinfer/ingest/config.h"
 #include "shipinfer/ingest/manager.h"
+#include "tests/parity_files.h"
 #include "tests/parity_scenario.h"
 #include "tests/parity_trace.h"
 #include "tests/scripted_source.h"
@@ -58,44 +59,6 @@ namespace {
     // (see `main`), because a gate that skips reads as evidence and is not.
 
     // -- where the scenarios and goldens are ------------------------------------------------
-
-    // The binary is run from the repository root by CI and from `csrc/build` by hand, so the
-    // root is searched rather than assumed — and a failure prints every path it tried, because
-    // "no such file" with no path is the least useful sentence a gate can end on.
-    std::string resolve(const std::string& relative) {
-        std::vector<std::string> roots;
-        const char* named = std::getenv("SHIPINFER_PARITY_GOLDEN");
-        if (named) {
-            // Authoritative, not merely preferred: an operator who names a directory and
-            // silently gets a different one has been lied to by the gate itself.
-            roots.emplace_back(named);
-        } else {
-            for (const char* root : {"benchmarks/parity", "../benchmarks/parity",
-                                     "../../benchmarks/parity", "../../../benchmarks/parity"}) {
-                roots.emplace_back(root);
-            }
-        }
-        std::string tried;
-        for (const std::string& root : roots) {
-            const std::string path = root + "/" + relative;
-            std::ifstream probe(path);
-            if (probe) return path;
-            tried += (tried.empty() ? "" : ", ") + path;
-        }
-        throw ConfigError("cannot find " + relative + "; tried " + tried +
-                          ". Run this binary from the repository root, or set "
-                          "SHIPINFER_PARITY_GOLDEN to the benchmarks/parity directory");
-    }
-
-    std::vector<std::string> read_lines(const std::string& path) {
-        std::ifstream file(path);
-        if (!file) throw ConfigError("cannot read " + path);
-        std::vector<std::string> lines;
-        for (std::string line; std::getline(file, line);) {
-            if (!line.empty()) lines.push_back(line);
-        }
-        return lines;
-    }
 
     // -- the register's other half ----------------------------------------------------------
 
@@ -132,30 +95,6 @@ namespace {
     // Which registered ids actually fired, across every scenario in this run. A register whose
     // entries stop firing is a register rotting into a suppression list, so `main` checks it.
     std::set<std::string> fired;
-
-    std::vector<std::string> differing_fields(const ParityRecord& left,
-                                              const ParityRecord& right) {
-        if (left.kind != right.kind) return {"kind"};
-        if (left.camera != right.camera) return {"camera"};
-        const auto entry = kFields().find(left.kind);
-        if (entry == kFields().end())
-            throw ConfigError("unknown record kind '" + left.kind + "'");
-        const FieldNames& names = entry->second;
-        std::vector<std::string> differ;
-        for (size_t i = 0; i < names.numbers.size(); ++i) {
-            if (i >= left.numbers.size() || i >= right.numbers.size() ||
-                left.numbers[i] != right.numbers[i]) {
-                differ.push_back(names.numbers[i]);
-            }
-        }
-        for (size_t i = 0; i < names.text.size(); ++i) {
-            if (i >= left.text.size() || i >= right.text.size() ||
-                left.text[i] != right.text[i]) {
-                differ.push_back(names.text[i]);
-            }
-        }
-        return differ;
-    }
 
     // -- driving one scenario over the real manager -----------------------------------------
 
