@@ -2075,8 +2075,9 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       scripts/emit_parity_golden.py) and states that this tip's re-derivation used NO override.
       Body also describes the .claude/TASKS.md part of the diff (P6-D1/D2/D3 opened), which the sync rule
       requires and which my first draft had omitted.
-- [~] **P6-D1/D2/D3 · ALL THREE DECIDED AND BUILT on `fix/ingest-parity-divergences`
-      (0b24fbf), waiting on #119 to free the queue.** Every one went the same way -- the C++
+- [~] **P6-D1/D2/D3 · OPEN as PR #120 (3dcb323, 4 Sep), automerge on.** Rebased past #118 and
+      #119; tier 3278 (main 3280; collection 3279 vs 3281, measured), five C++ binaries green
+      (397 checks), all three goldens re-derive byte-identically.** Every one went the same way -- the C++
       plane was already right and Python moved -- so `csrc` carries only comment repairs and
       the register `benchmarks/parity/known.py` is now EMPTY, which is the register working.
       D1: a type prefix cannot converge (the type names are the language's, and the safety net
@@ -2509,7 +2510,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       fails the `PR description` check and silently SKIPS auto-merge -- that cost a round on #113).
       ENV: the venv is not on PATH after a restart --
       `export PATH="/home/dungha15/workspaces/shipinfer/.venv/bin:$PATH"` before any pytest.
-- [~] **REDACTION · OPEN as PR #119 (4fd96d5, 4 Sep), automerge on.** Rebased on #118's main;
+- [x] **REDACTION · MERGED as PR #119 (9db1c74, 4 Sep), APPROVE round 1.** Rebased on #118's main;
       the C++ HALF WAS MISSING A TEST and now has one (`test_no_ingest_error_carries_a_
       credential_in_its_message`, +6 checks, test_ingest 220 -> 226); the constructor comment
       cut to 4 lines because #118's own ratchet caught it. Full tier 3280 passed / 1 skipped;
