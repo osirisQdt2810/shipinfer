@@ -2078,7 +2078,33 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       seam such a comparison needs, and P5-D is what makes it data-driven; say so in the
       P5-B/C body rather than leaving it implied. Land before P5 closes.
 
-- [~] **P5 · P5-A DONE and OPEN as PR #129 (4 Sep). The survey's headline finding was right --
+- [~] **P5 · P5-A MERGED as PR #129 (4 Sep) after FIVE review rounds, every one of which found
+      something real. Worth reading before P5-B starts:** r1 (5 blockers) -- the record builder
+      looked batches up by STAGE name where an `ObjectBatch` is keyed by its stage's OUTPUT
+      name, so every embedding was dropped as `[]`; it had NO test, and could not have one
+      until `ObjectBatch`/`EmissionInputs`/`FinishReason` were split out of the CUDA-reaching
+      `graph/state.h`; the converter sat in `core/` and included `pipeline/`; `json_number` was
+      not byte-identical (`to_chars` goes scientific whenever it is SHORTER -- `1e+05` for
+      100000.0 -- while Python's `repr` only past exp 16) and emitted bare `inf`/`nan`, which
+      is not valid JSON; and the `FLOATS` guard let every integral float through.
+      r2 -- `llround` is half AWAY FROM ZERO where Python's `round` is half TO EVEN, so 12.5
+      published `13` here and `12` there, in the field the gate was added to protect; and the
+      sink could THROW past `collector.seal()` (outside the worker's catch) and out of
+      `sweep()`'s bare thread (= `std::terminate`).
+      r3 -- the two planes wrote different `reason` WORDS: Python passes the collector's five
+      through verbatim and never writes `failed`, which this port wrote for two of them,
+      because `core/events/schema.py`'s docstring SAID `failed` and describes a plane that does
+      not exist. The gate could not see it (the scenario STATED the word and both planes echoed
+      it), so scenarios gained a `finished <FinishReason>` directive that names the enum and
+      lets each plane derive its own word.
+      r4 -- my own fix-round edit used a `std::mutex` without declaring it, and `bench.cpp` is
+      compiled by NOTHING in CI (see CSRC-BENCH-UNCOMPILED), so four rounds of green tests
+      merged a file that did not compile.
+      LESSON, and it is the one to carry: every single r1-r3 finding was a place where I ported
+      from a DOCSTRING or an assumption instead of from the code. The docstring lied, `to_chars`
+      is not `repr`, and `llround` is not `round`. Read the implementation.
+      LEFT: P5-B (repository reader), P5-C (resolved settings), P5-D (data-driven chain), plus
+      P5-A-ALLOC. Original: P5-A DONE and OPEN as PR #129 (4 Sep). The survey's headline finding was right --
       csrc emitted NO events at all, and `bench.cpp`'s sink comment CLAIMED it built one while
       the body only counted -- so P5-A was writing a writer, not porting one.** Delivered:
       `csrc/shipinfer/core/events/{schema,convert,json}` mirroring `src/shipinfer/core/events/`,
