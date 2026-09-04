@@ -2057,7 +2057,18 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       (Original: SEQUENCED after C8m moves pipeline/schema.py → core/events — writing it against the moving module is churn; planner 28 Aug.) Resolved config in, same events out.** The binary takes the settings tree and the
       model repository (`config.yaml`) the Python plane reads, not CLI flags; emits the same
       event schema (`pipeline/schema.py`) so one sink serves both planes.
-- [~] **P6-PRB · SCOPED 4 Sep, not yet built. The scheduling seam is the EASIEST parity target
+- [~] **P6-PRB · BUILT AND OPEN as PR #122 (ea21541, 4 Sep), automerge on. The two planes
+      matched on the FIRST run they were ever compared -- 18 checks, 0 failures, and no
+      known-divergence register, which is now the default rather than a concession.** Four
+      scenarios (fair_eviction / reject_is_the_default / priority_lanes / expiry_on_take), one
+      invariant each, asserted against the committed golden so a long-but-vacuous golden fails.
+      Revert-checked on BOTH planes with the same mutation (`evict_from_longest` picks the
+      shallowest key = the inherited starvation bug re-introduced): each gate reddens naming
+      the record and the field. Tier 3320 (main 3293 -> 3321 collected). Two extractions so the
+      second binary reuses rather than copies: `tests/parity_files.h` (resolve/read_lines) and
+      `differing_fields` into `parity_trace.h`. `kFleetKinds()` is now a SET on the C++ side and
+      a test compares it to FLEET_KINDS -- that hole decided whether records are compared as one
+      sequence or split per camera, and nothing checked it. Original: SCOPED 4 Sep, not yet built. The scheduling seam is the EASIEST parity target
       left, because the two contracts are already a deliberate mirror** -- `csrc/shipinfer/
       scheduling/queues/base.h` opens with "seam for seam" and spells the item contract
       (camera/rows/priority/expired), the same three drop reasons, the same PutStatus, the
