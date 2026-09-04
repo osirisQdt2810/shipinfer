@@ -14,6 +14,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -158,29 +159,47 @@ namespace {
             {1e-5, "1e-05"},
             {1.5e16, "1.5e+16"},
             {123456789012345.0, "123456789012345.0"},
-            // The cases that separate the FIXED-first fast path from the old
-            // scientific-then-fixed one, so a rewrite of `append_number` cannot pass on the
-            // easy values alone. Each spelling is `repr(v)`, checked against CPython.
+            // Twelve of the cases that separate the FIXED-first fast path from the old
+            // scientific-then-fixed one stay here as a smoke test; the WHOLE table is
+            // `golden/number_spellings.tsv`, emitted by CPython and read below -- so the
+            // spellings are checked against Python's own `repr` on every push rather than
+            // once, by hand, in a review.
             {-1e15, "-1000000000000000.0"},
             {-1e16, "-1e+16"},
-            {9999999999999998.0, "9999999999999998.0"},
-            {999999999999999.9, "999999999999999.9"},
-            {-1e-4, "-0.0001"},
-            {-1e-5, "-1e-05"},
-            {9.999e-5, "9.999e-05"},
-            {0.00012345, "0.00012345"},
-            // A 64-byte `to_chars` buffer is the exponent test on the fast path: these two
-            // are the ends of the double range, where the fixed form does not fit at all.
             {5e-324, "5e-324"},
             {1.7976931348623157e308, "1.7976931348623157e+308"},
-            {1e300, "1e+300"},
-            {1e-300, "1e-300"},
         };
         for (const auto& [value, spelling] : cases) {
             check(
                 events::json_number(value) == spelling,
                 "json_number -> '" + events::json_number(value) + "', want '" + spelling + "'");
         }
+        // Every spelling CPython emitted, byte for byte. `golden/number_spellings.tsv` is
+        // the shared artefact: `scripts/emit_number_spellings.py` writes it,
+        // `tests/test_number_spellings.py` holds that emitter to it, and this reads it. A
+        // divergence then names the plane that moved instead of failing on a random event.
+        int spellings = 0;
+        for (const std::string& line : read_lines(resolve("golden/number_spellings.tsv"))) {
+            if (line.empty() || line[0] == '#') continue;
+            const size_t tab = line.find('\t');
+            if (tab == std::string::npos) {
+                check(false, "malformed spelling row: " + line);
+                continue;
+            }
+            const std::string literal = line.substr(0, tab);
+            const std::string want = line.substr(tab + 1);
+            const double value = std::strtod(literal.c_str(), nullptr);
+            const std::string got = events::json_number(value);
+            // One check per row, so the printed total says how many spellings were compared
+            // rather than only whether any failed.
+            check(got == want,
+                  "json_number(" + literal + ") -> '" + got + "', CPython says '" + want + "'");
+            ++spellings;
+        }
+        // Non-vacuity: an empty or missing table would otherwise pass in silence.
+        check(spellings >= 500, "the spelling table has " + std::to_string(spellings) +
+                                    " rows; it is meant to carry several hundred");
+
         // A bare `inf` or `nan` is not valid JSON, so one NaN out of an fp16 engine would make
         // a strict consumer reject the whole line rather than one field. Refused instead.
         for (const double hostile : {std::nan(""), HUGE_VAL, -HUGE_VAL}) {
