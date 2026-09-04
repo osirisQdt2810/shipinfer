@@ -2417,6 +2417,18 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `crop 0 128` and Python did not, and `*.plan` in `.gitignore` would have swallowed every
       golden. 26 files, so it may need splitting at the Python/C++ line when it opens.
 
+- [ ] **RECORDS-CLASS-PREMISE · `records.h`'s "a batch only ever holds rows of ITS OWN
+      class" is no longer guaranteed, on BOTH planes** -- found by #132's reviewer. With a
+      crop slot that declares no `classes:` (every row) beside a per-class one, two batches
+      legitimately hold the same object index, and `records.cpp`'s last-candidate-wins fills
+      `embedding` twice. The comment at `records.h:26-30` justifies dropping the class check
+      on a premise the resolved plan can now make untrue -- and the Python plane's
+      `_vectors`/`output` pair has the same shape, so this is not a C++ defect. Decide the
+      rule (last wins, first wins, or refuse two slots that can cover one row at load time --
+      the loader already refuses a lot less than this) and apply it to both planes with a
+      cross-plane case in the event seam. Left out of #132 deliberately: it is a data-plane
+      rule change, not a reader fix, and it belongs with its own parity case.
+
 - [ ] **P6-SEGMENT-CROP · A pre-existing cross-plane divergence the plan made visible, and
       the direction is already DECIDED -- by `PoolSegment`'s own docstring, read 4 Sep.**
       `segment` CROPS on the C++ plane (`ship_crops_640`, 640x640, one crop per ship row) and
