@@ -2649,6 +2649,21 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       waves must take symbols *under* their caps, not merely shorten them: wave 1 removes 357
       lines of prose and moves the count only 1022 → 1002.
 
+- [~] **HOOKS-SUBMODULE · OPEN as PR #124 (4 Sep). A REAL DEFECT, and CI could never have seen
+      it: `check_docs.py` and `check_napoleon.py` walked `benchmarks/` with `rglob`, which
+      descends into the `benchmarks/baseline` SUBMODULE -- 995 cap findings against 58 and 48
+      Napoleon orphans against zero on any checkout that has it.** Napoleon is a
+      zero-tolerance gate and the caps are a ratchet, so `pytest` was RED on exactly the
+      machines that build the kernels while green on CI, which does not check the submodules
+      out. Fixed with `git ls-files` (a submodule is ONE entry, which `rglob` cannot see and a
+      name-based skip list would miss on the next one), shared as `scripts/hooks/_paths.py`
+      across all three walking hooks, with an rglob fallback for a tree git cannot answer for
+      and a test for that fallback. Proven BOTH ways on a worktree with the submodule checked
+      out: 58/rc=0 with the fix, 995 and five red tests with it reverted.
+      FOUND BY: running the tier in the primary checkout after a session of running it only in
+      fresh worktrees. LESSON: a worktree is not the same environment as the operator's
+      checkout -- submodules are the difference, and they are where the third-party code is.
+
 - [ ] **FLAKY-COST-TEST · `tests/test_support_models.py` `test_the_cost_is_linear_in_the_
       declared_work` failed once on 4 Sep under load** (a `build_csrc.py` compile on the same
       box) and passed on a quiet machine. It is a WALL-CLOCK linearity assertion in the
