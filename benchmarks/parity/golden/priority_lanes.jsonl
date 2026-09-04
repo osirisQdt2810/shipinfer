@@ -1,0 +1,15 @@
+{"schema":1,"scenario":"priority_lanes","plane":"python"}
+{"kind":"qput","camera":"","n":[1,1],"t":["cam_bg","accepted"]}
+{"kind":"qput","camera":"","n":[1,2],"t":["cam_hi","accepted"]}
+{"kind":"qput","camera":"","n":[1,3],"t":["cam_tc","accepted"]}
+{"kind":"qput","camera":"","n":[1,4],"t":["cam_bg","accepted"]}
+{"kind":"qbatch","camera":"","n":[2,2],"t":[]}
+{"kind":"qserved","camera":"","n":[1],"t":["cam_tc"]}
+{"kind":"qserved","camera":"","n":[1],"t":["cam_hi"]}
+{"kind":"qbatch","camera":"","n":[2,2],"t":[]}
+{"kind":"qserved","camera":"","n":[1],"t":["cam_bg"]}
+{"kind":"qserved","camera":"","n":[1],"t":["cam_bg"]}
+{"kind":"qstats","camera":"","n":[4,0,0,0,0,6],"t":[]}
+{"kind":"qcam","camera":"","n":[0,0,0,0],"t":["cam_bg"]}
+{"kind":"qcam","camera":"","n":[0,0,0,0],"t":["cam_hi"]}
+{"kind":"qcam","camera":"","n":[0,0,0,0],"t":["cam_tc"]}

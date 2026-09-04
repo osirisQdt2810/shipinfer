@@ -1,0 +1,22 @@
+# The inherited starvation bug, as a gate: one loud camera fills a shared queue and the
+# next arrival must evict the LOUD camera's own oldest item, never the quiet one's.
+scenario fair_eviction
+records_min 16
+
+queue fair
+capacity 4
+overflow drop_oldest
+max_batch_size 4
+max_delay_us 0
+
+put cam_loud
+put cam_loud
+put cam_loud
+put cam_quiet
+# Full. The victim is the greediest lane's oldest item, not the queue's oldest item --
+# which would be cam_loud's first either way, so the second overflow is the real test.
+put cam_loud
+put cam_loud
+# Whatever is left, in the order the queue chooses to serve it.
+take
+close
