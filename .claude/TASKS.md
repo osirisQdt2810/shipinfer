@@ -2057,8 +2057,11 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       (Original: SEQUENCED after C8m moves pipeline/schema.py → core/events — writing it against the moving module is churn; planner 28 Aug.) Resolved config in, same events out.** The binary takes the settings tree and the
       model repository (`config.yaml`) the Python plane reads, not CLI flags; emits the same
       event schema (`pipeline/schema.py`) so one sink serves both planes.
-- [~] **P6-PRB · MERGED as PR #122 (4 Sep), APPROVE round 1. FOLLOW-UP OWED (the review's
-      non-blockers 1-4, all real): (1) `fifo` is wired into both parsers and NO scenario uses
+- [~] **P6-PRB · MERGED as PR #122; the four follow-ups OPEN as PR #123 (4 Sep). One scenario
+      closed findings 1+2 -- `fifo_close_drains` -- and the C++ plane reproduced it byte for
+      byte (18 checks -> 22, 0 failures), so both holes were coverage and not divergence.
+      Findings 5 and 6 deliberately NOT taken, with the reason in the body. Original follow-up
+      list (the review's non-blockers 1-4, all real): (1) `fifo` is wired into both parsers and NO scenario uses
       it -- the second registered production queue is compiled into the gate and never
       compared; (2) `DropReason::Closed` is in the vocabulary but no golden carries a
       `qdrop ... closed`, and that is the one path where the planes are structurally different
@@ -2641,6 +2644,15 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       the count to zero. Until this line is `[x]` the cap is a convention, not a gate — and the
       waves must take symbols *under* their caps, not merely shorten them: wave 1 removes 357
       lines of prose and moves the count only 1022 → 1002.
+
+- [ ] **FLAKY-COST-TEST · `tests/test_support_models.py` `test_the_cost_is_linear_in_the_
+      declared_work` failed once on 4 Sep under load** (a `build_csrc.py` compile on the same
+      box) and passed on a quiet machine. It is a WALL-CLOCK linearity assertion in the
+      offline tier -- the tier whose promise is that it passes anywhere. Either give it a
+      tolerance that survives a loaded CI runner or move it behind a marker; a tier that fails
+      on a busy machine gets re-run until green, which is how a real failure gets ignored.
+      Cannot be run by name on the host (the container hook denies the file: it imports
+      torch), so reproduce it with the whole tier.
 
 ## Z · Final gate
 
