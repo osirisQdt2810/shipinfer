@@ -1,5 +1,6 @@
 #include "shipinfer/core/events/schema.h"
 
+#include <charconv>
 #include <chrono>
 #include <cmath>
 
@@ -11,55 +12,94 @@ namespace shipinfer::events {
 
         // A JSON array, one element per object of one class. Every `*_vec` key in the payload
         // is this shape, which is why it is a template rather than eleven near-identical loops.
+        //
+        // Appends, like everything else here: a returned `std::string` per element meant one
+        // allocation per number, and an embedding is 2048 of them (P5-A-ALLOC, measured by
+        // `cli/bench_events.cpp`).
         template <typename Fn>
-        std::string array_of(const std::vector<const ObjectRecord*>& objects, Fn&& element) {
-            std::string out = "[";
+        void append_array(std::string& out, const std::vector<const ObjectRecord*>& objects,
+                          Fn&& element) {
+            out += '[';
             for (size_t i = 0; i < objects.size(); ++i) {
                 if (i) out += ',';
-                out += element(*objects[i]);
+                element(out, *objects[i]);
             }
-            return out + "]";
+            out += ']';
         }
 
-        std::string optional_int(const std::optional<int64_t>& value) {
+        void append_optional_int(std::string& out, const std::optional<int64_t>& value) {
             // `null`, not a sentinel: the Python field is `int | None` and 0 is a legitimate
             // gallery id, a legitimate track id and a legitimate global id.
-            return value ? std::to_string(*value) : "null";
+            if (!value) {
+                out += "null";
+                return;
+            }
+            char buffer[24];
+            const std::to_chars_result done =
+                std::to_chars(buffer, buffer + sizeof(buffer), *value);
+            out.append(buffer, done.ptr);
         }
 
-        std::string optional_double(const std::optional<double>& value) {
-            return value ? json_number(*value) : "null";
+        void append_int(std::string& out, int64_t value) {
+            char buffer[24];
+            const std::to_chars_result done =
+                std::to_chars(buffer, buffer + sizeof(buffer), value);
+            out.append(buffer, done.ptr);
         }
 
-        std::string optional_word(const std::optional<std::string>& value) {
-            return value ? json_string(*value) : "null";
+        void append_optional_double(std::string& out, const std::optional<double>& value) {
+            if (value) {
+                append_number(out, *value);
+            } else {
+                out += "null";
+            }
         }
 
-        std::string bbox_of(const ObjectRecord& object) {
-            std::string out = "[";
+        void append_optional_word(std::string& out, const std::optional<std::string>& value) {
+            if (value) {
+                append_string(out, *value);
+            } else {
+                out += "null";
+            }
+        }
+
+        void append_bbox(std::string& out, const ObjectRecord& object) {
+            out += '[';
             for (int i = 0; i < 4; ++i) {
                 if (i) out += ',';
-                out += json_number(object.bbox[i]);
+                append_number(out, object.bbox[i]);
             }
-            return out + "]";
+            out += ']';
         }
 
-        std::string embedding_of(const ObjectRecord& object) {
-            std::string out = "[";
+        void append_embedding(std::string& out, const ObjectRecord& object) {
+            out += '[';
             for (size_t i = 0; i < object.embedding.size(); ++i) {
                 if (i) out += ',';
-                out += json_number(object.embedding[i]);
+                append_number(out, object.embedding[i]);
             }
-            return out + "]";
+            out += ']';
         }
 
-        std::string words(const std::vector<std::string>& values) {
-            std::string out = "[";
+        void append_words(std::string& out, const std::vector<std::string>& values) {
+            out += '[';
             for (size_t i = 0; i < values.size(); ++i) {
                 if (i) out += ',';
-                out += json_string(values[i]);
+                append_string(out, values[i]);
             }
-            return out + "]";
+            out += ']';
+        }
+
+        // What to ask for up front. Deliberately generous rather than exact: one over-large
+        // `reserve` costs a page or two of untouched address space, while an under-estimate
+        // costs a reallocation and a 400 KB copy on the emission path. 14 bytes is the
+        // measured mean for a `repr`-spelled double plus its comma.
+        size_t estimated_bytes(const std::vector<ObjectRecord>& objects) {
+            size_t total = 1024;
+            for (const ObjectRecord& object : objects) {
+                total += 320 + 14 * (object.embedding.size() + 4);
+            }
+            return total;
         }
 
     }  // namespace
@@ -81,62 +121,113 @@ namespace shipinfer::events {
         // it from a map would sort the keys and the gate would fail on every event.
         const std::vector<const ObjectRecord*> people = objects_of("person");
         const std::vector<const ObjectRecord*> ships = objects_of("ship");
-        const auto det_id = [](const ObjectRecord& o) { return json_string(o.det_id); };
-        const auto score = [](const ObjectRecord& o) { return json_number(o.score); };
-
-        std::string out = "{";
-        out += "\"sub_id\":" + json_string(source_id);
-        out += ",\"det_id_vec\":" + array_of(people, det_id);
-        out += ",\"camera_id\":" + json_string(camera_id);
-        out += ",\"image_id\":" + std::to_string(frame_id);
-        out += ",\"det_body_score_vec\":" + array_of(people, score);
-        out += ",\"body_bbox_vec\":" + array_of(people, bbox_of);
-        out += ",\"body_feature_vec\":" + array_of(people, embedding_of);
-        out += ",\"img_width\":" + std::to_string(img_width);
-        out += ",\"img_height\":" + std::to_string(img_height);
-        out += ",\"img_fps\":" + std::to_string(img_fps);
-        out += ",\"type\":" + json_string(kMessageType);
-        out += ",\"schema_version\":" + std::to_string(kSchemaVersion);
-        out += ",\"ship_det_id_vec\":" + array_of(ships, det_id);
-        out += ",\"det_ship_score_vec\":" + array_of(ships, score);
-        out += ",\"ship_bbox_vec\":" + array_of(ships, bbox_of);
-        out += ",\"ship_feature_vec\":" + array_of(ships, embedding_of);
-        out += ",\"ship_id_vec\":" +
-               array_of(ships, [](const ObjectRecord& o) { return optional_int(o.ship_id); });
-        out += ",\"ship_similarity_vec\":" + array_of(ships, [](const ObjectRecord& o) {
-                   return optional_double(o.similarity);
-               });
-        out += ",\"ship_mask_area_vec\":" + array_of(ships, [](const ObjectRecord& o) {
-                   return optional_double(o.mask_area_px);
-               });
-        const auto track_id = [](const ObjectRecord& o) { return optional_int(o.track_id); };
-        const auto track_state = [](const ObjectRecord& o) {
-            return optional_word(o.track_state);
+        const auto det_id = [](std::string& to, const ObjectRecord& o) {
+            append_string(to, o.det_id);
         };
-        const auto global_id = [](const ObjectRecord& o) { return optional_int(o.global_id); };
-        out += ",\"body_track_id_vec\":" + array_of(people, track_id);
-        out += ",\"body_track_state_vec\":" + array_of(people, track_state);
-        out += ",\"ship_track_id_vec\":" + array_of(ships, track_id);
-        out += ",\"ship_track_state_vec\":" + array_of(ships, track_state);
-        out += ",\"body_global_id_vec\":" + array_of(people, global_id);
-        out += ",\"ship_global_id_vec\":" + array_of(ships, global_id);
-        out += ",\"captured_unix_ns\":" + std::to_string(captured_unix_ns);
-        out += ",\"emitted_unix_ns\":" + std::to_string(emitted_unix_ns);
-        out += ",\"latency_us\":" + std::to_string(latency_us);
-        out += ",\"partial\":" + std::string(is_partial() ? "true" : "false");
-        out += ",\"missing_stages\":" + words(missing_stages);
-        out += ",\"reason\":" + json_string(reason);
+        const auto score = [](std::string& to, const ObjectRecord& o) {
+            append_number(to, o.score);
+        };
+        const auto ship_id = [](std::string& to, const ObjectRecord& o) {
+            append_optional_int(to, o.ship_id);
+        };
+        const auto similarity = [](std::string& to, const ObjectRecord& o) {
+            append_optional_double(to, o.similarity);
+        };
+        const auto mask_area = [](std::string& to, const ObjectRecord& o) {
+            append_optional_double(to, o.mask_area_px);
+        };
+        const auto track_id = [](std::string& to, const ObjectRecord& o) {
+            append_optional_int(to, o.track_id);
+        };
+        const auto track_state = [](std::string& to, const ObjectRecord& o) {
+            append_optional_word(to, o.track_state);
+        };
+        const auto global_id = [](std::string& to, const ObjectRecord& o) {
+            append_optional_int(to, o.global_id);
+        };
+
+        // ONE buffer for the whole event, reserved once. Every helper above appends into it,
+        // so a 2048-float embedding costs 2048 `to_chars` calls and no allocation at all --
+        // where it used to cost about three per number.
+        std::string out;
+        out.reserve(estimated_bytes(objects));
+        out += '{';
+        out += "\"sub_id\":";
+        append_string(out, source_id);
+        out += ",\"det_id_vec\":";
+        append_array(out, people, det_id);
+        out += ",\"camera_id\":";
+        append_string(out, camera_id);
+        out += ",\"image_id\":";
+        append_int(out, frame_id);
+        out += ",\"det_body_score_vec\":";
+        append_array(out, people, score);
+        out += ",\"body_bbox_vec\":";
+        append_array(out, people, append_bbox);
+        out += ",\"body_feature_vec\":";
+        append_array(out, people, append_embedding);
+        out += ",\"img_width\":";
+        append_int(out, img_width);
+        out += ",\"img_height\":";
+        append_int(out, img_height);
+        out += ",\"img_fps\":";
+        append_int(out, img_fps);
+        out += ",\"type\":";
+        append_string(out, kMessageType);
+        out += ",\"schema_version\":";
+        append_int(out, kSchemaVersion);
+        out += ",\"ship_det_id_vec\":";
+        append_array(out, ships, det_id);
+        out += ",\"det_ship_score_vec\":";
+        append_array(out, ships, score);
+        out += ",\"ship_bbox_vec\":";
+        append_array(out, ships, append_bbox);
+        out += ",\"ship_feature_vec\":";
+        append_array(out, ships, append_embedding);
+        out += ",\"ship_id_vec\":";
+        append_array(out, ships, ship_id);
+        out += ",\"ship_similarity_vec\":";
+        append_array(out, ships, similarity);
+        out += ",\"ship_mask_area_vec\":";
+        append_array(out, ships, mask_area);
+        out += ",\"body_track_id_vec\":";
+        append_array(out, people, track_id);
+        out += ",\"body_track_state_vec\":";
+        append_array(out, people, track_state);
+        out += ",\"ship_track_id_vec\":";
+        append_array(out, ships, track_id);
+        out += ",\"ship_track_state_vec\":";
+        append_array(out, ships, track_state);
+        out += ",\"body_global_id_vec\":";
+        append_array(out, people, global_id);
+        out += ",\"ship_global_id_vec\":";
+        append_array(out, ships, global_id);
+        out += ",\"captured_unix_ns\":";
+        append_int(out, captured_unix_ns);
+        out += ",\"emitted_unix_ns\":";
+        append_int(out, emitted_unix_ns);
+        out += ",\"latency_us\":";
+        append_int(out, latency_us);
+        out += ",\"partial\":";
+        out += is_partial() ? "true" : "false";
+        out += ",\"missing_stages\":";
+        append_words(out, missing_stages);
+        out += ",\"reason\":";
+        append_string(out, reason);
         if (!extra.empty()) {
             out += ",\"extra\":{";
             bool first = true;
             for (const auto& [key, value] : extra) {
                 if (!first) out += ',';
                 first = false;
-                out += json_string(key) + ":" + json_string(value);
+                append_string(out, key);
+                out += ':';
+                append_string(out, value);
             }
-            out += "}";
+            out += '}';
         }
-        return out + "}";
+        out += '}';
+        return out;
     }
 
     PerceptionEvent build(const std::string& camera_id, int64_t frame_id,
