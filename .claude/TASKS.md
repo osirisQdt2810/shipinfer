@@ -2255,7 +2255,10 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       FIRST SCENARIOS, one invariant each: fair-queue eviction picks the GREEDIEST camera (the
       inherited starvation bug); a full queue REJECTS rather than evicting under the default
       policy; priority lanes drain TRACKING_CRITICAL first; expiry drops on take, not on put.
-- [~] **P6 · PR-A #101, PR-B #122+#123, PR-C #127 ALL MERGED (4 Sep). What remains is only
+- [x] **P6 · COMPLETE 4 Sep. PR-A #101, PR-B #122+#123, PR-C #127, and PR-C's port half as
+      #131 + #132 (P6-PLAN).** The seam inventory records a decision for every package now and
+      `OWED_BY` is empty: `topology` and `runners` stay Python-side by ADR-020, which is code
+      and a gate rather than a sentence. Original: PR-A #101, PR-B #122+#123, PR-C #127 ALL MERGED (4 Sep). What remains is only
       PR-C's PORT half, which is the operator's open `CSRC-TOPOLOGY-Q` -- the seam inventory
       asserts that `topology` and `runners` are undecided and cites that item, so P6 stays [~]
       until it is answered rather than until anything is built. Original: PR-A #101, PR-B #122+#123 MERGED; PR-C OPEN as PR #127 (d5615f1, 4 Sep). Both of
@@ -2422,7 +2425,27 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       data; ADR-014 puts data-driven config in Python — which argues for the resolved-list answer, but it is a design
       call for the operator.
 
-- [~] **P6-PLAN · SPLIT at the plane boundary, 27 files being over the ~25 cap. PR-A is
+- [x] **P6-PLAN · DONE 4 Sep. Both halves merged: PR-A #131 (three rounds) and PR-B #132
+      (three rounds). The C++ plane reads a resolved plan and its literal ladder is gone --
+      including the label table that said a ship was class 1 while its own crop specs said 8,
+      so every ship left the event writer as `unknown`.**
+      Seven review rounds across the two, and every finding was one shape: a plan that says
+      something different from what the chain does, none of them catchable by the byte-compare
+      golden because the text was stable and only its MEANING changed. Worth carrying:
+      `classes: [cargo ship]` re-read as two labels (a whitespace-delimited format with fixed
+      arity); the plan carried DECLARED rather than EFFECTIVE decode params, so an ordinary
+      chain emitted no label table at all -- which undid the ADR the PR shipped with, and the
+      fix was an `Element.decode_parameters()` hook because re-reading `params` is a second
+      interpretation of one setting; `spaces=True` meant UNVALIDATED, so a newline in a label
+      emitted an extra LINE and injected a `node` nobody declared; `kNoClass` selected every
+      row (`>= 0` is false for -2); `max_detections: -1` became no cap here and n-1 there; and
+      a `segment` slot could not declare `classes:` at all, so the production plan segmented
+      every person crop at 640x640 and filed a ship-segmenter `mask_area_px` on every person.
+      THE STRUCTURAL LESSON, from #132's reviewer and worth more than the fixes: a 68-check
+      gate sat beside three defects because it covered the READER while the behaviour lived in
+      the decision next to it, which could not be gated offline because its header reached
+      CUDA. `plan_stages.{h,cpp}` is CUDA-free for exactly that reason now.
+      Original: SPLIT at the plane boundary, 27 files being over the ~25 cap. PR-A is
       **MERGED as #131** (the Python emitter, the format, ADR-020, after three rounds);
       THIS is PR-B, the C++ reader, `from_plan` and `bench --plan` -- the half that makes
       the decision real, so P6-PLAN stays [~] until it merges (CLAUDE.md's sync rule,
