@@ -1,0 +1,23 @@
+# Every verb the format has, on one chain: a label table with the demo detector's own ids
+# (a ship is 8, not 1), a declared crop that overrides the model's, geometry resolved FROM
+# the model, `classes:` row selection, `per:`, `scope:`, and a fan-in.
+name: branching
+elements:
+  decode: {impl: replay}
+  detect:
+    impl: pool
+    model: ship_detector
+    params:
+      decode: {class_labels: {0: person, 8: ship}, score_threshold: 0.3, max_detections: 120}
+  # `when:` on the one element that selects no rows -- a frame-level guard, and
+  # `meta['fps']` is the only frame-level key anything files (`runners/frames.py`).
+  segment:
+    impl: pool
+    model: ship_segmenter
+    when: fps == 20
+    params: {crop: {size: [512, 512]}}
+  embed_ship: {impl: pool, model: ship_embedder, params: {classes: [ship]}, after: segment}
+  embed_person: {impl: pool, model: person_embedder, params: {classes: [person]}, after: detect}
+  track: {impl: shipvision, per: camera, after: [embed_ship, embed_person]}
+  mtmc: {impl: shipvision, scope: global}
+  output: {impl: jsonlines}

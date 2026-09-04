@@ -749,6 +749,14 @@ class PoolDetect(_PoolElement):
             f"detect element {self.name!r}: `decode.normalize`",
         )
 
+    def decode_parameters(self) -> DecodeParams:
+        """The hook `Element` declares: what this detector will ACTUALLY decode with.
+
+        The same object `_prepare` uses, resolved here so a plan carries the effective
+        threshold, cap and table rather than only what the chain file happened to write.
+        """
+        return self._resolve_decode_params()
+
     def _resolve_decode_params(self) -> DecodeParams:
         """The score threshold, the per-frame cap and the class-id table.
 

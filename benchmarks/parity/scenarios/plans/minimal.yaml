@@ -1,0 +1,7 @@
+# The smallest chain that loads: a decode root and an output sink, nothing between them.
+# Here because a plan with no model element, no label table and no field lines is the case a
+# reader is most likely to get wrong by assuming those sections exist.
+name: minimal
+elements:
+  decode: {impl: replay}
+  output: {impl: jsonlines}
