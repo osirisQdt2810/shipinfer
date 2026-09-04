@@ -2099,8 +2099,12 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       doing. A PR editing `.github/workflows/**` cannot pass the review job (CLAUDE.md), so it
       needs a hand merge and the body has to say so.
 
-- [~] **P5-A-ALLOC · FIRST HALF OPEN as PR #134 (4 Sep). 2.37x, and the emitted bytes are
-      identical.** The
+- [~] **P5-A-ALLOC · FIRST HALF MERGED as PR #134 (4 Sep), APPROVE round 1. 2.37x, and the
+      emitted bytes are identical.** SECOND HALF still open (below): cross-plane comparing
+      `build_records` rather than hand-assembled events. It is UNBLOCKED now -- #132 made the
+      field map data-driven, which is the seam that comparison needs, so `test_event_parity`
+      can drive the production translation unit through a plan's `field` lines instead of a
+      hand-built `FieldMap`. The
       allocation half is done: `append_number`/`append_string` write into a caller's buffer,
       ONE `to_chars` on the common path (fixed first, and the 64-byte buffer IS the exponent
       test), `to_json` reserves once, and `snprintf` is gone from the `\uXXXX` escape.
