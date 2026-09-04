@@ -18,6 +18,7 @@
 #include "shipinfer/core/platform.h"
 #include "shipinfer/core/types.h"
 #include "shipinfer/engine/model.h"
+#include "shipinfer/pipeline/graph/plan_stages.h"
 #include "shipinfer/pipeline/graph/stage.h"
 #include "shipinfer/pipeline/graph/state.h"
 
@@ -82,13 +83,6 @@ namespace shipinfer {
         std::chrono::milliseconds timeout_;
     };
 
-    struct DetectConfig {
-        int size = 640;
-        float score_threshold = 0.25f;
-        int max_objects = 64;
-        float pad_value = 114.f / 255.f;  // TorchImageOps: fill 114, normalise mean 0 / std 255
-    };
-
     // Letterbox one frame, run the detector, decode the boxes into frame pixels.
     class DetectStage : public ModelStage {
       public:
@@ -102,21 +96,6 @@ namespace shipinfer {
       private:
         DetectConfig config_;
         WorkerScratch& scratch_;
-    };
-
-    struct CropSpec {
-        //: Every row -- what a crop element with no `classes:` means on the Python plane.
-        static constexpr int kAnyClass = -1;
-        //: No row: a DECLARED empty selection (`classes -` in a plan). An id no detector
-        //: emits, so the payload is produced with zero rows and the branch is skipped, which
-        //: is what "select nothing" has to mean on this side too.
-        static constexpr int kNoClass = -2;
-
-        std::string name;        // the payload's name, e.g. "person_crops"
-        std::string class_name;  // "person" / "ship", for the event builder
-        int class_id = kAnyClass;
-        int height = 256;
-        int width = 128;
     };
 
     // Cut every detection out of the frame, once per configured crop set. A crop set with no

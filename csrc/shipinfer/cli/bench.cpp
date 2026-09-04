@@ -29,6 +29,7 @@
 #include "shipinfer/pipeline/graph/dag.h"
 #include "shipinfer/pipeline/graph/from_plan.h"
 #include "shipinfer/pipeline/graph/plan.h"
+#include "shipinfer/pipeline/graph/plan_stages.h"
 #include "shipinfer/pipeline/graph/shapes.h"
 #include "shipinfer/pipeline/graph/stages.h"
 #include "shipinfer/pipeline/reassembly/collector.h"
@@ -358,7 +359,7 @@ int main(int argc, char** argv) {
         // event writer as `unknown` while the right rows were cropped.
         const ResolvedPlan plan =
             options.plan_path.empty() ? default_plan() : read_plan(options.plan_path);
-        const PlanTables planned = plan_tables(plan, models);
+        const PlanStages planned = plan_stages(plan, loaded_names(models));
         const std::vector<std::string>& stage_names = planned.stage_names;
         std::cerr << "chain '" << plan.name << "': " << stage_names.size() << " stage(s)";
         if (!planned.unsupported.empty()) {
@@ -491,7 +492,7 @@ int main(int argc, char** argv) {
                     // The chain, from the plan. Per worker because a Dag holds this
                     // thread's `WorkerScratch`; from the same plan as the tables above, so
                     // the collector's expectations and the stages cannot disagree.
-                    Dag dag = build_dag(plan, models, scratch,
+                    Dag dag = build_dag(planned, models, scratch,
                                         std::chrono::milliseconds(options.stage_timeout_ms));
 
                     while (!stopping.load()) {

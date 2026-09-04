@@ -412,6 +412,17 @@ def parse_plan(text: str, *, source: str = "<string>") -> ResolvedPlan:
 
     if name is None:
         raise PlanSyntaxError(f"{source}: no `plan <version> <name>` header")
+    # A `field` may only name a slot some `node` declared. Left unchecked, the C++ half
+    # dereferenced a null `PlanNode*` before any worker started and this half raised a bare
+    # `KeyError` from `ResolvedPlan.node` -- two different failures for one malformed plan.
+    declared = {node["slot"] for node in nodes}
+    for field_name, slots in fields.items():
+        for slot in slots:
+            if slot not in declared:
+                raise PlanSyntaxError(
+                    f"{source}: field {field_name!r} names slot {slot!r}, which no `node` "
+                    f"declares"
+                )
     return ResolvedPlan(
         name="" if name == "-" else name,
         nodes=tuple(PlanNode(**node) for node in nodes),  # type: ignore[arg-type]
@@ -458,10 +469,22 @@ _NUMBER = re.compile(r"^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$")
 _Attribute = Callable[[dict, Sequence[str], str], None]
 
 
+#: What a C++ `int` holds. Python's `int` is unbounded, so `label 99999999999999999999`
+#: loaded here and was refused by `std::stoi` on the other plane -- and a plan carries class
+#: ids and pixel extents, not arbitrary integers.
+_INT_MAX = 2**31 - 1
+
+
 def _int(text: str, where: str) -> int:
     if not _INTEGER.match(text):
         raise PlanSyntaxError(f"{where}: {text!r} is not an integer")
-    return int(text)
+    value = int(text)
+    if not -_INT_MAX - 1 <= value <= _INT_MAX:
+        raise PlanSyntaxError(
+            f"{where}: {text!r} does not fit in a 32-bit int, and a plan carries class ids "
+            f"and pixel extents rather than arbitrary integers"
+        )
+    return value
 
 
 def _extent_attr(key: str) -> _Attribute:

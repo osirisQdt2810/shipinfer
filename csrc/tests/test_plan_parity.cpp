@@ -150,6 +150,12 @@ namespace {
         check(refused("plan 1 x\nnode a b c\nclasses ship,\n"), "a trailing comma");
         check(refused("plan 1 x\nfield embedding a\nfield embedding b\n"),
               "a second `field` for one name");
+        check(refused("plan 1 x\nfield embedding nosuch\n"),
+              "a `field` naming a slot no `node` declares");
+        check(refused("plan 1 x\nnode a b c\nscore 0x10\n"),
+              "a hex float, which bare `stod` would have read");
+        check(refused("plan 1 x\nlabel 99999999999999999999 ship\n"),
+              "an id too large for an int, which Python's unbounded `int` used to accept");
         // The emitter refuses a value holding a tab, a newline or a repeated space, because
         // `split()` collapses them -- and a newline emits an extra LINE, which injected a
         // `node` the chain never declared (#131 round 3). This reader is the other half: it

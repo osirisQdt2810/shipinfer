@@ -183,6 +183,10 @@ class TestBothPlanesRefuseTheSameText:
         ("plan 1 x\nnode a b c\nclasses ,ship\n", "an empty label in `classes`"),
         ("plan 1 x\nnode a b c\nscore inf\n", "`inf`, which the writer must never emit"),
         ("plan 1 x\nnode a b c\nclasses ship,\n", "a trailing comma, so an empty label"),
+        ("plan 1 x\nfield embedding a\nfield embedding b\n", "a second `field` for one name"),
+        ("plan 1 x\nfield embedding nosuch\n", "a `field` naming a slot no `node` declares"),
+        ("plan 1 x\nnode a b c\nscore 0x10\n", "a hex float, which `stod` would accept"),
+        ("plan 1 x\nlabel 99999999999999999999 ship\n", "an id too large for a C++ int"),
     )
     ACCEPTED = (
         ("plan 1 -\n", "`-` is the empty chain name"),
@@ -192,6 +196,12 @@ class TestBothPlanesRefuseTheSameText:
         ("plan 1 x\nnode a b c\nclasses cargo ship,fishing vessel\n", "two labels, not four"),
         ("plan 1 x\nnode a b c\nclasses -\n", "`-` is a DECLARED empty selection"),
         ("plan 1 x\nnode a b c\nscore 1e-05\n", "an exponent-form threshold"),
+        # The READER tolerates a collapsed value because it cannot know one was collapsed;
+        # `_speakable` is what refuses to WRITE one, where the slot is still named. Stated
+        # here so the asymmetry is deliberate rather than a hole -- and the C++ gate asserts
+        # the same collapse on its side, for the same reason.
+        ("plan 1 x\nnode a b c\nclasses cargo  ship\n", "a collapsed value reads as one word"),
+        ("plan 1 x\nlabel 8 cargo\tship\n", "and a tab likewise, which the emitter refuses"),
     )
 
     @pytest.mark.parametrize("text,why", REFUSED, ids=[why for _, why in REFUSED])

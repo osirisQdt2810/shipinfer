@@ -13,13 +13,17 @@ namespace shipinfer {
         // Everything after the first `skip` whitespace-separated tokens, verbatim. The two
         // verbs whose last field is free text read their value this way.
         std::string rest_of(const std::string& line, size_t skip) {
-            size_t at = line.find_first_not_of(" \t");
+            // `\r` too, not only spaces and tabs: `str.splitlines` drops it on the Python
+            // side, so a CRLF plan would give `label 8 "ship\r"` here and `"ship"` there --
+            // one label, two spellings, which is the drift this seam exists to prevent.
+            static const char* const kSpace = " \t\r";
+            size_t at = line.find_first_not_of(kSpace);
             for (size_t i = 0; i < skip; ++i) {
-                at = line.find_first_of(" \t", at);
-                at = line.find_first_not_of(" \t", at);
+                at = line.find_first_of(kSpace, at);
+                at = line.find_first_not_of(kSpace, at);
             }
             const std::string tail = at == std::string::npos ? "" : line.substr(at);
-            const size_t last = tail.find_last_not_of(" \t");
+            const size_t last = tail.find_last_not_of(kSpace);
             return last == std::string::npos ? "" : tail.substr(0, last + 1);
         }
 
@@ -38,27 +42,48 @@ namespace shipinfer {
             }
         }
 
+        // Digits and an optional sign, and nothing else -- then `stoi`. Python's `int()`
+        // accepts a value too large for `int`, so an out-of-range `label` would load there
+        // and refuse here; the refusal is now the same shape on both planes.
         int as_int(const std::string& text, const std::string& where) {
-            try {
-                size_t used = 0;
-                const int value = std::stoi(text, &used);
-                if (used == text.size()) return value;
-            } catch (const std::exception&) {
+            const bool signed_digits =
+                !text.empty() &&
+                text.find_first_not_of("0123456789",
+                                       text[0] == '-' || text[0] == '+' ? 1 : 0) ==
+                    std::string::npos &&
+                text.size() > (text[0] == '-' || text[0] == '+' ? 1u : 0u);
+            if (signed_digits) {
+                try {
+                    return std::stoi(text);
+                } catch (const std::out_of_range&) {
+                    throw ConfigError(where + ": '" + text +
+                                      "' does not fit in an int, and a plan carries class ids "
+                                      "and pixel extents rather than arbitrary integers");
+                } catch (const std::exception&) {
+                }
             }
             throw ConfigError(where + ": '" + text + "' is not an integer");
         }
 
-        // Finite, and the whole token consumed: `stod` reads `nan` and `inf` happily, and a
-        // plan carrying either cannot be written back out at all -- `json_number` refuses a
-        // non-finite double, on both planes.
+        // Finite, decimal, and the whole token consumed. `stod` alone is three kinds of
+        // lenient where Python's `_NUMBER` regex is not: it reads `nan` and `inf` (which
+        // `json_number` then refuses to write), it reads a HEX float (`0x10`), and it is
+        // locale-sensitive about the decimal point. The character check comes first so all
+        // three refuse identically on the two planes.
         double as_double(const std::string& text, const std::string& where) {
-            try {
-                size_t used = 0;
-                const double value = std::stod(text, &used);
-                if (used == text.size() && std::isfinite(value)) return value;
-            } catch (const std::exception&) {
+            const bool decimal =
+                !text.empty() &&
+                text.find_first_not_of("0123456789+-.eE") == std::string::npos &&
+                text.find_first_of("0123456789") != std::string::npos;
+            if (decimal) {
+                try {
+                    size_t used = 0;
+                    const double value = std::stod(text, &used);
+                    if (used == text.size() && std::isfinite(value)) return value;
+                } catch (const std::exception&) {
+                }
             }
-            throw ConfigError(where + ": '" + text + "' is not a finite number");
+            throw ConfigError(where + ": '" + text + "' is not a finite decimal number");
         }
 
         Extent extent_of(const std::vector<std::string>& args, const std::string& where,
@@ -231,6 +256,18 @@ namespace shipinfer {
         }
         if (!header_seen) {
             throw ConfigError(source + ": no `plan <version> <name>` header");
+        }
+        // A `field` may only name a slot some `node` declared -- a READING question, so both
+        // readers answer it and the shared table can carry the row. `plan_stages` keeps its
+        // own refusal for a plan built in code (`bench.cpp`'s `default_plan`), which never
+        // passes through here.
+        for (const auto& [field, slots] : plan.fields) {
+            for (const std::string& slot : slots) {
+                if (plan.node(slot) == nullptr) {
+                    throw ConfigError(source + ": field '" + field + "' names slot '" + slot +
+                                      "', which no `node` declares");
+                }
+            }
         }
         return plan;
     }

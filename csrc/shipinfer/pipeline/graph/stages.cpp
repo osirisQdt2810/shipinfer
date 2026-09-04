@@ -183,7 +183,12 @@ namespace shipinfer {
                 // A negative id is EVERY row, which is what a crop element with no
                 // `classes:` means on the Python plane ("Default: every row",
                 // `elements/pool.py`). Nothing constructed one before the plan did.
-                if (spec.class_id >= 0 && det.class_id != spec.class_id) continue;
+                // `!= kAnyClass` and NOT `>= 0`: `kNoClass` is negative too, so `>= 0`
+                // skipped nothing and a DECLARED EMPTY selection cropped every row -- the
+                // opposite of what it means, and "at an embedder a doubled GPU bill".
+                if (spec.class_id != CropSpec::kAnyClass && det.class_id != spec.class_id) {
+                    continue;
+                }
                 boxes.insert(boxes.end(), {det.x1, det.y1, det.x2, det.y2});
                 indices.push_back(det.index);
             }
