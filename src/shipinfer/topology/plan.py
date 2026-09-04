@@ -106,8 +106,12 @@ def _speakable(value: str, where: str, *, spaces: bool = False, commas: bool = T
         # A padded value re-reads as its stripped form, so the two planes would publish
         # `"ship "` and `"ship"` for one label -- the `unknown` defect, one step milder.
         refused.append("leading or trailing space")
-    if not spaces and re.search(r"\s", value):
-        refused.append("whitespace")
+    # `spaces=True` means MULTI-WORD, not "unvalidated": both readers tokenise with
+    # `line.split()`, which collapses runs of whitespace, so a tab, a newline or a double
+    # space comes back as different text -- and a newline comes back as an extra LINE, which
+    # in scenario 2 of #131's round 3 injected a `node` the chain never declared.
+    elif re.search(r"\s\s|[^\S ]" if spaces else r"\s", value):
+        refused.append("a tab, newline or repeated space" if spaces else "whitespace")
     if "#" in value:
         refused.append("`#`")
     if not commas and "," in value:
@@ -280,6 +284,12 @@ def _classes_of(declared: tuple[str, ...] | None, where: str) -> tuple[str, ...]
     """The declared row selection, kept distinct from "no selection at all"."""
     if declared is None:
         return None
+    for label in declared:
+        if label == "-":
+            raise ConfigurationError(
+                f"{where}: `-` is the plan's spelling for a DECLARED EMPTY selection, so a "
+                f"class cannot be called that; it would come back as 'no rows at all'"
+            )
     return tuple(
         _speakable(label, f"{where}: class", spaces=True, commas=False) for label in declared
     )
@@ -387,6 +397,8 @@ def parse_plan(text: str, *, source: str = "<string>") -> ResolvedPlan:
         elif verb == "field":
             if len(args) < 2:
                 raise PlanSyntaxError(f"{where}: expected `field <name> <slot>...`")
+            if args[0] in fields:
+                raise PlanSyntaxError(f"{where}: a second `field {args[0]}`")
             fields[args[0]] = tuple(args[1:])
         elif verb in _ATTRIBUTES:
             if not nodes:

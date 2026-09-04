@@ -10,6 +10,7 @@ the other rejects is the worst outcome this seam has, and no golden can express 
 
 from __future__ import annotations
 
+import json
 import textwrap
 from pathlib import Path
 
@@ -342,12 +343,19 @@ class TestTheFormatRefusesWhatItCannotCarry:
         [
             ("", "an empty label, which emits `label 8 ` and reads as one argument"),
             ("ship ", "a padded label, which reads back as different text"),
+            ("cargo  ship", "a repeated space, which `split()` collapses"),
+            ("cargo\tship", "a tab, likewise"),
+            ("ship\nnode injected detect pool", "a newline, which injects a NODE"),
         ],
-        ids=["empty", "padded"],
+        ids=["empty", "padded", "double-space", "tab", "newline"],
     )
     def test_an_empty_or_padded_value_is_refused(
         self, tmp_path: Path, dims: dict[str, tuple[int, int]], label: str, what: str
     ) -> None:
+        # `json.dumps`, not an f-string in quotes: a RAW newline inside a double-quoted YAML
+        # scalar is folded to a space, so the test would pass on a value the guard allows.
+        # JSON escaping is valid YAML double-quoted style, and `\n` survives as a newline.
+        quoted = json.dumps(label)
         chain = self._chain(
             tmp_path,
             f"""
@@ -357,7 +365,7 @@ class TestTheFormatRefusesWhatItCannotCarry:
               detect:
                 impl: pool
                 model: ship_detector
-                params: {{decode: {{class_labels: {{8: "{label}"}}}}}}
+                params: {{decode: {{class_labels: {{8: {quoted}}}}}}}
               output: {{impl: jsonlines}}
             """,
         )
