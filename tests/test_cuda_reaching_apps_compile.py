@@ -15,7 +15,9 @@ the hole on the machines that run the bench, and the ledger carries the CI half.
 
 from __future__ import annotations
 
+import functools
 import importlib.util
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -25,7 +27,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 CSRC = ROOT / "csrc"
 #: Where this host keeps the two header sets, matching `build_csrc.py`'s own defaults.
+#: `SHIPINFER_TENSORRT_DIR` moves the second, as it does for the build script.
 INCLUDES = (Path("/usr/local/cuda/include"), Path("/usr/local/TensorRT/include"))
+#: A translation unit that needs exactly what these apps need. Probed with `g++` rather than
+#: tested with `is_dir()`, because a distribution's packages put `NvInfer.h` and
+#: `cuda_runtime.h` on the DEFAULT include path (`/usr/include/x86_64-linux-gnu`) where no
+#: `-I` names them -- and the `is_dir()` guard then skipped on the one machine that had them.
+_PROBE = "#include <NvInfer.h>\n#include <cuda_runtime.h>\nint main() { return 0; }\n"
 
 
 def _build_module():
@@ -48,14 +56,32 @@ def _cuda_reaching_apps() -> list[Path]:
     return [app for app in apps if not build.offline_ready(build.include_closure(app), set())]
 
 
-pytestmark = [
-    pytest.mark.skipif(shutil.which("g++") is None, reason="no g++ on PATH"),
-    pytest.mark.skipif(
-        not all(p.is_dir() for p in INCLUDES),
-        reason=f"needs the CUDA and TensorRT headers at {[str(p) for p in INCLUDES]}; "
-        f"CI has neither, which is why nothing there compiles these apps",
-    ),
-]
+def _include_flags() -> list[str]:
+    """The `-I` flags these apps need, or `[]` when the headers are already on the path."""
+    tensorrt = Path(os.environ.get("SHIPINFER_TENSORRT_DIR", "/usr/local/TensorRT"))
+    candidates = (Path("/usr/local/cuda/include"), tensorrt / "include")
+    return [f"-I{path}" for path in candidates if path.is_dir()]
+
+
+@functools.cache
+def _headers_available() -> bool:
+    """Whether `NvInfer.h` and `cuda_runtime.h` can be found at all, asked of the compiler."""
+    if shutil.which("g++") is None:
+        return False
+    done = subprocess.run(
+        ["g++", "-std=c++17", "-fsyntax-only", *_include_flags(), "-x", "c++", "-"],
+        input=_PROBE,
+        capture_output=True,
+        text=True,
+    )
+    return done.returncode == 0
+
+
+pytestmark = pytest.mark.skipif(
+    not _headers_available(),
+    reason="needs g++ plus the CUDA and TensorRT headers, on the include path or under "
+    "SHIPINFER_TENSORRT_DIR; without them nothing in this repository compiles these apps",
+)
 
 
 class TestTheAppsOfflineCannotBuild:
@@ -79,7 +105,7 @@ class TestTheAppsOfflineCannotBuild:
                     "-std=c++17",
                     "-fsyntax-only",
                     f"-I{CSRC}",
-                    *(f"-I{path}" for path in INCLUDES),
+                    *_include_flags(),
                     str(app),
                 ],
                 capture_output=True,
