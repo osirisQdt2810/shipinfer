@@ -51,8 +51,27 @@ namespace shipinfer::parity {
               {"state", "last_error"}}},
             {"stop", {{"abandoned"}, {}}},
             {"end", {{"cameras", "frames_read", "frames_published", "frames_dropped"}, {}}},
+            // The queue seam. Fleet-level, every one of them, and the item's camera travels
+            // in the words: a scheduling run is single-threaded with no clock in it, so WHICH
+            // camera comes out next is the invariant rather than the nondeterminism, and only
+            // the ungrouped sequence can compare that.
+            {"qput", {{"rows", "depth"}, {"camera", "status"}}},
+            {"qbatch", {{"items", "rows"}, {}}},
+            {"qserved", {{"rows"}, {"camera"}}},
+            {"qdrop", {{}, {"camera", "reason"}}},
+            {"qstats",
+             {{"accepted", "rejected", "evicted", "expired", "depth", "capacity"}, {}}},
+            {"qcam", {{"depth", "rejected", "evicted", "expired"}, {"camera"}}},
         };
         return table;
+    }
+
+    // `trace.py`'s FLEET_KINDS. A set rather than a chain of `==`, so the two spellings can
+    // be compared by a test instead of by whoever next adds a kind.
+    inline const std::set<std::string>& kFleetKinds() {
+        static const std::set<std::string> kinds = {"stop",    "end",   "qput",   "qbatch",
+                                                    "qserved", "qdrop", "qstats", "qcam"};
+        return kinds;
     }
 
     struct ParityRecord {
@@ -131,7 +150,7 @@ namespace shipinfer::parity {
             if (found == kFields().end()) {
                 throw ConfigError("unknown parity record kind '" + kind + "'");
             }
-            const bool fleet = kind == "stop" || kind == "end";
+            const bool fleet = kFleetKinds().count(kind) == 1;
             if (fleet == !camera.empty()) {
                 throw ConfigError("parity record '" + kind +
                                   "': fleet-level kinds carry no camera and every other kind "

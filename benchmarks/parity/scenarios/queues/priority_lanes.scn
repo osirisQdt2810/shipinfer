@@ -1,0 +1,19 @@
+# Lower value served first, and the lane is emptied before the next one is touched: a
+# tracking-critical frame does not queue behind a background batch (ADR-005).
+scenario priority_lanes
+records_min 14
+
+queue fair
+capacity 6
+overflow reject
+max_batch_size 2
+max_delay_us 0
+
+put cam_bg 1 background
+put cam_hi 1 high
+put cam_tc 1 tracking_critical
+put cam_bg 1 background
+# Two takes of two: tracking_critical and high first, then the two background frames.
+take
+take
+close

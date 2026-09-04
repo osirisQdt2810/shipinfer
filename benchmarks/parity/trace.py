@@ -62,6 +62,16 @@ FIELDS: Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     ),
     "stop": (("abandoned",), ()),
     "end": (("cameras", "frames_read", "frames_published", "frames_dropped"), ()),
+    # The queue seam. Fleet-level, every one of them, and the item's camera travels in the
+    # words: a scheduling run is single-threaded with no clock in it, so WHICH camera comes
+    # out next is the invariant rather than the nondeterminism, and only the ungrouped
+    # sequence can compare that.
+    "qput": (("rows", "depth"), ("camera", "status")),
+    "qbatch": (("items", "rows"), ()),
+    "qserved": (("rows",), ("camera",)),
+    "qdrop": ((), ("camera", "reason")),
+    "qstats": (("accepted", "rejected", "evicted", "expired", "depth", "capacity"), ()),
+    "qcam": (("depth", "rejected", "evicted", "expired"), ("camera",)),
 }
 
 #: Unknown kinds are refused by name on read: a typo that read as "no records of that kind"
@@ -69,7 +79,7 @@ FIELDS: Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
 KINDS = frozenset(FIELDS)
 
 #: Fleet-level records carry no camera and are compared as their own sequence.
-FLEET_KINDS = frozenset({"stop", "end"})
+FLEET_KINDS = frozenset({"stop", "end", "qput", "qbatch", "qserved", "qdrop", "qstats", "qcam"})
 
 
 @dataclass(frozen=True, slots=True)

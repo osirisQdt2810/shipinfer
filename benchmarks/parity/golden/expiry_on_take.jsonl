@@ -1,0 +1,9 @@
+{"schema":1,"scenario":"expiry_on_take","plane":"python"}
+{"kind":"qput","camera":"","n":[1,1],"t":["cam_late","accepted"]}
+{"kind":"qput","camera":"","n":[1,2],"t":["cam_live","accepted"]}
+{"kind":"qbatch","camera":"","n":[1,1],"t":[]}
+{"kind":"qserved","camera":"","n":[1],"t":["cam_live"]}
+{"kind":"qdrop","camera":"","n":[],"t":["cam_late","expired"]}
+{"kind":"qstats","camera":"","n":[2,0,0,1,0,4],"t":[]}
+{"kind":"qcam","camera":"","n":[0,0,0,1],"t":["cam_late"]}
+{"kind":"qcam","camera":"","n":[0,0,0,0],"t":["cam_live"]}

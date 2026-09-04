@@ -1,0 +1,10 @@
+{"schema":1,"scenario":"reject_is_the_default","plane":"python"}
+{"kind":"qput","camera":"","n":[1,1],"t":["cam_a","accepted"]}
+{"kind":"qput","camera":"","n":[1,2],"t":["cam_b","accepted"]}
+{"kind":"qput","camera":"","n":[1,2],"t":["cam_a","rejected"]}
+{"kind":"qbatch","camera":"","n":[2,2],"t":[]}
+{"kind":"qserved","camera":"","n":[1],"t":["cam_a"]}
+{"kind":"qserved","camera":"","n":[1],"t":["cam_b"]}
+{"kind":"qstats","camera":"","n":[2,1,0,0,0,2],"t":[]}
+{"kind":"qcam","camera":"","n":[0,1,0,0],"t":["cam_a"]}
+{"kind":"qcam","camera":"","n":[0,0,0,0],"t":["cam_b"]}
