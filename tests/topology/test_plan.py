@@ -130,7 +130,11 @@ class TestWhatTheChainResolvesTo:
 
         assert plan.node("embed_ship").classes == ("ship",)
         assert plan.node("embed_person").classes == ("person",)
-        assert plan.node("segment").classes is None, "no selection declared"
+        # The segmenter declares one too, since #132's review: a `segment` slot with no
+        # selection is EVERY row on the C++ plane, which is the ship segmenter on every
+        # person crop at 640x640 and a `mask_area_px` filed on every person record.
+        assert plan.node("segment").classes == ("ship",)
+        assert plan.node("decode").classes is None, "and a decode declares none at all"
 
     def test_each_event_field_names_the_slots_that_fill_it(
         self, dims: dict[str, tuple[int, int]]
@@ -183,6 +187,13 @@ class TestBothPlanesRefuseTheSameText:
         ("plan 1 x\nnode a b c\nclasses ,ship\n", "an empty label in `classes`"),
         ("plan 1 x\nnode a b c\nscore inf\n", "`inf`, which the writer must never emit"),
         ("plan 1 x\nnode a b c\nclasses ship,\n", "a trailing comma, so an empty label"),
+        ("plan 1 x\nfield embedding a\nfield embedding b\n", "a second `field` for one name"),
+        ("plan 1 x\nfield embedding nosuch\n", "a `field` naming a slot no `node` declares"),
+        ("plan 1 x\nnode a b c\nscore 0x10\n", "a hex float, which `stod` would accept"),
+        ("plan 1 x\nlabel 99999999999999999999 ship\n", "an id too large for a C++ int"),
+        ("plan 1 x\nnode a b c\nmax_detections -1\n", "`-1` for `no limit`, which is no cap"),
+        ("plan 1 x\nnode a b c\nmax_detections 0\n", "and zero, for the same reason"),
+        ("plan 1 x\nnode a b c\nscore 1e400\n", "an overflowing exponent, which is `inf`"),
     )
     ACCEPTED = (
         ("plan 1 -\n", "`-` is the empty chain name"),
@@ -192,6 +203,13 @@ class TestBothPlanesRefuseTheSameText:
         ("plan 1 x\nnode a b c\nclasses cargo ship,fishing vessel\n", "two labels, not four"),
         ("plan 1 x\nnode a b c\nclasses -\n", "`-` is a DECLARED empty selection"),
         ("plan 1 x\nnode a b c\nscore 1e-05\n", "an exponent-form threshold"),
+        ("plan 1 x\nnode a b c\nscore 5e-324\n", "a subnormal, which `stod` used to refuse"),
+        # The READER tolerates a collapsed value because it cannot know one was collapsed;
+        # `_speakable` is what refuses to WRITE one, where the slot is still named. Stated
+        # here so the asymmetry is deliberate rather than a hole -- and the C++ gate asserts
+        # the same collapse on its side, for the same reason.
+        ("plan 1 x\nnode a b c\nclasses cargo  ship\n", "a collapsed value reads as one word"),
+        ("plan 1 x\nlabel 8 cargo\tship\n", "and a tab likewise, which the emitter refuses"),
     )
 
     @pytest.mark.parametrize("text,why", REFUSED, ids=[why for _, why in REFUSED])
@@ -388,6 +406,30 @@ class TestTheFormatRefusesWhatItCannotCarry:
         )
 
         with pytest.raises(ConfigurationError, match="unnamed chain"):
+            resolve_plan(load_topology(chain), dims=dims)
+
+    def test_a_non_positive_cap_is_refused_where_the_slot_is_named(
+        self, tmp_path: Path, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """Nothing between a chain file and the decode loop refused `-1`: not the element's
+        bare `int()`, not the unvalidated `DecodeParams`. So `resolve_plan` does, and the C++
+        `detect_config` does -- because `static_cast<size_t>(-1)` is no bound at all there
+        while `keep[: -1]` drops one row here."""
+        chain = self._chain(
+            tmp_path,
+            """
+            name: uncapped
+            elements:
+              decode: {impl: replay}
+              detect:
+                impl: pool
+                model: ship_detector
+                params: {decode: {max_detections: -1}}
+              output: {impl: jsonlines}
+            """,
+        )
+
+        with pytest.raises(ConfigurationError, match="a positive count"):
             resolve_plan(load_topology(chain), dims=dims)
 
     def test_a_non_finite_threshold_is_refused_rather_than_written(

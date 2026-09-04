@@ -27,6 +27,9 @@
 #include "shipinfer/obs/sampler.h"
 #include "shipinfer/pipeline/events/records.h"
 #include "shipinfer/pipeline/graph/dag.h"
+#include "shipinfer/pipeline/graph/from_plan.h"
+#include "shipinfer/pipeline/graph/plan.h"
+#include "shipinfer/pipeline/graph/plan_stages.h"
 #include "shipinfer/pipeline/graph/shapes.h"
 #include "shipinfer/pipeline/graph/stages.h"
 #include "shipinfer/pipeline/reassembly/collector.h"
@@ -104,6 +107,10 @@ namespace {
         std::string seg_plan;
         std::string emb_plan;
         std::string ship_emb_plan;
+        // The resolved chain to run — `shipinfer plan -t <chain.yaml> -o <file>`. Absent,
+        // the defaults below are assembled into the SAME plan struct, so there is one
+        // construction path and no second spelling of the graph.
+        std::string plan_path;
         std::string log_path = "buffers.jsonl";
         std::vector<int> devices{0};
         int cameras = 12;
@@ -161,6 +168,8 @@ namespace {
                 options.emb_plan = next();
             else if (flag == "--ship-emb-engine")
                 options.ship_emb_plan = next();
+            else if (flag == "--plan")
+                options.plan_path = next();
             else if (flag == "--log-jsonl")
                 options.log_path = next();
             else if (flag == "--gpu-ids")
@@ -296,11 +305,21 @@ int main(int argc, char** argv) {
                 .count();
         std::cerr << "engines ready in " << startup_s << "s\n";
 
-        // The stage names, for the log's metadata and the collector's expectations.
-        std::vector<std::string> stage_names{"detect", "crop"};
-        if (models.count("ship_segmenter")) stage_names.push_back("ship_segmenter");
-        if (models.count("person_embedder")) stage_names.push_back("person_embedder");
-        if (models.count("ship_embedder")) stage_names.push_back("ship_embedder");
+        // WHAT THIS PROCESS RUNS, from one source. This used to be three hand-kept lists --
+        // the stage names here, a label table below, a field map below that, and an
+        // `if (models.count(...))` ladder inside each worker -- and they disagreed: the
+        // labels said a ship was class 1 while the crop specs said 8, so every ship left the
+        // event writer as `unknown` while the right rows were cropped.
+        const ResolvedPlan plan =
+            options.plan_path.empty() ? default_bench_plan() : read_plan(options.plan_path);
+        const PlanStages planned = plan_stages(plan, loaded_names(models));
+        const std::vector<std::string>& stage_names = planned.stage_names;
+        std::cerr << "chain '" << plan.name << "': " << stage_names.size() << " stage(s)";
+        if (!planned.unsupported.empty()) {
+            std::cerr << ", not run here:";
+            for (const std::string& slot : planned.unsupported) std::cerr << " " << slot;
+        }
+        std::cerr << "\n";
 
         std::atomic<uint64_t> emitted{0};
         std::atomic<uint64_t> complete{0};
@@ -314,20 +333,12 @@ int main(int argc, char** argv) {
         //: this path runs only on a refusal, which on a healthy fleet is never.
         std::mutex unwritable_lock;
         std::map<std::string, uint64_t> unwritable_by_camera;
-        // The labels a class id maps to, in the demo repository's order. Config on the Python
-        // plane (`pipeline.class_labels`); argv-only here until P5-C reads the settings tree,
-        // and stated rather than assumed because a raw class index is a property of the
-        // checkpoint and changes when the model is retrained.
-        const pipeline::events::ClassLabels labels = {{0, "person"}, {1, "ship"}};
-        // The batch names, from the stages built below -- an `ObjectBatch` is keyed by a
-        // stage's OUTPUT name and not its own (`graph/stages.cpp`: `out.name = output_`), and
-        // looking it up by the stage name found nothing on every frame. Stated here rather
-        // than defaulted in the converter, because these names are the graph's config and
-        // P5-D is the item that will read them from a chain file.
-        const pipeline::events::FieldMap event_fields = {
-            {"embedding", {"ship_embedder_out", "person_embedder_out"}},
-            {"mask_area_px", {"ship_segmenter_out"}},
-        };
+        // Both from the plan: the class ids are the CHECKPOINT's (this detector calls a ship
+        // 8) and the batch names are a stage's OUTPUT name rather than its own
+        // (`graph/stages.cpp`: `out.name = output_`), so `from_plan.cpp` derives them once
+        // and nothing here can spell either differently.
+        const pipeline::events::ClassLabels& labels = planned.labels;
+        const pipeline::events::FieldMap& event_fields = planned.fields;
         FrameCollector collector(
             [&emitted, &complete, &event_bytes, &unwritable, &unwritable_lock,
              &unwritable_by_camera, &labels, &event_fields, &options](FrameResult&& result) {
@@ -431,38 +442,11 @@ int main(int argc, char** argv) {
                     // overwrites it.
                     auto pixels = std::make_shared<DeviceBuffer>();
 
-                    Dag dag;
-                    dag.add(std::make_unique<DetectStage>(
-                        "detect", *models.at("ship_detector"), DetectConfig{}, scratch,
-                        std::chrono::milliseconds(options.stage_timeout_ms)));
-                    std::vector<CropSpec> crops;
-                    if (models.count("person_embedder"))
-                        crops.push_back({"person_crops", "person", 0, 256, 128});
-                    if (models.count("ship_segmenter"))
-                        crops.push_back({"ship_crops_640", "ship", 8, 640, 640});
-                    if (models.count("ship_embedder"))
-                        crops.push_back({"ship_crops", "ship", 8, 256, 128});
-                    if (crops.empty()) crops.push_back({"person_crops", "person", 0, 256, 128});
-                    dag.add(std::make_unique<CropStage>("crop", crops,
-                                                        DetectConfig{}.max_objects, scratch));
-                    if (models.count("ship_segmenter")) {
-                        dag.add(std::make_unique<ObjectStage>(
-                            "ship_segmenter", *models.at("ship_segmenter"), "ship_crops_640",
-                            "ship_segmenter_out",
-                            std::chrono::milliseconds(options.stage_timeout_ms)));
-                    }
-                    if (models.count("person_embedder")) {
-                        dag.add(std::make_unique<ObjectStage>(
-                            "person_embedder", *models.at("person_embedder"), "person_crops",
-                            "person_embedder_out",
-                            std::chrono::milliseconds(options.stage_timeout_ms)));
-                    }
-                    if (models.count("ship_embedder")) {
-                        dag.add(std::make_unique<ObjectStage>(
-                            "ship_embedder", *models.at("ship_embedder"), "ship_crops",
-                            "ship_embedder_out",
-                            std::chrono::milliseconds(options.stage_timeout_ms)));
-                    }
+                    // The chain, from the plan. Per worker because a Dag holds this
+                    // thread's `WorkerScratch`; from the same plan as the tables above, so
+                    // the collector's expectations and the stages cannot disagree.
+                    Dag dag = build_dag(planned, models, scratch,
+                                        std::chrono::milliseconds(options.stage_timeout_ms));
 
                     while (!stopping.load()) {
                         auto batch = queue.get_batch(frame_window);
