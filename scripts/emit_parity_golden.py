@@ -19,10 +19,14 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    # Run as a path (`python scripts/emit_parity_golden.py`), so the repository root is not
-    # on the path the way `-m` would have put it there.
-    sys.path.insert(0, str(ROOT))
+# Run as a path, so the repository root is not on sys.path the way `-m` would put it --
+# and `src` ahead of it, because in a git worktree an editable install still resolves
+# `shipinfer` to the PRIMARY checkout, and a golden emitted from another commit's plane
+# says nothing about this one. `pythonpath = [".", "src"]` is the same fix for pytest.
+for entry in (str(ROOT), str(ROOT / "src")):
+    if entry in sys.path:
+        sys.path.remove(entry)
+    sys.path.insert(0, entry)
 
 from benchmarks.parity.drive_python import GOLDEN, SCENARIOS, run_scenario  # noqa: E402
 from benchmarks.parity.scenario import load_scenario  # noqa: E402

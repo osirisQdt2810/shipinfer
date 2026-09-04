@@ -137,12 +137,10 @@ namespace shipinfer {
         // the atomic directly, because that path must not take the lock a stopper may be
         // holding while it waits for this very thread (#39 round 4, P4-NB5: the header's
         // "by ANY stopper" now includes the actor itself). Once abandoned, every `stop()`
-        // answers false —
-        // STICKY, deliberately, where the Python plane's stop() re-reads live is_alive():
-        // a detach is irreversible and the lifetime debt it creates is permanent, so "it
-        // has since finished" does not un-abandon it. The planes diverge only on a repeat
-        // stop() after an abandoned thread later exits (C++ false forever, Python true);
-        // a parity harness must not read that as a bug.
+        // answers false — STICKY, deliberately: a detach is irreversible and the lifetime
+        // debt it creates is permanent, so "it has since finished" does not un-abandon it.
+        // The Python plane latches `_abandoned` for the same reason (P6-D3), so both planes
+        // answer false for ever and the two `stop()`s are one contract.
         std::atomic<bool> thread_abandoned_{false};
         // The self-stop guard's own copy of the id, atomic because the guard cannot take
         // `lifecycle_mutex_` (a stopper holds it across its grace wait FOR this thread —
@@ -167,10 +165,11 @@ namespace shipinfer {
         uint64_t connects_ = 0;
         uint64_t connect_failures_ = 0;
         uint64_t consecutive_empty_ = 0;
-        // A guarded mirror of the backoff's attempt count. The backoff itself is touched only
-        // by the actor thread, and reading it from `health()` under this lock — as the Python
-        // original does — would be a data race in this language rather than merely a stale
-        // read.
+        // The actor's own failure count, not the backoff's attempt count: a fatal open records
+        // a failure and never asks for a delay, so the backoff would report none. Guarded
+        // because the backoff is the actor thread's alone, and reading it from `health()`
+        // would be a data race here rather than merely a stale read. The Python plane counts
+        // it the same way for the same reason (P6-D2).
         uint64_t consecutive_failures_ = 0;
         std::string last_error_;
         int64_t last_frame_unix_ns_ = 0;
