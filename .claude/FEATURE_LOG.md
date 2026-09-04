@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-04 — The record seam: both planes' `build_records`, byte-compared (P5-A-ALLOC)
+
+The event seam compares the two JSON writers on records a scenario STATES, so
+`build_records` -- the translation unit production runs, on both planes -- was covered only
+by each side's own unit checks. A record scenario states what the graph LEAVES BEHIND
+(detections by class id, the per-object batches with their row indices, the label table, the
+field map) and each plane builds its own records: `scenarios/records/` ->
+`golden/records/` -> `test_record_parity`, 17 checks, byte-identical on the first comparison.
+
+It also settled a rule that was undocumented and backwards: the candidates are a COVERAGE
+union and both planes OVERWROTE, so the last batch to mention a row set the field. The answer
+is the one the chain plane already had -- `PoolEmbed._scatter` and `ChainWalk.inbound` raise
+on exactly this state -- so `build_records` refuses on both planes, and the contested case is
+a scenario with no golden, because what both must do is refuse it.
+
 ## 2026-09-04 — The resolved chain plan: the C++ plane stops hard-coding its graph (ADR-020)
 
 `CSRC-TOPOLOGY-Q` answered: no `csrc/topology/` mirror. Python validates the chain and hands

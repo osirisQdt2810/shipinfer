@@ -19,7 +19,7 @@ from pathlib import Path
 
 from shipinfer.core.errors import ConfigurationError
 
-__all__ = ["EventScenario", "ObjectSpec", "load_event_scenario"]
+__all__ = ["EventScenario", "ObjectSpec", "load_event_scenario", "reason_of"]
 
 #: Every numeric literal a scenario may use, integers included: the gate compares bytes, so a
 #: value the two planes spell differently would fail on formatting and not on the schema. An
@@ -116,7 +116,9 @@ def _number(word: str, where: str) -> float:
 FINISH_REASONS = ("complete", "incomplete", "timeout", "shutdown", "evicted")
 
 
-def _reason_of(word: str, where: str) -> str:
+def reason_of(word: str, where: str) -> str:
+    """The word for a `FinishReason`, checked. Public because two seams read it:
+    the event scenario and the record scenario beside it."""
     if word not in FINISH_REASONS:
         raise ConfigurationError(
             f"{where}: {word!r} is not a FinishReason; known: {list(FINISH_REASONS)}"
@@ -180,7 +182,7 @@ def load_event_scenario(path: Path) -> EventScenario:
             # The ENUM, and each plane derives its own word from it. `reason` states the
             # string and is therefore echoed by both planes unchanged, which is why the gate
             # could not see the C++ plane writing `failed` where Python writes `evicted`.
-            fields["reason"] = _reason_of(words[0], where)
+            fields["reason"] = reason_of(words[0], where)
         elif directive == "frame":
             fields["frame"] = int(words[0])
         elif directive == "size":

@@ -37,6 +37,9 @@ from benchmarks.parity.drive_python import GOLDEN, SCENARIOS, run_scenario  # no
 from benchmarks.parity.drive_queue import GOLDEN as QUEUE_GOLDEN  # noqa: E402
 from benchmarks.parity.drive_queue import SCENARIOS as QUEUE_SCENARIOS  # noqa: E402
 from benchmarks.parity.drive_queue import run_queue_scenario  # noqa: E402
+from benchmarks.parity.drive_records import GOLDEN as RECORD_GOLDEN  # noqa: E402
+from benchmarks.parity.drive_records import load as load_record  # noqa: E402
+from benchmarks.parity.drive_records import render as render_record  # noqa: E402
 from benchmarks.parity.queue_scenario import load_queue_scenario  # noqa: E402
 from benchmarks.parity.scenario import load_scenario  # noqa: E402
 from benchmarks.parity.trace import Trace, TraceWriter  # noqa: E402
@@ -49,9 +52,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scenario", required=True, help="a name under scenarios/, or a path")
     parser.add_argument(
         "--kind",
-        choices=("ingest", "queue", "event", "plan"),
+        choices=("ingest", "queue", "event", "plan", "record"),
         default="ingest",
-        help="which seam: the camera actors, the request queue (scenarios/queues/), one\n        perception event (scenarios/events/), or a resolved chain (scenarios/plans/)",
+        help="which seam: the camera actors, the request queue (scenarios/queues/), one\n        perception event (scenarios/events/), a resolved chain (scenarios/plans/), or\n        one frame's stage outputs through the production record builder\n        (scenarios/records/)",
     )
     parser.add_argument("--out", type=Path, help="write the trace here instead of stdout")
     parser.add_argument(
@@ -80,6 +83,27 @@ def main(argv: list[str] | None = None) -> int:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(text, encoding="utf-8")
         print(f"wrote {destination} ({len(text.splitlines())} line(s))")
+        return 0
+
+    # One LINE rather than a trace, like `event` below -- the difference is which driver
+    # builds it: `event` states finished records and compares the two JSON writers, `record`
+    # states the frame's stage outputs and compares the two record BUILDERS.
+    if args.kind == "record":
+        named = Path(args.scenario)
+        scenario = load_record(str(named) if named.suffix == ".scn" else args.scenario)
+        line = render_record(scenario)
+        destination = RECORD_GOLDEN / f"{scenario.name}.jsonl" if args.emit_golden else args.out
+        if destination is None:
+            print(line)
+            return 0
+        if args.emit_golden and destination.exists() and not args.force:
+            raise ConfigurationError(
+                f"{destination} already exists. A golden is captured once and committed; "
+                f"pass --force only when the change to the plane IS the decision"
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(line + "\n", encoding="ascii")
+        print(f"wrote {destination} (1 record)")
         return 0
 
     if args.kind == "event":
