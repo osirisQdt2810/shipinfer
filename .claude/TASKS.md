@@ -2083,7 +2083,16 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
             header promises "by ANY stopper"). Fix: `thread_abandoned_` as
             `std::atomic<bool>` so the lockless self-stop path can read it; + a line
             keeping the header honest either way.
-- [ ] **CSRC-BENCH-UNCOMPILED · `cli/bench.cpp` is compiled by NOTHING in CI, and it took a
+- [!] **CSRC-BENCH-UNCOMPILED · BOTH HALVES BUILT and OPEN as PR #133, VERDICT APPROVE
+      (5 Sep) — OPERATOR: this one needs your MANUAL MERGE.** It edits
+      `.github/workflows/**`, which CLAUDE.md records as a permanent exception to the review
+      gate: the review job cannot mint a token for a workflow change, so `Auto-merge` stays
+      SKIPPED however green the rest is. Tests green on both interpreters, review APPROVE
+      after two rounds that each found a real defect (r1: the check could not fail --
+      `bash -e {0}` has no `pipefail` and `pytest` was not installed; r2: the job never
+      installed `NvInferPlugin.h`, which `engine.cpp` includes and NVIDIA ships separately, so
+      the job would have been red on its first run on main). Original:
+      `cli/bench.cpp` is compiled by NOTHING in CI, and it took a
       reviewer reading a diff to find that out (#129 round 4).** Its include closure reaches
       `core/platform.h`, so `build_csrc.py --offline` excludes it and `ci.yml`'s `cpp-offline`
       job is the only C++ job there is -- so a `std::mutex` used without being declared merged
