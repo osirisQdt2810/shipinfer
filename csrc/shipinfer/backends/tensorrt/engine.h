@@ -26,6 +26,7 @@
 #include <string>
 #include <vector>
 
+#include "shipinfer/backends/tensor_shape.h"
 #include "shipinfer/core/buffers.h"
 #include "shipinfer/core/platform.h"
 #include "shipinfer/core/types.h"
@@ -38,11 +39,11 @@ namespace shipinfer {
         bool is_input = false;
         size_t element_size = 4;
 
-        size_t elements_per_row() const {
-            size_t n = 1;
-            for (int64_t d : dims) n *= static_cast<size_t>(d < 0 ? 1 : d);
-            return n;
-        }
+        // Delegates, and does NOT clamp: `TrtEngine` refuses a non-positive per-row
+        // dimension at load (`require_static_row`), because `row_bytes()` sizes the device
+        // and host buffers from this and a `-1` clamped to 1 sized them for one element per
+        // row where the engine writes many.
+        size_t elements_per_row() const { return shipinfer::elements_per_row(dims); }
         size_t row_bytes() const { return elements_per_row() * element_size; }
     };
 

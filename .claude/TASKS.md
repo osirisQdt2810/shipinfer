@@ -2623,16 +2623,41 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       slot a YOLO-seg export puts its prototypes in is the export's choice, and assuming
       `output0`/`output1` refused a valid engine loudly from the wrong plane. Six new rows on
       the shared refusal table, both planes; `test_plan_parity` 91, `test_plan_stages` 54.
-- [ ] **ENGINE-DIMS-CAN-DISAGREE-WITH-WIDTH** (#139 review, non-blocking) —
-      `TrtEngineAdapter::output_row_elems` goes through `TensorSpec::elements_per_row()`,
-      which CLAMPS a negative dim to 1 (`backends/tensorrt/engine.h`), while `output_dims`
-      reports the `-1` verbatim. So for an output with a dynamic NON-BATCH dimension the pair
-      an `OutputTensor` carries is internally inconsistent. Pre-existing and unrealistic for a
-      YOLO-seg plan -- but `mask_area` is the first consumer to TRUST `dims`, so it should
-      refuse a shape holding a negative by name rather than build a mask from it. Taken in the
-      fold PR; recorded here because the clamp itself is the older half and is worth deciding
-      separately (clamping a dynamic dim to 1 is a silent lie about a width).
-
+- [x] **ENGINE-DIMS-CAN-DISAGREE-WITH-WIDTH · DONE 5 Sep on `fix/dynamic-non-batch-dim`, and
+      the survey found it WORSE than the review framed it.** The report was "an `OutputTensor`
+      can carry a width and a shape that disagree" -- true, and the second-order effect is the
+      real one: `TensorSpec::row_bytes()` sizes BOTH the device buffer and the host readback
+      (`backends/tensorrt/engine.cpp`), so a `-1` clamped to 1 allocated one element per row
+      for an output the engine fills with many. `(32, -1, 160)` at h=160 is a buffer 160x too
+      small, written by the engine and read back by `gpuMemcpyAsync`. Not a wrong number: an
+      overflow.
+      REFUSED AT LOAD now, naming the tensor and the shape, in a CUDA-free
+      `backends/tensor_shape.h` -- which is the point, because the rule used to live inside a
+      `TensorSpec` no offline gate can include, so nothing checked it.
+      AND THE CONTRACT ITSELF now refuses it, which is the finding's general half: a width
+      and a shape are two answers about one row, `TrtEngineAdapter` reads them from different
+      places, and only that one implementation was guarded. `require_shapes_agree` in
+      `backends/engine_api.h` is called from `ModelInstance`'s constructor, where the engine is
+      attached -- so every backend and every double is checked once, off the dispatch path.
+      GATES: `test_tensor_shape` 13 checks (the arithmetic of the defect itself -- the clamped
+      row is 1/160th of the real one); `test_engine` 41 -> 48, the six new ones covering both
+      spellings and one that says an agreeing two-output engine is still accepted.
+      REVERT-CHECK RED TWICE: accept a zero again -> 2 failures; drop the constructor call ->
+      6 failures; restored -> 0 and exit 0 for both. And the four real engines still load --
+      8 cameras x 5 fps x 20 s on GPUs 0-1, 800 frames -> 800 complete, exit 0 -- which is what
+      says the refusal does not refuse a valid plan.
+- [ ] **TEST-INGEST-RED-WHERE-OPENCV-IS-INSTALLED.** `csrc/tests/test_ingest.cpp:2213` is red
+      on this host and on `origin/main` -- reproduced in a clean worktree at `origin/main`, so
+      it is not #144's -- with `unknown video source 'replay'; known sources: fake`. The guard
+      above it is `if (!SOURCES().contains("replay"))`, and that is the WRONG FACT: a source
+      missing from the REGISTRY is not the same as its lane missing from the BUILD. This box
+      has OpenCV, so `build_csrc.py` puts the opencv lane IN the build and therefore NOT in
+      `-DSHIPINFER_OMITTED_LANES`; `test_ingest` still links no replay unit, so `replay` is
+      neither registered nor claimable by an omitted lane, and `canonical` correctly falls
+      through to "unknown". The assertion is about the lane TABLE, so the guard should ask the
+      table: `omitted_lane_of_source("replay") == "opencv"`. CI is green because its runner has
+      no OpenCV -- which is the part worth fixing, a gate that only fails on a developer's
+      better-equipped machine.
 - [ ] **CSRC-BENCH-STARTUP-ABORT · seen ONCE on 5 Sep and not reproduced, recorded rather
       than buried by a green re-run.** The first run of a freshly built `csrc/build/bench`
       aborted with `terminate called without an active exception` (exit 134) after all four

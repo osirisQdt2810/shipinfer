@@ -45,6 +45,7 @@ namespace shipinfer {
                   }
               }) {
         if (!engine_) throw ConfigError("instance " + name_ + " has no engine");
+        require_shapes_agree("instance " + name_, *engine_);
         if (window_.max_batch_size > static_cast<size_t>(engine_->max_batch())) {
             throw ConfigError("instance " + name_ + ": the window's max_batch_size " +
                               std::to_string(window_.max_batch_size) +

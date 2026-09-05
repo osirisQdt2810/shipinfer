@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "shipinfer/backends/tensor_shape.h"
 #include "shipinfer/core/device.h"
 
 namespace shipinfer {
@@ -62,5 +63,30 @@ namespace shipinfer {
         virtual void execute(int rows) = 0;
         virtual const float* output(size_t index = 0) const = 0;
     };
+
+    // Every output's width and shape state the same row, checked once where the engine is
+    // attached. The default `output_dims` derives one from the other and cannot disagree; an
+    // override can, and `TrtEngineAdapter` reads the two from different places -- the width
+    // from `TensorSpec::elements_per_row()`, the shape from the dimensions the plan declared.
+    // A backend whose two answers differ has a batcher slicing rows at one width while a
+    // consumer reads them at another, so this is a load-time refusal rather than a per-row
+    // check on the dispatch path.
+    inline void require_shapes_agree(const std::string& where, const Engine& engine) {
+        for (size_t index = 0; index < engine.outputs(); ++index) {
+            const std::vector<int64_t> dims = engine.output_dims(index);
+            const std::string name = engine.output_name(index);
+            require_static_row(name.empty() ? std::to_string(index) : name, dims);
+            const size_t declared = engine.output_row_elems(index);
+            if (elements_per_row(dims) == declared) continue;
+            std::string shape;
+            for (size_t i = 0; i < dims.size(); ++i) {
+                shape += (i ? ", " : "") + std::to_string(dims[i]);
+            }
+            throw ConfigError(where + ": output '" +
+                              (name.empty() ? std::to_string(index) : name) + "' is " +
+                              std::to_string(declared) + " float(s) a row but has the shape (" +
+                              shape + "), which is " + std::to_string(elements_per_row(dims)));
+        }
+    }
 
 }  // namespace shipinfer

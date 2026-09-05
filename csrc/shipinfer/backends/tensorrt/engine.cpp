@@ -125,6 +125,11 @@ namespace shipinfer {
             // Dimension 0 is the batch. A static plan states it; a dynamic one has -1 and the
             // profile's max is the truth.
             for (int d = 1; d < shape.nbDims; ++d) spec.dims.push_back(shape.d[d]);
+            // Refused HERE, where the artefact is still identifiable, rather than as a buffer
+            // overflow later: `row_bytes()` sizes both the device and the host buffer from
+            // this shape (below), and the clamp this replaced turned a `-1` into one element
+            // per row for an output the engine fills with many.
+            require_static_row(spec.name, spec.dims);
 
             int batch = shape.nbDims > 0 ? static_cast<int>(shape.d[0]) : 1;
             if (is_input && batch < 0) static_batch_ = false;
