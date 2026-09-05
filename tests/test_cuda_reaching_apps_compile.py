@@ -6,11 +6,12 @@ reaches it through `pipeline/graph/state.h`, so **nothing in this repository eve
 and it is the only caller of the perception-event writer.
 
 That is not hypothetical. A `std::mutex` and a `std::map` were used in its sink without being
-declared, every test stayed green, and the defect was found by a reviewer reading the diff. A
-syntax check is cheap, needs no device, and would have said so in two seconds.
+declared, every test stayed green, and the defect was found by a reviewer reading the diff.
 
-Skipped by name when the CUDA or TensorRT headers are absent, which is CI's case: this closes
-the hole on the machines that run the bench, and the ledger carries the CI half.
+The two compile classes are skipped BY NAME where the CUDA and TensorRT headers are absent,
+and CI's `cpp-syntax` job installs them -- so there a skip is the defect, and
+`SHIPINFER_REQUIRE_CSRC_HEADERS` turns it into a failure naming which headers are short.
+`TestAFailureArrivesWithItsReason` needs only `g++`, so it runs everywhere.
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ def _include_flags() -> list[str]:
     return [f"-I{path}" for path in candidates if path.is_dir()]
 
 
+@functools.cache
 def _build_module():
     """`build_csrc.py` by path -- `scripts/` is not a package."""
     spec = importlib.util.spec_from_file_location(
@@ -95,6 +97,16 @@ def _lanes_available(build, closure: set[Path]) -> bool:
         except FileNotFoundError:
             return False  # no `pkg-config` binary at all, which is the same answer
     return True
+
+
+def _lane_flags(build, closure: set[Path]) -> list[str]:
+    """The `-I` flags an external lane needs, asked of `pkg-config` through `build_csrc.py`."""
+    return [
+        flag
+        for lane in build.lanes_in(closure)
+        for flag in build.pkg_config_flags(lane)
+        if flag.startswith("-I")
+    ]
 
 
 def _uncompiled_units() -> list[Path]:
@@ -136,11 +148,15 @@ def _missing_headers_reason() -> str:
     )
 
 
-pytestmark = pytest.mark.skipif(
+#: Applied to the two COMPILE classes and not to the module: the guard tests below need `g++`
+#: and nothing else, so a module-level mark would have run them only on the `cpp-syntax`
+#: runner -- a harness whose own guards execute in one place is a harness nobody checks.
+needs_headers = pytest.mark.skipif(
     not _headers_available() and not os.environ.get(_REQUIRE), reason=_missing_headers_reason()
 )
 
 
+@needs_headers
 def test_the_headers_are_present_where_they_are_required() -> None:
     """Where CI installs them, a SKIP is the defect -- so it is a FAILURE with a reason.
 
@@ -214,6 +230,7 @@ class TestAFailureArrivesWithItsReason:
         assert _compiles(unit, []) == (True, "")
 
 
+@needs_headers
 class TestTheUnitsNothingCompiles:
     """The eight `.cpp` files outside the offline build, which the app check does not reach."""
 
@@ -224,13 +241,7 @@ class TestTheUnitsNothingCompiles:
         build = _build_module()
         failures: list[str] = []
         for unit in _uncompiled_units():
-            lanes = build.lanes_in(build.include_closure(unit))
-            extra = [
-                flag
-                for lane in lanes
-                for flag in build.pkg_config_flags(lane)
-                if flag.startswith("-I")
-            ]
+            extra = _lane_flags(build, build.include_closure(unit))
             ok, errors = _compiles(unit, extra)
             if not ok:
                 failures.append(f"{unit.relative_to(ROOT)}:\n  {errors}")
@@ -238,6 +249,7 @@ class TestTheUnitsNothingCompiles:
         assert not failures, "these do not compile:\n" + "\n".join(failures)
 
 
+@needs_headers
 class TestTheAppsOfflineCannotBuild:
     def test_there_is_at_least_one_of_them(self) -> None:
         """Without this the check below passes by having nothing to compile."""
@@ -248,12 +260,19 @@ class TestTheAppsOfflineCannotBuild:
     def test_each_one_still_compiles(self) -> None:
         """`-fsyntax-only`: no link, no device, no measurement -- just "is this valid C++".
 
-        One subprocess per app, ~2 s each on this host. It is the whole cost of never again
-        merging a translation unit that does not compile because no build reaches it.
+        Through the same lane reading as the unit check, so the two legs answer one question
+        one way. It changes nothing today -- `cli/bench.cpp` reaches opencv only through
+        `replay.cpp`, and `ingest/sources/replay.h` keeps `<opencv2/...>` behind a pimpl -- but
+        the day a header exposes a lane type, this leg would go RED on a runner without that
+        package where the unit leg skips.
         """
+        build = _build_module()
         failures: list[str] = []
         for app in _cuda_reaching_apps():
-            ok, errors = _compiles(app, [])
+            closure = build.include_closure(app)
+            if not _lanes_available(build, closure):
+                continue
+            ok, errors = _compiles(app, _lane_flags(build, closure))
             if not ok:
                 failures.append(f"{app.relative_to(ROOT)}:\n  {errors}")
 
