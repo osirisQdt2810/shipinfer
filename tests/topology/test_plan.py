@@ -346,6 +346,43 @@ class TestTheFoldCutsCross:
 
         assert "fold_score" not in text and "fold_mask" not in text
 
+    def test_a_misspelt_fold_key_is_refused_at_resolve_and_not_defaulted(
+        self, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """`resolve_plan` never opens the element, so this is the FIRST reading of those keys
+        on the `shipinfer plan` path. A second copy of it dropped `_do_open`'s refusals, so a
+        transposed letter wrote a plan positively ASSERTING the default cut -- for a chain the
+        runner would have refused. One reading, `_segment_settings`, for both paths.
+        """
+        with pytest.raises(ConfigurationError, match="does not know"):
+            self.resolved(
+                "{impl: pool, model: ship_segmenter, params: {classes: [ship], "
+                "segment: {score_threshhold: 0.4}}}",
+                dims,
+            )
+
+    def test_a_segment_block_that_is_not_a_mapping_is_refused_too(
+        self, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """The nesting slip: `segment: 0.4` rather than `segment: {score_threshold: 0.4}`."""
+        with pytest.raises(ConfigurationError, match="must be a mapping"):
+            self.resolved(
+                "{impl: pool, model: ship_segmenter, params: {classes: [ship], segment: 0.4}}",
+                dims,
+            )
+
+    def test_an_infinite_floor_names_the_key_the_operator_wrote(
+        self, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """A segment slot has no `decode:` block, so a refusal naming one sends the operator
+        to a key they never wrote."""
+        with pytest.raises(ConfigurationError, match=r"`segment\.score_threshold`"):
+            self.resolved(
+                "{impl: pool, model: ship_segmenter, params: {classes: [ship], "
+                "segment: {score_threshold: .inf}}}",
+                dims,
+            )
+
     def test_a_mask_probability_outside_the_range_is_refused_at_resolve(
         self, dims: dict[str, tuple[int, int]]
     ) -> None:

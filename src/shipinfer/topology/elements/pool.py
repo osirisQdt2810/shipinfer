@@ -1595,18 +1595,7 @@ class PoolSegment(_PoolCropElement):
         reports an area of 0 rather than the whole plane.
         """
         super()._do_open(context)
-        settings = self.params.get("segment") or {}
-        if not isinstance(settings, Mapping):
-            raise ConfigurationError(
-                f"{self.kind.value} element {self.name!r}: `params: segment:` is the fold's "
-                f"settings and must be a mapping, got {type(settings).__name__}"
-            )
-        unknown = sorted(set(settings) - _SEGMENT_KEYS)
-        if unknown:
-            raise ConfigurationError(
-                f"{self.kind.value} element {self.name!r}: `params: segment:` does not know "
-                f"{unknown}; it takes {sorted(_SEGMENT_KEYS)}"
-            )
+        settings = self._segment_settings()
         defaults = _fold_defaults()
         try:
             self._fold = InstanceMaskArea(
@@ -1630,6 +1619,31 @@ class PoolSegment(_PoolCropElement):
                 f"{self.kind.value} element {self.name!r}: `params: segment:` is not a valid "
                 f"fold -- {error}"
             ) from error
+
+    def _segment_settings(self) -> Mapping[str, Any]:
+        """``params: {segment: {...}}``, refused once for both readings of it.
+
+        ONE reading, because two paths read it and only one opens the element: `resolve_plan`
+        calls `fold_parameters` on a control plane with no model pool, so a second copy had the
+        plan writing the DEFAULT cut for a slot the runner would have refused.
+
+        Raises:
+            ConfigurationError: not a mapping, or a setting the fold has no use for -- a
+                transposed letter would otherwise be a silently ignored threshold.
+        """
+        settings = self.params.get("segment") or {}
+        if not isinstance(settings, Mapping):
+            raise ConfigurationError(
+                f"{self.kind.value} element {self.name!r}: `params: segment:` is the fold's "
+                f"settings and must be a mapping, got {type(settings).__name__}"
+            )
+        unknown = sorted(set(settings) - _SEGMENT_KEYS)
+        if unknown:
+            raise ConfigurationError(
+                f"{self.kind.value} element {self.name!r}: `params: segment:` does not know "
+                f"{unknown}; it takes {sorted(_SEGMENT_KEYS)}"
+            )
+        return settings
 
     def _engine_output(
         self, role: str, settings: Mapping[str, Any], defaults: Mapping[str, Any]
@@ -1660,9 +1674,7 @@ class PoolSegment(_PoolCropElement):
         placeholder here is never read.
         """
         defaults = _fold_defaults()
-        settings = self.params.get("segment") or {}
-        if not isinstance(settings, Mapping):
-            settings = {}
+        settings = self._segment_settings()
         try:
             return InstanceMaskArea(
                 crop_hw=(1, 1),

@@ -246,7 +246,11 @@ def resolve_plan(
                 max_detections=(
                     None if decode is None else _positive(decode.max_detections, where)
                 ),
-                fold_score=None if fold is None else _finite(fold.score_threshold, where),
+                fold_score=(
+                    None
+                    if fold is None
+                    else _finite(fold.score_threshold, where, "segment.score_threshold")
+                ),
                 fold_mask=(None if fold is None else _probability(fold.mask_threshold, where)),
                 instances=_runtime_int(runtime, "instances", where),
                 queue_delay_us=_runtime_int(runtime, "queue_delay_us", where, zero_ok=True),
@@ -384,14 +388,18 @@ def _positive(value: int, where: str) -> int:
     return count
 
 
-def _finite(value: float, where: str) -> float:
+def _finite(value: float, where: str, key: str = "decode.score_threshold") -> float:
     """A finite threshold. YAML spells `.inf`, and the writer would then emit `score inf` --
-    which its own reader refuses, so the plan would be unreadable by both planes."""
+    which its own reader refuses, so the plan would be unreadable by both planes.
+
+    `key` because two blocks now reach this: a segment slot has no `decode:` block at all, and
+    a message naming one sends the operator to a key they never wrote.
+    """
     number = float(value)
     if not math.isfinite(number):
         raise ConfigurationError(
-            f"{where}: `decode.score_threshold` is {value!r}; a plan carries finite numbers "
-            f"only, because neither `inf` nor `nan` has a spelling both planes read back"
+            f"{where}: `{key}` is {value!r}; a plan carries finite numbers only, because "
+            f"neither `inf` nor `nan` has a spelling both planes read back"
         )
     return number
 

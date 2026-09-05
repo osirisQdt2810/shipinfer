@@ -2608,6 +2608,19 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       wraps `InstanceMaskArea.__post_init__`'s bare `ValueError` in `ConfigurationError` --
       this is the first reading of those keys on the `shipinfer plan` path, which never opens
       the element. Goldens re-emitted; 89 + 52 checks green on the two C++ gates.
+      NOT the whole class, and #141's review is right that the item should not have claimed it:
+      see `SEGMENT-FOLD-OUTPUT-NAMES-DO-NOT-CROSS` below.
+- [ ] **SEGMENT-FOLD-OUTPUT-NAMES-DO-NOT-CROSS** (#141 review, non-blocking 3) — the two
+      CUTS cross now; the three NAMES do not. `MaskAreaSpec.detections/prototypes/name` are
+      `output0`/`output1`/`mask_area_px` on the C++ side, while the Python element accepts
+      `params: {segment: {detections: ..., prototypes: ...}}` and `params: {output: ...}` and
+      carries them nowhere. The engine-output pair fails LOUDLY over there (a missing output is
+      a `ConfigError`), but `params: {output: ship_area}` is a SILENT event-key divergence --
+      the Python plane files the area under `ship_area` and the C++ plane under
+      `mask_area_px`, so one plane's records carry a field the other's do not. Same shape as
+      the cuts: three more plan verbs, or a decision that those keys are not deployment
+      settings and the element should stop accepting them.
+
 - [ ] **ENGINE-DIMS-CAN-DISAGREE-WITH-WIDTH** (#139 review, non-blocking) —
       `TrtEngineAdapter::output_row_elems` goes through `TensorSpec::elements_per_row()`,
       which CLAMPS a negative dim to 1 (`backends/tensorrt/engine.h`), while `output_dims`
