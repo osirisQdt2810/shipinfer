@@ -859,6 +859,15 @@ hook down, for when the operator asked to see something before it is executed.
       for a reason worth keeping — it scales the appearance EMA by detection confidence, and
       MOT17 public detections carry a *constant* score, so on that benchmark the flag has no
       effect and a study sampling it would report its own sampler's spread as a finding.
+- [ ] **CI-CPP-JOBS-ARE-POST-MERGE** (#133 review round 3, note 3) — every C++ job lives in
+      `ci.yml` (push to `main`), and `pr-pipeline.yml` has none at all. So an undeclared
+      `std::mutex` in `bench.cpp` still MERGES and then reddens main, which is the exact
+      incident that opened `CSRC-BENCH-UNCOMPILED` -- the new `cpp-syntax` job closes the
+      "nothing compiles it" half and not the "it merged" half. Repo-wide rather than a
+      regression: `cpp-offline` and `cpp-gst-lane` are in the same place. Mirroring the three
+      C++ jobs into `pr-pipeline.yml` is the change that actually prevents it, and it edits
+      `.github/workflows/**`, so it needs a manual merge too.
+
 - [!] **C9 · OPERATOR: where does the NV12 work live?** The primary shipvision checkout has no dirty files, so the claimed 1021 uncommitted lines are not there — point at the clone that holds them, or C9 gets re-scoped as not-yet-written (phase D consumes it either way). CHECKED 28 Aug: the primary checkout has NO dirty files (the claimed 1021
       uncommitted lines are not there; three ancient WIP stashes exported to scratchpad/nms-pinned-reference/ as
       patches, two unpushed branches backup-pushed). If the NV12 work exists it is in a clone this session cannot see —
@@ -2083,7 +2092,27 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
             header promises "by ANY stopper"). Fix: `thread_abandoned_` as
             `std::atomic<bool>` so the lockless self-stop path can read it; + a line
             keeping the header honest either way.
-- [ ] **CSRC-BENCH-UNCOMPILED · `cli/bench.cpp` is compiled by NOTHING in CI, and it took a
+- [!] **CSRC-BENCH-UNCOMPILED · BOTH HALVES BUILT (4 Sep) and OPEN as a PR that needs the
+      OPERATOR'S MANUAL MERGE: it edits `.github/workflows/**`, which CLAUDE.md records as a
+      permanent exception to the review gate.** The host half landed with #129
+      (`tests/test_cuda_reaching_apps_compile.py`) but SKIPPED itself wherever the headers are
+      not at `/usr/local/{cuda,TensorRT}/include` -- and a skip is how the hole stayed open.
+      That guard is a compiler PROBE now, so it runs wherever `NvInfer.h` and `cuda_runtime.h`
+      can be found, including a distribution's default include path. The CI half is a new
+      `cpp-syntax` job: headers only (`cuda-cudart-dev-12-6` + `libnvinfer-headers-dev`, ~40 MB,
+      no nvcc, no driver, ordinary runner) and a step that FAILS on a skip, because a silent
+      skip is the defect -- and it is a pytest FAILURE now rather than a grep on `-q` output
+      inside a `| tee` pipeline whose status was `tee`'s (#133 round 1: the step could not
+      fail for the reason it existed, because `bash -e {0}` has no `pipefail` and pytest was
+      not even installed in the job).
+      SCOPE GREW in round 1, correctly: the check covers the EIGHT implementation units the
+      offline build cannot reach as well as the apps, since `-fsyntax-only` on an app does not
+      parse the `.cpp` files in its closure -- `backends/tensorrt/engine.cpp`, where
+      `initLibNvInferPlugins` lives, was compiled by nothing either. Two of them need an
+      external lane and are skipped where `pkg-config` says it is absent, which is the answer
+      `build_csrc.py` gives. Rehearsed in three states against the real tree: rc=0 with
+      headers and good code, rc=1 with the headers absent, rc=1 on a real compile error.
+      Original: `cli/bench.cpp` is compiled by NOTHING in CI, and it took a
       reviewer reading a diff to find that out (#129 round 4).** Its include closure reaches
       `core/platform.h`, so `build_csrc.py --offline` excludes it and `ci.yml`'s `cpp-offline`
       job is the only C++ job there is -- so a `std::mutex` used without being declared merged
@@ -2099,6 +2128,17 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       doing. A PR editing `.github/workflows/**` cannot pass the review job (CLAUDE.md), so it
       needs a hand merge and the body has to say so.
 
+      ROUND 3 (5 Sep): **VERDICT APPROVE**, after two rounds that both found real defects --
+      r1 the check could not fail (`bash -e {0}` has no `pipefail`, and `pytest` was not
+      installed), r2 the job never installed `NvInferPlugin.h` which `engine.cpp` includes, so
+      it would have been RED on its first run on main, and `": error:"` did not match gcc's
+      `fatal error:` so the failure arrived as a filename and a blank line. Both reproduced
+      before fixing, the second against a TensorRT tree with exactly the plugin package
+      removed. Round 3's five non-blocking notes are taken (the docstring that said the
+      opposite of what the file does; the module-level `pytestmark` that skipped the harness's
+      OWN guard tests everywhere but the CI runner -- they need only `g++`, and 3 of them now
+      run offline; `@functools.cache` on `_build_module`; the app leg reading lanes the way
+      the unit leg does; `codename` renamed `release`). STILL NEEDS THE OPERATOR'S MERGE.
 - [x] **P5-A-ALLOC · BOTH HALVES MERGED 4 Sep: #134 (the allocation half, 2.37x, APPROVE
       round 1) and #135 (the cross-plane record gate, three rounds).** SECOND HALF still open (below): cross-plane comparing
       `build_records` rather than hand-assembled events. It is UNBLOCKED now -- #132 made the
