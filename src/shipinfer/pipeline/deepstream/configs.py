@@ -632,7 +632,7 @@ def _artefacts(
     artifact: ModelArtifact, *, require: bool, missing: list[Path]
 ) -> tuple[Path, Path | None]:
     """``(engine, onnx)`` for one model, recording what is not on this machine."""
-    engine_file = str(artifact.config.parameters.get("engine_file", "model.plan"))
+    engine_file = artifact.config.engine_file
     engine = _artefact(artifact, engine_file, require=require, missing=missing)
     declared = artifact.config.parameters.get("onnx_file")
     onnx = (

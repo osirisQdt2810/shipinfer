@@ -11,7 +11,7 @@ namespace shipinfer {
         }
 
         bool runnable(const PlanNode& node, const std::set<std::string>& loaded) {
-            if (node.kind != "detect" && !crops(node.kind)) return false;
+            if (!plane_runs(node.kind)) return false;
             return !node.model.empty() && loaded.count(node.model) != 0;
         }
 
@@ -133,6 +133,10 @@ namespace shipinfer {
                 .push_back(spec.slot);
         }
         return plan;
+    }
+
+    bool plane_runs(const std::string& kind) {
+        return kind == "detect" || crops(kind);
     }
 
     std::string crop_payload_of(const std::string& slot) {

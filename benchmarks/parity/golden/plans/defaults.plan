@@ -10,17 +10,26 @@ model ship_detector
 letterbox 640 640
 score 0.25
 max_detections 100
+instances 2
+queue_delay_us 5000
+artefact ship_detector/1/model.plan
 
 node detect_small detect pool
 model ship_detector
 letterbox 640 640
 score 1e-05
 max_detections 7
+instances 2
+queue_delay_us 5000
+artefact ship_detector/1/model.plan
 
 node embed_none embed pool
 model ship_embedder
 classes -
 crop 256 128
+instances 1
+queue_delay_us 8000
+artefact ship_embedder/1/model.plan
 
 node output output jsonlines
 

@@ -70,7 +70,7 @@ class TensorRTBackend(ModelBackend):
     def _do_initialize(self) -> None:
         context = self.context
         params = context.config.parameters
-        engine_file = str(params.get("engine_file", "model.plan"))
+        engine_file = context.config.engine_file
 
         self._torch.cuda.set_device(self.device.index)
         # An engine is a build artefact of *this* GPU and *this* TensorRT, so it cannot be

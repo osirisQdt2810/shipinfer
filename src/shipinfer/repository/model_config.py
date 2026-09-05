@@ -89,6 +89,10 @@ class InstancePlacement(_Strict):
     model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
 
 
+#: The artefact a model version holds unless `parameters.engine_file` says otherwise.
+DEFAULT_ENGINE_FILE = "model.plan"
+
+
 class InstanceGroup(_Strict):
     """A rule that expands into N instances — Triton's ``instance_group``.
 
@@ -391,6 +395,17 @@ class ModelConfig(_Strict):
     #: Backend-specific knobs (engine filename, precision, warm-up iterations, ...). Kept
     #: opaque here so adding a backend never means editing this file.
     parameters: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def engine_file(self) -> str:
+        """``parameters.engine_file``, or the conventional name.
+
+        One spelling, because it was three: the TensorRT backend, the DeepStream config
+        writer and the plan resolver each carried the literal, and only one of them could
+        have been changed.
+        """
+        return str(self.parameters.get("engine_file", DEFAULT_ENGINE_FILE))
+
     #: Batches sent through every instance at load time so the first real request does not
     #: pay for lazy CUDA module loading and TensorRT's first-call allocations.
     warmup_batches: int = Field(default=2, ge=0)

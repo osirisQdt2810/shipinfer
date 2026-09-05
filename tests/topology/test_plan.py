@@ -18,7 +18,7 @@ import pytest
 
 from shipinfer.core.errors import ConfigurationError
 from shipinfer.repository import ModelRepository
-from shipinfer.repository.extents import model_extents
+from shipinfer.repository.resolved import ModelRuntime, model_extents, model_runtimes
 from shipinfer.topology import load_topology
 from shipinfer.topology.plan import (
     PLAN_VERSION,
@@ -49,8 +49,29 @@ def dims() -> dict[str, tuple[int, int]]:
     return model_extents(ModelRepository.load(REPOSITORY))
 
 
+@pytest.fixture(scope="module")
+def runtimes() -> dict[str, ModelRuntime]:
+    return model_runtimes(ModelRepository.load(REPOSITORY))
+
+
 def _plan(name: str, dims: dict[str, tuple[int, int]]) -> ResolvedPlan:
+    """The shape of the chain alone — no runtimes, which is what most checks here are about."""
     return resolve_plan(load_topology(CHAINS[name]), dims=dims)
+
+
+def _resolved(name: str) -> ResolvedPlan:
+    """A plan resolved exactly as `benchmarks/parity/drive_plan.py` resolves it.
+
+    Separate from `_plan` because the two halves of a byte compare must resolve the SAME way:
+    a golden emitted with the runtimes and a test comparing one without them is a golden
+    nothing checks.
+    """
+    models = ModelRepository.load(REPOSITORY)
+    return resolve_plan(
+        load_topology(CHAINS[name]),
+        dims=model_extents(models),
+        runtimes=model_runtimes(models),
+    )
 
 
 class TestTheCommittedGoldensAreWhatThisPlaneEmits:
@@ -61,12 +82,10 @@ class TestTheCommittedGoldensAreWhatThisPlaneEmits:
     """
 
     @pytest.mark.parametrize("name", sorted(CHAINS))
-    def test_the_golden_is_reproduced_exactly(
-        self, name: str, dims: dict[str, tuple[int, int]]
-    ) -> None:
+    def test_the_golden_is_reproduced_exactly(self, name: str) -> None:
         expected = (GOLDEN / f"{name}.plan").read_text(encoding="utf-8")
 
-        assert plan_text(_plan(name, dims)) == expected, (
+        assert plan_text(_resolved(name)) == expected, (
             f"the plan this code emits for {CHAINS[name].name} is not the committed golden. "
             f"If the change to the writer IS the decision, re-emit with "
             f"`python scripts/emit_parity_golden.py --kind plan --scenario {name} "
@@ -164,6 +183,42 @@ class TestWhatTheChainResolvesTo:
             resolve_plan(chain, dims={})
 
 
+class TestAModelThatAsksForNoDeviceInstance:
+    """`ship_person_cpu.yaml`'s own header documents a CPU repository as a supported target.
+
+    `ModelRuntime.instances` is `None` there, and `resolve_plan` used to hand that to `int()`
+    -- so the plan was never written at all, with an untyped `TypeError` from the module whose
+    whole idiom is a typed refusal naming the slot. `run_cpp_bench.sh` runs `shipinfer plan`
+    on every invocation, so it was a traceback in the measurement path.
+    """
+
+    class CpuOnly:
+        """A `RuntimeLike` for a model whose only instance group is `KIND_CPU`."""
+
+        instances = None
+        queue_delay_us = 8000
+        artefact = "m/1/model.plan"
+
+    def resolved(self) -> str:
+        chain = load_topology(CHAINS["ship_person_cpu"])
+        models = ModelRepository.load(REPOSITORY)
+        runtimes = dict(model_runtimes(models))
+        runtimes["ship_embedder"] = self.CpuOnly()  # type: ignore[assignment]
+        return plan_text(resolve_plan(chain, dims=model_extents(models), runtimes=runtimes))
+
+    def test_the_plan_is_written_and_carries_no_instances_line_for_it(self) -> None:
+        text = self.resolved()
+        block = text.split("node embed_ship ", 1)[1].split("\nnode ", 1)[0]
+
+        assert "instances" not in block, "no line at all, and not `instances 0`"
+        assert "queue_delay_us 8000" in block, "the rest of its runtime still travels"
+        assert "artefact m/1/model.plan" in block
+
+    def test_the_other_models_keep_their_counts(self) -> None:
+        """Non-vacuity: the absence above is this model's, not the writer giving up."""
+        assert "instances 2" in self.resolved()
+
+
 class TestBothPlanesRefuseTheSameText:
     """The same table as `refuses_what_python_refuses()` in the C++ gate, line for line."""
 
@@ -194,6 +249,11 @@ class TestBothPlanesRefuseTheSameText:
         ("plan 1 x\nnode a b c\nmax_detections -1\n", "`-1` for `no limit`, which is no cap"),
         ("plan 1 x\nnode a b c\nmax_detections 0\n", "and zero, for the same reason"),
         ("plan 1 x\nnode a b c\nscore 1e400\n", "an overflowing exponent, which is `inf`"),
+        ("plan 1 x\nnode a b c\ninstances 0\n", "zero instances, which runs nothing"),
+        ("plan 1 x\nnode a b c\ninstances -1\n", "and a negative count"),
+        ("plan 1 x\nnode a b c\nqueue_delay_us -1\n", "a negative batch window"),
+        ("plan 1 x\nnode a b c\ninstances two\n", "an instance count that is not a number"),
+        ("plan 1 x\nnode a b c\nartefact a b\n", "an artefact path holding a space"),
     )
     ACCEPTED = (
         ("plan 1 -\n", "`-` is the empty chain name"),
@@ -210,6 +270,9 @@ class TestBothPlanesRefuseTheSameText:
         # the same collapse on its side, for the same reason.
         ("plan 1 x\nnode a b c\nclasses cargo  ship\n", "a collapsed value reads as one word"),
         ("plan 1 x\nlabel 8 cargo\tship\n", "and a tab likewise, which the emitter refuses"),
+        ("plan 1 x\nnode a b c\nqueue_delay_us 0\n", "no batch window, which is batching off"),
+        ("plan 1 x\nnode a b c\ninstances 1\n", "the smallest count a slot can run"),
+        ("plan 1 x\nnode a b c\nartefact m/1/model.plan\n", "a repository-relative artefact"),
     )
 
     @pytest.mark.parametrize("text,why", REFUSED, ids=[why for _, why in REFUSED])

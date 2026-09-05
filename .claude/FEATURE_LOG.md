@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-05 — The plan carries the model runtime (P5-B)
+
+`run_cpp_bench.sh` restated `model_repository/*/config.yaml` on the command line and disagreed
+with it: `--seg-instances 3 --emb-instances 3 --ship-emb-instances 3` against a repository
+saying 2, 2 and **1**, no `--det-instances` so `bench.cpp`'s own default of 2 applied, and one
+global `--batch-delay-us 2000` against four windows of 5000/8000/8000/3000. Every C++
+measurement was taken at a configuration no file described.
+
+ADR-020 one artefact along: the repository is control plane and a second YAML reader in C++
+would be a second door. So the plan gains three verbs per model-bearing node — `instances`
+(per device), `queue_delay_us` (per model, `0` where batching is off) and `artefact`
+(repository-relative) — and `bench.cpp` builds its models from the plan, deleting the
+hard-coded table of four names with their `{3, 640, 640}` and `{3, 256, 128}` row shapes.
+`--repository` replaces the four `--*-engine` flags, exclusively rather than by ranking.
+
 ## 2026-09-05 — The segmenter crops (P6-SEGMENT-CROP)
 
 `PoolSegment` letterboxed the whole frame; the C++ plane has always cut a `ship_crops_640`
