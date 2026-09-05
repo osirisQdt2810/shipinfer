@@ -28,18 +28,23 @@ from .chain import ROW_FIELD_KINDS, Topology
 
 __all__ = [
     "PLAN_VERSION",
+    "SETTING_KEYS",
     "PlanNode",
+    "PlanSettings",
     "PlanSyntaxError",
     "ResolvedPlan",
     "RuntimeLike",
+    "SettingsLike",
     "parse_plan",
     "plan_text",
     "resolve_plan",
+    "resolve_settings",
 ]
 
-#: Bumped when a verb changes meaning. A reader refuses a version it does not know, because
-#: a plan silently half-understood is a chain running something other than what was declared.
-PLAN_VERSION = 1
+#: Bumped when a verb changes meaning; a reader refuses one it does not know, because a plan
+#: half understood is a chain running something other than what was declared. 2 added the
+#: `setting` lines: a version-1 plan carries no run configuration at all.
+PLAN_VERSION = 2
 
 #: Which event field a kind's outputs fill -- `chain.py`'s table, imported rather than
 #: repeated: the loader refuses a chain whose two slots could fill one of these for one row,
@@ -86,6 +91,78 @@ class PlanNode:
     scope: str | None = None
 
 
+class SettingsLike(Protocol):
+    """What :func:`resolve_settings` reads. The deployment settings tree, structurally.
+
+    A Protocol rather than the tree itself, for `RuntimeLike`'s reason one artefact along:
+    `topology/` states what it needs and `core/settings/` stays out of its imports, which is
+    the rule `base.py` gives elements and there is no reason the plan writer is exempt.
+    """
+
+    @property
+    def pipeline(self) -> object: ...
+    @property
+    def scheduler(self) -> object: ...
+
+
+@dataclass(frozen=True, slots=True)
+class PlanSettings:
+    """The run configuration a chain does not declare and a repository does not hold.
+
+    Every field was a C++ default and an argv flag until P5-C, defaulted a second time over
+    there, so the two planes ran configurations no settings file described.
+
+    TWO capacities, because they bound different things: `instance_queue` is one model
+    instance's queue (`scheduler.max_queue_size`) and `pipeline_queue` the frames ingest may
+    hand forward (`pipeline.queue_capacity`). `cli/bench.cpp` used one number for both.
+    """
+
+    workers: int
+    pipeline_queue: int
+    instance_queue: int
+    enqueue_block_timeout_ms: int
+    stage_timeout_ms: int
+    reassembly_capacity: int
+    reassembly_timeout_ms: int
+    reassembly_sweep_ms: int
+
+
+#: The `setting` keys, in written order, mapped to the `PlanSettings` field each names. A
+#: CLOSED set on both planes: an unknown key is refused by name rather than ignored, so adding
+#: one is a deliberate edit on both sides and never a value one plane silently drops.
+SETTING_KEYS: tuple[str, ...] = (
+    "workers",
+    "pipeline_queue",
+    "instance_queue",
+    "enqueue_block_timeout_ms",
+    "stage_timeout_ms",
+    "reassembly_capacity",
+    "reassembly_timeout_ms",
+    "reassembly_sweep_ms",
+)
+
+
+def resolve_settings(settings: SettingsLike) -> PlanSettings:
+    """The deployment settings the C++ plane needs, read once, on the plane that owns them.
+
+    The seam ADR-014 describes: `core/settings/` is control plane, so its values cross as a
+    resolved artefact and the data plane parses no config of its own.
+    """
+    pipeline = settings.pipeline
+    scheduler = settings.scheduler
+    reassembly = pipeline.reassembly  # type: ignore[attr-defined]
+    return PlanSettings(
+        workers=pipeline.workers,  # type: ignore[attr-defined]
+        pipeline_queue=pipeline.queue_capacity,  # type: ignore[attr-defined]
+        instance_queue=scheduler.max_queue_size,  # type: ignore[attr-defined]
+        enqueue_block_timeout_ms=scheduler.enqueue_block_timeout_ms,  # type: ignore
+        stage_timeout_ms=pipeline.stage_timeout_ms,  # type: ignore[attr-defined]
+        reassembly_capacity=reassembly.capacity,
+        reassembly_timeout_ms=reassembly.timeout_ms,
+        reassembly_sweep_ms=reassembly.sweep_interval_ms,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ResolvedPlan:
     """A whole chain, resolved. :func:`plan_text` writes it, :func:`parse_plan` reads it."""
@@ -95,6 +172,10 @@ class ResolvedPlan:
     edges: tuple[tuple[str, str, str], ...] = ()
     labels: Mapping[int, str] = field(default_factory=dict)
     fields: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    #: ``None`` where the caller resolved no settings -- the shape of the chain alone, which
+    #: is what a caller wanting no deployment gets. A reader that NEEDS them refuses then,
+    #: rather than substituting its own: a default that only one plane holds is the defect.
+    settings: PlanSettings | None = None
     version: int = PLAN_VERSION
 
     def node(self, slot: str) -> PlanNode:
@@ -201,6 +282,7 @@ def resolve_plan(
     *,
     dims: Mapping[str, tuple[int, int]] | None = None,
     runtimes: Mapping[str, RuntimeLike] | None = None,
+    settings: SettingsLike | None = None,
 ) -> ResolvedPlan:
     """Flatten a validated chain into a plan.
 
@@ -295,6 +377,7 @@ def resolve_plan(
         ),
         labels=_labels(topology),
         fields={name: tuple(slots) for name, slots in fields.items()},
+        settings=None if settings is None else resolve_settings(settings),
     )
 
 
@@ -425,6 +508,8 @@ def plan_text(plan: ResolvedPlan) -> str:
         "# A RESOLVED chain, written by `shipinfer plan` -- do not hand-edit.",
         f"plan {plan.version} {plan.name or '-'}",
     ]
+    if plan.settings is not None:
+        lines += [f"setting {key} {getattr(plan.settings, key)}" for key in SETTING_KEYS]
     lines += [f"label {index} {name}" for index, name in sorted(plan.labels.items())]
     for node in plan.nodes:
         lines += ["", f"node {node.slot} {node.kind} {node.impl}"]
@@ -486,6 +571,7 @@ def parse_plan(text: str, *, source: str = "<string>") -> ResolvedPlan:
     name: str | None = None
     version = 0
     labels: dict[int, str] = {}
+    settings: dict[str, int] = {}
     nodes: list[dict[str, object]] = []
     edges: list[tuple[str, str, str]] = []
     fields: dict[str, tuple[str, ...]] = {}
@@ -502,6 +588,18 @@ def parse_plan(text: str, *, source: str = "<string>") -> ResolvedPlan:
             version, name = _header(line, args, where)
         elif name is None:
             raise PlanSyntaxError(f"{where}: `{verb}` before the `plan` header")
+        elif verb == "setting":
+            _want(args, 2, where, "setting <key> <value>")
+            if args[0] not in SETTING_KEYS:
+                raise PlanSyntaxError(
+                    f"{where}: unknown setting {args[0]!r}; this plan states a value this "
+                    f"reader would not use, and silently dropping it is how the two planes "
+                    f"came to run configurations neither file described. Known: "
+                    f"{list(SETTING_KEYS)}"
+                )
+            if args[0] in settings:
+                raise PlanSyntaxError(f"{where}: a second `setting {args[0]}`")
+            settings[args[0]] = _int(args[1], where)
         elif verb == "label":
             if len(args) < 2:
                 raise PlanSyntaxError(f"{where}: expected `label <id> <name>`")
@@ -538,7 +636,7 @@ def parse_plan(text: str, *, source: str = "<string>") -> ResolvedPlan:
         else:
             raise PlanSyntaxError(
                 f"{where}: unknown verb {verb!r}; expected one of "
-                f"{sorted({'plan', 'label', 'node', 'edge', 'field', *_ATTRIBUTES})}"
+                f"{sorted({'plan', 'setting', 'label', 'node', 'edge', 'field', *_ATTRIBUTES})}"
             )
 
     if name is None:
@@ -560,8 +658,28 @@ def parse_plan(text: str, *, source: str = "<string>") -> ResolvedPlan:
         edges=tuple(edges),
         labels=labels,
         fields=fields,
+        settings=_settings(settings, source),
         version=version,
     )
+
+
+def _settings(values: Mapping[str, int], source: str) -> PlanSettings | None:
+    """The `setting` lines as a :class:`PlanSettings`, or ``None`` where there were none.
+
+    ALL OR NOTHING. A partial set is refused naming what is missing, because the alternative
+    is a reader filling the gap from its own default -- which is the thing this whole verb
+    exists to remove, and a half-written plan is the shape that reintroduces it quietly.
+    """
+    if not values:
+        return None
+    absent = [key for key in SETTING_KEYS if key not in values]
+    if absent:
+        raise PlanSyntaxError(
+            f"{source}: the plan states {len(values)} of {len(SETTING_KEYS)} settings and "
+            f"is missing {absent}. A reader would have to default those, which is what "
+            f"carrying them replaced"
+        )
+    return PlanSettings(**values)  # type: ignore[arg-type]
 
 
 def _header(line: str, args: Sequence[str], where: str) -> tuple[int, str]:

@@ -16,6 +16,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "shipinfer/core/types.h"
@@ -75,9 +76,40 @@ namespace shipinfer {
         std::string caps;  // `<format>@<location>`, already negotiated
     };
 
+    // The run configuration a chain does not declare and a repository does not hold --
+    // `topology/plan.py`'s `PlanSettings`, field for field. Every one of these was a default
+    // in `cli/bench.cpp` and a flag on its command line, defaulted a SECOND time there, so the
+    // two planes ran configurations neither settings file described (P5-C).
+    //
+    // Two capacities and not one: `instance_queue` bounds each model instance's own queue
+    // (`scheduler.max_queue_size`, 64 -- deliberately small, because a deep queue converts a
+    // throughput problem into a latency problem and then hides it) and `pipeline_queue` bounds
+    // the frames ingest may hand forward (`pipeline.queue_capacity`, 256). `bench.cpp` used
+    // ONE number, 65536, for both -- 1024x the first, which is a per-instance queue that can
+    // never reject and therefore a backpressure measurement whose zero was guaranteed.
+    struct PlanSettings {
+        int workers = 0;
+        int pipeline_queue = 0;
+        int instance_queue = 0;
+        int enqueue_block_timeout_ms = 0;
+        int stage_timeout_ms = 0;
+        int reassembly_capacity = 0;
+        int reassembly_timeout_ms = 0;
+        int reassembly_sweep_ms = 0;
+    };
+
+    // The `setting` keys in WRITTEN order, paired with the member each names. One table, so
+    // the reader, the writer and the completeness check cannot disagree about the set --
+    // which is the failure the closed set exists to prevent.
+    const std::vector<std::pair<std::string, int PlanSettings::*>>& setting_keys();
+
     struct ResolvedPlan {
         int version = 0;
         std::string name;
+        // Absent where the plan states no `setting` line: the shape of the chain alone. A
+        // consumer that NEEDS them refuses then rather than substituting its own defaults,
+        // because a default only one plane holds is exactly what carrying them replaced.
+        std::optional<PlanSettings> settings;
         std::vector<PlanNode> nodes;
         std::vector<PlanEdge> edges;
         std::map<int, std::string> labels;                       // class id -> label
@@ -93,7 +125,7 @@ namespace shipinfer {
 
     // The version this reader knows. A plan that says anything else is refused, because a
     // plan half understood is a chain running something other than what was declared.
-    inline constexpr int kPlanVersion = 1;
+    inline constexpr int kPlanVersion = 2;
 
     // Refusals name the line: `<source>:<n>: ...`. A plan one plane reads and the other
     // refuses is the worst outcome this seam has, so the messages are worth matching.
