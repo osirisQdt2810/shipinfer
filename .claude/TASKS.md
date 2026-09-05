@@ -2676,18 +2676,25 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       exemption abandoned this item's own argument -- `resolve_engine` is a PYTHON-plane
       mechanism while the plan's reader opens the path verbatim, so staying quiet there was
       the silence coming back one layer down.
-      SETTLED: the note checks `engine_file` -- what the plan NAMES -- and chooses the remedy
-      by platform (through `BACKENDS.canonical`, so `platform: trt` is not told to build a
-      TensorRT repository it already is), by whether an `.onnx` is beside it (naming which
-      plane can use it), and by whether the script installs it. The facts about the script
-      live in `repository/build_targets.py` and the two are pinned by a TEST rather than by an
-      import in either direction (the shipped package must not import the script, and the
-      script cannot be imported from `src/`) -- with `tests/test_architecture.py` growing a
-      rule that
-      `src/shipinfer/**` imports no `scripts.*`, because `pythonpath` will hide the next one
-      too. The backend detour is reverted entirely; it existed only because the check read the
-      wrong file. The two embedder configs saying "Built by `scripts/build_engines.py`" were
-      already false and now say what places them.
+      r4 -- my `else` branch WAS the reid two-step, so every TensorRT model not literally
+      named `ship_detector`/`ship_segmenter` was told to build a ReID ResNet-50 and copy it in.
+      r5 -- and naming the two sets did not fix the class: they key on a bare MODEL NAME, so a
+      third-party repository whose model happens to be called `ship_detector` still got this
+      checkout's build command, for a script that is in neither the wheel nor the image.
+      SETTLED, and the settling is a DELETION. All five rounds had ONE shape: the remedy was
+      trying to know something it cannot. A build command is only ever right for one
+      repository and this command runs against any of them. So the note says what is true
+      everywhere -- which artefact is absent, which plane could use an `.onnx` beside it
+      (through `BACKENDS.canonical`, so `platform: trt` is not called non-TensorRT), and where
+      the repository's OWN instruction lives. `build_targets.py`, both name sets and the
+      script-coupling test are gone with the prescription that needed them.
+      The knowledge moved to where it is right: `model_repository/*/1/README.md` now carries
+      the build commands, including the two-step the embedders need -- which is what the note
+      points at, and what makes pointing there worth doing. The backend detour is reverted
+      entirely. `tests/test_architecture.py`'s rule that `src/shipinfer/**` imports no
+      `scripts.*` OUTLIVES its cause and stays, because the next such import will be just as
+      invisible to `pythonpath = [".", "src"]`.
+
 - [x] **SEGMENT-NO-CLASSES-ASYMMETRY · CLOSED 5 Sep in PR #140, in favour of
       PERMITTING it on both planes.** A chain with one segment slot and no `classes:` loaded on
       the Python plane and was REFUSED by `plan_stages.cpp::class_of` -- one chain file with

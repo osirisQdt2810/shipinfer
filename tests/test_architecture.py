@@ -107,8 +107,9 @@ class TestImportsGoOneWay:
         `scripts/`, so importing it from `src/shipinfer/` is a `ModuleNotFoundError` exactly
         where the code runs -- and `pythonpath = [".", "src"]` hides that from this tier:
         `shipinfer plan` shipped such an import through two review rounds, green throughout.
-        A fact the package needs about that script goes IN the package
-        (`repository/build_targets.py`), and the script imports it.
+        The rule outlived the code that motivated it: `shipinfer plan` no longer needs to
+        know anything about that script, because a build command is only right for one
+        repository. The rule stays because the next such import will be just as invisible.
         """
         offenders = [
             f"{path.relative_to(SRC)} imports {module}"

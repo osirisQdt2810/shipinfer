@@ -13,11 +13,6 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from shipinfer.repository import ModelEntry, ModelRepository
-from shipinfer.repository.build_targets import (
-    BUILT_BY_REID_TARGET,
-    INSTALLED_BY_BUILD_ENGINES,
-    REID_ENGINE,
-)
 from shipinfer.repository.resolved import ModelRuntime, model_extents, model_runtimes
 from shipinfer.topology import Topology, load_topology
 from shipinfer.topology.plan import plan_text, resolve_plan
@@ -67,7 +62,9 @@ def _report_missing(
     if not missing:
         return
     lines = [f"note: {len(missing)} artefact(s) this plan names are not in {models.root}:"]
-    lines += [f"  {path} — {remedy}" for path, remedy in sorted(_remedies(missing))]
+    lines += [
+        f"  {path} — {remedy}" for path, remedy in sorted(_remedies(models.root, missing))
+    ]
     print("\n".join(lines), file=sys.stderr)
 
 
@@ -100,28 +97,32 @@ def _is_tensorrt(platform: str) -> bool:
     return BACKENDS.canonical(platform) == "tensorrt"
 
 
-def _remedies(missing: list[tuple[ModelEntry, str]]) -> list[tuple[str, str]]:
-    """One `(path, remedy)` per missing artefact, with the remedy that works for IT.
+def _remedies(root: Path, missing: list[tuple[ModelEntry, str]]) -> list[tuple[str, str]]:
+    """One `(path, remedy)` per missing artefact — and NO build command.
 
-    Four, because one command covers none of the others: a repository that is not TensorRT, a
-    directory holding the `.onnx` only the PYTHON plane builds from, a model
-    `build_engines.py` installs, and the two it builds an engine for and installs nowhere.
+    Five review rounds went into a remedy naming `scripts/build_engines.py`, and each fix
+    opened the next hole; the lesson is the shape rather than the last bug. A command is only
+    ever right for ONE repository and this runs against any of them, so what is said is what
+    is true everywhere: which artefact is absent, which plane could use what is beside it, and
+    where the repository's own instruction lives -- `<name>/<version>/README.md`, which is the
+    only thing that knows how its engines are built.
     """
     out: list[tuple[str, str]] = []
     for entry, path in missing:
         onnx = sorted(p.name for p in (entry.root / str(entry.latest)).glob("*.onnx"))
+        readme = f"{root / entry.name / str(entry.latest) / 'README.md'}"
         if not _is_tensorrt(entry.config.platform):
             out.append(
                 (
                     path,
-                    f"this repository is `platform: {entry.config.platform}`, and a plan is "
-                    f"read by a TensorRT-only plane; build a TensorRT repository for it",
+                    f"this repository is `platform: {entry.config.platform}` and a plan is "
+                    f"read by a TensorRT-only plane, so it names an artefact nothing here "
+                    f"builds",
                 )
             )
         elif len(onnx) == 1:
-            # The Python plane builds this at load; the plane that reads a plan does not.
-            # Saying so is the point: the two behave differently for one directory, and the
-            # operator is about to run the one that cannot.
+            # The one distinction the data supports and the operator cannot see: the same
+            # directory is complete for one plane and not for the other.
             out.append(
                 (
                     path,
@@ -130,35 +131,6 @@ def _remedies(missing: list[tuple[ModelEntry, str]]) -> list[tuple[str, str]]:
                     f"itself on the node that runs it",
                 )
             )
-        elif entry.name in INSTALLED_BY_BUILD_ENGINES:
-            out.append(
-                (
-                    path,
-                    f"`python scripts/build_engines.py --only {entry.name}` on the node that "
-                    f"runs it, inside the container",
-                )
-            )
-        elif entry.name in BUILT_BY_REID_TARGET:
-            # That target builds one engine both of them use and installs it into no version
-            # directory, so `--only ship_embedder` exits 2. Two commands, stated, because the
-            # README it would otherwise point at says only "drop the built artefact here".
-            out.append(
-                (
-                    path,
-                    "`python scripts/build_engines.py --only reid` then copy "
-                    f"`{REID_ENGINE}` to it — that target builds an engine and installs it "
-                    "nowhere",
-                )
-            )
         else:
-            # A model this repository's build script has never heard of, which is EVERY
-            # repository but this one's demo. Naming a command here would be confidently
-            # wrong -- worse than the silence this exists to remove.
-            out.append(
-                (
-                    path,
-                    "build a TensorRT engine for this model on the node that runs it, inside "
-                    "the container; `scripts/build_engines.py` has no target for it",
-                )
-            )
+            out.append((path, f"build it on the node that runs it; see {readme}"))
     return out
