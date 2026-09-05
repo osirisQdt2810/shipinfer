@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from shipinfer.core.errors import ConfigurationError
 from shipinfer.repository import ModelRepository
 from shipinfer.repository.resolved import ModelRuntime, model_extents, model_runtimes
 
@@ -128,6 +129,34 @@ class TestHowEachAnswerIsReached:
         )
 
         assert model_runtimes(models)["m"].instances == 5, "2 + 3, and not 10"
+
+    def test_groups_targeting_different_gpus_are_refused(self, tmp_path: Path) -> None:
+        """`expand` puts 2 on device 0 and 3 on device 1, so "instances per device" is not a
+        number -- and a plan carries one. Summing them to 5 would make the other plane create
+        5 per device: 10 against the config's 5, true of neither device."""
+        models = repository(
+            tmp_path,
+            instance_groups=[
+                {"kind": "KIND_GPU", "count": 2, "gpus": [0]},
+                {"kind": "KIND_GPU", "count": 3, "gpus": [1]},
+            ],
+        )
+
+        with pytest.raises(ConfigurationError, match="different GPU sets"):
+            model_runtimes(models)
+
+    def test_one_shared_target_is_still_a_single_number(self, tmp_path: Path) -> None:
+        """Two groups on the SAME devices place both counts on each, so 2 + 3 is 5 per
+        device and the plan can say so."""
+        models = repository(
+            tmp_path,
+            instance_groups=[
+                {"kind": "KIND_GPU", "count": 2, "gpus": [0, 1]},
+                {"kind": "KIND_GPU", "count": 3, "gpus": [0, 1]},
+            ],
+        )
+
+        assert model_runtimes(models)["m"].instances == 5
 
     def test_a_cpu_only_model_carries_no_instance_count(self, tmp_path: Path) -> None:
         """`None` and not `0`: the plan then says nothing and the consumer refuses by name,

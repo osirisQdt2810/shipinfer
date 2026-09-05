@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from shipinfer.core.errors import ConfigurationError
+
 from .model_config import InstanceKind, ModelConfig
 from .model_repository import ModelRepository
 
@@ -73,21 +75,29 @@ def _runtime_of(repository: ModelRepository, name: str) -> ModelRuntime:
 
 
 def _device_instances(config: ModelConfig) -> int | None:
-    """How many instances one GPU carries, read as ``InstanceGroup.expand`` reads it.
+    """How many instances one GPU carries, read as ``InstanceGroup.expand`` reads it: the
+    SUM over the groups that place a DEVICE instance, since each places ``count`` on every
+    device it targets, while a ``KIND_CPU`` group places its own on the host. ``None`` where
+    nothing device-bound is asked for, so the plan carries no line. ``shared_by`` is NOT
+    modelled: a shard sharing a GPU divides this.
 
-    The SUM over the groups that place a DEVICE instance: two ``KIND_GPU`` groups each place
-    ``count`` on every device they target, while a ``KIND_CPU`` group places its own on the
-    host, and adding that would run a GPU instance for a rule that asked for none.
-    ``KIND_AUTO`` is a device group wherever a GPU is visible, which the plane reading this
-    plan is. ``None`` where nothing device-bound is asked for, so the plan carries no line
-    and the consumer refuses by name rather than being handed a zero.
+    Raises:
+        ConfigurationError: device groups target different GPU sets, so this is not one
+            number and a plan carries one.
     """
-    counts = [
-        group.count for group in config.instance_groups if group.kind is not InstanceKind.CPU
-    ]
     if not config.instance_groups:
         return 1  # `instance_groups: []` is the default single instance, as `expand` treats it
-    return sum(counts) or None
+    device_groups = [
+        group for group in config.instance_groups if group.kind is not InstanceKind.CPU
+    ]
+    targeted = {tuple(sorted(group.gpus)) for group in device_groups if group.gpus}
+    if targeted and (len(targeted) > 1 or any(not group.gpus for group in device_groups)):
+        raise ConfigurationError(
+            f"instance groups target different GPU sets ({sorted(targeted)}), so this "
+            f"model's instances-per-device is not a single number and a plan carries one. "
+            f"Give every device group the same `gpus:`, or none"
+        )
+    return sum(group.count for group in device_groups) or None
 
 
 def _extent_of(config: ModelConfig) -> tuple[int, int] | None:

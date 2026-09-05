@@ -183,6 +183,42 @@ class TestWhatTheChainResolvesTo:
             resolve_plan(chain, dims={})
 
 
+class TestAModelThatAsksForNoDeviceInstance:
+    """`ship_person_cpu.yaml`'s own header documents a CPU repository as a supported target.
+
+    `ModelRuntime.instances` is `None` there, and `resolve_plan` used to hand that to `int()`
+    -- so the plan was never written at all, with an untyped `TypeError` from the module whose
+    whole idiom is a typed refusal naming the slot. `run_cpp_bench.sh` runs `shipinfer plan`
+    on every invocation, so it was a traceback in the measurement path.
+    """
+
+    class CpuOnly:
+        """A `RuntimeLike` for a model whose only instance group is `KIND_CPU`."""
+
+        instances = None
+        queue_delay_us = 8000
+        artefact = "m/1/model.plan"
+
+    def resolved(self) -> str:
+        chain = load_topology(CHAINS["ship_person_cpu"])
+        models = ModelRepository.load(REPOSITORY)
+        runtimes = dict(model_runtimes(models))
+        runtimes["ship_embedder"] = self.CpuOnly()  # type: ignore[assignment]
+        return plan_text(resolve_plan(chain, dims=model_extents(models), runtimes=runtimes))
+
+    def test_the_plan_is_written_and_carries_no_instances_line_for_it(self) -> None:
+        text = self.resolved()
+        block = text.split("node embed_ship ", 1)[1].split("\nnode ", 1)[0]
+
+        assert "instances" not in block, "no line at all, and not `instances 0`"
+        assert "queue_delay_us 8000" in block, "the rest of its runtime still travels"
+        assert "artefact m/1/model.plan" in block
+
+    def test_the_other_models_keep_their_counts(self) -> None:
+        """Non-vacuity: the absence above is this model's, not the writer giving up."""
+        assert "instances 2" in self.resolved()
+
+
 class TestBothPlanesRefuseTheSameText:
     """The same table as `refuses_what_python_refuses()` in the C++ gate, line for line."""
 

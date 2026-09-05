@@ -157,8 +157,10 @@ namespace {
             return options.repository + "/" + node.artefact;
         }
         // No repository: the four flags, matched by MODEL name. Kept for the run that has an
-        // engine and no repository, and refused below the moment a plan carries an artefact
-        // this process cannot reach, rather than loading the wrong file.
+        // engine and no repository. Under `--repository` an empty `artefact` is REFUSED
+        // rather than skipped -- see `bench_models` -- because the operator who passed a
+        // repository asked for the plan's artefacts, and a slot quietly reported "not run
+        // here" is a measurement of a shorter chain than the one that was named.
         if (node.model == "ship_detector") return options.det_plan;
         if (node.model == "ship_segmenter") return options.seg_plan;
         if (node.model == "person_embedder") return options.emb_plan;
@@ -197,19 +199,41 @@ namespace {
         std::vector<ModelSpec> specs;
         for (const PlanNode& node : plan.nodes) {
             if (node.model.empty()) continue;
-            if (std::any_of(specs.begin(), specs.end(),
-                            [&node](const ModelSpec& s) { return s.name == node.model; })) {
+            const std::vector<int64_t> fed_row = fed_row_of(node);
+            const auto seen =
+                std::find_if(specs.begin(), specs.end(),
+                             [&node](const ModelSpec& s) { return s.name == node.model; });
+            if (seen != specs.end()) {
+                // The dedup is deliberate -- one engine per device, weights paid once -- but
+                // the geometry is per SLOT, and two slots may name one model at different
+                // extents (`branching.yaml` crops `ship_segmenter` at 512 where
+                // `ship_person_cpu.yaml` crops it at 640). Feeding the second slot's rows at
+                // the first's shape is a silent wrong answer, so it is refused.
+                if (seen->fed_row != fed_row) {
+                    throw ConfigError("slot '" + node.slot + "' feeds model '" + node.model +
+                                      "' rows of a different extent than an earlier slot "
+                                      "does; one engine is loaded per model, so its input "
+                                      "shape has to be one shape");
+                }
                 continue;
             }
             ModelSpec spec;
             spec.name = node.model;
             spec.engine = engine_path_of(node, options);
-            if (spec.engine.empty()) continue;  // no engine for it: this run does not run it
+            if (spec.engine.empty()) {
+                if (!options.repository.empty()) {
+                    throw ConfigError("slot '" + node.slot + "' runs model '" + node.model +
+                                      "' and the plan states no `artefact` for it, so "
+                                      "--repository cannot resolve an engine. Re-run "
+                                      "`shipinfer plan` against the repository");
+                }
+                continue;  // no flag named it: this run does not run it
+            }
             spec.per_device =
                 node.instances ? *node.instances : argv_instances_of(node, options);
             spec.queue_delay_us =
                 node.queue_delay_us ? *node.queue_delay_us : options.batch_delay_us;
-            spec.fed_row = fed_row_of(node);
+            spec.fed_row = fed_row;
             specs.push_back(spec);
         }
         return specs;

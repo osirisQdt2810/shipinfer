@@ -141,7 +141,10 @@ class RuntimeLike(Protocol):
     layer states only which attributes it needs.
     """
 
-    instances: int
+    #: ``None`` where the model asks for no DEVICE instance at all -- a CPU-only model,
+    #: which `topology/ship_person_cpu.yaml`'s own header documents as a supported target.
+    #: The plan then carries no `instances` line and the consumer refuses by name.
+    instances: int | None
     queue_delay_us: int
     artefact: str
 
@@ -152,9 +155,9 @@ def _runtime_int(
     """One runtime number, refused here rather than written into a plan the other plane
     refuses. ``instances`` is a count and must be positive; a ``queue_delay_us`` of 0 is
     "no window", which is what dynamic batching being off resolves to."""
-    if runtime is None:
+    if runtime is None or (raw := getattr(runtime, field_name)) is None:
         return None
-    value = int(getattr(runtime, field_name))
+    value = int(raw)
     if value < 0 or (value == 0 and not zero_ok):
         raise ConfigurationError(
             f"{where}: {field_name} is {value}, and a plan carries a "
