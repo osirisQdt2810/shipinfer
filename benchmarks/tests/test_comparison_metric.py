@@ -532,8 +532,17 @@ class TestTheCapacityGuardUsesTheRightBound:
 
         capacities = shipinfer_harness.per_module_capacity(config)
 
-        assert capacities["ship_detector"] == 64 * 2 * 4, "8 instances x the 64-deep default"
-        assert capacities["ship_segmenter"] == 64 * 1 * 4
+        # Against `model_runtimes` and not against `repository_instances`: comparing the
+        # function to itself holds for any value it returns, including a wrong one. This
+        # asserted `1 * 4` for the segmenter as a literal and stayed green while `config.yaml`
+        # said `count: 2`, which is the drift the read fixed -- so it anchors on the source.
+        from shipinfer.repository import ModelRepository
+        from shipinfer.repository.resolved import model_runtimes
+
+        runtimes = model_runtimes(ModelRepository.load(config.resolved().model_repository))
+        assert capacities["ship_detector"] == 64 * runtimes["ship_detector"].instances * 4
+        assert capacities["ship_segmenter"] == 64 * runtimes["ship_segmenter"].instances * 4
+        assert runtimes["ship_segmenter"].instances == 2, "the number transcribed as 1"
 
     def test_the_pipeline_queue_keeps_its_own_much_larger_bound(self):
         config = BenchConfig(buffer_capacity=65536)
@@ -903,15 +912,18 @@ class TestThePlateauGuardUsesTheRunsOwnInstanceCount:
 
         assert eight["ship_detector"] == 2 * four["ship_detector"]
 
-    def test_without_a_count_it_falls_back_to_the_config_defaults(self):
+    def test_without_a_count_it_reads_the_repository(self):
         """The fallback still has to be right, because a caller that forgets is worse off
-        with `None` than with a slightly stale number."""
+        with `None` than with a number -- but it is READ now rather than transcribed. It
+        said `1 * 4 * 64` for the segmenter while `config.yaml` said `count: 2`."""
         cfg = BenchConfig(cameras=50, fps=20.0, gpus=(2, 3, 4, 5))
 
         capacities = shipinfer_harness.per_module_capacity(cfg)
 
-        assert capacities["ship_detector"] == 2 * 4 * 64
-        assert capacities["ship_segmenter"] == 1 * 4 * 64
+        counts = shipinfer_harness.repository_instances(cfg.resolved().model_repository)
+        assert capacities["ship_detector"] == counts["ship_detector"] * 4 * 64
+        assert capacities["ship_segmenter"] == counts["ship_segmenter"] * 4 * 64
+        assert counts["ship_segmenter"] == 2, "the number that was transcribed as 1"
 
     def test_every_sampled_module_gets_a_bound(self):
         """A model added to the graph and left out of the mapping loses its guard silently."""

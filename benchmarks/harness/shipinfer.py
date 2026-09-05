@@ -551,16 +551,28 @@ def achieved_offer(config: BenchConfig, result: ShipInferResult) -> float:  # no
     return entered / window if entered else 0.0
 
 
-#: Instances per GPU, as the four ``model_repository/*/config.yaml`` files declare them.
-#: A **fallback only** — :func:`per_module_capacity` prefers the count the run actually
-#: started, because this table is a second copy of a fact that lives somewhere else and will
-#: be wrong the first time somebody edits a config without editing this.
-DEFAULT_INSTANCES_PER_GPU = {
-    "ship_detector": 2,
-    "ship_segmenter": 1,
-    "ship_embedder": 1,
-    "person_embedder": 2,
-}
+def repository_instances(repository: Path | None) -> dict[str, int]:
+    """Instances per GPU for :data:`GRAPH_MODELS`, READ from ``model_repository/*/config.yaml``.
+
+    This was a literal table whose own docstring said it "will be wrong the first time
+    somebody edits a config without editing this". It was: `ship_segmenter` went to
+    ``count: 2`` on 27 Aug and the table stayed at 1, so this module's plateau guard sat at
+    half the real bound. Reading it costs one YAML parse and no device.
+    """
+    if repository is None:
+        return {}
+    try:
+        from shipinfer.repository import ModelRepository
+        from shipinfer.repository.resolved import model_runtimes
+
+        runtimes = model_runtimes(ModelRepository.load(repository))
+    except Exception:  # a checkout with no repository; the caller still needs a number
+        return {}
+    return {
+        name: runtimes[name].instances
+        for name in GRAPH_MODELS
+        if name in runtimes and runtimes[name].instances is not None
+    }
 
 
 def per_module_capacity(
@@ -580,13 +592,11 @@ def per_module_capacity(
 
     Args:
         instances: model -> how many instances the *run* actually started. Pass it. Without
-            it this falls back to :data:`DEFAULT_INSTANCES_PER_GPU`, which is a transcription
-            of the four ``config.yaml`` files and therefore a second copy of a fact that
-            already exists — review's finding: set ``ship_detector`` to ``count: 1`` and the
-            real bound becomes 256 while the guard still compares against 512, so a queue
-            pegged at its bound reads SUSTAINED and its offered rate publishes as throughput.
-            The caller holds `len(handle.instances)` and even writes it into the log's
-            metadata, so there is no reason to guess.
+            it this reads ``config.model_repository`` through :func:`repository_instances`,
+            which is the same file the run itself was configured from -- that used to be a
+            transcribed table, and it had already drifted on ``ship_segmenter``. The caller
+            holds `len(handle.instances)` and even writes it into the log's metadata, so
+            there is still no reason to guess.
     """
     from shipinfer.core.settings import ServerSettings
 
@@ -599,11 +609,12 @@ def per_module_capacity(
     # `capped` was permanently False, and a detector queue sitting at its 512-deep bound
     # read SUSTAINED. That is precisely the failure this function was written to fix, landed
     # on the wrong keys.
+    from_repository = repository_instances(config.resolved().model_repository)
     for name in GRAPH_MODELS:
         if instances is not None and name in instances:
             count = int(instances[name])
         else:
-            count = DEFAULT_INSTANCES_PER_GPU.get(name, 1) * len(config.gpus)
+            count = from_repository.get(name, 1) * len(config.gpus)
         capacities[name] = per_instance * count
     return capacities
 
