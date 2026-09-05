@@ -128,6 +128,26 @@ namespace {
         mutable std::vector<float> negated_;
     };
 
+    // A backend whose two answers about one row DISAGREE. Both spellings the contract allows:
+    // `kind == Wider` states a shape larger than the width (the slice the batcher hands out is
+    // short of what a consumer reads), `kind == Dynamic` a dimension the plan never fixed.
+    class DisagreeingEngine : public IdentityEngine {
+      public:
+        enum class Kind { Wider, Dynamic };
+
+        DisagreeingEngine(Device device, int max_batch, size_t width, Kind kind)
+            : IdentityEngine(device, max_batch, width), width_(width), kind_(kind) {}
+        std::string output_name(size_t) const override { return "rows"; }
+        std::vector<int64_t> output_dims(size_t) const override {
+            if (kind_ == Kind::Dynamic) return {-1, static_cast<int64_t>(width_)};
+            return {2, static_cast<int64_t>(width_)};
+        }
+
+      private:
+        size_t width_;
+        Kind kind_;
+    };
+
     InferenceRequest a_request(const std::string& camera, int64_t frame,
                                const std::vector<float>& payload, size_t width) {
         InferenceRequest request;
@@ -296,6 +316,64 @@ namespace {
         instance.stop();
     }
 
+    void test_an_engine_whose_width_and_shape_disagree_is_refused_at_construction() {
+        // ENGINE-DIMS-CAN-DISAGREE-WITH-WIDTH. The instance slices a batch's output by the
+        // WIDTH and a consumer reads it by the SHAPE, so a backend that answers 2 and (2, 2)
+        // for one row hands every row after the first another row's numbers. Nothing about
+        // that is visible per row -- the floats are real, just the wrong ones -- which is why
+        // this is refused where the engine is attached rather than checked on the hot path.
+        bool refused = false;
+        std::string message;
+        try {
+            ModelInstance instance("m:0",
+                                   std::make_unique<DisagreeingEngine>(
+                                       Device::cuda(0), 4, 2, DisagreeingEngine::Kind::Wider),
+                                   BatchWindow(4, 0), 16);
+        } catch (const ConfigError& error) {
+            refused = true;
+            message = error.what();
+        }
+        check(refused, "a width and a shape that disagree are refused at construction");
+        check(message.find("'rows'") != std::string::npos, "and the output is named");
+        check(message.find("m:0") != std::string::npos, "and so is the instance");
+        check(message.find("2 float(s) a row") != std::string::npos &&
+                  message.find("which is 4") != std::string::npos,
+              "and both numbers are in the message, so the fix is the one it points at");
+
+        // Every OTHER double here agrees, which is what says the check is not simply always
+        // throwing: `TwoOutputEngine` answers two different widths and two different shapes.
+        bool accepted = true;
+        try {
+            ModelInstance instance("m:1",
+                                   std::make_unique<TwoOutputEngine>(Device::cuda(0), 4, 2),
+                                   BatchWindow(4, 0), 16);
+        } catch (const ConfigError&) {
+            accepted = false;
+        }
+        check(accepted, "and an engine whose outputs agree at two widths is accepted");
+    }
+
+    void test_an_engine_with_a_dynamic_row_dimension_is_refused_by_name() {
+        // The same refusal one step earlier: a `-1` never reaches the width comparison,
+        // because a shape with one cannot size a buffer at all. `TrtEngine` refuses this at
+        // plan load, where the tensor is still identifiable; this is the contract's own
+        // guard, so a backend that is not TensorRT cannot reintroduce it.
+        bool refused = false;
+        std::string message;
+        try {
+            ModelInstance instance("m:0",
+                                   std::make_unique<DisagreeingEngine>(
+                                       Device::cuda(0), 4, 2, DisagreeingEngine::Kind::Dynamic),
+                                   BatchWindow(4, 0), 16);
+        } catch (const BackendError& error) {
+            refused = true;
+            message = error.what();
+        }
+        check(refused, "a dynamic non-batch dimension is refused at construction");
+        check(message.find("(-1, 2)") != std::string::npos,
+              "and the message prints the shape as the plan declared it");
+    }
+
     void test_stop_fails_everything_queued_and_in_flight() {
         // A slow engine holds one batch in flight while a second waits in the queue; stop()
         // must answer both — cancelled — rather than strand either future.
@@ -462,6 +540,8 @@ int main() {
     test_two_requests_are_batched_and_scattered_to_their_own_callers();
     test_a_failing_engine_fails_the_batch_and_the_instance_serves_the_next();
     test_a_request_wider_than_the_engine_is_refused_not_misread();
+    test_an_engine_whose_width_and_shape_disagree_is_refused_at_construction();
+    test_an_engine_with_a_dynamic_row_dimension_is_refused_by_name();
     test_stop_fails_everything_queued_and_in_flight();
     test_a_bind_that_fails_is_a_failed_start_not_a_hang();
     test_the_model_places_by_policy_and_answers();
