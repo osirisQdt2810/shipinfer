@@ -2508,7 +2508,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       CLOSED by `P6-SEGMENT-CROP` (5 Sep): both kinds in `ROW_FIELD_KINDS` are covered now, and
       `tests/topology/test_overlapping_fillers.py::test_two_segment_slots_are_considered_since_the_segmenter_crops`
       is the check that says so.
-- [x] **P6-SEGMENT-CROP · DONE 5 Sep, OPEN as PR #<PR>** (branch `feat/segment-crops`).
+- [x] **P6-SEGMENT-CROP · DONE 5 Sep, OPEN as PR #137** (branch `feat/segment-crops`).
       `PoolSegment` extends `_PoolCropElement`: one 640x640 crop per SELECTED detection, and a
       new `_reduced` hook folds the engine's two outputs (`output0` rows + `output1` prototype
       bank) into one `mask_area_px` per crop before the scatter -- the fold a per-row
