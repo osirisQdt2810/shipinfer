@@ -12,7 +12,83 @@ from pathlib import Path
 
 import pytest
 
-from benchmarks.harness.config import BenchConfig
+from benchmarks.harness.config import MODULE_MODELS, BenchConfig, read_instances_per_gpu
+
+
+class TestTheConcurrencyComesFromTheRepositoryAndNotFromAHandKeptTable:
+    """The translation was tested; the SOURCE of the number was not, and it drifted.
+
+    `config.py`'s own header calls `instances_per_gpu` "the one number in this file that can
+    silently make the comparison unfair". It held `{"det": 2, "seg": 1}` while
+    `model_repository/ship_segmenter/config.yaml` went to `count: 2` on 27 Aug -- so on a
+    7-GPU box the baseline was given seven segmenter threads where we ran fourteen. The same
+    asymmetry the class below exists to prevent, one field along.
+    """
+
+    def test_each_module_gets_the_count_its_model_declares(self) -> None:
+        from shipinfer.repository import ModelRepository
+        from shipinfer.repository.resolved import model_runtimes
+
+        repository = Path(__file__).resolve().parents[2] / "model_repository"
+        runtimes = model_runtimes(ModelRepository.load(repository))
+
+        found = read_instances_per_gpu(repository)
+
+        assert found, "no module resolved, so this test would pass on anything"
+        for module, model in MODULE_MODELS.items():
+            assert found[module] == runtimes[model].instances, module
+
+    def test_resolved_fills_it_and_an_explicit_mapping_still_wins(self) -> None:
+        assert dict(
+            BenchConfig(gpus=(0,)).resolved().instances_per_gpu
+        ) == read_instances_per_gpu(Path(__file__).resolve().parents[2] / "model_repository")
+        override = BenchConfig(gpus=(0,), instances_per_gpu={"det": 9}).resolved()
+
+        assert dict(override.instances_per_gpu) == {"det": 9}, "an explicit answer is kept"
+
+    def test_the_segmenter_is_two_per_gpu_which_is_the_drift_this_closed(self) -> None:
+        """Named rather than left implicit: 1 is the number that was wrong, and a future
+        edit that puts it back should fail here rather than in a benchmark nobody re-reads."""
+        repository = Path(__file__).resolve().parents[2] / "model_repository"
+
+        assert read_instances_per_gpu(repository)["seg"] == 2
+
+    def test_the_run_record_carries_the_concurrency_even_unresolved(self) -> None:
+        """`as_dict` is "the thing written into every log's metadata line", and the field it
+        reads now defaults to empty -- so an unresolved config would have recorded no
+        concurrency at all, leaving the run record a second source for this number."""
+        record = BenchConfig(cameras=50, fps=20.0).as_dict()
+
+        assert record["baseline_workers"], "the metadata line lost the number it exists for"
+        assert record["instances_per_gpu"]["seg"] == 2
+
+    def test_an_unreadable_repository_is_refused_and_not_guessed(self, tmp_path: Path) -> None:
+        """ "No repository", "a repository that will not parse" and "a repository that says 2"
+        are three different events; a last-resort literal made all three answer the same.
+
+        `resolved()` stays tolerant -- it is documented as usable where the artefacts are
+        absent -- so the refusal lands where the number is actually needed."""
+        from shipinfer.core.errors import ConfigurationError
+
+        empty = tmp_path / "model_repository"
+        empty.mkdir()
+        config = BenchConfig(gpus=(0,), model_repository=empty)
+
+        assert dict(config.resolved().instances_per_gpu) == {}, "resolved() still works"
+        with pytest.raises(ConfigurationError, match="not derivable"):
+            config.workers_for("det")
+
+    def test_the_other_harness_reads_the_same_file(self) -> None:
+        """`shipinfer.py` held a SECOND copy of the same table, model-keyed, also stale --
+        so the plateau guard for the segmenter sat at half its real bound."""
+        from benchmarks.harness.shipinfer import repository_instances
+
+        repository = Path(__file__).resolve().parents[2] / "model_repository"
+        counts = repository_instances(repository)
+
+        assert counts["ship_segmenter"] == 2
+        for module, model in MODULE_MODELS.items():
+            assert counts[model] == read_instances_per_gpu(repository)[module], module
 
 
 class TestBothSidesGetTheSameConcurrency:

@@ -2353,25 +2353,28 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       writing the bytes needs a device). Revert-check red both ways: the name resolver back to
       the literal -> 3 failures; the install line back -> 1.
 
-- [ ] **BENCH-CONCURRENCY-TRANSCRIBED · the head-to-head was unfair in our favour, again.**
-      `benchmarks/harness/config.py` holds `instances_per_gpu = {"det": 2, "seg": 1}` as a
-      LITERAL, and its own header calls that field "the one number in this file that can
+- [x] **BENCH-CONCURRENCY-TRANSCRIBED · DONE 5 Sep on `fix/bench-instances-from-repository`.**
+      The head-to-head was unfair in our favour, for the SECOND time and in the same field.
+      `benchmarks/harness/config.py` held `instances_per_gpu = {"det": 2, "seg": 1}` as a
+      literal, and its own header calls that field "the one number in this file that can
       silently make the comparison unfair" -- describing the previous instance of exactly this.
-      `model_repository/ship_segmenter/config.yaml` went to `count: 2` on 27 Aug (its comment
-      names the sweep that moved it) and the literal stayed at 1, so on a 7-GPU box the
-      baseline is given SEVEN segmenter threads where we run fourteen.
-      `benchmarks/harness/shipinfer.py`'s `DEFAULT_INSTANCES_PER_GPU` is a SECOND copy with the
-      same stale row, so the segmenter's plateau guard also sits at half its real bound (448
-      where the truth is 896) -- stricter than truth, which is the safe direction, but wrong.
-      MEASURED, both settings, 50 x 20 x 70 s on GPUs 0-6 today: 947.9 SATURATED at seg=1/gpu,
-      971.3 SUSTAINED at seg=2/gpu. The fairness fix moves the number in the BASELINE's favour
-      by 23 img/s and changes its verdict, which is what says it mattered.
-      FIX: read both from the repository -- `repository/resolved.py::model_runtimes` already
-      answers it on a driverless box, and it is the same reader `shipinfer plan` uses. The
-      `det`/`seg` -> model-name map is the translation the header already describes; state it
-      once. `benchmarks/tests/test_fairness.py` tests the TRANSLATION today and not the SOURCE,
-      which is why this drifted past it.
-
+      `model_repository/ship_segmenter/config.yaml` went to `count: 2` on 27 Aug and the
+      literal stayed at 1, so on a 7-GPU box the baseline got SEVEN segmenter threads where we
+      run fourteen. `benchmarks/harness/shipinfer.py` held a SECOND copy, model-keyed, with the
+      same stale row and a docstring saying out loud that it "will be wrong the first time
+      somebody edits a config without editing this" -- so the segmenter's plateau guard sat at
+      448 where the truth is 896.
+      BOTH READ THE REPOSITORY NOW (`repository/resolved.py::model_runtimes`, the reader
+      `shipinfer plan` uses, driverless because an instance COUNT is config not hardware). The
+      `det`/`seg` -> model map is `MODULE_MODELS`, stated once where the header described it.
+      MEASURED, both settings, 50 x 20 x 70 s on GPUs 0-6: 947.9 SATURATED at seg=1/gpu, 971.3
+      SUSTAINED at seg=2/gpu. The fix moves the number in the BASELINE's favour by 23 img/s and
+      changes its verdict. Against the C++ plane's 944 that is PARITY -- which the unfair
+      setting was hiding.
+      `test_fairness.py` tested the TRANSLATION and not the SOURCE, which is how it drifted
+      past; it reads both harness copies against the repository now and names `seg == 2`
+      explicitly. Two `test_comparison_metric.py` cases asserted the stale numbers as literals
+      and assert against the repository instead. Revert-check red: 3 failures, exit 1.
 - [x] **P6-PRB · DONE. #122 (the gate) and #123 (its four follow-ups) both MERGED, APPROVE
       round 1 each. The queue seam now has five scenarios, five goldens and a C++ gate at 22
       checks / 0 failures, with NO known-divergence register -- the planes have never
