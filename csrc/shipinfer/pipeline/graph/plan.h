@@ -98,10 +98,21 @@ namespace shipinfer {
         int reassembly_sweep_ms = 0;
     };
 
-    // The `setting` keys in WRITTEN order, paired with the member each names. One table, so
-    // the reader, the writer and the completeness check cannot disagree about the set --
-    // which is the failure the closed set exists to prevent.
-    const std::vector<std::pair<std::string, int PlanSettings::*>>& setting_keys();
+    // One `setting` key: its name, the member it fills, and the smallest value it may carry.
+    // The MINIMUM lives here because a bound stated anywhere else is a bound one plane can
+    // forget -- and `instance_queue -1` reaches `static_cast<size_t>` in `cli/bench.cpp` as
+    // SIZE_MAX, which is an unbounded per-instance queue: the 65536 this format removed,
+    // sanctioned by the format that removed it. Each matches its settings field's own `ge=`.
+    struct SettingKey {
+        std::string name;
+        int PlanSettings::*member;
+        int minimum;
+    };
+
+    // The keys in WRITTEN order. One table, so the reader, the writer, the range check and the
+    // completeness check cannot disagree -- which is the failure a closed set exists to
+    // prevent.
+    const std::vector<SettingKey>& setting_keys();
 
     struct ResolvedPlan {
         int version = 0;

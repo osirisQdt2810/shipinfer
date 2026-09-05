@@ -262,8 +262,8 @@ namespace {
         // Every carried setting, not the two that used to be flags: the record's contract is
         // that "the omission travels with the data", and a run whose per-instance queue was 64
         // and one whose was 65536 are different measurements that used to print the same line.
-        for (const auto& [key, member] : setting_keys()) {
-            out << ", \"" << key << "\": " << tuning.*member;
+        for (const SettingKey& key : setting_keys()) {
+            out << ", \"" << key.name << "\": " << tuning.*(key.member);
         }
         if (options.repository.empty()) {
             // The real answer only on the flag path; under `--repository` every instance took
