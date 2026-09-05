@@ -2644,18 +2644,21 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       the design load, because an abort here is indistinguishable from a crash in a long run.
       Log: `.artifacts/cpp/p5b-round2.log` on `feat/plan-model-runtime` (PR #138).
 
-- [ ] **ARTEFACT-NOT-BUILT-YET · the plan states the CONFIGURED artefact, which is not
-      always the one a backend loads** (#138 review round 2, non-blocking 3). A version
-      directory holding only an `.onnx` has `resolve_engine`
-      (`backends/tensorrt/autobuild.py`) build a plan at load, keyed to this TensorRT, GPU and
-      precision -- and that needs a live TensorRT and a device, which the control plane
-      writing a plan on a driverless box does not have. `git ls-files model_repository` shows
-      the shipped version dirs carry only a `README.md`, so this is the ordinary state of a
-      fresh checkout. The C++ plane then refuses by path: loud, but late -- the operator
-      learns at bench start-up that an engine has to be built. Options: carry the ONNX name
-      too and refuse with the build command in the message, or have `shipinfer plan` refuse at
-      write time when the named artefact is absent.
-
+- [x] **ARTEFACT-NOT-BUILT-YET · DONE 5 Sep on `feat/plan-reports-missing-artefacts`, as a
+      REPORT and not a refusal -- which the survey changed.** The first framing was "have
+      `shipinfer plan` refuse at write time when the named artefact is absent". Reading the
+      workflow says that would break the case the design is built for: ADR-014 lets the
+      control plane run on a driverless box, and `model_repository/*/1/README.md` says engines
+      are host-specific and built on the node that runs them, so a fresh checkout LEGITIMATELY
+      holds a `config.yaml` and no `model.plan` (`git ls-files model_repository` shows exactly
+      that -- four configs, four READMEs, no artefacts). Refusing would be refusing the
+      documented path.
+      So: `shipinfer plan` names, on stderr, every artefact IT NAMES that the repository does
+      not hold, with the build command -- and still writes the plan. And `TrtEngine::load`'s
+      "cannot open plan" says how to build one, since that is where an operator meets this
+      today: inside a container, after a start-up, from a loader that could only report a
+      path. Four checks, including that nothing is said when the artefacts are there and that
+      a model the chain does not name is not reported.
 - [x] **SEGMENT-NO-CLASSES-ASYMMETRY · CLOSED 5 Sep in PR #140, in favour of
       PERMITTING it on both planes.** A chain with one segment slot and no `classes:` loaded on
       the Python plane and was REFUSED by `plan_stages.cpp::class_of` -- one chain file with
