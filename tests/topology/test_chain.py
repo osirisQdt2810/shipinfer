@@ -48,6 +48,7 @@ from shipinfer.core.request import RequestContext
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.types import Tensor
 from shipinfer.engine import InferenceServer
+from shipinfer.runtime.ops import NumpyImageOps
 from shipinfer.topology import (
     Caps,
     ChainItem,
@@ -62,6 +63,7 @@ from shipinfer.topology import (
     load_topology,
     registry_for,
 )
+from shipinfer.topology.elements.detections import Detections
 from shipinfer.topology.elements.output import JsonLinesOutput, NullOutput, SinkOutput
 from shipinfer.topology.elements.pool import PoolRecognize, PoolSegment
 from tests.support.models import materialise
@@ -74,9 +76,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 #: accelerator can name today. It is a **branching** chain, not a straight line: two branches
 #: split at ``detect`` and rejoin at ``track``.
 #:
-#: The rows each *embedder* covers are ``params: classes:`` and not ``when:``, because that is
-#: the only spelling the loader accepts on a row-selecting element (C8b). ``segment`` and
-#: ``recognize`` select no rows, so their guards stay the frame conditions the file writes.
+#: The rows each *embedder* and the *segmenter* cover are ``params: classes:`` and not
+#: ``when:``, because that is the only spelling the loader accepts on a row-selecting element
+#: (C8b, and P6-SEGMENT-CROP for the segmenter). ``decode`` is the stage that selects no rows.
 #:
 #: Written out rather than generated: a chain file is the thing under test, and a generated
 #: one would test the generator. The cost of writing it out is that it can drift from the
@@ -88,7 +90,7 @@ CHAIN = textwrap.dedent("""
     elements:
       decode:       {impl: replay}
       detect:       {impl: pool, model: ship_detector}
-      segment:      {impl: pool, model: ship_segmenter}
+      segment:      {impl: pool, model: ship_segmenter, params: {classes: [ship]}}
       embed_ship:   {impl: pool, model: ship_embedder, params: {classes: [ship]}, after: segment}
       embed_person: {impl: pool, model: person_embedder, params: {classes: [person]}, after: detect}
       recognize:    {impl: shipvision, params: {classes: [ship]}, after: embed_ship}
@@ -537,18 +539,22 @@ class TestLoadingAValidChain:
         ``segment`` here consumes and produces ``nv12@gpu``, so the frame that skips it looks
         exactly like the frame that went through it and ``embed_ship`` cannot tell — which is
         the shape a branch condition is supposed to have.
+
+        The guard is ``fps``, a fact ``runners/frames.py`` files, and not ``class``: this slot
+        selects detection rows (P6-SEGMENT-CROP), so ``when: class == …`` on it is the
+        refusal :class:`TestRowSelectionIsNotAFrameCondition` is about.
         """
         chain = load("""
             elements:
               decode:     {impl: chain-test-gpu}
               detect:     {impl: pool, model: d}
-              segment:    {impl: pool, model: s, when: class == ship}
+              segment:    {impl: pool, model: s, params: {classes: [ship]}, when: fps == 20}
               embed_ship: {impl: pool, model: e, params: {classes: [ship]}}
               track:      {impl: shipvision}
               output:     {impl: none}
             """)
 
-        assert str(chain.node("segment").condition) == "class == ship"
+        assert str(chain.node("segment").condition) == "fps == 20"
         assert all(str(edge.caps) == "nv12@gpu" for edge in chain.edges[:3])
 
     def test_loading_twice_gives_two_independent_chains(self) -> None:
@@ -937,20 +943,20 @@ class TestThePackageSurface:
 
 
 class TestConditions:
-    #: A frame guard on a field the *test* files. `segment` selects no rows, so the loader
-    #: permits `class` there; the production chain carries no guard at all, because nothing
-    #: in a real chain writes a frame-level `meta["class"]` (`docs/arch.md` §1).
+    #: A frame guard on a field the *test* files. `detect` is the whole-frame stage -- it
+    #: selects no rows -- so the loader permits `class` there; the production chain carries no
+    #: guard at all, because nothing in a real chain writes a frame-level `meta["class"]`
+    #: (`docs/arch.md` §1).
     GUARDED = (
         "name: guarded\nelements:\n"
         "  decode:  {impl: replay}\n"
-        "  detect:  {impl: pool, model: d}\n"
-        "  segment: {impl: pool, model: s, when: class == ship}\n"
+        "  detect:  {impl: pool, model: d, when: class == ship}\n"
         "  output:  {impl: none}\n"
     )
 
     def test_a_when_expression_is_parsed(self) -> None:
         chain = load(self.GUARDED)
-        condition = chain.node("segment").condition
+        condition = chain.node("detect").condition
 
         assert condition == Condition("class", "==", "ship")
         assert str(condition) == "class == ship"
@@ -963,10 +969,10 @@ class TestConditions:
 
     def test_a_condition_gates_an_element_on_metadata(self) -> None:
         chain = load(self.GUARDED)
-        segment = chain.node("segment")
+        detect = chain.node("detect")
 
-        assert segment.admits(item().derive(**{"class": "ship"}))
-        assert not segment.admits(item().derive(**{"class": "person"}))
+        assert detect.admits(item().derive(**{"class": "ship"}))
+        assert not detect.admits(item().derive(**{"class": "person"}))
 
     def test_a_missing_field_satisfies_neither_operator(self) -> None:
         """Absence is not evidence: ``!=`` must not fire on a frame nobody classified."""
@@ -1068,11 +1074,15 @@ class TestElementLifecycle:
 
 #: One model, declared once, built to its own config by ``tests/support/models.py``. Small
 #: on purpose: the walk is what is under test, not the arithmetic inside the module.
+#: A YOLO-seg engine's two outputs at toy extents: ``(R, 6 + M)`` detection rows and an
+#: ``(M, h, w)`` prototype bank, because ``PoolSegment`` folds the two into one area per crop.
 _SEGMENTER = """
 platform: pytorch
 max_batch_size: 4
-inputs: [{name: images, data_type: FP32, dims: [4]}]
-outputs: [{name: masks, data_type: FP32, dims: [4]}]
+inputs: [{name: images, data_type: FP32, dims: [3, 16, 8]}]
+outputs:
+  - {name: output0, data_type: FP32, dims: [2, 8]}
+  - {name: output1, data_type: FP32, dims: [2, 4, 2]}
 instance_groups: [{kind: KIND_CPU, count: 1}]
 dynamic_batching: {enabled: false}
 """
@@ -1084,7 +1094,7 @@ WALKABLE = """
 name: walkable
 elements:
   decode:  {impl: replay}
-  segment: {impl: pool, model: ship_segmenter, params: {input: images}}
+  segment: {impl: pool, model: ship_segmenter, params: {input: images, classes: [ship]}}
   output:  {impl: none, params: {keep_last: 4}}
 """
 
@@ -1114,13 +1124,34 @@ class TestWalkingAChain:
 
     @staticmethod
     def frame(camera: str = "cam-42", frame_id: int = 1234, **meta: Any) -> ChainItem:
-        """One host-resident frame, in the shape a decoder's frame sink hands over."""
+        """One host-resident frame with one ship on it, as ``PoolDetect`` hands it on.
+
+        Real pixels and a real detection because the middle element crops: a segmenter is a
+        row-selecting stage since P6-SEGMENT-CROP, so a frame with nothing on it would walk
+        through submitting nothing and prove neither of this class's two properties.
+        """
+        filed: dict[str, Any] = {
+            "detections": Detections(
+                boxes=np.array([[2, 4, 30, 40]], dtype=np.float32),
+                scores=np.array([0.9], dtype=np.float32),
+                class_ids=np.array([8], dtype=np.int32),
+                labels=("ship",),
+            )
+        }
+        filed.update(meta)
         return ChainItem(
             RequestContext(camera_id=camera, frame_id=frame_id),
             Caps.parse("bgr@cpu"),
-            payload=Tensor.from_numpy(np.zeros((1, 4), dtype=np.float32)),
-            meta=dict(meta),
+            payload=Tensor.from_numpy(
+                np.arange(1 * 48 * 64 * 3, dtype=np.uint8).reshape(1, 48, 64, 3)
+            ),
+            meta=filed,
         )
+
+    @staticmethod
+    def context(server: Any) -> ElementContext:
+        """The context a runner builds: a pool, and the ops the crop element refuses without."""
+        return ElementContext(models=server, ops=NumpyImageOps())
 
     def test_the_tag_survives_every_element(self, server) -> None:
         """ADR-002, checked end to end: the ``(camera_id, frame_id)`` tag is never rewritten.
@@ -1131,7 +1162,7 @@ class TestWalkingAChain:
         """
         chain = load(WALKABLE)
         for node in chain:
-            node.element.open(ElementContext(models=server))
+            node.element.open(self.context(server))
         try:
             current = self.frame()
             start_key = current.key
@@ -1163,15 +1194,15 @@ class TestWalkingAChain:
         chain = load(WALKABLE)
         decode, segment = chain.node("decode").element, chain.node("segment").element
         decode.open(ElementContext())
-        segment.open(ElementContext(models=server))
+        segment.open(self.context(server))
         try:
-            after_decode = decode.process(self.frame(frame_hw=(4, 6), fps=20.0))
+            after_decode = decode.process(self.frame(frame_hw=(48, 64), fps=20.0))
             assert after_decode is not None
             after_segment = segment.process(after_decode)
 
             assert after_segment is not None
-            assert after_segment.meta["frame_hw"] == (4, 6), "the decoder's frame size survives"
-            assert after_segment.meta["masks"], "and the segmenter must have added its own"
+            assert after_segment.meta["frame_hw"] == (48, 64), "the frame size survives"
+            assert set(after_segment.meta["masks"]) == {0}, "one area, on the ship's row"
         finally:
             decode.close()
             segment.close()
@@ -1238,9 +1269,11 @@ class TestTheDonorAtAFanIn:
             elements:
               decode: {impl: replay}
               detect: {impl: pool, model: d}
-              left:   {impl: pool, kind: segment, model: s, after: detect}
+              left:   {impl: pool, kind: segment, model: s, after: detect,
+                       params: {classes: [ship]}}
               right:  {impl: pool, kind: embed, model: e, after: detect}
-              join:   {impl: pool, kind: segment, model: r, after: [right, left]}
+              join:   {impl: pool, kind: segment, model: r, after: [right, left],
+                       params: {classes: [person]}}
               output: {impl: none}
             """)
 
@@ -1363,17 +1396,24 @@ class TestTheProductionChainFile:
         assert ships == {"ship"} and people == {"person"}
         assert not ships & people, "a crop paid for twice is a crop attributed twice"
 
-    def test_the_whole_frame_stage_declares_no_rows(self) -> None:
-        """The mirror of the conversion: it must not have given every slot a ``classes:``.
+    def test_every_row_selecting_stage_declares_its_rows(self) -> None:
+        """And the whole-frame stage does not, which is the mirror of the conversion.
 
-        ``segment`` submits the whole frame and selects nothing, so a row filter on it would
-        be as wrong as a frame guard on an embedder — and without this half, the test above
-        would pass on a file that had simply had ``classes:`` sprayed across it.
+        ``detect`` submits one letterboxed frame and selects nothing, so a row filter on it
+        would be as wrong as a frame guard on an embedder — and without this half, the test
+        above would pass on a file that had simply had ``classes:`` sprayed across it.
+
+        ``segment`` is on the other side of that line since P6-SEGMENT-CROP: without its
+        ``classes:`` it runs the ship segmenter on every person crop at 640x640 — the defect
+        the ship embedder shipped with, one stage earlier.
         """
         chain = self.substituted()
+        selectors = {node.name for node in chain.nodes if node.element.selects_rows}
 
-        assert chain.node("segment").element.declared_classes() is None
-        assert chain.node("segment").condition is None
+        assert selectors == {"segment", "embed_ship", "embed_person", "recognize", "track"}
+        assert set(chain.node("segment").element.declared_classes()) == {"ship"}
+        assert chain.node("detect").element.declared_classes() is None
+        assert all(chain.node(name).condition is None for name in selectors)
 
     def test_the_inline_fixture_agrees_with_the_file(self) -> None:
         """``CHAIN`` resolves to exactly the wiring the production file resolves to.
@@ -1487,21 +1527,20 @@ class TestRowSelectionIsNotAFrameCondition:
     def test_an_element_that_selects_no_rows_may_still_be_guarded_by_class(self) -> None:
         """The refusal is a declaration on the implementation, not a ban on a word.
 
-        A ``segment`` slot is a whole-frame stage — it reads no ``classes:`` — so the loader
-        permits ``when: class == ship`` on one. Permitted is not recommended: nothing in a
-        real chain writes a frame-level ``meta["class"]``, which is why
-        ``topology/ship_person.yaml`` carries no guard at all
-        (:meth:`TestTheProductionChainFile.test_the_whole_frame_stage_declares_no_rows`).
+        A ``detect`` slot is a whole-frame stage — it letterboxes one frame and reads no
+        ``classes:`` — so the loader permits ``when: class == ship`` on one. Permitted is not
+        recommended: nothing in a real chain writes a frame-level ``meta["class"]``, which is
+        why ``topology/ship_person.yaml`` carries no guard at all
+        (:meth:`TestTheProductionChainFile.test_every_row_selecting_stage_declares_its_rows`).
         What is under test here is the shape of the *rule* — a declaration on the
         implementation rather than a ban on a word.
         """
         chain = self.chain(
-            "detect: {impl: pool, model: d}",
-            "segment: {impl: pool, model: s, when: class == ship}",
+            "detect: {impl: pool, model: d, when: class == ship}",
             "output: {impl: none}",
         )
 
-        assert str(chain.node("segment").condition) == "class == ship"
+        assert str(chain.node("detect").condition) == "class == ship"
 
 
 class TestAKeyReadPerRowMayNotBeFiledRaw:
@@ -1541,25 +1580,32 @@ class TestAKeyReadPerRowMayNotBeFiledRaw:
 
         assert chain.node("recognize").element.files_raw_response is False
 
-    def test_a_pool_segment_is_untouched_because_nothing_reads_masks_per_row(self) -> None:
-        """The rule is the declared pair, not "pool elements are suspect": ``masks`` is in
-        no reader's ``reads_per_row``, so the chain the runner's own test drives still loads."""
+    def test_a_pool_segment_is_untouched_and_now_for_two_reasons(self) -> None:
+        """The rule is the declared pair, not "pool elements are suspect".
+
+        ``masks`` is in no reader's ``reads_per_row`` — the half that held before
+        P6-SEGMENT-CROP — and since it the segmenter scatters one area per detection row
+        instead of filing its response raw, so neither half of the pair is met.
+        """
         chain = self.chain(
             "detect:  {impl: pool, model: d}",
             "segment: {impl: pool, model: s}",
             "output:  {impl: none}",
         )
 
-        assert chain.node("segment").element.files_raw_response is True
+        assert chain.node("segment").element.files_raw_response is False
 
     def test_the_refusal_needs_both_halves_declared(self) -> None:
         """Not "pool elements are suspect": the reader's key and the producer's key have to be
-        the same one. ``output`` reads ``vectors`` and ``identities``, and the segment case
-        above loads precisely because ``masks`` is in nobody's ``reads_per_row``.
+        the same one, and the *producer* has to file raw. ``output`` reads all three keys
+        since P6-SEGMENT-CROP, and the segment case above loads on the other half — it
+        scatters one area per row rather than filing the engine's two outputs.
         """
-        assert SinkOutput.reads_per_row == ("vectors", "identities")
+        assert SinkOutput.reads_per_row == ("vectors", "identities", "masks")
         assert PoolRecognize.meta_key in SinkOutput.reads_per_row
-        assert PoolSegment.meta_key not in SinkOutput.reads_per_row
+        assert PoolRecognize.files_raw_response is True, "so the pair refuses"
+        assert PoolSegment.meta_key in SinkOutput.reads_per_row
+        assert PoolSegment.files_raw_response is False, "so the pair does not"
 
 
 class TestClassesAreCheckedAgainstWhatTheDetectorEmits:

@@ -88,17 +88,19 @@ elements:
   output:        {impl: none}
 """
 
-#: Two ``segment`` slots on the same rejoining branches. ``PoolSegment`` keeps
-#: ``_PoolElement._finish``'s default and files the model's raw ``response.outputs`` --
-#: ``{output name: Tensor}`` -- under ``meta["masks"]``, which is a mapping and is *not* a
-#: scatter-back. This chain is the one that says so.
+#: Two ``segment`` slots on the same rejoining branches, with the disjoint selections the
+#: loader demands of two slots that could fill one row's field. What the tests below hand the
+#: merge is filed BY HAND and is a plain mapping -- what a key that is not a scatter-back
+#: looks like -- so the property is the merge's gate, not which element produced the value.
 TWO_SEGMENTERS = """
 name: two_segmenters
 elements:
   decode:     {impl: replay}
   detect:     {impl: pool, model: ship_detector}
-  seg_ship:   {impl: pool, kind: segment, model: ship_segmenter,   after: detect}
-  seg_person: {impl: pool, kind: segment, model: person_segmenter, after: detect}
+  seg_ship:   {impl: pool, kind: segment, model: ship_segmenter,   after: detect,
+               params: {classes: [ship]}}
+  seg_person: {impl: pool, kind: segment, model: person_segmenter, after: detect,
+               params: {classes: [person]}}
   track:      {impl: shipvision, kind: track, after: [seg_ship, seg_person]}
   output:     {impl: none}
 """
@@ -484,17 +486,19 @@ class TestTwoBranchesFilingTheSameMapping:
 class TestTwoBranchesFilingAModelsRawOutputs:
     """A mapping that is not a scatter-back keeps the rule it had before the union existed.
 
-    ``PoolSegment`` and ``PoolRecognize`` keep ``_PoolElement._finish``'s default, which files
-    the model's raw ``response.outputs`` — ``{output name: Tensor}`` — under ``meta["masks"]``
-    and ``meta["identities"]``. Those are mappings and they are emphatically *not* keyed by
-    detection row, so the union must not touch them. Sniffing ``isinstance(..., Mapping)``
-    cannot tell the two apart, which is why the writer declares itself with
-    :class:`~shipinfer.topology.base.RowIndexed` and only that type unions.
+    ``PoolRecognize`` keeps ``_PoolElement._finish``'s default, which files the model's raw
+    ``response.outputs`` — ``{output name: Tensor}`` — under ``meta["identities"]``. That is a
+    mapping and it is emphatically *not* keyed by detection row, so the union must not touch
+    it. Sniffing ``isinstance(..., Mapping)`` cannot tell the two apart, which is why the
+    writer declares itself with :class:`~shipinfer.topology.base.RowIndexed` and only that
+    type unions.
 
-    Both tests below describe the *same* chain — two ``segment`` slots on rejoining branches —
-    and differ only in whether the two engines happen to name their output the same. Under a
+    The two branches below file such a mapping by hand rather than through an element, and
+    they differ only in whether the two engines happen to name their output the same. Under a
     ``Mapping`` gate that coincidence decides between an exception on every frame and a
-    fabricated composite; under the declared gate it decides nothing, which is the property.
+    fabricated composite; under the declared gate it decides nothing, which is the property —
+    and it holds for any key any element files, which is why the chain under it no longer has
+    to be one whose elements would produce it.
     """
 
     def test_engines_naming_their_output_the_same_are_not_refused(
@@ -502,11 +506,10 @@ class TestTwoBranchesFilingAModelsRawOutputs:
     ) -> None:
         """First-writer-wins, exactly as it resolved before the union rule existed.
 
-        Both segmenters emit an output called ``masks``, so a ``Mapping``-gated union reads
-        the *output name* as a detection row, finds it claimed twice, and fails every frame of
-        the chain — with a message pointing at a ``params: classes:`` the ``segment`` family
-        does not have. There is nothing for an operator to fix and nothing wrong with the
-        chain.
+        Both branches file a key called ``masks``, so a ``Mapping``-gated union reads the
+        *inner* name as a detection row, finds it claimed twice, and fails every frame of the
+        chain — pointing an operator at a ``params: classes:`` that is already correct on both
+        slots. There is nothing to fix and nothing wrong with the chain.
         """
         node = segmenters.topology.node("track")
 

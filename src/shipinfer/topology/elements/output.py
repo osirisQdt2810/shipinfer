@@ -101,8 +101,8 @@ class SinkOutput(Element):
     kind: ClassVar[ElementKind] = ElementKind.OUTPUT
 
     #: Read one entry per detection row (``_records``), so the loader refuses a chain whose
-    #: producer of either key files a model's raw response under it instead.
-    reads_per_row: ClassVar[tuple[str, ...]] = ("vectors", "identities")
+    #: producer of any of them files a model's raw response under it instead.
+    reads_per_row: ClassVar[tuple[str, ...]] = ("vectors", "identities", "masks")
     #: Metadata first, host pixels second. A sink serialises, so it can never read device
     #: memory — declaring ``nv12@gpu`` here is how a chain grows a silent per-frame download
     #: (arch.md §8). ``test_chain.py::TestRefusals::test_a_serialising_sink_behind_a_device_decoder_is_refused``
@@ -245,6 +245,7 @@ class SinkOutput(Element):
         what = f"output element {self.name!r}"
         vectors = per_row(item.meta.get("vectors"), count, what=what, key="vectors")
         identities = per_row(item.meta.get("identities"), count, what=what, key="identities")
+        masks = per_row(item.meta.get("masks"), count, what=what, key="masks")
         tracks = self._tracks_by_row(item, count)
         camera_id = item.context.camera_id
         frame_id = item.context.frame_id
@@ -268,6 +269,7 @@ class SinkOutput(Element):
                     box_rows[index][3],
                 ),
                 embedding=_embedding(None if vectors is None else vectors[index]),
+                mask_area_px=_mask_area(None if masks is None else masks[index]),
                 ship_id=_identity(None if identities is None else identities[index]),
                 similarity=_similarity(None if identities is None else identities[index]),
                 track_id=tracks[index][0],
@@ -356,6 +358,22 @@ def _embedding(vector: Any) -> tuple[float, ...]:
     the *absence* rule and nothing else.
     """
     return () if vector is None else as_embedding(vector)
+
+
+def _mask_area(entry: Any) -> float | None:
+    """One object's foreground area in crop pixels, or ``None`` where no segmenter ran.
+
+    A segment element scatters a one-wide row per detection
+    (:class:`~shipinfer.topology.elements.masks.InstanceMaskArea`), so this unwraps that row.
+    ``None`` and not ``0.0``: ``0.0`` is the answer for a crop the engine found nothing in,
+    and "not segmented" must stay distinguishable from "segmented, and empty".
+    """
+    if entry is None:
+        return None
+    value = entry[0] if isinstance(entry, Sequence) and not isinstance(entry, str) else entry
+    if isinstance(value, np.ndarray):
+        value = value.reshape(-1)[0] if value.size else None
+    return None if value is None else float(value)
 
 
 def _identity(entry: Any) -> int | None:

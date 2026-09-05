@@ -47,7 +47,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
@@ -74,6 +74,7 @@ from shipinfer.topology.elements.detections import (
     decode_detections,
     parse_classes,
 )
+from shipinfer.topology.elements.masks import InstanceMaskArea
 from shipinfer.topology.registry import registry_for
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -1393,9 +1394,11 @@ class _PoolCropElement(_PoolElement):
         total = crops.shape[0]
         limit = self._max_rows
         if total <= limit:
-            return self._submit(item, crops)
+            return self._reduced(self._submit(item, crops))
         chunks = [
-            self._submit(item, crops.slice_batch(start, min(start + limit, total)))
+            self._reduced(
+                self._submit(item, crops.slice_batch(start, min(start + limit, total)))
+            )
             for start in range(0, total, limit)
         ]
         joined = np.concatenate([self._rows_of(chunk).numpy() for chunk in chunks], axis=0)
@@ -1405,6 +1408,16 @@ class _PoolCropElement(_PoolElement):
         # nothing is wrong today; a consumer that attributes device load off a crop element's
         # response would be reading chunk 0 and must aggregate here instead.
         return replace(chunks[0], outputs={self._output: Tensor.from_numpy(joined)})
+
+    def _reduced(self, response: InferenceResponse) -> InferenceResponse:
+        """One response, with :attr:`_output` holding one row per crop. Identity here.
+
+        The hook a subclass overrides when its model does not hand back one row per crop
+        already -- a segmentation engine emits detection rows and a bank of prototypes, and
+        the area is the two multiplied. Applied to EVERY response, chunked or not, so
+        ``_finish`` sees one shape and the fold happens exactly once per chunk.
+        """
+        return response
 
     def _rows_of(self, response: InferenceResponse) -> Tensor:
         """The declared output, or an :class:`InferenceError` naming what the model did send.
@@ -1471,8 +1484,8 @@ class _PoolCropElement(_PoolElement):
         What is filed is a :class:`~shipinfer.topology.base.RowIndexed`, which is what tells the
         fan-in the value is keyed by detection row and may be unioned. A bare dict still reaches
         ``track`` and simply does not union — the right default for a value nobody declared, and
-        why the ``segment`` slots filing raw outputs are left alone. Merging into a peer keeps
-        the peer's declaration: a plain dict stays plain.
+        what an element filing a model's raw ``response.outputs`` leaves behind. Merging into
+        a peer keeps the peer's declaration: a plain dict stays plain.
 
         **Both halves refuse an overlap.** Disjoint rows union; a row two elements both cover is
         an :class:`~shipinfer.core.errors.InferenceError` here exactly as at the fan-in, because
@@ -1520,42 +1533,136 @@ class _PoolCropElement(_PoolElement):
         return item.derive(**{self.meta_key: declared})
 
 
+def _fold_defaults() -> dict[str, Any]:
+    """:class:`InstanceMaskArea`'s own defaults, so this file does not restate them.
+
+    Read off the dataclass rather than off the class attributes: ``slots=True`` turns those
+    into member descriptors, and ``float(InstanceMaskArea.score_threshold)`` is a `TypeError`
+    rather than 0.25.
+    """
+    return {field.name: field.default for field in fields(InstanceMaskArea)}
+
+
+#: What `params: {segment: {...}}` accepts -- a typo there would otherwise be a silently
+#: ignored threshold, the failure `InstanceMaskArea` exists to refuse. Both cuts are here: the
+#: score floor below which a crop reports no area, and the mask probability at which a cell
+#: counts as inside. `InstanceMaskArea` validates the second's range.
+_SEGMENT_KEYS = frozenset({"detections", "prototypes", "score_threshold", "mask_threshold"})
+
+
 @registry_for(ElementKind.SEGMENT).register("pool")
-class PoolSegment(_PoolElement):
-    """Segmentation through the model pool.
+class PoolSegment(_PoolCropElement):
+    """Segmentation through the model pool: one crop per selected detection, one area per row.
 
-    Still the forwarding element, and deliberately so *for now*. The demo repository's
-    ``ship_segmenter`` is fed crops in the proven pipeline (``pipeline/graph/graph.py`` cuts a
-    ``ship_mask_crops`` set at 640x640 and hands it to an ``ObjectStage``), so the *first*
-    half of this element is exactly :class:`_PoolCropElement`'s and adopting it is a one-line
-    change of base class. The *second* half is not: a YOLO segmentation engine emits detection
-    rows and a bank of mask prototypes, never a mask, and the mask for one crop is the two
-    multiplied together and then reduced to an area
-    (``pipeline/graph/masks.py::InstanceMaskArea``) — a fold over two outputs at once, which
-    a per-row scatter-back cannot express.
+    A crop element like the embedders since P6-SEGMENT-CROP, which closes a cross-plane
+    divergence. The C++ plane has always cut a ``ship_crops_640`` set and run the segmenter on
+    it; this one letterboxed the whole frame, so ``mask_area_px`` was computed from different
+    pixels on the two planes for the same chain file.
 
-    Filing the raw rows per detection instead would be worse than leaving this alone: it pins
-    a ``(32, 160, 160)`` prototype tensor per frame alive for the rest of the walk so that a
-    later consumer can redo arithmetic that already exists, which is 3 MB a frame of
-    reassembly memory spent on pixels nobody reads. So the crop half lands with the
-    segmenter's own ``_finish``, in its own slice, and this class keeps the base's behaviour
-    until then rather than gaining half of a feature.
+    The second half is why it waited. A YOLO-seg engine emits detection rows and a bank of
+    mask prototypes, never a mask, and the mask for one crop is the two multiplied and
+    reduced (:class:`~shipinfer.topology.elements.masks.InstanceMaskArea`) -- a fold over two
+    outputs that the per-row scatter cannot express. :meth:`_reduced` is the seam for exactly
+    that: it turns one response into one row per crop before anything is scattered.
+
+    Filing the raw response instead would be worse than either: it pins a ``(32, 160, 160)``
+    prototype bank per frame alive for the rest of the walk so that a later consumer can redo
+    arithmetic that already exists -- ~3 MB a frame of reassembly memory spent on pixels
+    nobody reads.
     """
 
     kind: ClassVar[ElementKind] = ElementKind.SEGMENT
     meta_key: ClassVar[str] = "masks"
 
-    def declared_classes(self) -> tuple[str, ...] | None:
-        """The row selection this slot declares -- the half of the base-class swap the
-        RESOLVED PLAN needs, ahead of the ``_finish`` fold the rest of it waits on.
+    def _resolve_output(self) -> str:
+        """The name of the folded quantity, which is not one of the model's outputs.
 
-        Without this the base returns ``None``, ``params: {classes: [ship]}`` on a
-        ``segment`` slot was neither parsed nor refused, and the plan then carried no
-        selection -- which the C++ plane reads as EVERY row. The ship segmenter would run on
-        every person crop at 640x640 and file a `mask_area_px` on every person record.
+        Every other crop element names a model output because the model computed the rows it
+        scatters. This one scatters a number the engine has no name for, so the slot's
+        ``params: {output: ...}`` renames the *fold's* key and the default is the fold's own.
+        Overridden rather than special-cased in the base: the base's refusal ("a multi-output
+        model must say which output holds one row per crop") is exactly wrong here, since a
+        segmentation engine has two outputs by construction and both are read.
         """
-        return parse_classes(
-            self.params.get("classes"), f"{self.kind.value} element {self.name!r}"
+        return str(self.params.get("output") or _fold_defaults()["name"])
+
+    def _do_open(self, context: ElementContext) -> None:
+        """Build the fold once the crop size is known, since it is one of its arguments.
+
+        The two engine output names come from ``params: {segment: {detections: ...,
+        prototypes: ...}}`` and default to a YOLO-seg export's own (``output0``/``output1``);
+        ``score_threshold`` is the floor below which a crop the engine found nothing in
+        reports an area of 0 rather than the whole plane.
+        """
+        super()._do_open(context)
+        settings = self.params.get("segment") or {}
+        if not isinstance(settings, Mapping):
+            raise ConfigurationError(
+                f"{self.kind.value} element {self.name!r}: `params: segment:` is the fold's "
+                f"settings and must be a mapping, got {type(settings).__name__}"
+            )
+        unknown = sorted(set(settings) - _SEGMENT_KEYS)
+        if unknown:
+            raise ConfigurationError(
+                f"{self.kind.value} element {self.name!r}: `params: segment:` does not know "
+                f"{unknown}; it takes {sorted(_SEGMENT_KEYS)}"
+            )
+        defaults = _fold_defaults()
+        try:
+            self._fold = InstanceMaskArea(
+                crop_hw=self._crop_size,
+                detections=self._engine_output("detections", settings, defaults),
+                prototypes=self._engine_output("prototypes", settings, defaults),
+                name=self._output,
+                score_threshold=float(
+                    settings.get("score_threshold", defaults["score_threshold"])
+                ),
+                mask_threshold=float(
+                    settings.get("mask_threshold", defaults["mask_threshold"])
+                ),
+            )
+        except (TypeError, ValueError) as error:
+            # `float("high")` and `InstanceMaskArea.__post_init__`'s range check both raise a
+            # bare `ValueError`, which is outside this project's vocabulary -- so a chain file
+            # typo escaped the type every other refusal in this method raises, and a caller
+            # catching `ShipInferError` would miss it (CONVENTIONS: typed failures).
+            raise ConfigurationError(
+                f"{self.kind.value} element {self.name!r}: `params: segment:` is not a valid "
+                f"fold -- {error}"
+            ) from error
+
+    def _engine_output(
+        self, role: str, settings: Mapping[str, Any], defaults: Mapping[str, Any]
+    ) -> str:
+        """One of the fold's two engine outputs, checked against what the model declares.
+
+        `outpu0` for `output0` otherwise loads, opens and reports every shard ready -- then
+        raises on every frame of every camera, which is the outage `_check_one_filler_per_row`
+        argues a load-time refusal is strictly better than. A model that declares no outputs
+        (a fake, a backend that does not introspect) is not checked, exactly as
+        `_resolve_count_output` does not check one.
+        """
+        name = str(settings.get(role, defaults[role]))
+        specs = self._declared("output_specs")
+        if specs and name not in specs:
+            raise ConfigurationError(
+                f"{self.kind.value} element {self.name!r}: `params: segment: {role}:` names "
+                f"output {name!r}, and model {self.model!r} declares {sorted(specs)}"
+            )
+        return name
+
+    def _reduced(self, response: InferenceResponse) -> InferenceResponse:
+        """The engine's two outputs, folded to one area per crop.
+
+        Raises:
+            InferenceError: an output is missing, has the wrong rank, or disagrees about the
+                coefficient count -- :class:`InstanceMaskArea`'s refusals, which all say the
+                engine is not the one this slot was configured for.
+        """
+        areas = self._fold({name: value.numpy() for name, value in response.outputs.items()})
+        return replace(
+            response,
+            outputs={name: Tensor.from_numpy(value) for name, value in areas.items()},
         )
 
 

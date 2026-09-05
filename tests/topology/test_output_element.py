@@ -248,6 +248,33 @@ class TestPerObjectValuesLandOnTheirOwnRow:
         assert event.objects[0].embedding == ()
         assert event.objects[1].embedding == (0.5, 0.25)
 
+    def test_the_mask_area_lands_on_the_row_the_segmenter_cropped(self, element) -> None:
+        """``masks`` is read per row since P6-SEGMENT-CROP: the segmenter cuts one crop per
+        ship, so only the ship's record carries an area and the person's stays ``None``."""
+        element.process(
+            item(
+                detections=detections("ship", "person"),
+                masks={0: np.array([1536.0], dtype=np.float32)},
+            )
+        )
+
+        (event,) = emitted(element)
+        assert event.objects[0].mask_area_px == 1536.0
+        assert event.objects[1].mask_area_px is None, "no segmenter ran for a person"
+
+    def test_an_area_of_zero_is_published_and_is_not_absence(self, element) -> None:
+        """A crop the engine found nothing in scores 0.0, which is an answer. ``None`` would
+        say the segmenter never ran, and the two demand opposite investigations."""
+        element.process(
+            item(
+                detections=detections("ship"),
+                masks={0: np.array([0.0], dtype=np.float32)},
+            )
+        )
+
+        (event,) = emitted(element)
+        assert event.objects[0].mask_area_px == 0.0
+
     def test_a_row_per_detection_sequence_is_read_in_order(self, element) -> None:
         element.process(
             item(

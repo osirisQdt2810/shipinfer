@@ -977,13 +977,241 @@ class TestThePayloadIsHandedOnUntouched:
         assert emitted.meta["frame_hw"] == FRAME_HW
         assert len(emitted.meta["detections"]) == 4
 
-    def test_the_segmenter_is_still_the_forwarding_element(self) -> None:
-        """The crop half of ``PoolSegment`` is one line away and its ``_finish`` is not: a
-        segmentation engine emits mask *prototypes*, and one crop's mask is a fold over two
-        outputs that a per-row scatter-back cannot express. Half a feature is worse than
-        none."""
-        assert PoolSegment.needs_image_ops is False
+    def test_the_segmenter_crops_like_an_embedder_now(self) -> None:
+        """P6-SEGMENT-CROP: what kept ``PoolSegment`` whole-frame was its ``_finish``, not its
+        crop half -- a segmentation engine emits mask *prototypes*, and one crop's mask is a
+        fold over two outputs that the per-row scatter cannot express. ``_reduced`` is that
+        fold, so the element is an ordinary crop element and inherits every declaration
+        this file's subject makes."""
+        assert PoolSegment.needs_image_ops is True
+        assert PoolSegment.selects_rows is True
+        assert PoolSegment.files_raw_response is False
         assert PoolSegment.meta_key == "masks"
+
+
+# -- the segmenter's fold ------------------------------------------------------------------
+
+
+#: The prototype bank's extent, and the coefficient count that goes with it.
+PROTO_HW, COEFFS = (4, 2), 2
+#: One prototype cell in crop pixels: ``16 x 8`` crop over a ``4 x 2`` bank.
+CELL_PX = (CROP[0] * CROP[1]) / (PROTO_HW[0] * PROTO_HW[1])
+
+
+class FakeSegmenter:
+    """A YOLO-seg engine whose mask area says which crop it was given.
+
+    Crop ``i`` gets a prototype plane whose first ``i + 1`` cells are positive and the rest
+    negative, with coefficients ``[1, 0]`` — so the fold counts ``i + 1`` cells and the area
+    is ``(i + 1) * CELL_PX``. The same reasoning as :class:`FakeEmbedder`: every wrong version
+    of the scatter produces areas of the right dtype on rows that exist.
+    """
+
+    #: What the real `ship_segmenter` declares, at toy extents: two outputs, so the element's
+    #: check that `params: {segment: {detections: ...}}` names one of them has something to
+    #: check against.
+    DECLARES = FakeArtifact(
+        FakeConfig(
+            output_specs=(
+                TensorSpec("output0", DataType.FP32, (2, 6 + COEFFS)),
+                TensorSpec("output1", DataType.FP32, (COEFFS, *PROTO_HW)),
+            ),
+            max_batch_size=8,
+        )
+    )
+
+    def __init__(self, *, score: float = 0.9, bound: int | None = None) -> None:
+        self.artifact = self.DECLARES if bound is None else replace_bound(self.DECLARES, bound)
+        self.score = score
+        self.requests: list[InferenceRequest] = []
+
+    def infer(self, request: InferenceRequest) -> ResponseFuture:
+        self.requests.append(request)
+        count = next(iter(request.inputs.values())).shape[0]
+        cells = PROTO_HW[0] * PROTO_HW[1]
+        rows = np.zeros((count, 2, 6 + COEFFS), dtype=np.float32)
+        protos = np.full((count, COEFFS, *PROTO_HW), -1.0, dtype=np.float32)
+        for i in range(count):
+            rows[i, 0, 4], rows[i, 0, 6] = self.score, 1.0  # score, then coefficient 0
+            rows[i, 1, 4] = self.score / 2.0  # a weaker row, so the argmax is checkable
+            protos[i, 0].reshape(-1)[: min(i + 1, cells)] = 1.0
+        future = ResponseFuture(request)
+        future.set_result(
+            InferenceResponse(
+                request_id=request.request_id,
+                model_name=request.model_name,
+                model_version=1,
+                outputs={
+                    "output0": Tensor.from_numpy(rows),
+                    "output1": Tensor.from_numpy(protos),
+                },
+                context=request.context,
+            )
+        )
+        return future
+
+
+def replace_bound(artifact: FakeArtifact, bound: int) -> FakeArtifact:
+    """The same declaration at a different `max_batch_size`, so a chunk boundary is reachable."""
+    config = artifact.config
+    return FakeArtifact(
+        FakeConfig(
+            input_specs=config.input_specs,
+            output_specs=config.output_specs,
+            max_batch_size=bound,
+        )
+    )
+
+
+def segmenter(model: FakeSegmenter, *, params: dict[str, Any] | None = None) -> PoolSegment:
+    """A ``PoolSegment`` opened against ``model``, selecting ships unless told otherwise."""
+    declared: dict[str, Any] = {
+        "input": "images",
+        "classes": ["ship"],
+        "crop": {"size": list(CROP)},
+    }
+    declared.update(params or {})
+    element = PoolSegment("segment", declared, model="ship_segmenter")
+    element.open(ElementContext(models=FakePool(ship_segmenter=model), ops=NumpyImageOps()))
+    return element
+
+
+class TestTheSegmenterFoldsTwoOutputsIntoOneAreaPerRow:
+    """P6-SEGMENT-CROP: the crop half is the embedder's, and ``_reduced`` is the rest.
+
+    A YOLO-seg engine emits detection rows and a bank of mask prototypes, never a mask, so the
+    quantity a record carries is one the model has no output for. The fold runs once per
+    chunk, before the scatter, and what reaches ``meta["masks"]`` is one area per detection.
+    """
+
+    def test_each_area_lands_on_the_crop_it_was_computed_from(self) -> None:
+        """Ships are rows 0 and 2, so crop 0 is row 0 and crop 1 is row 2 — not rows 0 and 1."""
+        element = segmenter(FakeSegmenter())
+
+        result = element.process(item(mixed()))
+
+        assert result is not None
+        assert dict(result.meta["masks"]).keys() == {0, 2}
+        assert result.meta["masks"][0] == pytest.approx([1 * CELL_PX])
+        assert result.meta["masks"][2] == pytest.approx([2 * CELL_PX])
+
+    def test_the_areas_are_filed_as_row_indexed_so_a_fan_in_may_union_them(self) -> None:
+        element = segmenter(FakeSegmenter())
+
+        result = element.process(item(mixed()))
+
+        assert result is not None
+        assert isinstance(result.meta["masks"], RowIndexed)
+
+    def test_a_crop_the_engine_found_nothing_in_reports_no_area(self) -> None:
+        """The refusal :class:`InstanceMaskArea` exists for: below the floor the argmax row is
+        noise, and its mask covers the plane."""
+        element = segmenter(FakeSegmenter(score=0.01))
+
+        result = element.process(item(mixed()))
+
+        assert result is not None
+        assert [tuple(value) for value in result.meta["masks"].values()] == [(0.0,), (0.0,)]
+
+    def test_the_engine_is_asked_for_crops_and_not_for_the_frame(self) -> None:
+        model = FakeSegmenter()
+        element = segmenter(model)
+
+        element.process(item(mixed()))
+
+        (crops,) = [next(iter(r.inputs.values())).numpy() for r in model.requests]
+        assert crops.shape == (2, 3, *CROP), "two ships, cut to the model's extent"
+
+    def test_a_frame_with_no_selected_row_submits_nothing(self) -> None:
+        """The quiet camera, which is the common case at this sizing."""
+        model = FakeSegmenter()
+        element = segmenter(model, params={"classes": ["vehicle"]})
+
+        result = element.process(item(mixed()))
+
+        assert model.requests == [], "no crop is no request"
+        assert result is not None and result.meta["masks"] == {}, "and no area is claimed"
+
+    def test_the_default_output_name_is_the_folds_own(self) -> None:
+        """The key `_reduced` files under, pinned.
+
+        Every assertion above reads `meta["masks"]`, which is keyed by detection row — so the
+        output name round-trips through `_rows_of` and nothing sees it. It IS seen in the
+        scatter-back refusal, and it reached review as
+        `"<member 'name' of 'InstanceMaskArea' objects>"`: reading a `slots=True` dataclass's
+        default off the class gives a descriptor, and `str()` of one does not raise.
+        """
+        assert segmenter(FakeSegmenter())._output == "mask_area_px"
+        assert segmenter(FakeSegmenter(), params={"output": "hull_px"})._output == "hull_px"
+
+    def test_a_misspelt_engine_output_is_refused_at_open(self) -> None:
+        """`outpu0` would otherwise open, report the shard ready, and then fail every frame of
+        every camera — the outage `_check_one_filler_per_row` argues load-time refusal beats."""
+        with pytest.raises(ConfigurationError, match="names output 'outpu0'"):
+            segmenter(FakeSegmenter(), params={"segment": {"detections": "outpu0"}})
+
+    def test_both_cuts_are_settable_from_the_slot(self) -> None:
+        """`score_threshold` and `mask_threshold` are deployment knobs, so both are reachable
+        and an unknown third is refused rather than silently ignored."""
+        element = segmenter(
+            FakeSegmenter(), params={"segment": {"score_threshold": 0.4, "mask_threshold": 0.6}}
+        )
+
+        assert (element._fold.score_threshold, element._fold.mask_threshold) == (0.4, 0.6)
+        with pytest.raises(ConfigurationError, match="does not know"):
+            segmenter(FakeSegmenter(), params={"segment": {"scoer_threshold": 0.4}})
+
+    def test_a_value_the_fold_refuses_is_a_typed_refusal(self) -> None:
+        """A chain-file typo has to raise this project's own type.
+
+        `float("high")` and `InstanceMaskArea.__post_init__`'s range check both raise a bare
+        `ValueError`, which is not a `ShipInferError` — so a caller catching the project's
+        vocabulary would miss a malformed slot and see it as an unhandled exception instead.
+        """
+        with pytest.raises(ConfigurationError, match="not a valid fold"):
+            segmenter(FakeSegmenter(), params={"segment": {"mask_threshold": 1.5}})
+        with pytest.raises(ConfigurationError, match="not a valid fold"):
+            segmenter(FakeSegmenter(), params={"segment": {"score_threshold": "high"}})
+
+    def test_a_frame_chunked_at_the_models_batch_folds_once_per_chunk(self) -> None:
+        """The fold is per RESPONSE, so it has to run before the chunks are joined.
+
+        Five ships at a bound of two is three requests, and the areas still have to land on
+        rows 0..4 in order. Folding after the join would read three separate `(n, R, 6+M)`
+        answers as one and attribute every area to the wrong ship.
+        """
+        model = FakeSegmenter(bound=2)
+        element = segmenter(model, params={"classes": ["ship"]})
+        crowd = Detections(
+            boxes=np.array(
+                [[i * 8, i, i * 8 + 30, i + 30] for i in range(5)], dtype=np.float32
+            ),
+            scores=np.full(5, 0.9, dtype=np.float32),
+            class_ids=np.full(5, 8, dtype=np.int32),
+            labels=("ship",) * 5,
+        )
+
+        result = element.process(item(crowd))
+
+        assert [len(r.inputs["images"].numpy()) for r in model.requests] == [2, 2, 1]
+        assert result is not None
+        areas = {row: float(value[0]) for row, value in result.meta["masks"].items()}
+        assert areas == {i: (i % 2 + 1) * CELL_PX for i in range(5)}, "per chunk, in order"
+
+    def test_an_engine_with_one_output_is_refused_by_name(self) -> None:
+        """A detection-only engine in a ``segment`` slot: the fold says which output is
+        missing rather than filing an area computed from nothing."""
+        element = segmenter(FakeSegmenter())
+        response = InferenceResponse(
+            request_id="r",
+            model_name="ship_segmenter",
+            model_version=1,
+            outputs={"output0": Tensor.from_numpy(np.zeros((1, 2, 8), np.float32))},
+            context=RequestContext(camera_id="cam-1", frame_id=7),
+        )
+
+        with pytest.raises(InferenceError, match="'output1' is missing"):
+            element._reduced(response)
 
 
 # -- metrics -------------------------------------------------------------------------------------

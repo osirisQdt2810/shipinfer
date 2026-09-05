@@ -13,11 +13,44 @@ reason both are declarations.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 import yaml
 
 from shipinfer.core.errors import ChainStructureError
-from shipinfer.topology import ChainSpec, Topology
+from shipinfer.topology import (
+    ChainItem,
+    ChainSpec,
+    Element,
+    ElementContext,
+    ElementKind,
+    Topology,
+    registry_for,
+)
+
+
+@registry_for(ElementKind.EMBED).register("overlap-frame-embed")
+class FrameLevelEmbed(Element):
+    """An ``embed`` element that files ONE vector for the frame, not one per row.
+
+    Not a shipped shape -- every `pool` crop element scatters per row -- which is the point:
+    the check has to ask the element rather than carry a list of implementation names, and
+    without a double that answers `False` nothing here would prove the difference. The
+    `runner-embed` doubles in `tests/runners/test_inprocess.py` are the same shape; this file
+    declares its own rather than importing a test module for its registrations.
+    """
+
+    kind: ClassVar[ElementKind] = ElementKind.EMBED
+    accepts: ClassVar[tuple[str, ...]] = ("bgr@cpu",)
+    produces: ClassVar[tuple[str, ...]] = ("*@*",)
+
+    def _do_open(self, context: ElementContext) -> None:
+        return None
+
+    def _do_process(self, item: ChainItem) -> ChainItem | None:
+        return item
+
 
 #: The head every chain below shares: a detector whose table names both labels.
 HEAD = """
@@ -123,19 +156,27 @@ class TestTwoSlotsCoveringOneRow:
 
     def test_an_element_that_does_not_select_rows_is_not_considered(self) -> None:
         """`selects_rows` is the question, not the kind: a frame-level element cannot contest
-        a row, and a mock chain of them must still load -- `test_inprocess.py`'s chain is two
-        `runner-embed` doubles with no `classes:` at all. The check asks the element rather
-        than carrying a list of implementation names, which is why that flag exists.
-
-        `PoolSegment` is the deliberate gap: it parses `classes:` (the resolved plan needed
-        it) while its Python half is still whole-frame, so it declares `selects_rows = False`
-        and two overlapping segment slots are caught per frame instead. `P6-SEGMENT-CROP` is
-        the item that closes it, and this check covers it for free that day.
+        a row, so two of them with no `classes:` at all must still load. The check asks the
+        element rather than carrying a list of implementation names, which is why that flag
+        exists -- and `tests/runners/test_inprocess.py` drives a chain of exactly this shape.
         """
         chain = load(
-            "seg_a: {impl: pool, kind: segment, model: ship_segmenter, after: detect}",
-            "seg_b: {impl: pool, kind: segment, model: ship_segmenter, after: detect}",
+            "a: {impl: overlap-frame-embed, kind: embed, after: detect}",
+            "b: {impl: overlap-frame-embed, kind: embed, after: detect}",
         )
 
-        assert not chain.node("seg_a").element.selects_rows, "the documented gap"
-        assert len(chain) == 5, "so the chain loads, and the per-frame refusal is the guard"
+        assert not chain.node("a").element.selects_rows, "the flag under test"
+        assert len(chain) == 5, "so two of them load where two crop embedders would not"
+
+    def test_two_segment_slots_are_considered_since_the_segmenter_crops(self) -> None:
+        """The gap this check documented until P6-SEGMENT-CROP.
+
+        `PoolSegment` parsed `classes:` (the resolved plan needed it) while its Python half
+        was whole-frame, so it declared `selects_rows = False` and two overlapping segment
+        slots were caught per frame -- an outage plus a log line per frame -- instead of here.
+        """
+        with pytest.raises(ChainStructureError, match="both fill the event's 'mask_area_px'"):
+            load(
+                "seg_a: {impl: pool, kind: segment, model: ship_segmenter, after: detect}",
+                "seg_b: {impl: pool, kind: segment, model: ship_segmenter, after: detect}",
+            )

@@ -9,8 +9,8 @@ elements:
     model: ship_detector
     params:
       decode: {class_labels: {0: person, 8: ship}, score_threshold: 0.3, max_detections: 120}
-  # `when:` on the one element that selects no rows -- a frame-level guard, and
-  # `meta['fps']` is the only frame-level key anything files (`runners/frames.py`).
+  # A frame-level guard: `meta['fps']` is the only frame-level key anything files
+  # (`runners/frames.py`), and `when: class == ...` on a row-selecting slot is refused.
   segment:
     impl: pool
     model: ship_segmenter
