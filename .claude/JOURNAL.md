@@ -25,6 +25,15 @@ load; `when: class == …` on a segment slot is refused in favour of `params: cl
 `PoolRecognize`, now the only `pool` element that forwards its payload. Each fixture was
 rewritten to say what is true, not to say less.
 
+**And the C++ plane is only half right, which the first PR body got wrong.** It crops per
+ship row, which is why the Python side moved to meet it — but `ObjectStage::do_run` appends
+the engine's raw rows and there is no port of `InstanceMaskArea` anywhere in `csrc/`, so
+`records.cpp` publishes `output0[crop][0][0]`: a box coordinate where this plane now publishes
+an area. Review round 2 caught the claim, I verified it, and the honest reading is that this PR
+made the divergence *worse in kind* rather than causing it — before, this plane published
+`None` and nobody trusted the field. Open as `CSRC-SEGMENT-FOLD-MISSING`, and the record parity
+gate cannot see it: its scenarios state already-reduced `(N, 1)` rows.
+
 **`topology/ship_person.yaml` was a chain the C++ plane would have refused.** Its segment slot
 declared no `classes:`, which `plan_stages.cpp` rejects outright ("a 640x640 crop per person
 as well as per ship"). It says `classes: [ship]` now, and the two planes read the same file the

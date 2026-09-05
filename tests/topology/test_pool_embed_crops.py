@@ -1161,6 +1161,18 @@ class TestTheSegmenterFoldsTwoOutputsIntoOneAreaPerRow:
         with pytest.raises(ConfigurationError, match="does not know"):
             segmenter(FakeSegmenter(), params={"segment": {"scoer_threshold": 0.4}})
 
+    def test_a_value_the_fold_refuses_is_a_typed_refusal(self) -> None:
+        """A chain-file typo has to raise this project's own type.
+
+        `float("high")` and `InstanceMaskArea.__post_init__`'s range check both raise a bare
+        `ValueError`, which is not a `ShipInferError` — so a caller catching the project's
+        vocabulary would miss a malformed slot and see it as an unhandled exception instead.
+        """
+        with pytest.raises(ConfigurationError, match="not a valid fold"):
+            segmenter(FakeSegmenter(), params={"segment": {"mask_threshold": 1.5}})
+        with pytest.raises(ConfigurationError, match="not a valid fold"):
+            segmenter(FakeSegmenter(), params={"segment": {"score_threshold": "high"}})
+
     def test_a_frame_chunked_at_the_models_batch_folds_once_per_chunk(self) -> None:
         """The fold is per RESPONSE, so it has to run before the chunks are joined.
 

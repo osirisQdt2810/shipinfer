@@ -13,8 +13,13 @@ namespace shipinfer::pipeline::events {
         enum class Field { Embedding, ShipId, Similarity, MaskArea, TrackId };
 
         // `_as_float` on the Python plane is `row.reshape(-1)[0]` -- the FIRST element, not a
-        // sum. A `MaskArea` stage already reduces its mask to `(N, 1)`, so the two agree
-        // today; summing would diverge silently the moment a segmenter attached a raw row.
+        // sum, and this matches it. What it does NOT do is reduce: whatever the segment slot
+        // attached, `MaskArea` publishes its first float. That is wrong for a raw YOLO-seg
+        // row and this plane attaches exactly that -- `ObjectStage::do_run` appends the
+        // engine's rows with no combine, so `mask_area_px` here is `output0[crop][0][0]`, a
+        // box coordinate. The Python plane folds (`InstanceMaskArea`, P6-SEGMENT-CROP) and
+        // this plane has no port of it: `CSRC-SEGMENT-FOLD-MISSING` on the ledger. The record
+        // parity gate cannot see it -- its scenarios state already-reduced `(N, 1)` rows.
         void set_field(ObjectRecord& record, Field field, const float* row, int width) {
             switch (field) {
                 case Field::Embedding:

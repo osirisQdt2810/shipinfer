@@ -8,11 +8,11 @@ edits, typo fixes and pure docs.
 ## 2026-09-05 — The segmenter crops (P6-SEGMENT-CROP)
 
 `PoolSegment` letterboxed the whole frame; the C++ plane has always cut a `ship_crops_640`
-set, so `mask_area_px` came from different pixels on each. It extends `_PoolCropElement` now.
-What kept it waiting: a YOLO-seg engine emits rows plus a prototype bank and never a mask, so
-one crop's area is two outputs multiplied and reduced — a fold no per-row scatter can express.
-`_reduced` is that seam, run once per chunk before the scatter, and the ~3 MB prototype bank
-is dropped there rather than carried through reassembly.
+set, so `mask_area_px` came from different pixels on each. It extends `_PoolCropElement` now
+-- the crop half only: that plane has no fold (`CSRC-SEGMENT-FOLD-MISSING`). What kept this
+one waiting: a YOLO-seg engine emits rows plus a prototype bank and never a mask, so a crop's
+area is two outputs multiplied and reduced, which no per-row scatter can express. `_reduced`
+is that seam, run once per chunk before the scatter, dropping the ~3 MB bank there.
 
 Invisible offline and obvious on a GPU: `SinkOutput` never read `masks`, so `mask_area_px`
 was `None` in every event this system has published. It reads it now.

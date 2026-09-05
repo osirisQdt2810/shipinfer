@@ -1608,14 +1608,28 @@ class PoolSegment(_PoolCropElement):
                 f"{unknown}; it takes {sorted(_SEGMENT_KEYS)}"
             )
         defaults = _fold_defaults()
-        self._fold = InstanceMaskArea(
-            crop_hw=self._crop_size,
-            detections=self._engine_output("detections", settings, defaults),
-            prototypes=self._engine_output("prototypes", settings, defaults),
-            name=self._output,
-            score_threshold=float(settings.get("score_threshold", defaults["score_threshold"])),
-            mask_threshold=float(settings.get("mask_threshold", defaults["mask_threshold"])),
-        )
+        try:
+            self._fold = InstanceMaskArea(
+                crop_hw=self._crop_size,
+                detections=self._engine_output("detections", settings, defaults),
+                prototypes=self._engine_output("prototypes", settings, defaults),
+                name=self._output,
+                score_threshold=float(
+                    settings.get("score_threshold", defaults["score_threshold"])
+                ),
+                mask_threshold=float(
+                    settings.get("mask_threshold", defaults["mask_threshold"])
+                ),
+            )
+        except (TypeError, ValueError) as error:
+            # `float("high")` and `InstanceMaskArea.__post_init__`'s range check both raise a
+            # bare `ValueError`, which is outside this project's vocabulary -- so a chain file
+            # typo escaped the type every other refusal in this method raises, and a caller
+            # catching `ShipInferError` would miss it (CONVENTIONS: typed failures).
+            raise ConfigurationError(
+                f"{self.kind.value} element {self.name!r}: `params: segment:` is not a valid "
+                f"fold -- {error}"
+            ) from error
 
     def _engine_output(
         self, role: str, settings: Mapping[str, Any], defaults: Mapping[str, Any]

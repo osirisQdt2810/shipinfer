@@ -2174,6 +2174,26 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       * **P5-C (resolved settings) shrinks to what the plan does not carry**: the queue
         capacities, the reassembly window, the worker count. Same reasoning -- resolved on the
         Python side, carried, not re-parsed.
+      P5-B SURVEYED 5 Sep, and the motivating evidence is stronger than the item claimed: the
+      C++ measurement runs a configuration NO `config.yaml` describes, so the head-to-head is
+      not like-for-like. `scripts/run_cpp_bench.sh` passes `--seg-instances 3
+      --emb-instances 3 --ship-emb-instances 3` while the repository says segmenter 2,
+      person_embedder 2 and **ship_embedder 1** -- a 3x difference on one model -- and it
+      passes no `--det-instances` at all, so the detector takes `bench.cpp`'s own default of 2
+      (`bench.cpp:134-137` defaults 2/1/2/1, a third set of numbers). Worse for the batch
+      window: `--batch-delay-us` is ONE global (default 2000) where the four configs state
+      5000 / 8000 / 8000 / 3000 per model.
+      SHAPE: `repository/extents.py::model_extents` is the seam -- it already reads
+      `config.yaml` on a driverless box for exactly this purpose. Generalise it to a
+      `ModelRuntime` per model (extent, `max_batch_size`, `max_queue_delay_us`, the per-device
+      instance count from `instance_groups`, the input and output names, `engine_file`), fold
+      it into `PlanNode`, add the verbs to `plan_text`/`parse_plan` and to
+      `csrc/.../plan.cpp`, re-emit the goldens, and delete the four argv flags from
+      `bench.cpp` and the three from `run_cpp_bench.sh`. Note the instance count is PER DEVICE
+      (Triton's `instance_groups` semantics, which `repo ls`'s `expand()` already divides
+      among shards), so the plan carries the per-device number and the shard divides it.
+      This is also where `SEGMENT-FOLD-KNOBS-NOT-IN-THE-PLAN` belongs: same format change,
+      same gate.
       Plus P5-A-ALLOC (first half built, queued). Original: P5-A DONE and OPEN as PR #129 (4 Sep). The survey's headline finding was right --
       csrc emitted NO events at all, and `bench.cpp`'s sink comment CLAIMED it built one while
       the body only counted -- so P5-A was writing a writer, not porting one.** Delivered:
@@ -2532,13 +2552,40 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       -- ~50% of a 409600-pixel crop for the near vessels and 0.0 for the two the engine
       scored below the floor, which is `InstanceMaskArea`'s documented refusal working.
       VRAM verified idle after every run.
+      SPLIT at review round 2: this closes the PYTHON half. The C++ plane crops right and does
+      not fold at all, which the PR body first claimed was "already right" -- corrected there,
+      and open as `CSRC-SEGMENT-FOLD-MISSING`.
+
+- [ ] **CSRC-SEGMENT-FOLD-MISSING · the C++ plane has the CROP half of the segmenter and no
+      FOLD half at all** (#137 review round 2, verified 5 Sep). `ObjectStage::do_run`
+      (`csrc/.../graph/stages.cpp`) chunks, infers and `out.append`s the engine's RAW rows --
+      there is no `combine` seam on that stage and no port of `InstanceMaskArea` anywhere in
+      `csrc/` (`grep -rn MaskArea csrc/shipinfer/pipeline/graph/` finds nothing). So
+      `records.cpp`'s `Field::MaskArea` publishes `row[0]` of whatever was attached, which for
+      the shipped `ship_segmenter` is `output0[crop][0][0]` -- the x1 of the first candidate
+      row, 0-640 in crop pixels. The Python plane publishes ~206 000 for the same crop after
+      P6-SEGMENT-CROP. One chain file, one engine, two values four orders of magnitude apart.
+      P6-SEGMENT-CROP made this WORSE IN KIND rather than causing it: before, this plane
+      published `None` and nobody trusted the field; now one plane is plausible and the other
+      is a box coordinate, which is the "plausible, wrong and silent" class
+      `topology/elements/masks.py`'s docstring says the project refuses.
+      THE GATE CANNOT SEE IT: `csrc/tests/test_record_parity.cpp` feeds `build_records`
+      scenarios that state already-reduced `(N, 1)` rows, so the missing fold is invisible to
+      it by construction. A gate for this one has to compare the STAGE outputs, not the
+      records -- which is the seam the fold lives on.
+      WORK: an `ObjectStage` combine seam mirroring the Python `ObjectStage`'s, a `MaskArea`
+      combine with the same arithmetic (argmax row, score floor, einsum against the prototype
+      bank, threshold count, cell -> crop pixels), and a parity gate over the stage.
+      `records.cpp`'s comment was corrected in #137 to say what that plane actually does.
 
 - [ ] **SEGMENT-FOLD-KNOBS-NOT-IN-THE-PLAN** (#137 review, non-blocking 2) — `params:
       {segment: {score_threshold, mask_threshold}}` are read by the Python fold and the
       resolved plan cannot carry either: `PlanNode.score_threshold` is the DETECTOR's decode
-      floor (`topology/plan.py`), and `csrc/.../plan_stages.h` hard-codes `0.25f`. So a chain
-      saying `score_threshold: 0.4` folds at 0.4 here and 0.25 there, from one file, with no
-      refusal on either side. Nothing shipped diverges today because the defaults agree.
+      floor (`topology/plan.py`), and the `0.25f` in `csrc/.../plan_stages.h` is that same
+      detector floor (`DetectConfig::score_threshold`, consumed at `stages.cpp:143`) -- NOT a
+      segmentation one. There is no segmentation floor on that plane because there is no fold
+      at all (`CSRC-SEGMENT-FOLD-MISSING`), which is the stronger version of the same
+      conclusion: a chain saying `score_threshold: 0.4` has nowhere to say it to.
       Either the plan format grows the two fields (plan text + the C++ reader + the goldens)
       or the knobs go. Not folded into #137: it is a plan-format change with its own gate.
 
