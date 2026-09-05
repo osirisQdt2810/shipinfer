@@ -19,6 +19,7 @@
 #include "shipinfer/backends/tensorrt/adapter.h"
 #include "shipinfer/backends/tensorrt/engine.h"
 #include "shipinfer/core/buffers.h"
+#include "shipinfer/core/join_on_unwind.h"
 #include "shipinfer/core/platform.h"
 #include "shipinfer/engine/model.h"
 #include "shipinfer/ingest/manager.h"
@@ -578,6 +579,14 @@ int main(int argc, char** argv) {
                 collector.sweep();
             }
         });
+
+        // Declared AFTER the threads it watches, so it is destroyed BEFORE them: everything
+        // from here to the shutdown block can throw, and until this existed such a throw
+        // aborted the process instead of reporting.
+        JoinOnUnwind join_on_unwind(stopping);
+        for (std::thread& worker : workers) join_on_unwind.watch(worker);
+        join_on_unwind.watch(sweeper);
+        join_on_unwind.wake_with([&queue]() { queue.close(); });
 
         // -- cameras ----------------------------------------------------------------------
         const std::string ship_frames =
