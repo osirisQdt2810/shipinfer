@@ -2577,7 +2577,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       and open as `CSRC-SEGMENT-FOLD-MISSING`.
 
 - [x] **CSRC-SEGMENT-FOLD-MISSING · DONE 5 Sep in two PRs. The CONTRACT half is #139
-      (MERGED); the FOLD and its parity gate are `feat/csrc-mask-fold`.** The reason it was
+      (MERGED); the FOLD and its parity gate are PR #140.** The reason it was
       never ported: `backends/engine_api.h` carried ONE output, so a YOLO-seg engine's
       prototype bank had nowhere to arrive. With N outputs on the contract, `ObjectStage`
       gains an `ObjectCombine` applied per CHUNK before the scatter -- exactly where
@@ -2637,7 +2637,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       too and refuse with the build command in the message, or have `shipinfer plan` refuse at
       write time when the named artefact is absent.
 
-- [x] **SEGMENT-NO-CLASSES-ASYMMETRY · CLOSED 5 Sep on `feat/csrc-mask-fold`, in favour of
+- [x] **SEGMENT-NO-CLASSES-ASYMMETRY · CLOSED 5 Sep in PR #140, in favour of
       PERMITTING it on both planes.** A chain with one segment slot and no `classes:` loaded on
       the Python plane and was REFUSED by `plan_stages.cpp::class_of` -- one chain file with
       two answers. The refusal's argument was that "every row" is a 640x640 crop per person
