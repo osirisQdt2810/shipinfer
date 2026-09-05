@@ -1007,8 +1007,21 @@ class FakeSegmenter:
     of the scatter produces areas of the right dtype on rows that exist.
     """
 
-    def __init__(self, *, score: float = 0.9) -> None:
-        self.artifact = DECLARED
+    #: What the real `ship_segmenter` declares, at toy extents: two outputs, so the element's
+    #: check that `params: {segment: {detections: ...}}` names one of them has something to
+    #: check against.
+    DECLARES = FakeArtifact(
+        FakeConfig(
+            output_specs=(
+                TensorSpec("output0", DataType.FP32, (2, 6 + COEFFS)),
+                TensorSpec("output1", DataType.FP32, (COEFFS, *PROTO_HW)),
+            ),
+            max_batch_size=8,
+        )
+    )
+
+    def __init__(self, *, score: float = 0.9, bound: int | None = None) -> None:
+        self.artifact = self.DECLARES if bound is None else replace_bound(self.DECLARES, bound)
         self.score = score
         self.requests: list[InferenceRequest] = []
 
@@ -1036,6 +1049,18 @@ class FakeSegmenter:
             )
         )
         return future
+
+
+def replace_bound(artifact: FakeArtifact, bound: int) -> FakeArtifact:
+    """The same declaration at a different `max_batch_size`, so a chunk boundary is reachable."""
+    config = artifact.config
+    return FakeArtifact(
+        FakeConfig(
+            input_specs=config.input_specs,
+            output_specs=config.output_specs,
+            max_batch_size=bound,
+        )
+    )
 
 
 def segmenter(model: FakeSegmenter, *, params: dict[str, Any] | None = None) -> PoolSegment:
@@ -1106,6 +1131,60 @@ class TestTheSegmenterFoldsTwoOutputsIntoOneAreaPerRow:
 
         assert model.requests == [], "no crop is no request"
         assert result is not None and result.meta["masks"] == {}, "and no area is claimed"
+
+    def test_the_default_output_name_is_the_folds_own(self) -> None:
+        """The key `_reduced` files under, pinned.
+
+        Every assertion above reads `meta["masks"]`, which is keyed by detection row — so the
+        output name round-trips through `_rows_of` and nothing sees it. It IS seen in the
+        scatter-back refusal, and it reached review as
+        `"<member 'name' of 'InstanceMaskArea' objects>"`: reading a `slots=True` dataclass's
+        default off the class gives a descriptor, and `str()` of one does not raise.
+        """
+        assert segmenter(FakeSegmenter())._output == "mask_area_px"
+        assert segmenter(FakeSegmenter(), params={"output": "hull_px"})._output == "hull_px"
+
+    def test_a_misspelt_engine_output_is_refused_at_open(self) -> None:
+        """`outpu0` would otherwise open, report the shard ready, and then fail every frame of
+        every camera — the outage `_check_one_filler_per_row` argues load-time refusal beats."""
+        with pytest.raises(ConfigurationError, match="names output 'outpu0'"):
+            segmenter(FakeSegmenter(), params={"segment": {"detections": "outpu0"}})
+
+    def test_both_cuts_are_settable_from_the_slot(self) -> None:
+        """`score_threshold` and `mask_threshold` are deployment knobs, so both are reachable
+        and an unknown third is refused rather than silently ignored."""
+        element = segmenter(
+            FakeSegmenter(), params={"segment": {"score_threshold": 0.4, "mask_threshold": 0.6}}
+        )
+
+        assert (element._fold.score_threshold, element._fold.mask_threshold) == (0.4, 0.6)
+        with pytest.raises(ConfigurationError, match="does not know"):
+            segmenter(FakeSegmenter(), params={"segment": {"scoer_threshold": 0.4}})
+
+    def test_a_frame_chunked_at_the_models_batch_folds_once_per_chunk(self) -> None:
+        """The fold is per RESPONSE, so it has to run before the chunks are joined.
+
+        Five ships at a bound of two is three requests, and the areas still have to land on
+        rows 0..4 in order. Folding after the join would read three separate `(n, R, 6+M)`
+        answers as one and attribute every area to the wrong ship.
+        """
+        model = FakeSegmenter(bound=2)
+        element = segmenter(model, params={"classes": ["ship"]})
+        crowd = Detections(
+            boxes=np.array(
+                [[i * 8, i, i * 8 + 30, i + 30] for i in range(5)], dtype=np.float32
+            ),
+            scores=np.full(5, 0.9, dtype=np.float32),
+            class_ids=np.full(5, 8, dtype=np.int32),
+            labels=("ship",) * 5,
+        )
+
+        result = element.process(item(crowd))
+
+        assert [len(r.inputs["images"].numpy()) for r in model.requests] == [2, 2, 1]
+        assert result is not None
+        areas = {row: float(value[0]) for row, value in result.meta["masks"].items()}
+        assert areas == {i: (i % 2 + 1) * CELL_PX for i in range(5)}, "per chunk, in order"
 
     def test_an_engine_with_one_output_is_refused_by_name(self) -> None:
         """A detection-only engine in a ``segment`` slot: the fold says which output is

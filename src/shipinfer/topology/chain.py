@@ -1038,8 +1038,8 @@ def _check_row_indexed_meta(nodes: Sequence[ElementNode]) -> None:
 
     ``recognize: {impl: pool}`` files ``meta["identities"]`` as ``{output name: Tensor}`` and
     ``output`` reads that key per row, so the pair fails on every frame: the chain loads and
-    publishes nothing. Both halves are declarations (``reads_per_row``, ``files_raw_response``),
-    so ``segment: {impl: pool}`` still loads -- nothing reads ``masks`` per row.
+    publishes nothing. BOTH halves are declarations, which is why ``segment: {impl: pool}``
+    loads although ``output`` reads ``masks`` per row too: that slot scatters.
 
     Raises:
         ChainStructureError: naming the slot, the key, and the implementation that works.

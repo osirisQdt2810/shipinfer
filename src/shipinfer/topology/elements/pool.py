@@ -1544,8 +1544,10 @@ def _fold_defaults() -> dict[str, Any]:
 
 
 #: What `params: {segment: {...}}` accepts -- a typo there would otherwise be a silently
-#: ignored threshold, which is the failure `InstanceMaskArea` exists to refuse.
-_SEGMENT_KEYS = frozenset({"detections", "prototypes", "score_threshold"})
+#: ignored threshold, the failure `InstanceMaskArea` exists to refuse. Both cuts are here: the
+#: score floor below which a crop reports no area, and the mask probability at which a cell
+#: counts as inside. `InstanceMaskArea` validates the second's range.
+_SEGMENT_KEYS = frozenset({"detections", "prototypes", "score_threshold", "mask_threshold"})
 
 
 @registry_for(ElementKind.SEGMENT).register("pool")
@@ -1582,7 +1584,7 @@ class PoolSegment(_PoolCropElement):
         model must say which output holds one row per crop") is exactly wrong here, since a
         segmentation engine has two outputs by construction and both are read.
         """
-        return str(self.params.get("output") or InstanceMaskArea.name)
+        return str(self.params.get("output") or _fold_defaults()["name"])
 
     def _do_open(self, context: ElementContext) -> None:
         """Build the fold once the crop size is known, since it is one of its arguments.
@@ -1608,11 +1610,32 @@ class PoolSegment(_PoolCropElement):
         defaults = _fold_defaults()
         self._fold = InstanceMaskArea(
             crop_hw=self._crop_size,
-            detections=str(settings.get("detections", defaults["detections"])),
-            prototypes=str(settings.get("prototypes", defaults["prototypes"])),
+            detections=self._engine_output("detections", settings, defaults),
+            prototypes=self._engine_output("prototypes", settings, defaults),
             name=self._output,
             score_threshold=float(settings.get("score_threshold", defaults["score_threshold"])),
+            mask_threshold=float(settings.get("mask_threshold", defaults["mask_threshold"])),
         )
+
+    def _engine_output(
+        self, role: str, settings: Mapping[str, Any], defaults: Mapping[str, Any]
+    ) -> str:
+        """One of the fold's two engine outputs, checked against what the model declares.
+
+        `outpu0` for `output0` otherwise loads, opens and reports every shard ready -- then
+        raises on every frame of every camera, which is the outage `_check_one_filler_per_row`
+        argues a load-time refusal is strictly better than. A model that declares no outputs
+        (a fake, a backend that does not introspect) is not checked, exactly as
+        `_resolve_count_output` does not check one.
+        """
+        name = str(settings.get(role, defaults[role]))
+        specs = self._declared("output_specs")
+        if specs and name not in specs:
+            raise ConfigurationError(
+                f"{self.kind.value} element {self.name!r}: `params: segment: {role}:` names "
+                f"output {name!r}, and model {self.model!r} declares {sorted(specs)}"
+            )
+        return name
 
     def _reduced(self, response: InferenceResponse) -> InferenceResponse:
         """The engine's two outputs, folded to one area per crop.

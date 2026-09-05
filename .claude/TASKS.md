@@ -2533,6 +2533,15 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       scored below the floor, which is `InstanceMaskArea`'s documented refusal working.
       VRAM verified idle after every run.
 
+- [ ] **SEGMENT-FOLD-KNOBS-NOT-IN-THE-PLAN** (#137 review, non-blocking 2) — `params:
+      {segment: {score_threshold, mask_threshold}}` are read by the Python fold and the
+      resolved plan cannot carry either: `PlanNode.score_threshold` is the DETECTOR's decode
+      floor (`topology/plan.py`), and `csrc/.../plan_stages.h` hard-codes `0.25f`. So a chain
+      saying `score_threshold: 0.4` folds at 0.4 here and 0.25 there, from one file, with no
+      refusal on either side. Nothing shipped diverges today because the defaults agree.
+      Either the plan format grows the two fields (plan text + the C++ reader + the goldens)
+      or the knobs go. Not folded into #137: it is a plan-format change with its own gate.
+
 - [ ] **SEGMENT-NO-CLASSES-ASYMMETRY** — a chain with ONE segment slot and no `classes:`
       loads on the Python plane (it means "segment every row") and is REFUSED by the C++ plane
       (`csrc/.../plan_stages.cpp::class_of`, added in #132's review, because "every row" is a
