@@ -261,6 +261,7 @@ class TestBothPlanesRefuseTheSameText:
         ("plan 1 x\nnode a b c\nfold_mask 1\n", "and at 1, where it divides by zero"),
         ("plan 1 x\nnode a b c\nfold_mask 1.5\n", "and past it"),
         ("plan 1 x\nnode a b c\nfold_score nan\n", "a non-finite score floor"),
+        ("plan 1 x\nnode a b c\nfold_detections a b\n", "an output name holding a space"),
     )
     ACCEPTED = (
         ("plan 1 -\n", "`-` is the empty chain name"),
@@ -282,6 +283,8 @@ class TestBothPlanesRefuseTheSameText:
         ("plan 1 x\nnode a b c\nartefact m/1/model.plan\n", "a repository-relative artefact"),
         ("plan 1 x\nnode a b c\nfold_mask 0.5\nfold_score 0.25\n", "the two fold cuts"),
         ("plan 1 x\nnode a b c\nfold_score 0.0\n", "a floor of zero: every crop is an area"),
+        ("plan 1 x\nnode a b c\nfold_detections det\nfold_prototypes proto\n",
+         "an export that names its outputs something other than output0/output1"),
     )
 
     @pytest.mark.parametrize("text,why", REFUSED, ids=[why for _, why in REFUSED])
@@ -316,6 +319,30 @@ class TestTheFoldCutsCross:
         chain = Topology.from_spec(ChainSpec.from_yaml(self.chain(segment)))
         return plan_text(resolve_plan(chain, dims=dims))
 
+    def test_the_engine_output_names_reach_the_plan(
+        self, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """Which slot an export puts its prototypes in is the export's choice, so a plan that
+        omitted these made the other plane assume `output0`/`output1` -- and refuse a valid
+        engine, loudly, from the wrong plane."""
+        text = self.resolved(
+            "{impl: pool, model: ship_segmenter, params: {classes: [ship], "
+            "segment: {detections: boxes, prototypes: protos}}}",
+            dims,
+        )
+
+        assert "fold_detections boxes" in text
+        assert "fold_prototypes protos" in text
+
+    def test_the_default_output_names_are_carried_too(
+        self, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        text = self.resolved(
+            "{impl: pool, model: ship_segmenter, params: {classes: [ship]}}", dims
+        )
+
+        assert "fold_detections output0" in text and "fold_prototypes output1" in text
+
     def test_a_stated_cut_reaches_the_plan(self, dims: dict[str, tuple[int, int]]) -> None:
         text = self.resolved(
             "{impl: pool, model: ship_segmenter, params: {classes: [ship], "
@@ -345,6 +372,7 @@ class TestTheFoldCutsCross:
         )
 
         assert "fold_score" not in text and "fold_mask" not in text
+        assert "fold_detections" not in text and "fold_prototypes" not in text
 
     def test_a_misspelt_fold_key_is_refused_at_resolve_and_not_defaulted(
         self, dims: dict[str, tuple[int, int]]

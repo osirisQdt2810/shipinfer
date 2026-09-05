@@ -2610,17 +2610,19 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       the element. Goldens re-emitted; 89 + 52 checks green on the two C++ gates.
       NOT the whole class, and #141's review is right that the item should not have claimed it:
       see `SEGMENT-FOLD-OUTPUT-NAMES-DO-NOT-CROSS` below.
-- [ ] **SEGMENT-FOLD-OUTPUT-NAMES-DO-NOT-CROSS** (#141 review, non-blocking 3) — the two
-      CUTS cross now; the three NAMES do not. `MaskAreaSpec.detections/prototypes/name` are
-      `output0`/`output1`/`mask_area_px` on the C++ side, while the Python element accepts
-      `params: {segment: {detections: ..., prototypes: ...}}` and `params: {output: ...}` and
-      carries them nowhere. The engine-output pair fails LOUDLY over there (a missing output is
-      a `ConfigError`), but `params: {output: ship_area}` is a SILENT event-key divergence --
-      the Python plane files the area under `ship_area` and the C++ plane under
-      `mask_area_px`, so one plane's records carry a field the other's do not. Same shape as
-      the cuts: three more plan verbs, or a decision that those keys are not deployment
-      settings and the element should stop accepting them.
-
+- [x] **SEGMENT-FOLD-OUTPUT-NAMES-DO-NOT-CROSS · DONE 5 Sep on `feat/fold-names-cross`, and
+      the review's "silent event-key divergence" half turned out NOT to be one -- checked
+      rather than taken.** `params: {output: ...}` on a segment slot set `self._output`, which
+      is the key inside the FOLDED response and nothing else: `_finish` scatters by row index
+      under `meta_key = "masks"`, `SinkOutput` reads that key by name and publishes
+      `mask_area_px` whatever the slot said. So it changed nothing observable -- a knob an
+      operator could write with no effect, which is why it is REFUSED now rather than carried:
+      putting an internal name across a plane boundary for no effect is the opposite of what a
+      resolved plan is for.
+      The two that DO matter cross: `fold_detections` and `fold_prototypes`, because which
+      slot a YOLO-seg export puts its prototypes in is the export's choice, and assuming
+      `output0`/`output1` refused a valid engine loudly from the wrong plane. Six new rows on
+      the shared refusal table, both planes; `test_plan_parity` 91, `test_plan_stages` 54.
 - [ ] **ENGINE-DIMS-CAN-DISAGREE-WITH-WIDTH** (#139 review, non-blocking) —
       `TrtEngineAdapter::output_row_elems` goes through `TensorSpec::elements_per_row()`,
       which CLAMPS a negative dim to 1 (`backends/tensorrt/engine.h`), while `output_dims`
