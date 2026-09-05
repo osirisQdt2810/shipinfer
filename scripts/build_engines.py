@@ -55,6 +55,10 @@ class Target:
     version_dir: Path | None
 
 
+#: The names below, as the shipped package states them -- imported rather than restated so a
+#: target added here cannot leave `shipinfer plan`'s remedy saying the opposite. The direction
+#: is deliberate: `scripts/` is not in the wheel, so the dependency points the shippable way.
+
 TARGETS = (
     Target(
         "ship_detector",

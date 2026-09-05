@@ -14,6 +14,7 @@ import pytest
 
 from shipinfer.cli.commands.plan import plan
 from shipinfer.core.errors import ChainStructureError
+from shipinfer.repository.build_targets import INSTALLED_BY_BUILD_ENGINES
 from shipinfer.topology.plan import parse_plan
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -80,16 +81,21 @@ class TestItSaysWhichArtefactsAreNotThereYet:
         assert "--only reid" in note, "and the two-step that works for the one it does not"
         assert "build_engines.py --only ship_embedder" not in note, "which would exit 2"
 
-    def test_the_buildable_set_is_read_from_the_script(self) -> None:
-        """Not restated. A hard-coded copy makes the note say "no target for this" the day a
-        target is added, which is the stale instruction this diagnostic exists to remove."""
-        from scripts.build_engines import TARGETS
-        from shipinfer.cli.commands.plan import _installed_by_the_script
+    def test_the_shipped_set_and_the_script_agree(self) -> None:
+        """Pinned HERE, where both are importable, and not by `src/` importing the script.
 
-        assert _installed_by_the_script() == {
+        `scripts/` is in neither the wheel (`packages.find` is `src` only) nor the runtime
+        image, so `from scripts.build_engines import ...` inside `src/shipinfer/` crashes
+        exactly where the note is meant to run -- and `pythonpath = [".", "src"]` hides that
+        from the offline tier. The fact lives in the shipped package, the script imports it,
+        and this is what keeps the two from drifting.
+        """
+        from scripts.build_engines import TARGETS
+
+        assert {
             target.name for target in TARGETS if target.version_dir is not None
-        }
-        assert "ship_embedder" not in _installed_by_the_script(), "the case that bit"
+        } == INSTALLED_BY_BUILD_ENGINES
+        assert "ship_embedder" not in INSTALLED_BY_BUILD_ENGINES, "the case that bit"
 
     def test_a_model_the_repository_does_not_index_is_skipped(
         self, chain_file: Path, tmp_path: Path, capsys
@@ -142,32 +148,40 @@ class TestItSaysWhichArtefactsAreNotThereYet:
         assert "platform: pytorch" in note, "which is why the plan cannot be run as written"
         assert "build_engines.py" not in note, "and not a TensorRT build for a torch chain"
 
-    def test_an_onnx_a_tensorrt_model_will_be_built_from_is_not_missing(
+    def test_an_onnx_beside_it_is_reported_with_the_difference_between_the_planes(
         self, chain_file: Path, bare: Path, tmp_path: Path, capsys
     ) -> None:
-        """`resolve_engine` compiles a sibling `.onnx` at load, keyed to this TensorRT, GPU
-        and precision -- and the README tells an operator to drop one there. So a version
-        directory holding one is complete, and a note about the plan would fire forever."""
+        """`resolve_engine` is a PYTHON-plane mechanism. The plan's reader is `csrc/`, which
+        opens the path verbatim -- and autobuild would not write `model.plan` anyway, since
+        `cache_name` produces `<stem>.<digest>.trt<v>.sm<cc>.<precision>.plan`. Staying quiet
+        here was the silence coming back one layer down.
+        """
         for name in ("ship_detector", "ship_embedder"):
-            (bare / name / "1" / "model.onnx").write_bytes(b"an onnx graph")
+            (bare / name / "1" / "yolo26n.onnx").write_bytes(b"an onnx graph")
 
         assert plan(chain_file, bare, tmp_path / "chain.plan") == 0
+        note = capsys.readouterr().err
 
-        assert capsys.readouterr().err == ""
+        assert "2 artefact(s)" in note, "absent for the plan's reader, so reported"
+        assert "yolo26n.onnx` is beside it" in note, "and the remedy names what IS there"
+        assert "the plan's reader does not" in note
 
-    def test_two_onnx_files_are_not_treated_as_buildable(
+    def test_two_onnx_files_do_not_get_the_one_onnx_remedy(
         self, chain_file: Path, bare: Path, tmp_path: Path, capsys
     ) -> None:
-        """`_find_onnx` refuses two of them without `parameters.onnx_file`, so that directory
-        loads with a `BackendLoadError` -- staying quiet about it would be the silence again,
-        one layer down."""
+        """A remedy naming "the" ONNX would have to pick one, and `_find_onnx` refuses that
+        pair without `parameters.onnx_file` -- so the artefact is reported with the build
+        remedy instead of a file the loader will not accept."""
         for name in ("ship_detector", "ship_embedder"):
             for stem in ("a", "b"):
                 (bare / name / "1" / f"{stem}.onnx").write_bytes(b"an onnx graph")
 
         assert plan(chain_file, bare, tmp_path / "chain.plan") == 0
+        note = capsys.readouterr().err
 
-        assert "2 artefact(s)" in capsys.readouterr().err
+        assert "2 artefact(s)" in note
+        assert "is beside it" not in note, "no single ONNX to name"
+        assert "build_engines.py --only ship_detector" in note
 
     def test_the_plan_is_still_written(
         self, chain_file: Path, bare: Path, tmp_path: Path

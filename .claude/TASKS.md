@@ -2669,12 +2669,23 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       platform spellings (`platform: onnx` resolved to `None` and opened the directory); the
       C++ message handed the same wrong build command the Python note had just been split to
       avoid; and `_BUILDABLE` duplicated the script's own `TARGETS`.
+      r3 -- my r2 fix read the set from `scripts.build_engines`, and `scripts/` is in NEITHER
+      the wheel (`packages.find` is `src` only) nor the runtime image, so the note would
+      `ModuleNotFoundError` in exactly the container it was written for; `pythonpath = [".",
+      "src"]` hid that from the offline tier through two green rounds. And my lone-`.onnx`
+      exemption abandoned this item's own argument -- `resolve_engine` is a PYTHON-plane
+      mechanism while the plan's reader opens the path verbatim, so staying quiet there was
+      the silence coming back one layer down.
       SETTLED: the note checks `engine_file` -- what the plan NAMES -- and chooses the remedy
-      by platform and by whether the script installs it, one line per artefact with the
-      repository-relative path. The set is read from `scripts/build_engines.py::TARGETS` and a
-      test pins that. The backend detour is reverted entirely; it was only needed because the
-      check was reading the wrong file. The two embedder configs saying "Built by
-      `scripts/build_engines.py`" were already false and now say what places them.
+      by platform (through `BACKENDS.canonical`, so `platform: trt` is not told to build a
+      TensorRT repository it already is), by whether an `.onnx` is beside it (naming which
+      plane can use it), and by whether the script installs it. The fact about the script
+      lives in `repository/build_targets.py` and the SCRIPT imports it -- the dependency
+      pointing the shippable way -- with `tests/test_architecture.py` growing a rule that
+      `src/shipinfer/**` imports no `scripts.*`, because `pythonpath` will hide the next one
+      too. The backend detour is reverted entirely; it existed only because the check read the
+      wrong file. The two embedder configs saying "Built by `scripts/build_engines.py`" were
+      already false and now say what places them.
 - [x] **SEGMENT-NO-CLASSES-ASYMMETRY · CLOSED 5 Sep in PR #140, in favour of
       PERMITTING it on both planes.** A chain with one segment slot and no `classes:` loaded on
       the Python plane and was REFUSED by `plan_stages.cpp::class_of` -- one chain file with

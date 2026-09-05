@@ -12,6 +12,10 @@ import sys
 from pathlib import Path
 
 from shipinfer.repository import ModelEntry, ModelRepository
+from shipinfer.repository.build_targets import (
+    INSTALLED_BY_BUILD_ENGINES,
+    REID_ENGINE,
+)
 from shipinfer.repository.resolved import model_extents, model_runtimes
 from shipinfer.topology import Topology, load_topology
 from shipinfer.topology.plan import plan_text, resolve_plan
@@ -70,29 +74,43 @@ def _wanted_artefact(entry: ModelEntry) -> str | None:
     ``engine_file`` and not what this model's own backend opens: a plan's `artefact` line is
     `engine_file` whatever `platform:` says, because the plane reading a plan is TensorRT-only.
     So a `platform: pytorch` repository genuinely lacks it -- what would be wrong is
-    prescribing a TensorRT build, which is the REMEDY's job. ``None`` where the file is there,
-    or where `resolve_engine` will BUILD it from the one `.onnx` `1/README.md` says to drop
-    there; two of them is `_find_onnx`'s own refusal, not a missing artefact.
+    prescribing a TensorRT build, which is the REMEDY's job. ``None`` ONLY where the file is
+    there: a sibling `.onnx` is not an exemption, because `resolve_engine` is a PYTHON-plane
+    mechanism while the plan's reader opens the path verbatim, and would not write this name
+    anyway. The ONNX belongs in the remedy, which says which plane can use it.
     """
-    directory = entry.root / str(entry.latest)
     wanted = entry.config.engine_file
-    if (directory / wanted).is_file():
-        return None
-    if entry.config.platform == "tensorrt" and len(list(directory.glob("*.onnx"))) == 1:
+    if (entry.root / str(entry.latest) / wanted).is_file():
         return None
     return f"{entry.name}/{entry.latest}/{wanted}"
 
 
-def _remedies(missing: list[tuple[ModelEntry, str]]) -> list[tuple[str, str]]:
-    """One `(path, remedy)` per missing artefact, with the remedy that actually works.
+def _is_tensorrt(platform: str) -> bool:
+    """Through the registry, so a repository spelling it `trt` is not told to build one.
 
-    Three, because one command does not cover them: `build_engines.py` has targets that
-    install into a version directory, a `reid` target that builds an engine and installs it
-    nowhere, and nothing at all for a repository that is not TensorRT.
+    `BACKENDS.register_lazy("tensorrt", ..., "trt")` makes that alias a valid TensorRT
+    repository, and a literal comparison sent it down the "this is not TensorRT" branch and
+    withheld the remedy that works.
+    """
+    from shipinfer.backends.registry import BACKENDS
+
+    try:
+        return BACKENDS.canonical(platform) == "tensorrt"
+    except Exception:
+        return False
+
+
+def _remedies(missing: list[tuple[ModelEntry, str]]) -> list[tuple[str, str]]:
+    """One `(path, remedy)` per missing artefact, with the remedy that works for IT.
+
+    Four, because one command covers none of the others: a repository that is not TensorRT, a
+    directory holding the `.onnx` only the PYTHON plane builds from, a model
+    `build_engines.py` installs, and the two it builds an engine for and installs nowhere.
     """
     out: list[tuple[str, str]] = []
     for entry, path in missing:
-        if entry.config.platform != "tensorrt":
+        onnx = sorted(p.name for p in (entry.root / str(entry.latest)).glob("*.onnx"))
+        if not _is_tensorrt(entry.config.platform):
             out.append(
                 (
                     path,
@@ -100,7 +118,19 @@ def _remedies(missing: list[tuple[ModelEntry, str]]) -> list[tuple[str, str]]:
                     f"read by a TensorRT-only plane; build a TensorRT repository for it",
                 )
             )
-        elif entry.name in _installed_by_the_script():
+        elif len(onnx) == 1:
+            # The Python plane builds this at load; the plane that reads a plan does not.
+            # Saying so is the point: the two behave differently for one directory, and the
+            # operator is about to run the one that cannot.
+            out.append(
+                (
+                    path,
+                    f"`{onnx[0]}` is beside it, which the PYTHON plane builds at load "
+                    f"(`resolve_engine`) and the plan's reader does not — build the plan "
+                    f"itself on the node that runs it",
+                )
+            )
+        elif entry.name in INSTALLED_BY_BUILD_ENGINES:
             out.append(
                 (
                     path,
@@ -116,20 +146,8 @@ def _remedies(missing: list[tuple[ModelEntry, str]]) -> list[tuple[str, str]]:
                 (
                     path,
                     "`python scripts/build_engines.py --only reid` then copy "
-                    "`models/reid_r50_fp32.engine` to it — that target builds an engine and "
-                    "installs it nowhere",
+                    f"`{REID_ENGINE}` to it — that target builds an engine and installs it "
+                    "nowhere",
                 )
             )
     return out
-
-
-def _installed_by_the_script() -> frozenset[str]:
-    """Which models `scripts/build_engines.py` writes into a version directory.
-
-    Read from the script rather than restated: a hard-coded copy makes the note say "no target
-    for these" the day a target is added, which is the class of stale instruction this whole
-    diagnostic exists to remove.
-    """
-    from scripts.build_engines import TARGETS
-
-    return frozenset(target.name for target in TARGETS if target.version_dir is not None)
