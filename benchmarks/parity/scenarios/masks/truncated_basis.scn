@@ -1,0 +1,14 @@
+# A response both planes must REFUSE, so it has no golden.
+#
+# The detection rows carry 2 mask coefficients and the bank has 3 planes: one of the two
+# outputs is not the one this stage was configured for. Combining them would build a mask from
+# a truncated basis -- a plausible mask from the wrong planes, which is worse than no mask.
+scenario truncated_basis
+crop 16 8
+rows 1 8
+protos 3 4 2
+score_threshold 0.25
+mask_threshold 0.5
+
+det 0 0 0.9 1 0
+plane 0 0 1 1 1 1 1 1 1 1

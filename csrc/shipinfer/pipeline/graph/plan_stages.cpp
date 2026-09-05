@@ -20,20 +20,15 @@ namespace shipinfer {
             // element with no `classes:` means on the Python plane. A declared EMPTY
             // selection is no rows.
             if (!node.classes) {
-                // ...except for a SEGMENT slot, where "every row" is not a default anybody
-                // chose. `PoolSegment` did not parse `classes:` at all until #132's review,
-                // so the production plan carried no selection and this plane read it as the
-                // ship segmenter on every person crop at 640x640 -- an order of magnitude of
-                // segmenter work, and a `mask_area_px` filed on every person record from a
-                // batch of the wrong class. The chain can say `classes: [ship]` now, so this
-                // asks it to rather than guessing.
-                if (node.kind == "segment") {
-                    throw ConfigError(
-                        "slot '" + node.slot +
-                        "' segments and declares no `classes:`, which this plane would read "
-                        "as every row -- a 640x640 crop per person as well as per ship. Say "
-                        "which rows it segments");
-                }
+                // Every row, for a segment slot as for an embed one. This REFUSED a segment
+                // slot with no `classes:` between #132 and here, on the argument that "every
+                // row" was a 640x640 crop per person that nobody chose -- true, and equally
+                // true of an embedder, which has always been allowed to say it. The reason
+                // the two differed was that `PoolSegment` did not crop at all on the Python
+                // plane, so a plan with no selection meant different work on each side. Since
+                // P6-SEGMENT-CROP it means the same work on both, so one chain file gets one
+                // answer and the cost is the chain author's to choose
+                // (`SEGMENT-NO-CLASSES-ASYMMETRY`).
                 return CropSpec::kAnyClass;
             }
             if (node.classes->empty()) return CropSpec::kNoClass;
@@ -186,9 +181,24 @@ namespace shipinfer {
         built.stage_names.push_back(detect->slot);
         if (!croppers.empty()) built.stage_names.push_back("crop");
         for (const PlanNode* node : croppers) {
-            built.crops.push_back(crop_spec_of(plan, *node));
-            built.objects.push_back(
-                {node->slot, node->model, crop_payload_of(node->slot), output_of(node->slot)});
+            const CropSpec crop = crop_spec_of(plan, *node);
+            built.crops.push_back(crop);
+            ObjectStageSpec object;
+            object.slot = node->slot;
+            object.model = node->model;
+            object.source = crop_payload_of(node->slot);
+            object.output = output_of(node->slot);
+            // A SEGMENT slot's engine answers detection rows and a prototype bank, never a
+            // mask, so its stage folds the two into one area per crop before scattering --
+            // `PoolSegment._reduced` on the Python plane. An embedder's answers one vector per
+            // crop already, so it has no fold and its response is scattered as it is.
+            if (node->kind == "segment") {
+                MaskAreaSpec fold;
+                fold.crop_height = crop.height;
+                fold.crop_width = crop.width;
+                object.fold = fold;
+            }
+            built.objects.push_back(std::move(object));
             built.stage_names.push_back(node->slot);
         }
         // An `ObjectBatch` is keyed by a stage's OUTPUT name and not its own (`stages.cpp`:

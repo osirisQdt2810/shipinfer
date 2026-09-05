@@ -120,7 +120,7 @@ namespace {
     void test_a_scalar_field_takes_the_rows_first_element() {
         // `_as_float` on the Python plane is `row.reshape(-1)[0]`, NOT a sum. An earlier
         // version summed the row and said in a comment that Python did too; they agree only
-        // because `MaskArea` already reduces to `(N, 1)`.
+        // because a segment stage's fold already reduced its response to `(N, 1)`.
         EmissionInputs result = a_frame();
         result.batches["ship_segmenter_out"] =
             a_batch("ship_segmenter_out", {1}, {100.f, 7.f}, 2);

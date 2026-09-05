@@ -20,9 +20,16 @@ namespace shipinfer {
             dag.add(std::make_unique<CropStage>("crop", planned.crops,
                                                 planned.detect.max_objects, scratch));
         }
-        for (const std::array<std::string, 4>& object : planned.objects) {
-            dag.add(std::make_unique<ObjectStage>(object[0], *models.at(object[1]), object[2],
-                                                  object[3], timeout));
+        for (const ObjectStageSpec& object : planned.objects) {
+            ObjectCombine combine;
+            if (object.fold) {
+                combine = [spec = *object.fold](const InferenceResponse& response) {
+                    return mask_area(response, spec);
+                };
+            }
+            dag.add(std::make_unique<ObjectStage>(object.slot, *models.at(object.model),
+                                                  object.source, object.output, timeout,
+                                                  std::move(combine)));
         }
         return dag;
     }

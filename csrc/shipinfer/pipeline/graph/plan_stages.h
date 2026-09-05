@@ -12,12 +12,14 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
 #include "shipinfer/core/types.h"
 #include "shipinfer/pipeline/events/records.h"
+#include "shipinfer/pipeline/graph/mask_area.h"
 #include "shipinfer/pipeline/graph/plan.h"
 
 namespace shipinfer {
@@ -48,13 +50,24 @@ namespace shipinfer {
     // tables the event writer needs, the crop sets, and the slots this plane has no stage for.
     // One decision, so a label table that disagrees with the crop specs -- the defect ADR-020
     // cites -- cannot come back.
+    // One per-object stage: which model runs on which payload, and the fold that turns its
+    // response into one row per crop. `fold` is set only for a SEGMENT slot -- an embedder's
+    // engine already answers one vector per crop, so its stage scatters the response as it is.
+    struct ObjectStageSpec {
+        std::string slot;
+        std::string model;
+        std::string source;  // the crop payload it consumes
+        std::string output;  // the `ObjectBatch` it attaches
+        std::optional<MaskAreaSpec> fold;
+    };
+
     struct PlanStages {
         std::string detect_slot;
         std::string detect_model;
         DetectConfig detect;
         std::vector<CropSpec> crops;
-        //: `<slot, model, source payload, output batch>`, in the plan's order.
-        std::vector<std::array<std::string, 4>> objects;
+        //: The per-object stages, in the plan's order.
+        std::vector<ObjectStageSpec> objects;
         std::vector<std::string> stage_names;
         pipeline::events::ClassLabels labels;
         pipeline::events::FieldMap fields;

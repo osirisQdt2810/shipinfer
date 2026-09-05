@@ -238,10 +238,12 @@ namespace shipinfer {
     // ---------------------------------------------------------------------------
 
     ObjectStage::ObjectStage(std::string name, Model& model, std::string source,
-                             std::string output, std::chrono::milliseconds timeout)
+                             std::string output, std::chrono::milliseconds timeout,
+                             ObjectCombine combine)
         : ModelStage(std::move(name), model, timeout, {source}, {source}, {output}),
           source_(std::move(source)),
-          output_(std::move(output)) {}
+          output_(std::move(output)),
+          combine_(std::move(combine)) {}
 
     size_t ObjectStage::do_run(FrameState& state) {
         const DevicePayload* payload = state.payload(source_);
@@ -263,9 +265,20 @@ namespace shipinfer {
                                    " returned " + std::to_string(response.rows) +
                                    " row(s) for " + std::to_string(count) + " object(s)");
             }
-            const OutputTensor& rows = response.first();
-            out.append(rows.data.data(), static_cast<int>(count),
-                       static_cast<int>(rows.row_elems), payload->object_indices, start);
+            // Per chunk and before the append, which is the whole point of the seam: the fold
+            // reads one response's outputs together, and what is scattered is already one row
+            // per crop. `PoolSegment` applies `_reduced` at exactly this point.
+            const OutputTensor rows_out = combine_ ? combine_(response) : response.first();
+            if (rows_out.data.size() != count * rows_out.row_elems) {
+                throw BackendError("stage " + name() + ": the fold answered " +
+                                   std::to_string(rows_out.data.size()) + " float(s) for " +
+                                   std::to_string(count) + " crop(s) of " +
+                                   std::to_string(rows_out.row_elems) +
+                                   "; a scatter needs "
+                                   "one row per crop");
+            }
+            out.append(rows_out.data.data(), static_cast<int>(count),
+                       static_cast<int>(rows_out.row_elems), payload->object_indices, start);
         }
         state.attach(std::move(out));
         return payload->rows;

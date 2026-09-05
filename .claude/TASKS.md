@@ -2576,37 +2576,23 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       not fold at all, which the PR body first claimed was "already right" -- corrected there,
       and open as `CSRC-SEGMENT-FOLD-MISSING`.
 
-- [~] **CSRC-SEGMENT-FOLD-MISSING · SPLIT 5 Sep. Half one, the CONTRACT, is
-      `feat/csrc-multi-output` (PR #139); the fold and its parity gate follow on
-      `feat/csrc-mask-fold`.** The reason this was never ported is that the backend contract
-      carried ONE output -- `backends/engine_api.h` said so in as many words -- so a YOLO-seg
-      engine's prototype bank had nowhere to arrive. `Engine` takes N now, and
-      `InferenceResponse` carries them as named `OutputTensor`s WITH their per-row dims,
-      because `(300, 38)` rows and `(32, 160, 160)` prototypes are two shapes one flattened
-      width cannot tell apart. Found while doing it, and it is `CSRC-BENCH-UNCOMPILED`'s own
-      argument: the widening broke `pipeline/graph/stages.cpp`, all eleven gates stayed GREEN,
-      and only a hand `g++ -fsyntax-only` said so. Original: the C++ plane has the CROP half of the segmenter and no
-      FOLD half at all** (#137 review round 2, verified 5 Sep). `ObjectStage::do_run`
-      (`csrc/.../graph/stages.cpp`) chunks, infers and `out.append`s the engine's RAW rows --
-      there is no `combine` seam on that stage and no port of `InstanceMaskArea` anywhere in
-      `csrc/` (`grep -rn MaskArea csrc/shipinfer/pipeline/graph/` finds nothing). So
-      `records.cpp`'s `Field::MaskArea` publishes `row[0]` of whatever was attached, which for
-      the shipped `ship_segmenter` is `output0[crop][0][0]` -- the x1 of the first candidate
-      row, 0-640 in crop pixels. The Python plane publishes ~206 000 for the same crop after
-      P6-SEGMENT-CROP. One chain file, one engine, two values four orders of magnitude apart.
-      P6-SEGMENT-CROP made this WORSE IN KIND rather than causing it: before, this plane
-      published `None` and nobody trusted the field; now one plane is plausible and the other
-      is a box coordinate, which is the "plausible, wrong and silent" class
-      `topology/elements/masks.py`'s docstring says the project refuses.
-      THE GATE CANNOT SEE IT: `csrc/tests/test_record_parity.cpp` feeds `build_records`
-      scenarios that state already-reduced `(N, 1)` rows, so the missing fold is invisible to
-      it by construction. A gate for this one has to compare the STAGE outputs, not the
-      records -- which is the seam the fold lives on.
-      WORK: an `ObjectStage` combine seam mirroring the Python `ObjectStage`'s, a `MaskArea`
-      combine with the same arithmetic (argmax row, score floor, einsum against the prototype
-      bank, threshold count, cell -> crop pixels), and a parity gate over the stage.
-      `records.cpp`'s comment was corrected in #137 to say what that plane actually does.
-
+- [x] **CSRC-SEGMENT-FOLD-MISSING · DONE 5 Sep in two PRs. The CONTRACT half is #139
+      (MERGED); the FOLD and its parity gate are PR #140.** The reason it was
+      never ported: `backends/engine_api.h` carried ONE output, so a YOLO-seg engine's
+      prototype bank had nowhere to arrive. With N outputs on the contract, `ObjectStage`
+      gains an `ObjectCombine` applied per CHUNK before the scatter -- exactly where
+      `PoolSegment._reduced` runs, since folding after the join would read several chunks'
+      answers as one. `graph/mask_area.cpp` is the port: argmax row, score floor, coefficients
+      against the bank, threshold count, cells to crop pixels. `plan_stages.cpp` attaches it
+      to a `segment` slot and to nothing else.
+      THE GATE is one seam UPSTREAM of the record gate, because that one cannot see this at
+      all -- its scenarios state already-reduced `(N, 1)` rows, which is how this plane went
+      green for months while publishing a box coordinate. `scenarios/masks/` ->
+      `golden/masks/` -> `test_mask_parity` (11 checks) + `tests/pipeline/test_mask_parity.py`,
+      byte-identical on the first comparison. TWO REVERT-CHECKS RED: delete the score floor ->
+      2 failures, exit 1; the argmax replaced by "the first candidate" -> 1 failure, exit 1;
+      restored -> 0, exit 0. It also refuses a shape holding a dynamic dimension
+      (`ENGINE-DIMS-CAN-DISAGREE-WITH-WIDTH`), being the first consumer to trust `dims`.
 - [ ] **SEGMENT-FOLD-KNOBS-NOT-IN-THE-PLAN** (#137 review, non-blocking 2) — `params:
       {segment: {score_threshold, mask_threshold}}` are read by the Python fold and the
       resolved plan cannot carry either: `PlanNode.score_threshold` is the DETECTOR's decode
@@ -2651,15 +2637,16 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       too and refuse with the build command in the message, or have `shipinfer plan` refuse at
       write time when the named artefact is absent.
 
-- [ ] **SEGMENT-NO-CLASSES-ASYMMETRY** — a chain with ONE segment slot and no `classes:`
-      loads on the Python plane (it means "segment every row") and is REFUSED by the C++ plane
-      (`csrc/.../plan_stages.cpp::class_of`, added in #132's review, because "every row" is a
-      640x640 crop per person that nobody chose). Both refusals are load-time and loud, so
-      this is not a silent divergence -- but it is one chain file with two answers. Decide
-      which plane moves: either Python refuses it too, or the C++ plane accepts `kAnyClass`
-      for a segment slot. Not folded into P6-SEGMENT-CROP: it is a separate decision about
-      what a chain file may SAY, and that PR was already 14 files.
-
+- [x] **SEGMENT-NO-CLASSES-ASYMMETRY · CLOSED 5 Sep in PR #140, in favour of
+      PERMITTING it on both planes.** A chain with one segment slot and no `classes:` loaded on
+      the Python plane and was REFUSED by `plan_stages.cpp::class_of` -- one chain file with
+      two answers. The refusal's argument was that "every row" is a 640x640 crop per person
+      nobody chose; that is equally true of an EMBED slot with no `classes:`, which has always
+      been allowed to say it, so the rule was about the kind rather than the cost. What made
+      them differ is that `PoolSegment` did not crop at all, so a plan with no selection meant
+      DIFFERENT work on each plane; since P6-SEGMENT-CROP it means the same work on both, and
+      the cost is the chain author's to choose. `no_selection_at_all_matches_every_row`
+      asserts a segment slot reads as `kAnyClass` with its fold still attached.
 - [x] **HOOK-FP · MERGED as PR #104 (31 Aug 13:54), VERDICT: APPROVE.** (was OPEN as PR #104) (2 commits, 2 files, +89/-1, rebased onto 9d315da). 82 hook tests; full
       tier 3232 passed; pre-commit all Passed; clean. BOTH revert-checks reproduced on this tip: formatter
       carve-out deleted -> 4 failed/78 passed; parity carve-out deleted -> 2 failed/80 passed; restored -> 82.
