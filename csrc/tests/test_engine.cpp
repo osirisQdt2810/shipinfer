@@ -80,32 +80,51 @@ namespace {
         std::vector<float> output_;
     };
 
-    // A backend with TWO outputs, so the widened contract is exercised rather than only
-    // compiled. The second is the first negated, which tells "every output was scattered"
-    // from "the first one twice" -- and both are `rows` long, which is the contract's own
-    // rule: one row index selects one object's slice of all of them.
+    // A backend with TWO outputs of DIFFERENT widths, because those are the two degrees of
+    // freedom the widened contract added and a double that pins either to its trivial value
+    // tests neither. The second output is three times as wide as the first and holds the
+    // negated row repeated, which is the segmenter's actual shape: `(rows, 6 + coeffs)` beside
+    // `(coeffs, h, w)`, two widths over one row count.
     class TwoOutputEngine : public IdentityEngine {
       public:
+        static constexpr size_t kWide = 3;  // the second output's width, in first-output rows
+
         TwoOutputEngine(Device device, int max_batch, size_t width)
-            : IdentityEngine(device, max_batch, width), width_(width) {}
+            : IdentityEngine(device, max_batch, width),
+              width_(width),
+              max_batch_rows_(max_batch) {}
         size_t outputs() const override { return 2; }
+        size_t output_row_elems(size_t index = 0) const override {
+            return index == 0 ? width_ : width_ * kWide;
+        }
         std::string output_name(size_t index) const override {
             return index == 0 ? "rows" : "negated";
         }
         std::vector<int64_t> output_dims(size_t index) const override {
-            (void)index;
-            return {static_cast<int64_t>(width_ / 2), 2};
+            return index == 0 ? std::vector<int64_t>{static_cast<int64_t>(width_)}
+                              : std::vector<int64_t>{kWide, static_cast<int64_t>(width_)};
         }
         const float* output(size_t index) const override {
             const float* first = IdentityEngine::output(0);
             if (index == 0) return first;
-            negated_.assign(first, first + width_ * static_cast<size_t>(max_batch()));
-            for (float& value : negated_) value = -value;
+            // Row `r` of the wide output is row `r` of the first, negated and repeated
+            // `kWide` times -- so a slice taken at the WRONG width or from the WRONG offset
+            // comes back holding another request's numbers rather than a plausible pattern.
+            const size_t rows = static_cast<size_t>(max_batch_rows_);
+            negated_.assign(rows * width_ * kWide, 0.f);
+            for (size_t r = 0; r < rows; ++r) {
+                for (size_t k = 0; k < kWide; ++k) {
+                    for (size_t c = 0; c < width_; ++c) {
+                        negated_[(r * kWide + k) * width_ + c] = -first[r * width_ + c];
+                    }
+                }
+            }
             return negated_.data();
         }
 
       private:
         size_t width_;
+        int max_batch_rows_;
         mutable std::vector<float> negated_;
     };
 
@@ -125,28 +144,61 @@ namespace {
 
     void test_every_output_is_scattered_and_named() {
         // The widened contract (CSRC-SEGMENT-FOLD-MISSING): a segmentation engine answers
-        // detection rows AND a prototype bank, so a response that carried one output had
-        // nowhere for the second to arrive and the mask fold could not be written at all.
-        auto engine = std::make_unique<TwoOutputEngine>(Device::cuda(0), 4, 2);
-        ModelInstance instance("m:0", std::move(engine), BatchWindow(4, 0), 16);
+        // detection rows AND a prototype bank, so a response carrying one output had nowhere
+        // for the second to arrive and the mask fold could not be written at all.
+        //
+        // TWO batched requests of DIFFERENT row counts, because "scattered" is a claim about
+        // the span arithmetic and one request pins `spans[i].first` to 0. Review of #139
+        // showed the first version of this check green against both plausible regressions --
+        // slicing output 1 at output 0's width, and slicing it from the front of the batch
+        // for everybody, which hands camera B camera A's prototypes.
+        auto engine = std::make_unique<TwoOutputEngine>(Device::cuda(0), 8, 2);
+        ModelInstance instance("m:0", std::move(engine), BatchWindow(8, 20), 16);
         instance.start();
         check(instance.wait_ready(2s), "the instance becomes ready");
-        const std::vector<float> payload{1.f, 2.f, 3.f, 4.f};
-        WorkItem item(a_request("cam", 7, payload, 2));
-        auto future = item.future();
-        check(instance.enqueue(std::move(item)) == PutStatus::Accepted, "accepted");
-        const InferenceResponse response = future.get();
 
-        check(response.outputs.size() == 2, "both outputs come back");
-        check(response.first().data == payload, "the first is the answer it always was");
-        check(response.named("negated") != nullptr, "and the second is reachable BY NAME");
-        check(response.named("negated")->data == std::vector<float>{-1.f, -2.f, -3.f, -4.f},
-              "with its own values, not a second copy of the first");
-        check(response.named("nosuch") == nullptr, "an output the engine has not is null");
-        check(response.row_elems() == 2 && response.row(1)[0] == 3.f,
-              "and the single-output accessors still mean the first output");
-        check(response.first().dims == std::vector<int64_t>{1, 2},
-              "the artefact's own per-row shape travels, which a flat width cannot carry");
+        const std::vector<float> a{1.f, 2.f};                      // one row
+        const std::vector<float> b{3.f, 4.f, 5.f, 6.f, 7.f, 8.f};  // three rows
+        WorkItem first(a_request("cam-a", 1, a, 2));
+        WorkItem second(a_request("cam-b", 2, b, 2));
+        auto fa = first.future();
+        auto fb = second.future();
+        check(instance.enqueue(std::move(first)) == PutStatus::Accepted, "a accepted");
+        check(instance.enqueue(std::move(second)) == PutStatus::Accepted, "b accepted");
+        const InferenceResponse ra = fa.get();
+        const InferenceResponse rb = fb.get();
+
+        check(ra.outputs.size() == 2 && rb.outputs.size() == 2, "both outputs reach both");
+        check(ra.first().data == a && rb.first().data == b,
+              "the first output is scattered as it always was");
+        check(ra.named("negated") != nullptr && rb.named("negated") != nullptr,
+              "and the second is reachable BY NAME on both");
+
+        // Each caller's wide rows are ITS OWN, negated and repeated -- so reading them at the
+        // narrow width, or from offset 0 for everybody, produces the other caller's numbers.
+        const std::vector<float> wide_a{-1.f, -2.f, -1.f, -2.f, -1.f, -2.f};
+        std::vector<float> wide_b;
+        for (size_t r = 0; r < 3; ++r) {
+            for (size_t k = 0; k < TwoOutputEngine::kWide; ++k) {
+                wide_b.push_back(-b[r * 2]);
+                wide_b.push_back(-b[r * 2 + 1]);
+            }
+        }
+        check(ra.named("negated")->data == wide_a,
+              "a gets a's rows at the wide output's width");
+        check(rb.named("negated")->data == wide_b,
+              "and b gets b's -- not a's, which is what reading from the batch's front gives");
+        check(ra.named("negated")->row_elems == 6 && ra.row_elems() == 2,
+              "the two widths are the OUTPUT's own, not the first one's for both");
+        check(ra.named("negated")->data.size() == ra.rows * 6,
+              "and each output is `rows` long at its own width");
+
+        check(ra.named("nosuch") == nullptr, "an output the engine has not is null");
+        check(ra.row(0)[0] == 1.f, "the single-output accessors still mean the first output");
+        check(rb.first().dims == std::vector<int64_t>{2},
+              "the artefact's per-row shape travels, which a flat width cannot carry");
+        check(rb.named("negated")->dims == std::vector<int64_t>{3, 2},
+              "each output's own shape, which is what the fold solves its arithmetic from");
         instance.stop();
     }
 

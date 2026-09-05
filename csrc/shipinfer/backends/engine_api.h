@@ -36,7 +36,11 @@ namespace shipinfer {
         virtual size_t output_row_elems(size_t index = 0) const = 0;
         // How many outputs this engine has. Defaulted rather than pure: every double in the
         // tests has one, and a contract that made them all say so would be a contract paid
-        // for by the implementations that do not need it.
+        // for by the implementations that do not need it. THE COST OF THAT DEFAULT: a real
+        // backend that forgets to override it drops every output past the first SILENTLY --
+        // there is no compile error, and a fold reading a second output would refuse by name
+        // at run time rather than at load. `TrtEngineAdapter` is the only implementation that
+        // answers anything but 1 today, so a second one starts by overriding this.
         virtual size_t outputs() const { return 1; }
         // The name the artefact gives an output, so a consumer that needs a SPECIFIC one --
         // the segmentation fold needs prototypes, not "the second" -- can ask for it by name

@@ -2618,6 +2618,16 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       Either the plan format grows the two fields (plan text + the C++ reader + the goldens)
       or the knobs go. Not folded into #137: it is a plan-format change with its own gate.
 
+- [ ] **ENGINE-DIMS-CAN-DISAGREE-WITH-WIDTH** (#139 review, non-blocking) —
+      `TrtEngineAdapter::output_row_elems` goes through `TensorSpec::elements_per_row()`,
+      which CLAMPS a negative dim to 1 (`backends/tensorrt/engine.h`), while `output_dims`
+      reports the `-1` verbatim. So for an output with a dynamic NON-BATCH dimension the pair
+      an `OutputTensor` carries is internally inconsistent. Pre-existing and unrealistic for a
+      YOLO-seg plan -- but `mask_area` is the first consumer to TRUST `dims`, so it should
+      refuse a shape holding a negative by name rather than build a mask from it. Taken in the
+      fold PR; recorded here because the clamp itself is the older half and is worth deciding
+      separately (clamping a dynamic dim to 1 is a silent lie about a width).
+
 - [ ] **CSRC-BENCH-STARTUP-ABORT · seen ONCE on 5 Sep and not reproduced, recorded rather
       than buried by a green re-run.** The first run of a freshly built `csrc/build/bench`
       aborted with `terminate called without an active exception` (exit 134) after all four
