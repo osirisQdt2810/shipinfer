@@ -2,6 +2,8 @@
 #pragma once
 
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "shipinfer/backends/engine_api.h"
 #include "shipinfer/backends/tensorrt/engine.h"
@@ -14,11 +16,14 @@ namespace shipinfer {
         Device device() const override;
         int max_batch() const override;
         size_t input_row_elems() const override;
-        size_t output_row_elems() const override;
+        size_t output_row_elems(size_t index = 0) const override;
+        size_t outputs() const override;
+        std::string output_name(size_t index) const override;
+        std::vector<int64_t> output_dims(size_t index) const override;
         void write_rows(size_t row_offset, const float* src, size_t rows,
                         Device src_device) override;
         void execute(int rows) override;
-        const float* output() const override;
+        const float* output(size_t index = 0) const override;
         TrtInstance& instance() { return *instance_; }
 
       private:

@@ -193,9 +193,30 @@ namespace shipinfer {
         const int64_t end_ns = monotonic_ns();
 
         // Scatter: every output row returns to the request that produced it. Get it wrong and
-        // two cameras' detections swap places, and nothing crashes.
-        const size_t out_width = engine_->output_row_elems();
-        const float* out = engine_->output();
+        // two cameras' detections swap places, and nothing crashes. EVERY output, not just the
+        // first: they are all `rows` long, so one span selects one request's slice of each,
+        // and a segmentation engine's prototypes travel beside its detection rows.
+        //
+        // Read ONCE PER BATCH, not once per request: `output_name` and `output_dims` return by
+        // value and are invariant across the batch, so reading them in the request loop put
+        // two heap allocations and `4 x outputs` virtual calls on the dispatch path for every
+        // request -- including the single-output models shipped today, where the loop used to
+        // cost exactly one `assign`. It also stops the contract quietly requiring `output(i)`
+        // to be cheap and stable across repeated calls: a backend that re-materialises a host
+        // copy per call now pays once per batch.
+        struct OutputMeta {
+            std::string name;
+            std::vector<int64_t> dims;
+            size_t width = 0;
+            const float* base = nullptr;
+        };
+        const size_t out_count = engine_->outputs();
+        std::vector<OutputMeta> outputs;
+        outputs.reserve(out_count);
+        for (size_t o = 0; o < out_count; ++o) {
+            outputs.push_back({engine_->output_name(o), engine_->output_dims(o),
+                               engine_->output_row_elems(o), engine_->output(o)});
+        }
         const int64_t completed_ns = monotonic_ns();
         for (size_t i = 0; i < items.size(); ++i) {
             WorkItem& item = items[i];
@@ -203,9 +224,20 @@ namespace shipinfer {
             response.model_name = name_;
             response.tag = item.request().tag;
             response.rows = spans[i].second - spans[i].first;
-            response.row_elems = out_width;
-            response.data.assign(out + spans[i].first * out_width,
-                                 out + spans[i].second * out_width);
+            response.outputs.reserve(out_count);
+            for (const OutputMeta& meta : outputs) {
+                OutputTensor tensor;
+                tensor.name = meta.name;
+                tensor.row_elems = meta.width;
+                tensor.dims = meta.dims;
+                // Every output is `rows` long, so ONE span selects one request's slice of
+                // each -- at that output's OWN width, which is what makes a segmentation
+                // engine's prototype bank travel beside its detection rows rather than being
+                // read at the rows' width or from the front of the batch.
+                tensor.data.assign(meta.base + spans[i].first * meta.width,
+                                   meta.base + spans[i].second * meta.width);
+                response.outputs.push_back(std::move(tensor));
+            }
             response.executed_on = engine_->device();
             response.timings.received_ns = item.request().received_ns;
             response.timings.queued_ns = item.enqueued_ns();
