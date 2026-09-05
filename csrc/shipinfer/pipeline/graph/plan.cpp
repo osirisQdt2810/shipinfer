@@ -160,6 +160,27 @@ namespace shipinfer {
                                       "; a cap is a positive count on both planes");
                 }
                 node.max_detections = count;
+            } else if (verb == "instances") {
+                want(args, 1, where, "instances <count>");
+                // Positive, like `max_detections` and for the same reason: zero would load
+                // the engine, run nothing, and report every stage ready.
+                const int count = as_int(args[0], where);
+                if (count <= 0) {
+                    throw ConfigError(where + ": instances is " + std::to_string(count) +
+                                      "; a slot runs at least one");
+                }
+                node.instances = count;
+            } else if (verb == "queue_delay_us") {
+                want(args, 1, where, "queue_delay_us <microseconds>");
+                const int delay = as_int(args[0], where);
+                if (delay < 0) {
+                    throw ConfigError(where + ": queue_delay_us is " + std::to_string(delay) +
+                                      "; a window is not negative");
+                }
+                node.queue_delay_us = delay;
+            } else if (verb == "artefact") {
+                want(args, 1, where, "artefact <path>");
+                node.artefact = args[0];
             } else if (verb == "when") {
                 if (args.empty()) throw ConfigError(where + ": expected `when <expression>`");
                 std::string joined = args[0];
@@ -173,9 +194,9 @@ namespace shipinfer {
                 node.scope = args[0];
             } else {
                 throw ConfigError(where + ": unknown verb '" + verb +
-                                  "'; expected one of classes, crop, edge, field, label, "
-                                  "letterbox, max_detections, model, node, per, plan, score, "
-                                  "scope, when");
+                                  "'; expected one of artefact, classes, crop, edge, field, "
+                                  "instances, label, letterbox, max_detections, model, node, "
+                                  "per, plan, queue_delay_us, score, scope, when");
             }
         }
 
@@ -333,6 +354,11 @@ namespace shipinfer {
             if (node.max_detections) {
                 out += "max_detections " + std::to_string(*node.max_detections) + "\n";
             }
+            if (node.instances) out += "instances " + std::to_string(*node.instances) + "\n";
+            if (node.queue_delay_us) {
+                out += "queue_delay_us " + std::to_string(*node.queue_delay_us) + "\n";
+            }
+            if (!node.artefact.empty()) out += "artefact " + node.artefact + "\n";
             if (!node.when.empty()) out += "when " + node.when + "\n";
             if (!node.per.empty()) out += "per " + node.per + "\n";
             if (!node.scope.empty()) out += "scope " + node.scope + "\n";

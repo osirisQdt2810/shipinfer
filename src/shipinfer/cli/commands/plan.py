@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from shipinfer.repository import ModelRepository
-from shipinfer.repository.extents import model_extents
+from shipinfer.repository.resolved import model_extents, model_runtimes
 from shipinfer.topology import load_topology
 from shipinfer.topology.plan import plan_text, resolve_plan
 
@@ -21,7 +21,12 @@ __all__ = ["plan"]
 def plan(topology: Path, repository: Path, out: Path | None = None) -> int:
     """Write the resolved plan for ``topology`` to ``out``, or to stdout."""
     chain = load_topology(topology)
-    text = plan_text(resolve_plan(chain, dims=model_extents(ModelRepository.load(repository))))
+    models = ModelRepository.load(repository)
+    text = plan_text(
+        resolve_plan(
+            chain, dims=model_extents(models), runtimes=model_runtimes(models)
+        )
+    )
     if out is None:
         print(text, end="")
     else:

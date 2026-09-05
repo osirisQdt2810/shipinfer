@@ -1,5 +1,32 @@
 # Journal
 
+## 2026-09-05 (later) — the benchmark was measuring a machine nobody configured
+
+**P5-B**, and the survey found more than the ledger claimed. `run_cpp_bench.sh` passed
+`--seg-instances 3 --emb-instances 3 --ship-emb-instances 3`; the repository says 2, 2 and
+**one**. It passed no `--det-instances` at all, so `bench.cpp`'s own default of 2 applied — a
+third set of numbers. And `--batch-delay-us` is one global where the four `config.yaml` files
+state 5000, 8000, 8000 and 3000. Every C++ measurement in this repository was taken at a
+configuration no file describes, which means the head-to-head against the Python plane was
+never like for like.
+
+The engines were the same story wearing a different name: `models/yolo26n_fp32.engine` and
+`model_repository/ship_detector/1/model.plan` are byte-identical (`md5sum` agrees on all
+three), so four `--*-engine` flags restated paths the repository already owns.
+
+So the plan carries it — `instances`, `queue_delay_us`, `artefact` — and `bench.cpp` builds
+its models by walking the plan instead of a hard-coded table of four names with their row
+shapes. That table was the last of the hardcoded graph ADR-020 set out to delete. The run:
+8 cameras × 5 fps × 25 s on GPUs 0–1, no engine, instance or window flag on the command line
+at all, 1000 frames read → 1000 events emitted → 1000 complete, nothing dropped or evicted.
+
+Two things worth keeping from the reading. `InstanceGroup.expand` sums device groups and
+places CPU groups on the host, so the plan's per-device count is the sum over the non-CPU
+groups — my first version took the max and a CPU group's 5 beat a GPU group's 2, which a test
+caught. And the container image has no `pkg-config`, so `scripts/build_csrc.py` dies with
+`FileNotFoundError` inside it; the bench binary is built on the host by design, which is what
+`cpp.sh`'s header already says.
+
 ## 2026-09-05 — the segmenter crops, and the field it fills was never published
 
 **P6-SEGMENT-CROP**, the last of the divergences the resolved plan made visible. `PoolSegment`

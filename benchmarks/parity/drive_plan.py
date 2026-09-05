@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from shipinfer.repository import ModelRepository
-from shipinfer.repository.extents import model_extents
+from shipinfer.repository.resolved import model_extents, model_runtimes
 from shipinfer.topology import load_topology
 from shipinfer.topology.plan import plan_text, resolve_plan
 
@@ -35,6 +35,15 @@ def load_plan_scenario(name: str) -> Path:
 
 
 def render_plan(path: Path, *, repository: Path | None = None) -> str:
-    """The plan text for one chain file — what the golden holds and the C++ gate re-writes."""
-    dims = model_extents(ModelRepository.load(repository or REPOSITORY))
-    return plan_text(resolve_plan(load_topology(path), dims=dims))
+    """The plan text for one chain file — what the golden holds and the C++ gate re-writes.
+
+    Resolved WITH the runtimes, so the goldens carry the `instances`/`queue_delay_us`/
+    `artefact` lines and the cross-plane gate covers them. A plan resolved without them is
+    the shape of the chain alone, which is what a caller wanting no repository gets.
+    """
+    models = ModelRepository.load(repository or REPOSITORY)
+    return plan_text(
+        resolve_plan(
+            load_topology(path), dims=model_extents(models), runtimes=model_runtimes(models)
+        )
+    )

@@ -2172,7 +2172,18 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       * **P5-D (data-driven chain) is DONE** by #131 + #132. `bench.cpp` reads a resolved plan
         and `graph.cpp`'s hardcoded chain is gone; the label table, the crop extents, the
         threshold and the cap all arrive in it.
-      * **P5-B is NOT a C++ `config.yaml` reader any more, and building one would be a
+      * **P5-B DONE 5 Sep, open as PR #<PR>** (`feat/plan-model-runtime`). The plan carries
+        three new verbs per model-bearing node -- `instances` (per device), `queue_delay_us`
+        and `artefact` (repository-relative) -- read by `repository/resolved.py` and by
+        `csrc/.../plan.cpp`, and `bench.cpp` builds its model list FROM the plan instead of a
+        hard-coded four-entry table. The measurement's own numbers were the argument: the
+        command line said 3/3/3 where the repository says 2/2/**1**, passed no
+        `--det-instances` so the binary's own default of 2 applied, and used one global
+        `--batch-delay-us 2000` against four windows of 5000/8000/8000/3000 -- so the head to
+        head was not like for like. Evidence: 8 cameras x 5 fps x 25 s on GPUs 0-1 through
+        `--plan` + `--repository` and no engine/instance/window flag at all: 1000 frames read,
+        1000 accepted, 1000 events emitted, 1000 complete, 0 dropped / rejected / evicted.
+      * **P5-B was NOT a C++ `config.yaml` reader, and building one would have been a
         reinvention.** ADR-020's argument applies unchanged one artefact along: the model
         repository is control plane (ADR-014 names it), the Python side already validates it,
         and a second YAML reader in C++ is a second door whose failure is one plane accepting

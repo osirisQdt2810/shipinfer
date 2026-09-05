@@ -100,6 +100,15 @@ namespace {
         FairPriorityQueue<FrameWork>& queue_;
     };
 
+    // One model to load: what the plan says, resolved to a path this process can open.
+    struct ModelSpec {
+        std::string name;
+        std::string engine;
+        int per_device = 1;
+        int queue_delay_us = 0;
+        std::vector<int64_t> fed_row;
+    };
+
     struct Options {
         std::string person_frames;
         std::string ship_frames;
@@ -111,6 +120,10 @@ namespace {
         // the defaults below are assembled into the SAME plan struct, so there is one
         // construction path and no second spelling of the graph.
         std::string plan_path;
+        // The model repository root the plan's `artefact` paths are relative to. Given with
+        // `--plan`, it replaces the four `--*-engine` flags: the plan already says which
+        // artefact each slot runs, and two spellings of one path is how they drift.
+        std::string repository;
         std::string log_path = "buffers.jsonl";
         std::vector<int> devices{0};
         int cameras = 12;
@@ -137,6 +150,70 @@ namespace {
         int ship_emb_instances = 1;
         double sample_interval_s = 1.0;
     };
+
+    // The engine each slot runs, by the two spellings this binary accepts.
+    std::string engine_path_of(const PlanNode& node, const Options& options) {
+        if (!options.repository.empty() && !node.artefact.empty()) {
+            return options.repository + "/" + node.artefact;
+        }
+        // No repository: the four flags, matched by MODEL name. Kept for the run that has an
+        // engine and no repository, and refused below the moment a plan carries an artefact
+        // this process cannot reach, rather than loading the wrong file.
+        if (node.model == "ship_detector") return options.det_plan;
+        if (node.model == "ship_segmenter") return options.seg_plan;
+        if (node.model == "person_embedder") return options.emb_plan;
+        if (node.model == "ship_embedder") return options.ship_emb_plan;
+        return "";
+    }
+
+    // The default instance count for a model this binary has always had a flag for. Used only
+    // where the plan carries no `instances` line, which is a plan resolved with no repository.
+    int argv_instances_of(const PlanNode& node, const Options& options) {
+        if (node.model == "ship_detector") return options.det_instances;
+        if (node.model == "ship_segmenter") return options.seg_instances;
+        if (node.model == "person_embedder") return options.emb_instances;
+        if (node.model == "ship_embedder") return options.ship_emb_instances;
+        return 1;
+    }
+
+    // What the model is fed, per row: `(3, H, W)` from the slot's own geometry. The plan
+    // carries it (`crop`/`letterbox`), so the hard-coded table this replaced -- 640x640 for
+    // two named models and 256x128 for the other two -- is gone with the rest of the graph
+    // ADR-020 deleted.
+    std::vector<int64_t> fed_row_of(const PlanNode& node) {
+        const std::optional<Extent>& extent = node.crop ? node.crop : node.letterbox;
+        if (!extent) {
+            throw ConfigError("slot '" + node.slot + "' runs model '" + node.model +
+                              "' and the plan states no crop or letterbox extent for it, so "
+                              "this process cannot say what the engine is fed");
+        }
+        return {3, extent->height, extent->width};
+    }
+
+    // Every model-bearing slot the plan declares, deduplicated by MODEL: two slots may name
+    // one model (a chain with two detectors), and loading its engine twice would pay for the
+    // weights twice on every device.
+    std::vector<ModelSpec> bench_models(const ResolvedPlan& plan, const Options& options) {
+        std::vector<ModelSpec> specs;
+        for (const PlanNode& node : plan.nodes) {
+            if (node.model.empty()) continue;
+            if (std::any_of(specs.begin(), specs.end(),
+                            [&node](const ModelSpec& s) { return s.name == node.model; })) {
+                continue;
+            }
+            ModelSpec spec;
+            spec.name = node.model;
+            spec.engine = engine_path_of(node, options);
+            if (spec.engine.empty()) continue;  // no engine for it: this run does not run it
+            spec.per_device =
+                node.instances ? *node.instances : argv_instances_of(node, options);
+            spec.queue_delay_us =
+                node.queue_delay_us ? *node.queue_delay_us : options.batch_delay_us;
+            spec.fed_row = fed_row_of(node);
+            specs.push_back(spec);
+        }
+        return specs;
+    }
 
     std::vector<int> parse_ints(const std::string& csv) {
         std::vector<int> out;
@@ -170,6 +247,8 @@ namespace {
                 options.ship_emb_plan = next();
             else if (flag == "--plan")
                 options.plan_path = next();
+            else if (flag == "--repository")
+                options.repository = next();
             else if (flag == "--log-jsonl")
                 options.log_path = next();
             else if (flag == "--gpu-ids")
@@ -205,8 +284,27 @@ namespace {
             else
                 throw ConfigError("unknown flag " + flag);
         }
-        if (options.person_frames.empty() || options.det_plan.empty()) {
-            throw ConfigError("--person-frames and --det-engine are required");
+        if (options.person_frames.empty()) throw ConfigError("--person-frames is required");
+        // An engine comes from ONE of the two doors: `--plan` plus `--repository`, which is
+        // what the resolved chain carries (P5-B), or the per-model flags. Both spellings
+        // present is refused rather than ranked -- two sources for one path is exactly what
+        // the plan replaced, and silently preferring either would hide the disagreement the
+        // repository's own numbers already had with these flags.
+        const bool from_plan = !options.repository.empty();
+        const bool from_flags = !options.det_plan.empty() || !options.seg_plan.empty() ||
+                                !options.emb_plan.empty() || !options.ship_emb_plan.empty();
+        if (from_plan && from_flags) {
+            throw ConfigError("--repository and the --*-engine flags are two spellings of one "
+                              "path; the plan already names each slot's artefact, so pass one "
+                              "or the other");
+        }
+        if (!from_plan && !from_flags) {
+            throw ConfigError("no engine to run: pass --plan <file> --repository <root>, or "
+                              "the --*-engine flags");
+        }
+        if (from_plan && options.plan_path.empty()) {
+            throw ConfigError("--repository names the root a plan's `artefact` paths hang "
+                              "off, so it needs --plan <file>");
         }
         return options;
     }
@@ -244,32 +342,26 @@ int main(int argc, char** argv) {
         shipinfer::runtime::require_container("csrc bench");
         const Options options = parse(argc, argv);
 
-        // -- the models: one Model per plan, one instance per (device x count), each behind the
-        // Engine contract — the Python plane's shape (engine/model.py) replacing the pool
-        // graph.
+        // -- the models, FROM THE PLAN. Which slots run a model, the engine each one runs,
+        // how many instances per device, the batch window and the row shape it is fed are all
+        // resolved on the Python side and carried (ADR-020). What this used to be is the
+        // measurement's real defect: four `--*-instances` flags and one global
+        // `--batch-delay-us` restating `model_repository/*/config.yaml`, and disagreeing with
+        // it on three of the four models -- so the two planes were benchmarked at different
+        // instance counts and the head-to-head was not like for like.
+        const ResolvedPlan plan =
+            options.plan_path.empty() ? default_bench_plan() : read_plan(options.plan_path);
+        const std::vector<ModelSpec> specs = bench_models(plan, options);
         std::cerr << "loading engines...\n";
         const auto load_start = std::chrono::steady_clock::now();
-        struct Spec {
-            std::string name;
-            std::string plan;
-            int per_device;
-            std::vector<int64_t> fed_row;
-        };
-        const int64_t d = 640;
-        const std::vector<Spec> specs{
-            {"ship_detector", options.det_plan, options.det_instances, {3, d, d}},
-            {"ship_segmenter", options.seg_plan, options.seg_instances, {3, d, d}},
-            {"person_embedder", options.emb_plan, options.emb_instances, {3, 256, 128}},
-            {"ship_embedder", options.ship_emb_plan, options.ship_emb_instances, {3, 256, 128}},
-        };
         std::map<std::string, std::unique_ptr<Model>> models;
-        for (const Spec& spec : specs) {
-            if (spec.plan.empty()) continue;
+        for (const ModelSpec& spec : specs) {
+            if (spec.engine.empty()) continue;
             std::vector<std::unique_ptr<ModelInstance>> instances;
             for (int device : options.devices) {
                 // One engine per device, shared by that device's instances: the weights are
                 // paid for once per GPU rather than once per instance.
-                auto engine = TrtEngine::load(spec.plan, device);
+                auto engine = TrtEngine::load(spec.engine, device);
                 if (device == options.devices.front()) {
                     // Once per model: which `execute()` branch this plan takes. A static plan
                     // is padded to its batch; a dynamic one runs the rows it was given.
@@ -287,7 +379,7 @@ int main(int argc, char** argv) {
                     auto adapter = std::make_unique<TrtEngineAdapter>(
                         std::make_unique<TrtInstance>(engine, device));
                     const BatchWindow window(static_cast<size_t>(engine->max_batch()),
-                                             options.batch_delay_us);
+                                             spec.queue_delay_us);
                     instances.push_back(std::make_unique<ModelInstance>(
                         spec.name + ":" + std::to_string(device) + ":" + std::to_string(i),
                         std::move(adapter), window, static_cast<size_t>(options.queue_capacity),
@@ -298,7 +390,12 @@ int main(int argc, char** argv) {
             models[spec.name] = std::make_unique<Model>(spec.name, std::move(instances),
                                                         build_policy(options.policy));
         }
-        if (models.count("ship_detector") == 0) throw ConfigError("--det-engine is required");
+        // The chain's head. Named rather than "some model loaded", because a run whose
+        // detector is missing produces zero detections and reads as a quiet fleet.
+        if (models.count("ship_detector") == 0) {
+            throw ConfigError("no `ship_detector` was loaded; the plan must declare a slot "
+                              "running it and this process must be able to reach its engine");
+        }
         for (auto& [name, model] : models) model->start(std::chrono::milliseconds(120000));
         const double startup_s =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - load_start)
@@ -310,8 +407,6 @@ int main(int argc, char** argv) {
         // `if (models.count(...))` ladder inside each worker -- and they disagreed: the
         // labels said a ship was class 1 while the crop specs said 8, so every ship left the
         // event writer as `unknown` while the right rows were cropped.
-        const ResolvedPlan plan =
-            options.plan_path.empty() ? default_bench_plan() : read_plan(options.plan_path);
         const PlanStages planned = plan_stages(plan, loaded_names(models));
         const std::vector<std::string>& stage_names = planned.stage_names;
         std::cerr << "chain '" << plan.name << "': " << stage_names.size() << " stage(s)";
