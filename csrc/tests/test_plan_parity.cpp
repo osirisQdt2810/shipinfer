@@ -138,6 +138,15 @@ namespace {
         check(refused("plan 1 x\nnode a b\n"), "node with two arguments");
         check(refused("plan 1 x\nnode a b c\ncrop 256\n"), "crop with one extent");
         check(refused("plan 1 x\nnode a b c\ncrop 0 128\n"), "a crop that is not positive");
+        check(refused("plan 1 x\nnode a b c\ninstances 0\n"), "zero instances runs nothing");
+        check(refused("plan 1 x\nnode a b c\ninstances -1\n"), "and a negative count");
+        check(refused("plan 1 x\nnode a b c\nqueue_delay_us -1\n"), "a negative window");
+        check(refused("plan 1 x\nnode a b c\ninstances two\n"), "a count that is not one");
+        check(refused("plan 1 x\nnode a b c\nartefact a b\n"), "an artefact with a space");
+        check(!refused("plan 1 x\nnode a b c\nqueue_delay_us 0\n"), "0 is batching off");
+        check(!refused("plan 1 x\nnode a b c\ninstances 1\n"), "the smallest count");
+        check(!refused("plan 1 x\nnode a b c\nartefact m/1/model.plan\n"),
+              "a repository-relative artefact");
         check(refused("plan 1 x\nnode a b c\nscore nan\n"), "a non-finite score");
         check(refused("plan 1 x\nnode a b c\nnonsense 1\n"), "an unknown verb");
         check(refused("plan 1 x\nlabel eight ship\n"), "a label id that is not an integer");

@@ -26,6 +26,7 @@
 #include "shipinfer/ingest/sources/replay.h"
 #include "shipinfer/obs/sampler.h"
 #include "shipinfer/pipeline/events/records.h"
+#include "shipinfer/pipeline/graph/bench_models.h"
 #include "shipinfer/pipeline/graph/dag.h"
 #include "shipinfer/pipeline/graph/from_plan.h"
 #include "shipinfer/pipeline/graph/plan.h"
@@ -111,6 +112,10 @@ namespace {
         // the defaults below are assembled into the SAME plan struct, so there is one
         // construction path and no second spelling of the graph.
         std::string plan_path;
+        // The model repository root the plan's `artefact` paths are relative to. Given with
+        // `--plan`, it replaces the four `--*-engine` flags: the plan already says which
+        // artefact each slot runs, and two spellings of one path is how they drift.
+        std::string repository;
         std::string log_path = "buffers.jsonl";
         std::vector<int> devices{0};
         int cameras = 12;
@@ -137,6 +142,22 @@ namespace {
         int ship_emb_instances = 1;
         double sample_interval_s = 1.0;
     };
+
+    // How this binary's flags fill `BenchEngines`, which is the only place they are read.
+    BenchEngines engines_of(const Options& options) {
+        BenchEngines engines;
+        engines.repository = options.repository;
+        engines.detector = options.det_plan;
+        engines.segmenter = options.seg_plan;
+        engines.person_embedder = options.emb_plan;
+        engines.ship_embedder = options.ship_emb_plan;
+        engines.batch_delay_us = options.batch_delay_us;
+        engines.detector_instances = options.det_instances;
+        engines.segmenter_instances = options.seg_instances;
+        engines.person_embedder_instances = options.emb_instances;
+        engines.ship_embedder_instances = options.ship_emb_instances;
+        return engines;
+    }
 
     std::vector<int> parse_ints(const std::string& csv) {
         std::vector<int> out;
@@ -170,6 +191,8 @@ namespace {
                 options.ship_emb_plan = next();
             else if (flag == "--plan")
                 options.plan_path = next();
+            else if (flag == "--repository")
+                options.repository = next();
             else if (flag == "--log-jsonl")
                 options.log_path = next();
             else if (flag == "--gpu-ids")
@@ -205,13 +228,42 @@ namespace {
             else
                 throw ConfigError("unknown flag " + flag);
         }
-        if (options.person_frames.empty() || options.det_plan.empty()) {
-            throw ConfigError("--person-frames and --det-engine are required");
+        if (options.person_frames.empty()) throw ConfigError("--person-frames is required");
+        // An engine comes from ONE of the two doors: `--plan` plus `--repository`, which is
+        // what the resolved chain carries (P5-B), or the per-model flags. Both spellings
+        // present is refused rather than ranked -- two sources for one path is exactly what
+        // the plan replaced, and silently preferring either would hide the disagreement the
+        // repository's own numbers already had with these flags.
+        const bool from_plan = !options.repository.empty();
+        const bool from_flags = !options.det_plan.empty() || !options.seg_plan.empty() ||
+                                !options.emb_plan.empty() || !options.ship_emb_plan.empty();
+        if (from_plan && from_flags) {
+            throw ConfigError(
+                "--repository and the --*-engine flags are two spellings of one "
+                "path; the plan already names each slot's artefact, so pass one "
+                "or the other");
+        }
+        if (!from_plan && !from_flags) {
+            throw ConfigError(
+                "no engine to run: pass --plan <file> --repository <root>, or "
+                "the --*-engine flags");
+        }
+        if (from_plan && options.plan_path.empty()) {
+            throw ConfigError(
+                "--repository names the root a plan's `artefact` paths hang "
+                "off, so it needs --plan <file>");
         }
         return options;
     }
 
-    std::string meta_json(const Options& options, const std::vector<std::string>& stages) {
+    // The run record's first line. `benchmarks/harness/sampler.py` states its contract: it
+    // records "the configuration, the resolved artefact paths ... and -- the reason it exists
+    // -- which pipeline stages were actually wired", so "the omission travels with the data".
+    // Which means the numbers the PLAN owns have to be in it: this printed one global
+    // `batch_delay_us` that no instance used once the windows came per model, so two runs a
+    // month apart could differ in every window and say the same thing.
+    std::string meta_json(const Options& options, const std::vector<std::string>& stages,
+                          const std::vector<BenchModel>& models) {
         std::ostringstream out;
         out << "{\"meta\": {\"system\": \"cpp\", \"config\": {";
         out << "\"cameras\": " << options.cameras;
@@ -219,13 +271,25 @@ namespace {
         out << ", \"seconds\": " << options.seconds;
         out << ", \"workers\": " << options.workers;
         out << ", \"buffer_capacity\": " << options.queue_capacity;
-        out << ", \"batch_delay_us\": " << options.batch_delay_us;
+        if (options.repository.empty()) {
+            // The real answer only on the flag path; under `--repository` every instance took
+            // its window from the plan and this number is the binary's own default.
+            out << ", \"batch_delay_us\": " << options.batch_delay_us;
+        }
         out << ", \"policy\": \"" << options.policy << "\"";
         out << ", \"gpus\": [";
         for (size_t i = 0; i < options.devices.size(); ++i) {
             out << (i ? ", " : "") << options.devices[i];
         }
-        out << "]}, \"stages\": [";
+        out << "]}, \"models\": [";
+        for (size_t i = 0; i < models.size(); ++i) {
+            const BenchModel& model = models[i];
+            out << (i ? ", " : "") << "{\"name\": \"" << model.name << "\"";
+            out << ", \"engine\": \"" << model.engine << "\"";
+            out << ", \"instances_per_device\": " << model.per_device;
+            out << ", \"queue_delay_us\": " << model.queue_delay_us << "}";
+        }
+        out << "], \"stages\": [";
         for (size_t i = 0; i < stages.size(); ++i)
             out << (i ? ", " : "") << "\"" << stages[i] << "\"";
         out << "], \"note\": \"C++ data plane; tracking and fused kernels are NOT in this "
@@ -244,32 +308,26 @@ int main(int argc, char** argv) {
         shipinfer::runtime::require_container("csrc bench");
         const Options options = parse(argc, argv);
 
-        // -- the models: one Model per plan, one instance per (device x count), each behind the
-        // Engine contract — the Python plane's shape (engine/model.py) replacing the pool
-        // graph.
+        // -- the models, FROM THE PLAN. Which slots run a model, the engine each one runs,
+        // how many instances per device, the batch window and the row shape it is fed are all
+        // resolved on the Python side and carried (ADR-020). What this used to be is the
+        // measurement's real defect: four `--*-instances` flags and one global
+        // `--batch-delay-us` restating `model_repository/*/config.yaml`, and disagreeing with
+        // it on three of the four models -- so the two planes were benchmarked at different
+        // instance counts and the head-to-head was not like for like.
+        const ResolvedPlan plan =
+            options.plan_path.empty() ? default_bench_plan() : read_plan(options.plan_path);
+        const std::vector<BenchModel> specs = bench_models(plan, engines_of(options));
         std::cerr << "loading engines...\n";
         const auto load_start = std::chrono::steady_clock::now();
-        struct Spec {
-            std::string name;
-            std::string plan;
-            int per_device;
-            std::vector<int64_t> fed_row;
-        };
-        const int64_t d = 640;
-        const std::vector<Spec> specs{
-            {"ship_detector", options.det_plan, options.det_instances, {3, d, d}},
-            {"ship_segmenter", options.seg_plan, options.seg_instances, {3, d, d}},
-            {"person_embedder", options.emb_plan, options.emb_instances, {3, 256, 128}},
-            {"ship_embedder", options.ship_emb_plan, options.ship_emb_instances, {3, 256, 128}},
-        };
         std::map<std::string, std::unique_ptr<Model>> models;
-        for (const Spec& spec : specs) {
-            if (spec.plan.empty()) continue;
+        for (const BenchModel& spec : specs) {
+            if (spec.engine.empty()) continue;
             std::vector<std::unique_ptr<ModelInstance>> instances;
             for (int device : options.devices) {
                 // One engine per device, shared by that device's instances: the weights are
                 // paid for once per GPU rather than once per instance.
-                auto engine = TrtEngine::load(spec.plan, device);
+                auto engine = TrtEngine::load(spec.engine, device);
                 if (device == options.devices.front()) {
                     // Once per model: which `execute()` branch this plan takes. A static plan
                     // is padded to its batch; a dynamic one runs the rows it was given.
@@ -287,7 +345,7 @@ int main(int argc, char** argv) {
                     auto adapter = std::make_unique<TrtEngineAdapter>(
                         std::make_unique<TrtInstance>(engine, device));
                     const BatchWindow window(static_cast<size_t>(engine->max_batch()),
-                                             options.batch_delay_us);
+                                             spec.queue_delay_us);
                     instances.push_back(std::make_unique<ModelInstance>(
                         spec.name + ":" + std::to_string(device) + ":" + std::to_string(i),
                         std::move(adapter), window, static_cast<size_t>(options.queue_capacity),
@@ -298,7 +356,13 @@ int main(int argc, char** argv) {
             models[spec.name] = std::make_unique<Model>(spec.name, std::move(instances),
                                                         build_policy(options.policy));
         }
-        if (models.count("ship_detector") == 0) throw ConfigError("--det-engine is required");
+        // The chain's head. Named rather than "some model loaded", because a run whose
+        // detector is missing produces zero detections and reads as a quiet fleet.
+        if (models.count("ship_detector") == 0) {
+            throw ConfigError(
+                "no `ship_detector` was loaded; the plan must declare a slot "
+                "running it and this process must be able to reach its engine");
+        }
         for (auto& [name, model] : models) model->start(std::chrono::milliseconds(120000));
         const double startup_s =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - load_start)
@@ -310,8 +374,6 @@ int main(int argc, char** argv) {
         // `if (models.count(...))` ladder inside each worker -- and they disagreed: the
         // labels said a ship was class 1 while the crop specs said 8, so every ship left the
         // event writer as `unknown` while the right rows were cropped.
-        const ResolvedPlan plan =
-            options.plan_path.empty() ? default_bench_plan() : read_plan(options.plan_path);
         const PlanStages planned = plan_stages(plan, loaded_names(models));
         const std::vector<std::string>& stage_names = planned.stage_names;
         std::cerr << "chain '" << plan.name << "': " << stage_names.size() << " stage(s)";
@@ -416,7 +478,7 @@ int main(int argc, char** argv) {
                 }
                 return row;
             },
-            options.sample_interval_s, meta_json(options, stage_names));
+            options.sample_interval_s, meta_json(options, stage_names, specs));
 
         // -- workers ----------------------------------------------------------------------
         std::atomic<bool> stopping{false};

@@ -44,6 +44,15 @@ namespace shipinfer {
         std::optional<Extent> letterbox;
         std::optional<double> score_threshold;
         std::optional<int> max_detections;
+        // The runtime the model repository resolved: instances PER DEVICE, the batch window
+        // in microseconds (0 is "no window", which is dynamic batching off), and the artefact
+        // relative to the repository root. Absent where the plan was resolved without a
+        // repository, which is why every consumer refuses by name rather than defaulting --
+        // `bench.cpp` used to restate all three on its command line and its numbers disagreed
+        // with the repository's on three of four models.
+        std::optional<int> instances;
+        std::optional<int> queue_delay_us;
+        std::string artefact;
         std::string when;
         std::string per;
         std::string scope;

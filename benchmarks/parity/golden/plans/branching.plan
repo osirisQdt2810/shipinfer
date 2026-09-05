@@ -10,22 +10,34 @@ model ship_detector
 letterbox 640 640
 score 0.3
 max_detections 120
+instances 2
+queue_delay_us 5000
+artefact ship_detector/1/model.plan
 
 node segment segment pool
 model ship_segmenter
 classes ship
 crop 512 512
+instances 2
+queue_delay_us 8000
+artefact ship_segmenter/1/model.plan
 when fps == 20
 
 node embed_person embed pool
 model person_embedder
 classes person
 crop 256 128
+instances 2
+queue_delay_us 3000
+artefact person_embedder/1/model.plan
 
 node embed_ship embed pool
 model ship_embedder
 classes ship
 crop 256 128
+instances 1
+queue_delay_us 8000
+artefact ship_embedder/1/model.plan
 
 node track track shipvision
 per camera

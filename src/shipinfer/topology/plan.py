@@ -19,6 +19,7 @@ import math
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from shipinfer.core.errors import ConfigurationError
 
@@ -30,6 +31,7 @@ __all__ = [
     "PlanNode",
     "PlanSyntaxError",
     "ResolvedPlan",
+    "RuntimeLike",
     "parse_plan",
     "plan_text",
     "resolve_plan",
@@ -62,6 +64,12 @@ class PlanNode:
     letterbox: tuple[int, int] | None = None
     score_threshold: float | None = None
     max_detections: int | None = None
+    #: Instances PER DEVICE, the batch window in microseconds, and the artefact relative to
+    #: the repository root -- what the C++ bench restated on its command line, where its
+    #: numbers disagreed with the repository's on three of four models.
+    instances: int | None = None
+    queue_delay_us: int | None = None
+    artefact: str | None = None
     when: str | None = None
     per: str | None = None
     scope: str | None = None
@@ -125,6 +133,39 @@ def _speakable(value: str, where: str, *, spaces: bool = False, commas: bool = T
     )
 
 
+class RuntimeLike(Protocol):
+    """What :func:`resolve_plan` reads off a ``repository.resolved.ModelRuntime``.
+
+    Structural, like ``DecodeParamsLike`` in ``base.py`` and for the same reason: ``topology``
+    is pure and may not import ``repository``, so the caller passes the objects and this
+    layer states only which attributes it needs.
+    """
+
+    #: ``None`` where the model asks for no DEVICE instance at all -- a CPU-only model,
+    #: which `topology/ship_person_cpu.yaml`'s own header documents as a supported target.
+    #: The plan then carries no `instances` line and the consumer refuses by name.
+    instances: int | None
+    queue_delay_us: int
+    artefact: str
+
+
+def _runtime_int(
+    runtime: RuntimeLike | None, field_name: str, where: str, *, zero_ok: bool = False
+) -> int | None:
+    """One runtime number, refused here rather than written into a plan the other plane
+    refuses. ``instances`` is a count and must be positive; a ``queue_delay_us`` of 0 is
+    "no window", which is what dynamic batching being off resolves to."""
+    if runtime is None or (raw := getattr(runtime, field_name)) is None:
+        return None
+    value = int(raw)
+    if value < 0 or (value == 0 and not zero_ok):
+        raise ConfigurationError(
+            f"{where}: {field_name} is {value}, and a plan carries a "
+            f"{'non-negative' if zero_ok else 'positive'} one"
+        )
+    return value
+
+
 def _extent(value: object, where: str) -> tuple[int, int]:
     """``[h, w]``, both positive. Refused rather than defaulted, as ``pool.py`` refuses it."""
     pair = tuple(value) if isinstance(value, (list, tuple)) else ()
@@ -145,19 +186,23 @@ def _geometry(
 
 
 def resolve_plan(
-    topology: Topology, *, dims: Mapping[str, tuple[int, int]] | None = None
+    topology: Topology,
+    *,
+    dims: Mapping[str, tuple[int, int]] | None = None,
+    runtimes: Mapping[str, RuntimeLike] | None = None,
 ) -> ResolvedPlan:
     """Flatten a validated chain into a plan.
 
-    Geometry follows ``pool.py``'s rule: the slot's declaration wins, else the model's
-    input -- handed in as ``dims`` because reading a ``config.yaml`` is the repository's job.
+    Geometry follows ``pool.py``'s rule: the slot's declaration wins, else the model's input,
+    handed in as ``dims`` because a ``config.yaml`` is the repository's to read. ``runtimes``
+    is the rest of that reading (``repository/resolved.py``) and is optional.
 
     Raises:
-        ConfigurationError: an extent neither the slot nor ``dims`` states. Refused, not
-            defaulted: a crop at the wrong extent is answered with vectors wrong for every
-            object on every camera, and nothing reports it.
+        ConfigurationError: an extent neither the slot nor ``dims`` states -- refused, since
+            a crop at the wrong extent answers with vectors wrong for every object silently.
     """
     dims = dims or {}
+    runtimes = runtimes or {}
     nodes: list[PlanNode] = []
     fields: dict[str, list[str]] = {}
     for node in topology.nodes:
@@ -174,6 +219,7 @@ def resolve_plan(
         # decodes at one, and a plan that said nothing made the other plane default -- which
         # is the literal this whole seam exists to remove.
         decode = node.element.decode_parameters()
+        runtime = runtimes.get(node.spec.model or "") if node.spec.model else None
         if node.kind in (ElementKind.EMBED, ElementKind.SEGMENT) and crop is None:
             crop = _model_extent(node.spec.model, dims, where, "crop")
         if node.kind is ElementKind.DETECT and letterbox is None:
@@ -192,6 +238,13 @@ def resolve_plan(
                 ),
                 max_detections=(
                     None if decode is None else _positive(decode.max_detections, where)
+                ),
+                instances=_runtime_int(runtime, "instances", where),
+                queue_delay_us=_runtime_int(runtime, "queue_delay_us", where, zero_ok=True),
+                artefact=(
+                    None
+                    if runtime is None
+                    else _speakable(str(runtime.artefact), f"{where}: artefact")
                 ),
                 when=(
                     None
@@ -346,6 +399,12 @@ def plan_text(plan: ResolvedPlan) -> str:
             lines.append(f"score {node.score_threshold!r}")
         if node.max_detections is not None:
             lines.append(f"max_detections {node.max_detections}")
+        if node.instances is not None:
+            lines.append(f"instances {node.instances}")
+        if node.queue_delay_us is not None:
+            lines.append(f"queue_delay_us {node.queue_delay_us}")
+        if node.artefact:
+            lines.append(f"artefact {node.artefact}")
         if node.when:
             lines.append(f"when {node.when}")
         if node.per:
@@ -540,6 +599,26 @@ def _score(node: dict[str, object], args: Sequence[str], where: str) -> None:
     node["score_threshold"] = float(args[0])
 
 
+def _instances(node: dict[str, object], args: Sequence[str], where: str) -> None:
+    """Instances per device: a positive count, because zero would load the engine and run
+    nothing while every stage reported ready."""
+    _want(args, 1, where, "instances <count>")
+    count = _int(args[0], where)
+    if count <= 0:
+        raise PlanSyntaxError(f"{where}: instances is {count}; a slot runs at least one")
+    node["instances"] = count
+
+
+def _queue_delay(node: dict[str, object], args: Sequence[str], where: str) -> None:
+    """The batch window in microseconds. `0` is legal and means no window at all, which is
+    what `dynamic_batching: {enabled: false}` resolves to."""
+    _want(args, 1, where, "queue_delay_us <microseconds>")
+    delay = _int(args[0], where)
+    if delay < 0:
+        raise PlanSyntaxError(f"{where}: queue_delay_us is {delay}; a window is not negative")
+    node["queue_delay_us"] = delay
+
+
 def _max_detections(node: dict[str, object], args: Sequence[str], where: str) -> None:
     """A positive count. `-1` for "no limit" is a widespread convention and neither plane has
     it: here `keep[: -1]` would drop one row, and on the C++ side
@@ -588,6 +667,9 @@ _ATTRIBUTES = {
     "letterbox": _extent_attr("letterbox"),
     "score": _score,
     "max_detections": _max_detections,
+    "instances": _instances,
+    "queue_delay_us": _queue_delay,
+    "artefact": _word_attr("artefact"),
     "when": _when,
     "per": _word_attr("per"),
     "scope": _word_attr("scope"),
