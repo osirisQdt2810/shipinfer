@@ -19,8 +19,20 @@ namespace shipinfer {
     size_t TrtEngineAdapter::input_row_elems() const {
         return instance_->engine().inputs().front().elements_per_row();
     }
-    size_t TrtEngineAdapter::output_row_elems() const {
-        return instance_->output_rows();
+    size_t TrtEngineAdapter::output_row_elems(size_t index) const {
+        return instance_->output_rows(index);
+    }
+    size_t TrtEngineAdapter::outputs() const {
+        return instance_->engine().outputs().size();
+    }
+    std::vector<int64_t> TrtEngineAdapter::output_dims(size_t index) const {
+        return instance_->engine().outputs().at(index).dims;
+    }
+    std::string TrtEngineAdapter::output_name(size_t index) const {
+        // The ARTEFACT's own name, which is what a chain file's
+        // `params: {segment: {prototypes: output1}}` names -- so the fold asks for the output
+        // it needs rather than for a position the export controls.
+        return instance_->engine().outputs().at(index).name;
     }
 
     void TrtEngineAdapter::write_rows(size_t row_offset, const float* src, size_t rows,
@@ -77,8 +89,8 @@ namespace shipinfer {
         instance_->execute(plan_batch);
     }
 
-    const float* TrtEngineAdapter::output() const {
-        return instance_->output();
+    const float* TrtEngineAdapter::output(size_t index) const {
+        return instance_->output(index);
     }
 
 }  // namespace shipinfer

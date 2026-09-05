@@ -63,15 +63,47 @@ namespace shipinfer {
         double total_us() const { return (completed_ns - received_ns) / 1000.0; }
     };
 
+    // One of the engine's outputs: `rows` x `row_elems` floats on the host, named as the
+    // artefact names it. `InferenceResponse.outputs` on the Python plane is a `{name: Tensor}`
+    // map and this is the same seam -- no output is privileged, because a YOLO-seg engine's
+    // two are read together and neither is "the answer".
+    struct OutputTensor {
+        std::string name;
+        std::vector<float> data;  // `rows` x `row_elems`, row-major
+        size_t row_elems = 0;
+        // ONE ROW's shape, without the batch dimension -- the artefact's own, as `TensorSpec`
+        // declares it. `row_elems` is its product, and both are carried because a flattened
+        // width cannot be un-flattened: a segmentation engine's `(300, 38)` rows and
+        // `(32, 160, 160)` prototypes are two shapes the fold needs and one product hides.
+        std::vector<int64_t> dims;
+        const float* row(size_t index) const { return data.data() + index * row_elems; }
+    };
+
     struct InferenceResponse {
         std::string model_name;
         FrameTag tag;
-        std::vector<float> data;  // `rows` x `row_elems`, row-major, on the host
+        // In the engine's declaration order. Never empty for a completed response: an engine
+        // with no output is refused at load.
+        std::vector<OutputTensor> outputs;
         size_t rows = 0;
-        size_t row_elems = 0;
         Device executed_on;
         Timings timings;
-        const float* row(size_t index) const { return data.data() + index * row_elems; }
+
+        // The first output. Every model this plane began with has exactly one, and a
+        // single-output consumer means this by "the answer".
+        const OutputTensor& first() const { return outputs.at(0); }
+        size_t row_elems() const { return first().row_elems; }
+        const float* row(size_t index) const { return first().row(index); }
+        // By name, for a consumer that needs a SPECIFIC output -- the segmentation fold needs
+        // the prototype bank, not "the second one", because which position it occupies is the
+        // export's choice and not the chain's. `nullptr` where the engine has no such output,
+        // which the caller turns into a refusal naming it.
+        const OutputTensor* named(const std::string& name) const {
+            for (const OutputTensor& output : outputs) {
+                if (output.name == name) return &output;
+            }
+            return nullptr;
+        }
     };
 
     // The queue item: the request plus the promise its caller is waiting on. Satisfies the

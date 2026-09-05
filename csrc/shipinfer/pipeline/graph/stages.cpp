@@ -127,15 +127,15 @@ namespace shipinfer {
 
         const InferenceResponse response =
             infer(state, input, 1, row_elems, scratch_.device(), owner);
-        if (response.row_elems % kDetectionStride != 0) {
+        if (response.row_elems() % kDetectionStride != 0) {
             throw BackendError("stage " + name() + ": the detector's row of " +
-                               std::to_string(response.row_elems) + " floats is not " +
+                               std::to_string(response.row_elems()) + " floats is not " +
                                std::to_string(kDetectionStride) + " per candidate");
         }
         // Model space back to original pixels. Cropping in letterboxed coordinates is where the
         // off-by-a-pad-bar bugs live.
         std::vector<Detection> detections;
-        const size_t candidates = response.row_elems / kDetectionStride;
+        const size_t candidates = response.row_elems() / kDetectionStride;
         for (size_t d = 0;
              d < candidates && detections.size() < static_cast<size_t>(config_.max_objects);
              ++d) {
@@ -263,8 +263,9 @@ namespace shipinfer {
                                    " returned " + std::to_string(response.rows) +
                                    " row(s) for " + std::to_string(count) + " object(s)");
             }
-            out.append(response.data.data(), static_cast<int>(count),
-                       static_cast<int>(response.row_elems), payload->object_indices, start);
+            const OutputTensor& rows = response.first();
+            out.append(rows.data.data(), static_cast<int>(count),
+                       static_cast<int>(rows.row_elems), payload->object_indices, start);
         }
         state.attach(std::move(out));
         return payload->rows;

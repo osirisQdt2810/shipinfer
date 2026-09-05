@@ -2576,7 +2576,16 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       not fold at all, which the PR body first claimed was "already right" -- corrected there,
       and open as `CSRC-SEGMENT-FOLD-MISSING`.
 
-- [ ] **CSRC-SEGMENT-FOLD-MISSING · the C++ plane has the CROP half of the segmenter and no
+- [~] **CSRC-SEGMENT-FOLD-MISSING · SPLIT 5 Sep. Half one, the CONTRACT, is
+      `feat/csrc-multi-output` (PR #139); the fold and its parity gate follow on
+      `feat/csrc-mask-fold`.** The reason this was never ported is that the backend contract
+      carried ONE output -- `backends/engine_api.h` said so in as many words -- so a YOLO-seg
+      engine's prototype bank had nowhere to arrive. `Engine` takes N now, and
+      `InferenceResponse` carries them as named `OutputTensor`s WITH their per-row dims,
+      because `(300, 38)` rows and `(32, 160, 160)` prototypes are two shapes one flattened
+      width cannot tell apart. Found while doing it, and it is `CSRC-BENCH-UNCOMPILED`'s own
+      argument: the widening broke `pipeline/graph/stages.cpp`, all eleven gates stayed GREEN,
+      and only a hand `g++ -fsyntax-only` said so. Original: the C++ plane has the CROP half of the segmenter and no
       FOLD half at all** (#137 review round 2, verified 5 Sep). `ObjectStage::do_run`
       (`csrc/.../graph/stages.cpp`) chunks, infers and `out.append`s the engine's RAW rows --
       there is no `combine` seam on that stage and no port of `InstanceMaskArea` anywhere in
@@ -2608,6 +2617,16 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       conclusion: a chain saying `score_threshold: 0.4` has nowhere to say it to.
       Either the plan format grows the two fields (plan text + the C++ reader + the goldens)
       or the knobs go. Not folded into #137: it is a plan-format change with its own gate.
+
+- [ ] **ENGINE-DIMS-CAN-DISAGREE-WITH-WIDTH** (#139 review, non-blocking) —
+      `TrtEngineAdapter::output_row_elems` goes through `TensorSpec::elements_per_row()`,
+      which CLAMPS a negative dim to 1 (`backends/tensorrt/engine.h`), while `output_dims`
+      reports the `-1` verbatim. So for an output with a dynamic NON-BATCH dimension the pair
+      an `OutputTensor` carries is internally inconsistent. Pre-existing and unrealistic for a
+      YOLO-seg plan -- but `mask_area` is the first consumer to TRUST `dims`, so it should
+      refuse a shape holding a negative by name rather than build a mask from it. Taken in the
+      fold PR; recorded here because the clamp itself is the older half and is worth deciding
+      separately (clamping a dynamic dim to 1 is a silent lie about a width).
 
 - [ ] **CSRC-BENCH-STARTUP-ABORT · seen ONCE on 5 Sep and not reproduced, recorded rather
       than buried by a green re-run.** The first run of a freshly built `csrc/build/bench`
