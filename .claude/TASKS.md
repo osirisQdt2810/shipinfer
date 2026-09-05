@@ -2174,6 +2174,26 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       * **P5-C (resolved settings) shrinks to what the plan does not carry**: the queue
         capacities, the reassembly window, the worker count. Same reasoning -- resolved on the
         Python side, carried, not re-parsed.
+      P5-B SURVEYED 5 Sep, and the motivating evidence is stronger than the item claimed: the
+      C++ measurement runs a configuration NO `config.yaml` describes, so the head-to-head is
+      not like-for-like. `scripts/run_cpp_bench.sh` passes `--seg-instances 3
+      --emb-instances 3 --ship-emb-instances 3` while the repository says segmenter 2,
+      person_embedder 2 and **ship_embedder 1** -- a 3x difference on one model -- and it
+      passes no `--det-instances` at all, so the detector takes `bench.cpp`'s own default of 2
+      (`bench.cpp:134-137` defaults 2/1/2/1, a third set of numbers). Worse for the batch
+      window: `--batch-delay-us` is ONE global (default 2000) where the four configs state
+      5000 / 8000 / 8000 / 3000 per model.
+      SHAPE: `repository/extents.py::model_extents` is the seam -- it already reads
+      `config.yaml` on a driverless box for exactly this purpose. Generalise it to a
+      `ModelRuntime` per model (extent, `max_batch_size`, `max_queue_delay_us`, the per-device
+      instance count from `instance_groups`, the input and output names, `engine_file`), fold
+      it into `PlanNode`, add the verbs to `plan_text`/`parse_plan` and to
+      `csrc/.../plan.cpp`, re-emit the goldens, and delete the four argv flags from
+      `bench.cpp` and the three from `run_cpp_bench.sh`. Note the instance count is PER DEVICE
+      (Triton's `instance_groups` semantics, which `repo ls`'s `expand()` already divides
+      among shards), so the plan carries the per-device number and the shard divides it.
+      This is also where `SEGMENT-FOLD-KNOBS-NOT-IN-THE-PLAN` belongs: same format change,
+      same gate.
       Plus P5-A-ALLOC (first half built, queued). Original: P5-A DONE and OPEN as PR #129 (4 Sep). The survey's headline finding was right --
       csrc emitted NO events at all, and `bench.cpp`'s sink comment CLAIMED it built one while
       the body only counted -- so P5-A was writing a writer, not porting one.** Delivered:
@@ -2502,39 +2522,81 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `TWO_EMBEDDERS`/`THREE_EMBEDDERS` gained disjoint `classes:` (and a third label on the
       detector), which is what those chains meant all along -- their comment already said
       "each covers its own classes" while the YAML said nothing.
-      ONE GAP, deliberate and documented in the check itself: `PoolSegment` parses `classes:`
-      (the resolved plan needed it) while its Python half is whole-frame, so it declares
-      `selects_rows = False` and two overlapping SEGMENT slots are still caught per frame.
-      `P6-SEGMENT-CROP` is the item that makes it a real row-selector, and this check starts
-      covering it that day. Flipping the flag now would refuse `when: class == ...` on every
-      segment slot, which is four other tests' subject and a change that belongs with it.
-- [ ] **P6-SEGMENT-CROP · A pre-existing cross-plane divergence the plan made visible, and
-      the direction is already DECIDED -- by `PoolSegment`'s own docstring, read 4 Sep.**
-      `segment` CROPS on the C++ plane (`ship_crops_640`, 640x640, one crop per ship row) and
-      letterboxes the WHOLE FRAME on the Python one, so `mask_area_px` is computed from
-      different pixels. Not caused by ADR-020 -- the plan carries what the C++ plane already
-      did -- but now stated in one file rather than implied by two.
-      **The C++ shape is the destination and the Python side is the one that moves**, in as
-      many words: *"the demo repository's `ship_segmenter` is fed crops in the proven pipeline
-      (`pipeline/graph/graph.py` cuts a `ship_mask_crops` set at 640x640 and hands it to an
-      `ObjectStage`), so the FIRST half of this element is exactly `_PoolCropElement`'s and
-      adopting it is a one-line change of base class."* What blocks it is the second half: a
-      YOLO-seg engine emits rows plus a bank of mask prototypes and the mask for one crop is
-      the two multiplied and reduced to an area (`pipeline/graph/masks.py::InstanceMaskArea`)
-      -- a fold over two outputs that a per-row scatter-back cannot express, and filing the
-      raw rows instead would pin a `(32, 160, 160)` prototype tensor per frame alive (~3 MB a
-      frame of reassembly memory for pixels nobody reads).
-      SO: the work is `PoolSegment` gaining `_PoolCropElement` as its base PLUS its own
-      `_finish` doing the fold, in the slice the docstring already reserves for it -- not a
-      design question.
-      WHAT IT WILL ALSO COST, measured 4 Sep so the next slice does not discover it midway:
-      `PoolSegment` must declare `selects_rows = True` (it parses `classes:` since #132 but
-      does not declare it), and that flip (a) makes `_check_one_filler_per_row` cover segment
-      slots, which stops `tests/runners/test_walk.py`'s `TWO_SEGMENTERS` loading -- two
-      `segment` slots with no `classes:` -- and (b) makes `when: class == ...` on a segment
-      slot a refusal, which is four tests' subject in `tests/topology/test_chain.py`. Both
-      are the correct behaviour and both belong in that slice. Then `params: {classes: [ship]}` on the slot, and the two planes agree.
-      Until then the divergence is real and stated in both places.
+      ONE GAP, deliberate and documented in the check itself: `PoolSegment` parsed `classes:`
+      (the resolved plan needed it) while its Python half was whole-frame, so it declared
+      `selects_rows = False` and two overlapping SEGMENT slots were caught per frame.
+      CLOSED by `P6-SEGMENT-CROP` (5 Sep): both kinds in `ROW_FIELD_KINDS` are covered now, and
+      `tests/topology/test_overlapping_fillers.py::test_two_segment_slots_are_considered_since_the_segmenter_crops`
+      is the check that says so.
+- [x] **P6-SEGMENT-CROP · DONE 5 Sep, OPEN as PR #137** (branch `feat/segment-crops`).
+      `PoolSegment` extends `_PoolCropElement`: one 640x640 crop per SELECTED detection, and a
+      new `_reduced` hook folds the engine's two outputs (`output0` rows + `output1` prototype
+      bank) into one `mask_area_px` per crop before the scatter -- the fold a per-row
+      scatter-back cannot express, run once per chunk. `InstanceMaskArea` moved to
+      `topology/elements/masks.py` (`topology` may not import `pipeline`), with
+      `pipeline/graph/masks.py` re-exporting it.
+      LAST MILE, found by the GPU run and not by the suite: `SinkOutput` never read `masks`,
+      so `mask_area_px` was `None` in every published event. `reads_per_row` now carries it
+      and `_records` fills it; `None` still means "no segmenter ran" and `0.0` means "it ran
+      and found nothing", which are opposite investigations.
+      COSTS, all measured and all the correct behaviour: `selects_rows = True` makes
+      `_check_one_filler_per_row` cover segment slots and `when: class == ...` on one a
+      refusal; `topology/ship_person.yaml` gains `params: {classes: [ship]}` (without it the
+      C++ plane REFUSES the plan and the Python plane would segment every person crop);
+      `tests/runners/test_pool_element.py`'s "one kind stands for the four" witness moved to
+      `PoolRecognize`, the only `pool` element that still forwards.
+      EVIDENCE: offline 3546 passed (three runs, two random-order); `-m gpu` 67 passed /
+      3 skipped in the container on GPUs 0-6 (card 7 is degraded again -- the documented
+      `SHIPINFER_GPUS` route-around); and the real chain on the real `yolo26n-seg` engine over
+      `ship_2K`, publishing `ship_mask_area_vec=[206112.0, 214192.0, 0.0, 0.0]` for four ships
+      -- ~50% of a 409600-pixel crop for the near vessels and 0.0 for the two the engine
+      scored below the floor, which is `InstanceMaskArea`'s documented refusal working.
+      VRAM verified idle after every run.
+      SPLIT at review round 2: this closes the PYTHON half. The C++ plane crops right and does
+      not fold at all, which the PR body first claimed was "already right" -- corrected there,
+      and open as `CSRC-SEGMENT-FOLD-MISSING`.
+
+- [ ] **CSRC-SEGMENT-FOLD-MISSING · the C++ plane has the CROP half of the segmenter and no
+      FOLD half at all** (#137 review round 2, verified 5 Sep). `ObjectStage::do_run`
+      (`csrc/.../graph/stages.cpp`) chunks, infers and `out.append`s the engine's RAW rows --
+      there is no `combine` seam on that stage and no port of `InstanceMaskArea` anywhere in
+      `csrc/` (`grep -rn MaskArea csrc/shipinfer/pipeline/graph/` finds nothing). So
+      `records.cpp`'s `Field::MaskArea` publishes `row[0]` of whatever was attached, which for
+      the shipped `ship_segmenter` is `output0[crop][0][0]` -- the x1 of the first candidate
+      row, 0-640 in crop pixels. The Python plane publishes ~206 000 for the same crop after
+      P6-SEGMENT-CROP. One chain file, one engine, two values four orders of magnitude apart.
+      P6-SEGMENT-CROP made this WORSE IN KIND rather than causing it: before, this plane
+      published `None` and nobody trusted the field; now one plane is plausible and the other
+      is a box coordinate, which is the "plausible, wrong and silent" class
+      `topology/elements/masks.py`'s docstring says the project refuses.
+      THE GATE CANNOT SEE IT: `csrc/tests/test_record_parity.cpp` feeds `build_records`
+      scenarios that state already-reduced `(N, 1)` rows, so the missing fold is invisible to
+      it by construction. A gate for this one has to compare the STAGE outputs, not the
+      records -- which is the seam the fold lives on.
+      WORK: an `ObjectStage` combine seam mirroring the Python `ObjectStage`'s, a `MaskArea`
+      combine with the same arithmetic (argmax row, score floor, einsum against the prototype
+      bank, threshold count, cell -> crop pixels), and a parity gate over the stage.
+      `records.cpp`'s comment was corrected in #137 to say what that plane actually does.
+
+- [ ] **SEGMENT-FOLD-KNOBS-NOT-IN-THE-PLAN** (#137 review, non-blocking 2) — `params:
+      {segment: {score_threshold, mask_threshold}}` are read by the Python fold and the
+      resolved plan cannot carry either: `PlanNode.score_threshold` is the DETECTOR's decode
+      floor (`topology/plan.py`), and the `0.25f` in `csrc/.../plan_stages.h` is that same
+      detector floor (`DetectConfig::score_threshold`, consumed at `stages.cpp:143`) -- NOT a
+      segmentation one. There is no segmentation floor on that plane because there is no fold
+      at all (`CSRC-SEGMENT-FOLD-MISSING`), which is the stronger version of the same
+      conclusion: a chain saying `score_threshold: 0.4` has nowhere to say it to.
+      Either the plan format grows the two fields (plan text + the C++ reader + the goldens)
+      or the knobs go. Not folded into #137: it is a plan-format change with its own gate.
+
+- [ ] **SEGMENT-NO-CLASSES-ASYMMETRY** — a chain with ONE segment slot and no `classes:`
+      loads on the Python plane (it means "segment every row") and is REFUSED by the C++ plane
+      (`csrc/.../plan_stages.cpp::class_of`, added in #132's review, because "every row" is a
+      640x640 crop per person that nobody chose). Both refusals are load-time and loud, so
+      this is not a silent divergence -- but it is one chain file with two answers. Decide
+      which plane moves: either Python refuses it too, or the C++ plane accepts `kAnyClass`
+      for a segment slot. Not folded into P6-SEGMENT-CROP: it is a separate decision about
+      what a chain file may SAY, and that PR was already 14 files.
 
 - [x] **HOOK-FP · MERGED as PR #104 (31 Aug 13:54), VERDICT: APPROVE.** (was OPEN as PR #104) (2 commits, 2 files, +89/-1, rebased onto 9d315da). 82 hook tests; full
       tier 3232 passed; pre-commit all Passed; clean. BOTH revert-checks reproduced on this tip: formatter
