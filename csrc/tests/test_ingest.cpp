@@ -35,6 +35,7 @@
 #include "shipinfer/ingest/config.h"
 #include "shipinfer/ingest/frame.h"
 #include "shipinfer/ingest/manager.h"
+#include "shipinfer/ingest/omitted_lanes.h"
 #include "shipinfer/ingest/registry.h"
 #include "shipinfer/ingest/sink.h"
 // The pure half of the GStreamer source: strings and element choices, no `libgstreamer`. The
@@ -2162,6 +2163,28 @@ namespace {
         return config;
     }
 
+    // NOT REGISTERED and NOT IN THIS BUILD are two questions, and a check that asks the wrong
+    // one is red on some machines and green on others. Unconditional, because every claim below
+    // holds on every build -- which is the property the guards above needed and did not have.
+    void test_a_missing_source_and_an_omitted_lane_are_different_questions() {
+        // `test_ingest` links no real source, so `replay` is absent from its registry ALWAYS.
+        check(!SOURCES().contains("replay"),
+              "this binary registers no real source, on every box");
+        // Whether the opencv LANE was compiled is a property of the box, not of this binary:
+        // `build_csrc.py` puts it in when pkg-config resolves OpenCV. So the registry answer
+        // above says nothing about the lane, and a check that used it as the guard asserted a
+        // lane message on machines that have OpenCV -- red for a developer, green in CI.
+        const bool lane_omitted = omitted_lane_of_source("replay") == "opencv";
+        check(lane_omitted == (omitted_lanes().find("opencv") != std::string::npos),
+              "the lane table answers about the BUILD, and only the build");
+        // The name is the question too: `canonical` reports a lane only for a name that lane
+        // registers, so a genuine typo still reads as a typo however the build was configured.
+        check(omitted_lane_of_source("nosuchsource").empty(),
+              "a name no lane owns is never blamed on a lane");
+        check(SOURCES().contains("fake") && omitted_lane_of_source("fake").empty(),
+              "and a source that IS registered is never reported omitted");
+    }
+
     void test_the_gstreamer_source_where_it_is_linked() {
         if (!SOURCES().contains("gstreamer")) {
             // Not only a skip. The binary that cannot run these checks is exactly the binary
@@ -2183,21 +2206,39 @@ namespace {
             // hand-rolled `g++` line with no define, where the refusal stays the bare
             // "unknown video source" — an unconditional check here contradicted that
             // documented fallback and made hand builds fail instead of skip (#48 round 1).
-            check(
-                contains(message, "'gstreamer' exists but was not compiled into this binary") &&
-                    contains(message, "the 'gstreamer' external lane") &&
-                    contains(message, "--with-external"),
-                "a source this build left out is refused by BUILD LANE, not as a typo "
-                "(-DSHIPINFER_OMITTED_LANES, baked in by scripts/build_csrc.py): " +
-                    message);
+            // The lane table again, for the reason the opencv row below states: reaching here
+            // means gstreamer is not REGISTERED, which is not the same as its lane being out
+            // of the BUILD. A binary that links the lane but not this source would otherwise
+            // be asserted to say "was not compiled into this binary" -- true of the source and
+            // false of the lane, which is the sentence being checked.
+            if (omitted_lane_of_source("gstreamer") == "gstreamer") {
+                check(contains(message,
+                               "'gstreamer' exists but was not compiled into this binary") &&
+                          contains(message, "the 'gstreamer' external lane") &&
+                          contains(message, "--with-external"),
+                      "a source this build left out is refused by BUILD LANE, not as a typo "
+                      "(-DSHIPINFER_OMITTED_LANES, baked in by scripts/build_csrc.py): " +
+                          message);
+            }
             {
                 // The table's other row, end to end (#48 round 1): the opencv lane's names
-                // answer the same way in a binary that omitted it. The construction sits
-                // INSIDE the guard (#49 round 1 N1): a `--with-external opencv` build with
-                // gstreamer omitted still enters this branch, and constructing a real
-                // ReplaySource for nothing was harmless only via another unit's detail
-                // (replay throws from do_open, not its constructor).
-                if (!SOURCES().contains("replay")) {
+                // answer the same way in a binary that omitted it.
+                //
+                // GUARDED ON THE LANE TABLE, not on the registry, and the difference is the
+                // whole point of this check. "replay is not registered" and "the opencv lane
+                // is not in this build" are INDEPENDENT facts: `test_ingest` links no real
+                // source at all, so `replay` is absent from its registry on every box, while
+                // a box with OpenCV installed has the opencv lane IN the build and therefore
+                // NOT in `-DSHIPINFER_OMITTED_LANES`. `canonical` then correctly answers
+                // "unknown video source", the old guard asserted a lane message anyway, and
+                // this gate was red on every developer machine with OpenCV while CI -- whose
+                // runner has none -- stayed green.
+                //
+                // The construction stays INSIDE the guard (#49 round 1 N1): a
+                // `--with-external opencv` build with gstreamer omitted still enters this
+                // branch, and constructing a real ReplaySource for nothing was harmless only
+                // via another unit's detail (replay throws from do_open, not its constructor).
+                if (omitted_lane_of_source("replay") == "opencv") {
                     std::string replay_message;
                     try {
                         FrameCounter counter("cam-r");
@@ -2598,6 +2639,7 @@ int main() {
     test_the_decoder_and_converter_are_probed_not_assumed();
     test_an_unsupported_codec_is_refused_before_a_thread_starts();
 
+    test_a_missing_source_and_an_omitted_lane_are_different_questions();
     test_the_gstreamer_source_where_it_is_linked();
     test_a_decoded_pixel_over_a_real_rtsp_session();
 

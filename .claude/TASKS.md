@@ -2646,18 +2646,23 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       6 failures; restored -> 0 and exit 0 for both. And the four real engines still load --
       8 cameras x 5 fps x 20 s on GPUs 0-1, 800 frames -> 800 complete, exit 0 -- which is what
       says the refusal does not refuse a valid plan.
-- [ ] **TEST-INGEST-RED-WHERE-OPENCV-IS-INSTALLED.** `csrc/tests/test_ingest.cpp:2213` is red
-      on this host and on `origin/main` -- reproduced in a clean worktree at `origin/main`, so
-      it is not #144's -- with `unknown video source 'replay'; known sources: fake`. The guard
-      above it is `if (!SOURCES().contains("replay"))`, and that is the WRONG FACT: a source
-      missing from the REGISTRY is not the same as its lane missing from the BUILD. This box
-      has OpenCV, so `build_csrc.py` puts the opencv lane IN the build and therefore NOT in
-      `-DSHIPINFER_OMITTED_LANES`; `test_ingest` still links no replay unit, so `replay` is
-      neither registered nor claimable by an omitted lane, and `canonical` correctly falls
-      through to "unknown". The assertion is about the lane TABLE, so the guard should ask the
-      table: `omitted_lane_of_source("replay") == "opencv"`. CI is green because its runner has
-      no OpenCV -- which is the part worth fixing, a gate that only fails on a developer's
-      better-equipped machine.
+- [x] **TEST-INGEST-RED-WHERE-OPENCV-IS-INSTALLED · DONE 5 Sep on `fix/gate-assumes-no-opencv`.**
+      `csrc/tests/test_ingest.cpp` was red on any box with OpenCV -- reproduced at `origin/main`
+      in a clean worktree before touching anything. The guard was `if (!SOURCES().contains(
+      "replay"))` and that is the WRONG QUESTION: "not registered" and "not in this build" are
+      independent. `test_ingest` links no real source, so `replay` is absent from its registry on
+      EVERY box; this one has OpenCV, so `build_csrc.py` puts the opencv lane IN the build and
+      therefore NOT in `-DSHIPINFER_OMITTED_LANES`, and `canonical` correctly answered "unknown
+      video source" while the check asserted a lane message anyway. CI is green because its
+      runner has no OpenCV -- a gate that only fails on a better-equipped machine.
+      FIXED by asking the lane table (`omitted_lane_of_source("replay") == "opencv"`), and the
+      gstreamer row beside it now reads the same way rather than staying one latent instance of
+      the same confusion. `test_a_missing_source_and_an_omitted_lane_are_different_questions`
+      pins the distinction unconditionally.
+      EVIDENCE, both build shapes: full build (opencv lane in) 229 checks 0 failures; `--offline`
+      (both lanes out, so the opencv-row assertion actually runs) 230 checks 0 failures.
+      REVERT-CHECK RED: the old guard back, full build -> 1 failure, exit 1, with the original
+      message verbatim; restored -> 0, exit 0.
 - [ ] **CSRC-BENCH-STARTUP-ABORT · seen ONCE on 5 Sep and not reproduced, recorded rather
       than buried by a green re-run.** The first run of a freshly built `csrc/build/bench`
       aborted with `terminate called without an active exception` (exit 134) after all four
