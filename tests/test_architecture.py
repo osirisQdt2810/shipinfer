@@ -100,6 +100,29 @@ class TestImportsGoOneWay:
                     offenders.append(f"{path.relative_to(SRC)} imports {module}")
         assert not offenders, "core must not import upward:\n" + "\n".join(offenders)
 
+    def test_nothing_shipped_imports_the_unshipped_scripts(self) -> None:
+        """`scripts/` is in neither the wheel nor the runtime image.
+
+        `packages.find` is `src` only and the Dockerfile's runtime stage never copies
+        `scripts/`, so importing it from `src/shipinfer/` is a `ModuleNotFoundError` exactly
+        where the code runs -- and `pythonpath = [".", "src"]` hides that from this tier:
+        `shipinfer plan` shipped such an import through two review rounds, green throughout.
+        The rule outlived the code that motivated it: `shipinfer plan` no longer needs to
+        know anything about that script, because a build command is only right for one
+        repository. The rule stays because the next such import will be just as invisible.
+        """
+        offenders = [
+            f"{path.relative_to(SRC)} imports {module}"
+            for path in SRC.rglob("*.py")
+            for module in _modules_imported_by(path)
+            if module == "scripts" or module.startswith("scripts.")
+        ]
+
+        assert not offenders, (
+            "src/shipinfer must not import `scripts.*` -- it is in neither the wheel nor the "
+            "image:\n" + "\n".join(offenders)
+        )
+
     def test_scheduling_only_imports_core(self) -> None:
         allowed = {"shipinfer.core", "shipinfer.scheduling"}
         offenders: list[str] = []

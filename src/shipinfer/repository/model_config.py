@@ -402,7 +402,9 @@ class ModelConfig(_Strict):
 
         One spelling, because it was three: the TensorRT backend, the DeepStream config
         writer and the plan resolver each carried the literal, and only one of them could
-        have been changed.
+        have been changed. This is the TENSORRT artefact whatever the platform, because the
+        resolved plan's `artefact` line is read by a TensorRT-only plane, so this is what
+        that line says whatever `platform:` a repository declares.
         """
         return str(self.parameters.get("engine_file", DEFAULT_ENGINE_FILE))
 
