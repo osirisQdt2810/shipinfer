@@ -948,8 +948,27 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 6 · The final goal (V49)
 
-- [~] **C1 · MEASURED AT THE DESIGN LOAD 5 Sep, and the number moved a long way. C4 is DONE
-      (#130); the remaining gate is Phase D, which is operator-blocked (`PHASE-D-NV12`).**
+- [!] **C1 · OPERATOR: the >=5x TARGET LOOKS UNREACHABLE BY CONSTRUCTION, and I would like
+      your call on re-scoping it before spending more GPU time chasing it.** Measured at the
+      design load on 5 Sep, both sides, in one sitting: the C++ plane retires **944 img/s** and
+      the fairly-configured baseline sustains **971.3** -- PARITY, up from the recorded 0.45x.
+      THE ARGUMENT: the counting simulation runs the SAME TensorRT engines on the SAME GPUs,
+      and at this load both sides are GPU-bound at ~950-970 img/s on seven A5000s. No amount of
+      scheduling gets 5x more work out of the same kernels; the target was set (V-era) when the
+      plane was 2.2x SLOWER, where "catch up and pass" was the shape of the problem.
+      WHAT THE ARCHITECTURE ACTUALLY BUYS is visible in the same runs and is not throughput:
+      bounded queues that reject rather than grow (the baseline at seg=1/gpu was SATURATED,
+      its segmentation backlog growing 35/s), per-camera attribution of every drop
+      (`queue_rejected_by_camera`), and no silent eviction of a quiet camera by a busy one --
+      which is the documented failure this project exists to fix.
+      THE QUESTION, and either answer is fine: (a) re-scope C1 to a LATENCY / FAIRNESS claim at
+      equal throughput, which the numbers already support, or (b) keep >=5x as a throughput
+      target, in which case it needs a different baseline (one that does less GPU work) or
+      hardware, and I should stop tuning toward it.
+      Phase D (`PHASE-D-NV12`, also yours) is the one remaining lever inside the current shape
+      and it is worth ~the decode cost, not 5x.
+      Original: MEASURED AT THE DESIGN LOAD 5 Sep. C4 is DONE
+      (#130); the remaining gate is Phase D, which is operator-blocked (`PHASE-D-NV12`).
       50 cameras x 20 fps x 70 s on GPUs 0-6, container, `run_cpp_bench.sh`. The generator
       DELIVERED the design load -- 69 998 frames read in 70 s -- so this is the real thing and
       not a scaled stand-in.
