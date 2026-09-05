@@ -10,6 +10,12 @@
 # be restated on this command line and the numbers disagreed -- 3/3/3 against the repository's
 # 2/2/1, and one global 2000 us against its 5000/8000/8000/3000 -- so the two planes were
 # measured at configurations neither file described.
+#
+# The WORKER COUNT went the same way (P5-C), with the queue capacities and the reassembly
+# window beside it: they are `core/settings/`'s, `shipinfer plan` reads them below, and the
+# binary refuses a plan that states none. `SHIPINFER_BENCH_WORKERS` therefore sets the
+# SETTING -- the plan is written in this shell, so the env var reaches it the ordinary way --
+# rather than a flag the binary would have had to reconcile with the file.
 set -euo pipefail
 
 LABEL="${1:?usage: run_cpp_bench.sh <label> [extra flags...]}"
@@ -22,7 +28,8 @@ mkdir -p "$REPO/.artifacts/cpp"
 # repository no longer describes, which is the defect this replaced.
 CHAIN="${SHIPINFER_BENCH_CHAIN:-$REPO/topology/ship_person_cpu.yaml}"
 PLAN="$REPO/.artifacts/cpp/${LABEL}.plan"
-python -m shipinfer plan -t "$CHAIN" -r "$REPO/model_repository" -o "$PLAN"
+SHIPINFER_PIPELINE__WORKERS="${SHIPINFER_BENCH_WORKERS:-48}" \
+  python -m shipinfer plan -t "$CHAIN" -r "$REPO/model_repository" -o "$PLAN"
 
 # `set -e` would abort on a non-zero exit before the status is printed, so the run that most
 # needs reading — a timeout (124), a crash — would leave no line and no summary. Capture it.
@@ -36,7 +43,6 @@ timeout "${SHIPINFER_BENCH_TIMEOUT:-900}" "$REPO/deploy/rootless/cpp.sh" \
   --cameras "${SHIPINFER_BENCH_CAMERAS:-50}" \
   --fps "${SHIPINFER_BENCH_FPS:-20}" \
   --seconds "${SHIPINFER_BENCH_SECONDS:-70}" \
-  --workers "${SHIPINFER_BENCH_WORKERS:-48}" \
   --log-jsonl "/work/.artifacts/cpp/${LABEL}.jsonl" \
   "$@" > "$REPO/.artifacts/cpp/${LABEL}.log" 2>&1 || status=$?
 echo "exit=$status"

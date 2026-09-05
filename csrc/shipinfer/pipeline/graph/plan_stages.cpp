@@ -97,6 +97,13 @@ namespace shipinfer {
         ResolvedPlan plan;
         plan.version = kPlanVersion;
         plan.name = "bench-default";
+        // `core/settings/`'s own defaults, so the no-`--plan` run and a plan written from an
+        // unconfigured deployment are the SAME configuration. A different number here would be
+        // a fifth set, which is what P5-C exists to stop: `pipeline.workers`,
+        // `pipeline.queue_capacity`, `scheduler.max_queue_size`,
+        // `scheduler.enqueue_block_timeout_ms`, `pipeline.stage_timeout_ms` and the three
+        // `pipeline.reassembly` fields, in that order.
+        plan.settings = PlanSettings{4, 256, 64, 50, 5000, 1024, 1500, 100};
         plan.labels = {{0, "person"}, {8, "ship"}};
         PlanNode detect;
         detect.slot = "detect";

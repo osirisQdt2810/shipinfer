@@ -12,6 +12,7 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
+from shipinfer.cli.common import build_settings
 from shipinfer.repository import ModelEntry, ModelRepository
 from shipinfer.repository.resolved import ModelRuntime, model_extents, model_runtimes
 from shipinfer.topology import Topology, load_topology
@@ -25,7 +26,17 @@ def plan(topology: Path, repository: Path, out: Path | None = None) -> int:
     chain = load_topology(topology)
     models = ModelRepository.load(repository)
     runtimes = model_runtimes(models)
-    text = plan_text(resolve_plan(chain, dims=model_extents(models), runtimes=runtimes))
+    # `build_settings` and not `ServerSettings()`: the plan must carry what THIS deployment
+    # says, and that is flags over `SHIPINFER_*` over defaults. Reading them anywhere else
+    # would give the data plane a third set of numbers, which is the defect P5-C closes.
+    text = plan_text(
+        resolve_plan(
+            chain,
+            dims=model_extents(models),
+            runtimes=runtimes,
+            settings=build_settings(repository),
+        )
+    )
     if out is None:
         print(text, end="")
     else:

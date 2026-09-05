@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from benchmarks.parity.drive_plan import SETTINGS
 from shipinfer.core.errors import ConfigurationError
 from shipinfer.repository import ModelRepository
 from shipinfer.repository.resolved import ModelRuntime, model_extents, model_runtimes
@@ -71,6 +72,10 @@ def _resolved(name: str) -> ResolvedPlan:
         load_topology(CHAINS[name]),
         dims=model_extents(models),
         runtimes=model_runtimes(models),
+        # THE SAME DOUBLE the emitter uses, imported rather than restated: two settings
+        # objects with equal values would pass today and drift the day one is edited, and
+        # the golden is a byte compare, so the drift would read as a writer change.
+        settings=SETTINGS,
     )
 
 
@@ -219,73 +224,113 @@ class TestAModelThatAsksForNoDeviceInstance:
         assert "instances 2" in self.resolved()
 
 
+#: Every `setting` key in written order -- the C++ gate's `kAllSettings`, line for line. All
+#: eight or none, so a partial set is one of the refusals below rather than seven defaults.
+ALL_SETTINGS = (
+    "setting workers 4\n"
+    "setting pipeline_queue 256\n"
+    "setting instance_queue 64\n"
+    "setting enqueue_block_timeout_ms 50\n"
+    "setting stage_timeout_ms 5000\n"
+    "setting reassembly_capacity 1024\n"
+    "setting reassembly_timeout_ms 1500\n"
+    "setting reassembly_sweep_ms 100\n"
+)
+
+
 class TestBothPlanesRefuseTheSameText:
     """The same table as `refuses_what_python_refuses()` in the C++ gate, line for line."""
 
     REFUSED = (
         ("", "no header at all"),
         ("node a decode replay\n", "a verb before the header"),
-        ("plan 1 x\nplan 1 y\n", "a second header"),
-        ("plan 2 x\n", "an unknown version"),
-        ("plan 1 x\nmodel m\n", "an attribute before any node"),
-        ("plan 1 x\nnode a b\n", "node with two arguments"),
-        ("plan 1 x\nnode a b c\ncrop 256\n", "crop with one extent"),
-        ("plan 1 x\nnode a b c\ncrop 0 128\n", "a crop that is not positive"),
-        ("plan 1 x\nnode a b c\nscore nan\n", "a non-finite score"),
-        ("plan 1 x\nnode a b c\nnonsense 1\n", "an unknown verb"),
-        ("plan 1 x\nlabel eight ship\n", "a label id that is not an integer"),
-        ("plan 1 x\nedge a b\n", "an edge with no cap"),
-        ("plan 1 x\nfield embedding\n", "a field with no slot"),
+        ("plan 2 x\nplan 2 y\n", "a second header"),
+        ("plan 1 x\n", "the PREVIOUS version, which carries no settings"),
+        ("plan 3 x\n", "and a version from the future"),
+        ("plan 2 x\nmodel m\n", "an attribute before any node"),
+        ("plan 2 x\nnode a b\n", "node with two arguments"),
+        ("plan 2 x\nnode a b c\ncrop 256\n", "crop with one extent"),
+        ("plan 2 x\nnode a b c\ncrop 0 128\n", "a crop that is not positive"),
+        ("plan 2 x\nnode a b c\nscore nan\n", "a non-finite score"),
+        ("plan 2 x\nnode a b c\nnonsense 1\n", "an unknown verb"),
+        ("plan 2 x\nlabel eight ship\n", "a label id that is not an integer"),
+        ("plan 2 x\nedge a b\n", "an edge with no cap"),
+        ("plan 2 x\nfield embedding\n", "a field with no slot"),
         ("plan 1_0 x\n", "an integer `int()` accepts and `std::stoi` does not"),
-        ("plan 1 x\nnode a b c\nnode a b c\n", "a second block for one slot"),
-        ("plan 1 x\nlabel 8 ship\nlabel 8 vessel\n", "a second table row for one id"),
-        ("plan 1 x\nnode a b c\nclasses ,ship\n", "an empty label in `classes`"),
-        ("plan 1 x\nnode a b c\nscore inf\n", "`inf`, which the writer must never emit"),
-        ("plan 1 x\nnode a b c\nclasses ship,\n", "a trailing comma, so an empty label"),
-        ("plan 1 x\nfield embedding a\nfield embedding b\n", "a second `field` for one name"),
-        ("plan 1 x\nfield embedding nosuch\n", "a `field` naming a slot no `node` declares"),
-        ("plan 1 x\nnode a b c\nscore 0x10\n", "a hex float, which `stod` would accept"),
-        ("plan 1 x\nlabel 99999999999999999999 ship\n", "an id too large for a C++ int"),
-        ("plan 1 x\nnode a b c\nmax_detections -1\n", "`-1` for `no limit`, which is no cap"),
-        ("plan 1 x\nnode a b c\nmax_detections 0\n", "and zero, for the same reason"),
-        ("plan 1 x\nnode a b c\nscore 1e400\n", "an overflowing exponent, which is `inf`"),
-        ("plan 1 x\nnode a b c\ninstances 0\n", "zero instances, which runs nothing"),
-        ("plan 1 x\nnode a b c\ninstances -1\n", "and a negative count"),
-        ("plan 1 x\nnode a b c\nqueue_delay_us -1\n", "a negative batch window"),
-        ("plan 1 x\nnode a b c\ninstances two\n", "an instance count that is not a number"),
-        ("plan 1 x\nnode a b c\nartefact a b\n", "an artefact path holding a space"),
+        ("plan 2 x\nnode a b c\nnode a b c\n", "a second block for one slot"),
+        ("plan 2 x\nlabel 8 ship\nlabel 8 vessel\n", "a second table row for one id"),
+        ("plan 2 x\nnode a b c\nclasses ,ship\n", "an empty label in `classes`"),
+        ("plan 2 x\nnode a b c\nscore inf\n", "`inf`, which the writer must never emit"),
+        ("plan 2 x\nnode a b c\nclasses ship,\n", "a trailing comma, so an empty label"),
+        ("plan 2 x\nfield embedding a\nfield embedding b\n", "a second `field` for one name"),
+        ("plan 2 x\nfield embedding nosuch\n", "a `field` naming a slot no `node` declares"),
+        ("plan 2 x\nnode a b c\nscore 0x10\n", "a hex float, which `stod` would accept"),
+        ("plan 2 x\nlabel 99999999999999999999 ship\n", "an id too large for a C++ int"),
+        ("plan 2 x\nnode a b c\nmax_detections -1\n", "`-1` for `no limit`, which is no cap"),
+        ("plan 2 x\nnode a b c\nmax_detections 0\n", "and zero, for the same reason"),
+        ("plan 2 x\nnode a b c\nscore 1e400\n", "an overflowing exponent, which is `inf`"),
+        ("plan 2 x\nnode a b c\ninstances 0\n", "zero instances, which runs nothing"),
+        ("plan 2 x\nnode a b c\ninstances -1\n", "and a negative count"),
+        ("plan 2 x\nnode a b c\nqueue_delay_us -1\n", "a negative batch window"),
+        ("plan 2 x\nnode a b c\ninstances two\n", "an instance count that is not a number"),
+        ("plan 2 x\nnode a b c\nartefact a b\n", "an artefact path holding a space"),
         (
-            "plan 1 x\nnode a b c\nfold_mask 0\n",
+            "plan 2 x\nnode a b c\nfold_mask 0\n",
             "a mask probability at 0, where the cut is -inf",
         ),
-        ("plan 1 x\nnode a b c\nfold_mask 1\n", "and at 1, where it divides by zero"),
-        ("plan 1 x\nnode a b c\nfold_mask 1.5\n", "and past it"),
-        ("plan 1 x\nnode a b c\nfold_score nan\n", "a non-finite score floor"),
-        ("plan 1 x\nnode a b c\nfold_detections a b\n", "an output name holding a space"),
+        ("plan 2 x\nnode a b c\nfold_mask 1\n", "and at 1, where it divides by zero"),
+        ("plan 2 x\nnode a b c\nfold_mask 1.5\n", "and past it"),
+        ("plan 2 x\nnode a b c\nfold_score nan\n", "a non-finite score floor"),
+        ("plan 2 x\nnode a b c\nfold_detections a b\n", "an output name holding a space"),
+        ("plan 2 x\nsetting nonsense 1\n", "a setting key neither plane would use"),
+        ("plan 2 x\nsetting workers four\n", "a setting value that is not an integer"),
+        ("plan 2 x\nsetting workers 4\n", "one setting, so seven a reader would default"),
+        (f"plan 2 x\n{ALL_SETTINGS}setting workers 8\n", "a second value for one key"),
+        ("plan 2 x\nsetting workers\n", "a key with no value"),
+        # COMPLETE sets with one value out of range. A one-line plan is refused by the
+        # all-or-nothing check before the value is ever looked at, so a row spelled that way
+        # passes whether or not the range check exists -- which is a row that tests nothing.
+        (
+            f"plan 2 x\n{ALL_SETTINGS.replace('instance_queue 64', 'instance_queue -1')}",
+            "a negative queue, which reaches `static_cast<size_t>` as SIZE_MAX",
+        ),
+        (
+            f"plan 2 x\n{ALL_SETTINGS.replace('workers 4', 'workers 0')}",
+            "zero workers, which reads frames and retires none",
+        ),
+        (
+            f"plan 2 x\n{ALL_SETTINGS.replace('sweep_ms 100', 'sweep_ms 0')}",
+            "a sweeper that never sleeps",
+        ),
     )
     ACCEPTED = (
-        ("plan 1 -\n", "`-` is the empty chain name"),
-        ("plan 1 x  # trailing comment\n", "a comment after a directive"),
-        ("plan 1 ship person cpu\n", "a multi-word chain name is the rest of the line"),
-        ("plan 1 x\nlabel 8 cargo ship\n", "and so is a multi-word label"),
-        ("plan 1 x\nnode a b c\nclasses cargo ship,fishing vessel\n", "two labels, not four"),
-        ("plan 1 x\nnode a b c\nclasses -\n", "`-` is a DECLARED empty selection"),
-        ("plan 1 x\nnode a b c\nscore 1e-05\n", "an exponent-form threshold"),
-        ("plan 1 x\nnode a b c\nscore 5e-324\n", "a subnormal, which `stod` used to refuse"),
+        ("plan 2 -\n", "`-` is the empty chain name"),
+        ("plan 2 x  # trailing comment\n", "a comment after a directive"),
+        ("plan 2 ship person cpu\n", "a multi-word chain name is the rest of the line"),
+        ("plan 2 x\nlabel 8 cargo ship\n", "and so is a multi-word label"),
+        ("plan 2 x\nnode a b c\nclasses cargo ship,fishing vessel\n", "two labels, not four"),
+        ("plan 2 x\nnode a b c\nclasses -\n", "`-` is a DECLARED empty selection"),
+        ("plan 2 x\nnode a b c\nscore 1e-05\n", "an exponent-form threshold"),
+        ("plan 2 x\nnode a b c\nscore 5e-324\n", "a subnormal, which `stod` used to refuse"),
         # The READER tolerates a collapsed value because it cannot know one was collapsed;
         # `_speakable` is what refuses to WRITE one, where the slot is still named. Stated
         # here so the asymmetry is deliberate rather than a hole -- and the C++ gate asserts
         # the same collapse on its side, for the same reason.
-        ("plan 1 x\nnode a b c\nclasses cargo  ship\n", "a collapsed value reads as one word"),
-        ("plan 1 x\nlabel 8 cargo\tship\n", "and a tab likewise, which the emitter refuses"),
-        ("plan 1 x\nnode a b c\nqueue_delay_us 0\n", "no batch window, which is batching off"),
-        ("plan 1 x\nnode a b c\ninstances 1\n", "the smallest count a slot can run"),
-        ("plan 1 x\nnode a b c\nartefact m/1/model.plan\n", "a repository-relative artefact"),
-        ("plan 1 x\nnode a b c\nfold_mask 0.5\nfold_score 0.25\n", "the two fold cuts"),
-        ("plan 1 x\nnode a b c\nfold_score 0.0\n", "a floor of zero: every crop is an area"),
+        ("plan 2 x\nnode a b c\nclasses cargo  ship\n", "a collapsed value reads as one word"),
+        ("plan 2 x\nlabel 8 cargo\tship\n", "and a tab likewise, which the emitter refuses"),
+        ("plan 2 x\nnode a b c\nqueue_delay_us 0\n", "no batch window, which is batching off"),
+        ("plan 2 x\nnode a b c\ninstances 1\n", "the smallest count a slot can run"),
+        ("plan 2 x\nnode a b c\nartefact m/1/model.plan\n", "a repository-relative artefact"),
+        ("plan 2 x\nnode a b c\nfold_mask 0.5\nfold_score 0.25\n", "the two fold cuts"),
+        ("plan 2 x\nnode a b c\nfold_score 0.0\n", "a floor of zero: every crop is an area"),
         (
-            "plan 1 x\nnode a b c\nfold_detections det\nfold_prototypes proto\n",
+            "plan 2 x\nnode a b c\nfold_detections det\nfold_prototypes proto\n",
             "an export that names its outputs something other than output0/output1",
+        ),
+        (f"plan 2 x\n{ALL_SETTINGS}", "every setting, the only complete spelling"),
+        (
+            f"plan 2 x\n{ALL_SETTINGS.replace('block_timeout_ms 50', 'block_timeout_ms 0')}",
+            "0 for the block timeout ALONE, which `SchedulerSettings` allows",
         ),
     )
 
@@ -300,7 +345,50 @@ class TestBothPlanesRefuseTheSameText:
 
     def test_a_crop_that_is_not_positive_names_the_line(self) -> None:
         with pytest.raises(PlanSyntaxError, match=r"<string>:3"):
-            parse_plan("plan 1 x\nnode a b c\ncrop 0 128\n")
+            parse_plan("plan 2 x\nnode a b c\ncrop 0 128\n")
+
+
+class TestTheSettingsCrossFromTheRealTree:
+    """`resolve_settings` against `ServerSettings`, which the goldens' double cannot pin.
+
+    The parity goldens use a fixed double so they reproduce on any box (`drive_plan.SETTINGS`
+    says why). That leaves one thing unchecked and it is the one that rots: whether the eight
+    names still exist on the settings tree. A rename there would leave every gate green and
+    the plan carrying an `AttributeError` -- so this reads the real classes.
+    """
+
+    def test_every_carried_value_is_the_tree_s(self) -> None:
+        from shipinfer.core.settings import ServerSettings
+        from shipinfer.topology.plan import resolve_settings
+
+        settings = ServerSettings()
+        carried = resolve_settings(settings)
+
+        assert carried.workers == settings.pipeline.workers
+        assert carried.pipeline_queue == settings.pipeline.queue_capacity
+        assert carried.instance_queue == settings.scheduler.max_queue_size
+        assert carried.enqueue_block_timeout_ms == settings.scheduler.enqueue_block_timeout_ms
+        assert carried.stage_timeout_ms == settings.pipeline.stage_timeout_ms
+        assert carried.reassembly_capacity == settings.pipeline.reassembly.capacity
+        assert carried.reassembly_timeout_ms == settings.pipeline.reassembly.timeout_ms
+        assert carried.reassembly_sweep_ms == settings.pipeline.reassembly.sweep_interval_ms
+
+    def test_the_two_queue_capacities_are_NOT_one_number(self) -> None:
+        """The defect this closed, stated as a test: `cli/bench.cpp` used one 65536 for both.
+
+        They bound different things and the tree's answers differ by a factor of four, so a
+        plane that carried one number was running a per-instance queue 1024x its setting --
+        a queue that can never reject, and therefore a backpressure measurement (ADR-005)
+        whose zero was guaranteed rather than observed.
+        """
+        from shipinfer.core.settings import ServerSettings
+        from shipinfer.topology.plan import resolve_settings
+
+        carried = resolve_settings(ServerSettings())
+
+        assert carried.instance_queue != carried.pipeline_queue
+        assert carried.instance_queue == 64, "scheduler.max_queue_size, per instance"
+        assert carried.pipeline_queue == 256, "pipeline.queue_capacity, frames from ingest"
 
 
 class TestTheFoldCutsCross:

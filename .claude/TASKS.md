@@ -2191,9 +2191,19 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
         -- instance counts per device, `max_batch_size`, `max_queue_delay_us`, the input and
         output names -- which is why `run_cpp_bench.sh:18-21` restates instance counts by hand
         today. Same format, same gate, probably new verbs (`instances <slot> <device> <n>`).
-      * **P5-C (resolved settings) shrinks to what the plan does not carry**: the queue
-        capacities, the reassembly window, the worker count. Same reasoning -- resolved on the
-        Python side, carried, not re-parsed.
+      * **P5-C DONE 5 Sep on `feat/plan-resolved-settings`.** The plan gained eight `setting`
+        lines (PLAN_VERSION 1 -> 2) carrying the worker count, BOTH queue capacities, the
+        enqueue block timeout, the stage timeout and the three reassembly numbers; read by
+        `csrc/.../plan.cpp`, and `bench.cpp` lost `--workers`, `--queue-capacity` and
+        `--stage-timeout-ms` plus its own five defaults. THE SURVEY FOUND WORSE THAN THE ITEM
+        CLAIMED, and it is the same shape as P5-B's: `bench.cpp` used ONE capacity, 65536, for
+        both the pipeline queue AND every model instance's queue, where the Python plane uses
+        `pipeline.queue_capacity` 256 and `scheduler.max_queue_size` **64**. A per-instance
+        queue 1024x its setting cannot reject, so every `queue_rejected 0` this benchmark ever
+        printed was guaranteed by the number rather than observed -- on the seam ADR-005 is
+        about. Evidence: 8 cameras x 5 fps x 25 s on GPUs 0-1 at the CARRIED 64, 1000 frames
+        read -> 1000 accepted -> 1000 complete, 0 rejected / evicted / timed out, exit 0; the
+        run record now names all eight; a plan with no `setting` line is REFUSED by name.
       P5-B SURVEYED 5 Sep, and the motivating evidence is stronger than the item claimed: the
       C++ measurement runs a configuration NO `config.yaml` describes, so the head-to-head is
       not like-for-like. `scripts/run_cpp_bench.sh` passes `--seg-instances 3

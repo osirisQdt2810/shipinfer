@@ -39,7 +39,7 @@ namespace {
     const std::set<std::string> kLoaded = {"ship_detector", "ship_embedder", "person_embedder"};
 
     ResolvedPlan plan_of(const std::string& body) {
-        return parse_plan("plan 1 probe\nlabel 0 person\nlabel 8 ship\n" + body, "probe");
+        return parse_plan("plan 2 probe\nlabel 0 person\nlabel 8 ship\n" + body, "probe");
     }
 
     const std::string kDetect =
@@ -165,7 +165,7 @@ namespace {
         // Non-vacuity: the same plan with the second slot's model absent is fine, because
         // then only one is runnable and the other is reported.
         const PlanStages built =
-            plan_stages(parse_plan("plan 1 probe\nlabel 8 ship\n" + kDetect +
+            plan_stages(parse_plan("plan 2 probe\nlabel 8 ship\n" + kDetect +
                                        "node detect_other detect pool\nmodel absent_model\n",
                                    "probe"),
                         kLoaded);
@@ -189,7 +189,7 @@ namespace {
     void the_refusals_this_plane_owes_the_operator() {
         // The reader's own refusals (a missing header, an unknown verb) are
         // `test_plan_parity`'s; these are the ones this decision owns.
-        // NO `plan 1 probe` prefix here: `plan_of` prepends the header, and a body carrying
+        // NO `plan 2 probe` prefix here: `plan_of` prepends the header, and a body carrying
         // its own was refused on a DUPLICATE HEADER before `plan_stages` ran at all -- three
         // checks passing for the wrong reason, and "no runnable detect slot" then had no
         // coverage anywhere (found by #132's round 3).

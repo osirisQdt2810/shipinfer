@@ -11,6 +11,7 @@ with no driver — which is where CI emits and checks it.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from shipinfer.repository import ModelRepository
@@ -25,7 +26,54 @@ SCENARIOS = Path(__file__).resolve().parent / "scenarios" / "plans"
 GOLDEN = Path(__file__).resolve().parent / "golden" / "plans"
 REPOSITORY = ROOT / "model_repository"
 
-__all__ = ["GOLDEN", "REPOSITORY", "SCENARIOS", "load_plan_scenario", "render_plan"]
+__all__ = ["GOLDEN", "REPOSITORY", "SCENARIOS", "SETTINGS", "load_plan_scenario", "render_plan"]
+
+
+@dataclass(frozen=True)
+class _Pipeline:
+    workers: int
+    queue_capacity: int
+    stage_timeout_ms: int
+    reassembly: object
+
+
+@dataclass(frozen=True)
+class _Reassembly:
+    capacity: int
+    timeout_ms: int
+    sweep_interval_ms: int
+
+
+@dataclass(frozen=True)
+class _Scheduler:
+    max_queue_size: int
+    enqueue_block_timeout_ms: int
+
+
+@dataclass(frozen=True)
+class _Settings:
+    pipeline: _Pipeline
+    scheduler: _Scheduler
+
+
+# doc: long the two properties a settings double for a byte-compare golden must have
+#: A FIXED double, whose every value is deliberately NOT the tree's default.
+#:
+#: FIXED, because `ServerSettings()` reads `SHIPINFER_*`: a golden emitted from it encodes
+#: whichever box emitted it and re-checks red on the next one.
+#:
+#: NOT-THE-DEFAULT, because that is what lets the golden fail. A plane that ignores a
+#: `setting` line and substitutes its own default reproduces the file exactly when the two
+#: agree. `tests/topology/test_plan.py` pins the field names against the real tree.
+SETTINGS = _Settings(
+    pipeline=_Pipeline(
+        workers=7,
+        queue_capacity=257,
+        stage_timeout_ms=5001,
+        reassembly=_Reassembly(capacity=1025, timeout_ms=1501, sweep_interval_ms=101),
+    ),
+    scheduler=_Scheduler(max_queue_size=65, enqueue_block_timeout_ms=51),
+)
 
 
 def load_plan_scenario(name: str) -> Path:
@@ -44,6 +92,9 @@ def render_plan(path: Path, *, repository: Path | None = None) -> str:
     models = ModelRepository.load(repository or REPOSITORY)
     return plan_text(
         resolve_plan(
-            load_topology(path), dims=model_extents(models), runtimes=model_runtimes(models)
+            load_topology(path),
+            dims=model_extents(models),
+            runtimes=model_runtimes(models),
+            settings=SETTINGS,
         )
     )

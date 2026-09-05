@@ -121,8 +121,6 @@ namespace {
         int cameras = 12;
         double fps = 10.0;
         double seconds = 40.0;
-        int workers = 32;
-        int queue_capacity = 65536;
         // The detector's batch window, `dynamic_batching.max_queue_delay_us` in the demo
         // repository's config: once one frame is in, the queue waits this long for a batch to
         // fill.
@@ -133,9 +131,6 @@ namespace {
         // this binary links today; naming it rather than hard-coding it is what makes the
         // GStreamer source a new file and nothing else.
         std::string source = "replay";
-        int stage_timeout_ms = 5000;
-        int reassembly_capacity = 1024;
-        int reassembly_timeout_ms = 1500;
         int det_instances = 2;
         int seg_instances = 1;
         int emb_instances = 2;
@@ -203,18 +198,12 @@ namespace {
                 options.fps = std::stod(next());
             else if (flag == "--seconds")
                 options.seconds = std::stod(next());
-            else if (flag == "--workers")
-                options.workers = std::stoi(next());
-            else if (flag == "--queue-capacity")
-                options.queue_capacity = std::stoi(next());
             else if (flag == "--batch-delay-us")
                 options.batch_delay_us = std::stoi(next());
             else if (flag == "--policy")
                 options.policy = next();
             else if (flag == "--source")
                 options.source = next();
-            else if (flag == "--stage-timeout-ms")
-                options.stage_timeout_ms = std::stoi(next());
             else if (flag == "--det-instances")
                 options.det_instances = std::stoi(next());
             else if (flag == "--seg-instances")
@@ -262,15 +251,20 @@ namespace {
     // Which means the numbers the PLAN owns have to be in it: this printed one global
     // `batch_delay_us` that no instance used once the windows came per model, so two runs a
     // month apart could differ in every window and say the same thing.
-    std::string meta_json(const Options& options, const std::vector<std::string>& stages,
+    std::string meta_json(const Options& options, const PlanSettings& tuning,
+                          const std::vector<std::string>& stages,
                           const std::vector<BenchModel>& models) {
         std::ostringstream out;
         out << "{\"meta\": {\"system\": \"cpp\", \"config\": {";
         out << "\"cameras\": " << options.cameras;
         out << ", \"fps\": " << options.fps;
         out << ", \"seconds\": " << options.seconds;
-        out << ", \"workers\": " << options.workers;
-        out << ", \"buffer_capacity\": " << options.queue_capacity;
+        // Every carried setting, not the two that used to be flags: the record's contract is
+        // that "the omission travels with the data", and a run whose per-instance queue was 64
+        // and one whose was 65536 are different measurements that used to print the same line.
+        for (const SettingKey& key : setting_keys()) {
+            out << ", \"" << key.name << "\": " << tuning.*(key.member);
+        }
         if (options.repository.empty()) {
             // The real answer only on the flag path; under `--repository` every instance took
             // its window from the plan and this number is the binary's own default.
@@ -317,6 +311,18 @@ int main(int argc, char** argv) {
         // instance counts and the head-to-head was not like for like.
         const ResolvedPlan plan =
             options.plan_path.empty() ? default_bench_plan() : read_plan(options.plan_path);
+        // NOT defaulted here. A run this binary configured from its own numbers is exactly
+        // what the head-to-head could not be: the worker count, both queue capacities and the
+        // reassembly window are `core/settings/`'s, and a plan that states none of them was
+        // written by a control plane too old to carry them.
+        if (!plan.settings) {
+            throw ConfigError(
+                "the plan states no `setting` lines, and this binary will not "
+                "supply its own: the worker count, the two queue capacities and "
+                "the reassembly window are the deployment's (core/settings/). "
+                "Rewrite it with `python -m shipinfer plan`");
+        }
+        const PlanSettings& tuning = *plan.settings;
         const std::vector<BenchModel> specs = bench_models(plan, engines_of(options));
         std::cerr << "loading engines...\n";
         const auto load_start = std::chrono::steady_clock::now();
@@ -348,7 +354,7 @@ int main(int argc, char** argv) {
                                              spec.queue_delay_us);
                     instances.push_back(std::make_unique<ModelInstance>(
                         spec.name + ":" + std::to_string(device) + ":" + std::to_string(i),
-                        std::move(adapter), window, static_cast<size_t>(options.queue_capacity),
+                        std::move(adapter), window, static_cast<size_t>(tuning.instance_queue),
                         Overflow::Reject,
                         [](Device dev) { GPU_CHECK(gpuSetDevice(dev.index)); }));
                 }
@@ -452,14 +458,15 @@ int main(int argc, char** argv) {
                 if (result.reason == FinishReason::Complete) complete.fetch_add(1);
                 emitted.fetch_add(1);
             },
-            static_cast<size_t>(options.reassembly_capacity), options.reassembly_timeout_ms);
+            static_cast<size_t>(tuning.reassembly_capacity), tuning.reassembly_timeout_ms);
 
         // Frames the queue still held when the run stopped are counted, not destroyed silently:
         // frames_read - frames_accepted is otherwise a number the reader has to explain by
         // hand.
         std::atomic<uint64_t> unread_at_stop{0};
         FairPriorityQueue<FrameWork> queue(
-            "pipeline", static_cast<size_t>(options.queue_capacity), Overflow::Reject, 50, true,
+            "pipeline", static_cast<size_t>(tuning.pipeline_queue), Overflow::Reject,
+            tuning.enqueue_block_timeout_ms, true,
             [&unread_at_stop](FrameWork&&, DropReason why) {
                 if (why == DropReason::Closed) unread_at_stop.fetch_add(1);
             });
@@ -478,7 +485,7 @@ int main(int argc, char** argv) {
                 }
                 return row;
             },
-            options.sample_interval_s, meta_json(options, stage_names, specs));
+            options.sample_interval_s, meta_json(options, tuning, stage_names, specs));
 
         // -- workers ----------------------------------------------------------------------
         std::atomic<bool> stopping{false};
@@ -493,7 +500,7 @@ int main(int argc, char** argv) {
         // every frame in flight.
         const BatchWindow frame_window(1, 0);
         std::atomic<int> failures_shouted{0};
-        for (int w = 0; w < options.workers; ++w) {
+        for (int w = 0; w < tuning.workers; ++w) {
             const int device = options.devices[static_cast<size_t>(w) % options.devices.size()];
             workers.emplace_back([&, device]() {
                 try {
@@ -508,7 +515,7 @@ int main(int argc, char** argv) {
                     // thread's `WorkerScratch`; from the same plan as the tables above, so
                     // the collector's expectations and the stages cannot disagree.
                     Dag dag = build_dag(planned, models, scratch,
-                                        std::chrono::milliseconds(options.stage_timeout_ms));
+                                        std::chrono::milliseconds(tuning.stage_timeout_ms));
 
                     while (!stopping.load()) {
                         auto batch = queue.get_batch(frame_window);
@@ -566,7 +573,8 @@ int main(int argc, char** argv) {
         // -- the sweeper ------------------------------------------------------------------
         std::thread sweeper([&]() {
             while (!stopping.load()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(tuning.reassembly_sweep_ms));
                 collector.sweep();
             }
         });

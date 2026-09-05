@@ -21,14 +21,38 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from benchmarks.harness import analysis
 
 
+# doc: long two bounds apply to a model module and the judge must take the smaller
 def capacities(meta: dict, samples) -> dict[str, int]:
-    """The bound each module's occupancy can actually reach."""
-    workers = int(meta["config"]["workers"])
+    """The bound each module's occupancy can actually reach.
+
+    `pipeline` is the frame queue: `pipeline_queue`, which was `buffer_capacity` until P5-C
+    renamed it -- a renamed key travels to this judge as a KeyError, after the run.
+
+    A MODEL module samples `Model::total_depth()`, the sum of its instances' queue depths, and
+    TWO bounds apply. Structurally it cannot pass `instance_queue x instances`; in practice the
+    workers are the concurrency feeding it. Whichever is smaller is the one the series can
+    reach, and this file's whole rule is that it must not be the friendlier judge -- so a
+    ceiling that is too loose (a plateau guard that can never trip, every model row SUSTAINED
+    and unreachable) is the failure to avoid, and the minimum is what avoids it.
+
+    The worker count alone was right only while every instance queue was 65536 and could
+    therefore never bind. P5-C made 64 real, and 64 x 2 x 2 is below a 48-worker run.
+    """
+    config = meta["config"]
+    per_device = {model["name"]: int(model["instances_per_device"]) for model in meta["models"]}
+    devices = len(config["gpus"])
+    instance_queue = int(config["instance_queue"])
+    workers = int(config["workers"])
     out = {}
     for module in samples.modules:
-        out[module] = (
-            int(meta["config"]["buffer_capacity"]) if module == "pipeline" else workers
-        )
+        if module == "pipeline":
+            out[module] = int(config["pipeline_queue"])
+        elif module in per_device:
+            out[module] = min(workers, instance_queue * per_device[module] * devices)
+        else:
+            # A module the run record does not name: the worker count is the only bound left,
+            # and saying so beats refusing to score a run over a module nobody added here.
+            out[module] = workers
     return out
 
 
@@ -59,12 +83,10 @@ def main() -> int:
         # "sustained" more than the whole run retired. The object-fed models are data-driven for
         # the same reason the Python harness measures theirs instead of asserting them.
         offered={"pipeline": achieved},
-        # Per module, never one scalar. The pipeline queue's bound is the configured capacity;
-        # a model module's series is `ModelPool::waiting()`, which is bounded by the *worker*
-        # count — so a pool with every worker blocked in `lease()` plateaus at `workers`, and a
-        # plateau guard set at 0.95 x 65536 could never trip for it. The first version passed the
-        # scalar, and the four model rows it printed as SUSTAINED were structurally unreachable
-        # by the guard: the friendlier judge this file says it must never be.
+        # Per module, never one scalar. The first version passed one, and the four model rows
+        # it printed as SUSTAINED were structurally unreachable by the plateau guard: the
+        # friendlier judge this file says it must never be. `capacities` states which bound
+        # each module actually has, and why a model module takes the smaller of two.
         capacity=capacities(meta, samples),
         entry_modules=("pipeline",),
     )
