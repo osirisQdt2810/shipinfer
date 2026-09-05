@@ -9,14 +9,16 @@ diffable rather than happening invisibly inside a launcher.
 from __future__ import annotations
 
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 from shipinfer.repository import ModelEntry, ModelRepository
 from shipinfer.repository.build_targets import (
+    BUILT_BY_REID_TARGET,
     INSTALLED_BY_BUILD_ENGINES,
     REID_ENGINE,
 )
-from shipinfer.repository.resolved import model_extents, model_runtimes
+from shipinfer.repository.resolved import ModelRuntime, model_extents, model_runtimes
 from shipinfer.topology import Topology, load_topology
 from shipinfer.topology.plan import plan_text, resolve_plan
 
@@ -27,19 +29,20 @@ def plan(topology: Path, repository: Path, out: Path | None = None) -> int:
     """Write the resolved plan for ``topology`` to ``out``, or to stdout."""
     chain = load_topology(topology)
     models = ModelRepository.load(repository)
-    text = plan_text(
-        resolve_plan(chain, dims=model_extents(models), runtimes=model_runtimes(models))
-    )
+    runtimes = model_runtimes(models)
+    text = plan_text(resolve_plan(chain, dims=model_extents(models), runtimes=runtimes))
     if out is None:
         print(text, end="")
     else:
         out.write_text(text, encoding="utf-8")
         print(f"wrote {out} ({len(text.splitlines())} lines) for chain {chain.name!r}")
-    _report_missing(chain, models)
+    _report_missing(chain, models, runtimes)
     return 0
 
 
-def _report_missing(chain: Topology, models: ModelRepository) -> None:
+def _report_missing(
+    chain: Topology, models: ModelRepository, runtimes: Mapping[str, ModelRuntime]
+) -> None:
     """Say which artefacts THE PLAN NAMES that the repository does not hold.
 
     Reported and NOT refused: writing a plan where the engine is absent is the documented
@@ -58,7 +61,7 @@ def _report_missing(chain: Topology, models: ModelRepository) -> None:
         # on disk -- a diagnostic refusing, which is what this exists not to do.
         for name in sorted({n.spec.model for n in chain.nodes if n.spec.model} & indexed)
         for entry in [models.entry(name)]
-        for wanted in [_wanted_artefact(entry)]
+        for wanted in [_wanted_artefact(models.root, runtimes[name].artefact)]
         if wanted is not None
     ]
     if not missing:
@@ -68,7 +71,7 @@ def _report_missing(chain: Topology, models: ModelRepository) -> None:
     print("\n".join(lines), file=sys.stderr)
 
 
-def _wanted_artefact(entry: ModelEntry) -> str | None:
+def _wanted_artefact(root: Path, artefact: str) -> str | None:
     """The artefact the plan names for this model, if the repository does not hold it.
 
     ``engine_file`` and not what this model's own backend opens: a plan's `artefact` line is
@@ -79,10 +82,10 @@ def _wanted_artefact(entry: ModelEntry) -> str | None:
     mechanism while the plan's reader opens the path verbatim, and would not write this name
     anyway. The ONNX belongs in the remedy, which says which plane can use it.
     """
-    wanted = entry.config.engine_file
-    if (entry.root / str(entry.latest) / wanted).is_file():
-        return None
-    return f"{entry.name}/{entry.latest}/{wanted}"
+    # THE PLAN'S OWN string, threaded in rather than rebuilt here: this note's whole claim
+    # is "the artefact the plan names", and two constructions of `<name>/<version>/<file>`
+    # agree by coincidence until one of them moves.
+    return None if (root / artefact).is_file() else artefact
 
 
 def _is_tensorrt(platform: str) -> bool:
@@ -94,10 +97,7 @@ def _is_tensorrt(platform: str) -> bool:
     """
     from shipinfer.backends.registry import BACKENDS
 
-    try:
-        return BACKENDS.canonical(platform) == "tensorrt"
-    except Exception:
-        return False
+    return BACKENDS.canonical(platform) == "tensorrt"
 
 
 def _remedies(missing: list[tuple[ModelEntry, str]]) -> list[tuple[str, str]]:
@@ -138,16 +138,27 @@ def _remedies(missing: list[tuple[ModelEntry, str]]) -> list[tuple[str, str]]:
                     f"runs it, inside the container",
                 )
             )
-        else:
-            # The `reid` target builds `models/reid_r50_fp32.engine` and installs it into no
-            # version directory, so `--only ship_embedder` exits 2. Two commands, stated,
-            # because the README it would otherwise point at says only "drop it here".
+        elif entry.name in BUILT_BY_REID_TARGET:
+            # That target builds one engine both of them use and installs it into no version
+            # directory, so `--only ship_embedder` exits 2. Two commands, stated, because the
+            # README it would otherwise point at says only "drop the built artefact here".
             out.append(
                 (
                     path,
                     "`python scripts/build_engines.py --only reid` then copy "
                     f"`{REID_ENGINE}` to it — that target builds an engine and installs it "
                     "nowhere",
+                )
+            )
+        else:
+            # A model this repository's build script has never heard of, which is EVERY
+            # repository but this one's demo. Naming a command here would be confidently
+            # wrong -- worse than the silence this exists to remove.
+            out.append(
+                (
+                    path,
+                    "build a TensorRT engine for this model on the node that runs it, inside "
+                    "the container; `scripts/build_engines.py` has no target for it",
                 )
             )
     return out

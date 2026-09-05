@@ -14,9 +14,15 @@ from __future__ import annotations
 __all__ = ["INSTALLED_BY_BUILD_ENGINES", "REID_ENGINE"]
 
 #: The models whose plan `scripts/build_engines.py` writes into `<model>/<version>/`.
-#: The two embedders are absent by design: the script's `reid` target builds ONE engine that
-#: both of them use, and installs it nowhere -- `--only ship_embedder` exits 2.
 INSTALLED_BY_BUILD_ENGINES = frozenset({"ship_detector", "ship_segmenter"})
 
-#: What that `reid` target writes, so a remedy can name the file to copy.
+#: The models the script's `reid` target builds ONE engine for and installs NOWHERE, so their
+#: remedy is that target plus a copy. NAMED rather than "everything else": a model this script
+#: never heard of would otherwise be told to build a ReID ResNet-50 and copy it into a
+#: detector's directory -- confidently wrong, and wrong for every repository but this demo.
+BUILT_BY_REID_TARGET = frozenset({"ship_embedder", "person_embedder"})
+
+#: What that `reid` target writes at the default precision, so a remedy can name the file.
+#: `--fp16` writes `reid_r50_fp16.engine`; the remedy says the default because that is what
+#: `--only reid` with no flag produces.
 REID_ENGINE = "models/reid_r50_fp32.engine"

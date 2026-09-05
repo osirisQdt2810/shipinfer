@@ -14,7 +14,10 @@ import pytest
 
 from shipinfer.cli.commands.plan import plan
 from shipinfer.core.errors import ChainStructureError
-from shipinfer.repository.build_targets import INSTALLED_BY_BUILD_ENGINES
+from shipinfer.repository.build_targets import (
+    BUILT_BY_REID_TARGET,
+    INSTALLED_BY_BUILD_ENGINES,
+)
 from shipinfer.topology.plan import parse_plan
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -81,6 +84,38 @@ class TestItSaysWhichArtefactsAreNotThereYet:
         assert "--only reid" in note, "and the two-step that works for the one it does not"
         assert "build_engines.py --only ship_embedder" not in note, "which would exit 2"
 
+    def test_a_model_the_build_script_never_heard_of_gets_a_generic_remedy(
+        self, chain_file: Path, tmp_path: Path, capsys
+    ) -> None:
+        """EVERY repository but this one's demo. The `else` branch used to be the reid
+        two-step, so an operator with their own `vessel_classifier` was told to build a ReID
+        ResNet-50 and copy it into a detector's version directory -- confidently wrong, which
+        is worse than the silence this exists to remove.
+        """
+        root = tmp_path / "theirs"
+        (root / "ship_detector" / "1").mkdir(parents=True)
+        (root / "ship_detector" / "config.yaml").write_text(
+            (REPOSITORY / "ship_detector" / "config.yaml").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        (root / "ship_embedder" / "1").mkdir(parents=True)
+        (root / "ship_embedder" / "config.yaml").write_text(
+            (REPOSITORY / "ship_embedder" / "config.yaml")
+            .read_text(encoding="utf-8")
+            .replace("name: ship_embedder", "name: vessel_classifier"),
+            encoding="utf-8",
+        )
+        (root / "ship_embedder").rename(root / "vessel_classifier")
+        chain = tmp_path / "theirs.yaml"
+        chain.write_text(CHAIN.replace("model: ship_embedder", "model: vessel_classifier"))
+
+        assert plan(chain, root, tmp_path / "chain.plan") == 0
+        note = capsys.readouterr().err
+
+        assert "vessel_classifier/1/model.plan" in note
+        assert "reid" not in note, "not a ReID ResNet-50 for somebody's classifier"
+        assert "has no target for it" in note, "the truthful statement about this model"
+
     def test_the_shipped_set_and_the_script_agree(self) -> None:
         """Pinned HERE, where both are importable, and not by `src/` importing the script.
 
@@ -96,6 +131,8 @@ class TestItSaysWhichArtefactsAreNotThereYet:
             target.name for target in TARGETS if target.version_dir is not None
         } == INSTALLED_BY_BUILD_ENGINES
         assert "ship_embedder" not in INSTALLED_BY_BUILD_ENGINES, "the case that bit"
+        assert {"ship_embedder", "person_embedder"} == BUILT_BY_REID_TARGET
+        assert not (BUILT_BY_REID_TARGET & INSTALLED_BY_BUILD_ENGINES), "one remedy each"
 
     def test_a_model_the_repository_does_not_index_is_skipped(
         self, chain_file: Path, tmp_path: Path, capsys

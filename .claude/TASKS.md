@@ -2679,9 +2679,11 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       SETTLED: the note checks `engine_file` -- what the plan NAMES -- and chooses the remedy
       by platform (through `BACKENDS.canonical`, so `platform: trt` is not told to build a
       TensorRT repository it already is), by whether an `.onnx` is beside it (naming which
-      plane can use it), and by whether the script installs it. The fact about the script
-      lives in `repository/build_targets.py` and the SCRIPT imports it -- the dependency
-      pointing the shippable way -- with `tests/test_architecture.py` growing a rule that
+      plane can use it), and by whether the script installs it. The facts about the script
+      live in `repository/build_targets.py` and the two are pinned by a TEST rather than by an
+      import in either direction (the shipped package must not import the script, and the
+      script cannot be imported from `src/`) -- with `tests/test_architecture.py` growing a
+      rule that
       `src/shipinfer/**` imports no `scripts.*`, because `pythonpath` will hide the next one
       too. The backend detour is reverted entirely; it existed only because the check read the
       wrong file. The two embedder configs saying "Built by `scripts/build_engines.py`" were
