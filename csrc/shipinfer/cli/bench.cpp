@@ -294,17 +294,20 @@ namespace {
         const bool from_flags = !options.det_plan.empty() || !options.seg_plan.empty() ||
                                 !options.emb_plan.empty() || !options.ship_emb_plan.empty();
         if (from_plan && from_flags) {
-            throw ConfigError("--repository and the --*-engine flags are two spellings of one "
-                              "path; the plan already names each slot's artefact, so pass one "
-                              "or the other");
+            throw ConfigError(
+                "--repository and the --*-engine flags are two spellings of one "
+                "path; the plan already names each slot's artefact, so pass one "
+                "or the other");
         }
         if (!from_plan && !from_flags) {
-            throw ConfigError("no engine to run: pass --plan <file> --repository <root>, or "
-                              "the --*-engine flags");
+            throw ConfigError(
+                "no engine to run: pass --plan <file> --repository <root>, or "
+                "the --*-engine flags");
         }
         if (from_plan && options.plan_path.empty()) {
-            throw ConfigError("--repository names the root a plan's `artefact` paths hang "
-                              "off, so it needs --plan <file>");
+            throw ConfigError(
+                "--repository names the root a plan's `artefact` paths hang "
+                "off, so it needs --plan <file>");
         }
         return options;
     }
@@ -393,8 +396,9 @@ int main(int argc, char** argv) {
         // The chain's head. Named rather than "some model loaded", because a run whose
         // detector is missing produces zero detections and reads as a quiet fleet.
         if (models.count("ship_detector") == 0) {
-            throw ConfigError("no `ship_detector` was loaded; the plan must declare a slot "
-                              "running it and this process must be able to reach its engine");
+            throw ConfigError(
+                "no `ship_detector` was loaded; the plan must declare a slot "
+                "running it and this process must be able to reach its engine");
         }
         for (auto& [name, model] : models) model->start(std::chrono::milliseconds(120000));
         const double startup_s =
