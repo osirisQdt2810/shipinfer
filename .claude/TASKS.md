@@ -2172,7 +2172,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       * **P5-D (data-driven chain) is DONE** by #131 + #132. `bench.cpp` reads a resolved plan
         and `graph.cpp`'s hardcoded chain is gone; the label table, the crop extents, the
         threshold and the cap all arrive in it.
-      * **P5-B DONE 5 Sep, open as PR #<PR>** (`feat/plan-model-runtime`). The plan carries
+      * **P5-B DONE 5 Sep, OPEN as PR #138** (`feat/plan-model-runtime`). The plan carries
         three new verbs per model-bearing node -- `instances` (per device), `queue_delay_us`
         and `artefact` (repository-relative) -- read by `repository/resolved.py` and by
         `csrc/.../plan.cpp`, and `bench.cpp` builds its model list FROM the plan instead of a
