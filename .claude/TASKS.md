@@ -2577,7 +2577,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       and open as `CSRC-SEGMENT-FOLD-MISSING`.
 
 - [~] **CSRC-SEGMENT-FOLD-MISSING · SPLIT 5 Sep. Half one, the CONTRACT, is
-      `feat/csrc-multi-output`; the fold and its parity gate follow on
+      `feat/csrc-multi-output` (PR #139); the fold and its parity gate follow on
       `feat/csrc-mask-fold`.** The reason this was never ported is that the backend contract
       carried ONE output -- `backends/engine_api.h` said so in as many words -- so a YOLO-seg
       engine's prototype bank had nowhere to arrive. `Engine` takes N now, and
