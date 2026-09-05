@@ -28,7 +28,33 @@ mkdir -p "$REPO/.artifacts/cpp"
 # repository no longer describes, which is the defect this replaced.
 CHAIN="${SHIPINFER_BENCH_CHAIN:-$REPO/topology/ship_person_cpu.yaml}"
 PLAN="$REPO/.artifacts/cpp/${LABEL}.plan"
-SHIPINFER_PIPELINE__WORKERS="${SHIPINFER_BENCH_WORKERS:-48}" \
+
+GPU_IDS="${SHIPINFER_BENCH_GPUS:-2,3,4,5}"
+NGPUS="$(printf '%s' "$GPU_IDS" | tr ',' '\n' | grep -c .)"
+
+# PER GPU, because the workers feed per-GPU model instances and this file's GPU set is a
+# variable. 23 x 7 = 161 is the measurement below; a fixed 160 would have been right only for
+# the seven-device set the sweep used and wrong at this file's own default of four.
+#
+# MEASURED at 50 x 20 fps on GPUs 0-6 (7 is `GPU7-DEGRADED`), 70 s each, one variable. At the
+# old 48 the run retired 597 img/s and rejected 40% at the ingest queue while every model queue
+# sat near empty -- the workers were the binding constraint, not the GPUs:
+#
+#   total  48 (~7/gpu) -> 597 img/s   (27 974 rejected, 40%)
+#   total 112 (16/gpu) -> 858 img/s   ( 9 722 rejected, 14%)
+#   total 160 (23/gpu) -> 937 img/s   ( 4 015 rejected, 5.7%)   <- the plateau starts here
+#   total 192 (27/gpu) -> 940 img/s   ( 3 761 rejected, 5.4%)
+#   total 224 (32/gpu) -> 690 img/s   (21 118 rejected, 30%)    <- the segmenter backs up
+#
+# Past ~27/gpu it inverts: `ship_segmenter_buffer_size` goes 30 -> 123 while the others stay
+# near ten, so the contention has moved into one model's queue. 23 is the start of the plateau
+# rather than its top -- 27 buys 0.3% for 20% more threads on a box that is shared.
+#
+# THE PER-GPU FORM IS AN ASSUMPTION, not a measurement: the sweep ran on one device count, and
+# what generalises is that the workers feed per-GPU instances. Re-sweep before trusting it on a
+# very different device count.
+WORKERS_PER_GPU="${SHIPINFER_BENCH_WORKERS_PER_GPU:-23}"
+SHIPINFER_PIPELINE__WORKERS="${SHIPINFER_BENCH_WORKERS:-$((WORKERS_PER_GPU * NGPUS))}" \
   python -m shipinfer plan -t "$CHAIN" -r "$REPO/model_repository" -o "$PLAN"
 
 # `set -e` would abort on a non-zero exit before the status is printed, so the run that most
@@ -39,7 +65,7 @@ timeout "${SHIPINFER_BENCH_TIMEOUT:-900}" "$REPO/deploy/rootless/cpp.sh" \
   --ship-frames   /work/benchmarks/baseline/data/ship_2K \
   --plan          "/work/.artifacts/cpp/${LABEL}.plan" \
   --repository    /work/model_repository \
-  --gpu-ids "${SHIPINFER_BENCH_GPUS:-2,3,4,5}" \
+  --gpu-ids "$GPU_IDS" \
   --cameras "${SHIPINFER_BENCH_CAMERAS:-50}" \
   --fps "${SHIPINFER_BENCH_FPS:-20}" \
   --seconds "${SHIPINFER_BENCH_SECONDS:-70}" \

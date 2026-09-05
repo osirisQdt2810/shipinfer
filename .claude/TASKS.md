@@ -948,7 +948,37 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 6 · The final goal (V49)
 
-- [~] **C1 · UNBLOCKED by #128 for the GPU half; the engine gate above (C4) and Phase D
+- [~] **C1 · MEASURED AT THE DESIGN LOAD 5 Sep, and the number moved a long way. C4 is DONE
+      (#130); the remaining gate is Phase D, which is operator-blocked (`PHASE-D-NV12`).**
+      50 cameras x 20 fps x 70 s on GPUs 0-6, container, `run_cpp_bench.sh`. The generator
+      DELIVERED the design load -- 69 998 frames read in 70 s -- so this is the real thing and
+      not a scaled stand-in.
+      THE BINDING CONSTRAINT WAS THE WORKER POOL, and it was invisible until this session:
+      at the old 48 workers the run retired 597 img/s and REJECTED 40% at the ingest queue while
+      every model queue sat near empty (2/6/3/0 of 64). Sweeping it:
+        48 -> 597 img/s (27 974 rejected)   112 -> 858 (9 722)   160 -> 937 (4 015)
+        192 -> 940 (3 761)                  224 -> 690 (21 118, `ship_segmenter` 30 -> 123)
+      So ~940 img/s at 23 workers per GPU, a PLATEAU, and past ~27/gpu the contention moves
+      into one model's queue rather than easing. The default is PER GPU because the workers
+      feed per-GPU instances and this file's GPU set is a variable; 23 x 7 = 161 re-measured at
+      944 img/s (66 056 complete, 5.2% shed). Against the recorded C++ number of 390.5 that is
+      2.4x.
+      THE BASELINE SIDE IS NOT A CLEAN COMPARISON YET, and the reason is a fairness defect
+      found while trying to make one: `benchmarks/harness/config.py` transcribed
+      `instances_per_gpu = {"det": 2, "seg": 1}` where the repository says the segmenter is
+      2/GPU, so the baseline was given SEVEN segmenter threads on a 7-GPU box where we run
+      fourteen. Re-measured today at both settings: 947.9 SATURATED at seg=1/gpu, 971.3
+      SUSTAINED at seg=2/gpu. So the fair number is 971.3 and shipinfer is at ~0.97x -- PARITY,
+      not the >=5x C1 asks for, and the fairness fix moved it in the BASELINE's favour.
+      That fix is `BENCH-CONCURRENCY-TRANSCRIBED` below; this item's number is the C++ side.
+      WHY IT WAS INVISIBLE: the worker count only became a carried setting in #145, and the same
+      PR made `pipeline_queue` 256 real -- it was 65536, which absorbs a 1000 fps burst silently
+      and converts a throughput problem into a latency one. The 40% rejection is the queue doing
+      its job (ADR-005) and saying so.
+      STILL OPEN: 5.4% is still shed at the plateau, and the judge says UNMEASURED for TOTAL --
+      correctly, because the offered rate exceeds what was retired. Phase D (NVDEC into VRAM) is
+      the next lever and needs the operator's docker rebuild.
+      Original: UNBLOCKED by #128 for the GPU half; the engine gate above (C4) and Phase D
       remain. Original: BLOCKED on GPU7-DEGRADED (re-confirmed 4 Sep, see C4) as well as on Phase C+D.
       A bench run with a per-device breakdown is the whole deliverable and the GPU tier is down.**
       Original: >=5x counting-simulation, whole system.** (RUNBOOK: scratchpad/plan-phase-e-bench.md — run 4 of the consolidated Phase-E matrix; gated on Phase C+D per arch.md §10.) Measured: baseline 868.2 img/s against the
@@ -2303,6 +2333,25 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `tests/test_build_engines.py` is 9 checks, offline (a NAME is repository config; only
       writing the bytes needs a device). Revert-check red both ways: the name resolver back to
       the literal -> 3 failures; the install line back -> 1.
+
+- [ ] **BENCH-CONCURRENCY-TRANSCRIBED · the head-to-head was unfair in our favour, again.**
+      `benchmarks/harness/config.py` holds `instances_per_gpu = {"det": 2, "seg": 1}` as a
+      LITERAL, and its own header calls that field "the one number in this file that can
+      silently make the comparison unfair" -- describing the previous instance of exactly this.
+      `model_repository/ship_segmenter/config.yaml` went to `count: 2` on 27 Aug (its comment
+      names the sweep that moved it) and the literal stayed at 1, so on a 7-GPU box the
+      baseline is given SEVEN segmenter threads where we run fourteen.
+      `benchmarks/harness/shipinfer.py`'s `DEFAULT_INSTANCES_PER_GPU` is a SECOND copy with the
+      same stale row, so the segmenter's plateau guard also sits at half its real bound (448
+      where the truth is 896) -- stricter than truth, which is the safe direction, but wrong.
+      MEASURED, both settings, 50 x 20 x 70 s on GPUs 0-6 today: 947.9 SATURATED at seg=1/gpu,
+      971.3 SUSTAINED at seg=2/gpu. The fairness fix moves the number in the BASELINE's favour
+      by 23 img/s and changes its verdict, which is what says it mattered.
+      FIX: read both from the repository -- `repository/resolved.py::model_runtimes` already
+      answers it on a driverless box, and it is the same reader `shipinfer plan` uses. The
+      `det`/`seg` -> model-name map is the translation the header already describes; state it
+      once. `benchmarks/tests/test_fairness.py` tests the TRANSLATION today and not the SOURCE,
+      which is why this drifted past it.
 
 - [x] **P6-PRB · DONE. #122 (the gate) and #123 (its four follow-ups) both MERGED, APPROVE
       round 1 each. The queue seam now has five scenarios, five goldens and a C++ gate at 22
