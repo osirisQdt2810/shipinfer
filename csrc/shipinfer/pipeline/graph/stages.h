@@ -9,6 +9,7 @@
 #pragma once
 
 #include <chrono>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -118,10 +119,21 @@ namespace shipinfer {
     // A model applied to every object of one frame at once, in chunks of the engine's batch.
     // Runs only when its source payload is non-empty (`needs`), so a frame with only people
     // never reaches the ship segmenter.
+    // One response in, one row per crop out. The seam `PoolSegment._reduced` is on the Python
+    // plane, and it exists for the same reason: a YOLO-seg engine emits detection rows and a
+    // bank of mask prototypes, and one crop's mask is the two multiplied and reduced -- a fold
+    // over two outputs that a per-row scatter cannot express. Returning the engine's first
+    // output unchanged is the identity, which is what an embedder wants.
+    //
+    // Applied per CHUNK, before anything is appended, so the fold sees one response's rows
+    // together. Folding after the join would read three chunks' answers as one.
+    using ObjectCombine = std::function<OutputTensor(const InferenceResponse&)>;
+
     class ObjectStage : public ModelStage {
       public:
         ObjectStage(std::string name, Model& model, std::string source, std::string output,
-                    std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+                    std::chrono::milliseconds timeout = std::chrono::milliseconds(5000),
+                    ObjectCombine combine = {});
 
       protected:
         size_t do_run(FrameState& state) override;
@@ -129,6 +141,7 @@ namespace shipinfer {
       private:
         std::string source_;
         std::string output_;
+        ObjectCombine combine_;
     };
 
 }  // namespace shipinfer

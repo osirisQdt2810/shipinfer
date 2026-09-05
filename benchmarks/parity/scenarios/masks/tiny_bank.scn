@@ -1,0 +1,32 @@
+# Four crops through a 2-coefficient, 4x2 bank. A 16x8 crop over 8 cells is 16 px a cell, so
+# every area is a multiple of 16 and both planes spell it exactly.
+#
+# Every coefficient and plane value is +-1 or +-2 against a cut of 0, so no summation order
+# can move a cell across the threshold -- see `mask_scenario.py`.
+scenario tiny_bank
+crop 16 8
+rows 2 8
+protos 2 4 2
+score_threshold 0.25
+mask_threshold 0.5
+
+# crop 0: the strong row is candidate 1, and coefficient 0 selects a plane with 3 cells set.
+det 0 0 0.1 1 0
+det 0 1 0.9 1 0
+plane 0 0 1 1 1 -1 -1 -1 -1 -1
+plane 0 1 -1 -1 -1 -1 -1 -1 -1 -1
+
+# crop 1: BELOW the floor, and its plane is entirely positive -- the "found nothing reports
+# the whole plane" failure `InstanceMaskArea` exists to refuse. Must be 0.0, not 128.0.
+det 1 0 0.2 1 0
+plane 1 0 1 1 1 1 1 1 1 1
+
+# crop 2: two coefficients, so the fold has to combine them rather than take the first.
+# Cell k is inside where `1*a[k] + 2*b[k] >= 0`: -1+2=+1 (in), 1-2=-1 (out), so 4 cells.
+det 2 0 0.75 1 2
+plane 2 0 -1 1 -1 1 -1 1 -1 1
+plane 2 1 1 -1 1 -1 1 -1 1 -1
+
+# crop 3: every cell inside, so the area is the whole crop -- the upper bound stated.
+det 3 0 0.5 1 0
+plane 3 0 1 1 1 1 1 1 1 1
