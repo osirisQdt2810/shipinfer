@@ -76,6 +76,11 @@ class PlanNode:
     #: diverges the moment a chain file states one.
     fold_score: float | None = None
     fold_mask: float | None = None
+    #: Which of the engine's outputs the fold reads. Which slot a YOLO-seg export puts its
+    #: prototypes in is the export's choice, so a plan that omitted these made the other plane
+    #: assume `output0`/`output1` and refuse an engine that names them anything else.
+    fold_detections: str | None = None
+    fold_prototypes: str | None = None
     when: str | None = None
     per: str | None = None
     scope: str | None = None
@@ -245,6 +250,16 @@ def resolve_plan(
                 ),
                 max_detections=(
                     None if decode is None else _positive(decode.max_detections, where)
+                ),
+                fold_detections=(
+                    None
+                    if fold is None
+                    else _speakable(str(fold.detections), f"{where}: `segment.detections`")
+                ),
+                fold_prototypes=(
+                    None
+                    if fold is None
+                    else _speakable(str(fold.prototypes), f"{where}: `segment.prototypes`")
                 ),
                 fold_score=(
                     None
@@ -433,6 +448,10 @@ def plan_text(plan: ResolvedPlan) -> str:
             lines.append(f"queue_delay_us {node.queue_delay_us}")
         if node.artefact:
             lines.append(f"artefact {node.artefact}")
+        if node.fold_detections:
+            lines.append(f"fold_detections {node.fold_detections}")
+        if node.fold_prototypes:
+            lines.append(f"fold_prototypes {node.fold_prototypes}")
         if node.fold_score is not None:
             lines.append(f"fold_score {node.fold_score!r}")
         if node.fold_mask is not None:
@@ -728,6 +747,8 @@ _ATTRIBUTES = {
     "letterbox": _extent_attr("letterbox"),
     "score": _score,
     "max_detections": _max_detections,
+    "fold_detections": _word_attr("fold_detections"),
+    "fold_prototypes": _word_attr("fold_prototypes"),
     "fold_score": _fold_score,
     "fold_mask": _fold_mask,
     "instances": _instances,

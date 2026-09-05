@@ -160,6 +160,12 @@ namespace shipinfer {
                                       "; a cap is a positive count on both planes");
                 }
                 node.max_detections = count;
+            } else if (verb == "fold_detections") {
+                want(args, 1, where, "fold_detections <output name>");
+                node.fold_detections = args[0];
+            } else if (verb == "fold_prototypes") {
+                want(args, 1, where, "fold_prototypes <output name>");
+                node.fold_prototypes = args[0];
             } else if (verb == "fold_score") {
                 want(args, 1, where, "fold_score <threshold>");
                 node.fold_score = as_double(args[0], where);
@@ -207,9 +213,9 @@ namespace shipinfer {
             } else {
                 throw ConfigError(where + ": unknown verb '" + verb +
                                   "'; expected one of artefact, classes, crop, edge, field, "
-                                  "fold_mask, fold_score, instances, label, letterbox, "
-                                  "max_detections, model, node, per, plan, queue_delay_us, "
-                                  "score, scope, when");
+                                  "fold_detections, fold_mask, fold_prototypes, fold_score, "
+                                  "instances, label, letterbox, max_detections, model, node, "
+                                  "per, plan, queue_delay_us, score, scope, when");
             }
         }
 
@@ -374,6 +380,12 @@ namespace shipinfer {
             if (!node.artefact.empty()) out += "artefact " + node.artefact + "\n";
             // AFTER `artefact`, because `plan_text` writes them there and the gate is a byte
             // compare: an emission order that differs is a round trip that does not.
+            if (!node.fold_detections.empty()) {
+                out += "fold_detections " + node.fold_detections + "\n";
+            }
+            if (!node.fold_prototypes.empty()) {
+                out += "fold_prototypes " + node.fold_prototypes + "\n";
+            }
             if (node.fold_score) {
                 out += "fold_score " + events::json_number(*node.fold_score) + "\n";
             }

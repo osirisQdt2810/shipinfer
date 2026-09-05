@@ -249,6 +249,8 @@ class FoldParamsLike(Protocol):
     inversion is :class:`DecodeParamsLike`'s: ``elements`` imports this module.
     """
 
+    detections: str
+    prototypes: str
     score_threshold: float
     mask_threshold: float
 

@@ -21,6 +21,8 @@ crop 640 640
 instances 2
 queue_delay_us 8000
 artefact ship_segmenter/1/model.plan
+fold_detections output0
+fold_prototypes output1
 fold_score 0.25
 fold_mask 0.5
 

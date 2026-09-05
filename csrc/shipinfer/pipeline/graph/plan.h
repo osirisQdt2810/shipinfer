@@ -59,6 +59,11 @@ namespace shipinfer {
         // `log(m / (1 - m))`, which is -inf at 0 and a division by zero at 1.
         std::optional<double> fold_score;
         std::optional<double> fold_mask;
+        // Which of the engine's outputs the fold reads. Which slot a YOLO-seg export puts its
+        // prototypes in is the export's choice, so assuming `output0`/`output1` here refused
+        // an engine that names them anything else -- loudly, but from the wrong plane.
+        std::string fold_detections;
+        std::string fold_prototypes;
         std::string when;
         std::string per;
         std::string scope;

@@ -199,6 +199,8 @@ namespace shipinfer {
                 // The plan's cuts where it states them. The defaults on `MaskAreaSpec` agree
                 // with the Python fold's, which is exactly why an absent line was silent:
                 // both planes were right by luck until a chain file said otherwise.
+                if (!node->fold_detections.empty()) fold.detections = node->fold_detections;
+                if (!node->fold_prototypes.empty()) fold.prototypes = node->fold_prototypes;
                 if (node->fold_score)
                     fold.score_threshold = static_cast<float>(*node->fold_score);
                 if (node->fold_mask) fold.mask_threshold = static_cast<float>(*node->fold_mask);

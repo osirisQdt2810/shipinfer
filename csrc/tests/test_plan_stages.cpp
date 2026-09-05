@@ -126,6 +126,21 @@ namespace {
         check(stated.objects.at(0).fold->score_threshold == 0.4f &&
                   stated.objects.at(0).fold->mask_threshold == 0.6f,
               "and a plan that states them is what the fold uses");
+
+        // The engine's output NAMES likewise: a YOLO-seg export chooses which slot holds its
+        // prototypes, and assuming `output0`/`output1` refused a valid engine from here.
+        check(segment.objects.at(0).fold->detections == "output0" &&
+                  segment.objects.at(0).fold->prototypes == "output1",
+              "a plan stating no output names leaves the export's usual pair");
+
+        const PlanStages named = plan_stages(
+            plan_of(kDetect + "node segment_all segment pool\nmodel ship_segmenter\n"
+                              "crop 640 640\nfold_detections boxes\nfold_prototypes protos\n"),
+            {"ship_detector", "ship_segmenter"});
+
+        check(named.objects.at(0).fold->detections == "boxes" &&
+                  named.objects.at(0).fold->prototypes == "protos",
+              "and a plan that names them is what the fold reads");
     }
 
     void a_named_class_resolves_through_the_label_table() {

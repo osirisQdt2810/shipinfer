@@ -147,6 +147,10 @@ namespace {
         check(refused("plan 1 x\nnode a b c\nfold_mask 1\n"), "and 1 divides by zero");
         check(refused("plan 1 x\nnode a b c\nfold_mask 1.5\n"), "and past it");
         check(refused("plan 1 x\nnode a b c\nfold_score nan\n"), "a non-finite score floor");
+        check(refused("plan 1 x\nnode a b c\nfold_detections a b\n"),
+              "an output name holding a space");
+        check(!refused("plan 1 x\nnode a b c\nfold_detections det\nfold_prototypes proto\n"),
+              "an export that names its outputs something other than output0/output1");
         check(!refused("plan 1 x\nnode a b c\nfold_mask 0.5\nfold_score 0.25\n"),
               "the two fold cuts");
         check(!refused("plan 1 x\nnode a b c\nfold_score 0.0\n"),
