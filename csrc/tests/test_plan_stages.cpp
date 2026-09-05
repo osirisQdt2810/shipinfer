@@ -94,6 +94,24 @@ namespace {
 
         check(built.crops.size() == 1 && built.crops[0].class_id == CropSpec::kAnyClass,
               "no `classes` line: every row, as `pool.py` defaults");
+
+        // A SEGMENT slot reads the same way, which it did not between #132 and
+        // P6-SEGMENT-CROP: this plane REFUSED one with no `classes:` while the Python loader
+        // accepted it, so one chain file had two answers. The refusal's argument -- "every
+        // row is a 640x640 crop per person" -- is equally true of the embedder above, which
+        // has always been allowed to say it, and both planes now do the same work for it.
+        // Its own `loaded` set: `kLoaded` has no segmenter, and an unrunnable slot never
+        // reaches `class_of` at all -- which is how the check this replaces once passed
+        // while asserting nothing.
+        const PlanStages segment = plan_stages(
+            plan_of(kDetect + "node segment_all segment pool\nmodel ship_segmenter\n"
+                              "crop 640 640\n"),
+            {"ship_detector", "ship_segmenter"});
+
+        check(segment.crops.size() == 1 && segment.crops[0].class_id == CropSpec::kAnyClass,
+              "and a segment slot with no `classes` is every row too, not a refusal");
+        check(segment.objects.size() == 1 && segment.objects[0].fold.has_value(),
+              "with its fold attached, because it is still a segment slot");
     }
 
     void a_named_class_resolves_through_the_label_table() {
@@ -105,7 +123,7 @@ namespace {
         check(built.crops[0].class_id == 8, "a ship is 8 in this plan's table");
         check(built.crops[0].class_name == "ship", "and the event gets the name");
         check(built.crops[0].name == "embed_ship_crops", "the payload name is derived");
-        check(built.objects.size() == 1 && built.objects[0][3] == "embed_ship_out",
+        check(built.objects.size() == 1 && built.objects[0].output == "embed_ship_out",
               "and so is the output batch, which is how a batch is keyed");
     }
 
@@ -163,19 +181,10 @@ namespace {
         // negative bound is no bound. Refused here rather than surviving to the loop.
         check(refused("node detect detect pool\nmodel ship_detector\nmax_detections -1\n"),
               "a declared cap of -1, which `static_cast<size_t>` turns into no cap");
-        // `kLoaded` has no segmenter, so this one needs its own call: an unrunnable slot
-        // never reaches `class_of` at all, which is how the first version of this check
-        // passed while asserting nothing.
-        bool refused_segment = false;
-        try {
-            plan_stages(plan_of(kDetect + "node segment segment pool\nmodel ship_segmenter\n"
-                                          "crop 640 640\n"),
-                        {"ship_detector", "ship_segmenter"});
-        } catch (const ConfigError&) {
-            refused_segment = true;
-        }
-        check(refused_segment,
-              "a segment slot with no row selection, which would be EVERY row");
+        // A segment slot with no `classes:` is NOT refused here any more -- see
+        // `no_selection_at_all_matches_every_row`, which asserts the reading it gets now.
+        // It was, between #132 and P6-SEGMENT-CROP, while the Python plane accepted the same
+        // file: one chain file with two answers.
     }
 
     // A plan built in CODE never passes through `parse_plan`, so the reader's refusals do

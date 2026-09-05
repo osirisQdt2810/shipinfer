@@ -31,6 +31,9 @@ for entry in (str(ROOT), str(ROOT / "src")):
 from benchmarks.parity.drive_events import GOLDEN as EVENT_GOLDEN  # noqa: E402
 from benchmarks.parity.drive_events import load as load_event  # noqa: E402
 from benchmarks.parity.drive_events import render as render_event  # noqa: E402
+from benchmarks.parity.drive_masks import GOLDEN as MASK_GOLDEN  # noqa: E402
+from benchmarks.parity.drive_masks import load as load_mask  # noqa: E402
+from benchmarks.parity.drive_masks import render_masks  # noqa: E402
 from benchmarks.parity.drive_plan import GOLDEN as PLAN_GOLDEN  # noqa: E402
 from benchmarks.parity.drive_plan import load_plan_scenario, render_plan  # noqa: E402
 from benchmarks.parity.drive_python import GOLDEN, SCENARIOS, run_scenario  # noqa: E402
@@ -52,9 +55,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scenario", required=True, help="a name under scenarios/, or a path")
     parser.add_argument(
         "--kind",
-        choices=("ingest", "queue", "event", "plan", "record"),
+        choices=("ingest", "queue", "event", "plan", "record", "mask"),
         default="ingest",
-        help="which seam: the camera actors, the request queue (scenarios/queues/), one\n        perception event (scenarios/events/), a resolved chain (scenarios/plans/), or\n        one frame's stage outputs through the production record builder\n        (scenarios/records/)",
+        help="which seam: the camera actors, the request queue (scenarios/queues/), one\n        perception event (scenarios/events/), a resolved chain (scenarios/plans/), or\n        one frame's stage outputs through the production record builder\n        (scenarios/records/), or a segmentation engine's two outputs through the mask\n        fold (scenarios/masks/)",
     )
     parser.add_argument("--out", type=Path, help="write the trace here instead of stdout")
     parser.add_argument(
@@ -104,6 +107,26 @@ def main(argv: list[str] | None = None) -> int:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(line + "\n", encoding="ascii")
         print(f"wrote {destination} (1 record)")
+        return 0
+
+    # One area per crop, one per line -- the FOLD, which is one seam upstream of `record`:
+    # a record scenario states already-reduced rows and cannot see a fold that is missing.
+    if args.kind == "mask":
+        named = Path(args.scenario)
+        scenario = load_mask(str(named) if named.suffix == ".scn" else args.scenario)
+        text = render_masks(scenario)
+        destination = MASK_GOLDEN / f"{scenario.name}.txt" if args.emit_golden else args.out
+        if destination is None:
+            print(text, end="")
+            return 0
+        if args.emit_golden and destination.exists() and not args.force:
+            raise ConfigurationError(
+                f"{destination} already exists. A golden is captured once and committed; "
+                f"pass --force only when the change to the plane IS the decision"
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(text, encoding="ascii")
+        print(f"wrote {destination} ({len(text.splitlines())} area(s))")
         return 0
 
     if args.kind == "event":
