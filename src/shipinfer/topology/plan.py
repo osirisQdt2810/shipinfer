@@ -70,6 +70,12 @@ class PlanNode:
     instances: int | None = None
     queue_delay_us: int | None = None
     artefact: str | None = None
+    #: A segmentation fold's two cuts: the score below which a crop reports no area, and the
+    #: mask probability at which a cell counts as inside. Both defaulted on both planes, which
+    #: is exactly why the plan has to carry them -- an omission agrees by luck today and
+    #: diverges the moment a chain file states one.
+    fold_score: float | None = None
+    fold_mask: float | None = None
     when: str | None = None
     per: str | None = None
     scope: str | None = None
@@ -220,6 +226,7 @@ def resolve_plan(
         # is the literal this whole seam exists to remove.
         decode = node.element.decode_parameters()
         runtime = runtimes.get(node.spec.model or "") if node.spec.model else None
+        fold = node.element.fold_parameters()
         if node.kind in (ElementKind.EMBED, ElementKind.SEGMENT) and crop is None:
             crop = _model_extent(node.spec.model, dims, where, "crop")
         if node.kind is ElementKind.DETECT and letterbox is None:
@@ -238,6 +245,10 @@ def resolve_plan(
                 ),
                 max_detections=(
                     None if decode is None else _positive(decode.max_detections, where)
+                ),
+                fold_score=None if fold is None else _finite(fold.score_threshold, where),
+                fold_mask=(
+                    None if fold is None else _probability(fold.mask_threshold, where)
                 ),
                 instances=_runtime_int(runtime, "instances", where),
                 queue_delay_us=_runtime_int(runtime, "queue_delay_us", where, zero_ok=True),
@@ -350,6 +361,17 @@ def _classes_of(declared: tuple[str, ...] | None, where: str) -> tuple[str, ...]
     )
 
 
+def _probability(value: float, where: str) -> float:
+    """Strictly inside (0, 1) -- the range `InstanceMaskArea` refuses outside, refused here so
+    a plan is never written holding a value the other plane's `log(m / (1 - m))` cannot take."""
+    number = float(value)
+    if not 0.0 < number < 1.0:
+        raise ConfigurationError(
+            f"{where}: a mask probability is strictly inside (0, 1), got {number!r}"
+        )
+    return number
+
+
 def _positive(value: int, where: str) -> int:
     """A cap is a positive count. Nothing between a chain file and the decode loop refused a
     `-1` -- not `_resolve_decode_params`'s bare `int()`, not the unvalidated `DecodeParams`
@@ -405,6 +427,10 @@ def plan_text(plan: ResolvedPlan) -> str:
             lines.append(f"queue_delay_us {node.queue_delay_us}")
         if node.artefact:
             lines.append(f"artefact {node.artefact}")
+        if node.fold_score is not None:
+            lines.append(f"fold_score {node.fold_score!r}")
+        if node.fold_mask is not None:
+            lines.append(f"fold_mask {node.fold_mask!r}")
         if node.when:
             lines.append(f"when {node.when}")
         if node.per:
@@ -619,6 +645,35 @@ def _queue_delay(node: dict[str, object], args: Sequence[str], where: str) -> No
     node["queue_delay_us"] = delay
 
 
+def _fold_score(node: dict[str, object], args: Sequence[str], where: str) -> None:
+    """The score floor. Finite, like `score` -- an infinite one passes no crop and reports
+    nothing wrong."""
+    _want(args, 1, where, "fold_score <threshold>")
+    if not _NUMBER.match(args[0]) or not math.isfinite(float(args[0])):
+        raise PlanSyntaxError(f"{where}: {args[0]!r} is not a finite number")
+    node["fold_score"] = float(args[0])
+
+
+def _fold_mask(node: dict[str, object], args: Sequence[str], where: str) -> None:
+    """The mask probability, strictly inside (0, 1).
+
+    `InstanceMaskArea.__post_init__` refuses the endpoints and the C++ fold takes
+    `log(m / (1 - m))`, which is `-inf` at 0 and a division by zero at 1 -- so a plan carrying
+    either is a chain that loads on neither plane, and the reader says so rather than the
+    arithmetic.
+    """
+    _want(args, 1, where, "fold_mask <probability>")
+    if not _NUMBER.match(args[0]):
+        raise PlanSyntaxError(f"{where}: {args[0]!r} is not a number")
+    value = float(args[0])
+    if not 0.0 < value < 1.0:
+        raise PlanSyntaxError(
+            f"{where}: fold_mask is {value}; a mask probability is strictly inside (0, 1), "
+            f"because the cut is log(m / (1 - m))"
+        )
+    node["fold_mask"] = value
+
+
 def _max_detections(node: dict[str, object], args: Sequence[str], where: str) -> None:
     """A positive count. `-1` for "no limit" is a widespread convention and neither plane has
     it: here `keep[: -1]` would drop one row, and on the C++ side
@@ -667,6 +722,8 @@ _ATTRIBUTES = {
     "letterbox": _extent_attr("letterbox"),
     "score": _score,
     "max_detections": _max_detections,
+    "fold_score": _fold_score,
+    "fold_mask": _fold_mask,
     "instances": _instances,
     "queue_delay_us": _queue_delay,
     "artefact": _word_attr("artefact"),

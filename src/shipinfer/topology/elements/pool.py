@@ -1651,6 +1651,38 @@ class PoolSegment(_PoolCropElement):
             )
         return name
 
+    def fold_parameters(self) -> InstanceMaskArea:
+        """The cuts this slot will fold with, for the resolved plan to carry.
+
+        Built from ``params`` rather than returned from ``self._fold``, because a plan is
+        written by a control plane that never opened the element -- `shipinfer plan` has no
+        model pool and no image ops. The crop extent is the plan's own `crop` line, so the
+        placeholder here is never read.
+        """
+        defaults = _fold_defaults()
+        settings = self.params.get("segment") or {}
+        if not isinstance(settings, Mapping):
+            settings = {}
+        try:
+            return InstanceMaskArea(
+                crop_hw=(1, 1),
+                score_threshold=float(
+                    settings.get("score_threshold", defaults["score_threshold"])
+                ),
+                mask_threshold=float(
+                    settings.get("mask_threshold", defaults["mask_threshold"])
+                ),
+            )
+        except (TypeError, ValueError) as error:
+            # The same wrap `_do_open` does, and needed here for a stronger reason: a plan is
+            # written by a control plane that never opens the element, so this is the FIRST
+            # reading of those keys on that path -- and a bare `ValueError` would escape the
+            # vocabulary `shipinfer plan` reports failures in.
+            raise ConfigurationError(
+                f"{self.kind.value} element {self.name!r}: `params: segment:` is not a valid "
+                f"fold -- {error}"
+            ) from error
+
     def _reduced(self, response: InferenceResponse) -> InferenceResponse:
         """The engine's two outputs, folded to one area per crop.
 

@@ -53,6 +53,12 @@ namespace shipinfer {
         std::optional<int> instances;
         std::optional<int> queue_delay_us;
         std::string artefact;
+        // A segmentation fold's two cuts. Both are defaulted on both planes, which is why the
+        // plan carries them: an omission agrees by luck today and diverges the moment a chain
+        // file states one. `fold_mask` is strictly inside (0, 1) -- the cut is
+        // `log(m / (1 - m))`, which is -inf at 0 and a division by zero at 1.
+        std::optional<double> fold_score;
+        std::optional<double> fold_mask;
         std::string when;
         std::string per;
         std::string scope;

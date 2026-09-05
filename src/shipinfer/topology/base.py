@@ -242,6 +242,17 @@ class DecodeParamsLike(Protocol):
     max_detections: int
 
 
+class FoldParamsLike(Protocol):
+    """A segment element's resolved fold cuts, as a shape rather than an import.
+
+    :class:`shipinfer.topology.elements.masks.InstanceMaskArea` satisfies this, and the
+    inversion is :class:`DecodeParamsLike`'s: ``elements`` imports this module.
+    """
+
+    score_threshold: float
+    mask_threshold: float
+
+
 class ImageOpsLike(Protocol):
     """The preprocessing an element needs, as a shape rather than an import.
 
@@ -727,6 +738,16 @@ class Element(abc.ABC):
 
         A hook and not a re-read of ``params``, for :meth:`detection_labels`'s reason: the
         element has parsed the key and applied its own refusals already.
+        """
+        return None
+
+    def fold_parameters(self) -> FoldParamsLike | None:
+        """This element's **effective** fold cuts, or ``None`` if it folds nothing.
+
+        :meth:`decode_parameters`'s argument one stage along: a segmentation fold has a score
+        floor and a mask probability, both defaulted, and a plan that omitted them made the
+        other plane hard-code its own -- the literal ADR-020 deletes. `0.25` and `0.5` agree
+        on both planes today, which is exactly why an omission here would be silent.
         """
         return None
 

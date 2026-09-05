@@ -160,6 +160,19 @@ namespace shipinfer {
                                       "; a cap is a positive count on both planes");
                 }
                 node.max_detections = count;
+            } else if (verb == "fold_score") {
+                want(args, 1, where, "fold_score <threshold>");
+                node.fold_score = as_double(args[0], where);
+            } else if (verb == "fold_mask") {
+                want(args, 1, where, "fold_mask <probability>");
+                const double value = as_double(args[0], where);
+                if (!(value > 0.0 && value < 1.0)) {
+                    throw ConfigError(where + ": fold_mask is " +
+                                      events::json_number(value) +
+                                      "; a mask probability is strictly inside (0, 1), "
+                                      "because the cut is log(m / (1 - m))");
+                }
+                node.fold_mask = value;
             } else if (verb == "instances") {
                 want(args, 1, where, "instances <count>");
                 // Positive, like `max_detections` and for the same reason: zero would load
@@ -195,8 +208,9 @@ namespace shipinfer {
             } else {
                 throw ConfigError(where + ": unknown verb '" + verb +
                                   "'; expected one of artefact, classes, crop, edge, field, "
-                                  "instances, label, letterbox, max_detections, model, node, "
-                                  "per, plan, queue_delay_us, score, scope, when");
+                                  "fold_mask, fold_score, instances, label, letterbox, "
+                                  "max_detections, model, node, per, plan, queue_delay_us, "
+                                  "score, scope, when");
             }
         }
 
@@ -359,6 +373,14 @@ namespace shipinfer {
                 out += "queue_delay_us " + std::to_string(*node.queue_delay_us) + "\n";
             }
             if (!node.artefact.empty()) out += "artefact " + node.artefact + "\n";
+            // AFTER `artefact`, because `plan_text` writes them there and the gate is a byte
+            // compare: an emission order that differs is a round trip that does not.
+            if (node.fold_score) {
+                out += "fold_score " + events::json_number(*node.fold_score) + "\n";
+            }
+            if (node.fold_mask) {
+                out += "fold_mask " + events::json_number(*node.fold_mask) + "\n";
+            }
             if (!node.when.empty()) out += "when " + node.when + "\n";
             if (!node.per.empty()) out += "per " + node.per + "\n";
             if (!node.scope.empty()) out += "scope " + node.scope + "\n";

@@ -21,6 +21,8 @@ crop 512 512
 instances 2
 queue_delay_us 8000
 artefact ship_segmenter/1/model.plan
+fold_score 0.25
+fold_mask 0.5
 when fps == 20
 
 node embed_person embed pool

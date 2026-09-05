@@ -196,6 +196,11 @@ namespace shipinfer {
                 MaskAreaSpec fold;
                 fold.crop_height = crop.height;
                 fold.crop_width = crop.width;
+                // The plan's cuts where it states them. The defaults on `MaskAreaSpec` agree
+                // with the Python fold's, which is exactly why an absent line was silent:
+                // both planes were right by luck until a chain file said otherwise.
+                if (node->fold_score) fold.score_threshold = static_cast<float>(*node->fold_score);
+                if (node->fold_mask) fold.mask_threshold = static_cast<float>(*node->fold_mask);
                 object.fold = fold;
             }
             built.objects.push_back(std::move(object));
