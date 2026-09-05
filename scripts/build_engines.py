@@ -157,6 +157,39 @@ def build(targets: tuple[Target, ...], *, fp16: bool, force: bool) -> int:
     return 1 if failures else 0
 
 
+# doc: long why the model name comes from the path and not from `Target.name`
+def _artefact_name(version_dir: Path, engine: Path) -> str:
+    """The file name THIS model's config asks for, not the conventional one.
+
+    `parameters.engine_file` is configurable and defaults to `model.plan`; the install wrote
+    the default unconditionally. A model naming anything else got its plan under a name nothing
+    loads: the builder reports success, `shipinfer plan` names the configured file, and the
+    failure arrives at the next start-up, minutes of TensorRT later.
+
+    THE MODEL NAME COMES FROM THE PATH, `<repository>/<name>/<version>`, and not from
+    `Target.name` -- those are not the same thing. `reid` is one target that feeds TWO
+    repository models and has no `version_dir` at all, so a name-keyed lookup would be right
+    for two of the three targets by luck.
+
+    Read through `ModelRepository` because that is the reader that already knows; a second
+    parser here is the second door ADR-020 argues against, one artefact along.
+    """
+    from shipinfer.core.errors import ShipInferError
+    from shipinfer.repository import ModelRepository
+
+    name = version_dir.parent.name
+    try:
+        return ModelRepository.load(version_dir.parents[1]).entry(name).config.engine_file
+    except (ShipInferError, OSError) as error:
+        # Refused, not defaulted. Guessing `model.plan` here is exactly the defect above, and
+        # the flat engine is already built and named in the output, so nothing is lost.
+        raise SystemExit(
+            f"{name}: built the engine, but cannot read the repository to learn where to "
+            f"install it ({error}). The flat engine is at {engine}; fix "
+            f"{version_dir.parent / 'config.yaml'} and re-run to install it"
+        ) from None
+
+
 def _install(target: Target, engine: Path) -> None:
     """Put the plan where the server looks for it.
 
@@ -164,18 +197,21 @@ def _install(target: Target, engine: Path) -> None:
     container whose mount layout differs is a confusing way to fail at start-up.
 
     Called on the skip path too. Skipping the copy when the flat engine already existed
-    left `model.plan` absent, `autobuild` then built the server a *different* plan from
+    left the artefact absent, `autobuild` then built the server a *different* plan from
     ONNX, and the benchmark's identity check had nothing to compare — so the two sides ran
     different engines and the guard passed.
     """
     if target.version_dir is None:
         return
-    destination = target.version_dir / "model.plan"
+    destination = target.version_dir / _artefact_name(target.version_dir, engine)
     if destination.is_file() and destination.read_bytes() == engine.read_bytes():
         return
     target.version_dir.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(engine.read_bytes())
-    print(f"{'':<16}  -> {destination.relative_to(REPO)}")
+    # `relative_to` RAISES for a path outside the repository rather than returning the
+    # absolute one, so printing where the file went could be the thing that fails.
+    shown = destination.relative_to(REPO) if destination.is_relative_to(REPO) else destination
+    print(f"{'':<16}  -> {shown}")
 
 
 def main(argv: list[str] | None = None) -> int:
