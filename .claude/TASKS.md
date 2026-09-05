@@ -2673,17 +2673,26 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       (both lanes out, so the opencv-row assertion actually runs) 230 checks 0 failures.
       REVERT-CHECK RED: the old guard back, full build -> 1 failure, exit 1, with the original
       message verbatim; restored -> 0, exit 0.
-- [ ] **CSRC-BENCH-STARTUP-ABORT · seen ONCE on 5 Sep and not reproduced, recorded rather
-      than buried by a green re-run.** The first run of a freshly built `csrc/build/bench`
-      aborted with `terminate called without an active exception` (exit 134) after all four
-      engines loaded and before any camera connected -- so between `Model::start` and the
-      ingest actors. Two subsequent runs of the SAME binary were clean (800 frames -> 800
-      events -> 800 complete). That message is a `std::thread` destroyed while joinable, or a
-      throw crossing a thread boundary, and the start-up path has both shapes: `Model::start`
-      waits on instance threads and the camera sources spawn their own. Worth a look before
-      the design load, because an abort here is indistinguishable from a crash in a long run.
-      Log: `.artifacts/cpp/p5b-round2.log` on `feat/plan-model-runtime` (PR #138).
-
+- [x] **CSRC-BENCH-STARTUP-ABORT · ROOT-CAUSED AND REPRODUCED 5 Sep on
+      `fix/bench-startup-abort`. Not a heisenbug: a start-up ordering defect that aborts on any
+      refusal after the workers spawn.** `cli/bench.cpp` starts its workers and its sweeper
+      BEFORE it builds the cameras, and building them throws -- `ReplayLibrary::acquire` on a
+      folder it cannot read, `create_source` on a name this binary does not link, the ingest
+      manager on a camera it will not accept. That throw unwinds past a
+      `std::vector<std::thread>` of joinable threads, which is `terminate called without an
+      active exception`. Which is why the symptom was "after all four engines loaded and before
+      any camera connected", and why re-running was clean: it needs the refusal, not luck.
+      REPRODUCED ON DEMAND, twice. End to end: `--person-frames <missing>` on the real binary
+      without the fix -> `terminate called without an active exception`, exit 134, after the
+      engines printed -- the reported line verbatim; WITH it -> `frame folder is not a
+      directory: ...`, exit 1. And offline: `csrc/tests/test_join_on_unwind.cpp` (14 checks)
+      with the join removed prints the SAME message at exit 134 on a box with no GPU.
+      FIXED by `core/join_on_unwind.h` -- a guard that WATCHES the threads rather than owning
+      them, so the normal shutdown keeps its own order (models stop BETWEEN the workers and the
+      sweeper) and finds nothing to do. A header, not another anonymous class in `bench.cpp`,
+      for `bench_models.h`'s reason: a `main()` translation unit is one no gate can link.
+      Normal path unaffected: 8 cameras x 5 fps x 20 s on GPUs 0-1, 800 frames -> 800 complete,
+      0 rejected, exit 0.
 - [x] **ARTEFACT-NOT-BUILT-YET · DONE 5 Sep, OPEN as PR #143, as a
       REPORT and not a refusal -- which the survey changed.** The first framing was "have
       `shipinfer plan` refuse at write time when the named artefact is absent". Reading the
