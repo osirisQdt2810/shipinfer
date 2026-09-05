@@ -26,11 +26,16 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 CSRC = ROOT / "csrc"
-#: A translation unit that needs exactly what these apps need. Probed with `g++` rather than
-#: tested with `is_dir()`, because a distribution's packages put `NvInfer.h` and
-#: `cuda_runtime.h` on the DEFAULT include path (`/usr/include/x86_64-linux-gnu`) where no
-#: `-I` names them -- and the `is_dir()` guard then skipped on the one machine that had them.
-_PROBE = "#include <NvInfer.h>\n#include <cuda_runtime.h>\nint main() { return 0; }\n"
+#: What these apps need, probed with `g++` rather than `is_dir()`: a distribution puts these
+#: headers on the DEFAULT include path, where no `-I` names them. `NvInferPlugin.h` is here
+#: because `engine.cpp` includes it and NVIDIA ships it SEPARATELY -- a probe certifying a
+#: smaller set than the check needs passes, and then the check fails.
+_PROBE = (
+    "#include <NvInfer.h>\n"
+    "#include <NvInferPlugin.h>\n"
+    "#include <cuda_runtime.h>\n"
+    "int main() { return 0; }\n"
+)
 
 #: Set by CI's `cpp-syntax` job: a SKIP is the hole this check exists to close, so where the
 #: headers are meant to be installed their absence has to be a failure with a reason.
@@ -86,7 +91,9 @@ def _lanes_available(build, closure: set[Path]) -> bool:
         try:
             build.pkg_config_flags(lane)
         except SystemExit:
-            return False
+            return False  # `pkg-config` answered, and the package is not installed
+        except FileNotFoundError:
+            return False  # no `pkg-config` binary at all, which is the same answer
     return True
 
 
@@ -95,9 +102,10 @@ def _uncompiled_units() -> list[Path]:
 
     `-fsyntax-only` on an APP does not parse the `.cpp` files in its closure, so the eight
     units outside the offline build were covered by nothing even with the apps checked --
-    including `backends/tensorrt/engine.cpp`, where `initLibNvInferPlugins` lives. Two of them
-    need an external lane (opencv, gstreamer) and are skipped where it is not installed, which
-    is the same answer `build_csrc.py` gives.
+    including `backends/tensorrt/engine.cpp`, where `initLibNvInferPlugins` lives. Two need an
+    external lane (opencv, gstreamer) and are skipped where it is absent, which is the answer
+    `build_csrc.py` gives. `.cpp` only: `runtime/ops.cu` stays covered by nothing here,
+    because `g++` cannot parse CUDA and `nvcc` is the device tier's job.
     """
     build = _build_module()
     apps = set(_apps())
@@ -162,8 +170,48 @@ def _compiles(path: Path, extra: list[str]) -> tuple[bool, str]:
         text=True,
         cwd=ROOT,
     )
-    errors = [line for line in done.stderr.splitlines() if ": error:" in line][:3]
-    return done.returncode == 0, "\n  ".join(errors)
+    # ` error:` and not `: error:` -- gcc spells a missing header `fatal error:`, which the
+    # narrower filter dropped, so the one failure this job exists to report arrived as a
+    # filename and a blank line. The stderr tail is the fallback: a check that fails without
+    # saying why is the same defect as a check that skips without saying why.
+    errors = [line for line in done.stderr.splitlines() if " error:" in line][:3]
+    return done.returncode == 0, "\n  ".join(errors or done.stderr.splitlines()[-3:])
+
+
+class TestAFailureArrivesWithItsReason:
+    """The whole thesis of this job, applied to itself: a red check has to say what broke.
+
+    The first version filtered gcc's stderr for `": error:"`. gcc spells a missing include
+    `fatal error:`, which that filter dropped — so the one failure this job exists to report
+    (a header the runner does not install) would have arrived as a filename followed by a
+    blank line, and a red main would have had to be reproduced by hand to be read.
+    """
+
+    def test_a_missing_header_is_reported_by_name(self, tmp_path: Path) -> None:
+        unit = tmp_path / "missing_header.cpp"
+        unit.write_text("#include <NoSuchHeaderExists.h>\nint main() { return 0; }\n")
+
+        ok, reason = _compiles(unit, [])
+
+        assert not ok
+        assert "NoSuchHeaderExists.h" in reason, "gcc says `fatal error:`, not `error:`"
+
+    def test_an_ordinary_error_is_still_reported(self, tmp_path: Path) -> None:
+        """The widened filter must not have lost the case the narrow one did catch."""
+        unit = tmp_path / "bad_syntax.cpp"
+        unit.write_text("int main() { return undeclared_thing; }\n")
+
+        ok, reason = _compiles(unit, [])
+
+        assert not ok
+        assert "undeclared_thing" in reason
+
+    def test_a_unit_that_compiles_reports_nothing(self, tmp_path: Path) -> None:
+        """Non-vacuity: the fallback tail must not invent a reason for a clean compile."""
+        unit = tmp_path / "fine.cpp"
+        unit.write_text("int main() { return 0; }\n")
+
+        assert _compiles(unit, []) == (True, "")
 
 
 class TestTheUnitsNothingCompiles:
@@ -205,21 +253,8 @@ class TestTheAppsOfflineCannotBuild:
         """
         failures: list[str] = []
         for app in _cuda_reaching_apps():
-            done = subprocess.run(
-                [
-                    "g++",
-                    "-std=c++17",
-                    "-fsyntax-only",
-                    f"-I{CSRC}",
-                    *_include_flags(),
-                    str(app),
-                ],
-                capture_output=True,
-                text=True,
-                cwd=ROOT,
-            )
-            if done.returncode != 0:
-                errors = [line for line in done.stderr.splitlines() if ": error:" in line][:3]
-                failures.append(f"{app.relative_to(ROOT)}:\n  " + "\n  ".join(errors))
+            ok, errors = _compiles(app, [])
+            if not ok:
+                failures.append(f"{app.relative_to(ROOT)}:\n  {errors}")
 
         assert not failures, "these do not compile:\n" + "\n".join(failures)

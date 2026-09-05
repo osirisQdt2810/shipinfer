@@ -149,12 +149,17 @@ jobs:
           wget -q "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${codename}/x86_64/cuda-keyring_1.1-1_all.deb"
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update -qq
-          # Headers only: `cuda-cudart-dev` brings `cuda_runtime.h` and the pinned
-          # `libnvinfer-headers-dev` brings `NvInfer.h`. No runtime, no nvcc, ~40 MB.
+          # Headers only: `cuda-cudart-dev` brings `cuda_runtime.h`, `libnvinfer-headers-dev`
+          # brings `NvInfer.h`, and the PLUGIN package brings `NvInferPlugin.h` -- which
+          # `backends/tensorrt/engine.cpp` includes for `initLibNvInferPlugins` and which
+          # NVIDIA does not ship in the first one. Without it this job is red on its first
+          # run, and a dev-box rehearsal cannot see it: `/usr/local/TensorRT` has the plugin
+          # headers, only the runner's package set is short. No runtime, no nvcc, ~40 MB.
           # PINNED to TensorRT 10: this tree has no `NV_TENSORRT_MAJOR` guard, so an
           # unpinned major would break main's CI with no commit to blame.
           sudo apt-get install -y --no-install-recommends \
-            cuda-cudart-dev-12-6 "libnvinfer-headers-dev=10.*"
+            cuda-cudart-dev-12-6 "libnvinfer-headers-dev=10.*" \
+            "libnvinfer-headers-plugin-dev=10.*"
       - name: Syntax-check every unit the offline build cannot reach
         shell: bash          # -> `bash --noprofile --norc -eo pipefail`, so a pipe cannot mask
         env:
