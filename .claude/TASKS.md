@@ -2593,7 +2593,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       2 failures, exit 1; the argmax replaced by "the first candidate" -> 1 failure, exit 1;
       restored -> 0, exit 0. It also refuses a shape holding a dynamic dimension
       (`ENGINE-DIMS-CAN-DISAGREE-WITH-WIDTH`), being the first consumer to trust `dims`.
-- [x] **SEGMENT-FOLD-KNOBS-NOT-IN-THE-PLAN · DONE 5 Sep on `feat/plan-fold-cuts`.** The
+- [x] **SEGMENT-FOLD-KNOBS-NOT-IN-THE-PLAN · DONE 5 Sep, OPEN as PR #141.** The
       plan carries `fold_score` and `fold_mask` on a segment node, read from a new
       `Element.fold_parameters()` hook -- `decode_parameters`'s argument one stage along, and
       built from `params` rather than from `self._fold`, because a plan is written by a

@@ -167,8 +167,7 @@ namespace shipinfer {
                 want(args, 1, where, "fold_mask <probability>");
                 const double value = as_double(args[0], where);
                 if (!(value > 0.0 && value < 1.0)) {
-                    throw ConfigError(where + ": fold_mask is " +
-                                      events::json_number(value) +
+                    throw ConfigError(where + ": fold_mask is " + events::json_number(value) +
                                       "; a mask probability is strictly inside (0, 1), "
                                       "because the cut is log(m / (1 - m))");
                 }

@@ -247,9 +247,7 @@ def resolve_plan(
                     None if decode is None else _positive(decode.max_detections, where)
                 ),
                 fold_score=None if fold is None else _finite(fold.score_threshold, where),
-                fold_mask=(
-                    None if fold is None else _probability(fold.mask_threshold, where)
-                ),
+                fold_mask=(None if fold is None else _probability(fold.mask_threshold, where)),
                 instances=_runtime_int(runtime, "instances", where),
                 queue_delay_us=_runtime_int(runtime, "queue_delay_us", where, zero_ok=True),
                 artefact=(

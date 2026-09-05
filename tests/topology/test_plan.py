@@ -254,7 +254,10 @@ class TestBothPlanesRefuseTheSameText:
         ("plan 1 x\nnode a b c\nqueue_delay_us -1\n", "a negative batch window"),
         ("plan 1 x\nnode a b c\ninstances two\n", "an instance count that is not a number"),
         ("plan 1 x\nnode a b c\nartefact a b\n", "an artefact path holding a space"),
-        ("plan 1 x\nnode a b c\nfold_mask 0\n", "a mask probability at 0, where the cut is -inf"),
+        (
+            "plan 1 x\nnode a b c\nfold_mask 0\n",
+            "a mask probability at 0, where the cut is -inf",
+        ),
         ("plan 1 x\nnode a b c\nfold_mask 1\n", "and at 1, where it divides by zero"),
         ("plan 1 x\nnode a b c\nfold_mask 1.5\n", "and past it"),
         ("plan 1 x\nnode a b c\nfold_score nan\n", "a non-finite score floor"),
@@ -313,9 +316,7 @@ class TestTheFoldCutsCross:
         chain = Topology.from_spec(ChainSpec.from_yaml(self.chain(segment)))
         return plan_text(resolve_plan(chain, dims=dims))
 
-    def test_a_stated_cut_reaches_the_plan(
-        self, dims: dict[str, tuple[int, int]]
-    ) -> None:
+    def test_a_stated_cut_reaches_the_plan(self, dims: dict[str, tuple[int, int]]) -> None:
         text = self.resolved(
             "{impl: pool, model: ship_segmenter, params: {classes: [ship], "
             "segment: {score_threshold: 0.4, mask_threshold: 0.6}}}",
@@ -337,9 +338,7 @@ class TestTheFoldCutsCross:
         assert "fold_score 0.25" in text
         assert "fold_mask 0.5" in text
 
-    def test_only_a_segment_slot_carries_them(
-        self, dims: dict[str, tuple[int, int]]
-    ) -> None:
+    def test_only_a_segment_slot_carries_them(self, dims: dict[str, tuple[int, int]]) -> None:
         """An embedder folds nothing, so its node has no cut to state."""
         text = self.resolved(
             "{impl: pool, kind: embed, model: ship_embedder, params: {classes: [ship]}}", dims
