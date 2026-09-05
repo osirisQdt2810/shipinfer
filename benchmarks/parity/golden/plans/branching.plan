@@ -1,5 +1,5 @@
 # A RESOLVED chain, written by `shipinfer plan` -- do not hand-edit.
-plan 2 branching
+plan 3 branching
 setting workers 7
 setting pipeline_queue 257
 setting instance_queue 65
@@ -8,6 +8,8 @@ setting stage_timeout_ms 5001
 setting reassembly_capacity 1025
 setting reassembly_timeout_ms 1501
 setting reassembly_sweep_ms 101
+policy power_of_two
+policy_option probes 3
 label 0 person
 label 8 ship
 

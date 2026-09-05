@@ -216,7 +216,8 @@ namespace shipinfer {
                                   "'; expected one of artefact, classes, crop, edge, field, "
                                   "fold_detections, fold_mask, fold_prototypes, fold_score, "
                                   "instances, label, letterbox, max_detections, model, node, "
-                                  "per, plan, queue_delay_us, score, scope, setting, when");
+                                  "per, plan, policy, policy_option, queue_delay_us, score, "
+                                  "scope, setting, when");
             }
         }
 
@@ -319,6 +320,22 @@ namespace shipinfer {
                         "refused");
                 }
                 settings.*(found->member) = value;
+            } else if (verb == "policy") {
+                want(args, 1, where, "policy <name>");
+                if (!plan.policy.empty()) throw ConfigError(where + ": a second `policy`");
+                plan.policy = args[0];
+            } else if (verb == "policy_option") {
+                want(args, 2, where, "policy_option <key> <value>");
+                if (plan.policy.empty()) {
+                    // Before `policy`, not merely without one: an option belongs to a named
+                    // policy and the Python half attaches it to the same string, so a stray
+                    // one is a plan whose meaning depends on which reader you ask.
+                    throw ConfigError(where + ": `policy_option` before any `policy`");
+                }
+                if (plan.policy_options.count(args[0]) != 0) {
+                    throw ConfigError(where + ": a second `policy_option " + args[0] + "`");
+                }
+                plan.policy_options[args[0]] = args[1];
             } else if (verb == "label") {
                 // Also the rest of the line: `label 8 cargo ship` is one label, and a
                 // multi-word label is the normal case in this domain (COCO's `traffic
@@ -419,6 +436,14 @@ namespace shipinfer {
             for (const SettingKey& key : setting_keys()) {
                 out += "setting " + key.name + " " +
                        std::to_string((*plan.settings).*(key.member)) + "\n";
+            }
+        }
+        if (!plan.policy.empty()) {
+            out += "policy " + plan.policy + "\n";
+            // A `std::map` is already sorted; the Python half sorts its `dict` to match,
+            // because this format is byte-compared and insertion order is not an order.
+            for (const auto& [key, value] : plan.policy_options) {
+                out += "policy_option " + key + " " + value + "\n";
             }
         }
         for (const auto& [index, name] : plan.labels) {

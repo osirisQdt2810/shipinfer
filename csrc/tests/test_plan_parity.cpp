@@ -158,93 +158,103 @@ namespace {
     void refuses_what_python_refuses() {
         check(refused(""), "an empty plan has no header");
         check(refused("node a decode replay\n"), "a verb before the header");
-        check(refused("plan 2 x\nplan 2 y\n"), "a second header");
-        check(refused("plan 1 x\n"), "the PREVIOUS version, which carries no settings");
-        check(refused("plan 3 x\n"), "and a version from the future");
-        check(refused("plan 2 x\nmodel m\n"), "an attribute before any node");
-        check(refused("plan 2 x\nnode a b\n"), "node with two arguments");
-        check(refused("plan 2 x\nnode a b c\ncrop 256\n"), "crop with one extent");
-        check(refused("plan 2 x\nnode a b c\ncrop 0 128\n"), "a crop that is not positive");
-        check(refused("plan 2 x\nnode a b c\ninstances 0\n"), "zero instances runs nothing");
-        check(refused("plan 2 x\nnode a b c\ninstances -1\n"), "and a negative count");
-        check(refused("plan 2 x\nnode a b c\nqueue_delay_us -1\n"), "a negative window");
-        check(refused("plan 2 x\nnode a b c\ninstances two\n"), "a count that is not one");
-        check(refused("plan 2 x\nnode a b c\nartefact a b\n"), "an artefact with a space");
-        check(refused("plan 2 x\nnode a b c\nfold_mask 0\n"), "a mask cut of 0 is -inf");
-        check(refused("plan 2 x\nnode a b c\nfold_mask 1\n"), "and 1 divides by zero");
-        check(refused("plan 2 x\nnode a b c\nfold_mask 1.5\n"), "and past it");
-        check(refused("plan 2 x\nnode a b c\nfold_score nan\n"), "a non-finite score floor");
-        check(refused("plan 2 x\nnode a b c\nfold_detections a b\n"),
+        check(refused("plan 3 x\nplan 3 y\n"), "a second header");
+        check(refused("plan 2 x\n"), "the PREVIOUS version, which carries no `policy`");
+        check(refused("plan 4 x\n"), "and a version from the future");
+        check(refused("plan 3 x\nmodel m\n"), "an attribute before any node");
+        check(refused("plan 3 x\nnode a b\n"), "node with two arguments");
+        check(refused("plan 3 x\nnode a b c\ncrop 256\n"), "crop with one extent");
+        check(refused("plan 3 x\nnode a b c\ncrop 0 128\n"), "a crop that is not positive");
+        check(refused("plan 3 x\nnode a b c\ninstances 0\n"), "zero instances runs nothing");
+        check(refused("plan 3 x\nnode a b c\ninstances -1\n"), "and a negative count");
+        check(refused("plan 3 x\nnode a b c\nqueue_delay_us -1\n"), "a negative window");
+        check(refused("plan 3 x\nnode a b c\ninstances two\n"), "a count that is not one");
+        check(refused("plan 3 x\nnode a b c\nartefact a b\n"), "an artefact with a space");
+        check(refused("plan 3 x\nnode a b c\nfold_mask 0\n"), "a mask cut of 0 is -inf");
+        check(refused("plan 3 x\nnode a b c\nfold_mask 1\n"), "and 1 divides by zero");
+        check(refused("plan 3 x\nnode a b c\nfold_mask 1.5\n"), "and past it");
+        check(refused("plan 3 x\nnode a b c\nfold_score nan\n"), "a non-finite score floor");
+        check(refused("plan 3 x\nnode a b c\nfold_detections a b\n"),
               "an output name holding a space");
-        check(refused("plan 2 x\nsetting nonsense 1\n"),
+        check(refused("plan 3 x\nsetting nonsense 1\n"),
               "a setting key neither plane would use");
-        check(refused("plan 2 x\nsetting workers four\n"),
+        check(refused("plan 3 x\nsetting workers four\n"),
               "a setting value that is not an integer");
-        check(refused("plan 2 x\nsetting workers 4\n"),
+        check(refused("plan 3 x\nsetting workers 4\n"),
               "one setting, so seven a reader would default");
-        check(refused(std::string("plan 2 x\n") + kAllSettings + "setting workers 8\n"),
+        check(refused(std::string("plan 3 x\n") + kAllSettings + "setting workers 8\n"),
               "a second value for one key");
-        check(refused("plan 2 x\nsetting workers\n"), "a key with no value");
+        check(refused("plan 3 x\nsetting workers\n"), "a key with no value");
+        check(refused("plan 3 x\npolicy a\npolicy b\n"), "a second `policy`");
+        check(refused("plan 3 x\npolicy\n"), "a `policy` with no name");
+        check(refused("plan 3 x\npolicy_option k v\n"), "an option before any `policy`");
+        check(refused("plan 3 x\npolicy a\npolicy_option k v\npolicy_option k w\n"),
+              "a repeated option");
+        check(refused("plan 3 x\npolicy a\npolicy_option k\n"), "an option with no value");
+        check(!refused("plan 3 x\npolicy jsq\n"),
+              "a policy with no options, which is the ordinary case");
+        check(!refused("plan 3 x\npolicy jsq\npolicy_option a 1\npolicy_option b 2\n"),
+              "and with two");
         // COMPLETE sets with one value out of range. A one-line plan is refused by the
         // all-or-nothing check before the value is looked at, so a case spelled that way
         // passes whether or not the range check exists -- a check that tests nothing.
-        check(refused(std::string("plan 2 x\n") + with_setting("instance_queue", "-1")),
+        check(refused(std::string("plan 3 x\n") + with_setting("instance_queue", "-1")),
               "a negative queue, which reaches `static_cast<size_t>` as SIZE_MAX");
-        check(refused(std::string("plan 2 x\n") + with_setting("workers", "0")),
+        check(refused(std::string("plan 3 x\n") + with_setting("workers", "0")),
               "zero workers, which reads frames and retires none");
-        check(refused(std::string("plan 2 x\n") + with_setting("reassembly_sweep_ms", "0")),
+        check(refused(std::string("plan 3 x\n") + with_setting("reassembly_sweep_ms", "0")),
               "a sweeper that never sleeps");
-        check(!refused(std::string("plan 2 x\n") + kAllSettings),
+        check(!refused(std::string("plan 3 x\n") + kAllSettings),
               "every setting, which is the only complete spelling");
         check(
-            !refused(std::string("plan 2 x\n") + with_setting("enqueue_block_timeout_ms", "0")),
+            !refused(std::string("plan 3 x\n") + with_setting("enqueue_block_timeout_ms", "0")),
             "0 for the block timeout ALONE, which `SchedulerSettings` allows");
-        check(!refused("plan 2 x\nnode a b c\nfold_detections det\nfold_prototypes proto\n"),
+        check(!refused("plan 3 x\nnode a b c\nfold_detections det\nfold_prototypes proto\n"),
               "an export that names its outputs something other than output0/output1");
-        check(!refused("plan 2 x\nnode a b c\nfold_mask 0.5\nfold_score 0.25\n"),
+        check(!refused("plan 3 x\nnode a b c\nfold_mask 0.5\nfold_score 0.25\n"),
               "the two fold cuts");
-        check(!refused("plan 2 x\nnode a b c\nfold_score 0.0\n"),
+        check(!refused("plan 3 x\nnode a b c\nfold_score 0.0\n"),
               "a floor of zero: every crop is an area");
-        check(!refused("plan 2 x\nnode a b c\nqueue_delay_us 0\n"), "0 is batching off");
-        check(!refused("plan 2 x\nnode a b c\ninstances 1\n"), "the smallest count");
-        check(!refused("plan 2 x\nnode a b c\nartefact m/1/model.plan\n"),
+        check(!refused("plan 3 x\nnode a b c\nqueue_delay_us 0\n"), "0 is batching off");
+        check(!refused("plan 3 x\nnode a b c\ninstances 1\n"), "the smallest count");
+        check(!refused("plan 3 x\nnode a b c\nartefact m/1/model.plan\n"),
               "a repository-relative artefact");
-        check(refused("plan 2 x\nnode a b c\nscore nan\n"), "a non-finite score");
-        check(refused("plan 2 x\nnode a b c\nnonsense 1\n"), "an unknown verb");
-        check(refused("plan 2 x\nlabel eight ship\n"), "a label id that is not an integer");
-        check(refused("plan 2 x\nedge a b\n"), "an edge with no cap");
-        check(refused("plan 2 x\nfield embedding\n"), "a field with no slot");
+        check(refused("plan 3 x\nnode a b c\nscore nan\n"), "a non-finite score");
+        check(refused("plan 3 x\nnode a b c\nnonsense 1\n"), "an unknown verb");
+        check(refused("plan 3 x\nlabel eight ship\n"), "a label id that is not an integer");
+        check(refused("plan 3 x\nedge a b\n"), "an edge with no cap");
+        check(refused("plan 3 x\nfield embedding\n"), "a field with no slot");
         check(refused("plan 1_0 x\n"), "an integer Python would accept and this would not");
-        check(refused("plan 2 x\nnode a b c\nnode a b c\n"), "a second block for one slot");
-        check(refused("plan 2 x\nlabel 8 ship\nlabel 8 vessel\n"), "a second row for one id");
-        check(refused("plan 2 x\nnode a b c\nclasses ,ship\n"), "an empty label in `classes`");
-        check(refused("plan 2 x\nnode a b c\nclasses ship,\n"), "a trailing comma");
-        check(refused("plan 2 x\nfield embedding a\nfield embedding b\n"),
+        check(refused("plan 3 x\nnode a b c\nnode a b c\n"), "a second block for one slot");
+        check(refused("plan 3 x\nlabel 8 ship\nlabel 8 vessel\n"), "a second row for one id");
+        check(refused("plan 3 x\nnode a b c\nclasses ,ship\n"), "an empty label in `classes`");
+        check(refused("plan 3 x\nnode a b c\nclasses ship,\n"), "a trailing comma");
+        check(refused("plan 3 x\nfield embedding a\nfield embedding b\n"),
               "a second `field` for one name");
-        check(refused("plan 2 x\nfield embedding nosuch\n"),
+        check(refused("plan 3 x\nfield embedding nosuch\n"),
               "a `field` naming a slot no `node` declares");
-        check(refused("plan 2 x\nnode a b c\nscore 0x10\n"),
+        check(refused("plan 3 x\nnode a b c\nscore 0x10\n"),
               "a hex float, which bare `stod` would have read");
-        check(refused("plan 2 x\nlabel 99999999999999999999 ship\n"),
+        check(refused("plan 3 x\nlabel 99999999999999999999 ship\n"),
               "an id too large for an int, which Python's unbounded `int` used to accept");
-        check(refused("plan 2 x\nnode a b c\nmax_detections -1\n"),
+        check(refused("plan 3 x\nnode a b c\nmax_detections -1\n"),
               "`-1` for `no limit`: no bound here, one row fewer there");
-        check(refused("plan 2 x\nnode a b c\nmax_detections 0\n"), "and zero");
-        check(refused("plan 2 x\nnode a b c\nscore 1e400\n"),
+        check(refused("plan 3 x\nnode a b c\nmax_detections 0\n"), "and zero");
+        check(refused("plan 3 x\nnode a b c\nscore 1e400\n"),
               "an exponent that overflows to `inf`, which Python's regex alone allowed");
         // The emitter refuses a value holding a tab, a newline or a repeated space, because
         // `split()` collapses them -- and a newline emits an extra LINE, which injected a
         // `node` the chain never declared (#131 round 3). This reader is the other half: it
         // must read what the emitter can legally write, and these are not that.
         const ResolvedPlan collapsed =
-            parse_plan("plan 2 x\nnode a b c\nclasses cargo  ship\n", "probe");
+            parse_plan("plan 3 x\nnode a b c\nclasses cargo  ship\n", "probe");
         check(
             collapsed.node("a")->classes && (*collapsed.node("a")->classes)[0] == "cargo ship",
             "a repeated space collapses here too, which is why the emitter refuses it");
 
-        check(!refused("plan 2 -\n"), "`-` is the empty chain name, and is legal");
-        check(!refused("plan 2 x  # trailing comment\n"), "a comment after a directive");
-        check(!refused("plan 2 x\nnode a b c\nscore 5e-324\n"),
+        check(!refused("plan 3 -\n"), "`-` is the empty chain name, and is legal");
+        check(!refused("plan 3 x  # trailing comment\n"), "a comment after a directive");
+        check(!refused("plan 3 x\nnode a b c\nscore 5e-324\n"),
               "a subnormal threshold: `stod` threw on ERANGE-underflow where Python's "
               "`float()` returns it, so this plane refused a plan the other one writes");
     }
@@ -254,16 +264,16 @@ namespace {
     // `shipinfer plan` had just written -- and silently re-read `[cargo ship]` as two labels
     // that no detector emits. Found by #131's review, before either reader shipped.
     void carries_what_this_domain_names_things() {
-        const ResolvedPlan named = parse_plan("plan 2 ship person cpu\n", "probe");
+        const ResolvedPlan named = parse_plan("plan 3 ship person cpu\n", "probe");
         check(named.name == "ship person cpu", "a multi-word chain name");
 
         const ResolvedPlan labelled =
-            parse_plan("plan 2 x\nlabel 0 person\nlabel 8 cargo ship\n", "probe");
+            parse_plan("plan 3 x\nlabel 0 person\nlabel 8 cargo ship\n", "probe");
         check(labelled.labels.at(8) == "cargo ship", "a multi-word label");
         check(labelled.class_id("cargo ship") == 8, "and it is findable by name");
 
         const ResolvedPlan selected = parse_plan(
-            "plan 2 x\nnode e embed pool\nclasses cargo ship,fishing vessel\n", "probe");
+            "plan 3 x\nnode e embed pool\nclasses cargo ship,fishing vessel\n", "probe");
         const std::vector<std::string> want = {"cargo ship", "fishing vessel"};
         check(selected.node("e")->classes == want, "two labels, not four");
 
@@ -272,7 +282,7 @@ namespace {
         check(
             plan_text(selected).find("classes cargo ship,fishing vessel") != std::string::npos,
             "the writer joins classes with commas");
-        check(plan_text(named).find("plan 2 ship person cpu") != std::string::npos,
+        check(plan_text(named).find("plan 3 ship person cpu") != std::string::npos,
               "and writes a multi-word name unquoted");
     }
 
@@ -280,11 +290,11 @@ namespace {
     // ABSENT `classes` line is every row, a `classes -` line is NO rows. Conflating them
     // selects everything where the chain said nothing -- at an embedder, a doubled GPU bill.
     void tells_select_nothing_from_select_everything() {
-        const ResolvedPlan absent = parse_plan("plan 2 x\nnode e embed pool\n", "probe");
+        const ResolvedPlan absent = parse_plan("plan 3 x\nnode e embed pool\n", "probe");
         check(!absent.node("e")->classes.has_value(), "no line: no selection declared");
 
         const ResolvedPlan empty =
-            parse_plan("plan 2 x\nnode e embed pool\nclasses -\n", "probe");
+            parse_plan("plan 3 x\nnode e embed pool\nclasses -\n", "probe");
         check(empty.node("e")->classes.has_value() && empty.node("e")->classes->empty(),
               "`classes -`: a declared empty selection");
 

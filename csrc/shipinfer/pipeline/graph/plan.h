@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "shipinfer/core/options.h"
 #include "shipinfer/core/types.h"
 
 namespace shipinfer {
@@ -121,6 +122,13 @@ namespace shipinfer {
         // consumer that NEEDS them refuses then rather than substituting its own defaults,
         // because a default only one plane holds is exactly what carrying them replaced.
         std::optional<PlanSettings> settings;
+        // `scheduler.placement_policy` and its options: how a model's request picks an
+        // instance. Its OWN verbs and not a `setting`, because that table is integers with a
+        // minimum and this is a registered name with a keyword map. Empty means the caller
+        // resolved none, and `cli/bench.cpp` refuses that rather than choosing for itself --
+        // it used to, from `--policy`, with its own default beside the settings tree's.
+        std::string policy;
+        KeywordOptions policy_options;
         std::vector<PlanNode> nodes;
         std::vector<PlanEdge> edges;
         std::map<int, std::string> labels;                       // class id -> label
@@ -136,7 +144,7 @@ namespace shipinfer {
 
     // The version this reader knows. A plan that says anything else is refused, because a
     // plan half understood is a chain running something other than what was declared.
-    inline constexpr int kPlanVersion = 2;
+    inline constexpr int kPlanVersion = 3;
 
     // Refusals name the line: `<source>:<n>: ...`. A plan one plane reads and the other
     // refuses is the worst outcome this seam has, so the messages are worth matching.

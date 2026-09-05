@@ -48,6 +48,8 @@ class _Reassembly:
 class _Scheduler:
     max_queue_size: int
     enqueue_block_timeout_ms: int
+    placement_policy: str
+    placement_policy_options: dict
 
 
 @dataclass(frozen=True)
@@ -72,7 +74,14 @@ SETTINGS = _Settings(
         stage_timeout_ms=5001,
         reassembly=_Reassembly(capacity=1025, timeout_ms=1501, sweep_interval_ms=101),
     ),
-    scheduler=_Scheduler(max_queue_size=65, enqueue_block_timeout_ms=51),
+    scheduler=_Scheduler(
+        max_queue_size=65,
+        enqueue_block_timeout_ms=51,
+        # Not the default (`locality_spillover`), for the same reason every number here is not:
+        # a plane that ignored the `policy` line and used its own would reproduce the golden.
+        placement_policy="power_of_two",
+        placement_policy_options={"probes": "3"},
+    ),
 )
 
 
