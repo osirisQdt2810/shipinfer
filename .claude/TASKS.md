@@ -2143,7 +2143,14 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       seam such a comparison needs, and P5-D is what makes it data-driven; say so in the
       P5-B/C body rather than leaving it implied. Land before P5 closes.
 
-- [~] **P5 · P5-A MERGED as PR #129 (4 Sep) after FIVE review rounds, every one of which found
+- [x] **P5 · COMPLETE 5 Sep. Every sub-item merged: P5-A #129, P5-A-ALLOC #134 + the record
+      half, P5-B #138, P5-C #145, P5-D #131/#132, and the fold knobs #141.** The promise was
+      "resolved config in, same events out", and both halves hold: the binary takes the model
+      repository and the settings tree through the resolved plan rather than from flags, and
+      the events are byte-identical to the Python plane's under `test_event_parity`.
+      ONE THING THE SCOPE DID NOT NAME AND SO DID NOT DELIVER -- see
+      `PLACEMENT-POLICY-STILL-FROM-ARGV` below, opened rather than folded in.
+      P5-A MERGED as PR #129 (4 Sep) after FIVE review rounds, every one of which found
       something real. Worth reading before P5-B starts:** r1 (5 blockers) -- the record builder
       looked batches up by STAGE name where an `ObjectBatch` is keyed by its stage's OUTPUT
       name, so every embedding was dropped as `[]`; it had NO test, and could not have one
@@ -2252,6 +2259,23 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       (Original: SEQUENCED after C8m moves pipeline/schema.py → core/events — writing it against the moving module is churn; planner 28 Aug.) Resolved config in, same events out.** The binary takes the settings tree and the
       model repository (`config.yaml`) the Python plane reads, not CLI flags; emits the same
       event schema (`pipeline/schema.py`) so one sink serves both planes.
+- [ ] **PLACEMENT-POLICY-STILL-FROM-ARGV.** Found closing P5 by auditing what `bench.cpp` still
+      takes from argv. Under `--plan --repository` the engine paths, instance counts and batch
+      windows are all the plan's and the legacy flags are ignored (`bench_models.cpp:48`,
+      `from_plan`) -- but `build_policy(options.policy)` at `bench.cpp:363` runs UNCONDITIONALLY,
+      so the placement policy is chosen from `--policy` with the binary's own default
+      `"locality_spillover"` while the Python plane reads `scheduler.placement_policy`. Two
+      independent defaults for the same knob, which is P5-B's and P5-C's defect exactly, on the
+      one seam CLAUDE.md calls "the part this project exists to own". They happen to agree
+      today, which is why nothing has noticed; an operator who sets `placement_policy` in
+      settings gets it on one plane only.
+      SHAPE: a ninth `setting placement_policy <name>` -- except the value is a NAME, not an
+      int, and every `setting` today is an int (the key table carries `int PlanSettings::*` and
+      a minimum). So either the table grows a type, or the policy gets its own verb. Prefer the
+      OWN VERB: `policy <name>`, validated against the C++ registry at parse time the way
+      `impl` already is, which keeps `setting` as the integer table it is and gives the refusal
+      somewhere to name the known policies. Delete `--policy` when the plan carries it.
+
 - [x] **P6-PRB · DONE. #122 (the gate) and #123 (its four follow-ups) both MERGED, APPROVE
       round 1 each. The queue seam now has five scenarios, five goldens and a C++ gate at 22
       checks / 0 failures, with NO known-divergence register -- the planes have never
