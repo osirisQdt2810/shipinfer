@@ -287,6 +287,21 @@ class TestBothPlanesRefuseTheSameText:
         ("plan 2 x\nsetting workers 4\n", "one setting, so seven a reader would default"),
         (f"plan 2 x\n{ALL_SETTINGS}setting workers 8\n", "a second value for one key"),
         ("plan 2 x\nsetting workers\n", "a key with no value"),
+        # COMPLETE sets with one value out of range. A one-line plan is refused by the
+        # all-or-nothing check before the value is ever looked at, so a row spelled that way
+        # passes whether or not the range check exists -- which is a row that tests nothing.
+        (
+            f"plan 2 x\n{ALL_SETTINGS.replace('instance_queue 64', 'instance_queue -1')}",
+            "a negative queue, which reaches `static_cast<size_t>` as SIZE_MAX",
+        ),
+        (
+            f"plan 2 x\n{ALL_SETTINGS.replace('workers 4', 'workers 0')}",
+            "zero workers, which reads frames and retires none",
+        ),
+        (
+            f"plan 2 x\n{ALL_SETTINGS.replace('sweep_ms 100', 'sweep_ms 0')}",
+            "a sweeper that never sleeps",
+        ),
     )
     ACCEPTED = (
         ("plan 2 -\n", "`-` is the empty chain name"),
@@ -313,6 +328,10 @@ class TestBothPlanesRefuseTheSameText:
             "an export that names its outputs something other than output0/output1",
         ),
         (f"plan 2 x\n{ALL_SETTINGS}", "every setting, the only complete spelling"),
+        (
+            f"plan 2 x\n{ALL_SETTINGS.replace('block_timeout_ms 50', 'block_timeout_ms 0')}",
+            "0 for the block timeout ALONE, which `SchedulerSettings` allows",
+        ),
     )
 
     @pytest.mark.parametrize("text,why", REFUSED, ids=[why for _, why in REFUSED])

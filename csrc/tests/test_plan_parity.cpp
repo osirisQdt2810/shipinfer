@@ -12,6 +12,7 @@
 // Offline: g++ alone, no CUDA, no GStreamer.
 
 #include <cstdio>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -139,6 +140,18 @@ namespace {
         "setting reassembly_timeout_ms 1500\n"
         "setting reassembly_sweep_ms 100\n";
 
+    // The complete set with ONE key given another value -- `ALL_SETTINGS.replace(...)` on the
+    // Python half, and the same rows come out of both.
+    std::string with_setting(const std::string& key, const std::string& value) {
+        std::string out;
+        std::istringstream lines(kAllSettings);
+        for (std::string line; std::getline(lines, line);) {
+            const std::string head = "setting " + key + " ";
+            out += (line.rfind(head, 0) == 0 ? head + value : line) + "\n";
+        }
+        return out;
+    }
+
     // The refusals `topology/plan.py` raises, in the same order, so a malformed plan cannot
     // load on one plane and fail on the other. `tests/topology/test_plan.py` holds the
     // Python half to this same table.
@@ -172,8 +185,20 @@ namespace {
         check(refused(std::string("plan 2 x\n") + kAllSettings + "setting workers 8\n"),
               "a second value for one key");
         check(refused("plan 2 x\nsetting workers\n"), "a key with no value");
+        // COMPLETE sets with one value out of range. A one-line plan is refused by the
+        // all-or-nothing check before the value is looked at, so a case spelled that way
+        // passes whether or not the range check exists -- a check that tests nothing.
+        check(refused(std::string("plan 2 x\n") + with_setting("instance_queue", "-1")),
+              "a negative queue, which reaches `static_cast<size_t>` as SIZE_MAX");
+        check(refused(std::string("plan 2 x\n") + with_setting("workers", "0")),
+              "zero workers, which reads frames and retires none");
+        check(refused(std::string("plan 2 x\n") + with_setting("reassembly_sweep_ms", "0")),
+              "a sweeper that never sleeps");
         check(!refused(std::string("plan 2 x\n") + kAllSettings),
               "every setting, which is the only complete spelling");
+        check(
+            !refused(std::string("plan 2 x\n") + with_setting("enqueue_block_timeout_ms", "0")),
+            "0 for the block timeout ALONE, which `SchedulerSettings` allows");
         check(!refused("plan 2 x\nnode a b c\nfold_detections det\nfold_prototypes proto\n"),
               "an export that names its outputs something other than output0/output1");
         check(!refused("plan 2 x\nnode a b c\nfold_mask 0.5\nfold_score 0.25\n"),

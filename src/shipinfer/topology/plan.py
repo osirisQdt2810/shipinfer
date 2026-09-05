@@ -28,6 +28,7 @@ from .chain import ROW_FIELD_KINDS, Topology
 
 __all__ = [
     "PLAN_VERSION",
+    "SETTING_BOUNDS",
     "SETTING_KEYS",
     "PlanNode",
     "PlanSettings",
@@ -127,19 +128,27 @@ class PlanSettings:
     reassembly_sweep_ms: int
 
 
-#: The `setting` keys, in written order, mapped to the `PlanSettings` field each names. A
-#: CLOSED set on both planes: an unknown key is refused by name rather than ignored, so adding
-#: one is a deliberate edit on both sides and never a value one plane silently drops.
-SETTING_KEYS: tuple[str, ...] = (
-    "workers",
-    "pipeline_queue",
-    "instance_queue",
-    "enqueue_block_timeout_ms",
-    "stage_timeout_ms",
-    "reassembly_capacity",
-    "reassembly_timeout_ms",
-    "reassembly_sweep_ms",
+# doc: long the closed set and the bound are two rules, and each needs its reason
+#: The `setting` keys in written order, each with the smallest value it may carry. CLOSED on
+#: both planes: an unknown key is refused by name, so adding one is a deliberate edit on both
+#: sides and never a value one plane silently drops.
+#:
+#: The MINIMUM is in the table because a bound stated elsewhere is one a plane can forget. Each
+#: matches its settings field's own `ge=`, and `instance_queue -1` reaches `static_cast<size_t>`
+#: in `bench.cpp` as `SIZE_MAX` -- the 65536 this item removed, back via its own artefact.
+SETTING_BOUNDS: tuple[tuple[str, int], ...] = (
+    ("workers", 1),
+    ("pipeline_queue", 1),
+    ("instance_queue", 1),
+    ("enqueue_block_timeout_ms", 0),  # `SchedulerSettings` allows 0: do not block at all
+    ("stage_timeout_ms", 1),
+    ("reassembly_capacity", 1),
+    ("reassembly_timeout_ms", 1),
+    ("reassembly_sweep_ms", 1),
 )
+
+#: Just the names, in the same order -- what the writer walks and the completeness check lists.
+SETTING_KEYS: tuple[str, ...] = tuple(key for key, _ in SETTING_BOUNDS)
 
 
 def resolve_settings(settings: SettingsLike) -> PlanSettings:
@@ -599,7 +608,15 @@ def parse_plan(text: str, *, source: str = "<string>") -> ResolvedPlan:
                 )
             if args[0] in settings:
                 raise PlanSyntaxError(f"{where}: a second `setting {args[0]}`")
-            settings[args[0]] = _int(args[1], where)
+            value = _int(args[1], where)
+            minimum = dict(SETTING_BOUNDS)[args[0]]
+            if value < minimum:
+                raise PlanSyntaxError(
+                    f"{where}: setting {args[0]} is {value}, and the smallest it may be is "
+                    f"{minimum} -- `core/settings/` states that bound, so a plan carrying less "
+                    f"is one the settings tree would have refused"
+                )
+            settings[args[0]] = value
         elif verb == "label":
             if len(args) < 2:
                 raise PlanSyntaxError(f"{where}: expected `label <id> <name>`")

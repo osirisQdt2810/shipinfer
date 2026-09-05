@@ -222,18 +222,20 @@ namespace shipinfer {
 
     }  // namespace
 
-    const std::vector<std::pair<std::string, int PlanSettings::*>>& setting_keys() {
-        // Written order, matching `topology/plan.py`'s `SETTING_KEYS` -- the writer walks it,
-        // so a reordering here is a byte difference the parity gate catches immediately.
-        static const std::vector<std::pair<std::string, int PlanSettings::*>> keys{
-            {"workers", &PlanSettings::workers},
-            {"pipeline_queue", &PlanSettings::pipeline_queue},
-            {"instance_queue", &PlanSettings::instance_queue},
-            {"enqueue_block_timeout_ms", &PlanSettings::enqueue_block_timeout_ms},
-            {"stage_timeout_ms", &PlanSettings::stage_timeout_ms},
-            {"reassembly_capacity", &PlanSettings::reassembly_capacity},
-            {"reassembly_timeout_ms", &PlanSettings::reassembly_timeout_ms},
-            {"reassembly_sweep_ms", &PlanSettings::reassembly_sweep_ms},
+    const std::vector<SettingKey>& setting_keys() {
+        // Written order and bounds, matching `topology/plan.py`'s `SETTING_BOUNDS` -- the
+        // writer walks this, so a reordering is a byte difference the parity gate catches.
+        static const std::vector<SettingKey> keys{
+            {"workers", &PlanSettings::workers, 1},
+            {"pipeline_queue", &PlanSettings::pipeline_queue, 1},
+            {"instance_queue", &PlanSettings::instance_queue, 1},
+            // 0 is legal for this one alone: `SchedulerSettings` allows it, meaning do not
+            // block a producer at all.
+            {"enqueue_block_timeout_ms", &PlanSettings::enqueue_block_timeout_ms, 0},
+            {"stage_timeout_ms", &PlanSettings::stage_timeout_ms, 1},
+            {"reassembly_capacity", &PlanSettings::reassembly_capacity, 1},
+            {"reassembly_timeout_ms", &PlanSettings::reassembly_timeout_ms, 1},
+            {"reassembly_sweep_ms", &PlanSettings::reassembly_sweep_ms, 1},
         };
         return keys;
     }
@@ -289,13 +291,13 @@ namespace shipinfer {
             } else if (verb == "setting") {
                 want(args, 2, where, "setting <key> <value>");
                 const auto& keys = setting_keys();
-                const auto found = std::find_if(keys.begin(), keys.end(), [&](const auto& e) {
-                    return e.first == args[0];
-                });
+                const auto found =
+                    std::find_if(keys.begin(), keys.end(),
+                                 [&](const SettingKey& key) { return key.name == args[0]; });
                 if (found == keys.end()) {
                     std::string known;
-                    for (const auto& [key, _] : keys)
-                        known += (known.empty() ? "" : ", ") + key;
+                    for (const SettingKey& key : keys)
+                        known += (known.empty() ? "" : ", ") + key.name;
                     throw ConfigError(where + ": unknown setting '" + args[0] +
                                       "'; this plan states a value this reader would not use, "
                                       "and silently dropping it is how the two planes came to "
@@ -307,7 +309,16 @@ namespace shipinfer {
                     throw ConfigError(where + ": a second `setting " + args[0] + "`");
                 }
                 settings_seen.push_back(args[0]);
-                settings.*(found->second) = as_int(args[1], where);
+                const int value = as_int(args[1], where);
+                if (value < found->minimum) {
+                    throw ConfigError(
+                        where + ": setting " + args[0] + " is " + std::to_string(value) +
+                        ", and the smallest it may be is " + std::to_string(found->minimum) +
+                        " -- `core/settings/` states that bound, so a plan "
+                        "carrying less is one the settings tree would have "
+                        "refused");
+                }
+                settings.*(found->member) = value;
             } else if (verb == "label") {
                 // Also the rest of the line: `label 8 cargo ship` is one label, and a
                 // multi-word label is the normal case in this domain (COCO's `traffic
@@ -357,10 +368,13 @@ namespace shipinfer {
         // that filled the gap silently is how the two came to disagree in the first place.
         if (!settings_seen.empty()) {
             std::string absent;
-            for (const auto& [key, _] : setting_keys()) {
-                if (std::find(settings_seen.begin(), settings_seen.end(), key) ==
+            for (const SettingKey& key : setting_keys()) {
+                if (std::find(settings_seen.begin(), settings_seen.end(), key.name) ==
                     settings_seen.end()) {
-                    absent += (absent.empty() ? "" : ", ") + key;
+                    // Quoted, so this list reads exactly as Python's `{absent!r}` renders it:
+                    // the file states matching wording as a goal and the refusal tables assert
+                    // only THAT both refuse, so nothing else would catch the drift.
+                    absent += (absent.empty() ? "" : ", ") + ("'" + key.name + "'");
                 }
             }
             if (!absent.empty()) {
@@ -402,8 +416,9 @@ namespace shipinfer {
         out += "plan " + std::to_string(plan.version) + " " +
                (plan.name.empty() ? "-" : plan.name) + "\n";
         if (plan.settings) {
-            for (const auto& [key, member] : setting_keys()) {
-                out += "setting " + key + " " + std::to_string((*plan.settings).*member) + "\n";
+            for (const SettingKey& key : setting_keys()) {
+                out += "setting " + key.name + " " +
+                       std::to_string((*plan.settings).*(key.member)) + "\n";
             }
         }
         for (const auto& [index, name] : plan.labels) {
