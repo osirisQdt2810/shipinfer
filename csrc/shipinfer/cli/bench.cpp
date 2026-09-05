@@ -126,8 +126,6 @@ namespace {
         // repository's config: once one frame is in, the queue waits this long for a batch to
         // fill.
         int batch_delay_us = 2000;
-        // The placement policy for every model, by name — the Python plane's default.
-        std::string policy = "locality_spillover";
         // The video source every camera uses, by name in `SOURCES()`. `replay` is the only one
         // this binary links today; naming it rather than hard-coding it is what makes the
         // GStreamer source a new file and nothing else.
@@ -201,8 +199,6 @@ namespace {
                 options.seconds = std::stod(next());
             else if (flag == "--batch-delay-us")
                 options.batch_delay_us = std::stoi(next());
-            else if (flag == "--policy")
-                options.policy = next();
             else if (flag == "--source")
                 options.source = next();
             else if (flag == "--det-instances")
@@ -252,9 +248,10 @@ namespace {
     // Which means the numbers the PLAN owns have to be in it: this printed one global
     // `batch_delay_us` that no instance used once the windows came per model, so two runs a
     // month apart could differ in every window and say the same thing.
-    std::string meta_json(const Options& options, const PlanSettings& tuning,
+    std::string meta_json(const Options& options, const ResolvedPlan& plan,
                           const std::vector<std::string>& stages,
                           const std::vector<BenchModel>& models) {
+        const PlanSettings& tuning = *plan.settings;
         std::ostringstream out;
         out << "{\"meta\": {\"system\": \"cpp\", \"config\": {";
         out << "\"cameras\": " << options.cameras;
@@ -271,7 +268,10 @@ namespace {
             // its window from the plan and this number is the binary's own default.
             out << ", \"batch_delay_us\": " << options.batch_delay_us;
         }
-        out << ", \"policy\": \"" << options.policy << "\"";
+        out << ", \"policy\": \"" << plan.policy << "\"";
+        for (const auto& [key, value] : plan.policy_options) {
+            out << ", \"policy." << key << "\": \"" << value << "\"";
+        }
         out << ", \"gpus\": [";
         for (size_t i = 0; i < options.devices.size(); ++i) {
             out << (i ? ", " : "") << options.devices[i];
@@ -324,6 +324,17 @@ int main(int argc, char** argv) {
                 "Rewrite it with `python -m shipinfer plan`");
         }
         const PlanSettings& tuning = *plan.settings;
+        // Not defaulted either, and for the sharper version of the same reason: the placement
+        // policy is the seam this project exists to own, and it used to come from `--policy`
+        // with this binary's own default sitting beside `scheduler.placement_policy`. They
+        // agreed, which is why nothing noticed; an operator who changed the setting got it on
+        // one plane. `build_policy` refuses an unknown name and lists the known ones.
+        if (plan.policy.empty()) {
+            throw ConfigError(
+                "the plan states no `policy`, and this binary will not choose "
+                "one: the placement policy is `scheduler.placement_policy`. "
+                "Rewrite it with `python -m shipinfer plan`");
+        }
         const std::vector<BenchModel> specs = bench_models(plan, engines_of(options));
         std::cerr << "loading engines...\n";
         const auto load_start = std::chrono::steady_clock::now();
@@ -360,8 +371,9 @@ int main(int argc, char** argv) {
                         [](Device dev) { GPU_CHECK(gpuSetDevice(dev.index)); }));
                 }
             }
-            models[spec.name] = std::make_unique<Model>(spec.name, std::move(instances),
-                                                        build_policy(options.policy));
+            models[spec.name] =
+                std::make_unique<Model>(spec.name, std::move(instances),
+                                        build_policy(plan.policy, plan.policy_options));
         }
         // The chain's head. Named rather than "some model loaded", because a run whose
         // detector is missing produces zero detections and reads as a quiet fleet.
@@ -486,7 +498,7 @@ int main(int argc, char** argv) {
                 }
                 return row;
             },
-            options.sample_interval_s, meta_json(options, tuning, stage_names, specs));
+            options.sample_interval_s, meta_json(options, plan, stage_names, specs));
 
         // -- workers ----------------------------------------------------------------------
         std::atomic<bool> stopping{false};
