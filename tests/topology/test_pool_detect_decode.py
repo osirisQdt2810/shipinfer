@@ -200,11 +200,10 @@ class TestItRefusesWithoutTheOpsItWasPromised:
         """The gating is only worth having if it is selective: a chain of forwarding `pool`
         elements, or of elements that never touch the frame, must resolve no ops at all.
 
-        ``PoolEmbed`` answers ``True`` since C8 — it cuts one crop per detection out of the
-        source frame (``tests/topology/test_pool_embed_crops.py``). ``PoolSegment`` does not
-        *yet*: its crop half is one line away and its ``_finish`` is a fold over two outputs
-        that a per-row scatter-back cannot express, so it keeps the forwarding default rather
-        than gaining half a feature.
+        ``PoolEmbed`` answers ``True`` since C8 and ``PoolSegment`` since P6-SEGMENT-CROP —
+        both cut one crop per detection out of the source frame. ``PoolRecognize`` is the
+        ``pool`` element that does not: identity is a gallery query over vectors an embedder
+        already produced, so it forwards the frame untouched.
         """
         from shipinfer.topology.elements.pool import PoolEmbed, PoolRecognize, PoolSegment
         from shipinfer.topology.elements.track import ShipvisionTrack
@@ -212,7 +211,7 @@ class TestItRefusesWithoutTheOpsItWasPromised:
         assert [
             cls.needs_image_ops
             for cls in (PoolSegment, PoolEmbed, PoolRecognize, ShipvisionTrack)
-        ] == [False, True, False, False]
+        ] == [True, True, False, False]
 
     def test_a_context_with_no_ops_is_a_typed_refusal_at_open(self) -> None:
         element = PoolDetect(

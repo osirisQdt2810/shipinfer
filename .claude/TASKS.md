@@ -2502,39 +2502,45 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `TWO_EMBEDDERS`/`THREE_EMBEDDERS` gained disjoint `classes:` (and a third label on the
       detector), which is what those chains meant all along -- their comment already said
       "each covers its own classes" while the YAML said nothing.
-      ONE GAP, deliberate and documented in the check itself: `PoolSegment` parses `classes:`
-      (the resolved plan needed it) while its Python half is whole-frame, so it declares
-      `selects_rows = False` and two overlapping SEGMENT slots are still caught per frame.
-      `P6-SEGMENT-CROP` is the item that makes it a real row-selector, and this check starts
-      covering it that day. Flipping the flag now would refuse `when: class == ...` on every
-      segment slot, which is four other tests' subject and a change that belongs with it.
-- [ ] **P6-SEGMENT-CROP · A pre-existing cross-plane divergence the plan made visible, and
-      the direction is already DECIDED -- by `PoolSegment`'s own docstring, read 4 Sep.**
-      `segment` CROPS on the C++ plane (`ship_crops_640`, 640x640, one crop per ship row) and
-      letterboxes the WHOLE FRAME on the Python one, so `mask_area_px` is computed from
-      different pixels. Not caused by ADR-020 -- the plan carries what the C++ plane already
-      did -- but now stated in one file rather than implied by two.
-      **The C++ shape is the destination and the Python side is the one that moves**, in as
-      many words: *"the demo repository's `ship_segmenter` is fed crops in the proven pipeline
-      (`pipeline/graph/graph.py` cuts a `ship_mask_crops` set at 640x640 and hands it to an
-      `ObjectStage`), so the FIRST half of this element is exactly `_PoolCropElement`'s and
-      adopting it is a one-line change of base class."* What blocks it is the second half: a
-      YOLO-seg engine emits rows plus a bank of mask prototypes and the mask for one crop is
-      the two multiplied and reduced to an area (`pipeline/graph/masks.py::InstanceMaskArea`)
-      -- a fold over two outputs that a per-row scatter-back cannot express, and filing the
-      raw rows instead would pin a `(32, 160, 160)` prototype tensor per frame alive (~3 MB a
-      frame of reassembly memory for pixels nobody reads).
-      SO: the work is `PoolSegment` gaining `_PoolCropElement` as its base PLUS its own
-      `_finish` doing the fold, in the slice the docstring already reserves for it -- not a
-      design question.
-      WHAT IT WILL ALSO COST, measured 4 Sep so the next slice does not discover it midway:
-      `PoolSegment` must declare `selects_rows = True` (it parses `classes:` since #132 but
-      does not declare it), and that flip (a) makes `_check_one_filler_per_row` cover segment
-      slots, which stops `tests/runners/test_walk.py`'s `TWO_SEGMENTERS` loading -- two
-      `segment` slots with no `classes:` -- and (b) makes `when: class == ...` on a segment
-      slot a refusal, which is four tests' subject in `tests/topology/test_chain.py`. Both
-      are the correct behaviour and both belong in that slice. Then `params: {classes: [ship]}` on the slot, and the two planes agree.
-      Until then the divergence is real and stated in both places.
+      ONE GAP, deliberate and documented in the check itself: `PoolSegment` parsed `classes:`
+      (the resolved plan needed it) while its Python half was whole-frame, so it declared
+      `selects_rows = False` and two overlapping SEGMENT slots were caught per frame.
+      CLOSED by `P6-SEGMENT-CROP` (5 Sep): both kinds in `ROW_FIELD_KINDS` are covered now, and
+      `tests/topology/test_overlapping_fillers.py::test_two_segment_slots_are_considered_since_the_segmenter_crops`
+      is the check that says so.
+- [x] **P6-SEGMENT-CROP · DONE 5 Sep, OPEN as PR #<PR>** (branch `feat/segment-crops`).
+      `PoolSegment` extends `_PoolCropElement`: one 640x640 crop per SELECTED detection, and a
+      new `_reduced` hook folds the engine's two outputs (`output0` rows + `output1` prototype
+      bank) into one `mask_area_px` per crop before the scatter -- the fold a per-row
+      scatter-back cannot express, run once per chunk. `InstanceMaskArea` moved to
+      `topology/elements/masks.py` (`topology` may not import `pipeline`), with
+      `pipeline/graph/masks.py` re-exporting it.
+      LAST MILE, found by the GPU run and not by the suite: `SinkOutput` never read `masks`,
+      so `mask_area_px` was `None` in every published event. `reads_per_row` now carries it
+      and `_records` fills it; `None` still means "no segmenter ran" and `0.0` means "it ran
+      and found nothing", which are opposite investigations.
+      COSTS, all measured and all the correct behaviour: `selects_rows = True` makes
+      `_check_one_filler_per_row` cover segment slots and `when: class == ...` on one a
+      refusal; `topology/ship_person.yaml` gains `params: {classes: [ship]}` (without it the
+      C++ plane REFUSES the plan and the Python plane would segment every person crop);
+      `tests/runners/test_pool_element.py`'s "one kind stands for the four" witness moved to
+      `PoolRecognize`, the only `pool` element that still forwards.
+      EVIDENCE: offline 3546 passed (three runs, two random-order); `-m gpu` 67 passed /
+      3 skipped in the container on GPUs 0-6 (card 7 is degraded again -- the documented
+      `SHIPINFER_GPUS` route-around); and the real chain on the real `yolo26n-seg` engine over
+      `ship_2K`, publishing `ship_mask_area_vec=[206112.0, 214192.0, 0.0, 0.0]` for four ships
+      -- ~50% of a 409600-pixel crop for the near vessels and 0.0 for the two the engine
+      scored below the floor, which is `InstanceMaskArea`'s documented refusal working.
+      VRAM verified idle after every run.
+
+- [ ] **SEGMENT-NO-CLASSES-ASYMMETRY** — a chain with ONE segment slot and no `classes:`
+      loads on the Python plane (it means "segment every row") and is REFUSED by the C++ plane
+      (`csrc/.../plan_stages.cpp::class_of`, added in #132's review, because "every row" is a
+      640x640 crop per person that nobody chose). Both refusals are load-time and loud, so
+      this is not a silent divergence -- but it is one chain file with two answers. Decide
+      which plane moves: either Python refuses it too, or the C++ plane accepts `kAnyClass`
+      for a segment slot. Not folded into P6-SEGMENT-CROP: it is a separate decision about
+      what a chain file may SAY, and that PR was already 14 files.
 
 - [x] **HOOK-FP · MERGED as PR #104 (31 Aug 13:54), VERDICT: APPROVE.** (was OPEN as PR #104) (2 commits, 2 files, +89/-1, rebased onto 9d315da). 82 hook tests; full
       tier 3232 passed; pre-commit all Passed; clean. BOTH revert-checks reproduced on this tip: formatter

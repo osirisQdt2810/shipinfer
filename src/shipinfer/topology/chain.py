@@ -988,11 +988,9 @@ def _check_one_filler_per_row(nodes: Sequence[ElementNode]) -> None:
     an element that does not scatter per row cannot collide per row, and the loader must not
     carry a list of implementation names that do.
 
-    That leaves one gap on purpose. ``PoolSegment`` parses ``classes:`` since the resolved
-    plan needed it, but still declares ``selects_rows = False`` because its Python half is
-    whole-frame -- so two overlapping segment slots are caught per frame rather than here.
-    ``P6-SEGMENT-CROP`` is the item that makes it a real row-selector, and this check starts
-    covering it for free on the day it does.
+    Both kinds in :data:`ROW_FIELD_KINDS` are covered since P6-SEGMENT-CROP made
+    ``PoolSegment`` a row-selector; before it, two overlapping segment slots were caught per
+    frame instead, which is the outage this check exists to move to load time.
 
     A ``when:`` guard is deliberately NOT considered. Two slots with the same ``classes:`` and
     mutually exclusive frame guards (``when: fps > 10`` / ``when: fps < 5``) can never both

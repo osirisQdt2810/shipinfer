@@ -478,24 +478,23 @@ class TestWhoNeedsImageOps:
     def test_a_model_kind_that_reads_no_pixels_needs_none(self) -> None:
         assert image_ops_are_needed("inprocess", topology_of(GALLERY_CHAIN)) is False
 
-    def test_a_pool_chain_that_reads_no_pixels_needs_none(self) -> None:
-        """The half that would be lost by reusing ``needs_model``: a ``pool`` element that
-        forwards its payload submits a tensor somebody else shaped, so it needs the pool and
-        no pre-processing at all.
+    def test_a_chain_that_needs_the_pool_and_no_pixels_needs_none(self) -> None:
+        """The half that would be lost by reusing ``needs_model``: an element that submits a
+        tensor somebody else shaped needs the pool and no pre-processing at all.
 
-        ``segment`` and not ``embed``: since C8 an embedder cuts one crop per detection out of
-        the source frame and therefore *does* need ops
-        (``tests/topology/test_pool_embed_crops.py``), which makes it the wrong witness for
-        "needs the pool, needs no ops" — but not for the property, which is that the two
-        declarations are independent.
+        On a double, because no *shipped* pair answers this way any more: ``PoolDetect``
+        letterboxes, ``PoolEmbed`` crops since C8, ``PoolSegment`` since P6-SEGMENT-CROP, and
+        ``PoolRecognize`` forwards but files its response raw under a key ``output`` reads per
+        row, which the loader refuses on its own grounds. :class:`DetectHere` is the element
+        at which ``run.py``'s two readers disagree, which is the property.
         """
-        segment_only = POOL_CHAIN.replace(
+        no_pixels = POOL_CHAIN.replace(
             "detect: {impl: pool, model: detector, params: {input: images}}",
-            "segment: {impl: pool, model: detector}",
-        ).replace("name: pool_chain", "name: segment_chain")
+            "detect: {impl: run-engine-here, model: detector}",
+        ).replace("name: pool_chain", "name: no_pixels_chain")
 
-        assert model_pool_is_needed("inprocess", topology_of(segment_only)) is True
-        assert image_ops_are_needed("inprocess", topology_of(segment_only)) is False
+        assert model_pool_is_needed("inprocess", topology_of(no_pixels)) is True
+        assert image_ops_are_needed("inprocess", topology_of(no_pixels)) is False
 
     def test_the_fleet_needs_none_because_each_shard_resolves_its_own(self) -> None:
         assert image_ops_are_needed("fleet", topology_of(POOL_CHAIN)) is False

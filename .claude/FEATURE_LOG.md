@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-05 — The segmenter crops (P6-SEGMENT-CROP)
+
+`PoolSegment` letterboxed the whole frame; the C++ plane has always cut a `ship_crops_640`
+set, so `mask_area_px` came from different pixels on each. It extends `_PoolCropElement` now.
+What kept it waiting: a YOLO-seg engine emits rows plus a prototype bank and never a mask, so
+one crop's area is two outputs multiplied and reduced — a fold no per-row scatter can express.
+`_reduced` is that seam, run once per chunk before the scatter, and the ~3 MB prototype bank
+is dropped there rather than carried through reassembly.
+
+Invisible offline and obvious on a GPU: `SinkOutput` never read `masks`, so `mask_area_px`
+was `None` in every event this system has published. It reads it now.
+
+`selects_rows = True` was the price: two segment slots that could fill one row are refused at
+load, `when: class == …` on one is refused, and `ship_person.yaml` gains `classes: [ship]`.
+
 ## 2026-09-04 — The record seam: both planes' `build_records`, byte-compared (P5-A-ALLOC)
 
 The event seam compares the two JSON writers on records a scenario STATES, so

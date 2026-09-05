@@ -1,5 +1,42 @@
 # Journal
 
+## 2026-09-05 — the segmenter crops, and the field it fills was never published
+
+**P6-SEGMENT-CROP**, the last of the divergences the resolved plan made visible. `PoolSegment`
+letterboxed the whole frame; the C++ plane has always cropped per ship row. Same chain file,
+different pixels. The C++ shape wins, and the element is an ordinary crop element now — plus
+one new hook, `_reduced`, because a YOLO-seg engine emits rows and a prototype bank rather
+than a mask, and folding those into one area per crop is not something a per-row scatter can
+do. The hook runs once per chunk, before the scatter, and drops the ~3 MB prototype bank there.
+
+**The GPU run found what 3546 offline tests could not.** With the fold working end to end, the
+published events still carried `ship_mask_area_vec: [null, null, null, null]` — `SinkOutput`
+never read `masks` at all, so `mask_area_px` has been `None` in every event this system has
+ever emitted. One line of `reads_per_row` and one field in `_records`. The lesson is the old
+one in a new place: a field nothing asserts on is a field nothing fills, and only a real run
+through the real sink says so. With it: `[206112.0, 214192.0, 0.0, 0.0]` for four ships, half
+a 409600-pixel crop each for the two near vessels and `0.0` for the two the engine scored
+below the floor — `InstanceMaskArea`'s documented refusal, working on the real engine.
+
+**Twelve tests changed their premise and none of them were weakened.** `selects_rows = True`
+is a declaration with consequences: two segment slots that could fill one row are refused at
+load; `when: class == …` on a segment slot is refused in favour of `params: classes:`; and
+`tests/runners/test_pool_element.py`'s "one kind stands for the four" witness had to move to
+`PoolRecognize`, now the only `pool` element that forwards its payload. Each fixture was
+rewritten to say what is true, not to say less.
+
+**`topology/ship_person.yaml` was a chain the C++ plane would have refused.** Its segment slot
+declared no `classes:`, which `plan_stages.cpp` rejects outright ("a 640x640 crop per person
+as well as per ship"). It says `classes: [ship]` now, and the two planes read the same file the
+same way. What is left is one asymmetry, on the ledger as `SEGMENT-NO-CLASSES-ASYMMETRY`: a
+single segment slot with no selection loads here and is refused there. Loud on both sides, so
+not urgent, but it is one file with two answers.
+
+**Card 7 is degraded again** — `device=7, num_gpus=7` at CUDA init, exactly the failure
+`_gpus.sh` was written for on 1 Sep. `SHIPINFER_GPUS=0,1,2,3,4,5,6` routes around it; the
+whole GPU tier is green behind that.
+
+
 ## 2026-09-04 (night) — the container's own offline tier was red on main
 
 **#130 merged after three rounds** — the container door CLAUDE.md documented as `make shell`
