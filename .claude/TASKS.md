@@ -2593,16 +2593,33 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       2 failures, exit 1; the argmax replaced by "the first candidate" -> 1 failure, exit 1;
       restored -> 0, exit 0. It also refuses a shape holding a dynamic dimension
       (`ENGINE-DIMS-CAN-DISAGREE-WITH-WIDTH`), being the first consumer to trust `dims`.
-- [ ] **SEGMENT-FOLD-KNOBS-NOT-IN-THE-PLAN** (#137 review, non-blocking 2) — `params:
-      {segment: {score_threshold, mask_threshold}}` are read by the Python fold and the
-      resolved plan cannot carry either: `PlanNode.score_threshold` is the DETECTOR's decode
-      floor (`topology/plan.py`), and the `0.25f` in `csrc/.../plan_stages.h` is that same
-      detector floor (`DetectConfig::score_threshold`, consumed at `stages.cpp:143`) -- NOT a
-      segmentation one. There is no segmentation floor on that plane because there is no fold
-      at all (`CSRC-SEGMENT-FOLD-MISSING`), which is the stronger version of the same
-      conclusion: a chain saying `score_threshold: 0.4` has nowhere to say it to.
-      Either the plan format grows the two fields (plan text + the C++ reader + the goldens)
-      or the knobs go. Not folded into #137: it is a plan-format change with its own gate.
+- [x] **SEGMENT-FOLD-KNOBS-NOT-IN-THE-PLAN · DONE 5 Sep, OPEN as PR #141.** The
+      plan carries `fold_score` and `fold_mask` on a segment node, read from a new
+      `Element.fold_parameters()` hook -- `decode_parameters`'s argument one stage along, and
+      built from `params` rather than from `self._fold`, because a plan is written by a
+      control plane that never opened the element.
+      WHY IT MATTERED ONLY AFTER #140: until the C++ fold existed there was nothing to state
+      the cuts TO. Once it existed it hard-coded `MaskAreaSpec`'s defaults, which happen to
+      equal the Python fold's -- so an omitted line agreed BY LUCK and would have diverged the
+      moment a chain file said `score_threshold: 0.4` or either default moved. The plan states
+      them even when defaulted, for exactly that reason.
+      `fold_mask` is refused outside (0, 1) on BOTH readers and at resolve time, because the
+      cut is `log(m / (1 - m))`: -inf at 0, a division by zero at 1. And `fold_parameters()`
+      wraps `InstanceMaskArea.__post_init__`'s bare `ValueError` in `ConfigurationError` --
+      this is the first reading of those keys on the `shipinfer plan` path, which never opens
+      the element. Goldens re-emitted; 89 + 52 checks green on the two C++ gates.
+      NOT the whole class, and #141's review is right that the item should not have claimed it:
+      see `SEGMENT-FOLD-OUTPUT-NAMES-DO-NOT-CROSS` below.
+- [ ] **SEGMENT-FOLD-OUTPUT-NAMES-DO-NOT-CROSS** (#141 review, non-blocking 3) — the two
+      CUTS cross now; the three NAMES do not. `MaskAreaSpec.detections/prototypes/name` are
+      `output0`/`output1`/`mask_area_px` on the C++ side, while the Python element accepts
+      `params: {segment: {detections: ..., prototypes: ...}}` and `params: {output: ...}` and
+      carries them nowhere. The engine-output pair fails LOUDLY over there (a missing output is
+      a `ConfigError`), but `params: {output: ship_area}` is a SILENT event-key divergence --
+      the Python plane files the area under `ship_area` and the C++ plane under
+      `mask_area_px`, so one plane's records carry a field the other's do not. Same shape as
+      the cuts: three more plan verbs, or a decision that those keys are not deployment
+      settings and the element should stop accepting them.
 
 - [ ] **ENGINE-DIMS-CAN-DISAGREE-WITH-WIDTH** (#139 review, non-blocking) —
       `TrtEngineAdapter::output_row_elems` goes through `TensorSpec::elements_per_row()`,
