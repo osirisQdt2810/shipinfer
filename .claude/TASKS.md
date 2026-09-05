@@ -2644,7 +2644,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       the design load, because an abort here is indistinguishable from a crash in a long run.
       Log: `.artifacts/cpp/p5b-round2.log` on `feat/plan-model-runtime` (PR #138).
 
-- [x] **ARTEFACT-NOT-BUILT-YET · DONE 5 Sep on `feat/plan-reports-missing-artefacts`, as a
+- [x] **ARTEFACT-NOT-BUILT-YET · DONE 5 Sep, OPEN as PR #143, as a
       REPORT and not a refusal -- which the survey changed.** The first framing was "have
       `shipinfer plan` refuse at write time when the named artefact is absent". Reading the
       workflow says that would break the case the design is built for: ADR-014 lets the
