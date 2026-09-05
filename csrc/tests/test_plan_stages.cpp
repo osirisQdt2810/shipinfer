@@ -112,6 +112,20 @@ namespace {
               "and a segment slot with no `classes` is every row too, not a refusal");
         check(segment.objects.size() == 1 && segment.objects[0].fold.has_value(),
               "with its fold attached, because it is still a segment slot");
+        // The plan's cuts, not this plane's constants: `MaskAreaSpec`'s defaults happen to
+        // agree with the Python fold's, so a plan that omitted them was right BY LUCK.
+        check(segment.objects[0].fold->score_threshold == 0.25f &&
+                  segment.objects[0].fold->mask_threshold == 0.5f,
+              "a plan stating no cut leaves the shared defaults");
+
+        const PlanStages stated = plan_stages(
+            plan_of(kDetect + "node segment_all segment pool\nmodel ship_segmenter\n"
+                              "crop 640 640\nfold_score 0.4\nfold_mask 0.6\n"),
+            {"ship_detector", "ship_segmenter"});
+
+        check(stated.objects.at(0).fold->score_threshold == 0.4f &&
+                  stated.objects.at(0).fold->mask_threshold == 0.6f,
+              "and a plan that states them is what the fold uses");
     }
 
     void a_named_class_resolves_through_the_label_table() {

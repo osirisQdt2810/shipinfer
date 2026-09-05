@@ -143,6 +143,14 @@ namespace {
         check(refused("plan 1 x\nnode a b c\nqueue_delay_us -1\n"), "a negative window");
         check(refused("plan 1 x\nnode a b c\ninstances two\n"), "a count that is not one");
         check(refused("plan 1 x\nnode a b c\nartefact a b\n"), "an artefact with a space");
+        check(refused("plan 1 x\nnode a b c\nfold_mask 0\n"), "a mask cut of 0 is -inf");
+        check(refused("plan 1 x\nnode a b c\nfold_mask 1\n"), "and 1 divides by zero");
+        check(refused("plan 1 x\nnode a b c\nfold_mask 1.5\n"), "and past it");
+        check(refused("plan 1 x\nnode a b c\nfold_score nan\n"), "a non-finite score floor");
+        check(!refused("plan 1 x\nnode a b c\nfold_mask 0.5\nfold_score 0.25\n"),
+              "the two fold cuts");
+        check(!refused("plan 1 x\nnode a b c\nfold_score 0.0\n"),
+              "a floor of zero: every crop is an area");
         check(!refused("plan 1 x\nnode a b c\nqueue_delay_us 0\n"), "0 is batching off");
         check(!refused("plan 1 x\nnode a b c\ninstances 1\n"), "the smallest count");
         check(!refused("plan 1 x\nnode a b c\nartefact m/1/model.plan\n"),

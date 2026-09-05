@@ -1595,18 +1595,7 @@ class PoolSegment(_PoolCropElement):
         reports an area of 0 rather than the whole plane.
         """
         super()._do_open(context)
-        settings = self.params.get("segment") or {}
-        if not isinstance(settings, Mapping):
-            raise ConfigurationError(
-                f"{self.kind.value} element {self.name!r}: `params: segment:` is the fold's "
-                f"settings and must be a mapping, got {type(settings).__name__}"
-            )
-        unknown = sorted(set(settings) - _SEGMENT_KEYS)
-        if unknown:
-            raise ConfigurationError(
-                f"{self.kind.value} element {self.name!r}: `params: segment:` does not know "
-                f"{unknown}; it takes {sorted(_SEGMENT_KEYS)}"
-            )
+        settings = self._segment_settings()
         defaults = _fold_defaults()
         try:
             self._fold = InstanceMaskArea(
@@ -1631,6 +1620,31 @@ class PoolSegment(_PoolCropElement):
                 f"fold -- {error}"
             ) from error
 
+    def _segment_settings(self) -> Mapping[str, Any]:
+        """``params: {segment: {...}}``, refused once for both readings of it.
+
+        ONE reading, because two paths read it and only one opens the element: `resolve_plan`
+        calls `fold_parameters` on a control plane with no model pool, so a second copy had the
+        plan writing the DEFAULT cut for a slot the runner would have refused.
+
+        Raises:
+            ConfigurationError: not a mapping, or a setting the fold has no use for -- a
+                transposed letter would otherwise be a silently ignored threshold.
+        """
+        settings = self.params.get("segment") or {}
+        if not isinstance(settings, Mapping):
+            raise ConfigurationError(
+                f"{self.kind.value} element {self.name!r}: `params: segment:` is the fold's "
+                f"settings and must be a mapping, got {type(settings).__name__}"
+            )
+        unknown = sorted(set(settings) - _SEGMENT_KEYS)
+        if unknown:
+            raise ConfigurationError(
+                f"{self.kind.value} element {self.name!r}: `params: segment:` does not know "
+                f"{unknown}; it takes {sorted(_SEGMENT_KEYS)}"
+            )
+        return settings
+
     def _engine_output(
         self, role: str, settings: Mapping[str, Any], defaults: Mapping[str, Any]
     ) -> str:
@@ -1650,6 +1664,36 @@ class PoolSegment(_PoolCropElement):
                 f"output {name!r}, and model {self.model!r} declares {sorted(specs)}"
             )
         return name
+
+    def fold_parameters(self) -> InstanceMaskArea:
+        """The cuts this slot will fold with, for the resolved plan to carry.
+
+        Built from ``params`` rather than returned from ``self._fold``, because a plan is
+        written by a control plane that never opened the element -- `shipinfer plan` has no
+        model pool and no image ops. The crop extent is the plan's own `crop` line, so the
+        placeholder here is never read.
+        """
+        defaults = _fold_defaults()
+        settings = self._segment_settings()
+        try:
+            return InstanceMaskArea(
+                crop_hw=(1, 1),
+                score_threshold=float(
+                    settings.get("score_threshold", defaults["score_threshold"])
+                ),
+                mask_threshold=float(
+                    settings.get("mask_threshold", defaults["mask_threshold"])
+                ),
+            )
+        except (TypeError, ValueError) as error:
+            # The same wrap `_do_open` does, and needed here for a stronger reason: a plan is
+            # written by a control plane that never opens the element, so this is the FIRST
+            # reading of those keys on that path -- and a bare `ValueError` would escape the
+            # vocabulary `shipinfer plan` reports failures in.
+            raise ConfigurationError(
+                f"{self.kind.value} element {self.name!r}: `params: segment:` is not a valid "
+                f"fold -- {error}"
+            ) from error
 
     def _reduced(self, response: InferenceResponse) -> InferenceResponse:
         """The engine's two outputs, folded to one area per crop.

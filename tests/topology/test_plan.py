@@ -19,7 +19,7 @@ import pytest
 from shipinfer.core.errors import ConfigurationError
 from shipinfer.repository import ModelRepository
 from shipinfer.repository.resolved import ModelRuntime, model_extents, model_runtimes
-from shipinfer.topology import load_topology
+from shipinfer.topology import ChainSpec, Topology, load_topology
 from shipinfer.topology.plan import (
     PLAN_VERSION,
     PlanNode,
@@ -254,6 +254,13 @@ class TestBothPlanesRefuseTheSameText:
         ("plan 1 x\nnode a b c\nqueue_delay_us -1\n", "a negative batch window"),
         ("plan 1 x\nnode a b c\ninstances two\n", "an instance count that is not a number"),
         ("plan 1 x\nnode a b c\nartefact a b\n", "an artefact path holding a space"),
+        (
+            "plan 1 x\nnode a b c\nfold_mask 0\n",
+            "a mask probability at 0, where the cut is -inf",
+        ),
+        ("plan 1 x\nnode a b c\nfold_mask 1\n", "and at 1, where it divides by zero"),
+        ("plan 1 x\nnode a b c\nfold_mask 1.5\n", "and past it"),
+        ("plan 1 x\nnode a b c\nfold_score nan\n", "a non-finite score floor"),
     )
     ACCEPTED = (
         ("plan 1 -\n", "`-` is the empty chain name"),
@@ -273,6 +280,8 @@ class TestBothPlanesRefuseTheSameText:
         ("plan 1 x\nnode a b c\nqueue_delay_us 0\n", "no batch window, which is batching off"),
         ("plan 1 x\nnode a b c\ninstances 1\n", "the smallest count a slot can run"),
         ("plan 1 x\nnode a b c\nartefact m/1/model.plan\n", "a repository-relative artefact"),
+        ("plan 1 x\nnode a b c\nfold_mask 0.5\nfold_score 0.25\n", "the two fold cuts"),
+        ("plan 1 x\nnode a b c\nfold_score 0.0\n", "a floor of zero: every crop is an area"),
     )
 
     @pytest.mark.parametrize("text,why", REFUSED, ids=[why for _, why in REFUSED])
@@ -287,6 +296,104 @@ class TestBothPlanesRefuseTheSameText:
     def test_a_crop_that_is_not_positive_names_the_line(self) -> None:
         with pytest.raises(PlanSyntaxError, match=r"<string>:3"):
             parse_plan("plan 1 x\nnode a b c\ncrop 0 128\n")
+
+
+class TestTheFoldCutsCross:
+    """`SEGMENT-FOLD-KNOBS-NOT-IN-THE-PLAN`: both cuts are defaulted on both planes, so an
+    omission agreed BY LUCK -- and diverged the moment a chain file stated one. The C++ fold
+    hard-coded 0.25 and 0.5 until the plan could carry them."""
+
+    def chain(self, segment: str) -> str:
+        return (
+            "name: cuts\nelements:\n"
+            "  decode: {impl: replay}\n"
+            "  detect: {impl: pool, model: ship_detector}\n"
+            f"  segment: {segment}\n"
+            "  output: {impl: none}\n"
+        )
+
+    def resolved(self, segment: str, dims: dict[str, tuple[int, int]]) -> str:
+        chain = Topology.from_spec(ChainSpec.from_yaml(self.chain(segment)))
+        return plan_text(resolve_plan(chain, dims=dims))
+
+    def test_a_stated_cut_reaches_the_plan(self, dims: dict[str, tuple[int, int]]) -> None:
+        text = self.resolved(
+            "{impl: pool, model: ship_segmenter, params: {classes: [ship], "
+            "segment: {score_threshold: 0.4, mask_threshold: 0.6}}}",
+            dims,
+        )
+
+        assert "fold_score 0.4" in text
+        assert "fold_mask 0.6" in text
+
+    def test_a_defaulted_cut_is_carried_and_not_omitted(
+        self, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """The whole point: an omission would agree with the other plane's hard-coded
+        constant today and silently stop agreeing the day either default moved."""
+        text = self.resolved(
+            "{impl: pool, model: ship_segmenter, params: {classes: [ship]}}", dims
+        )
+
+        assert "fold_score 0.25" in text
+        assert "fold_mask 0.5" in text
+
+    def test_only_a_segment_slot_carries_them(self, dims: dict[str, tuple[int, int]]) -> None:
+        """An embedder folds nothing, so its node has no cut to state."""
+        text = self.resolved(
+            "{impl: pool, kind: embed, model: ship_embedder, params: {classes: [ship]}}", dims
+        )
+
+        assert "fold_score" not in text and "fold_mask" not in text
+
+    def test_a_misspelt_fold_key_is_refused_at_resolve_and_not_defaulted(
+        self, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """`resolve_plan` never opens the element, so this is the FIRST reading of those keys
+        on the `shipinfer plan` path. A second copy of it dropped `_do_open`'s refusals, so a
+        transposed letter wrote a plan positively ASSERTING the default cut -- for a chain the
+        runner would have refused. One reading, `_segment_settings`, for both paths.
+        """
+        with pytest.raises(ConfigurationError, match="does not know"):
+            self.resolved(
+                "{impl: pool, model: ship_segmenter, params: {classes: [ship], "
+                "segment: {score_threshhold: 0.4}}}",
+                dims,
+            )
+
+    def test_a_segment_block_that_is_not_a_mapping_is_refused_too(
+        self, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """The nesting slip: `segment: 0.4` rather than `segment: {score_threshold: 0.4}`."""
+        with pytest.raises(ConfigurationError, match="must be a mapping"):
+            self.resolved(
+                "{impl: pool, model: ship_segmenter, params: {classes: [ship], segment: 0.4}}",
+                dims,
+            )
+
+    def test_an_infinite_floor_names_the_key_the_operator_wrote(
+        self, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """A segment slot has no `decode:` block, so a refusal naming one sends the operator
+        to a key they never wrote."""
+        with pytest.raises(ConfigurationError, match=r"`segment\.score_threshold`"):
+            self.resolved(
+                "{impl: pool, model: ship_segmenter, params: {classes: [ship], "
+                "segment: {score_threshold: .inf}}}",
+                dims,
+            )
+
+    def test_a_mask_probability_outside_the_range_is_refused_at_resolve(
+        self, dims: dict[str, tuple[int, int]]
+    ) -> None:
+        """Refused where the slot is still named, rather than as a `log(0)` on the other
+        plane -- `InstanceMaskArea` refuses the same range at open."""
+        with pytest.raises(ConfigurationError, match="not a valid fold"):
+            self.resolved(
+                "{impl: pool, model: ship_segmenter, params: {classes: [ship], "
+                "segment: {mask_threshold: 1.0}}}",
+                dims,
+            )
 
 
 class TestTheWriterIsDeterministic:
