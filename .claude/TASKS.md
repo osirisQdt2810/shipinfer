@@ -2598,6 +2598,17 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       Either the plan format grows the two fields (plan text + the C++ reader + the goldens)
       or the knobs go. Not folded into #137: it is a plan-format change with its own gate.
 
+- [ ] **CSRC-BENCH-STARTUP-ABORT · seen ONCE on 5 Sep and not reproduced, recorded rather
+      than buried by a green re-run.** The first run of a freshly built `csrc/build/bench`
+      aborted with `terminate called without an active exception` (exit 134) after all four
+      engines loaded and before any camera connected -- so between `Model::start` and the
+      ingest actors. Two subsequent runs of the SAME binary were clean (800 frames -> 800
+      events -> 800 complete). That message is a `std::thread` destroyed while joinable, or a
+      throw crossing a thread boundary, and the start-up path has both shapes: `Model::start`
+      waits on instance threads and the camera sources spawn their own. Worth a look before
+      the design load, because an abort here is indistinguishable from a crash in a long run.
+      Log: `.artifacts/cpp/p5b-round2.log` on `feat/plan-model-runtime` (PR #138).
+
 - [ ] **SEGMENT-NO-CLASSES-ASYMMETRY** — a chain with ONE segment slot and no `classes:`
       loads on the Python plane (it means "segment every row") and is REFUSED by the C++ plane
       (`csrc/.../plan_stages.cpp::class_of`, added in #132's review, because "every row" is a
