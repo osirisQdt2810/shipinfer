@@ -11,25 +11,21 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from shipinfer.repository import ModelRepository
+from shipinfer.repository import ModelEntry, ModelRepository
 from shipinfer.repository.resolved import model_extents, model_runtimes
 from shipinfer.topology import Topology, load_topology
 from shipinfer.topology.plan import plan_text, resolve_plan
 
 __all__ = ["plan"]
 
-#: The models `scripts/build_engines.py` has a target for. The two embedders are absent from
-#: it, so a note that sent an operator there for them cost a container start and changed
-#: nothing -- `build_engines.py --only ship_embedder` exits 2 with "unknown model(s)".
-_BUILDABLE = frozenset({"ship_detector", "ship_segmenter"})
-
 
 def plan(topology: Path, repository: Path, out: Path | None = None) -> int:
     """Write the resolved plan for ``topology`` to ``out``, or to stdout."""
     chain = load_topology(topology)
     models = ModelRepository.load(repository)
-    runtimes = model_runtimes(models)
-    text = plan_text(resolve_plan(chain, dims=model_extents(models), runtimes=runtimes))
+    text = plan_text(
+        resolve_plan(chain, dims=model_extents(models), runtimes=model_runtimes(models))
+    )
     if out is None:
         print(text, end="")
     else:
@@ -40,7 +36,7 @@ def plan(topology: Path, repository: Path, out: Path | None = None) -> int:
 
 
 def _report_missing(chain: Topology, models: ModelRepository) -> None:
-    """Say which artefacts the plan names and the repository does not hold.
+    """Say which artefacts THE PLAN NAMES that the repository does not hold.
 
     Reported and NOT refused: writing a plan where the engine is absent is the documented
     workflow. ADR-014 lets the control plane run on a driverless box and
@@ -49,48 +45,91 @@ def _report_missing(chain: Topology, models: ModelRepository) -> None:
     SILENCE -- otherwise the operator learns at bench start-up, inside a container, while the
     machine that knew is the one that wrote the plan.
     """
-    named = {node.spec.model for node in chain.nodes if node.spec.model}
+    indexed = set(models.names())
     missing = [
-        (name, wanted)
-        for name in sorted(named)
-        for wanted in [_wanted_file(models, name)]
+        (entry, wanted)
+        # A model the repository does not index is skipped, not looked up: `resolve_plan` is
+        # deliberately tolerant of one (a slot declaring its own extent needs no config), so
+        # `entry()` here turned a written plan into a `ModelNotFoundError` AFTER the file was
+        # on disk -- a diagnostic refusing, which is what this exists not to do.
+        for name in sorted({n.spec.model for n in chain.nodes if n.spec.model} & indexed)
+        for entry in [models.entry(name)]
+        for wanted in [_wanted_artefact(entry)]
         if wanted is not None
     ]
     if not missing:
         return
-    buildable = sorted(name for name, _ in missing if name in _BUILDABLE)
-    rest = sorted(f"{name}/{wanted}" for name, wanted in missing if name not in _BUILDABLE)
     lines = [f"note: {len(missing)} artefact(s) this plan names are not in {models.root}:"]
-    if buildable:
-        lines.append(
-            f"  {', '.join(buildable)} — `python scripts/build_engines.py "
-            f"--only {' '.join(buildable)}` on the node that runs them, inside the container"
-        )
-    if rest:
-        # NOT the build script: it has no target for these, so sending an operator there
-        # costs them a container start and leaves the artefact exactly as absent.
-        lines.append(
-            f"  {', '.join(rest)} — see `model_repository/<name>/1/README.md`; "
-            f"`scripts/build_engines.py` has no target for these"
-        )
+    lines += [f"  {path} — {remedy}" for path, remedy in sorted(_remedies(missing))]
     print("\n".join(lines), file=sys.stderr)
 
 
-def _wanted_file(models: ModelRepository, name: str) -> str | None:
-    """The artefact THIS model's backend opens, if the repository does not hold it yet.
+def _wanted_artefact(entry: ModelEntry) -> str | None:
+    """The artefact the plan names for this model, if the repository does not hold it.
 
-    ``None`` when it is there, when the platform has no file of its own (`ensemble`), or when
-    TensorRT will BUILD it: `resolve_engine` compiles a sibling `.onnx` at load, so a version
-    directory holding one -- which the README tells an operator to drop there -- is complete
-    and a note about the plan would be a false alarm on every run.
+    ``engine_file`` and not what this model's own backend opens: a plan's `artefact` line is
+    `engine_file` whatever `platform:` says, because the plane reading a plan is TensorRT-only.
+    So a `platform: pytorch` repository genuinely lacks it -- what would be wrong is
+    prescribing a TensorRT build, which is the REMEDY's job. ``None`` where the file is there,
+    or where `resolve_engine` will BUILD it from the one `.onnx` `1/README.md` says to drop
+    there; two of them is `_find_onnx`'s own refusal, not a missing artefact.
     """
-    entry = models.entry(name)
-    wanted = entry.config.artefact_file
-    if wanted is None:
-        return None
     directory = entry.root / str(entry.latest)
+    wanted = entry.config.engine_file
     if (directory / wanted).is_file():
         return None
-    if entry.config.platform == "tensorrt" and any(directory.glob("*.onnx")):
+    if entry.config.platform == "tensorrt" and len(list(directory.glob("*.onnx"))) == 1:
         return None
-    return wanted
+    return f"{entry.name}/{entry.latest}/{wanted}"
+
+
+def _remedies(missing: list[tuple[ModelEntry, str]]) -> list[tuple[str, str]]:
+    """One `(path, remedy)` per missing artefact, with the remedy that actually works.
+
+    Three, because one command does not cover them: `build_engines.py` has targets that
+    install into a version directory, a `reid` target that builds an engine and installs it
+    nowhere, and nothing at all for a repository that is not TensorRT.
+    """
+    out: list[tuple[str, str]] = []
+    for entry, path in missing:
+        if entry.config.platform != "tensorrt":
+            out.append(
+                (
+                    path,
+                    f"this repository is `platform: {entry.config.platform}`, and a plan is "
+                    f"read by a TensorRT-only plane; build a TensorRT repository for it",
+                )
+            )
+        elif entry.name in _installed_by_the_script():
+            out.append(
+                (
+                    path,
+                    f"`python scripts/build_engines.py --only {entry.name}` on the node that "
+                    f"runs it, inside the container",
+                )
+            )
+        else:
+            # The `reid` target builds `models/reid_r50_fp32.engine` and installs it into no
+            # version directory, so `--only ship_embedder` exits 2. Two commands, stated,
+            # because the README it would otherwise point at says only "drop it here".
+            out.append(
+                (
+                    path,
+                    "`python scripts/build_engines.py --only reid` then copy "
+                    "`models/reid_r50_fp32.engine` to it — that target builds an engine and "
+                    "installs it nowhere",
+                )
+            )
+    return out
+
+
+def _installed_by_the_script() -> frozenset[str]:
+    """Which models `scripts/build_engines.py` writes into a version directory.
+
+    Read from the script rather than restated: a hard-coded copy makes the note say "no target
+    for these" the day a target is added, which is the class of stale instruction this whole
+    diagnostic exists to remove.
+    """
+    from scripts.build_engines import TARGETS
+
+    return frozenset(target.name for target in TARGETS if target.version_dir is not None)

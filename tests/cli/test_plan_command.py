@@ -62,30 +62,69 @@ class TestItSaysWhichArtefactsAreNotThereYet:
             )
         return root
 
-    def test_a_missing_artefact_is_named_with_a_remedy_that_works(
+    def test_each_artefact_gets_the_remedy_that_works_for_IT(
         self, chain_file: Path, bare: Path, tmp_path: Path, capsys
     ) -> None:
-        """Split, because one remedy does not cover both. `build_engines.py` has targets for
-        `ship_detector` and `ship_segmenter` and NONE for the two embedders --
-        `--only ship_embedder` exits 2 with "unknown model(s)" -- so a note naming all four
-        with that command costs a container start and leaves two artefacts exactly as absent.
+        """Per artefact, because one command does not cover them. `build_engines.py` installs
+        `ship_detector` into its version directory; its `reid` target builds an engine and
+        installs it NOWHERE, so `--only ship_embedder` exits 2 with "unknown model(s)" -- a
+        container start spent to change nothing.
         """
         assert plan(chain_file, bare, tmp_path / "chain.plan") == 0
         note = capsys.readouterr().err
 
         assert "2 artefact(s)" in note
-        assert "build_engines.py --only ship_detector" in note, "the one it can build"
-        assert "ship_embedder/model.plan" in note, "and the one it cannot, named separately"
-        assert "README.md" in note, "pointed at the instruction that is true for it"
+        assert "ship_detector/1/model.plan" in note, "the path the PLAN names, copyable"
+        assert "ship_embedder/1/model.plan" in note
+        assert "build_engines.py --only ship_detector" in note, "the one it installs"
+        assert "--only reid" in note, "and the two-step that works for the one it does not"
         assert "build_engines.py --only ship_embedder" not in note, "which would exit 2"
 
-    def test_a_pytorch_model_asks_for_its_own_artefact(
+    def test_the_buildable_set_is_read_from_the_script(self) -> None:
+        """Not restated. A hard-coded copy makes the note say "no target for this" the day a
+        target is added, which is the stale instruction this diagnostic exists to remove."""
+        from scripts.build_engines import TARGETS
+        from shipinfer.cli.commands.plan import _installed_by_the_script
+
+        assert _installed_by_the_script() == {
+            target.name for target in TARGETS if target.version_dir is not None
+        }
+        assert "ship_embedder" not in _installed_by_the_script(), "the case that bit"
+
+    def test_a_model_the_repository_does_not_index_is_skipped(
         self, chain_file: Path, tmp_path: Path, capsys
     ) -> None:
-        """The offline tier's own repository is `platform: pytorch` with a `model.pt` in each
-        version dir (`tests/support/models.py`), and a check that asked every model for
-        `model.plan` reported four missing artefacts for a repository with nothing wrong with
-        it -- and prescribed a TensorRT build for a chain running TorchScript."""
+        """`resolve_plan` is deliberately tolerant of one -- a slot declaring its own extent
+        needs no config -- so looking it up here turned a written plan into a
+        `ModelNotFoundError` AFTER the file was on disk: a diagnostic refusing."""
+        root = tmp_path / "partial"
+        (root / "ship_detector" / "1").mkdir(parents=True)
+        (root / "ship_detector" / "config.yaml").write_text(
+            (REPOSITORY / "ship_detector" / "config.yaml").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        chain = tmp_path / "declared.yaml"
+        chain.write_text(
+            CHAIN.replace(
+                "embed_ship: {impl: pool, model: ship_embedder, params: {classes: [ship]}}",
+                "embed_ship: {impl: pool, model: ship_embedder, "
+                "params: {classes: [ship], crop: {size: [256, 128]}}}",
+            )
+        )
+        out = tmp_path / "chain.plan"
+
+        assert plan(chain, root, out) == 0
+        assert parse_plan(out.read_text(), source=str(out)).name == "cli_chain"
+        assert "ship_embedder" not in capsys.readouterr().err
+
+    def test_a_non_tensorrt_repository_gets_a_remedy_that_is_not_a_tensorrt_build(
+        self, chain_file: Path, tmp_path: Path, capsys
+    ) -> None:
+        """A plan's `artefact` line is `engine_file` whatever `platform:` says, because the
+        plane that reads a plan is TensorRT-only. So a `platform: pytorch` repository DOES
+        lack the artefact the plan names -- saying otherwise would restore the silence. What
+        would be wrong is prescribing `build_engines.py` for a chain running TorchScript.
+        """
         root = tmp_path / "torch_repo"
         for name in ("ship_detector", "ship_embedder"):
             (root / name / "1").mkdir(parents=True)
@@ -98,8 +137,10 @@ class TestItSaysWhichArtefactsAreNotThereYet:
             (root / name / "1" / "model.pt").write_bytes(b"a scripted module")
 
         assert plan(chain_file, root, tmp_path / "chain.plan") == 0
+        note = capsys.readouterr().err
 
-        assert capsys.readouterr().err == "", "every artefact its backend loads is present"
+        assert "platform: pytorch" in note, "which is why the plan cannot be run as written"
+        assert "build_engines.py" not in note, "and not a TensorRT build for a torch chain"
 
     def test_an_onnx_a_tensorrt_model_will_be_built_from_is_not_missing(
         self, chain_file: Path, bare: Path, tmp_path: Path, capsys
@@ -113,6 +154,20 @@ class TestItSaysWhichArtefactsAreNotThereYet:
         assert plan(chain_file, bare, tmp_path / "chain.plan") == 0
 
         assert capsys.readouterr().err == ""
+
+    def test_two_onnx_files_are_not_treated_as_buildable(
+        self, chain_file: Path, bare: Path, tmp_path: Path, capsys
+    ) -> None:
+        """`_find_onnx` refuses two of them without `parameters.onnx_file`, so that directory
+        loads with a `BackendLoadError` -- staying quiet about it would be the silence again,
+        one layer down."""
+        for name in ("ship_detector", "ship_embedder"):
+            for stem in ("a", "b"):
+                (bare / name / "1" / f"{stem}.onnx").write_bytes(b"an onnx graph")
+
+        assert plan(chain_file, bare, tmp_path / "chain.plan") == 0
+
+        assert "2 artefact(s)" in capsys.readouterr().err
 
     def test_the_plan_is_still_written(
         self, chain_file: Path, bare: Path, tmp_path: Path

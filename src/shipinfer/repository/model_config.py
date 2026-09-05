@@ -92,15 +92,6 @@ class InstancePlacement(_Strict):
 #: The artefact a model version holds unless `parameters.engine_file` says otherwise.
 DEFAULT_ENGINE_FILE = "model.plan"
 
-#: What each platform's backend opens in a version directory, and the `parameters` key that
-#: overrides it. One table, because it was three literals in three backends and a fourth
-#: reading of one of them then told an operator to build a `model.plan` for a `pytorch` model.
-ARTEFACT_FILES = {
-    "tensorrt": ("engine_file", DEFAULT_ENGINE_FILE),
-    "onnxruntime": ("model_file", "model.onnx"),
-    "pytorch": ("model_file", "model.pt"),
-}
-
 
 class InstanceGroup(_Strict):
     """A rule that expands into N instances — Triton's ``instance_group``.
@@ -412,25 +403,10 @@ class ModelConfig(_Strict):
         One spelling, because it was three: the TensorRT backend, the DeepStream config
         writer and the plan resolver each carried the literal, and only one of them could
         have been changed. This is the TENSORRT artefact whatever the platform, because the
-        resolved plan's `artefact` line is read by a TensorRT-only plane; what THIS model's
-        backend opens is :attr:`artefact_file`.
+        resolved plan's `artefact` line is read by a TensorRT-only plane, so this is what
+        that line says whatever `platform:` a repository declares.
         """
         return str(self.parameters.get("engine_file", DEFAULT_ENGINE_FILE))
-
-    @property
-    def artefact_file(self) -> str | None:
-        """What THIS platform's backend opens in the version directory, or ``None``.
-
-        `pytorch` loads `model.pt` and `onnxruntime` loads `model.onnx`, so a check that asked
-        every model for `model.plan` reported four missing artefacts for a repository with
-        nothing wrong with it -- and prescribed a TensorRT build for a chain running
-        TorchScript. `ensemble` has no file of its own: it is a DAG over other models.
-        """
-        entry = ARTEFACT_FILES.get(self.platform)
-        if entry is None:
-            return None
-        key, default = entry
-        return str(self.parameters.get(key, default))
 
     #: Batches sent through every instance at load time so the first real request does not
     #: pay for lazy CUDA module loading and TensorRT's first-call allocations.

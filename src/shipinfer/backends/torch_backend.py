@@ -45,7 +45,8 @@ class TorchScriptBackend(ModelBackend):
         self._half = bool(context.config.parameters.get("fp16", False)) and self.device.is_cuda
 
     def _do_initialize(self) -> None:
-        path = self.context.artifact.file(self.context.config.artefact_file or "")
+        params = self.context.config.parameters
+        path = self.context.artifact.file(str(params.get("model_file", "model.pt")))
         module = self._torch.jit.load(str(path), map_location=self._torch_device)
         module.eval()
         if self._half:

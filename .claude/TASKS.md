@@ -2659,15 +2659,22 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       today: inside a container, after a start-up, from a loader that could only report a
       path. Four checks, including that nothing is said when the artefacts are there and that
       a model the chain does not name is not reported.
-      ROUND 1 found the note itself WRONG in two ways, both fixed: it asked every model for
-      `model.plan` regardless of `platform`, so the offline tier's own `platform: pytorch`
-      repository (which holds `model.pt`) got four false alarms and a TensorRT build
-      instruction -- `ModelConfig.artefact_file` is the one table now, used by the ONNX and
-      TorchScript backends too; and it prescribed `scripts/build_engines.py` for four models
-      when that script has targets for TWO, so `--only ship_embedder` exits 2. The note is
-      split: what the script builds, with the command, and the rest pointed at
-      `1/README.md`. The two embedder configs saying "Built by `scripts/build_engines.py`"
-      were false and now say what actually places them.
+      TWO REVIEW ROUNDS, and the second is the one worth reading: a diagnostic's only failure
+      mode is being WRONG, and mine was, five times. r1 -- it asked every model for
+      `model.plan` regardless of `platform`, and it prescribed `build_engines.py` for models
+      that script has no install target for (`--only ship_embedder` exits 2). r2 -- my r1 fix
+      for the first of those checked `artefact_file` (what the BACKEND opens) under a heading
+      saying "artefacts this plan names", which restored the silence for a non-TensorRT
+      repository; it dragged two backend load-path files in and broke the registry's ALIAS
+      platform spellings (`platform: onnx` resolved to `None` and opened the directory); the
+      C++ message handed the same wrong build command the Python note had just been split to
+      avoid; and `_BUILDABLE` duplicated the script's own `TARGETS`.
+      SETTLED: the note checks `engine_file` -- what the plan NAMES -- and chooses the remedy
+      by platform and by whether the script installs it, one line per artefact with the
+      repository-relative path. The set is read from `scripts/build_engines.py::TARGETS` and a
+      test pins that. The backend detour is reverted entirely; it was only needed because the
+      check was reading the wrong file. The two embedder configs saying "Built by
+      `scripts/build_engines.py`" were already false and now say what places them.
 - [x] **SEGMENT-NO-CLASSES-ASYMMETRY · CLOSED 5 Sep in PR #140, in favour of
       PERMITTING it on both planes.** A chain with one segment slot and no `classes:` loaded on
       the Python plane and was REFUSED by `plan_stages.cpp::class_of` -- one chain file with

@@ -71,9 +71,15 @@ namespace shipinfer {
             // on the target node (`model_repository/*/1/README.md`), so a fresh checkout has
             // a `config.yaml` and no `model.plan` -- and the operator meets that here, after
             // a container start, rather than when the plan was written.
+            // Deliberately NOT a build command. `scripts/build_engines.py` installs a plan
+            // for two of the four shipped models and none for the embedders, so naming it
+            // here would spend a container start to change nothing -- the same defect
+            // `shipinfer plan`'s note was split to avoid, and this cannot tell which model a
+            // path belongs to. That note knows, and says the remedy per artefact.
             throw BackendError("cannot open plan " + plan_path +
-                               ". An engine is built on the node that runs it: "
-                               "`python scripts/build_engines.py` inside the container");
+                               ". An engine is built on the node that runs it; "
+                               "`shipinfer plan` names every artefact a chain needs and how "
+                               "to build each one");
         }
         const std::streamsize size = file.tellg();
         file.seekg(0, std::ios::beg);

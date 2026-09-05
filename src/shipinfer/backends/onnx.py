@@ -53,7 +53,7 @@ class OnnxRuntimeBackend(ModelBackend):
 
     def _do_initialize(self) -> None:
         params = self.context.config.parameters
-        path = self.context.artifact.file(self.context.config.artefact_file or "")
+        path = self.context.artifact.file(str(params.get("model_file", "model.onnx")))
 
         options = self._ort.SessionOptions()
         options.graph_optimization_level = self._ort.GraphOptimizationLevel.ORT_ENABLE_ALL
