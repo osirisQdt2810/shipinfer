@@ -2610,7 +2610,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       the element. Goldens re-emitted; 89 + 52 checks green on the two C++ gates.
       NOT the whole class, and #141's review is right that the item should not have claimed it:
       see `SEGMENT-FOLD-OUTPUT-NAMES-DO-NOT-CROSS` below.
-- [x] **SEGMENT-FOLD-OUTPUT-NAMES-DO-NOT-CROSS · DONE 5 Sep on `feat/fold-names-cross`, and
+- [x] **SEGMENT-FOLD-OUTPUT-NAMES-DO-NOT-CROSS · DONE 5 Sep, OPEN as PR #142, and
       the review's "silent event-key divergence" half turned out NOT to be one -- checked
       rather than taken.** `params: {output: ...}` on a segment slot set `self._output`, which
       is the key inside the FOLDED response and nothing else: `_finish` scatters by row index

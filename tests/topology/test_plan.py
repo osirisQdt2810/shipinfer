@@ -283,8 +283,10 @@ class TestBothPlanesRefuseTheSameText:
         ("plan 1 x\nnode a b c\nartefact m/1/model.plan\n", "a repository-relative artefact"),
         ("plan 1 x\nnode a b c\nfold_mask 0.5\nfold_score 0.25\n", "the two fold cuts"),
         ("plan 1 x\nnode a b c\nfold_score 0.0\n", "a floor of zero: every crop is an area"),
-        ("plan 1 x\nnode a b c\nfold_detections det\nfold_prototypes proto\n",
-         "an export that names its outputs something other than output0/output1"),
+        (
+            "plan 1 x\nnode a b c\nfold_detections det\nfold_prototypes proto\n",
+            "an export that names its outputs something other than output0/output1",
+        ),
     )
 
     @pytest.mark.parametrize("text,why", REFUSED, ids=[why for _, why in REFUSED])
