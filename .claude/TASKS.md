@@ -2280,6 +2280,30 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       record says `"policy": "jsq"`. Default path unchanged: 800 -> 800, 0 rejected. A plan
       with the line stripped is refused by name. `test_plan_parity` 102 -> 109, revert-checked
       red (2 failures, exit 1); `tests/topology/test_plan.py` 116 -> 123.
+- [x] **ENGINE-INSTALLED-UNDER-THE-WRONG-NAME · DONE 5 Sep on `fix/engine-file-name`.** Found
+      by sweeping `scripts/` for the failure class #145's review named -- two files that must
+      agree about a name, with nothing at run time comparing them. `scripts/build_engines.py`
+      installed every plan as `"model.plan"` while `parameters.engine_file` is CONFIGURABLE and
+      only DEFAULTS to that (`repository/model_config.py:400`). A model naming anything else got
+      its plan under a name nothing loads: the builder prints success, `shipinfer plan` names
+      the configured file, and the two disagree at the next start-up -- minutes of TensorRT
+      later, on a machine that had the answer the whole time. The four committed configs all say
+      `model.plan`, so it is latent, which is why nothing has hit it.
+      THE MODEL NAME NOW COMES FROM THE PATH, `<repository>/<name>/<version>`, and not from
+      `Target.name`: those are not the same thing. `reid` is ONE target feeding TWO repository
+      models with no `version_dir` at all, so a name-keyed lookup is right for the other two
+      targets by luck -- the same shape as #143 round 5's name-keyed set.
+      REFUSED, NOT DEFAULTED, when the repository will not parse: guessing `model.plan` there is
+      the defect itself. The message names the flat engine (already built, so nothing is lost)
+      and the config to fix.
+      Also: the success line called `relative_to(REPO)`, which RAISES for a destination outside
+      the repository rather than returning the absolute path -- so printing where the file went
+      could be the thing that failed. `is_relative_to` now guards it, which is also what made
+      `_install` testable at all.
+      `tests/test_build_engines.py` is 9 checks, offline (a NAME is repository config; only
+      writing the bytes needs a device). Revert-check red both ways: the name resolver back to
+      the literal -> 3 failures; the install line back -> 1.
+
 - [x] **P6-PRB · DONE. #122 (the gate) and #123 (its four follow-ups) both MERGED, APPROVE
       round 1 each. The queue seam now has five scenarios, five goldens and a C++ gate at 22
       checks / 0 failures, with NO known-divergence register -- the planes have never
