@@ -44,8 +44,9 @@ __all__ = [
 
 #: Bumped when a verb changes meaning; a reader refuses one it does not know, because a plan
 #: half understood is a chain running something other than what was declared. 2 added the
-#: `setting` lines: a version-1 plan carries no run configuration at all.
-PLAN_VERSION = 2
+#: `setting` lines: a version-1 plan carries no run configuration at all. 3 added `policy`, for
+#: the same reason and to keep the message a VERSION mismatch rather than an unknown verb.
+PLAN_VERSION = 3
 
 #: Which event field a kind's outputs fill -- `chain.py`'s table, imported rather than
 #: repeated: the loader refuses a chain whose two slots could fill one of these for one row,
@@ -172,6 +173,29 @@ def resolve_settings(settings: SettingsLike) -> PlanSettings:
     )
 
 
+def _policy_name(settings: SettingsLike) -> str:
+    """``scheduler.placement_policy``, refused here if the format would reinterpret it."""
+    return _speakable(
+        str(settings.scheduler.placement_policy),  # type: ignore[attr-defined]
+        "the scheduler's placement_policy",
+    )
+
+
+def _policy_options(settings: SettingsLike) -> dict[str, str]:
+    """``placement_policy_options`` as strings -- the C++ registry takes a keyword map of them.
+
+    Values are stringified rather than typed, because that is what `KeywordOptions` is on the
+    other plane and each policy parses its own (`option_int`). Booleans go through `str` too,
+    so `True` crosses as `True`: `option_bool` on the far side reads that spelling.
+    """
+    options = settings.scheduler.placement_policy_options  # type: ignore[attr-defined]
+    where = "a placement_policy option"
+    return {
+        _speakable(str(key), where): _speakable(str(value), where)
+        for key, value in sorted(dict(options).items())
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class ResolvedPlan:
     """A whole chain, resolved. :func:`plan_text` writes it, :func:`parse_plan` reads it."""
@@ -185,6 +209,11 @@ class ResolvedPlan:
     #: is what a caller wanting no deployment gets. A reader that NEEDS them refuses then,
     #: rather than substituting its own: a default that only one plane holds is the defect.
     settings: PlanSettings | None = None
+    #: ``scheduler.placement_policy`` and its options: how a model's request picks an instance.
+    #: Its OWN verbs and not a `setting`, because that table is integers with a minimum and
+    #: this is a registered name with a keyword map. Empty means the caller resolved none.
+    policy: str = ""
+    policy_options: Mapping[str, str] = field(default_factory=dict)
     version: int = PLAN_VERSION
 
     def node(self, slot: str) -> PlanNode:
@@ -387,6 +416,8 @@ def resolve_plan(
         labels=_labels(topology),
         fields={name: tuple(slots) for name, slots in fields.items()},
         settings=None if settings is None else resolve_settings(settings),
+        policy="" if settings is None else _policy_name(settings),
+        policy_options={} if settings is None else _policy_options(settings),
     )
 
 
@@ -519,6 +550,13 @@ def plan_text(plan: ResolvedPlan) -> str:
     ]
     if plan.settings is not None:
         lines += [f"setting {key} {getattr(plan.settings, key)}" for key in SETTING_KEYS]
+    if plan.policy:
+        lines.append(f"policy {plan.policy}")
+        # Sorted, because a `dict` preserves insertion order and the C++ half holds a `std::map`
+        # -- two orders for one plan, and this format is byte-compared.
+        lines += [
+            f"policy_option {key} {value}" for key, value in sorted(plan.policy_options.items())
+        ]
     lines += [f"label {index} {name}" for index, name in sorted(plan.labels.items())]
     for node in plan.nodes:
         lines += ["", f"node {node.slot} {node.kind} {node.impl}"]
@@ -562,6 +600,13 @@ def plan_text(plan: ResolvedPlan) -> str:
     return "\n".join(lines) + "\n"
 
 
+#: Every top-level verb, so the "unknown verb" message lists them all and cannot fall behind
+#: the reader. Attributes (`_ATTRIBUTES`) are added to it there -- those attach to a `node`.
+_VERBS = frozenset(
+    {"plan", "setting", "policy", "policy_option", "label", "node", "edge", "field"}
+)
+
+
 class PlanSyntaxError(ConfigurationError):
     """A plan line the reader cannot honour, named by line number.
 
@@ -581,6 +626,8 @@ def parse_plan(text: str, *, source: str = "<string>") -> ResolvedPlan:
     version = 0
     labels: dict[int, str] = {}
     settings: dict[str, int] = {}
+    policy = ""
+    policy_options: dict[str, str] = {}
     nodes: list[dict[str, object]] = []
     edges: list[tuple[str, str, str]] = []
     fields: dict[str, tuple[str, ...]] = {}
@@ -617,6 +664,21 @@ def parse_plan(text: str, *, source: str = "<string>") -> ResolvedPlan:
                     f"is one the settings tree would have refused"
                 )
             settings[args[0]] = value
+        elif verb == "policy":
+            _want(args, 1, where, "policy <name>")
+            if policy:
+                raise PlanSyntaxError(f"{where}: a second `policy`")
+            policy = args[0]
+        elif verb == "policy_option":
+            _want(args, 2, where, "policy_option <key> <value>")
+            if not policy:
+                # Before `policy`, not merely without one: an option belongs to a named policy
+                # and the C++ half attaches it to the same string, so a stray one is a plan
+                # whose meaning depends on which reader you ask.
+                raise PlanSyntaxError(f"{where}: `policy_option` before any `policy`")
+            if args[0] in policy_options:
+                raise PlanSyntaxError(f"{where}: a second `policy_option {args[0]}`")
+            policy_options[args[0]] = args[1]
         elif verb == "label":
             if len(args) < 2:
                 raise PlanSyntaxError(f"{where}: expected `label <id> <name>`")
@@ -653,7 +715,7 @@ def parse_plan(text: str, *, source: str = "<string>") -> ResolvedPlan:
         else:
             raise PlanSyntaxError(
                 f"{where}: unknown verb {verb!r}; expected one of "
-                f"{sorted({'plan', 'setting', 'label', 'node', 'edge', 'field', *_ATTRIBUTES})}"
+                f"{sorted(_VERBS | set(_ATTRIBUTES))}"
             )
 
     if name is None:
@@ -676,6 +738,8 @@ def parse_plan(text: str, *, source: str = "<string>") -> ResolvedPlan:
         labels=labels,
         fields=fields,
         settings=_settings(settings, source),
+        policy=policy,
+        policy_options=policy_options,
         version=version,
     )
 

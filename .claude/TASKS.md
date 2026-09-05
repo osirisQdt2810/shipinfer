@@ -2259,23 +2259,27 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       (Original: SEQUENCED after C8m moves pipeline/schema.py → core/events — writing it against the moving module is churn; planner 28 Aug.) Resolved config in, same events out.** The binary takes the settings tree and the
       model repository (`config.yaml`) the Python plane reads, not CLI flags; emits the same
       event schema (`pipeline/schema.py`) so one sink serves both planes.
-- [ ] **PLACEMENT-POLICY-STILL-FROM-ARGV.** Found closing P5 by auditing what `bench.cpp` still
-      takes from argv. Under `--plan --repository` the engine paths, instance counts and batch
-      windows are all the plan's and the legacy flags are ignored (`bench_models.cpp:48`,
-      `from_plan`) -- but `build_policy(options.policy)` at `bench.cpp:363` runs UNCONDITIONALLY,
-      so the placement policy is chosen from `--policy` with the binary's own default
-      `"locality_spillover"` while the Python plane reads `scheduler.placement_policy`. Two
-      independent defaults for the same knob, which is P5-B's and P5-C's defect exactly, on the
-      one seam CLAUDE.md calls "the part this project exists to own". They happen to agree
-      today, which is why nothing has noticed; an operator who sets `placement_policy` in
-      settings gets it on one plane only.
-      SHAPE: a ninth `setting placement_policy <name>` -- except the value is a NAME, not an
-      int, and every `setting` today is an int (the key table carries `int PlanSettings::*` and
-      a minimum). So either the table grows a type, or the policy gets its own verb. Prefer the
-      OWN VERB: `policy <name>`, validated against the C++ registry at parse time the way
-      `impl` already is, which keeps `setting` as the integer table it is and gives the refusal
-      somewhere to name the known policies. Delete `--policy` when the plan carries it.
-
+- [x] **PLACEMENT-POLICY-STILL-FROM-ARGV · DONE 5 Sep on `feat/plan-carries-policy`.** Found
+      closing P5 by auditing what `bench.cpp` still takes from argv: under `--plan --repository`
+      the engine paths, instance counts and batch windows are the plan's and the legacy flags
+      are ignored, but `build_policy(options.policy)` ran UNCONDITIONALLY -- so the placement
+      policy came from `--policy` with the binary's own default `"locality_spillover"` sitting
+      beside `scheduler.placement_policy`. Two defaults for one knob, on the seam CLAUDE.md
+      calls the part this project exists to own. They agreed, which is why nothing noticed.
+      ITS OWN VERBS, as the item argued: `policy <name>` plus repeated `policy_option <k> <v>`,
+      not a ninth `setting` -- that table is integers with a minimum and this is a registered
+      name with a keyword map. `--policy` is gone and a plan without one is REFUSED.
+      NOT validated in the reader, which the item guessed wrong: `impl` is not either, and
+      importing the policy registry into `plan.cpp` would put scheduling in the link line of
+      every gate. `build_policy` already refuses an unknown name and lists the known ones,
+      which is the same place `impl` is resolved.
+      PLAN_VERSION 2 -> 3, for the precedent #145 set one PR earlier: a new verb makes an older
+      reader say "unknown verb" where a version mismatch is the better message.
+      EVIDENCE, the whole loop: `SHIPINFER_SCHEDULER__PLACEMENT_POLICY=jsq` -> `policy jsq` in
+      the written plan -> the binary runs it (600 frames -> 600 complete, exit 0) and its run
+      record says `"policy": "jsq"`. Default path unchanged: 800 -> 800, 0 rejected. A plan
+      with the line stripped is refused by name. `test_plan_parity` 102 -> 109, revert-checked
+      red (2 failures, exit 1); `tests/topology/test_plan.py` 116 -> 123.
 - [x] **P6-PRB · DONE. #122 (the gate) and #123 (its four follow-ups) both MERGED, APPROVE
       round 1 each. The queue seam now has five scenarios, five goldens and a C++ gate at 22
       checks / 0 failures, with NO known-divergence register -- the planes have never
