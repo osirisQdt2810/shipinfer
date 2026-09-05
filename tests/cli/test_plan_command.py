@@ -133,6 +133,25 @@ class TestItSaysWhichArtefactsAreNotThereYet:
         assert "platform: pytorch" in note, "which is why the plan cannot be run as written"
         assert "build_engines.py" not in note, "and not a TensorRT build for a torch chain"
 
+    def test_a_trt_alias_repository_is_not_called_non_tensorrt(
+        self, chain_file: Path, bare: Path, tmp_path: Path, capsys
+    ) -> None:
+        """`BACKENDS.register_lazy("tensorrt", ..., "trt")` makes that alias a valid TensorRT
+        repository. A literal `platform == "tensorrt"` sent it down the "this is not TensorRT"
+        branch and told an operator to build a TensorRT repository they already had."""
+        for name in ("ship_detector", "ship_embedder"):
+            path = bare / name / "config.yaml"
+            path.write_text(
+                path.read_text(encoding="utf-8").replace("platform: tensorrt", "platform: trt"),
+                encoding="utf-8",
+            )
+
+        assert plan(chain_file, bare, tmp_path / "chain.plan") == 0
+        note = capsys.readouterr().err
+
+        assert "README.md" in note, "the TensorRT remedy"
+        assert "platform: trt" not in note, "not told it is not TensorRT when it is"
+
     def test_an_onnx_beside_it_is_reported_with_the_difference_between_the_planes(
         self, chain_file: Path, bare: Path, tmp_path: Path, capsys
     ) -> None:

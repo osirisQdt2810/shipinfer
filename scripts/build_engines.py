@@ -55,10 +55,10 @@ class Target:
     version_dir: Path | None
 
 
-#: The names below, as the shipped package states them -- imported rather than restated so a
-#: target added here cannot leave `shipinfer plan`'s remedy saying the opposite. The direction
-#: is deliberate: `scripts/` is not in the wheel, so the dependency points the shippable way.
-
+#: The build targets. Nothing outside this file reads them: `shipinfer plan` used to, to
+#: prescribe a build command, and that prescription is gone -- a command is only ever right
+#: for one repository and that note runs against any of them. Each version directory's
+#: `README.md` carries the command for ITS model, which is where the knowledge is true.
 TARGETS = (
     Target(
         "ship_detector",

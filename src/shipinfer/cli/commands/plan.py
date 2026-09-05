@@ -47,18 +47,16 @@ def _report_missing(
     SILENCE -- otherwise the operator learns at bench start-up, inside a container, while the
     machine that knew is the one that wrote the plan.
     """
-    indexed = set(models.names())
-    missing = [
-        (entry, wanted)
-        # A model the repository does not index is skipped, not looked up: `resolve_plan` is
-        # deliberately tolerant of one (a slot declaring its own extent needs no config), so
-        # `entry()` here turned a written plan into a `ModelNotFoundError` AFTER the file was
-        # on disk -- a diagnostic refusing, which is what this exists not to do.
-        for name in sorted({n.spec.model for n in chain.nodes if n.spec.model} & indexed)
-        for entry in [models.entry(name)]
-        for wanted in [_wanted_artefact(models.root, runtimes[name].artefact)]
-        if wanted is not None
-    ]
+    # A model the repository does not index is SKIPPED, not looked up: `resolve_plan` is
+    # deliberately tolerant of one (a slot declaring its own extent needs no config), so
+    # `entry()` here turned a written plan into a `ModelNotFoundError` after the file was on
+    # disk -- a diagnostic refusing, which is what this exists not to do.
+    named = {node.spec.model for node in chain.nodes if node.spec.model}
+    missing: list[tuple[ModelEntry, str]] = []
+    for name in sorted(named & set(models.names())):
+        wanted = _wanted_artefact(models.root, runtimes[name].artefact)
+        if wanted is not None:
+            missing.append((models.entry(name), wanted))
     if not missing:
         return
     lines = [f"note: {len(missing)} artefact(s) this plan names are not in {models.root}:"]

@@ -78,8 +78,8 @@ namespace shipinfer {
             // path belongs to. That note knows, and says the remedy per artefact.
             throw BackendError("cannot open plan " + plan_path +
                                ". An engine is built on the node that runs it; "
-                               "`shipinfer plan` names every artefact a chain needs and how "
-                               "to build each one");
+                               "`shipinfer plan` names every artefact a chain needs and "
+                               "where its build instructions live");
         }
         const std::streamsize size = file.tellg();
         file.seekg(0, std::ios::beg);
