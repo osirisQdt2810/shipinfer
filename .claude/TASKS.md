@@ -2644,17 +2644,56 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       the design load, because an abort here is indistinguishable from a crash in a long run.
       Log: `.artifacts/cpp/p5b-round2.log` on `feat/plan-model-runtime` (PR #138).
 
-- [ ] **ARTEFACT-NOT-BUILT-YET · the plan states the CONFIGURED artefact, which is not
-      always the one a backend loads** (#138 review round 2, non-blocking 3). A version
-      directory holding only an `.onnx` has `resolve_engine`
-      (`backends/tensorrt/autobuild.py`) build a plan at load, keyed to this TensorRT, GPU and
-      precision -- and that needs a live TensorRT and a device, which the control plane
-      writing a plan on a driverless box does not have. `git ls-files model_repository` shows
-      the shipped version dirs carry only a `README.md`, so this is the ordinary state of a
-      fresh checkout. The C++ plane then refuses by path: loud, but late -- the operator
-      learns at bench start-up that an engine has to be built. Options: carry the ONNX name
-      too and refuse with the build command in the message, or have `shipinfer plan` refuse at
-      write time when the named artefact is absent.
+- [x] **ARTEFACT-NOT-BUILT-YET · DONE 5 Sep, OPEN as PR #143, as a
+      REPORT and not a refusal -- which the survey changed.** The first framing was "have
+      `shipinfer plan` refuse at write time when the named artefact is absent". Reading the
+      workflow says that would break the case the design is built for: ADR-014 lets the
+      control plane run on a driverless box, and `model_repository/*/1/README.md` says engines
+      are host-specific and built on the node that runs them, so a fresh checkout LEGITIMATELY
+      holds a `config.yaml` and no `model.plan` (`git ls-files model_repository` shows exactly
+      that -- four configs, four READMEs, no artefacts). Refusing would be refusing the
+      documented path.
+      So: `shipinfer plan` names, on stderr, every artefact IT NAMES that the repository does
+      not hold, with the build command -- and still writes the plan. And `TrtEngine::load`'s
+      "cannot open plan" says how to build one, since that is where an operator meets this
+      today: inside a container, after a start-up, from a loader that could only report a
+      path. Four checks, including that nothing is said when the artefacts are there and that
+      a model the chain does not name is not reported.
+      TWO REVIEW ROUNDS, and the second is the one worth reading: a diagnostic's only failure
+      mode is being WRONG, and mine was, five times. r1 -- it asked every model for
+      `model.plan` regardless of `platform`, and it prescribed `build_engines.py` for models
+      that script has no install target for (`--only ship_embedder` exits 2). r2 -- my r1 fix
+      for the first of those checked `artefact_file` (what the BACKEND opens) under a heading
+      saying "artefacts this plan names", which restored the silence for a non-TensorRT
+      repository; it dragged two backend load-path files in and broke the registry's ALIAS
+      platform spellings (`platform: onnx` resolved to `None` and opened the directory); the
+      C++ message handed the same wrong build command the Python note had just been split to
+      avoid; and `_BUILDABLE` duplicated the script's own `TARGETS`.
+      r3 -- my r2 fix read the set from `scripts.build_engines`, and `scripts/` is in NEITHER
+      the wheel (`packages.find` is `src` only) nor the runtime image, so the note would
+      `ModuleNotFoundError` in exactly the container it was written for; `pythonpath = [".",
+      "src"]` hid that from the offline tier through two green rounds. And my lone-`.onnx`
+      exemption abandoned this item's own argument -- `resolve_engine` is a PYTHON-plane
+      mechanism while the plan's reader opens the path verbatim, so staying quiet there was
+      the silence coming back one layer down.
+      r4 -- my `else` branch WAS the reid two-step, so every TensorRT model not literally
+      named `ship_detector`/`ship_segmenter` was told to build a ReID ResNet-50 and copy it in.
+      r5 -- and naming the two sets did not fix the class: they key on a bare MODEL NAME, so a
+      third-party repository whose model happens to be called `ship_detector` still got this
+      checkout's build command, for a script that is in neither the wheel nor the image.
+      SETTLED, and the settling is a DELETION. All five rounds had ONE shape: the remedy was
+      trying to know something it cannot. A build command is only ever right for one
+      repository and this command runs against any of them. So the note says what is true
+      everywhere -- which artefact is absent, which plane could use an `.onnx` beside it
+      (through `BACKENDS.canonical`, so `platform: trt` is not called non-TensorRT), and where
+      the repository's OWN instruction lives. `build_targets.py`, both name sets and the
+      script-coupling test are gone with the prescription that needed them.
+      The knowledge moved to where it is right: `model_repository/*/1/README.md` now carries
+      the build commands, including the two-step the embedders need -- which is what the note
+      points at, and what makes pointing there worth doing. The backend detour is reverted
+      entirely. `tests/test_architecture.py`'s rule that `src/shipinfer/**` imports no
+      `scripts.*` OUTLIVES its cause and stays, because the next such import will be just as
+      invisible to `pythonpath = [".", "src"]`.
 
 - [x] **SEGMENT-NO-CLASSES-ASYMMETRY · CLOSED 5 Sep in PR #140, in favour of
       PERMITTING it on both planes.** A chain with one segment slot and no `classes:` loaded on

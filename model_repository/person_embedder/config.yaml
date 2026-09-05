@@ -2,7 +2,9 @@
 #
 # A REAL engine: ResNet-50 with ImageNet weights, global-pooled and L2-normalised to a 2048-d
 # vector — the same backbone family the reference FastReID implementation uses (R50-SBS).
-# Built by `scripts/build_engines.py`.
+# Built in TWO steps, because the script's `reid` target writes
+# `models/reid_r50_fp32.engine` and installs it into no version directory -- `1/README.md`
+# has the pair of commands.
 #
 # What is claimed and what is not: the whole path is exercised — crop, letterbox, batch,
 # engine, normalise, gallery — with a network of the right shape and the right cost. It is
