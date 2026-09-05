@@ -2659,6 +2659,15 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       today: inside a container, after a start-up, from a loader that could only report a
       path. Four checks, including that nothing is said when the artefacts are there and that
       a model the chain does not name is not reported.
+      ROUND 1 found the note itself WRONG in two ways, both fixed: it asked every model for
+      `model.plan` regardless of `platform`, so the offline tier's own `platform: pytorch`
+      repository (which holds `model.pt`) got four false alarms and a TensorRT build
+      instruction -- `ModelConfig.artefact_file` is the one table now, used by the ONNX and
+      TorchScript backends too; and it prescribed `scripts/build_engines.py` for four models
+      when that script has targets for TWO, so `--only ship_embedder` exits 2. The note is
+      split: what the script builds, with the command, and the rest pointed at
+      `1/README.md`. The two embedder configs saying "Built by `scripts/build_engines.py`"
+      were false and now say what actually places them.
 - [x] **SEGMENT-NO-CLASSES-ASYMMETRY · CLOSED 5 Sep in PR #140, in favour of
       PERMITTING it on both planes.** A chain with one segment slot and no `classes:` loaded on
       the Python plane and was REFUSED by `plan_stages.cpp::class_of` -- one chain file with

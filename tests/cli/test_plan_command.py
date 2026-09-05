@@ -62,15 +62,57 @@ class TestItSaysWhichArtefactsAreNotThereYet:
             )
         return root
 
-    def test_a_missing_artefact_is_named_with_the_build_command(
+    def test_a_missing_artefact_is_named_with_a_remedy_that_works(
         self, chain_file: Path, bare: Path, tmp_path: Path, capsys
     ) -> None:
+        """Split, because one remedy does not cover both. `build_engines.py` has targets for
+        `ship_detector` and `ship_segmenter` and NONE for the two embedders --
+        `--only ship_embedder` exits 2 with "unknown model(s)" -- so a note naming all four
+        with that command costs a container start and leaves two artefacts exactly as absent.
+        """
         assert plan(chain_file, bare, tmp_path / "chain.plan") == 0
         note = capsys.readouterr().err
 
-        assert "ship_detector/1/model.plan" in note
-        assert "ship_embedder/1/model.plan" in note
-        assert "build_engines.py" in note, "and how to fix it, on the node that runs it"
+        assert "2 artefact(s)" in note
+        assert "build_engines.py --only ship_detector" in note, "the one it can build"
+        assert "ship_embedder/model.plan" in note, "and the one it cannot, named separately"
+        assert "README.md" in note, "pointed at the instruction that is true for it"
+        assert "build_engines.py --only ship_embedder" not in note, "which would exit 2"
+
+    def test_a_pytorch_model_asks_for_its_own_artefact(
+        self, chain_file: Path, tmp_path: Path, capsys
+    ) -> None:
+        """The offline tier's own repository is `platform: pytorch` with a `model.pt` in each
+        version dir (`tests/support/models.py`), and a check that asked every model for
+        `model.plan` reported four missing artefacts for a repository with nothing wrong with
+        it -- and prescribed a TensorRT build for a chain running TorchScript."""
+        root = tmp_path / "torch_repo"
+        for name in ("ship_detector", "ship_embedder"):
+            (root / name / "1").mkdir(parents=True)
+            (root / name / "config.yaml").write_text(
+                (REPOSITORY / name / "config.yaml")
+                .read_text(encoding="utf-8")
+                .replace("platform: tensorrt", "platform: pytorch"),
+                encoding="utf-8",
+            )
+            (root / name / "1" / "model.pt").write_bytes(b"a scripted module")
+
+        assert plan(chain_file, root, tmp_path / "chain.plan") == 0
+
+        assert capsys.readouterr().err == "", "every artefact its backend loads is present"
+
+    def test_an_onnx_a_tensorrt_model_will_be_built_from_is_not_missing(
+        self, chain_file: Path, bare: Path, tmp_path: Path, capsys
+    ) -> None:
+        """`resolve_engine` compiles a sibling `.onnx` at load, keyed to this TensorRT, GPU
+        and precision -- and the README tells an operator to drop one there. So a version
+        directory holding one is complete, and a note about the plan would fire forever."""
+        for name in ("ship_detector", "ship_embedder"):
+            (bare / name / "1" / "model.onnx").write_bytes(b"an onnx graph")
+
+        assert plan(chain_file, bare, tmp_path / "chain.plan") == 0
+
+        assert capsys.readouterr().err == ""
 
     def test_the_plan_is_still_written(
         self, chain_file: Path, bare: Path, tmp_path: Path
