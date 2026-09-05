@@ -1577,14 +1577,21 @@ class PoolSegment(_PoolCropElement):
     def _resolve_output(self) -> str:
         """The name of the folded quantity, which is not one of the model's outputs.
 
-        Every other crop element names a model output because the model computed the rows it
-        scatters. This one scatters a number the engine has no name for, so the slot's
-        ``params: {output: ...}`` renames the *fold's* key and the default is the fold's own.
-        Overridden rather than special-cased in the base: the base's refusal ("a multi-output
-        model must say which output holds one row per crop") is exactly wrong here, since a
-        segmentation engine has two outputs by construction and both are read.
+        Overridden rather than special-cased in the base, whose refusal ("a multi-output model
+        must say which output holds one row per crop") is exactly wrong for an engine with two
+        by construction. ``params: {output: ...}`` is REFUSED rather than honoured: it renamed
+        a key that never leaves this element -- `_finish` scatters by row index under
+        `meta_key`, and the sink publishes `mask_area_px` whatever the slot said -- so it
+        changed nothing observable (`SEGMENT-FOLD-OUTPUT-NAMES-DO-NOT-CROSS`).
         """
-        return str(self.params.get("output") or _fold_defaults()["name"])
+        if self.params.get("output"):
+            raise ConfigurationError(
+                f"{self.kind.value} element {self.name!r}: `params: output:` names which of a "
+                f"model's outputs holds one row per crop, and this element folds TWO of them "
+                f"into a quantity the engine has no name for. The published field is "
+                f"`mask_area_px` either way, so this key would change nothing; remove it"
+            )
+        return str(_fold_defaults()["name"])
 
     def _do_open(self, context: ElementContext) -> None:
         """Build the fold once the crop size is known, since it is one of its arguments.
@@ -1678,6 +1685,8 @@ class PoolSegment(_PoolCropElement):
         try:
             return InstanceMaskArea(
                 crop_hw=(1, 1),
+                detections=str(settings.get("detections", defaults["detections"])),
+                prototypes=str(settings.get("prototypes", defaults["prototypes"])),
                 score_threshold=float(
                     settings.get("score_threshold", defaults["score_threshold"])
                 ),

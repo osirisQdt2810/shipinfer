@@ -1142,7 +1142,12 @@ class TestTheSegmenterFoldsTwoOutputsIntoOneAreaPerRow:
         default off the class gives a descriptor, and `str()` of one does not raise.
         """
         assert segmenter(FakeSegmenter())._output == "mask_area_px"
-        assert segmenter(FakeSegmenter(), params={"output": "hull_px"})._output == "hull_px"
+
+        # And `params: {output: ...}` is REFUSED rather than honoured: it renamed a key that
+        # never leaves this element -- `_finish` scatters under `meta_key` and the sink
+        # publishes `mask_area_px` either way -- so it was a knob that changed nothing.
+        with pytest.raises(ConfigurationError, match="would change nothing"):
+            segmenter(FakeSegmenter(), params={"output": "hull_px"})
 
     def test_a_misspelt_engine_output_is_refused_at_open(self) -> None:
         """`outpu0` would otherwise open, report the shard ready, and then fail every frame of
