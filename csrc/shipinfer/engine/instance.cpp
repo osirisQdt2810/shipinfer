@@ -193,9 +193,10 @@ namespace shipinfer {
         const int64_t end_ns = monotonic_ns();
 
         // Scatter: every output row returns to the request that produced it. Get it wrong and
-        // two cameras' detections swap places, and nothing crashes.
-        const size_t out_width = engine_->output_row_elems();
-        const float* out = engine_->output();
+        // two cameras' detections swap places, and nothing crashes. EVERY output, not just the
+        // first: they are all `rows` long, so one span selects one request's slice of each,
+        // and a segmentation engine's prototypes travel beside its detection rows.
+        const size_t out_count = engine_->outputs();
         const int64_t completed_ns = monotonic_ns();
         for (size_t i = 0; i < items.size(); ++i) {
             WorkItem& item = items[i];
@@ -203,9 +204,17 @@ namespace shipinfer {
             response.model_name = name_;
             response.tag = item.request().tag;
             response.rows = spans[i].second - spans[i].first;
-            response.row_elems = out_width;
-            response.data.assign(out + spans[i].first * out_width,
-                                 out + spans[i].second * out_width);
+            response.outputs.reserve(out_count);
+            for (size_t o = 0; o < out_count; ++o) {
+                const size_t width = engine_->output_row_elems(o);
+                const float* out = engine_->output(o);
+                OutputTensor tensor;
+                tensor.name = engine_->output_name(o);
+                tensor.row_elems = width;
+                tensor.dims = engine_->output_dims(o);
+                tensor.data.assign(out + spans[i].first * width, out + spans[i].second * width);
+                response.outputs.push_back(std::move(tensor));
+            }
             response.executed_on = engine_->device();
             response.timings.received_ns = item.request().received_ns;
             response.timings.queued_ns = item.enqueued_ns();
