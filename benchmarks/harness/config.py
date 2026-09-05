@@ -24,15 +24,12 @@ them, because they bound what the final number means:
 * **``batch`` is advisory for ShipInfer.** A TensorRT plan carries its own batch dimension,
   so the server's batch size is a property of the artefact, not of this config. The field is
   kept because it is what the baseline is *told*, and both must be told the same thing.
-* **``instances_per_gpu`` has to be kept in step by hand.** ShipInfer's instance count comes
-  from each model's ``config.yaml``, so one repository runs unchanged on a 4-GPU box and a
-  16-GPU node (ADR-006); the baseline takes a *total* on its command line. This field is the
-  translation, and it is the one number in this file that can silently make the comparison
-  unfair: it read ``4`` total across four GPUs — one thread per GPU per module — while our
-  detector ran ``count: 2, streams: 2`` on every one of them. The baseline could not overlap
-  a host-to-device copy with compute and we could, in the one measurement this repository
-  exists to produce. It now mirrors the repository, and ``concurrency_note`` prints both
-  figures so a reader can check rather than trust.
+* **``instances_per_gpu`` is READ from the repository**, no longer kept in step by hand. Our
+  count comes from each model's ``config.yaml`` (ADR-006) and the baseline takes a *total* on
+  its command line, so this field is the translation — and it is the one number here that can
+  silently make the comparison unfair. It has been wrong twice: ``4`` total across four GPUs
+  against our ``count: 2`` per GPU, and later ``seg: 1`` against a repository saying ``2``.
+  ``concurrency_note`` prints both figures so a reader can check rather than trust.
 
 ``cameras`` is split in half on purpose. The baseline runs person frames through the
 detector and ship frames through the segmenter as two unrelated streams, so at 50 workers it
@@ -51,7 +48,7 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
-__all__ = ["BenchConfig", "Resolution"]
+__all__ = ["MODULE_MODELS", "BenchConfig", "Resolution", "read_instances_per_gpu"]
 
 #: The frame sets that ship with ``benchmarks/baseline``. Both are 1920x1080 JPEGs; ``4k``
 #: is the same content upscaled by the baseline's own ``change_image_resolution.py``.
@@ -78,6 +75,54 @@ def _digest(path: Path) -> str:
 def _repo_root() -> Path:
     """The repository root, whether the harness runs from the host or from ``/work``."""
     return Path(__file__).resolve().parents[2]
+
+
+#: The baseline's module vocabulary -> the repository model each one stands for. The baseline
+#: knows two stages; we run four, and only these two are the ones it is given threads for.
+MODULE_MODELS: Mapping[str, str] = {"det": "ship_detector", "seg": "ship_segmenter"}
+
+
+def read_instances_per_gpu(repository: Path) -> dict[str, int]:
+    """Each baseline module's per-GPU instance count, READ FROM THE REPOSITORY.
+
+    `instance_groups` is where the number is decided (ADR-006: one repository runs unchanged
+    on a 4-GPU box and a 16-GPU node), the baseline takes a total on its command line, and
+    this file's header calls the translation "the one number in this file that can silently
+    make the comparison unfair". It was kept in step by hand and drifted -- so it is read.
+
+    `repository/resolved.py` is the reader, the same one `shipinfer plan` uses, and it works
+    on a driverless box because an instance COUNT is config rather than hardware.
+
+    REFUSES rather than substituting a number: "no repository", "one that will not parse" and
+    "one that says 2" are three different events, and a *plausible* wrong concurrency is the
+    whole subject here.
+
+    Raises:
+        ConfigurationError: unreadable, or a module's model declares no device instances.
+    """
+    from shipinfer.core.errors import ConfigurationError
+    from shipinfer.repository import ModelRepository
+    from shipinfer.repository.resolved import model_runtimes
+
+    try:
+        runtimes = model_runtimes(ModelRepository.load(repository))
+    except Exception as error:
+        raise ConfigurationError(
+            f"cannot read {repository} for the baseline's per-GPU instance counts ({error}). "
+            f"That number decides how much concurrency the baseline is given, so guessing it "
+            f"is how the comparison became unfair the last two times"
+        ) from None
+    missing = [
+        model
+        for model in MODULE_MODELS.values()
+        if model not in runtimes or runtimes[model].instances is None
+    ]
+    if missing:
+        raise ConfigurationError(
+            f"{missing} declare no device instances in {repository}; the baseline's worker "
+            f"count is not derivable from a repository that asks for none"
+        )
+    return {module: runtimes[model].instances for module, model in MODULE_MODELS.items()}
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,13 +153,16 @@ class BenchConfig:
     #: How often the buffer occupancy is sampled. 1.0 s is the baseline's own cadence and
     #: changing it would make the two logs incomparable.
     sample_interval_s: float = 1.0
-    #: Inference instances **per GPU**, per module, mirroring `model_repository/*/config.yaml`.
-    #: This is not a tuning knob: it is how the baseline is given the same concurrency we
-    #: give ourselves. It read 4 *total* across 4 GPUs — one thread per GPU per module —
-    #: while our detector runs `count: 2, streams: 2` on each of them, so the baseline could
-    #: not overlap H2D with compute per device and we could. An asymmetry in our favour, in
-    #: the one measurement this repository exists to produce.
-    instances_per_gpu: Mapping[str, int] = field(default_factory=lambda: {"det": 2, "seg": 1})
+    # doc: long the field is empty by default and that needs its reason
+    #: Inference instances **per GPU**, per module: how the baseline is given the same
+    #: concurrency we give ourselves. Not a tuning knob.
+    #:
+    #: EMPTY BY DEFAULT, and `resolved()` fills it from `model_repository/*/config.yaml`. The
+    #: literal it replaced said `seg: 1` while the repository said `count: 2`, so on a 7-GPU
+    #: box the baseline got seven segmenter threads where we ran fourteen.
+    #:
+    #: Set it explicitly to override; `resolved()` leaves a non-empty mapping alone.
+    instances_per_gpu: Mapping[str, int] = field(default_factory=dict)
     #: OpenMP threads, applied to **both** systems or to neither. Previously pinned to 1 on
     #: the baseline process only, while our torch pre-processing had the whole box — and the
     #: baseline letterboxes on the CPU inside those same threads, so the pin plausibly *was*
@@ -226,19 +274,35 @@ class BenchConfig:
                     f"gives each shard one GPU"
                 )
 
+    def module_instances(self) -> Mapping[str, int]:
+        """``instances_per_gpu``, filled from the repository if the caller left it empty.
+
+        Not only in `resolved()`: an unresolved config still has to answer this, and a
+        `concurrency_note` that printed nothing would remove the line the reader checks the
+        fairness with -- worse than the stale literal it replaced.
+        """
+        if self.instances_per_gpu:
+            return self.instances_per_gpu
+        repository = self.model_repository or _repo_root() / "model_repository"
+        return read_instances_per_gpu(repository)
+
     def workers_for(self, module: str) -> int:
         """Baseline inference threads for one module: instances per GPU x GPUs.
 
         The baseline takes a total, we configure per GPU, and the comparison is only fair
         if the two describe the same machine.
         """
-        return max(1, self.instances_per_gpu.get(module, 1) * len(self.gpus))
+        return max(1, self.module_instances().get(module, 1) * len(self.gpus))
 
     @property
     def concurrency_note(self) -> str:
         """One line for the report, so the reader can check the fairness themselves."""
-        per_gpu = ", ".join(f"{k}={v}/gpu" for k, v in sorted(self.instances_per_gpu.items()))
-        total = ", ".join(f"{k}={self.workers_for(k)}" for k in sorted(self.instances_per_gpu))
+        # Read ONCE and used for both halves: `workers_for` re-enters `module_instances()`,
+        # so the two numbers on this line came from two independent reads of the same file.
+        instances = self.module_instances()
+        gpus = len(self.gpus)
+        per_gpu = ", ".join(f"{k}={v}/gpu" for k, v in sorted(instances.items()))
+        total = ", ".join(f"{k}={max(1, v * gpus)}" for k, v in sorted(instances.items()))
         pin = "unpinned" if self.omp_threads is None else f"OMP_NUM_THREADS={self.omp_threads}"
         return f"concurrency: {per_gpu} (baseline totals {total}); both sides {pin}"
 
@@ -294,13 +358,23 @@ class BenchConfig:
         root = _repo_root()
         person_dir, ship_dir = _RESOLUTION_FOLDERS[self.resolution]
         data = root / "benchmarks" / "baseline" / "data"
+        repository = self.model_repository or root / "model_repository"
+        # TOLERANT here, strict at the point of use: `resolved()` is documented as usable
+        # where the artefacts are absent, so it leaves the field EMPTY and
+        # `module_instances()` refuses when somebody needs the number. What never happens
+        # either way is a plausible made-up count.
+        try:
+            resolved_instances = read_instances_per_gpu(repository)
+        except Exception:
+            resolved_instances = {}
         return replace(
             self,
             person_frames=self.person_frames or data / person_dir,
             ship_frames=self.ship_frames or data / ship_dir,
             det_engine=self.det_engine or root / "models" / "yolo26n_fp32.engine",
             seg_engine=self.seg_engine or root / "models" / "yolo26n-seg_fp32.engine",
-            model_repository=self.model_repository or root / "model_repository",
+            model_repository=repository,
+            instances_per_gpu=self.instances_per_gpu or resolved_instances,
         )
 
     def require_inputs(self) -> None:
@@ -394,6 +468,7 @@ class BenchConfig:
     def as_dict(self) -> dict[str, Any]:
         """JSON-safe, and the thing written into every log's metadata line."""
         resolved = self.resolved()
+        instances = resolved.module_instances()
         return {
             "cameras": self.cameras,
             "fps": self.fps,
@@ -402,8 +477,12 @@ class BenchConfig:
             "seconds": self.seconds,
             "warmup_s": self.warmup_s,
             "sample_interval_s": self.sample_interval_s,
-            "instances_per_gpu": dict(self.instances_per_gpu),
-            "baseline_workers": {k: self.workers_for(k) for k in self.instances_per_gpu},
+            # Through `module_instances()`, not the raw field: this is "the thing written
+            # into every log's metadata line", and an UNRESOLVED config would otherwise record
+            # an empty concurrency -- the exact hazard `module_instances` exists for, one
+            # method along, and a second source for the number this PR consolidated.
+            "instances_per_gpu": dict(instances),
+            "baseline_workers": {k: self.workers_for(k) for k in instances},
             "omp_threads": self.omp_threads,
             "buffer_capacity": self.buffer_capacity,
             "pipeline_workers": self.pipeline_workers,
