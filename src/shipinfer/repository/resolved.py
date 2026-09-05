@@ -83,9 +83,7 @@ def _device_instances(config: ModelConfig) -> int | None:
     and the consumer refuses by name rather than being handed a zero.
     """
     counts = [
-        group.count
-        for group in config.instance_groups
-        if group.kind is not InstanceKind.CPU
+        group.count for group in config.instance_groups if group.kind is not InstanceKind.CPU
     ]
     if not config.instance_groups:
         return 1  # `instance_groups: []` is the default single instance, as `expand` treats it

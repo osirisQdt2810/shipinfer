@@ -23,9 +23,7 @@ def plan(topology: Path, repository: Path, out: Path | None = None) -> int:
     chain = load_topology(topology)
     models = ModelRepository.load(repository)
     text = plan_text(
-        resolve_plan(
-            chain, dims=model_extents(models), runtimes=model_runtimes(models)
-        )
+        resolve_plan(chain, dims=model_extents(models), runtimes=model_runtimes(models))
     )
     if out is None:
         print(text, end="")
