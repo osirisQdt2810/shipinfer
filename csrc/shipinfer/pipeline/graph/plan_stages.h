@@ -66,6 +66,12 @@ namespace shipinfer {
 
     // The payload a crop element consumes, and the batch its model publishes. Derived once so
     // `<slot>_crops` and `<slot>_out` cannot drift between the two readers.
+    // Which KINDS this plane runs at all: a detector, and the two that crop per detection.
+    // Exported because `cli/bench.cpp` builds its model list from the same plan and asked the
+    // same question -- and a second copy of the answer is how one door runs a slot the other
+    // reports as "not run here".
+    bool plane_runs(const std::string& kind);
+
     std::string crop_payload_of(const std::string& slot);
     std::string output_of(const std::string& slot);
 

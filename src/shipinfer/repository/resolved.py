@@ -65,7 +65,11 @@ def _runtime_of(repository: ModelRepository, name: str) -> ModelRuntime:
     entry = repository.entry(name)
     config = entry.config
     batching = config.dynamic_batching
-    engine_file = str(config.parameters.get("engine_file", "model.plan"))
+    # The CONFIGURED artefact, not always the one a backend loads: a version directory holding
+    # only an `.onnx` has `resolve_engine` build a plan at load, which needs a live TensorRT
+    # and a device -- neither of which a driverless control plane has
+    # (`ARTEFACT-NOT-BUILT-YET`).
+    engine_file = config.engine_file
     return ModelRuntime(
         extent=_extent_of(config),
         instances=_device_instances(config),

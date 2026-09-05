@@ -26,6 +26,7 @@
 #include "shipinfer/ingest/sources/replay.h"
 #include "shipinfer/obs/sampler.h"
 #include "shipinfer/pipeline/events/records.h"
+#include "shipinfer/pipeline/graph/bench_models.h"
 #include "shipinfer/pipeline/graph/dag.h"
 #include "shipinfer/pipeline/graph/from_plan.h"
 #include "shipinfer/pipeline/graph/plan.h"
@@ -100,15 +101,6 @@ namespace {
         FairPriorityQueue<FrameWork>& queue_;
     };
 
-    // One model to load: what the plan says, resolved to a path this process can open.
-    struct ModelSpec {
-        std::string name;
-        std::string engine;
-        int per_device = 1;
-        int queue_delay_us = 0;
-        std::vector<int64_t> fed_row;
-    };
-
     struct Options {
         std::string person_frames;
         std::string ship_frames;
@@ -151,92 +143,20 @@ namespace {
         double sample_interval_s = 1.0;
     };
 
-    // The engine each slot runs, by the two spellings this binary accepts.
-    std::string engine_path_of(const PlanNode& node, const Options& options) {
-        if (!options.repository.empty() && !node.artefact.empty()) {
-            return options.repository + "/" + node.artefact;
-        }
-        // No repository: the four flags, matched by MODEL name. Kept for the run that has an
-        // engine and no repository. Under `--repository` an empty `artefact` is REFUSED
-        // rather than skipped -- see `bench_models` -- because the operator who passed a
-        // repository asked for the plan's artefacts, and a slot quietly reported "not run
-        // here" is a measurement of a shorter chain than the one that was named.
-        if (node.model == "ship_detector") return options.det_plan;
-        if (node.model == "ship_segmenter") return options.seg_plan;
-        if (node.model == "person_embedder") return options.emb_plan;
-        if (node.model == "ship_embedder") return options.ship_emb_plan;
-        return "";
-    }
-
-    // The default instance count for a model this binary has always had a flag for. Used only
-    // where the plan carries no `instances` line, which is a plan resolved with no repository.
-    int argv_instances_of(const PlanNode& node, const Options& options) {
-        if (node.model == "ship_detector") return options.det_instances;
-        if (node.model == "ship_segmenter") return options.seg_instances;
-        if (node.model == "person_embedder") return options.emb_instances;
-        if (node.model == "ship_embedder") return options.ship_emb_instances;
-        return 1;
-    }
-
-    // What the model is fed, per row: `(3, H, W)` from the slot's own geometry. The plan
-    // carries it (`crop`/`letterbox`), so the hard-coded table this replaced -- 640x640 for
-    // two named models and 256x128 for the other two -- is gone with the rest of the graph
-    // ADR-020 deleted.
-    std::vector<int64_t> fed_row_of(const PlanNode& node) {
-        const std::optional<Extent>& extent = node.crop ? node.crop : node.letterbox;
-        if (!extent) {
-            throw ConfigError("slot '" + node.slot + "' runs model '" + node.model +
-                              "' and the plan states no crop or letterbox extent for it, so "
-                              "this process cannot say what the engine is fed");
-        }
-        return {3, extent->height, extent->width};
-    }
-
-    // Every model-bearing slot the plan declares, deduplicated by MODEL: two slots may name
-    // one model (a chain with two detectors), and loading its engine twice would pay for the
-    // weights twice on every device.
-    std::vector<ModelSpec> bench_models(const ResolvedPlan& plan, const Options& options) {
-        std::vector<ModelSpec> specs;
-        for (const PlanNode& node : plan.nodes) {
-            if (node.model.empty()) continue;
-            const std::vector<int64_t> fed_row = fed_row_of(node);
-            const auto seen =
-                std::find_if(specs.begin(), specs.end(),
-                             [&node](const ModelSpec& s) { return s.name == node.model; });
-            if (seen != specs.end()) {
-                // The dedup is deliberate -- one engine per device, weights paid once -- but
-                // the geometry is per SLOT, and two slots may name one model at different
-                // extents (`branching.yaml` crops `ship_segmenter` at 512 where
-                // `ship_person_cpu.yaml` crops it at 640). Feeding the second slot's rows at
-                // the first's shape is a silent wrong answer, so it is refused.
-                if (seen->fed_row != fed_row) {
-                    throw ConfigError("slot '" + node.slot + "' feeds model '" + node.model +
-                                      "' rows of a different extent than an earlier slot "
-                                      "does; one engine is loaded per model, so its input "
-                                      "shape has to be one shape");
-                }
-                continue;
-            }
-            ModelSpec spec;
-            spec.name = node.model;
-            spec.engine = engine_path_of(node, options);
-            if (spec.engine.empty()) {
-                if (!options.repository.empty()) {
-                    throw ConfigError("slot '" + node.slot + "' runs model '" + node.model +
-                                      "' and the plan states no `artefact` for it, so "
-                                      "--repository cannot resolve an engine. Re-run "
-                                      "`shipinfer plan` against the repository");
-                }
-                continue;  // no flag named it: this run does not run it
-            }
-            spec.per_device =
-                node.instances ? *node.instances : argv_instances_of(node, options);
-            spec.queue_delay_us =
-                node.queue_delay_us ? *node.queue_delay_us : options.batch_delay_us;
-            spec.fed_row = fed_row;
-            specs.push_back(spec);
-        }
-        return specs;
+    // How this binary's flags fill `BenchEngines`, which is the only place they are read.
+    BenchEngines engines_of(const Options& options) {
+        BenchEngines engines;
+        engines.repository = options.repository;
+        engines.detector = options.det_plan;
+        engines.segmenter = options.seg_plan;
+        engines.person_embedder = options.emb_plan;
+        engines.ship_embedder = options.ship_emb_plan;
+        engines.batch_delay_us = options.batch_delay_us;
+        engines.detector_instances = options.det_instances;
+        engines.segmenter_instances = options.seg_instances;
+        engines.person_embedder_instances = options.emb_instances;
+        engines.ship_embedder_instances = options.ship_emb_instances;
+        return engines;
     }
 
     std::vector<int> parse_ints(const std::string& csv) {
@@ -336,7 +256,14 @@ namespace {
         return options;
     }
 
-    std::string meta_json(const Options& options, const std::vector<std::string>& stages) {
+    // The run record's first line. `benchmarks/harness/sampler.py` states its contract: it
+    // records "the configuration, the resolved artefact paths ... and -- the reason it exists
+    // -- which pipeline stages were actually wired", so "the omission travels with the data".
+    // Which means the numbers the PLAN owns have to be in it: this printed one global
+    // `batch_delay_us` that no instance used once the windows came per model, so two runs a
+    // month apart could differ in every window and say the same thing.
+    std::string meta_json(const Options& options, const std::vector<std::string>& stages,
+                          const std::vector<BenchModel>& models) {
         std::ostringstream out;
         out << "{\"meta\": {\"system\": \"cpp\", \"config\": {";
         out << "\"cameras\": " << options.cameras;
@@ -344,13 +271,25 @@ namespace {
         out << ", \"seconds\": " << options.seconds;
         out << ", \"workers\": " << options.workers;
         out << ", \"buffer_capacity\": " << options.queue_capacity;
-        out << ", \"batch_delay_us\": " << options.batch_delay_us;
+        if (options.repository.empty()) {
+            // The real answer only on the flag path; under `--repository` every instance took
+            // its window from the plan and this number is the binary's own default.
+            out << ", \"batch_delay_us\": " << options.batch_delay_us;
+        }
         out << ", \"policy\": \"" << options.policy << "\"";
         out << ", \"gpus\": [";
         for (size_t i = 0; i < options.devices.size(); ++i) {
             out << (i ? ", " : "") << options.devices[i];
         }
-        out << "]}, \"stages\": [";
+        out << "]}, \"models\": [";
+        for (size_t i = 0; i < models.size(); ++i) {
+            const BenchModel& model = models[i];
+            out << (i ? ", " : "") << "{\"name\": \"" << model.name << "\"";
+            out << ", \"engine\": \"" << model.engine << "\"";
+            out << ", \"instances_per_device\": " << model.per_device;
+            out << ", \"queue_delay_us\": " << model.queue_delay_us << "}";
+        }
+        out << "], \"stages\": [";
         for (size_t i = 0; i < stages.size(); ++i)
             out << (i ? ", " : "") << "\"" << stages[i] << "\"";
         out << "], \"note\": \"C++ data plane; tracking and fused kernels are NOT in this "
@@ -378,11 +317,11 @@ int main(int argc, char** argv) {
         // instance counts and the head-to-head was not like for like.
         const ResolvedPlan plan =
             options.plan_path.empty() ? default_bench_plan() : read_plan(options.plan_path);
-        const std::vector<ModelSpec> specs = bench_models(plan, options);
+        const std::vector<BenchModel> specs = bench_models(plan, engines_of(options));
         std::cerr << "loading engines...\n";
         const auto load_start = std::chrono::steady_clock::now();
         std::map<std::string, std::unique_ptr<Model>> models;
-        for (const ModelSpec& spec : specs) {
+        for (const BenchModel& spec : specs) {
             if (spec.engine.empty()) continue;
             std::vector<std::unique_ptr<ModelInstance>> instances;
             for (int device : options.devices) {
@@ -539,7 +478,7 @@ int main(int argc, char** argv) {
                 }
                 return row;
             },
-            options.sample_interval_s, meta_json(options, stage_names));
+            options.sample_interval_s, meta_json(options, stage_names, specs));
 
         // -- workers ----------------------------------------------------------------------
         std::atomic<bool> stopping{false};

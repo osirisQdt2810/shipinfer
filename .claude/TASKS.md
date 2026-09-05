@@ -2620,6 +2620,18 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       the design load, because an abort here is indistinguishable from a crash in a long run.
       Log: `.artifacts/cpp/p5b-round2.log` on `feat/plan-model-runtime` (PR #138).
 
+- [ ] **ARTEFACT-NOT-BUILT-YET · the plan states the CONFIGURED artefact, which is not
+      always the one a backend loads** (#138 review round 2, non-blocking 3). A version
+      directory holding only an `.onnx` has `resolve_engine`
+      (`backends/tensorrt/autobuild.py`) build a plan at load, keyed to this TensorRT, GPU and
+      precision -- and that needs a live TensorRT and a device, which the control plane
+      writing a plan on a driverless box does not have. `git ls-files model_repository` shows
+      the shipped version dirs carry only a `README.md`, so this is the ordinary state of a
+      fresh checkout. The C++ plane then refuses by path: loud, but late -- the operator
+      learns at bench start-up that an engine has to be built. Options: carry the ONNX name
+      too and refuse with the build command in the message, or have `shipinfer plan` refuse at
+      write time when the named artefact is absent.
+
 - [ ] **SEGMENT-NO-CLASSES-ASYMMETRY** — a chain with ONE segment slot and no `classes:`
       loads on the Python plane (it means "segment every row") and is REFUSED by the C++ plane
       (`csrc/.../plan_stages.cpp::class_of`, added in #132's review, because "every row" is a
