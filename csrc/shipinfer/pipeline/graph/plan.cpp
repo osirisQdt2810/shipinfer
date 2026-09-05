@@ -1,5 +1,6 @@
 #include "shipinfer/pipeline/graph/plan.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cmath>
 #include <cstdlib>
@@ -215,11 +216,27 @@ namespace shipinfer {
                                   "'; expected one of artefact, classes, crop, edge, field, "
                                   "fold_detections, fold_mask, fold_prototypes, fold_score, "
                                   "instances, label, letterbox, max_detections, model, node, "
-                                  "per, plan, queue_delay_us, score, scope, when");
+                                  "per, plan, queue_delay_us, score, scope, setting, when");
             }
         }
 
     }  // namespace
+
+    const std::vector<std::pair<std::string, int PlanSettings::*>>& setting_keys() {
+        // Written order, matching `topology/plan.py`'s `SETTING_KEYS` -- the writer walks it,
+        // so a reordering here is a byte difference the parity gate catches immediately.
+        static const std::vector<std::pair<std::string, int PlanSettings::*>> keys{
+            {"workers", &PlanSettings::workers},
+            {"pipeline_queue", &PlanSettings::pipeline_queue},
+            {"instance_queue", &PlanSettings::instance_queue},
+            {"enqueue_block_timeout_ms", &PlanSettings::enqueue_block_timeout_ms},
+            {"stage_timeout_ms", &PlanSettings::stage_timeout_ms},
+            {"reassembly_capacity", &PlanSettings::reassembly_capacity},
+            {"reassembly_timeout_ms", &PlanSettings::reassembly_timeout_ms},
+            {"reassembly_sweep_ms", &PlanSettings::reassembly_sweep_ms},
+        };
+        return keys;
+    }
 
     const PlanNode* ResolvedPlan::node(const std::string& slot) const {
         for (const PlanNode& candidate : nodes) {
@@ -238,6 +255,8 @@ namespace shipinfer {
     ResolvedPlan parse_plan(const std::string& text, const std::string& source) {
         ResolvedPlan plan;
         bool header_seen = false;
+        PlanSettings settings;
+        std::vector<std::string> settings_seen;
         std::istringstream stream(text);
         std::string raw;
         for (int number = 1; std::getline(stream, raw); ++number) {
@@ -267,6 +286,28 @@ namespace shipinfer {
                 header_seen = true;
             } else if (!header_seen) {
                 throw ConfigError(where + ": `" + verb + "` before the `plan` header");
+            } else if (verb == "setting") {
+                want(args, 2, where, "setting <key> <value>");
+                const auto& keys = setting_keys();
+                const auto found = std::find_if(keys.begin(), keys.end(), [&](const auto& e) {
+                    return e.first == args[0];
+                });
+                if (found == keys.end()) {
+                    std::string known;
+                    for (const auto& [key, _] : keys)
+                        known += (known.empty() ? "" : ", ") + key;
+                    throw ConfigError(where + ": unknown setting '" + args[0] +
+                                      "'; this plan states a value this reader would not use, "
+                                      "and silently dropping it is how the two planes came to "
+                                      "run configurations neither file described. Known: " +
+                                      known);
+                }
+                if (std::find(settings_seen.begin(), settings_seen.end(), args[0]) !=
+                    settings_seen.end()) {
+                    throw ConfigError(where + ": a second `setting " + args[0] + "`");
+                }
+                settings_seen.push_back(args[0]);
+                settings.*(found->second) = as_int(args[1], where);
             } else if (verb == "label") {
                 // Also the rest of the line: `label 8 cargo ship` is one label, and a
                 // multi-word label is the normal case in this domain (COCO's `traffic
@@ -311,6 +352,27 @@ namespace shipinfer {
         if (!header_seen) {
             throw ConfigError(source + ": no `plan <version> <name>` header");
         }
+        // ALL OR NOTHING, as `topology/plan.py::_settings` is. A partial set would leave this
+        // reader defaulting the rest, which is the thing carrying them replaced -- and a plane
+        // that filled the gap silently is how the two came to disagree in the first place.
+        if (!settings_seen.empty()) {
+            std::string absent;
+            for (const auto& [key, _] : setting_keys()) {
+                if (std::find(settings_seen.begin(), settings_seen.end(), key) ==
+                    settings_seen.end()) {
+                    absent += (absent.empty() ? "" : ", ") + key;
+                }
+            }
+            if (!absent.empty()) {
+                throw ConfigError(source + ": the plan states " +
+                                  std::to_string(settings_seen.size()) + " of " +
+                                  std::to_string(setting_keys().size()) +
+                                  " settings and is missing [" + absent +
+                                  "]. A reader would have to default those, which is what "
+                                  "carrying them replaced");
+            }
+            plan.settings = settings;
+        }
         // A `field` may only name a slot some `node` declared -- a READING question, so both
         // readers answer it and the shared table can carry the row. `plan_stages` keeps its
         // own refusal for a plan built in code (`bench.cpp`'s `default_plan`), which never
@@ -339,6 +401,11 @@ namespace shipinfer {
             "# A RESOLVED chain, written by `shipinfer plan` -- do not hand-edit.\n";
         out += "plan " + std::to_string(plan.version) + " " +
                (plan.name.empty() ? "-" : plan.name) + "\n";
+        if (plan.settings) {
+            for (const auto& [key, member] : setting_keys()) {
+                out += "setting " + key + " " + std::to_string((*plan.settings).*member) + "\n";
+            }
+        }
         for (const auto& [index, name] : plan.labels) {
             out += "label " + std::to_string(index) + " " + name + "\n";
         }
