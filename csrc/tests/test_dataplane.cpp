@@ -505,6 +505,128 @@ namespace {
         return worst;
     }
 
+    // The BGR crop reference, sampling NV12 instead. Deliberately a SEPARATE function rather
+    // than a parameter on the existing one: what makes a parity test mean anything is that the
+    // readable implementation was written from the convention and not from the kernel, and
+    // #155 is the round that proved sharing the arithmetic hides the bug in both halves.
+    std::vector<float> nv12_crop_reference(const std::vector<uint8_t>& nv12, int src_h,
+                                           int src_w, int stride, size_t uv_offset,
+                                           const std::vector<float>& boxes, int count,
+                                           int dst_h, int dst_w, bool swap_rb) {
+        std::vector<float> dst(static_cast<size_t>(count) * 3 * dst_h * dst_w, 0.f);
+        const int plane = dst_h * dst_w;
+        const uint8_t* uv = nv12.data() + uv_offset;
+        const auto bgr_at = [&](int yi, int xi, float* out) {
+            const float Y = (static_cast<float>(nv12[yi * stride + xi]) - 16.f) * 1.164383f;
+            const int cx = (xi / 2) * 2, cy = yi / 2;
+            const float U = static_cast<float>(uv[cy * stride + cx + 0]) - 128.f;
+            const float V = static_cast<float>(uv[cy * stride + cx + 1]) - 128.f;
+            out[0] = std::min(255.f, std::max(0.f, Y + 2.017232f * U));
+            out[1] = std::min(255.f, std::max(0.f, Y - 0.391762f * U - 0.812968f * V));
+            out[2] = std::min(255.f, std::max(0.f, Y + 1.596027f * V));
+        };
+        for (int n = 0; n < count; ++n) {
+            const int x1 =
+                static_cast<int>(std::min(std::max(boxes[n * 4 + 0], 0.f), src_w - 1.f));
+            const int y1 =
+                static_cast<int>(std::min(std::max(boxes[n * 4 + 1], 0.f), src_h - 1.f));
+            const int x2 =
+                static_cast<int>(std::min(std::max(boxes[n * 4 + 2], 0.f), src_w - 1.f));
+            const int y2 =
+                static_cast<int>(std::min(std::max(boxes[n * 4 + 3], 0.f), src_h - 1.f));
+            const int box_w = x2 - x1, box_h = y2 - y1;
+            float* out = dst.data() + static_cast<size_t>(n) * 3 * plane;
+            if (box_w <= 0 || box_h <= 0) continue;  // a black crop, as the kernel yields
+            for (int y = 0; y < dst_h; ++y) {
+                for (int x = 0; x < dst_w; ++x) {
+                    const float lx =
+                        std::max(0.f, (x + 0.5f) * static_cast<float>(box_w) / dst_w - 0.5f);
+                    const float ly =
+                        std::max(0.f, (y + 0.5f) * static_cast<float>(box_h) / dst_h - 0.5f);
+                    const int px0 = std::min(static_cast<int>(lx), box_w - 1);
+                    const int py0 = std::min(static_cast<int>(ly), box_h - 1);
+                    const int px1 = std::min(px0 + 1, box_w - 1);
+                    const int py1 = std::min(py0 + 1, box_h - 1);
+                    const float wx = lx - px0, wy = ly - py0;
+                    float p00[3], p01[3], p10[3], p11[3];
+                    bgr_at(y1 + py0, x1 + px0, p00);
+                    bgr_at(y1 + py0, x1 + px1, p01);
+                    bgr_at(y1 + py1, x1 + px0, p10);
+                    bgr_at(y1 + py1, x1 + px1, p11);
+                    for (int c = 0; c < 3; ++c) {
+                        const int sc = swap_rb ? (2 - c) : c;
+                        const float value = (p00[sc] * (1.f - wx) + p01[sc] * wx) * (1.f - wy) +
+                                            (p10[sc] * (1.f - wx) + p11[sc] * wx) * wy;
+                        out[c * plane + y * dst_w + x] = value / 255.f;
+                    }
+                }
+            }
+        }
+        return dst;
+    }
+
+    void test_the_nv12_crop_kernel_agrees_with_the_reference() {
+        // A PADDED surface, because that is what NVDEC hands back and the padding is what the
+        // kernel could get wrong: 90 displayed rows decoded at 96, the 1080/1088 relationship.
+        const int src_h = 90, src_w = 160, stride = 192, coded_h = 96, dst = 32;
+        const size_t uv_offset = static_cast<size_t>(stride) * coded_h;
+        std::vector<uint8_t> host(uv_offset + static_cast<size_t>(stride) * src_h / 2);
+        for (size_t i = 0; i < host.size(); ++i)
+            host[i] = static_cast<uint8_t>(16 + (i * 29) % 220);
+
+        // Three boxes and one of them degenerate, because a zero-area detection is data.
+        const std::vector<float> boxes{10.f, 8.f,  60.f, 48.f,   // an ordinary box
+                                       -5.f, -5.f, 40.f, 30.f,   // clipped at the origin
+                                       70.f, 20.f, 70.f, 20.f};  // zero area -> a black crop
+        const int count = 3;
+
+        uint8_t* device_src = nullptr;
+        float* device_boxes = nullptr;
+        float* device_dst = nullptr;
+        if (gpuMalloc(&device_src, host.size()) != gpuSuccess) {
+            skip("no CUDA device for the NV12 crop parity test");
+            return;
+        }
+        gpuMalloc(&device_boxes, boxes.size() * sizeof(float));
+        gpuMalloc(&device_dst, static_cast<size_t>(count) * 3 * dst * dst * sizeof(float));
+        gpuMemcpy(device_src, host.data(), host.size(), gpuMemcpyHostToDevice);
+        gpuMemcpy(device_boxes, boxes.data(), boxes.size() * sizeof(float),
+                  gpuMemcpyHostToDevice);
+
+        nv12_crop_resize_into(device_src, src_h, src_w, stride, uv_offset, device_boxes, count,
+                              device_dst, dst, dst, true, nullptr);
+        gpuDeviceSynchronize();
+        std::vector<float> got(static_cast<size_t>(count) * 3 * dst * dst);
+        gpuMemcpy(got.data(), device_dst, got.size() * sizeof(float), gpuMemcpyDeviceToHost);
+        const auto want = nv12_crop_reference(host, src_h, src_w, stride, uv_offset, boxes,
+                                              count, dst, dst, true);
+
+        double worst = 0;
+        for (size_t i = 0; i < got.size(); ++i)
+            worst = std::max(worst, static_cast<double>(std::fabs(got[i] - want[i])));
+        check_near(worst, 0.0, 1e-4,
+                   "the NV12 crop kernel matches the readable implementation, padded surface "
+                   "and clipped and degenerate boxes included");
+
+        // The degenerate box is black, and asserted separately: it is the one case where
+        // "matches the reference" could mean "both produce nothing".
+        const size_t third = static_cast<size_t>(2) * 3 * dst * dst;
+        double loudest = 0;
+        for (size_t i = 0; i < static_cast<size_t>(3) * dst * dst; ++i)
+            loudest = std::max(loudest, static_cast<double>(std::fabs(got[third + i])));
+        check_near(loudest, 0.0, 1e-9, "a zero-area box yields a black crop, not a wild read");
+        // And the ordinary box is NOT black, or the comparison above is vacuous.
+        double brightest = 0;
+        for (size_t i = 0; i < static_cast<size_t>(3) * dst * dst; ++i)
+            brightest = std::max(brightest, static_cast<double>(std::fabs(got[i])));
+        check(brightest > 0.01,
+              "while the ordinary box carries pixels: " + std::to_string(brightest));
+
+        gpuFree(device_src);
+        gpuFree(device_boxes);
+        gpuFree(device_dst);
+    }
+
     void test_the_nv12_kernel_addresses_a_padded_surface() {
         // 90 displayed rows decoded at 96 -- the same relationship 1080/1088 has, small enough
         // to keep the fixture cheap. The stride is padded too, as NVDEC's is.
@@ -677,6 +799,7 @@ int main() {
     test_the_crop_kernel_agrees_with_the_reference();
     test_the_nv12_letterbox_kernel_agrees_with_the_reference();
     test_the_nv12_kernel_addresses_a_padded_surface();
+    test_the_nv12_crop_kernel_agrees_with_the_reference();
     test_the_nv12_kernel_refuses_a_surface_it_cannot_address();
     test_a_degenerate_box_yields_a_black_crop();
     test_a_capture_during_attach_is_a_consistent_snapshot();

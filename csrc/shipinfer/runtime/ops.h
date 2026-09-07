@@ -71,4 +71,24 @@ namespace shipinfer {
                                      int dst_w, bool swap_rb, float pad_value,
                                      gpuStream_t stream);
 
+    // doc: long the crop's NV12 twin, and why converting once would be worse
+    // `crop_resize_into`'s NV12 twin: N boxes out of a decoder surface, each resized into a
+    // normalised NCHW row, with no BGR image in between.
+    //
+    // WITHOUT THIS the NV12 path stops at the detector. `crop_resize_into` indexes an HWC BGR
+    // array, so a graph fed an NVDEC surface would have to convert the whole frame once --
+    // ~6 MB of device temporary per 1080p frame, 6 GB/s at the design load, which is the cost
+    // `nv12_letterbox_into` exists to avoid one stage earlier. Sampling NV12 in place costs
+    // four chroma loads per output pixel and no allocation at all.
+    //
+    // Same conventions as the BGR twin, deliberately, so the two cannot disagree about a box:
+    // boxes are `[x1, y1, x2, y2]` in FRAME pixels, clipped then truncated; a degenerate box
+    // yields a black crop rather than a launch failure; sampling is bilinear with
+    // `align_corners=False` in patch coordinates. `uv_offset` is `stride * coded_height`, as
+    // above.
+    void nv12_crop_resize_into(const uint8_t* nv12_device, int src_h, int src_w, int stride,
+                               size_t uv_offset, const float* boxes_device, int count,
+                               float* dst_device, int dst_h, int dst_w, bool swap_rb,
+                               gpuStream_t stream);
+
 }  // namespace shipinfer
