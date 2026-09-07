@@ -23,8 +23,10 @@
 #pragma once
 
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include "shipinfer/core/buffers.h"
@@ -33,37 +35,60 @@
 
 namespace shipinfer {
 
-    // One camera's intake. Not thread-safe to CALL -- one actor thread owns a camera for its
-    // whole life (ADR-002) -- but a buffer is RETURNED from whichever worker finishes the
-    // frame, so the free list is behind a mutex.
+    // ONE GPU'S intake, shared by every camera decoding on it -- so `take` is called
+    // concurrently by every one of those actor threads, and everything shared is under
+    // `mutex_`. (It said "one camera's intake, not thread-safe to call" when this landed, which
+    // was true of neither and an invitation to add an unguarded field.) `gpuSetDevice` is
+    // per-thread and each caller states it, so no CUDA state is shared either.
+    //
+    // HELD THROUGH A `shared_ptr`, and that is a contract rather than a convenience: a frame's
+    // surface keeps its pool alive. The first version captured `this` in the deleter and argued
+    // that the sink outlives every frame -- which is false on the unwind path the whole of
+    // `core/join_on_unwind.h` exists for: the sink is declared AFTER the guard that stops the
+    // workers, so a throw between `manager.start()` and `queue.close()` destroys the pool while
+    // worker threads still hold surfaces, and every deleter then locks a destroyed mutex. There
+    // is no cycle to worry about: the free list holds buffers, never surfaces.
     class SurfaceIntake {
       public:
         // `device` is the GPU the decoder is on, and the one every buffer is allocated on: a
         // frame stays where it was decoded (ADR-004).
+        //
+        // `max_pooled` is per SIZE, because that is what a bucket is: a fleet of mixed
+        // resolutions holds one cap's worth of each rather than one cap between them.
         explicit SurfaceIntake(int device, size_t max_pooled = 8);
 
         // `image` copied into a pooled buffer. The returned surface owns that buffer and
-        // returns it to the pool when the last reference goes; the CALLER still holds
-        // `image.owner`, and dropping it is what gives the decode slot back.
+        // returns it to the pool when the last reference goes -- and holds `self` so the pool
+        // outlives it. The CALLER still holds `image.owner`, and dropping it is what gives the
+        // decode slot back.
+        //
+        // `self` must be the `shared_ptr` that owns `*this`; the static overload below is the
+        // reason this is not a plain member. `camera` names the camera in a refusal.
         //
         // Throws `ConfigError` if `image` is not a usable NV12 surface, and the typed CUDA
         // error if the copy fails -- never a surface with fewer bytes than it claims.
-        DeviceSurface take(const DeviceImage& image);
+        static DeviceSurface take(const std::shared_ptr<SurfaceIntake>& self,
+                                  const DeviceImage& image, const std::string& camera);
 
-        // How many buffers are sitting in the free list. For the gate that proves reuse: an
-        // allocation per frame at a thousand frames a second is the thing this class avoids.
+        // How many buffers are sitting in the free lists, across sizes. For the gate that
+        // proves reuse: an allocation per frame at a thousand frames a second is what this
+        // class avoids.
         size_t pooled() const;
 
       private:
-        // Returned by the deleter, or dropped if the pool is full or the size no longer
-        // matches. A cap because a stalled consumer must not turn into unbounded VRAM.
+        // Returned by the deleter, into ITS OWN SIZE'S bucket. A cap per bucket, because a
+        // stalled consumer must not turn into unbounded VRAM -- and keyed by size because one
+        // shared `bytes_` made a mixed-resolution fleet retire the whole list on every
+        // alternating frame: a `cudaMalloc` plus a `cudaFree` per frame, inside the mutex every
+        // camera on the GPU contends for, which is precisely what this class exists to prevent.
         void give_back(std::unique_ptr<DeviceBuffer> buffer);
 
         int device_;
         size_t max_pooled_;
         mutable std::mutex mutex_;
-        size_t bytes_ = 0;  // what the pooled buffers hold; a change empties the pool
-        std::vector<std::unique_ptr<DeviceBuffer>> free_;
+        //: Size -> the buffers of that size waiting to be reused. A resolution change retires
+        //: only its own bucket, and a fleet of two resolutions gets pool hits for both.
+        std::map<size_t, std::vector<std::unique_ptr<DeviceBuffer>>> free_;
     };
 
 }  // namespace shipinfer
