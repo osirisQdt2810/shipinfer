@@ -170,6 +170,79 @@ class TestOnlyGstLaneUnitsReachTheBus:
             assert self.HEADER in build_csrc.include_closure(unit), name
 
 
+class TestTheNvdecSectionsRunFirst:
+    """``test_ingest.cpp`` must exercise the NVDEC sections before anything gst-linked.
+
+    That order is the only thing in the tree that can notice a source which does not initialise
+    GStreamer itself. #156 shipped one, and the gate stayed green because the plugin probe and
+    the GStreamer source ran first and initialised the library on its behalf -- a test that
+    passed because of its neighbours, until the bench segfaulted on it.
+
+    A comment saying "do not move these back down" is what #156 relied on too. This is the
+    mechanical version, and it runs on a plain runner: no GStreamer, no GPU, no compiler.
+    """
+
+    INGEST = CSRC / "tests" / "test_ingest.cpp"
+
+    def _order(self) -> list[str]:
+        """The `test_*()` calls in `main()`, in the order the binary runs them."""
+        text = self.INGEST.read_text()
+        main = text[text.index("int main(") :]
+        calls = re.findall(r"^\s*(test_\w+)\(\);", main, re.M)
+        assert len(calls) > 20, f"parsed {len(calls)} calls from main(); the regex has drifted"
+        return calls
+
+    def _bodies(self) -> dict[str, str]:
+        """Each test function's source, from its signature to the next one's."""
+        text = self.INGEST.read_text()
+        starts = [
+            (m.group(1), m.start())
+            for m in re.finditer(r"^\s*void (test_\w+)\(\) \{", text, re.M)
+        ]
+        assert starts, "no test function definitions found"
+        ends = [at for _, at in starts[1:]] + [len(text)]
+        return {name: text[at:end] for (name, at), end in zip(starts, ends, strict=True)}
+
+    def _lane_of(self, body: str, table: dict[str, set[str]]) -> set[str]:
+        """Which lanes' sources this test BUILDS, by the names they register.
+
+        The lane's names come from `omitted_lanes.h` rather than a list here. What counts as
+        using one is narrower than mentioning it, and it has to be: a redaction test that puts
+        `"gstreamer"` in an error message reaches no library at all, and reading a bare literal
+        flagged it. So a use is the source being SELECTED -- assigned to a camera's `source`, or
+        asked of the registry -- which is what a test does immediately before building one.
+        """
+        used = set()
+        for lane, names in table.items():
+            for name in names:
+                selects = rf'(\.source\s*=\s*"{name}")|(SOURCES\(\)\.contains\("{name}"\))'
+                if re.search(selects, body):
+                    used.add(lane)
+        return used
+
+    def test_no_gst_lane_section_runs_before_an_nvdec_one(
+        self, cpp_table: dict[str, set[str]]
+    ) -> None:
+        table = cpp_table
+        bodies = self._bodies()
+        nvdec: list[int] = []
+        gstreamer: list[tuple[int, str]] = []
+        for index, name in enumerate(self._order()):
+            lanes = self._lane_of(bodies.get(name, ""), table)
+            if "nvdec" in lanes:
+                nvdec.append(index)
+            elif "gstreamer" in lanes:
+                gstreamer.append((index, name))
+        assert nvdec, "no test in main() asks for the nvdec source; this check went vacuous"
+        assert gstreamer, "no gst-linked test either, so the ordering claim means nothing"
+        too_early = [name for index, name in gstreamer if index < max(nvdec)]
+        assert too_early == [], (
+            f"{too_early} run before the NVDEC sections and initialise GStreamer for them, "
+            f"which is what hid a missing `initialise_gstreamer()` in #159 -- move the NVDEC "
+            f"calls back above them"
+        )
+
+
 class TestTheDefineSaysWhatIsMissing:
     """``-DSHIPINFER_OMITTED_LANES`` is the whole contract with the C++ side."""
 

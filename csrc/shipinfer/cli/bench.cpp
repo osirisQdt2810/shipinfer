@@ -35,6 +35,7 @@
 #include "shipinfer/pipeline/graph/plan_stages.h"
 #include "shipinfer/pipeline/graph/shapes.h"
 #include "shipinfer/pipeline/graph/stages.h"
+#include "shipinfer/pipeline/queue_sink.h"
 #include "shipinfer/pipeline/reassembly/collector.h"
 #include "shipinfer/runtime/containment.h"
 #include "shipinfer/scheduling/policies/registry.h"
@@ -43,78 +44,6 @@
 using namespace shipinfer;
 
 namespace {
-
-    // One frame's worth of work as it sits in the fair queue.
-    //
-    // The pixels stay on the **host** here, and the worker copies them to its own device. The
-    // first version had the camera thread copy to a device chosen by camera index, and then any
-    // worker could pick up any frame — a frame on device 1 executed by an instance on device 0,
-    // which is a cross-device access. It does not fail at the call that caused it; it surfaces
-    // as `an illegal memory access was encountered` inside an unrelated `gpuDeviceSynchronize`
-    // several frames later, which is why ADR-002 makes the rule structural rather than
-    // advisory.
-    //
-    // Keeping one fleet-wide fair queue matters more than saving the copy: fairness across
-    // cameras is the thing this project exists to get right, and a queue per device would make
-    // it fair only within a device.
-    struct FrameWork {
-        FrameTag tag;
-        std::shared_ptr<FrameState> state;
-        HostFrame frame;  // the library owns the pixels and outlives every frame in flight
-
-        size_t rows() const { return 1; }
-        std::string camera() const { return tag.camera_id; }
-        // A frame into the detector is NORMAL priority with no deadline — what the Python
-        // pipeline submits. The lanes above and below exist for the requests that will use
-        // them.
-        int priority() const { return Priority::Normal; }
-        bool expired(int64_t) const { return false; }
-    };
-
-    // The bridge from the ingest plane to the fair queue: a `FrameSink` that turns a tagged
-    // frame into one queue entry.
-    //
-    // It is *here*, in the application, rather than in `ingest/` — mapping a frame onto a unit
-    // of scheduled work is dispatch policy, and the same code has to undo the mapping when the
-    // results are reassembled. Refusal is thrown rather than returned because the actor is the
-    // only component that knows whose frame it is and can charge the drop to that camera
-    // (ADR-005).
-    class QueueSink : public FrameSink {
-      public:
-        explicit QueueSink(FairPriorityQueue<FrameWork>& queue) : queue_(queue) {}
-
-        void put(Frame&& frame) override {
-            // REFUSED until the graph can read one. This sink carries `frame.image` and would
-            // DROP `frame.device`, so the first NVDEC source would produce a 0x0 work item per
-            // frame with nothing red and nothing logged -- the detect stage letterboxing an
-            // empty image while the fleet reported 50 streaming (#153 round 3, note 1). The
-            // ordering this enforces: `nv12_letterbox_into` gets wired into the graph BEFORE
-            // any source that can populate the field.
-            if (frame.on_device()) {
-                throw ConfigError(
-                    "camera '" + frame.tag.camera_id +
-                    "': this sink carries host frames only, and a device frame would be "
-                    "silently dropped. Wire the NV12 device path into the graph first "
-                    "(PHASE-D-NV12)");
-            }
-            FrameWork work;
-            work.tag = frame.tag;
-            work.frame = std::move(frame.image);
-            work.state = std::make_shared<FrameState>(work.tag, work.frame.height,
-                                                      work.frame.width, 0.0f);
-            const PutStatus status = queue_.put(std::move(work));
-            if (status == PutStatus::Rejected) {
-                const QueueStats stats = queue_.stats();
-                throw QueueFullError("pipeline queue is full", stats.depth, stats.capacity);
-            }
-            if (status == PutStatus::Closed) {
-                throw RequestCancelledError("pipeline queue is closed");
-            }
-        }
-
-      private:
-        FairPriorityQueue<FrameWork>& queue_;
-    };
 
     struct Options {
         std::string person_frames;
@@ -277,6 +206,12 @@ namespace {
         out << "\"cameras\": " << options.cameras;
         out << ", \"fps\": " << options.fps;
         out << ", \"seconds\": " << options.seconds;
+        // THE SOURCE, because a run whose artefact does not say where its frames came from
+        // cannot be read afterwards. Two runs of this bench at the same shape differed by 16%
+        // and the only way to tell whether one of them had taken the replay path was to trust
+        // the shell history -- which is not evidence. The Python harness records it in
+        // `summary.json` for the same reason.
+        out << ", \"source\": \"" << options.source << "\"";
         // Every carried setting, not the two that used to be flags: the record's contract is
         // that "the omission travels with the data", and a run whose per-instance queue was 64
         // and one whose was 65536 are different measurements that used to print the same line.
@@ -565,14 +500,33 @@ int main(int argc, char** argv) {
                                 continue;
                             }
                             try {
-                                const size_t bytes = static_cast<size_t>(item.frame.height) *
-                                                     item.frame.width * 3;
-                                if (pixels->bytes() < bytes) *pixels = DeviceBuffer(bytes);
-                                GPU_CHECK(gpuMemcpyAsync(pixels->get(), item.frame.pixels,
-                                                         bytes, gpuMemcpyHostToDevice,
-                                                         scratch.stream()));
-                                scratch.synchronise();
-                                item.state->set_image(pixels, device);
+                                if (item.device >= 0) {
+                                    // ALREADY ON A DEVICE, and it cannot move: ADR-004 says a
+                                    // frame stays where it was decoded. The state carries the
+                                    // surface from the sink, so there is nothing to upload --
+                                    // which is the whole of V156's route, and the check below
+                                    // is what stops a worker reading another GPU's pointer.
+                                    if (item.device != device) {
+                                        throw ConfigError(
+                                            "frame " + item.tag.key() + " was decoded on gpu" +
+                                            std::to_string(item.device) +
+                                            " and this worker is on gpu" +
+                                            std::to_string(device) +
+                                            ": a device frame cannot move (ADR-004). Run one "
+                                            "process per GPU (`--runner fleet`), or give this "
+                                            "bench a single `--devices`");
+                                    }
+                                } else {
+                                    const size_t bytes =
+                                        static_cast<size_t>(item.frame.height) *
+                                        item.frame.width * 3;
+                                    if (pixels->bytes() < bytes) *pixels = DeviceBuffer(bytes);
+                                    GPU_CHECK(gpuMemcpyAsync(pixels->get(), item.frame.pixels,
+                                                             bytes, gpuMemcpyHostToDevice,
+                                                             scratch.stream()));
+                                    scratch.synchronise();
+                                    item.state->set_image(pixels, device);
+                                }
                                 CollectorObserver observer(collector, item.tag);
                                 for (const StageOutcome& outcome :
                                      dag.execute(*item.state, observer)) {
@@ -668,7 +622,8 @@ int main(int argc, char** argv) {
             camera.fps = options.fps;
             fleet.push_back(std::move(camera));
         }
-        QueueSink sink(queue);
+        QueueSink sink(queue, static_cast<size_t>(tuning.pipeline_queue),
+                       options.devices.size());
         IngestManager manager(std::move(fleet), sink);
 
         sampler.start();

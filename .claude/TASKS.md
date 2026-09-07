@@ -3134,16 +3134,74 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       deciding what "reaches the gst lane" means from text without a hand-kept list, which is
       the two-place edit the lane-table checks exist to avoid.
 
-      LEFT: the CARRIER, and #156 round 2 asked for its plan in writing rather than at the
-      design load, which is fair -- so: `ulNumOutputSurfaces = 2` caps in-flight surfaces per
-      camera at two, and a fair queue exists to HOLD frames, so a surface must not travel
-      through it. Raising the pool to the queue depth is per-camera VRAM times fifty;
-      shortening the queue gives up the fairness this project is about. So the hand-off COPIES,
-      which is what DeepStream does between the decoder's NVMM pool and `nvvideoconvert`'s: the
-      sink copies the surface into an NV12 device buffer the work item owns and releases the
-      surface at once. ~3 MB device-to-device for 1080p against ~6 MB down AND 6 MB up for the
-      host round trip this route exists to remove -- so "tren vram het" holds and the decoder's
-      pool stays bounded by decode depth. Then the design-load run.**
+      **THE ROUTE RUNS END TO END, 7 Sep, and this is what V156 asked for.** `rtsp -> H.264
+      bitstream -> NVDEC -> NV12 surface in VRAM -> one device-to-device copy -> the fair queue
+      -> the graph (`nv12_letterbox_into`, `nv12_crop_resize_into`) -> events`, with NO host
+      pixel copy anywhere in it. All four models busy, 0 failed, 0 dropped, 0 rejected.
+      LIKE-FOR-LIKE against the host BGR path -- same GPU, same cameras, same 30 s -- and I took
+      FIVE RUNS OF EACH rather than one, because the first pair said +17%/+22% and that was two
+      lucky runs. This box is shared and the spread is wide:
+                          nvdec (NV12 in VRAM)        gstreamer (host BGR)
+        frames_read       median 1026  (931..1054)    median  960  (840..968)
+        events_complete   median 1002  (916..1041)    median  929  (802..939)
+        events_incomplete median   23  ( 18..  33)    median   46  ( 23.. 59)
+      So **+6.9% read, +7.9% complete, and HALF the reassembly timeouts** -- not the +17% two
+      runs suggested, and worth saying because I would have shipped that number. The
+      read/complete ranges overlap at the edges (nvdec's worst 931 against BGR's best 968); the
+      timeout counts barely do. At this load nothing is saturated (1200 offered; nvdec 85%, BGR
+      80%), so this is the INGEST cost and not the GPU. Not 5x and not meant to be: that needs
+      the design load, which needs the item below.
+      THE ARTEFACT DID NOT SAY WHICH SOURCE IT RAN, which is how two runs 16% apart could not
+      be told apart without trusting shell history. `meta.config.source` now records it, as the
+      Python harness's `summary.json` already did.
+      THE CARRIER, as promised to #156 round 2 in writing rather than discovered at the design
+      load: `pipeline/surface_intake.h` copies the surface into a POOLED NV12 device buffer and
+      the sink releases the decode slot before the frame is queued. Why a copy at all --
+      `ulNumOutputSurfaces = 2` caps in-flight surfaces per camera at two, and a fair queue
+      exists to HOLD frames; raising the pool to the queue depth is per-camera VRAM times
+      fifty, and shortening the queue gives up the fairness this project is about. DeepStream
+      does the same between the decoder's NVMM pool and `nvvideoconvert`'s (V86).
+      `QueueSink` and `FrameWork` moved OUT of `cli/bench.cpp` into `pipeline/queue_sink.h` to
+      be testable at all -- an anonymous-namespace type in a composition root was fine while
+      `put` was six lines, and it now chooses between two representations, copies out of a pool
+      and refuses a shape that cannot work. That move paid immediately: the new gate caught the
+      surface being held until the ACTOR'S NEXT READ, because `put` takes `Frame&&` (a
+      reference) and the release had been left to a destructor -- one extra slot out of a pool
+      of two, per camera, for as long as a queue holds frames.
+      `test_pipeline` 19 -> 50 checks, 0 failures. Revert-checks: the one-plane copy replaced by
+      a single `bytes` memcpy fails at `brightest is 1.000000` (the 0xFF padding sentinel, in
+      the output) and on the byte-identical comparison; `has_pixels()` back to `image_` alone
+      fails the planner check; the seam passing `state.width()` as the stride fails both NV12
+      paths.
+      ONE GPU PER PROCESS FOR A DEVICE FRAME, refused in the sink by name. Not a shortcut:
+      ADR-004 says a frame stays where it was decoded, and this bench's ONE fleet-wide queue is
+      what lets any worker take any frame. `--runner fleet` is one process per GPU, which is
+      where the multi-GPU shape lives. The design-load run needs either that or per-device lanes
+      here -- opened as `DEVICE-FRAME-NEEDS-A-LANE-PER-GPU` below.
+      AND `NVDEC-SECTION-ORDER-HAS-NO-GUARD` IS CLOSED with it, which is where #159's reviewer
+      said it belonged: `TestTheNvdecSectionsRunFirst` reads `main()`'s call order and each
+      test's body, decides which lane a test SELECTS (assignment to `.source`, or
+      `SOURCES().contains`) from `omitted_lanes.h`'s table rather than a hand-kept list, and
+      refuses any gst-lane call before the last NVDEC one. Offline, 0.3 s, no compiler.
+      Narrowing "mentions" to "selects" was the whole of the work: a redaction test that puts
+      `"gstreamer"` in an error message reaches no library, and the first version flagged it.
+      REVERT-CHECK: move the three calls back down and it names
+      `test_an_unsupported_codec_is_refused_before_a_thread_starts`,
+      `test_the_gstreamer_source_where_it_is_linked` and
+      `test_a_decoded_pixel_over_a_real_rtsp_session`.**
+- [ ] **DEVICE-FRAME-NEEDS-A-LANE-PER-GPU · the design load's blocker, opened 7 Sep.** A device
+      frame cannot move (ADR-004), so a worker on another GPU cannot take it -- and `cli/bench`
+      keeps ONE fleet-wide fair queue precisely so any worker can take any frame, which is what
+      makes it fair across cameras rather than within a device. The two are incompatible in one
+      process, and the sink refuses the combination by name today.
+      Cross-device fairness is UNACHIEVABLE for device frames rather than merely unimplemented,
+      which is what makes a queue per device the right shape here and not a regression: fair
+      across the cameras assigned to a GPU, with the assignment doing the cross-device balance
+      (which is the placement problem this project already owns). The deployment already works
+      this way -- `--runner fleet` is one shard process per GPU.
+      Needed for: the C++ design-load run at 50 x 20 over 8 GPUs, and therefore for C1's >=5x.
+      Also a two-plane question (the Python plane's fleet gets it from processes, so the sync
+      rule may be satisfied already -- check before building).
 - [x] **CSRC-TOPOLOGY-Q · ANSWERED 4 Sep as ADR-020, by me, under V154 ("làm theo hướng bạn
       nghĩ là tốt nhất"). NO `csrc/topology/` and no `csrc/runners/`: the chain stays a Python
       declaration and the C++ plane receives a RESOLVED PLAN.** Three reasons, none of them
