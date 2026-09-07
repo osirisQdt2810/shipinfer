@@ -46,14 +46,25 @@ namespace shipinfer {
     // exactly this shape.
     //
     // `pitch` is separate from `width` because NVDEC's surfaces are padded: the Y plane's rows
-    // are `pitch` bytes apart and the interleaved UV plane follows at `pitch * height`.
-    // Assuming `pitch == width` reads the next row's left edge into this row's right edge, a
-    // skew that looks like a decoder bug rather than an arithmetic one.
+    // are `pitch` bytes apart. Assuming `pitch == width` reads the next row's left edge into
+    // this row's right edge, a skew that looks like a decoder bug rather than an arithmetic
+    // one.
+    //
+    // `uv_offset` is separate for the SAME reason one plane up, and it is the field this
+    // carrier shipped without: the chroma plane does NOT follow at `pitch * height`. NVDEC
+    // decodes at a CODED height rounded up -- 1088 for 1080p -- so the chroma begins at
+    // `pitch * 1088` while `height` is 1080, and `pitch * height` reads the last EIGHT ROWS OF
+    // THE LUMA PLANE as chroma. Right brightness, wrong colour, every frame, on every camera.
+    // `runtime/ops.h` made it a parameter for exactly this and its guard (`uv_offset >= pitch *
+    // height`) is satisfied EXACTLY by the derived value, so nothing downstream can catch it.
     struct DeviceImage {
         const void* nv12 = nullptr;
         int height = 0;
         int width = 0;
         int pitch = 0;
+        //: Bytes from `nv12` to the interleaved chroma plane. `pitch * coded_height` for an
+        //: NVDEC surface; `pitch * height` only for a genuinely tight one.
+        size_t uv_offset = 0;
         //: Which device the pointer belongs to. A frame decoded on GPU 3 is unreadable from a
         //: worker bound to GPU 1, and ADR-002 says one thread never touches another's memory,
         //: so the consumer checks rather than assumes.
@@ -69,7 +80,9 @@ namespace shipinfer {
             // field's own default is -1, and a decoder that forgot to set it would otherwise
             // reach a consumer that compares an ordinal against its own bound GPU, or calls
             // `cudaSetDevice(-1)`. ADR-002 says the consumer checks; this is what it checks.
-            return nv12 == nullptr || height <= 0 || width <= 0 || pitch < width || device < 0;
+            return nv12 == nullptr || height <= 0 || width <= 0 || pitch < width ||
+                   device < 0 ||
+                   uv_offset < static_cast<size_t>(pitch) * static_cast<size_t>(height);
         }
     };
 

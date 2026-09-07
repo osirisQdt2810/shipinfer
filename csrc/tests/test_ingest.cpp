@@ -1010,6 +1010,7 @@ namespace {
             image.height = 1080;
             image.width = 1920;
             image.pitch = 2048;
+            image.uv_offset = 2048ULL * 1088;  // the CODED height, as NVDEC reports it
             image.device = 0;
             return image;
         }
@@ -1026,6 +1027,42 @@ namespace {
         bool delivered_ = false;
         std::array<uint8_t, 3> pixels_{{1, 2, 3}};
     };
+
+    // A sink that refuses BY CONTRACT, the way `QueueSink` refuses a device frame until the
+    // graph can read one. Distinct from `RefusingSink` above, which refuses with
+    // `QueueFullError` -- backpressure, which the actor is meant to survive.
+    class ContractRefusingSink : public FrameSink {
+      public:
+        void put(Frame&& frame) override {
+            ++offered;
+            throw ConfigError("camera '" + frame.tag.camera_id +
+                              "': this sink carries host frames only");
+        }
+        std::atomic<int> offered{0};
+    };
+
+    void test_a_sink_that_refuses_by_contract_STOPS_the_camera_too() {
+        // #153 round 4: the `QueueSink` guard threw from `publish()`, which is OUTSIDE pump's
+        // `ConfigError` handler, so it escaped into `run()`'s generic one -- record_failure,
+        // teardown, back off, retry. And `backoff_.reset()` plus the counter clear had already
+        // run that same iteration, so it was a MIN-BACKOFF HOT LOOP reporting
+        // Streaming/Degraded with `frames_published` flat at zero and the fleet summary saying
+        // `unhealthy: 0`. Exactly the outcome round 2 fixed, arriving through round 3's armour.
+        FakeScript script;
+        script.on_read = [](int) { return 1; };
+        ContractRefusingSink sink;
+        CameraActor actor(a_camera("cam0"), sink, scripted(script));
+        actor.start();
+        for (int i = 0; i < 400 && actor.is_running(); ++i) std::this_thread::sleep_for(5ms);
+
+        check(!actor.is_running(), "a sink's contract refusal stops the camera");
+        check(sink.offered.load() <= 2, "and it is not a retry loop: " +
+                                            std::to_string(sink.offered.load()) + " offer(s)");
+        const CameraHealth health = actor.health();
+        check(health.state == CameraState::Unhealthy,
+              "and it reports UNHEALTHY, which is what a fleet summary pages on");
+        actor.stop();
+    }
 
     void test_a_camera_whose_pixels_move_off_the_device_STOPS_rather_than_retrying() {
         // #153 round 1: `pump()` caught `std::exception` and backed off, so a contract
@@ -2729,6 +2766,7 @@ int main() {
 
     test_a_full_sink_is_a_drop_charged_to_this_camera();
     test_a_camera_whose_pixels_move_off_the_device_STOPS_rather_than_retrying();
+    test_a_sink_that_refuses_by_contract_STOPS_the_camera_too();
     test_a_closed_sink_finishes_the_actor();
     test_an_accepting_sink_publishes_everything();
 

@@ -279,17 +279,7 @@ namespace shipinfer {
             // exactly like one an operator decommissioned. `last_error` cannot separate them
             // either: it is written on every transient failure a camera recovered from
             // (#153 round 2).
-            record_failure(error.what());
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                fatal_ = true;
-            }
-            set_state(CameraState::Unhealthy);
-            shout("camera " + config_.camera_id + ": stopping, not reconnecting (" +
-                  redact_in(error.what()) + ")");
-            teardown();
-            stop_.set();
-            return false;
+            return refuse_fatally(error.what());
         } catch (const std::exception& error) {
             record_failure(error.what());
             const double delay = backoff_.next_delay();
@@ -311,8 +301,37 @@ namespace shipinfer {
             consecutive_failures_ = 0;
             last_error_.clear();
         }
-        publish(std::move(*frame));
+        // INSIDE a `ConfigError` handler, because `publish` is where a sink refuses -- and a
+        // sink's `ConfigError` used to escape `publish` (which catches only `QueueFullError`
+        // and `RequestCancelledError`), escape `pump`, and land in `run()`'s generic handler:
+        // record_failure, teardown, back off, retry. With `backoff_.reset()` and the counter
+        // clear having already run above, that is a MIN-BACKOFF HOT LOOP reporting
+        // Streaming/Degraded, `frames_read` climbing and `frames_published` flat at zero, and
+        // the fleet summary saying `unhealthy: 0` -- the outcome round 2 fixed, arriving
+        // through the armour round 3 added (#153 round 4).
+        try {
+            publish(std::move(*frame));
+        } catch (const ConfigError& error) {
+            return refuse_fatally(error.what());
+        }
         return true;
+    }
+
+    bool CameraActor::refuse_fatally(const std::string& reason) {
+        // The four steps `connect()`'s `SourceUnavailableError` takes, shared by the two places
+        // that need them so they cannot drift: a contract violation is fatal for this camera,
+        // and it has to PAGE rather than read as one somebody decommissioned.
+        record_failure(reason);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            fatal_ = true;
+        }
+        set_state(CameraState::Unhealthy);
+        shout("camera " + config_.camera_id + ": stopping, not reconnecting (" +
+              redact_in(reason) + ")");
+        teardown();
+        stop_.set();
+        return false;
     }
 
     bool CameraActor::on_empty_read(const FrameSource& source) {

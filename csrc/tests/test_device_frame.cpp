@@ -30,13 +30,16 @@ namespace {
         }
     }
 
-    //: A plausible NVDEC surface: 1080p, padded to a 256-byte pitch, on device 3.
+    //: A plausible NVDEC surface: 1080p displayed, decoded at a CODED height of 1088, padded
+    //: to a 2048-byte pitch, on device 3. The coded height is the point -- `pitch * 1088` is
+    //: where the chroma is, and `pitch * 1080` is where a derivation would look for it.
     DeviceImage a_surface(std::shared_ptr<const void> owner = nullptr) {
         DeviceImage image;
         image.nv12 = reinterpret_cast<const void*>(0xdeadbeef000ULL);
         image.height = 1080;
         image.width = 1920;
         image.pitch = 2048;
+        image.uv_offset = 2048ULL * 1088;
         image.device = 3;
         image.owner = std::move(owner);
         return image;
@@ -108,6 +111,23 @@ namespace {
         no_device.device = -1;  // the field's own default
         check(no_device.empty(),
               "and no device index, which a consumer would compare against its own bound GPU");
+        DeviceImage inside_luma = a_surface();
+        inside_luma.uv_offset = 2048ULL * 1079;  // one row short: the chroma would overlap
+        check(inside_luma.empty(), "a chroma offset inside the luma plane is mis-filled");
+
+        // AND THE LIMIT OF THIS CHECK, stated rather than papered over: `pitch * height`
+        // EXACTLY is legal, because a genuinely tight surface has its chroma right there --
+        // and this struct has no coded height, so it cannot tell that from an NVDEC surface
+        // whose filler forgot the padding. What the field buys is that the offset must be
+        // STATED: it can no longer be derived downstream, which is where `runtime/ops.cu`'s
+        // guard (also `>= pitch * height`) was satisfied exactly by the wrong value and threw
+        // nothing (#153 round 4). The NVDEC source's own gate is what checks 1088 against
+        // what cuvid reported.
+        DeviceImage genuinely_tight = a_surface();
+        genuinely_tight.uv_offset = 2048ULL * 1080;
+        check(!genuinely_tight.empty(),
+              "`pitch * height` is a tight surface, which is legal -- the carrier cannot see a "
+              "coded height it was never told");
         DeviceImage tight = a_surface();
         tight.pitch = tight.width;
         check(!tight.empty(), "but pitch == width is legal: an unpadded surface");

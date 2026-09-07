@@ -2783,6 +2783,25 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       right; the count is build-dependent, and the body says so instead of picking one.
       NOTE 5: `where_latched()`/`reads_device()` are documented FOR A TEST only now -- the
       counter is not thread-safe, so a report reading them would race the actor that stamps.
+      ROUND 4, and it is a CONTRADICTION BETWEEN MY OWN TWO PRs: #155 made `uv_offset` a
+      parameter of `nv12_letterbox_into` because NVDEC's chroma is at `pitch * CODED height`,
+      and then #153 shipped a carrier WITHOUT the field whose docstring prescribed
+      `pitch * height` -- the exact derivation #155 rejects. The kernel's guard is
+      `uv_offset >= pitch * height`, which the derived value satisfies EXACTLY, so nothing
+      downstream could catch it: every frame of every camera would have had the last eight luma
+      rows read as chroma. `DeviceImage` carries `uv_offset` now and `empty()` rejects one
+      inside the luma plane.
+      AND THE LIMIT IS STATED rather than papered over: `pitch * height` EXACTLY is accepted,
+      because a genuinely tight surface has its chroma there and this struct has no coded height
+      to compare against. What the field buys is that the offset must be STATED and can no
+      longer be derived; checking 1088 against what cuvid reported is the NVDEC source's gate.
+      ROUND 4b: the `QueueSink` armour round 3 added threw from `publish()`, which is OUTSIDE
+      pump's `ConfigError` handler -- so it escaped into `run()`'s generic one, and with
+      `backoff_.reset()` and the counter clear already run that iteration it was a MIN-BACKOFF
+      HOT LOOP reporting Streaming/Degraded, `frames_published` flat at zero, fleet summary
+      `unhealthy: 0`. The outcome round 2 fixed, arriving through round 3's armour. The four
+      steps are `refuse_fatally()` now, shared by the read refusal and the sink's so they cannot
+      drift. Revert-check: 5 offers in the window instead of <= 2.
       TWO PLANES, and the answer is "this seam exists once, by design": Python's
       `FrameSource._do_read` gets NO device counterpart. Python's host round trip IS the wall
       V156 removes -- `runtime/ops.h` already says the Python path "could not do this without a
