@@ -402,8 +402,9 @@ namespace {
         PaddedSurface decoded;
         DeviceSurface held;
         {
-            FairPriorityQueue<FrameWork> queue("pipeline", 8, Overflow::Reject);
-            QueueSink sink(queue, /*pooled=*/2, /*devices=*/{0});
+            PipelineLanes lanes({0}, /*per_device=*/false, 8, 50, nullptr);
+            QueueSink sink(lanes, /*pooled=*/2, /*devices=*/{0});
+            PipelineLanes::Queue& queue = lanes.lane(0);
             Frame frame;
             frame.tag = FrameTag{"cam", 1, 0};
             frame.device = a_device_image(decoded);
@@ -420,12 +421,31 @@ namespace {
         check(true, "and releasing it afterwards runs the deleter against a live pool");
     }
 
+    // The lanes' own contract, which the sink leans on: a lane index IS the device's position
+    // in the list this run was given, so a worker can use its own index into `--devices`
+    // without a lookup. And one lane takes everything, which is what makes the default
+    // indistinguishable from the single fleet-wide queue it replaced.
+    void test_a_lane_is_its_devices_position_in_the_run() {
+        PipelineLanes per_gpu({3, 4, 5}, /*per_device=*/true, 8, 50, nullptr);
+        check(per_gpu.count() == 3, "one lane per GPU");
+        check(per_gpu.lane_of(3, "cam") == 0 && per_gpu.lane_of(4, "cam") == 1 &&
+                  per_gpu.lane_of(5, "cam") == 2,
+              "and a device's lane is its position in `--devices`, not its index");
+
+        PipelineLanes single({3, 4, 5}, /*per_device=*/false, 8, 50, nullptr);
+        check(single.count() == 1, "`per_device` false is one lane whatever the GPU list says");
+        check(single.lane_of(-1, "cam") == 0 && single.lane_of(5, "cam") == 0 &&
+                  single.lane_of(99, "cam") == 0,
+              "which takes a host frame, a listed GPU and an unlisted one alike");
+    }
+
     // The sink is where a frame becomes scheduled work, and it is the one place that decides
     // between the two pixel representations. Three questions, and the third is the one an
     // operator meets.
     void test_the_sink_turns_either_representation_into_one_work_item() {
-        FairPriorityQueue<FrameWork> queue("pipeline", 16, Overflow::Reject);
-        QueueSink sink(queue, /*pooled=*/4, /*devices=*/{0});
+        PipelineLanes lanes({0}, /*per_device=*/false, 16, 50, nullptr);
+        QueueSink sink(lanes, /*pooled=*/4, /*devices=*/{0});
+        PipelineLanes::Queue& queue = lanes.lane(0);
 
         // -- a host frame: the pixels stay on the host and the worker uploads them ----------
         std::vector<uint8_t> pixels(8 * 8 * 3, 7);
@@ -473,8 +493,8 @@ namespace {
     // `SurfaceIntake::take` and therefore before any CUDA call, so this runs in the offline
     // tier where a wrong predicate would otherwise only show up on a GPU box.
     void test_a_device_frame_from_a_gpu_this_process_lacks_is_refused_by_name() {
-        FairPriorityQueue<FrameWork> queue("pipeline", 16, Overflow::Reject);
-        QueueSink sink(queue, /*pooled=*/4, /*devices=*/{1, 2});
+        PipelineLanes lanes({1, 2}, /*per_device=*/true, 16, 50, nullptr);
+        QueueSink sink(lanes, /*pooled=*/4, /*devices=*/{1, 2});
         uint8_t nothing = 0;  // never read: `empty()` asks only that it is non-null
         Frame frame;
         frame.tag = FrameTag{"cam09", 3, 0};
@@ -502,7 +522,7 @@ namespace {
               "a GPU this process does not drive is refused, naming the camera, its GPU and "
               "the ones there are: " +
                   reason);
-        check(queue.stats().depth == 0, "and nothing is queued");
+        check(lanes.stats().depth == 0, "and nothing is queued");
     }
 
     // NO DEVICE NEEDED: the refusal happens before `gpuSetDevice` is reached, which is what
@@ -719,6 +739,7 @@ int main() {
     test_a_frame_with_no_pixels_is_refused_by_name();
     test_an_incomplete_surface_never_becomes_a_buffer();
     test_a_device_frame_from_a_gpu_this_process_lacks_is_refused_by_name();
+    test_a_lane_is_its_devices_position_in_the_run();
     if (has_device()) {
         test_the_pixel_seam_reads_a_padded_surface_as_a_surface();
         test_the_intake_frees_the_decoders_slot_and_keeps_the_pixels();
