@@ -181,7 +181,8 @@ namespace shipinfer {
         // The other representation, and the two are exclusive: a camera's pixels live in one
         // place for its whole life (`FrameCounter::latch_where` on the ingest side enforces
         // that a source cannot change its mind). `pipeline/graph/pixels.h` is the only thing
-        // that asks which.
+        // INSIDE THE GRAPH that asks which -- the sink asks once on the way in, to decide
+        // whether a frame needs an upload or already has its pixels.
         void set_surface(DeviceSurface surface, int device) {
             surface_ = std::move(surface);
             device_ = device;
