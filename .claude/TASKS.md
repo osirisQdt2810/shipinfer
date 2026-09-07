@@ -2633,7 +2633,15 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `ship_detector 390/378, ship_segmenter 186/198, ship_embedder 188/196,
       person_embedder 247/217`. `test_camera_uris` is 12 checks, offline.
       SPLIT, and the first two halves are mine:
-        (a-py) the same measurement on the Python plane, and the design-load run;
+        (a-py) DONE 7 Sep: the PYTHON plane reads from RTSP too. `bench.sh --systems shipinfer
+            --source rtsp --cameras 8 --fps 5 --seconds 30 --gpus 0,1`: 39.8 of 40 img/s
+            offered (100%), TOTAL 36.0 **SUSTAINED**, and all four models busy on both devices
+            -- ship_detector 463/398, ship_segmenter 221/181, ship_embedder 213/181,
+            person_embedder 246/227. `summary.json` records `source: rtsp`.
+            SO BOTH PLANES NOW READ FROM RTSP, which is R55's first half on both sides. The
+            decode is still SOFTWARE BGR on both: `ingest/sources/gstreamer.py:149` negotiates
+            `video/x-raw,format=BGR`, so NV12-in-VRAM remains the whole of what is left.
+        (a-load) the design-load run from RTSP, on both planes, against the baseline;
         (b) make the RTSP path negotiate NV12 and keep it on the device as far as the current
             headers allow (`nvvideoconvert`'s NVMM hand-off is already why `_CONVERTERS` names
             it), so the remaining gap is exactly the missing package and not our code;
