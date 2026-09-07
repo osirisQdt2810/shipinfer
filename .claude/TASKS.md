@@ -948,25 +948,27 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 6 · The final goal (V49)
 
-- [!] **C1 · OPERATOR: the >=5x TARGET LOOKS UNREACHABLE BY CONSTRUCTION, and I would like
-      your call on re-scoping it before spending more GPU time chasing it.** Measured at the
-      design load on 5 Sep, both sides, in one sitting: the C++ plane retires **944 img/s** and
-      the fairly-configured baseline sustains **971.3** -- PARITY, up from the recorded 0.45x.
-      THE ARGUMENT: the counting simulation runs the SAME TensorRT engines on the SAME GPUs,
-      and at this load both sides are GPU-bound at ~950-970 img/s on seven A5000s. No amount of
-      scheduling gets 5x more work out of the same kernels; the target was set (V-era) when the
-      plane was 2.2x SLOWER, where "catch up and pass" was the shape of the problem.
-      WHAT THE ARCHITECTURE ACTUALLY BUYS is visible in the same runs and is not throughput:
-      bounded queues that reject rather than grow (the baseline at seg=1/gpu was SATURATED,
-      its segmentation backlog growing 35/s), per-camera attribution of every drop
-      (`queue_rejected_by_camera`), and no silent eviction of a quiet camera by a busy one --
-      which is the documented failure this project exists to fix.
-      THE QUESTION, and either answer is fine: (a) re-scope C1 to a LATENCY / FAIRNESS claim at
-      equal throughput, which the numbers already support, or (b) keep >=5x as a throughput
-      target, in which case it needs a different baseline (one that does less GPU work) or
-      hardware, and I should stop tuning toward it.
-      Phase D (`PHASE-D-NV12`, also yours) is the one remaining lever inside the current shape
-      and it is worth ~the decode cost, not 5x.
+- [~] **C1 · ANSWERED BY V156: the >=5x target STANDS, and my "unreachable by construction"
+      argument was wrong on its premise.** I argued that the counting simulation runs the same
+      engines on the same GPUs, so both sides are GPU-bound at ~950-970 img/s and no scheduling
+      finds 5x. The premise was "the same work" -- and V156's instruction is precisely to STOP
+      doing the same work: `gstreamer rtsp -> nv12 -> tren vram het -> xu ly tren vram toan bo`.
+      Decode with NVDEC into VRAM and never come back, and the host per-frame cost -- a CPU
+      decode plus a pageable full-frame H2D per camera per frame -- disappears on our side and
+      stays on the baseline's. That is where a multiple comes from; it was never going to come
+      from the scheduler.
+      SO THE ROUTE IS: `R55-BENCH-SOURCE` (a) RTSP as the source on both planes, (b) negotiate
+      NV12, (c) the zero-copy VRAM carrier -- and `PHASE-D-NV12` moves from a deferred phase to
+      the CRITICAL PATH. V156 also restates the fairness rule: one bench shape for both systems,
+      video in and targets out.
+      MEASURED SO FAR, 5 Sep, both sides in one sitting at 50x20 on GPUs 0-6, `--source replay`:
+      the C++ plane retires 944 img/s, the fairly-configured baseline sustains 971.3 -- parity,
+      up from the recorded 0.45x. Those are the pre-NV12 floor, and the replay caveat is the
+      whole reason they are not the answer.
+      WHAT THE SAME RUNS ALSO SHOW, and is worth keeping whatever the multiple turns out to be:
+      bounded queues that reject rather than grow (the baseline at the harness's old seg=1/gpu
+      was SATURATED, its segmentation backlog growing 35/s), per-camera attribution of every
+      drop, and no silent eviction of a quiet camera by a busy one.
       Original: MEASURED AT THE DESIGN LOAD 5 Sep. C4 is DONE
       (#130); the remaining gate is Phase D, which is operator-blocked (`PHASE-D-NV12`).
       50 cameras x 20 fps x 70 s on GPUs 0-6, container, `run_cpp_bench.sh`. The generator
@@ -2584,7 +2586,7 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
 
 ---
 
-- [ ] **R55-BENCH-SOURCE · MY BENCH NUMBERS DO NOT MEET R55, and the operator had to ask.**
+- [~] **R55-BENCH-SOURCE · MY BENCH NUMBERS DO NOT MEET R55, and the operator had to ask.**
       Every measurement in this stretch -- including the C1 parity number (944 against 971.3) --
       ran `--source replay`: JPEGs decoded from disk on the CPU, with the harness printing
       `source: replay  (decode path NOT measured)` in its own header. R55 (user.md §3, with

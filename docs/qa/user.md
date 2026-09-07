@@ -999,6 +999,40 @@ merged (#144-#151), fourteen `[!]` items, and C1 measured at parity (944 against
 971.3) with its >=5x target marked as a question for exactly this moment. Not a new instruction
 so much as the moment the `[!]` queue was supposed to be waiting for.
 
+### V156 · 7 Sep 2026 — giữ mục tiêu >=5x; cùng một cách bench; RTSP -> NV12 -> toàn bộ trên VRAM
+
+> 2. giữ mục tiêu >=5x. cách bench của cả baseline và shipinfer phải giống nhau. đầu vào là
+> video đầu ra là target. tôi nghĩ cách tốt nhất đạt perf tốt nhất đó là đọc gstreamer rtsp ra
+> nv12 -> trên vram hết -> xử lý trên vram toàn bộ
+
+> đây tôi nghĩ là thuật toán tốt nhất rồi
+
+**This retires the argument I had just made, and the retirement is the point.** I marked C1
+`[!]` claiming >=5x was unreachable by construction: the counting simulation runs the same
+engines on the same GPUs, both sides are GPU-bound at ~950-970 img/s on seven A5000s, so no
+scheduling gets 5x more work out of the same kernels. **The premise was "the same work", and
+the operator's instruction is precisely to stop doing the same work.** Decode NVDEC ->
+NV12 -> never leave VRAM and the host per-frame cost -- a JPEG/H.264 decode on the CPU, a
+pageable H2D of a full frame per camera per frame -- goes away on our side and stays on the
+baseline's. That is where a multiple comes from; it was never going to come from the
+scheduler.
+
+So: the target STANDS, the route is named, and `PHASE-D-NV12` moves from a deferred phase to
+the critical path. "cách bench phải giống nhau, đầu vào là video đầu ra là target" is also the
+fairness rule restated -- video in and targets out, one harness shape for both systems, which
+is what `R55-BENCH-SOURCE` is for.
+
+### V157 · 7 Sep 2026 — nếu không còn gì block thì làm tới khi xong toàn bộ system
+
+> néue không còn gì block, thì bạn hãy thực hiện cho tới khi xong toàn bộ system nhé
+
+A standing grant to run to completion, and it reads on the `[!]` queue: "if nothing blocks"
+means resolve the blockers I am able to resolve rather than hold them for an answer. Concretely
+it settles the image question the same way V154 settled design questions -- the gstcuda headers
+`PHASE-D-NV12` waits on are added by the documented `docker run` + `docker commit` recipe, and
+I do that under a NEW tag rather than mutating the shared 12.6 GB image, so the old one is
+still there if the new one is wrong.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
@@ -1204,6 +1238,8 @@ The rules that do not expire, each pointing at where it was stated. `V` = verbat
 | Benchmarks run the whole stack: system → algo → kernel | R44 |
 | Throughput must reach ≥5× counting-simulation, measured by buffer-growth saturation | R40, R43, R49 |
 | RTSP ingest is mandatory for test and benchmark, in subfaceid's GPU NV12/YUV form | R55 |
+| **C1's >=5x target STANDS**; the route is RTSP -> NV12 -> everything on VRAM, and one bench shape for both systems (video in, targets out) | V156 |
+| If nothing blocks, run to completion; resolve the blockers I can, new image tag rather than mutating a shared one | V157 |
 | Each model gets its own resize + crop from the original image | R55 |
 | ONNX weights: the server auto-builds the engine | V20 |
 | Model weights all under `models/` | R51 |
