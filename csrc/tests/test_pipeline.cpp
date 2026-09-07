@@ -503,6 +503,37 @@ namespace {
               "the ones there are: " +
                   reason);
         check(queue.stats().depth == 0, "and nothing is queued");
+
+        // AND THE OTHER HALF, which set membership alone accepts: the frame IS on a GPU this
+        // process drives, and is still unschedulable, because the queue is fleet-wide and any
+        // worker may take it -- so half of them land on the wrong GPU. `--devices 0,1
+        // --source nvdec` builds exactly this, and it came out as ~50% `frames_failed` with
+        // every camera reporting `Streaming` (#160 round 3).
+        FairPriorityQueue<FrameWork> pair("pipeline", 16, Overflow::Reject);
+        QueueSink across(pair, /*pooled=*/4, /*devices=*/{0, 1});
+        Frame second;
+        second.tag = FrameTag{"cam10", 4, 0};
+        second.device.nv12 = &nothing;
+        second.device.height = PaddedSurface::height;
+        second.device.width = PaddedSurface::width;
+        second.device.pitch = PaddedSurface::stride;
+        second.device.uv_offset = PaddedSurface::uv_offset();
+        second.device.device = 0;  // IN the set {0, 1}, and still not schedulable
+        second.device.owner = std::shared_ptr<const void>(&nothing, [](const void*) {});
+        std::string spread;
+        try {
+            across.put(std::move(second));
+        } catch (const std::exception& error) {
+            // `std::exception` and not `ConfigError`, so the assertion below FAILS rather than
+            // the binary terminating when the refusal is missing: the frame is then accepted
+            // and the intake tries to copy from this test's host pointer.
+            spread = error.what();
+        }
+        check(spread.find("cam10") != std::string::npos &&
+                  spread.find("0,1") != std::string::npos,
+              "two GPUs in one process is refused too, even for a frame on one of them: " +
+                  spread);
+        check(pair.stats().depth == 0, "and nothing is queued for it either");
     }
 
     // NO DEVICE NEEDED: the refusal happens before `gpuSetDevice` is reached, which is what

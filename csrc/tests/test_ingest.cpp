@@ -2334,6 +2334,39 @@ namespace {
     // NOT REGISTERED and NOT IN THIS BUILD are two questions, and a check that asks the wrong
     // one is red on some machines and green on others. Unconditional, because every claim below
     // holds on every build -- which is the property the guards above needed and did not have.
+    // `produces_device_frames` is a registry CAPABILITY, and what a caller does with it is
+    // size its queues before any camera connects -- so a wrong answer is a wrong queue
+    // topology, not a wrong frame. Asked of EVERY registered source rather than of a list,
+    // because which sources this binary holds is a build question (`omitted_lanes.h`).
+    void test_the_registry_says_which_sources_hand_over_device_frames() {
+        for (const std::string& name : SOURCES().names()) {
+            const bool device = SOURCES().produces_device_frames(name);
+            check(device == (name == "nvdec"),
+                  "only the nvdec source hands over device frames, and " + name + " answers " +
+                      (device ? "true" : "false"));
+        }
+        // AN ALIAS ANSWERS THE SAME, which the implementation routes through `canonical`
+        // specifically to guarantee: an operator who spelled it `cuvid` must not get a
+        // different queue topology from one who spelled it `nvdec`.
+        if (SOURCES().contains("nvdec")) {
+            check(SOURCES().produces_device_frames("cuvid") &&
+                      SOURCES().produces_device_frames("nvv12"),
+                  "and so do its aliases");
+        } else {
+            skip("nvdec is not linked into this binary; its aliases cannot be asked");
+        }
+        // AND AN UNKNOWN NAME IS REFUSED rather than answered false, which a caller would read
+        // as "this source hands over host frames" and size one fleet-wide queue for.
+        std::string refused;
+        try {
+            SOURCES().produces_device_frames("gstremaer");
+        } catch (const ConfigError& error) {
+            refused = error.what();
+        }
+        check(refused.find("gstremaer") != std::string::npos,
+              "an unknown name gets `canonical`'s refusal: " + refused);
+    }
+
     void test_a_missing_source_and_an_omitted_lane_are_different_questions() {
         // `test_ingest` links no real source, so `replay` is absent from its registry ALWAYS.
         check(!SOURCES().contains("replay"),
@@ -3151,6 +3184,7 @@ int main() {
     // to be no, and with the plugin probe and the GStreamer source running first it was
     // invisible. It surfaced as eighteen `gst_is_initialized()` assertions and a segfault the
     // first time the bench ran `--source nvdec`. Do not move these back down.
+    test_the_registry_says_which_sources_hand_over_device_frames();
     test_a_device_surface_over_a_real_rtsp_session();
     test_an_unreachable_camera_and_a_broken_one_are_told_apart();
     test_a_reordered_stream_delivers_every_picture();

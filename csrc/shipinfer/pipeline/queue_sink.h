@@ -10,11 +10,13 @@
 // is dispatch policy, and the same code has to undo the mapping when results are reassembled.
 #pragma once
 
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "shipinfer/core/types.h"
 #include "shipinfer/ingest/frame.h"
@@ -86,14 +88,17 @@ namespace shipinfer {
                 // deployment shape already resolves it -- `--runner fleet` is one shard per
                 // GPU.
                 //
-                // THE SET, NOT THE COUNT. The first version refused on `devices > 1`, which
-                // cannot see the case it exists for: `--devices 3 --source nvdec` on this box
-                // (an ordinary choice when gpu0 is busy) has every camera decoding on gpu0
-                // because nothing sets their `device` option, `devices == 1` so the sink
-                // accepts, and the worker bound to gpu3 then throws per frame, forever -- the
-                // exact outcome this refusal exists to replace with one health line.
-                if (std::find(devices_.begin(), devices_.end(), frame.device.device) ==
-                    devices_.end()) {
+                // BOTH PREDICATES, and each caught a real case the other misses. `devices > 1`
+                // alone cannot see `--devices 3 --source nvdec` -- an ordinary choice when gpu0
+                // is busy -- where every camera decodes on gpu0, the count is 1, and the worker
+                // bound to gpu3 throws per frame forever. Set membership alone cannot see
+                // `--devices 0,1`, where the cameras ARE spread across the two, every frame
+                // passes, and then half of them are pulled by a worker on the other GPU: ~50%
+                // `frames_failed` with every camera reporting `Streaming`. Both are the same
+                // outcome this refusal exists to replace with one health line, and both are
+                // unsatisfiable for the same reason -- a fleet-wide queue plus a frame that
+                // cannot move (ADR-004) works for exactly one GPU.
+                if (devices_.size() != 1 || devices_.front() != frame.device.device) {
                     std::string given;
                     for (int device : devices_) {
                         given += (given.empty() ? "" : ",") + std::to_string(device);

@@ -3228,6 +3228,23 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `graph/state.h` claim that `pixels.h` is the only thing that asks which representation
       (the sink asks once on the way in), the `// doc: long` markers the surrounding `csrc/`
       uses, and a `FEATURE_LOG.md` entry for the whole route.
+      ROUND 3: I HAD REPLACED A PREDICATE THAT SHOULD HAVE BEEN JOINED. Round 2 swapped
+      `devices > 1` for set membership, and each catches a case the other misses -- membership
+      alone accepts `--devices 0,1 --source nvdec`, where round 2's own camera assignment SPREADS
+      the cameras across both, every frame passes the sink, and then half of them are pulled by
+      a worker on the other GPU: ~50% `frames_failed` with every camera reporting `Streaming`
+      and the advice buried in five stderr lines. Both now, and the offline gate carries both
+      halves -- the second one (`devices={0,1}`, a frame on gpu0, IN the set and still
+      unschedulable) fails on round 2's code.
+      The test catches `std::exception` rather than `ConfigError` deliberately: without the
+      refusal the frame is ACCEPTED and the intake then copies from the test's host pointer, so
+      a narrower catch terminated the binary instead of printing a named failure.
+      NOTES: an over-cap buffer's `cudaFree` no longer runs inside the mutex every camera on the
+      GPU contends for (the same shape round 1 fixed for the resolution case, on the path a
+      design-load run actually takes); `<algorithm>` and `<vector>` are included rather than
+      arriving transitively; and `produces_device_frames` has a gate that asks EVERY registered
+      source rather than a list -- which found that the first version of that test terminated a
+      binary without the opencv lane, because it asked about `replay` unconditionally.
       AND `NVDEC-SECTION-ORDER-HAS-NO-GUARD` IS CLOSED with it, which is where #159's reviewer
       said it belonged: `TestTheNvdecSectionsRunFirst` reads `main()`'s call order and each
       test's body, decides which lane a test SELECTS (assignment to `.source`, or

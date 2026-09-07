@@ -19,14 +19,21 @@ namespace shipinfer {
     }
 
     void SurfaceIntake::give_back(std::unique_ptr<DeviceBuffer> buffer) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto bucket = free_.find(buffer->bytes());
-        if (bucket == free_.end()) {
-            free_.emplace(buffer->bytes(), std::vector<std::unique_ptr<DeviceBuffer>>{});
-            bucket = free_.find(buffer->bytes());
+        // DECLARED BEFORE THE LOCK, so an over-cap buffer's `cudaFree` runs after it is
+        // released. Freeing inside the lock is the same shape as the resolution case: a
+        // device-synchronising call inside the mutex every camera on this GPU contends for.
+        // It only fires above the cap -- not the steady state -- but that is precisely the
+        // path a design-load run takes.
+        std::unique_ptr<DeviceBuffer> discarded;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            std::vector<std::unique_ptr<DeviceBuffer>>& bucket = free_[buffer->bytes()];
+            if (bucket.size() >= max_pooled_) {
+                discarded = std::move(buffer);
+            } else {
+                bucket.push_back(std::move(buffer));
+            }
         }
-        if (bucket->second.size() >= max_pooled_) return;  // freed instead of pooled
-        bucket->second.push_back(std::move(buffer));
     }
 
     DeviceSurface SurfaceIntake::take(const std::shared_ptr<SurfaceIntake>& self,
