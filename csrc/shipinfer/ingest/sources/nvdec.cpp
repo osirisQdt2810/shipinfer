@@ -113,10 +113,9 @@ namespace shipinfer {
         bool context_pushed = false;
         CUvideoparser parser = nullptr;
 
-        //: What the SEQUENCE callback reported, which is the only place the coded height is
-        //: stated. `uv_offset` is `pitch * coded_height`, and nothing else knows it: the
-        //: display rect is smaller, and the pitch says nothing about the padding.
-        int coded_height = 0;
+        //: What the SEQUENCE callback reported. The OUTPUT surface's extent, which is the
+        //: display rect because nothing here resizes -- see `map_next` on why the coded height
+        //: is not this and is not kept.
         int display_height = 0;
         int display_width = 0;
         int surfaces = kDefaultSurfaces;
@@ -213,11 +212,6 @@ namespace shipinfer {
 
         self->display_width = static_cast<int>(create.ulTargetWidth);
         self->display_height = static_cast<int>(create.ulTargetHeight);
-        // KEPT, because it is the only statement of where the chroma plane begins. The
-        // output surface is `ulTargetHeight` tall in the display sense and padded to the
-        // coded height in memory: `uv_offset = pitch * coded_height`, and getting that
-        // wrong reads luma rows as chroma (`runtime/ops.h`).
-        self->coded_height = static_cast<int>(format->coded_height);
 
         if (self->cuvid->cuvidCreateDecoder(&session.decoder, &create) != CUDA_SUCCESS) {
             self->failure = "cuvidCreateDecoder refused this stream";
@@ -541,12 +535,26 @@ namespace shipinfer {
         image.height = d.display_height;
         image.width = d.display_width;
         image.pitch = static_cast<int>(pitch);
-        // THE CODED HEIGHT, not the display one. The surface is padded, so the chroma plane
-        // begins past the last displayed luma row -- 1088 for 1080p. `pitch * height` here
-        // would read the last eight luma rows as chroma on every frame, and
-        // `nv12_letterbox_into`'s own guard cannot catch it because that value satisfies it
-        // exactly (#153 round 4, #155).
-        image.uv_offset = static_cast<size_t>(pitch) * static_cast<size_t>(d.coded_height);
+        // doc: long the coded height is NOT this, and #156 shipped believing it was
+        // THE OUTPUT SURFACE'S HEIGHT, which is `ulTargetHeight` -- the display extent, because
+        // nothing here resizes. **#156 used the CODED height and that was wrong**, argued at
+        // length in its own body and past three reviews. The distinction: the coded height
+        // (1088 for 1080p) sizes the DECODE surfaces, which an application never sees;
+        // `cuvidMapVideoFrame` hands back a post-processed OUTPUT surface at the target extent,
+        // whose chroma plane is at `pitch * ulTargetHeight` and which ends there plus a half.
+        //
+        // MEASURED, because reading either from a comment is how the first version happened.
+        // On a 1080p camera, probing both offsets out of a real mapped surface:
+        //
+        //   PROBE pitch=2048 display=1920x1080 coded_h=1088
+        //         at_coded=cudaErrorInvalidValue  at_display=cudaSuccess
+        //
+        // The coded read is 8 rows -- `pitch * 8` bytes -- past the end of the mapping, which
+        // is why it faulted rather than returning wrong pixels. Nothing in the tree had ever
+        // read this plane: `test_ingest` may not dereference a device pointer and asserted the
+        // OFFSET, `test_dataplane` reads synthetic buffers, and `QueueSink` refused device
+        // frames. The first thing that read it was the bench, and it stopped at once.
+        image.uv_offset = static_cast<size_t>(pitch) * static_cast<size_t>(d.display_height);
         image.device = d.device_index;
         // Unmaps on release, and holds the DECODER alive to do it. NVDEC hands out a slot from
         // a pool of `surfaces`, so holding this is what stops the next picture overwriting

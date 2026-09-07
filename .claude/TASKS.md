@@ -3067,6 +3067,27 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       with the old order the same revert is 290 checks, 0 failures, which is exactly the point.
       Found by RUNNING it (V86's sibling lesson): three reviews and my own reading had all gone
       past it, because every test in the tree exercised it only after something else had.
+      AND THE SECOND BUG THE SAME RUN FOUND IS THE BIGGER ONE: **`uv_offset` was the CODED
+      height and it should be the DISPLAY height.** #156 argued the coded-height claim at
+      length -- in its body, in this ledger, in `runtime/ops.h`'s docstring -- and it went past
+      three reviews. It is wrong. `cuvidMapVideoFrame` hands back a post-processed OUTPUT
+      surface at the TARGET extent; the coded height (1088 for 1080p) sizes the DECODE surfaces
+      an application never sees. MEASURED, by probing both offsets out of a real mapped surface
+      rather than reading a header:
+        PROBE pitch=2048 display=1920x1080 coded_h=1088
+              at_coded=cudaErrorInvalidValue  at_display=cudaSuccess
+      The coded read is `pitch * 8` bytes past the end of the mapping -- so it FAULTED rather
+      than returning wrong pixels, which is the only lucky part.
+      WHY NOTHING CAUGHT IT, and this is the lesson worth keeping: no test in the tree had ever
+      READ that plane. `test_ingest` may not dereference a device pointer, so it asserted the
+      OFFSET -- with `>`, which passes on exactly the unreadable value. `test_dataplane` reads
+      synthetic buffers where the offset is whatever the fixture says. `QueueSink` refused
+      device frames, so the graph never saw one. Three gates, all green, none of them touching
+      the byte in question. The first thing that read it was the bench, and it stopped at once.
+      REVERT-CHECK: `FAIL: ... 131072 vs 128000`, on the 320x250 fixture. The fixture's
+      non-16-multiple height still earns its place, for the opposite reason to the one #156
+      gave: the surface's plane is `pitch * 250` while the stream codes at 256, so a source
+      reporting the coded value is caught rather than agreeing by coincidence.
       LEFT: the CARRIER, and #156 round 2 asked for its plan in writing rather than at the
       design load, which is fair -- so: `ulNumOutputSurfaces = 2` caps in-flight surfaces per
       camera at two, and a fair queue exists to HOLD frames, so a surface must not travel
