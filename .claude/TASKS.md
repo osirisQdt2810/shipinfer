@@ -2733,7 +2733,19 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       C1's parity reading is against a baseline measured the same way -- like for like, but not
       the like R55 asks for.
 
-- [ ] **CONNECT-AND-PUMP-DISAGREE-ON-CONFIGERROR · #153 round 3, note 3.** #153 established
+- [x] **CONNECT-AND-PUMP-DISAGREE-ON-CONFIGERROR · DONE 7 Sep, open as #161.** `connect()` now
+      catches `ConfigError` and calls the same `refuse_fatally` the `read()` path uses, so the
+      two agree: a `ConfigError` out of a source is a CONTRACT VIOLATION, fatal for the camera.
+      REVERT-CHECK, and it names the hot loop rather than describing it: without the catch the
+      factory is called **4 times in 5 seconds** and the camera keeps running --
+      `and it is not retried even once: 4`. With it, one attempt, `Unhealthy`, and the reason
+      names the camera. `test_ingest` 289 -> 293 checks.
+      The commonest instance is the one #153's own note pointed at: `FrameSource`'s constructor
+      refusing a counter that belongs to another camera, thrown INSIDE `factory_`. The
+      `SourceUnavailableError` branch above it is left alone deliberately -- it is the reference
+      `refuse_fatally` was extracted from, and its wording ("giving up; retrying cannot fix
+      this") is about a missing runtime rather than a broken contract.
+      ORIGINAL: #153 round 3, note 3. #153 established
       that a `ConfigError` out of a source is a CONTRACT VIOLATION -- fatal for the camera, not
       a reconnect -- and wired that into `CameraActor::pump`. `connect()` did not get the same
       treatment: `FrameSource`'s constructor throws `ConfigError` on a counter/camera mismatch

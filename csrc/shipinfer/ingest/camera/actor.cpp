@@ -235,6 +235,15 @@ namespace shipinfer {
                   " — giving up; retrying cannot fix this");
             stop_.set();
             return false;
+        } catch (const ConfigError& error) {
+            // FATAL, and the same class of thing as the `read()` handler below: a `ConfigError`
+            // out of the factory is a CONTRACT VIOLATION, not a camera being unreachable.
+            // `FrameSource`'s own constructor throws one when the counter it was handed belongs
+            // to another camera (`ingest/base.cpp`), and the source's `do_open` throws one for
+            // a knob it cannot honour -- neither of which the next attempt will find any
+            // different. It was reaching the generic handler below, which backs off and retries
+            // it forever: the same hot loop #153 fixed in `pump`, one function along.
+            return refuse_fatally(error.what());
         } catch (const std::exception& error) {
             record_failure(error.what());
             const double delay = backoff_.next_delay();
