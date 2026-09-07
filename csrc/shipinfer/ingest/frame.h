@@ -37,10 +37,66 @@ namespace shipinfer {
         bool empty() const { return pixels == nullptr || height <= 0 || width <= 0; }
     };
 
+    // doc: long a device image needs no CUDA header, and why the pitch is here
+    // A decoded image in DEVICE memory: NV12, as NVDEC produces it.
+    //
+    // NO ACCELERATOR HEADER IS NEEDED TO HOLD ONE, which is what keeps `ingest/` free of them
+    // (`HostFrame` above makes the same promise). A device pointer is an address; only reading
+    // it needs CUDA, and that happens in `runtime/`, where `nv12_letterbox_into` already takes
+    // exactly this shape.
+    //
+    // `pitch` is separate from `width` because NVDEC's surfaces are padded: the Y plane's rows
+    // are `pitch` bytes apart. Assuming `pitch == width` reads the next row's left edge into
+    // this row's right edge, a skew that looks like a decoder bug rather than an arithmetic
+    // one.
+    //
+    // `uv_offset` is separate for the SAME reason one plane up, and it is the field this
+    // carrier shipped without: the chroma plane does NOT follow at `pitch * height`. NVDEC
+    // decodes at a CODED height rounded up -- 1088 for 1080p -- so the chroma begins at
+    // `pitch * 1088` while `height` is 1080, and `pitch * height` reads the last EIGHT ROWS OF
+    // THE LUMA PLANE as chroma. Right brightness, wrong colour, every frame, on every camera.
+    // `runtime/ops.h` made it a parameter for exactly this and its guard (`uv_offset >= pitch *
+    // height`) is satisfied EXACTLY by the derived value, so nothing downstream can catch it.
+    struct DeviceImage {
+        const void* nv12 = nullptr;
+        int height = 0;
+        int width = 0;
+        int pitch = 0;
+        //: Bytes from `nv12` to the interleaved chroma plane. `pitch * coded_height` for an
+        //: NVDEC surface; `pitch * height` only for a genuinely tight one.
+        size_t uv_offset = 0;
+        //: Which device the pointer belongs to. A frame decoded on GPU 3 is unreadable from a
+        //: worker bound to GPU 1, and ADR-002 says one thread never touches another's memory,
+        //: so the consumer checks rather than assumes.
+        int device = -1;
+        // Kept alive for as long as this frame exists, the way `HostFrame::owner` is -- and
+        // here it is what UNMAPS the decoder's surface, because NVDEC hands out a slot from a
+        // small pool and reuses it as soon as it is released. Dropping this early does not
+        // free the pixels, it lets the next frame overwrite them.
+        std::shared_ptr<const void> owner;
+
+        bool empty() const {
+            // `device < 0` for the same reason as `pitch < width`: a half-filled surface. The
+            // field's own default is -1, and a decoder that forgot to set it would otherwise
+            // reach a consumer that compares an ordinal against its own bound GPU, or calls
+            // `cudaSetDevice(-1)`. ADR-002 says the consumer checks; this is what it checks.
+            return nv12 == nullptr || height <= 0 || width <= 0 || pitch < width ||
+                   device < 0 ||
+                   uv_offset < static_cast<size_t>(pitch) * static_cast<size_t>(height);
+        }
+    };
+
     // A tagged frame: what a source produces and a sink consumes.
+    //
+    // EXACTLY ONE of `image` and `device` is populated. A source decodes to host memory or to
+    // VRAM for its whole life, never both, and `FrameSource::read` latches which on the first
+    // frame and refuses a change -- see `ingest/base.cpp`.
     struct Frame {
         FrameTag tag;
         HostFrame image;
+        DeviceImage device;
+
+        bool on_device() const { return !device.empty(); }
     };
 
     // Stamps decoded images with a monotonic, per-camera frame id and both clocks.
@@ -58,6 +114,40 @@ namespace shipinfer {
         const std::string& camera_id() const { return camera_id_; }
         // The id the next `stamp` will use.
         int64_t next_frame_id() const { return next_; }
+        // doc: long the latch lives here because it has to outlive one connection
+        // Remember, then enforce, whether this CAMERA's pixels arrive on the device.
+        //
+        // ON THE COUNTER, not on the source, and the source's own header says why: "a source
+        // is not expected to survive an error. The actor throws it away and builds a new one,
+        // which is why the reconnect state -- the backoff, the frame counter, the stop
+        // signal -- lives outside it". A latch inside a source resets on every reconnect, and
+        // A RECONNECT IS THE WHOLE SCENARIO: the stream hiccups, the new source finds the
+        // hardware decoder busy, falls back to software, and the graph moves onto the host
+        // path silently. Which is exactly what this exists to refuse.
+        //
+        // Throws ConfigError naming both answers. `CameraActor::pump` treats that as fatal for
+        // the camera rather than reconnecting, because retrying a contract violation is a hot
+        // loop around a bug.
+        void latch_where(bool on_device) {
+            if (!where_latched_) {
+                where_latched_ = true;
+                reads_device_ = on_device;
+                return;
+            }
+            if (reads_device_ == on_device) return;
+            throw ConfigError(
+                "camera '" + camera_id_ + "': a source answered from do_read" +
+                (on_device ? "_device" : "") + " after this camera had answered from do_read" +
+                (reads_device_ ? "_device" : "") +
+                "; where a camera's pixels live is a property of the camera, and the chain is "
+                "built once from it -- most plausibly a reconnect fell back to software "
+                "decode");
+        }
+        // Whether this camera has answered yet, and from where. FOR A TEST -- not for a
+        // report: this class is documented not thread-safe, so a reader off the manager thread
+        // would be racing the actor that stamps.
+        bool where_latched() const { return where_latched_; }
+        bool reads_device() const { return reads_device_; }
         // How many frames this counter has stamped, across every reconnect.
         uint64_t stamped() const { return stamped_; }
 
@@ -67,21 +157,38 @@ namespace shipinfer {
         // place that knows when the frame actually existed. A timestamp taken later measures
         // the queue, not the camera.
         Frame stamp(HostFrame image) {
+            Frame frame = tagged();
+            frame.image = std::move(image);
+            return frame;
+        }
+
+        // The same stamp for a frame that never left the device. One counter for both, because
+        // the `(camera_id, frame_id)` key ADR-002 relies on does not care where the pixels are.
+        Frame stamp(DeviceImage image) {
+            Frame frame = tagged();
+            frame.device = std::move(image);
+            return frame;
+        }
+
+      private:
+        // The tag and the advance, shared by both `stamp` overloads so the two cannot drift on
+        // which clocks they read or when the id moves.
+        Frame tagged() {
             Frame frame;
             frame.tag.camera_id = camera_id_;
             frame.tag.frame_id = next_;
             frame.tag.captured_ns = monotonic_ns();
             frame.tag.captured_unix_ns = unix_ns();
-            frame.image = std::move(image);
             ++next_;
             ++stamped_;
             return frame;
         }
 
-      private:
         std::string camera_id_;
         int64_t next_ = 0;
         uint64_t stamped_ = 0;
+        bool where_latched_ = false;
+        bool reads_device_ = false;
     };
 
 }  // namespace shipinfer

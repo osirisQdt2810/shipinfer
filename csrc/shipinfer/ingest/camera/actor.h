@@ -103,6 +103,9 @@ namespace shipinfer {
         void run();
         bool connect();
         bool pump();
+        // The four steps a contract violation takes: fatal, Unhealthy, teardown, stop. Shared
+        // by `read()`'s refusal and a sink's so the two cannot drift; always returns false.
+        bool refuse_fatally(const std::string& reason);
         bool on_empty_read(const FrameSource& source);
         void publish(Frame&& frame);
         void record_frame(const Frame& frame);
