@@ -54,10 +54,9 @@ namespace shipinfer {
     // interleaved chroma plane `uv_offset` bytes in, `stride` bytes per row.
     //
     // `uv_offset` is carried and not derived, which is the whole reason this is a struct rather
-    // than a pointer. NVDEC decodes at a CODED height rounded up -- 1088 for 1080p -- so the
-    // chroma begins at `stride * 1088` while the frame is 1080 tall, and `stride * height`
-    // reads the last eight luma rows as chroma: right brightness, wrong colour, on every frame
-    // (#153 round 4, #155, and the reason `runtime/ops.h` takes it as a parameter).
+    // than a pointer. `ingest/frame.h` is where that rule and its measurement live -- one copy,
+    // because this comment claimed the opposite when #158 merged and six copies of a correction
+    // drift the same way one copy of a mistake did.
     //
     // `owner` is what keeps those bytes alive. For an NVDEC surface it unmaps a slot out of a
     // small pool, so dropping it early does not free the pixels -- it lets the next picture

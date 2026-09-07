@@ -13,7 +13,7 @@
 // prerequisites into the closure of the whole ingest plane, and the offline C++ tier would stop
 // building on a machine with no CUDA and no `-dev` package. (`sources/gstreamer_pipeline.h` is
 // the pure sibling and is free of all of it — anything may include that.
-// `sources/gstreamer_bus.h`, shared by the last two, is NOT: it includes `gst/gst.h`, and
+// `sources/gstreamer_shared.h`, shared by the last two, is NOT: it includes `gst/gst.h`, and
 // `tests/test_build_csrc.py::TestOnlyGstLaneUnitsReachTheBus` is what holds that line.)
 //
 // That is why this registry is populated by file-scope registrars in the source files

@@ -58,14 +58,12 @@ namespace shipinfer {
     // without an intermediate BGR image. The Python path could not do this without a host round
     // trip, and at 1000 frames a second a 1080p BGR temporary is 6 MB of pure waste per frame.
     //
-    // `uv_offset` is where the interleaved chroma plane starts, in BYTES from `nv12_device`. It
-    // is a PARAMETER and not `stride * src_h`, which is what this computed until the NVDEC path
-    // was written: NVDEC decodes at a CODED height rounded up (1088 for 1080p, and the pitch is
-    // padded too), so its chroma plane begins at `stride * 1088` while `src_h` is 1080. Reading
-    // it at `stride * src_h` takes the chroma from the last eight rows of the LUMA plane --
-    // correct brightness, wrong colour, on every frame. It looks like a model problem.
-    //
-    // For a tight buffer, pass `stride * src_h`; for an NVDEC surface, `stride * coded_height`.
+    // `uv_offset` is where the interleaved chroma plane starts, in BYTES from `nv12_device`. A
+    // PARAMETER and not a derivation, because the CALLER knows and this kernel cannot: the
+    // plane's offset is a property of the buffer it was decoded into, and a kernel that guessed
+    // it would read luma rows as chroma -- correct brightness, wrong colour, on every frame,
+    // looking exactly like a model problem. `stride * src_h` for every producer in this tree;
+    // `ingest/frame.h` states that once, with the measurement behind it.
     LetterboxMap nv12_letterbox_into(const uint8_t* nv12_device, int src_h, int src_w,
                                      int stride, size_t uv_offset, float* dst_device, int dst_h,
                                      int dst_w, bool swap_rb, float pad_value,
@@ -84,8 +82,7 @@ namespace shipinfer {
     // Same conventions as the BGR twin, deliberately, so the two cannot disagree about a box:
     // boxes are `[x1, y1, x2, y2]` in FRAME pixels, clipped then truncated; a degenerate box
     // yields a black crop rather than a launch failure; sampling is bilinear with
-    // `align_corners=False` in patch coordinates. `uv_offset` is `stride * coded_height`, as
-    // above.
+    // `align_corners=False` in patch coordinates. `uv_offset` is the caller's, as above.
     void nv12_crop_resize_into(const uint8_t* nv12_device, int src_h, int src_w, int stride,
                                size_t uv_offset, const float* boxes_device, int count,
                                float* dst_device, int dst_h, int dst_w, bool swap_rb,

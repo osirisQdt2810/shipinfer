@@ -50,20 +50,35 @@ namespace shipinfer {
     // this row's right edge, a skew that looks like a decoder bug rather than an arithmetic
     // one.
     //
-    // `uv_offset` is separate for the SAME reason one plane up, and it is the field this
-    // carrier shipped without: the chroma plane does NOT follow at `pitch * height`. NVDEC
-    // decodes at a CODED height rounded up -- 1088 for 1080p -- so the chroma begins at
-    // `pitch * 1088` while `height` is 1080, and `pitch * height` reads the last EIGHT ROWS OF
-    // THE LUMA PLANE as chroma. Right brightness, wrong colour, every frame, on every camera.
-    // `runtime/ops.h` made it a parameter for exactly this and its guard (`uv_offset >= pitch *
-    // height`) is satisfied EXACTLY by the derived value, so nothing downstream can catch it.
+    // doc: long the field this carrier shipped without, and the wrong rule it then shipped WITH
+    // `uv_offset` is separate for the SAME reason one plane up: the plane's offset is a
+    // property of the buffer the frame was decoded into, and a consumer that derived it would
+    // read luma rows as chroma -- right brightness, wrong colour, every frame, on every camera,
+    // looking exactly like a model problem. `runtime/ops.h` takes it as a parameter for that.
+    //
+    // **What it IS, for every producer in this tree: `pitch * height`.** This header said the
+    // opposite in capitals until #159 -- that NVDEC decodes at a coded height rounded up, so
+    // the chroma begins at `pitch * 1088` for a 1080p camera -- and the source written from it
+    // faulted `pitch * 8` bytes past the end of the mapping the first time anything read that
+    // plane. The coded height sizes the DECODE surfaces, which no application sees;
+    // `cuvidMapVideoFrame` hands back a post-processed OUTPUT surface at the TARGET extent. A
+    // tight buffer's offset is the same value for its own reason, so the two producers shipped
+    // today agree on the number.
+    //
+    // MEASURED, not re-read, because reading a header is how the first version happened:
+    //   PROBE pitch=2048 display=1920x1080 coded_h=1088
+    //         at_coded=cudaErrorInvalidValue  at_display=cudaSuccess
+    //
+    // Note what the guard in `runtime/ops.h` can and cannot do: it refuses an offset INSIDE the
+    // luma plane, and `pitch * coded_height` is not inside it -- so a producer that gets this
+    // wrong upward is caught by nothing until something reads the bytes.
     struct DeviceImage {
         const void* nv12 = nullptr;
         int height = 0;
         int width = 0;
         int pitch = 0;
-        //: Bytes from `nv12` to the interleaved chroma plane. `pitch * coded_height` for an
-        //: NVDEC surface; `pitch * height` only for a genuinely tight one.
+        //: Bytes from `nv12` to the interleaved chroma plane: `pitch * height`, for a mapped
+        //: decoder surface and a tight buffer alike. Carried, not derived -- see above.
         size_t uv_offset = 0;
         //: Which device the pointer belongs to. A frame decoded on GPU 3 is unreadable from a
         //: worker bound to GPU 1, and ADR-002 says one thread never touches another's memory,

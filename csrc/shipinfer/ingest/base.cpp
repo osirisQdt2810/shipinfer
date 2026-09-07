@@ -57,10 +57,8 @@ namespace shipinfer {
                     "camera '" + config_.camera_id +
                     "': the decoder returned an incomplete device surface -- it needs a "
                     "pointer, a positive height and width, a pitch >= the width, a device "
-                    "index "
-                    ">= 0, and a uv_offset at or past the end of the luma plane (for NVDEC "
-                    "that "
-                    "is pitch * CODED height, which is taller than the displayed one). A "
+                    "index >= 0, and a uv_offset at or past the end of the luma plane, which "
+                    "is `pitch * height` for every producer here (see `ingest/frame.h`). A "
                     "decoder that forgot one will forget it on the rebuilt source too, so this "
                     "is fatal for the camera rather than a reconnect");
             }
