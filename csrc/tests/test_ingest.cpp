@@ -2022,6 +2022,66 @@ namespace {
               "tcp and udp still say so");
     }
 
+    void test_the_bitstream_pipeline_stops_at_the_encoded_access_units() {
+        // V156's route: `rtsp -> nv12 -> tren vram het`. Decoding through GStreamer and reading
+        // the pixels back is the host cost the route exists to remove, so this pipeline hands
+        // out encoded access units and NVDEC decodes them straight into VRAM.
+        PipelineOptions bits = for_codec("h264");
+        bits.bitstream = true;
+
+        check_exact(build_pipeline(kGstUri, bits),
+                    "rtspsrc location=" + std::string(kGstUri) +
+                        " latency=200 protocols=tcp ! rtph264depay ! h264parse ! "
+                        "video/x-h264,stream-format=byte-stream,alignment=au ! "
+                        "appsink name=shipinfer_sink emit-signals=false sync=false drop=true "
+                        "max-buffers=2",
+                    "no decoder, no converter, no scaler -- the omission IS the mode");
+
+        // `alignment=au` is not decoration: NVDEC's parser is fed whole access units, and a
+        // buffer holding half of one is a decode error rather than a frame that arrives later.
+        check(contains(build_pipeline(kGstUri, bits), "alignment=au"),
+              "whole access units, because half of one is a decode error");
+
+        PipelineOptions h265 = for_codec("h265");
+        h265.bitstream = true;
+        check(contains(build_pipeline(kGstUri, h265),
+                       " rtph265depay ! h265parse ! video/x-h265,"),
+              "and h265 gets its own depay, parse and caps from the same tables");
+    }
+
+    void test_a_bitstream_pipeline_refuses_what_would_decode_anyway() {
+        // Both refusals guard the same thing: a pipeline that quietly decoded would measure
+        // the route this mode exists to replace, and look like it worked.
+        PipelineOptions any = for_codec("auto");
+        any.bitstream = true;
+        bool refused = false;
+        std::string message;
+        try {
+            (void)build_pipeline(kGstUri, any);
+        } catch (const ConfigError& error) {
+            refused = true;
+            message = error.what();
+        }
+        check(refused && contains(message, "decodebin"),
+              "codec 'auto' is a decoder, so it cannot be a bitstream pipeline: " + message);
+
+        PipelineOptions scaled = for_codec("h264");
+        scaled.bitstream = true;
+        scaled.width = 640;
+        scaled.height = 640;
+        refused = false;
+        message.clear();
+        try {
+            (void)build_pipeline(kGstUri, scaled);
+        } catch (const ConfigError& error) {
+            refused = true;
+            message = error.what();
+        }
+        check(refused && contains(message, "on the device"),
+              "there is nothing decoded to scale, and the letterbox is a device kernel: " +
+                  message);
+    }
+
     void test_build_pipeline_refuses_what_would_never_negotiate() {
         bool refused = false;
         try {
@@ -2635,6 +2695,8 @@ int main() {
     test_the_exact_pipeline_line_per_codec();
     test_the_gl_trap_and_the_deepstream_nvmm_handoff();
     test_a_property_gstreamer_has_no_value_for_is_omitted();
+    test_the_bitstream_pipeline_stops_at_the_encoded_access_units();
+    test_a_bitstream_pipeline_refuses_what_would_decode_anyway();
     test_build_pipeline_refuses_what_would_never_negotiate();
     test_the_decoder_and_converter_are_probed_not_assumed();
     test_an_unsupported_codec_is_refused_before_a_thread_starts();

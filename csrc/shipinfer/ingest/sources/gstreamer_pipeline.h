@@ -168,6 +168,17 @@ namespace shipinfer {
         // for live perception is the only sane policy: a 5-second-old frame is not worth a GPU.
         int max_buffers = 2;
         std::string appsink_name = kAppsinkName;
+        // doc: long the bitstream mode, what it omits, and why the omission is the point
+        //: Stop at the ENCODED bitstream: depay and parse, then straight to the appsink, with
+        //: no decoder, no converter and no scaler. What comes out is access units of
+        //: `video/x-h264` -- a few KB a frame instead of a ~3 MB decoded one.
+        //:
+        //: For the NVDEC path (V156: `rtsp -> nv12 -> tren vram het`). Decoding through
+        //: GStreamer and then reading the pixels back is the host cost the whole route exists
+        //: to remove; the decoder is NVDEC, driven directly, and the frame never leaves VRAM.
+        //: `width`/`height` are refused with it, because scaling an encoded stream is not a
+        //: thing -- the letterbox happens on the device, in `nv12_letterbox_into`.
+        bool bitstream = false;
     };
 
     // The one line an operator pastes into `gst-launch-1.0`.
@@ -188,6 +199,19 @@ namespace shipinfer {
         if ((options.width == 0) != (options.height == 0)) {
             throw ConfigError("width and height must be given together, or neither");
         }
+        if (options.bitstream && options.codec == "auto") {
+            // `decodebin` IS a decoder, and the point of the bitstream mode is not to run one.
+            // Refused rather than ignored: a pipeline that decoded anyway would measure the
+            // route this exists to replace and look like it worked.
+            throw ConfigError(
+                "codec 'auto' cannot be a bitstream pipeline: `decodebin` decodes, and this "
+                "mode stops at the encoded access units so NVDEC can");
+        }
+        if (options.bitstream && options.width != 0) {
+            throw ConfigError(
+                "width/height cannot be set on a bitstream pipeline: there is nothing decoded "
+                "to scale, and the letterbox happens on the device");
+        }
 
         std::string source =
             "rtspsrc location=" + uri + " latency=" + std::to_string(options.latency_ms);
@@ -195,6 +219,17 @@ namespace shipinfer {
         // being absent, so `auto` emits nothing rather than a value that fails to parse.
         if (options.transport == "tcp" || options.transport == "udp") {
             source += " protocols=" + options.transport;
+        }
+
+        if (options.bitstream) {
+            // `alignment=au` matters: NVDEC's parser is fed whole access units, and a buffer
+            // holding half of one is a decode error rather than a frame that arrives later.
+            return source + " ! " + detail::gst::depay_for(codec) + " ! " +
+                   detail::gst::parse_for(codec) + " ! video/x-" + codec +
+                   ",stream-format=byte-stream,alignment=au" +
+                   " ! appsink name=" + options.appsink_name +
+                   " emit-signals=false sync=false drop=true max-buffers=" +
+                   std::to_string(options.max_buffers);
         }
 
         std::string decode;
