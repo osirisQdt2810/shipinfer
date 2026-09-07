@@ -65,7 +65,11 @@ namespace shipinfer {
         std::shared_ptr<const void> owner;
 
         bool empty() const {
-            return nv12 == nullptr || height <= 0 || width <= 0 || pitch < width;
+            // `device < 0` for the same reason as `pitch < width`: a half-filled surface. The
+            // field's own default is -1, and a decoder that forgot to set it would otherwise
+            // reach a consumer that compares an ordinal against its own bound GPU, or calls
+            // `cudaSetDevice(-1)`. ADR-002 says the consumer checks; this is what it checks.
+            return nv12 == nullptr || height <= 0 || width <= 0 || pitch < width || device < 0;
         }
     };
 

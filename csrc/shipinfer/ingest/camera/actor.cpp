@@ -268,15 +268,27 @@ namespace shipinfer {
             // FATAL FOR THIS CAMERA, and not a reconnect. A `ConfigError` out of `read()` is a
             // contract violation -- today, a source whose pixels changed which memory they live
             // in (`FrameCounter::latch_where`) -- and reconnecting around one is a hot loop
-            // about a bug. The fleet keeps its other cameras; this one stops and says why,
-            // which is `CameraHealth`'s job. Caught BEFORE the generic handler below, which
-            // would otherwise back off and retry it forever: that handler catches
-            // `std::exception`, so the two were indistinguishable and the reason given for
-            // choosing `ConfigError` did not hold (#153 round 1).
+            // about a bug. Caught BEFORE the generic handler below, which catches
+            // `std::exception` and would back off and retry it forever (#153 round 1).
+            //
+            // AND IT IS THE SAME SHAPE AS `connect()`'s `SourceUnavailableError` above, so it
+            // does the same four things. `record_failure` alone leaves the camera `Degraded`
+            // and `state_is_final()` false, so `run()`'s exit relabels it `Stopped` -- "stopped
+            // on request" -- and `manager.cpp`'s summary counts only `Unhealthy`, so a fleet
+            // with a permanently dead camera reads `streaming: 49, unhealthy: 0` and looks
+            // exactly like one an operator decommissioned. `last_error` cannot separate them
+            // either: it is written on every transient failure a camera recovered from
+            // (#153 round 2).
             record_failure(error.what());
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                fatal_ = true;
+            }
+            set_state(CameraState::Unhealthy);
             shout("camera " + config_.camera_id + ": stopping, not reconnecting (" +
                   redact_in(error.what()) + ")");
             teardown();
+            stop_.set();
             return false;
         } catch (const std::exception& error) {
             record_failure(error.what());

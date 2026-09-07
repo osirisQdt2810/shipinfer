@@ -1048,6 +1048,12 @@ namespace {
         const CameraHealth health = actor.health();
         check(health.last_error.find("property of the camera") != std::string::npos,
               "with the reason on the camera's health: " + health.last_error);
+        // UNHEALTHY, not Stopped. `record_failure` alone leaves it `Degraded`, `state_is_final`
+        // false, and `run()`'s exit relabels it `Stopped` -- "stopped on request" -- so a fleet
+        // with a permanently dead camera reads `unhealthy: 0` and looks like one somebody
+        // decommissioned. This is the assertion that catches that (#153 round 2).
+        check(health.state == CameraState::Unhealthy,
+              "and the camera reports UNHEALTHY, which is what a fleet summary pages on");
         actor.stop();
     }
 

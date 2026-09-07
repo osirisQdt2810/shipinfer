@@ -99,6 +99,10 @@ namespace {
         check(no_pointer.empty(), "no pointer, no image");
         check(no_size.empty(), "no height, no image");
         check(short_pitch.empty(), "a pitch under the width cannot hold a row");
+        DeviceImage no_device = a_surface();
+        no_device.device = -1;  // the field's own default
+        check(no_device.empty(),
+              "and no device index, which a consumer would compare against its own bound GPU");
         DeviceImage tight = a_surface();
         tight.pitch = tight.width;
         check(!tight.empty(), "but pitch == width is legal: an unpadded surface");

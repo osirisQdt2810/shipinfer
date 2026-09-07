@@ -2737,6 +2737,20 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       goes red while the within-connection one still passes (exactly what the reviewer
       measured); drop the `ConfigError` handler -> the actor rebuilds in a loop, 3 builds and
       counting.
+      ROUND 2 (both findings real, both revert-checked): the fatal path left the camera
+      reporting `Stopped` -- "stopped on request" -- because `record_failure` alone leaves it
+      `Degraded` with `state_is_final()` false, so `run()`'s exit relabels it and
+      `manager.cpp`'s summary (which counts only `Unhealthy`) reads `streaming: 49,
+      unhealthy: 0` for a fleet with a permanently dead camera. Indistinguishable from one an
+      operator decommissioned, and `last_error` cannot separate them because it is written on
+      every transient failure too. It now does the SAME FOUR THINGS `connect()`'s
+      `SourceUnavailableError` peer does -- `fatal_`, `set_state(Unhealthy)`, `teardown`,
+      `stop_.set()`. And `DeviceImage::empty()` rejects `device < 0`, the field's own default,
+      for the same reason it rejects `pitch < width`. Revert-checks: 5 now, one per guard.
+      AND THE BODY WAS EVIDENCE FROM A SUPERSEDED COMMIT -- it pasted `21 checks` where the
+      binary prints 27, and named none of round 1's three tests. Rewritten from the diff, with
+      every `Test*` name grepped against `git diff origin/main` (2 hits each). That is the house
+      rule that has now cost four PR bodies.
       TWO PLANES, and the answer is "this seam exists once, by design": Python's
       `FrameSource._do_read` gets NO device counterpart. Python's host round trip IS the wall
       V156 removes -- `runtime/ops.h` already says the Python path "could not do this without a
