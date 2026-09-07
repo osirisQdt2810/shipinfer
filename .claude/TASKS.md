@@ -2643,6 +2643,14 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       C1's parity reading is against a baseline measured the same way -- like for like, but not
       the like R55 asks for.
 
+- [ ] **CONNECT-AND-PUMP-DISAGREE-ON-CONFIGERROR · #153 round 3, note 3.** #153 established
+      that a `ConfigError` out of a source is a CONTRACT VIOLATION -- fatal for the camera, not
+      a reconnect -- and wired that into `CameraActor::pump`. `connect()` did not get the same
+      treatment: `FrameSource`'s constructor throws `ConfigError` on a counter/camera mismatch
+      (`ingest/base.cpp:14`), inside `factory_(...)`, where `connect()`'s generic handler backs
+      off and retries it forever. Same class, same hot loop, one function along. The fix is the
+      same four lines `SourceUnavailableError` already gets there.
+
 - [~] **PHASE-D-NV12 · OPENED by V156 (critical path now, not a deferred phase), and THE ITEM'S
       OWN PREMISE WAS WRONG -- measured 7 Sep by installing the package it named.**
       `libgstreamer-plugins-bad1.0-dev` installs fine and gives NEITHER `gstreamer-cuda-1.0`
@@ -2751,6 +2759,30 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       binary prints 27, and named none of round 1's three tests. Rewritten from the diff, with
       every `Test*` name grepped against `git diff origin/main` (2 hits each). That is the house
       rule that has now cost four PR bodies.
+      ROUND 3, and the sharpest of the three: `read()` NEVER CALLED `empty()`. It was defensive
+      documentation. `Frame::on_device()` is DEFINED as `!device.empty()`, so an
+      engaged-but-invalid surface was not rejected -- it was silently reclassified as a HOST
+      frame with a null pixel pointer, and `Frame`'s own "exactly one of `image` and `device` is
+      populated" became ZERO. Downstream reads as healthy the whole way: `pump()` resets the
+      backoff and publishes, and the detect stage letterboxes a 0x0 image while the fleet
+      reports 50 streaming. AND ROUND 2 MADE IT WORSE -- adding `device < 0` to `empty()`
+      widened the set that got laundered. Checked at the seam now, with `ConfigError`; 4 checks
+      go red when the guard is removed.
+      NOTE 1 TAKEN AS ARMOUR, because it is a sequencing hazard and not a style point: every
+      sink today carries `frame.image` and DROPS `frame.device`, so the first NVDEC source would
+      have produced a 0x0 work item per frame with nothing red. `QueueSink::put` refuses a
+      device frame by name, which enforces the ordering -- the graph branch lands BEFORE any
+      source that can populate the field.
+      NOTE 2: the latch's justification was the weakest available ("a branch per frame", which
+      at 1000 fps is free and which `on_device()` already is). The honest argument is that where
+      the pixels live is a PLAN-CONSTRUCTION fact -- the chain is built once from it -- and the
+      comment says that now, along with the reasonable objection it overrides.
+      NOTE 4 WAS NOT A STALE NUMBER: `test_ingest` prints 239 on an `--offline` build and 238
+      on a full one, stable five runs each. The extra check is the opencv row of the lane table,
+      which only runs where that lane is OMITTED -- #146's mechanism exactly. Both numbers are
+      right; the count is build-dependent, and the body says so instead of picking one.
+      NOTE 5: `where_latched()`/`reads_device()` are documented FOR A TEST only now -- the
+      counter is not thread-safe, so a report reading them would race the actor that stamps.
       TWO PLANES, and the answer is "this seam exists once, by design": Python's
       `FrameSource._do_read` gets NO device counterpart. Python's host round trip IS the wall
       V156 removes -- `runtime/ops.h` already says the Python path "could not do this without a

@@ -44,6 +44,22 @@ namespace shipinfer {
         // The latch is the COUNTER's, so it survives the reconnect that motivates it -- see
         // `FrameCounter::latch_where`.
         if (std::optional<DeviceImage> on_device = do_read_device()) {
+            // CHECKED, not documented. `Frame::on_device()` is DEFINED as `!device.empty()`,
+            // so an engaged-but-invalid surface was not rejected -- it was silently
+            // reclassified as a HOST frame with a null pixel pointer, and `Frame`'s own
+            // "exactly one of `image` and `device` is populated" became zero. Worse, round 2
+            // adding `device < 0` to `empty()` WIDENED the set that got laundered that way.
+            // Downstream reads as healthy: `pump()` resets the backoff and publishes, and the
+            // detect stage letterboxes a 0x0 image while the fleet reports 50 streaming
+            // (#153 round 3).
+            if (on_device->empty()) {
+                throw ConfigError(
+                    "camera '" + config_.camera_id +
+                    "': the decoder returned an incomplete device surface -- it needs a "
+                    "pointer, a positive height and width, a pitch >= the width, and a device "
+                    "index >= 0. A decoder that forgot one will forget it on the rebuilt "
+                    "source too, so this is fatal for the camera rather than a reconnect");
+            }
             counter_.latch_where(true);
             return counter_.stamp(std::move(*on_device));
         }

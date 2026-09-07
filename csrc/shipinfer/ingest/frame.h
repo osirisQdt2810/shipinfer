@@ -130,7 +130,9 @@ namespace shipinfer {
                 "built once from it -- most plausibly a reconnect fell back to software "
                 "decode");
         }
-        // Whether this camera has answered yet, and from where. For a test and for a report.
+        // Whether this camera has answered yet, and from where. FOR A TEST -- not for a
+        // report: this class is documented not thread-safe, so a reader off the manager thread
+        // would be racing the actor that stamps.
         bool where_latched() const { return where_latched_; }
         bool reads_device() const { return reads_device_; }
         // How many frames this counter has stamped, across every reconnect.

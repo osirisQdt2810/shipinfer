@@ -113,11 +113,17 @@ namespace shipinfer {
         // straight into VRAM and never brings the pixels back (V156: `rtsp -> nv12 -> tren
         // vram het`). Nothing by default, which is every source that answers `do_read`.
         //
-        // A SOURCE ANSWERS FROM ONE HOOK FOR ITS WHOLE LIFE. `read()` latches which on the
-        // first frame and refuses a change, because a chain that saw both would need a branch
-        // per frame on a fact that is a property of the camera -- and a source that answered
-        // host on a reconnect after answering device would silently move the whole graph back
-        // onto the slow path with nothing said.
+        // A CAMERA ANSWERS FROM ONE HOOK FOR ITS WHOLE LIFE. `read()` latches which on the
+        // first frame and refuses a change -- and the reason is NOT the cost of a branch, which
+        // at 1000 fps is free and which `Frame::on_device()` already is. It is that where the
+        // pixels live is a PLAN-CONSTRUCTION fact: the chain is built once from it, so it
+        // cannot change under a chain that is already running.
+        //
+        // The honest objection is that falling back to software decode keeps 1 of 50 cameras
+        // alive where refusing kills it. Refusing anyway, because the alternative is that
+        // camera silently feeding a graph built for device frames -- and the operator learns
+        // from `CameraHealth` either way, which is the difference between a stopped camera and
+        // a wrong one.
         virtual std::optional<DeviceImage> do_read_device() { return std::nullopt; }
         // Release resources. Must tolerate being called after a partial `do_open`.
         virtual void do_close() = 0;

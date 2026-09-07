@@ -58,6 +58,9 @@ namespace {
             : FrameSource(std::move(config), counter, stop) {}
 
         bool next_is_device = true;
+        //: Leave the device index at its default, the way a decoder that filled everything
+        //: else and forgot this one would. `-1` is what `DeviceImage` starts with.
+        bool forget_device_index = false;
         std::vector<uint8_t> pixels{1, 2, 3};
 
       protected:
@@ -66,7 +69,9 @@ namespace {
 
         std::optional<DeviceImage> do_read_device() override {
             if (!next_is_device) return std::nullopt;
-            return a_surface();
+            DeviceImage image = a_surface();
+            if (forget_device_index) image.device = -1;
+            return image;
         }
         std::optional<HostFrame> do_read() override {
             HostFrame frame;
@@ -172,6 +177,36 @@ namespace {
         check(message.find("cam0") != std::string::npos, "and the camera");
     }
 
+    void an_incomplete_surface_is_REFUSED_and_not_laundered_into_a_host_frame() {
+        // #153 round 3, and it is the sharpest of the three: `empty()` was defensive
+        // DOCUMENTATION -- nothing on the read path consulted it. `Frame::on_device()` is
+        // defined as `!device.empty()`, so an engaged-but-invalid surface was reclassified as
+        // a HOST frame with a null pixel pointer, and `Frame`'s own "exactly one is populated"
+        // became ZERO. Downstream that reads as healthy all the way to a 0x0 letterbox.
+        FrameCounter counter("cam9");
+        StopSignal stop;
+        SwitchingSource source(a_camera("cam9"), counter, stop);
+        source.forget_device_index = true;  // everything else filled, as a real decoder would
+        source.open();
+
+        bool refused = false;
+        std::string message;
+        try {
+            (void)source.read();
+        } catch (const ConfigError& error) {
+            refused = true;
+            message = error.what();
+        }
+
+        check(refused, "an incomplete surface is refused, not delivered as a host frame");
+        check(message.find("incomplete device surface") != std::string::npos,
+              "and says what is missing: " + message);
+        check(message.find("cam9") != std::string::npos, "and which camera");
+        check(!counter.where_latched(),
+              "and it did NOT latch: a refused read must not decide where this camera reads "
+              "from, or the rebuilt source is judged against a frame that never counted");
+    }
+
     void the_latch_survives_a_RECONNECT_which_is_its_whole_motivation() {
         // #153 round 1: the latch was on the SOURCE, and a source is a per-connection object --
         // its own header says the reconnect state lives outside it. So the plausible failure
@@ -249,6 +284,7 @@ int main() {
     an_incomplete_surface_is_empty_rather_than_trusted();
     the_stamp_is_the_same_key_wherever_the_pixels_are();
     the_owner_is_what_unmaps_the_surface();
+    an_incomplete_surface_is_REFUSED_and_not_laundered_into_a_host_frame();
     a_source_answers_from_ONE_hook_for_its_whole_life();
     the_latch_survives_a_RECONNECT_which_is_its_whole_motivation();
     the_frame_id_still_advances_across_the_rebuild();
