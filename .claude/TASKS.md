@@ -2612,9 +2612,28 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       differ: yes`. So the C++ plane reads REAL RTSP pixels end to end and always could -- what
       was missing is that the host build has no gstreamer, so every bench run I took used the
       only source that build links, `replay`. The gap was in my run recipe, not in the plane.
+      (a) DONE 7 Sep on `feat/bench-rtsp-source`: the C++ bench reads from RTSP end to end,
+      all four models exercised. `SHIPINFER_BENCH_SOURCE=gstreamer` routes through
+      `scripts/cpp_bench_over_rtsp.sh`, which starts both servers IN THE SAME CONTAINER
+      (a second one is unreachable -- the rootless bridge has no NAT) and hands the bench one
+      URI per camera. Two real bugs found by running it rather than by reading it:
+        * `bench.cpp` gave every even camera `--person-frames` verbatim. Right for `replay`,
+          where a folder of JPEGs is shared by design; for RTSP it pointed 25 cameras at one
+          stream. `ingest/camera_uris.h` reads one URI per line and REFUSES a short list,
+          because a reused stream reports a fleet's throughput for a stream's.
+        * the wrapper read `SHIPINFER_BENCH_CAMERAS`/`_FPS` from the environment and they never
+          crossed `docker run` -- no `-e` passes them -- so a run asking for 8 cameras at 5 fps
+          got servers publishing 50 at 20, every camera indexed into the PERSON half of the URI
+          list, and `per_device ship_segmenter 0:0 1:0`: the ship branch did no work at all.
+          It parses the bench's own argv now, so the servers and the fleet are the same numbers
+          by construction rather than by two agreeing defaults.
+      EVIDENCE, 8 cameras x 5 fps x 25 s on GPUs 0-1: `rtsp fleet: 8 camera(s) at 5 fps, from
+      this binary's own argv`, `4 person stream(s) on :8554, then 4 ship stream(s) on :8555`,
+      760 frames read -> 696 complete, 0 rejected, and every model busy --
+      `ship_detector 390/378, ship_segmenter 186/198, ship_embedder 188/196,
+      person_embedder 247/217`. `test_camera_uris` is 12 checks, offline.
       SPLIT, and the first two halves are mine:
-        (a) take the RTSP-sourced measurement on BOTH planes with that build, stating plainly
-            that the decode is software BGR;
+        (a-py) the same measurement on the Python plane, and the design-load run;
         (b) make the RTSP path negotiate NV12 and keep it on the device as far as the current
             headers allow (`nvvideoconvert`'s NVMM hand-off is already why `_CONVERTERS` names
             it), so the remaining gap is exactly the missing package and not our code;
