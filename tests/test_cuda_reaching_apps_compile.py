@@ -155,12 +155,42 @@ def _headers_available() -> bool:
     return done.returncode == 0
 
 
+# doc: long the header-to-package map, and the round it cost
+#: A header a package ships, and the package that ships it -- consulted only after the probe
+#: has failed, to turn a CUDA-internal include error into an apt line. `crt/host_defines.h` is
+#: the one that cost a round: `cuda-cudart-dev` ships `cuda_runtime.h` but not the `crt/`
+#: headers it includes (#133 round 5), and a dev box's full toolkit cannot see that.
+_HEADER_PACKAGES: tuple[tuple[str, str], ...] = (
+    ("crt/host_defines.h", "cuda-crt-<major>-<minor> (headers only, ~881 KB, no nvcc)"),
+    ("NvInferPlugin.h", "libnvinfer-headers-plugin-dev"),
+    ("NvInfer.h", "libnvinfer-headers-dev"),
+    ("cuda_runtime.h", "cuda-cudart-dev-<major>-<minor>"),
+)
+
+
+def _absent_headers() -> list[str]:
+    """Which of :data:`_HEADER_PACKAGES` cannot be found under the flags we would pass.
+
+    A directory walk and not a compile, because this runs only after the compiler has already
+    said no: the job's failure message is worth more than one more subprocess.
+    """
+    roots = [Path(flag[2:]) for flag in _include_flags() if flag.startswith("-I")]
+    roots += [Path("/usr/include"), Path("/usr/local/include")]
+    return [
+        f"{header} -> install {package}"
+        for header, package in _HEADER_PACKAGES
+        if not any((root / header).is_file() for root in roots)
+    ]
+
+
 def _missing_headers_reason() -> str:
-    return (
+    reason = (
         "needs g++ plus the CUDA and TensorRT headers, on the include path or under "
         "CUDA_HOME / SHIPINFER_TENSORRT_DIR; without them nothing in this repository "
         "compiles these apps"
     )
+    absent = _absent_headers()
+    return reason if not absent else reason + ". Not found: " + "; ".join(absent)
 
 
 # doc: long which lanes are another job's, and what adding one costs
@@ -351,6 +381,31 @@ class TestThisFileStandsAlone:
             "types",
         }
     )
+
+    def test_a_missing_header_names_the_package_that_ships_it(self) -> None:
+        """Because the raw compiler error names a file nobody here has heard of.
+
+        `cuda-cudart-dev` ships `cuda_runtime.h` WITHOUT the `crt/` headers it includes, so the
+        first run on main failed with `crt/host_defines.h: No such file or directory` on all
+        three compile legs -- which reads as an NVIDIA packaging problem rather than as a short
+        apt line (#133 round 5). A dev box has a full toolkit and cannot see it, so the message
+        has to carry the answer.
+        """
+        headers = dict(_HEADER_PACKAGES)
+
+        assert "crt/host_defines.h" in headers, "the one that cost a round"
+        assert "cuda-crt" in headers["crt/host_defines.h"], "and it names cuda-crt"
+        assert set(headers) >= {"NvInfer.h", "NvInferPlugin.h", "cuda_runtime.h"}, (
+            "every header the probe includes needs a package beside it, or its absence "
+            "produces an error message with no action in it"
+        )
+
+    def test_the_reason_stays_plain_when_the_headers_are_there(self) -> None:
+        """On a box that has them, the reason must not grow a misleading `Not found` tail."""
+        if not _headers_available():
+            pytest.skip("this box has no headers; the tail is correct here")
+
+        assert "Not found" not in _missing_headers_reason()
 
     def test_this_file_needs_no_conftest(self) -> None:
         """Its imports are stdlib plus pytest, so it runs on an interpreter with only pytest."""

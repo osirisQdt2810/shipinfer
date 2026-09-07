@@ -163,8 +163,15 @@ jobs:
           # falls out of the check, and NOTHING else in CI compiles it (`cpp-gst-lane` covers
           # `gstreamer.cpp`, not this one). That is this ticket's own thesis, so the ~50 MB is
           # the price of the ticket being true (#133 round 4).
+          # `cuda-crt-12-6` (881 KB, headers only, no nvcc binary): `cuda-cudart-dev` ships
+          # `cuda_runtime.h` WITHOUT the `crt/` headers it includes -- `cuda_runtime_api.h`
+          # includes `crt/host_defines.h` and `cuda_runtime.h` includes `crt/host_config.h`,
+          # both from `Source: cuda-nvcc`, and nothing here depends on them under
+          # `--no-install-recommends`. Without it all three compile legs are red on the first
+          # run on main, naming a CUDA-internal header, which reads as an NVIDIA packaging
+          # problem rather than as "this job never worked" (#133 round 5).
           sudo apt-get install -y --no-install-recommends \
-            cuda-cudart-dev-12-6 "libnvinfer-headers-dev=10.*" \
+            cuda-cudart-dev-12-6 cuda-crt-12-6 "libnvinfer-headers-dev=10.*" \
             "libnvinfer-headers-plugin-dev=10.*" libopencv-dev
       - name: Syntax-check every unit the offline build cannot reach
         shell: bash          # -> `bash --noprofile --norc -eo pipefail`, so a pipe cannot mask

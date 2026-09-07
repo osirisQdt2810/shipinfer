@@ -2625,6 +2625,17 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       (2) `_headers_available()` runs a `g++` subprocess when the module is imported, so a
       plain offline `pytest` collection pays one cached spawn even though the classes then
       skip. A lazy string condition or a session-scoped fixture avoids it.
+      ROUND 5: `cuda-cudart-dev-12-6` ships `cuda_runtime.h` WITHOUT the `crt/` headers it
+      includes -- `cuda_runtime_api.h` includes `crt/host_defines.h`, `cuda_runtime.h` includes
+      `crt/host_config.h`, both from `Source: cuda-nvcc`, and nothing depends on them under
+      `--no-install-recommends`. So all three compile legs would have been RED on the first run
+      on main, naming a CUDA-internal header, which reads as an NVIDIA packaging problem rather
+      than as "this job never worked". `cuda-crt-12-6` added (881 KB, headers only, no nvcc).
+      THIRD TIME IN THIS SHAPE, so the durable part is the MESSAGE: `_HEADER_PACKAGES` maps
+      each header the probe needs to the package that ships it, and a required-headers failure
+      now ends `Not found: crt/host_defines.h -> install cuda-crt-...` instead of a compiler
+      error about a file nobody here has heard of. A dev box's full toolkit cannot see any of
+      these, which is exactly why the answer belongs in the failure.
       ROUND 4 CLOSED THE OTHER TWO NOTES rather than deferring them: `replay.cpp` was compiled
       by NOTHING in CI (its opencv lane was unresolvable on the runner and it fell out with no
       assertion naming it, while `cpp-gst-lane` covers only `gstreamer.cpp`) -- `libopencv-dev`
