@@ -3122,18 +3122,6 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       and `ops.cu` are one-line pointers to it. `test_dataplane`'s fixtures are unchanged and
       still right -- the kernel must honour the offset it is handed -- but they no longer
       attribute an above-the-plane offset to NVDEC, which is the retracted claim.
-- [ ] **NVDEC-SECTION-ORDER-HAS-NO-GUARD · #159 round 2, note 3.** `test_ingest.cpp`'s NVDEC
-      sections run before anything else in that binary touches GStreamer, and that ORDER is what
-      makes a missing `initialise_gstreamer()` visible -- but the only thing holding it is a
-      comment saying "do not move these back down", which is what #156 relied on too. That file
-      is not gst-linked so it cannot assert `!gst_is_initialized()` itself; the reviewer's
-      suggestion is a text-order assertion in `tests/test_build_csrc.py` (the three NVDEC calls
-      appear in `main()` before any call whose body reaches the gst lane), which would fail on a
-      plain runner rather than only inside `jammy-nvdec`. Deferred out of #159 on the reviewer's
-      own advice ("worth considering with the carrier work, not here"): the mechanical part is
-      deciding what "reaches the gst lane" means from text without a hand-kept list, which is
-      the two-place edit the lane-table checks exist to avoid.
-
       **THE ROUTE RUNS END TO END, 7 Sep, and this is what V156 asked for.** `rtsp -> H.264
       bitstream -> NVDEC -> NV12 surface in VRAM -> one device-to-device copy -> the fair queue
       -> the graph (`nv12_letterbox_into`, `nv12_crop_resize_into`) -> events`, with NO host
@@ -3215,6 +3203,31 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
           loop checks the stop signal every pass now, and one pull is capped at 100 ms so that
           check is reached promptly; the deadline still bounds the read. Zero abandonments in
           three runs since.
+      ROUND 2 FOUND THE GUARD'S PREDICATE WRONG, and it is the right kind of finding: I had
+      written `devices > 1`, and what makes a device frame unusable is not HOW MANY GPUs a
+      process drives but whether the frame's GPU is one of them. `--devices 3 --source nvdec` --
+      an ordinary choice when gpu0 is busy -- has every camera decoding on gpu0 because nothing
+      set their `device` option, `devices == 1` so the sink accepts, and the worker bound to
+      gpu3 then throws PER FRAME, FOREVER: the exact outcome the sink's refusal exists to
+      replace with one health line. It takes the device SET now and refuses a frame from outside
+      it, `bench.cpp` assigns each camera's decoder device from the run's list, and the test
+      runs OFFLINE (the refusal precedes any CUDA call, so a dummy pointer is enough) -- which
+      is where a wrong predicate should have been caught.
+      AND THE LEDGER SAID THE OPPOSITE OF THE BODY, which is worth recording as its own mistake:
+      the whole 100-line route narrative had been appended INSIDE the
+      `NVDEC-SECTION-ORDER-HAS-NO-GUARD` item, leaving it `[ ]` while the body said it closed --
+      so the Stop hook would have kept re-blocking on a guard that exists and passes, and
+      `PHASE-D-NV12` recorded nothing about the route running. Moved here, where it belongs.
+      NOTES TAKEN: why this is not `WorkerScratch` is now IN the header (single-threaded, keyed
+      by name, throws past its cap -- an ingest pool can accept none of the three); the stale
+      claim that a size change empties the pool is corrected, and the bucket-retirement rule the
+      reviewer offered is NOT added, deliberately -- a stale bucket is bounded (~93 MB per 1080p
+      size at the derived cap), a source refuses a resolution change mid-stream so a size only
+      appears across a reconnect, and a rule without a least-recently-taken clock would drop a
+      bucket a camera still wants. Stated in the header rather than guessed at. Also: the
+      `graph/state.h` claim that `pixels.h` is the only thing that asks which representation
+      (the sink asks once on the way in), the `// doc: long` markers the surrounding `csrc/`
+      uses, and a `FEATURE_LOG.md` entry for the whole route.
       AND `NVDEC-SECTION-ORDER-HAS-NO-GUARD` IS CLOSED with it, which is where #159's reviewer
       said it belonged: `TestTheNvdecSectionsRunFirst` reads `main()`'s call order and each
       test's body, decides which lane a test SELECTS (assignment to `.source`, or
@@ -3226,6 +3239,24 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `test_an_unsupported_codec_is_refused_before_a_thread_starts`,
       `test_the_gstreamer_source_where_it_is_linked` and
       `test_a_decoded_pixel_over_a_real_rtsp_session`.**
+- [x] **NVDEC-SECTION-ORDER-HAS-NO-GUARD · DONE 7 Sep, with the carrier (#160), which is where
+      #159's reviewer said it belonged.** `TestTheNvdecSectionsRunFirst` in
+      `tests/test_build_csrc.py` reads `test_ingest.cpp`'s `main()` call order and each test's
+      body and refuses any gst-lane call before the last NVDEC one -- offline, 0.3 s, no
+      GStreamer and no compiler, so it fails on a plain runner where the hazard is invisible.
+      THE MECHANICAL PART, which was the reason to defer it: what "reaches the gst lane" means
+      from text, without a hand-kept list. The lane's registered NAMES come from
+      `omitted_lanes.h`'s table, and a test USES a lane when it SELECTS the source
+      (`.source = "<name>"`, or `SOURCES().contains("<name>")`). Narrowing "mentions" to
+      "selects" was the whole of the work: the first version read bare string literals and
+      flagged `test_no_ingest_error_carries_a_credential_in_its_message`, which puts
+      `"gstreamer"` in an error message and reaches no library at all.
+      REVERT-CHECK: move the three NVDEC calls back down and it names
+      `test_an_unsupported_codec_is_refused_before_a_thread_starts`,
+      `test_the_gstreamer_source_where_it_is_linked` and
+      `test_a_decoded_pixel_over_a_real_rtsp_session` -- the three that would initialise
+      GStreamer on the NVDEC source's behalf.
+      ORIGINAL: #159 round 2, note 3.
 - [ ] **DEVICE-FRAME-NEEDS-A-LANE-PER-GPU · the design load's blocker, opened 7 Sep.** A device
       frame cannot move (ADR-004), so a worker on another GPU cannot take it -- and `cli/bench`
       keeps ONE fleet-wide fair queue precisely so any worker can take any frame, which is what

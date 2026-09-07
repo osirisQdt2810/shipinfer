@@ -403,7 +403,7 @@ namespace {
         DeviceSurface held;
         {
             FairPriorityQueue<FrameWork> queue("pipeline", 8, Overflow::Reject);
-            QueueSink sink(queue, /*pooled=*/2, /*devices=*/1);
+            QueueSink sink(queue, /*pooled=*/2, /*devices=*/{0});
             Frame frame;
             frame.tag = FrameTag{"cam", 1, 0};
             frame.device = a_device_image(decoded);
@@ -425,7 +425,7 @@ namespace {
     // operator meets.
     void test_the_sink_turns_either_representation_into_one_work_item() {
         FairPriorityQueue<FrameWork> queue("pipeline", 16, Overflow::Reject);
-        QueueSink sink(queue, /*pooled=*/4, /*devices=*/1);
+        QueueSink sink(queue, /*pooled=*/4, /*devices=*/{0});
 
         // -- a host frame: the pixels stay on the host and the worker uploads them ----------
         std::vector<uint8_t> pixels(8 * 8 * 3, 7);
@@ -469,20 +469,22 @@ namespace {
               "and they are the sink's copy, not the decoder's surface");
     }
 
-    void test_a_device_frame_across_two_gpus_is_refused_by_name() {
+    // NO DEVICE NEEDED, and that is worth the dummy pointer: the refusal happens before
+    // `SurfaceIntake::take` and therefore before any CUDA call, so this runs in the offline
+    // tier where a wrong predicate would otherwise only show up on a GPU box.
+    void test_a_device_frame_from_a_gpu_this_process_lacks_is_refused_by_name() {
         FairPriorityQueue<FrameWork> queue("pipeline", 16, Overflow::Reject);
-        QueueSink sink(queue, /*pooled=*/4, /*devices=*/2);
-        PaddedSurface decoded;
+        QueueSink sink(queue, /*pooled=*/4, /*devices=*/{1, 2});
+        uint8_t nothing = 0;  // never read: `empty()` asks only that it is non-null
         Frame frame;
         frame.tag = FrameTag{"cam09", 3, 0};
-        frame.device.nv12 = decoded.device.get();
+        frame.device.nv12 = &nothing;
         frame.device.height = PaddedSurface::height;
         frame.device.width = PaddedSurface::width;
         frame.device.pitch = PaddedSurface::stride;
         frame.device.uv_offset = PaddedSurface::uv_offset();
-        frame.device.device = 0;
-        frame.device.owner =
-            std::shared_ptr<const void>(decoded.device.get(), [](const void*) {});
+        frame.device.device = 0;  // a process driving {1, 2} has no worker for it
+        frame.device.owner = std::shared_ptr<const void>(&nothing, [](const void*) {});
         std::string reason;
         try {
             sink.put(std::move(frame));
@@ -491,11 +493,15 @@ namespace {
         }
         // A `ConfigError` and not a drop, because `CameraActor` refuses one fatally: the camera
         // stops with this text in its health line rather than failing every frame forever.
-        check(
-            reason.find("cam09") != std::string::npos &&
-                reason.find("--runner fleet") != std::string::npos,
-            "two GPUs in one process is refused, naming the camera and the shape that works: " +
-                reason);
+        // THE SET AND NOT THE COUNT is what this pins. `devices > 1` was the first predicate
+        // and it accepts exactly this frame -- one GPU, and the wrong one -- which is the
+        // `--devices 3 --source nvdec` case where every frame then failed in the worker.
+        check(reason.find("cam09") != std::string::npos &&
+                  reason.find("gpu0") != std::string::npos &&
+                  reason.find("1,2") != std::string::npos,
+              "a GPU this process does not drive is refused, naming the camera, its GPU and "
+              "the ones there are: " +
+                  reason);
         check(queue.stats().depth == 0, "and nothing is queued");
     }
 
@@ -712,6 +718,7 @@ int main() {
     test_a_frame_carrying_only_a_surface_still_has_pixels();
     test_a_frame_with_no_pixels_is_refused_by_name();
     test_an_incomplete_surface_never_becomes_a_buffer();
+    test_a_device_frame_from_a_gpu_this_process_lacks_is_refused_by_name();
     if (has_device()) {
         test_the_pixel_seam_reads_a_padded_surface_as_a_surface();
         test_the_intake_frees_the_decoders_slot_and_keeps_the_pixels();
@@ -719,7 +726,6 @@ int main() {
         test_a_surface_holds_its_pool_alive();
         test_a_surface_outlives_the_sink_that_made_it();
         test_the_sink_turns_either_representation_into_one_work_item();
-        test_a_device_frame_across_two_gpus_is_refused_by_name();
         scratch_pool_reuses_only_released_buffers();
         scratch_pool_refuses_unbounded_growth();
     } else {

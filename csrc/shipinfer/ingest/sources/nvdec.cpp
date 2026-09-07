@@ -580,7 +580,10 @@ namespace shipinfer {
             [](const IngestConfig& config, FrameCounter& counter,
                StopSignal& stop) -> std::unique_ptr<FrameSource> {
                 return std::make_unique<NvdecSource>(config, counter, stop);
-            });
+            },
+            // DEVICE FRAMES, declared: the only source that answers from `do_read_device`, and
+            // the fact a caller needs before any camera connects (`ingest/registry.h`).
+            /*device_frames=*/true);
 
     }  // namespace
 

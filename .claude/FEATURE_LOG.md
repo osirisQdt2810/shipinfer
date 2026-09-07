@@ -5,6 +5,20 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-07 — RTSP to targets without the pixels ever leaving the GPU (V156's route)
+
+`rtsp -> nv12 -> trên vram hết -> xử lý trên vram toàn bộ`, in five PRs: two NV12 kernels that
+read a surface in place (#155, #157), an NVDEC source taking the H.264 *bitstream* off the
+socket and decoding it through `libnvcuvid` (#156), one seam in the graph that tells the two
+pixel representations apart (#158), and the intake that copies a mapped surface out of the
+decoder's pool of two so the fair queue can hold frames (#160).
+
+Two bugs no gate could find, because none had ever *read* the chroma plane: nothing initialised
+GStreamer for the NVDEC unit, and `uv_offset` was the coded height where `cuvidMapVideoFrame`
+puts the plane at the display one -- `pitch * 8` past the mapping (#159). 8 cameras x 5 fps on
+one A5000, five runs each: +6.9% frames read and half the reassembly timeouts against the host
+BGR path. The 5x needs the design load and one queue per GPU.
+
 ## 2026-09-05 — The plan carries the model runtime (P5-B)
 
 `run_cpp_bench.sh` restated `model_repository/*/config.yaml` on the command line and disagreed
