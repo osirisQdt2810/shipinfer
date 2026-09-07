@@ -50,6 +50,26 @@ namespace shipinfer {
         bool empty() const { return rows == 0; }
     };
 
+    // The frame's pixels AS THE DECODER LEFT THEM: one NV12 surface, luma plane first and the
+    // interleaved chroma plane `uv_offset` bytes in, `stride` bytes per row.
+    //
+    // `uv_offset` is carried and not derived, which is the whole reason this is a struct rather
+    // than a pointer. NVDEC decodes at a CODED height rounded up -- 1088 for 1080p -- so the
+    // chroma begins at `stride * 1088` while the frame is 1080 tall, and `stride * height`
+    // reads the last eight luma rows as chroma: right brightness, wrong colour, on every frame
+    // (#153 round 4, #155, and the reason `runtime/ops.h` takes it as a parameter).
+    //
+    // `owner` is what keeps those bytes alive. For an NVDEC surface it unmaps a slot out of a
+    // small pool, so dropping it early does not free the pixels -- it lets the next picture
+    // overwrite them under a worker that is still reading.
+    struct DeviceSurface {
+        const uint8_t* nv12 = nullptr;
+        int stride = 0;
+        size_t uv_offset = 0;
+        std::shared_ptr<const void> owner;
+        bool empty() const { return nv12 == nullptr; }
+    };
+
     class FrameState {
       public:
         FrameState(FrameTag tag, int height, int width, float fps)
@@ -111,7 +131,7 @@ namespace shipinfer {
         // answered (even if it found nothing), every payload and every batch.
         std::vector<std::string> available() const {
             std::vector<std::string> names;
-            if (image_) names.push_back(FRAME_INPUT);
+            if (has_pixels()) names.push_back(FRAME_INPUT);
             if (detected_) names.push_back(DETECTIONS);
             for (const auto& [name, _] : payloads_) names.push_back(name);
             for (const auto& [name, _] : batches_) names.push_back(name);
@@ -122,7 +142,7 @@ namespace shipinfer {
         // graph is valid) and not non-empty (the segmenter is never called for it).
         std::vector<std::string> non_empty() const {
             std::vector<std::string> names;
-            if (image_) names.push_back(FRAME_INPUT);
+            if (has_pixels()) names.push_back(FRAME_INPUT);
             if (detected_ && !detections_.empty()) names.push_back(DETECTIONS);
             for (const auto& [name, payload] : payloads_) {
                 if (!payload.empty()) names.push_back(name);
@@ -159,6 +179,15 @@ namespace shipinfer {
             device_ = device;
         }
         const DeviceBuffer* image() const { return image_.get(); }
+        // The other representation, and the two are exclusive: a camera's pixels live in one
+        // place for its whole life (`FrameCounter::latch_where` on the ingest side enforces
+        // that a source cannot change its mind). `pipeline/graph/pixels.h` is the only thing
+        // that asks which.
+        void set_surface(DeviceSurface surface, int device) {
+            surface_ = std::move(surface);
+            device_ = device;
+        }
+        const DeviceSurface& surface() const { return surface_; }
         int device() const { return device_; }
         // Released as soon as the last stage that needs pixels is done, because a 1080p frame
         // is 6 MB and a thousand of them in flight is the whole budget. Not called yet, and
@@ -168,9 +197,17 @@ namespace shipinfer {
         // flight is the whole budget. The graph runs every stage that needs pixels before it
         // returns, so today the `shared_ptr` dies with the frame and the effect is the same;
         // this is the hook for when a stage runs after them.
-        void release_image() { image_.reset(); }
+        void release_image() {
+            image_.reset();
+            surface_ = DeviceSurface{};
+        }
 
       private:
+        // Whether `FRAME_INPUT` is satisfied. EITHER representation counts, and asking this
+        // rather than `image_` is what stops an NV12 frame looking like a frame with no pixels
+        // -- which the planner would answer by skipping the detector on every frame, silently.
+        bool has_pixels() const { return image_ != nullptr || !surface_.empty(); }
+
         FrameTag tag_;
         int height_ = 0;
         int width_ = 0;
@@ -187,6 +224,7 @@ namespace shipinfer {
         std::vector<Detection> detections_;
         std::map<std::string, ObjectBatch> batches_;
         std::shared_ptr<DeviceBuffer> image_;
+        DeviceSurface surface_;
     };
 
 }  // namespace shipinfer

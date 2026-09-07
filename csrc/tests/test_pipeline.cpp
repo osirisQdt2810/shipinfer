@@ -1,6 +1,7 @@
 // The graph's planning and reassembly wiring — `tests/pipeline/test_graph.py`'s claims, with no
 // device: fake stages that mark names on the state, and the real Dag, FrameState and collector.
 
+#include <algorithm>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -9,6 +10,7 @@
 #include "shipinfer/core/buffers.h"
 #include "shipinfer/core/platform.h"
 #include "shipinfer/pipeline/graph/dag.h"
+#include "shipinfer/pipeline/graph/pixels.h"
 #include "shipinfer/pipeline/graph/stage.h"
 #include "shipinfer/pipeline/graph/stages.h"
 #include "shipinfer/pipeline/graph/state.h"
@@ -98,6 +100,146 @@ namespace {
         auto state = std::make_shared<FrameState>(FrameTag{"cam", 1, 0}, 8, 8, 20.f);
         state->set_image(std::make_shared<DeviceBuffer>(), 0);  // present, never read here
         return state;
+    }
+
+    // A surface-only frame satisfies `FRAME_INPUT`. No device: this is the PLANNER's half, and
+    // it is the half that fails silently -- a chain whose detector never becomes runnable
+    // produces complete frames with no detections, and every count downstream agrees with
+    // itself.
+    void test_a_frame_carrying_only_a_surface_still_has_pixels() {
+        FrameState state(FrameTag{"cam", 1, 0}, 250, 320, 20.f);
+        check(state.available().empty(), "a frame with neither representation offers nothing");
+
+        // A non-null pointer is all `DeviceSurface::empty()` asks about; nothing here reads it.
+        uint8_t byte = 0;
+        DeviceSurface surface;
+        surface.nv12 = &byte;
+        surface.stride = 384;
+        surface.uv_offset = static_cast<size_t>(384) * 256;
+        state.set_surface(surface, 3);
+
+        const std::vector<std::string> available = state.available();
+        check(available.size() == 1 && available.front() == FRAME_INPUT,
+              "an NV12 surface satisfies FRAME_INPUT, so the detector becomes runnable");
+        const std::vector<std::string> non_empty = state.non_empty();
+        // Spelled out rather than compared against `available`: both come from `has_pixels()`,
+        // so comparing them passes on exactly the drift this test exists to catch.
+        check(non_empty.size() == 1 && non_empty.front() == FRAME_INPUT,
+              "and is non-empty, so a `needs` on it is met too");
+        check(state.device() == 3, "on the device it was decoded on (ADR-004)");
+        check(state.surface().uv_offset == static_cast<size_t>(384) * 256,
+              "with the coded-height uv_offset carried, not derived");
+        check(state.image() == nullptr, "and no host image: exactly one representation");
+
+        state.release_image();
+        check(state.available().empty(),
+              "and releasing the pixels releases BOTH -- a surface left behind would keep an "
+              "NVDEC slot out of a pool of four for the life of the frame");
+    }
+
+    // The seam picks by representation, and the fixture is built so that picking wrong is
+    // VISIBLE rather than merely wrong-looking: the surface is padded (stride > width, chroma
+    // at the coded height) and every padding byte is a sentinel. A read that ignored the stride
+    // -- which is what routing an NV12 frame through the BGR entry point does -- pulls the
+    // sentinel into the output.
+    void test_the_pixel_seam_reads_a_padded_surface_as_a_surface() {
+        const int src_h = 90, src_w = 160, stride = 192, coded_h = 96, dst = 32;
+        const size_t uv_offset = static_cast<size_t>(stride) * coded_h;
+        std::vector<uint8_t> host(uv_offset + static_cast<size_t>(stride) * src_h / 2, 0xFF);
+        // The image proper: a mid-grey ramp well away from the sentinel, chroma neutral.
+        for (int y = 0; y < src_h; ++y) {
+            for (int x = 0; x < src_w; ++x)
+                host[y * stride + x] = static_cast<uint8_t>(40 + x % 60);
+        }
+        for (int y = 0; y < src_h / 2; ++y) {
+            for (int x = 0; x < src_w; ++x) host[uv_offset + y * stride + x] = 128;
+        }
+
+        DeviceBuffer pixels(host.size());
+        GPU_CHECK(gpuMemcpy(pixels.get(), host.data(), host.size(), gpuMemcpyHostToDevice));
+        FrameState state(FrameTag{"cam", 1, 0}, src_h, src_w, 20.f);
+        DeviceSurface surface;
+        surface.nv12 = pixels.as<uint8_t>();
+        surface.stride = stride;
+        surface.uv_offset = uv_offset;
+        state.set_surface(surface, 0);
+
+        DeviceBuffer out(static_cast<size_t>(3) * dst * dst * sizeof(float));
+        const LetterboxMap map = letterbox_frame(state, out.as<float>(), dst, dst,
+                                                 /*swap_rb=*/true, 0.f, nullptr);
+        GPU_CHECK(gpuStreamSynchronize(nullptr));
+        const LetterboxMap want = letterbox_fit(src_h, src_w, dst, dst);
+        check(map.scale == want.scale && map.pad_x == want.pad_x && map.pad_y == want.pad_y,
+              "the geometry is the display extent's, whichever representation carried it");
+
+        std::vector<float> got(static_cast<size_t>(3) * dst * dst);
+        GPU_CHECK(gpuMemcpy(got.data(), out.get(), out.bytes(), gpuMemcpyDeviceToHost));
+        float brightest = 0.f;
+        for (int y = 0; y < map.new_h; ++y) {
+            for (int x = 0; x < map.new_w; ++x) {
+                const size_t at = static_cast<size_t>(map.pad_y + y) * dst + map.pad_x + x;
+                for (int c = 0; c < 3; ++c) {
+                    brightest =
+                        std::max(brightest, got[static_cast<size_t>(c) * dst * dst + at]);
+                }
+            }
+        }
+        // 0xFF luma with neutral chroma converts to ~1.0; the ramp tops out at 99, which is
+        // ~0.11 of full scale. So the sentinel cannot hide inside the image's own range.
+        check(brightest > 0.02f,
+              "the image was read at all: brightest inside the letterbox is " +
+                  std::to_string(brightest));
+        check(brightest < 0.5f,
+              "and no padding byte reached the output -- a stride-blind read would put 0xFF "
+              "there: brightest is " +
+                  std::to_string(brightest));
+
+        // The crop half of the same seam, on the same surface. An ordinary box and a degenerate
+        // one, because "agrees with the reference" can mean "both produced nothing".
+        const std::vector<float> boxes{20.f, 10.f, 120.f, 70.f, 5.f, 5.f, 5.f, 5.f};
+        DeviceBuffer boxes_device(boxes.size() * sizeof(float));
+        GPU_CHECK(gpuMemcpy(boxes_device.get(), boxes.data(), boxes_device.bytes(),
+                            gpuMemcpyHostToDevice));
+        const size_t row = static_cast<size_t>(3) * 16 * 16;
+        DeviceBuffer crops(2 * row * sizeof(float));
+        crop_frame(state, boxes_device.as<float>(), 2, crops.as<float>(), 16, 16,
+                   /*swap_rb=*/true, nullptr);
+        GPU_CHECK(gpuStreamSynchronize(nullptr));
+        std::vector<float> cropped(2 * row);
+        GPU_CHECK(gpuMemcpy(cropped.data(), crops.get(), crops.bytes(), gpuMemcpyDeviceToHost));
+        float ordinary = 0.f, degenerate = 0.f;
+        for (size_t i = 0; i < row; ++i) {
+            ordinary = std::max(ordinary, cropped[i]);
+            degenerate = std::max(degenerate, cropped[row + i]);
+        }
+        check(ordinary > 0.02f && ordinary < 0.5f,
+              "a crop out of the surface carries the image and not the padding: " +
+                  std::to_string(ordinary));
+        check(degenerate == 0.f, "and a zero-area box is black rather than a launch failure");
+    }
+
+    // Neither representation attached. A stage's `needs` is `FRAME_INPUT`, so the planner
+    // should never run it -- which makes this a wiring fault, and it must arrive as one rather
+    // than as a black frame that reads as a camera pointing at a wall.
+    void test_a_frame_with_no_pixels_is_refused_by_name() {
+        FrameState state(FrameTag{"cam", 7, 0}, 8, 8, 20.f);
+        std::string reason;
+        try {
+            letterbox_frame(state, nullptr, 4, 4, true, 0.f, nullptr);
+        } catch (const ConfigError& error) {
+            reason = error.what();
+        }
+        check(reason.find(state.tag().key()) != std::string::npos &&
+                  reason.find("no pixels") != std::string::npos,
+              "letterboxing a frame with no pixels names the frame and the fault: " + reason);
+        reason.clear();
+        try {
+            crop_frame(state, nullptr, 1, nullptr, 4, 4, true, nullptr);
+        } catch (const ConfigError& error) {
+            reason = error.what();
+        }
+        check(reason.find("no pixels") != std::string::npos,
+              "and so does cropping one: " + reason);
     }
 
     void test_both_clocks_survive_the_capture() {
@@ -268,11 +410,14 @@ int main() {
     test_a_failing_stage_does_not_end_the_frame();
     test_the_collector_sees_planned_delivered_and_missing();
     test_a_skipped_branch_is_a_complete_frame();
+    test_a_frame_carrying_only_a_surface_still_has_pixels();
+    test_a_frame_with_no_pixels_is_refused_by_name();
     if (has_device()) {
+        test_the_pixel_seam_reads_a_padded_surface_as_a_surface();
         scratch_pool_reuses_only_released_buffers();
         scratch_pool_refuses_unbounded_growth();
     } else {
-        skip("no CUDA device for the worker-scratch pool tests");
+        skip("no CUDA device for the worker-scratch pool or padded-surface tests");
     }
     std::printf("%d checks, %d failure(s), %d skipped\n", checks, failures, skips);
     return failures == 0 ? 0 : 1;

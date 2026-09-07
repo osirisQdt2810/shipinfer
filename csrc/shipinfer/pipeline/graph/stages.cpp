@@ -5,6 +5,7 @@
 #include <future>
 
 #include "shipinfer/core/buffers.h"
+#include "shipinfer/pipeline/graph/pixels.h"
 #include "shipinfer/runtime/ops.h"
 
 namespace shipinfer {
@@ -117,9 +118,11 @@ namespace shipinfer {
         std::shared_ptr<DeviceBuffer> owner =
             scratch_.acquire("letterbox", row_elems * sizeof(float));
         float* input = owner->as<float>();
-        const LetterboxMap map = letterbox_into(
-            state.image()->as<uint8_t>(), state.height(), state.width(), input, config_.size,
-            config_.size, /*swap_rb=*/true, config_.pad_value, scratch_.stream());
+        // Whichever representation this camera's decoder produces -- `graph/pixels.h` is the
+        // one place that asks, and the geometry it returns is the same either way.
+        const LetterboxMap map =
+            letterbox_frame(state, input, config_.size, config_.size, /*swap_rb=*/true,
+                            config_.pad_value, scratch_.stream());
         scratch_.synchronise();
         // Stored on the state, not recomputed downstream: the decode must undo exactly the
         // transform that was applied.
@@ -219,9 +222,8 @@ namespace shipinfer {
                                                 payload.row_elems * sizeof(float));
             float* dst = owner->as<float>();
             const float* boxes_device = scratch_.upload_boxes(boxes);
-            crop_resize_into(state.image()->as<uint8_t>(), state.height(), state.width(),
-                             boxes_device, count, dst, spec.height, spec.width,
-                             /*swap_rb=*/true, scratch_.stream());
+            crop_frame(state, boxes_device, count, dst, spec.height, spec.width,
+                       /*swap_rb=*/true, scratch_.stream());
             scratch_.synchronise();
             payload.data = dst;
             payload.owner = std::move(owner);
