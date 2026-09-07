@@ -28,13 +28,16 @@
 // THE ERROR TAXONOMY
 // ------------------
 //   pipeline will not parse / no appsink / PLAYING refused    -> SourceOpenError (retryable)
+//   the stream does not start within `open_timeout_ms`        -> SourceOpenError (retryable)
 //   EOS, a bus ERROR, a cuvid decode failure                  -> FrameDecodeError (reconnect)
+//   a 10-bit stream, which P016 and not NV12 would carry      -> ConfigError (fatal, no retry)
 //   libnvcuvid absent, or no CUDA device                      -> SourceUnavailableError (fatal)
 //
 // **EOS ON A CAMERA IS A FAULT**, as it is for the GStreamer source: a live stream that ends
 // has broken, so this never overrides `is_exhausted()`.
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -90,6 +93,13 @@ namespace shipinfer {
 
       private:
         struct Decoder;
+        // Pull one access unit and hand it to the parser. `timeout_ns` bounds the pull; a
+        // `uint64_t` rather than a `GstClockTime` so this header stays GStreamer-free.
+        void feed_one_access_unit(Decoder& decoder, uint64_t timeout_ns);
+        // Map the oldest displayable picture into a surface the chain can read. Called only
+        // with one queued, so it returns an image or throws -- never an empty one.
+        DeviceImage map_next(Decoder& decoder);
+
         std::unique_ptr<Decoder> decoder_;
         std::string description_;
     };

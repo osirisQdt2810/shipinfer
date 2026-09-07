@@ -2946,6 +2946,57 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `omitted_lanes.h` row, and `libffmpeg-nvenc-dev` in `gst-image.sh` so a `FORCE=1` rebake
       reproduces the image. The host build omits the lane with the full hint and the gate skips
       by name -- 241 checks / 4 skipped there against 279 / 1 in the image.
+      ROUND 1 CAME BACK BLOCKING WITH SIX, and every one was real -- checked against the code
+      before touching it, which is the rule that mattered here because they were not where I was
+      looking. The decode half (the `uv_offset` work, the pimpl, the taxonomy) was accepted as
+      it stood; **all six were in the GSTREAMER half, and each one was a place this source had
+      copied `sources/gstreamer.cpp` and dropped something that sibling does on purpose**:
+        1. `open()` reported success on `GST_STATE_CHANGE_ASYNC`. `rtspsrc` has not sent
+           DESCRIBE at that point, so a stale password gave a camera the fleet reported UP that
+           never delivered a frame; `open_timeout_ms` was never read. Now blocks on
+           `gst_element_get_state`, as the sibling has all along.
+        2. a hardcoded 100 ms pull ignored `read_timeout_ms`. Worse than an unused knob: with
+           `empty_reads_before_reconnect` = 5 the actor tore the source down in half a second,
+           before a 2 s GOP could deliver its first picture, and blamed the network. The port is
+           not "use the knob for the pull" -- on the sibling one pull IS one frame, here a frame
+           is N access units (SPS/PPS/SEI carry no picture) -- so `read_timeout_ms` is now a
+           DEADLINE ACROSS the access units and the loop is what bounds the read.
+        3. nothing ever read the bus, so a mid-stream peer reset (camera reboot, switch flap)
+           came out as "5 consecutive empty reads" with GStreamer's own words dropped. The
+           sibling's drain is now SHARED -- `sources/gstreamer_bus.h`, lifted out of the second
+           copy rather than pasted into it.
+        4. the appsink ref was leaked on every open: `gst_bin_get_by_name` is (transfer full)
+           and the comment said "owned by the pipeline". One `GstAppSink` with its pad, caps and
+           queued access units stranded per reconnect, forever, in a 24/7 process.
+        5. the keepalive captured a RAW function table and a raw decoder handle. `QueueSink`'s
+           refusal was the only thing making that safe, and it comes off next. Fixed by a
+           `Session` the frame's deleter holds a reference to: the decoder cannot outrun the last
+           mapped surface, and both the release and the teardown PUSH THE CONTEXT themselves, so
+           a worker thread may be the one that drops the last frame.
+        6. the one-slot `ready` overwrote a picture and counted it into a field nothing read.
+           A parse can display more than one picture (a reorder flush), so a B-frame camera lost
+           frames with `frames_read` and `frames_dropped` both looking healthy. Now a deque
+           bounded by `surfaces` -- deliver them, do not count them. A display info is an INDEX,
+           not a mapped surface, which is why this is not a queue of GPU memory.
+      Plus the 10-bit note: NV12 is 8-bit, so a 10-bit stream needs P016 and got
+      "cuvidCreateDecoder refused this stream" -- retryable, so a permanent capability mismatch
+      reconnected forever. Now a `ConfigError` naming the depth, which stops the camera.
+      GPU EVIDENCE: `test_ingest` 279 -> 287 checks, 0 failures, and FOUR REVERT-CHECKS, each
+      breaking one fix alone in `shipinfer-gst:jammy-nvdec`:
+        (1) `FAIL: an unreachable camera fails open() rather than reporting success: open()
+            returned`
+        (2) `FAIL: ... an empty read spends read_timeout_ms rather than a constant: waited
+            0.000001s of a 1000ms budget`
+        (3) `FAIL: and a server that goes away raises rather than going quiet:` (empty reason)
+        (5) `Segmentation fault (core dumped)`, exit status 139, with no summary line at all --
+            the use-after-free, in the thread that dropped the frame.
+      Findings 4 and 6 have no assertion of their own and the body says so: a stranded
+      `GstAppSink` is not observable from the test binary without a leak tracer, and the deque
+      shows up only on a B-frame stream the loopback fixture does not produce.
+      The new `gstreamer_bus.h` is the FIRST header in this tree to include `gst/gst.h`, which
+      the closure walker cannot see (it attributes lanes to `.cpp` units). So
+      `TestOnlyGstLaneUnitsReachTheBus` derives the allowed set from the lane table and both its
+      checks fail when `frame.h` includes it.
       LEFT: the graph branch to `nv12_letterbox_into`, which `QueueSink`'s refusal is holding
       the door for, and then the design-load run.**
 - [x] **CSRC-TOPOLOGY-Q · ANSWERED 4 Sep as ADR-020, by me, under V154 ("làm theo hướng bạn
