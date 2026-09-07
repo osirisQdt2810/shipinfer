@@ -2700,7 +2700,14 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       run at 90 displayed rows decoded at 96 -- the same relationship 1080/1088 has.
       REVERT-CHECK ON A REAL GPU: put `stride * src_h` back and the padded case fails with
       `got 1, wanted 0 +- 0.0001` -- a MAXIMUM-magnitude error on a 0..1 scale, so the chroma
-      was entirely wrong rather than slightly off. Restored: 50 checks, 0 failures, 0 skipped.**
+      was entirely wrong rather than slightly off. Restored: 50 checks, 0 failures, 0 skipped.
+      SHIPVISION'S BATCHED TWIN IS NOT AFFECTED -- checked, not assumed, after I had written
+      that it was. `core/platform.h`'s `Nv12View` carries `y` and `uv` as SEPARATE POINTERS with
+      separate strides and `image_ops.cu:90` dereferences `view.uv` directly, so the caller
+      supplies the chroma address and there is nothing to infer. No shipvision work is owed.
+      THE TWO SHAPES ARE THE LESSON: two pointers cannot be wrong; one pointer plus a DERIVED
+      second is what made a padded surface unrepresentable. An explicit `uv_offset` is the
+      one-pointer form of the same guarantee.**
 - [x] **CSRC-TOPOLOGY-Q · ANSWERED 4 Sep as ADR-020, by me, under V154 ("làm theo hướng bạn
       nghĩ là tốt nhất"). NO `csrc/topology/` and no `csrc/runners/`: the chain stays a Python
       declaration and the C++ plane receives a RESOLVED PLAN.** Three reasons, none of them
