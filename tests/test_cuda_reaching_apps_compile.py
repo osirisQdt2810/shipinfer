@@ -6,16 +6,19 @@ reaches it through `pipeline/graph/state.h`, so **nothing in this repository eve
 and it is the only caller of the perception-event writer.
 
 That is not hypothetical. A `std::mutex` and a `std::map` were used in its sink without being
-declared, every test stayed green, and the defect was found by a reviewer reading the diff. A
-syntax check is cheap, needs no device, and would have said so in two seconds.
+declared, every test stayed green, and the defect was found by a reviewer reading the diff.
 
-Skipped by name when the CUDA or TensorRT headers are absent, which is CI's case: this closes
-the hole on the machines that run the bench, and the ledger carries the CI half.
+The two compile classes are skipped BY NAME where the CUDA and TensorRT headers are absent,
+and CI's `cpp-syntax` job installs them -- so there a skip is the defect, and
+`SHIPINFER_REQUIRE_CSRC_HEADERS` turns it into a failure naming which headers are short.
+`TestAFailureArrivesWithItsReason` needs only `g++`, so it runs everywhere.
 """
 
 from __future__ import annotations
 
+import functools
 import importlib.util
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -24,10 +27,41 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 CSRC = ROOT / "csrc"
-#: Where this host keeps the two header sets, matching `build_csrc.py`'s own defaults.
-INCLUDES = (Path("/usr/local/cuda/include"), Path("/usr/local/TensorRT/include"))
+#: What these apps need, probed with `g++` rather than `is_dir()`: a distribution puts these
+#: headers on the DEFAULT include path, where no `-I` names them. `NvInferPlugin.h` is here
+#: because `engine.cpp` includes it and NVIDIA ships it SEPARATELY -- a probe certifying a
+#: smaller set than the check needs passes, and then the check fails.
+_PROBE = (
+    "#include <NvInfer.h>\n"
+    "#include <NvInferPlugin.h>\n"
+    "#include <cuda_runtime.h>\n"
+    "int main() { return 0; }\n"
+)
+
+#: Set by CI's `cpp-syntax` job: a SKIP is the hole this check exists to close, so where the
+#: headers are meant to be installed their absence has to be a failure with a reason.
+_REQUIRE = "SHIPINFER_REQUIRE_CSRC_HEADERS"
 
 
+def _include_flags() -> list[str]:
+    """The `-I` flags these apps need, or `[]` when the headers are already on the path.
+
+    `CUDA_HOME` and `SHIPINFER_TENSORRT_DIR` are read exactly as `scripts/build_csrc.py`
+    reads them -- the first version honoured only the second, so a box with CUDA elsewhere
+    skipped silently while `shipinfer bench` built fine. The `targets/<arch>/include` layout
+    is there because that is where `cuda-cudart-dev-12-x` puts the headers on a runner.
+    """
+    cuda = Path(os.environ.get("CUDA_HOME", "/usr/local/cuda"))
+    tensorrt = Path(os.environ.get("SHIPINFER_TENSORRT_DIR", "/usr/local/TensorRT"))
+    candidates = (
+        cuda / "include",
+        cuda / "targets" / "x86_64-linux" / "include",
+        tensorrt / "include",
+    )
+    return [f"-I{path}" for path in candidates if path.is_dir()]
+
+
+@functools.cache
 def _build_module():
     """`build_csrc.py` by path -- `scripts/` is not a package."""
     spec = importlib.util.spec_from_file_location(
@@ -39,25 +73,425 @@ def _build_module():
     return module
 
 
+def _apps() -> list[Path]:
+    return sorted((CSRC / "shipinfer" / "cli").glob("*.cpp")) + sorted(
+        (CSRC / "tests").glob("*.cpp")
+    )
+
+
 def _cuda_reaching_apps() -> list[Path]:
     """Every app `--offline` refuses, asked of the build script rather than guessed."""
     build = _build_module()
-    apps = sorted((CSRC / "shipinfer" / "cli").glob("*.cpp")) + sorted(
-        (CSRC / "tests").glob("*.cpp")
+    return [
+        app for app in _apps() if not build.offline_ready(build.include_closure(app), set())
+    ]
+
+
+# doc: long why a syntax check reads `lanes_of` and not `lanes_in`, which cost `bench.cpp`
+def _lanes_needed(build, unit: Path) -> set[str]:
+    """The lanes COMPILING this unit needs -- `lanes_of`, deliberately not `lanes_in`.
+
+    `lanes_in(closure)` is documented as wider on purpose: "compiling `cli/bench.cpp` needs no
+    OpenCV header, but *linking* it needs `replay.cpp`'s object". `-fsyntax-only` never links,
+    so gating a compile-only check on a link-time fact skipped the one app this whole file
+    exists to compile -- everywhere `libopencv-dev` is absent, which is exactly CI's runner
+    (#133 round 3). Measured here: `lanes_in(closure(bench.cpp))` is `{'opencv'}` while
+    `lanes_of(bench.cpp)` is empty, and no HEADER in that closure declares a lane at all --
+    `EXTERNAL` names only `replay.cpp` and `gstreamer.cpp`, both `.cpp`.
+    """
+    return build.lanes_of(unit)
+
+
+def _lanes_available(build, unit: Path) -> bool:
+    """Whether every external lane COMPILING this unit needs is installed, per `pkg-config`."""
+    for lane in _lanes_needed(build, unit):
+        try:
+            build.pkg_config_flags(lane)
+        except SystemExit:
+            return False  # `pkg-config` answered, and the package is not installed
+        except FileNotFoundError:
+            return False  # no `pkg-config` binary at all, which is the same answer
+    return True
+
+
+def _lane_flags(build, unit: Path) -> list[str]:
+    """The `-I` flags an external lane needs, asked of `pkg-config` through `build_csrc.py`."""
+    return [
+        flag
+        for lane in _lanes_needed(build, unit)
+        for flag in build.pkg_config_flags(lane)
+        if flag.startswith("-I")
+    ]
+
+
+def _uncompiled_units() -> list[Path]:
+    """Implementation units nothing in this repository compiles, lanes permitting.
+
+    `-fsyntax-only` on an APP does not parse the `.cpp` files in its closure, so the eight
+    units outside the offline build were covered by nothing even with the apps checked --
+    including `backends/tensorrt/engine.cpp`, where `initLibNvInferPlugins` lives. Two need an
+    external lane (opencv, gstreamer) and are skipped where it is absent, which is the answer
+    `build_csrc.py` gives. `.cpp` only: `runtime/ops.cu` stays covered by nothing here,
+    because `g++` cannot parse CUDA and `nvcc` is the device tier's job.
+    """
+    build = _build_module()
+    apps = set(_apps())
+    units = [p for p in sorted((CSRC / "shipinfer").rglob("*.cpp")) if p not in apps]
+    outside = [u for u in units if not build.offline_ready(build.include_closure(u), set())]
+    return [u for u in outside if _lanes_available(build, u)]
+
+
+@functools.cache
+def _headers_available() -> bool:
+    """Whether `NvInfer.h` and `cuda_runtime.h` can be found at all, asked of the compiler."""
+    if shutil.which("g++") is None:
+        return False
+    done = subprocess.run(
+        ["g++", "-std=c++17", "-fsyntax-only", *_include_flags(), "-x", "c++", "-"],
+        input=_PROBE,
+        capture_output=True,
+        text=True,
     )
-    return [app for app in apps if not build.offline_ready(build.include_closure(app), set())]
+    return done.returncode == 0
 
 
-pytestmark = [
-    pytest.mark.skipif(shutil.which("g++") is None, reason="no g++ on PATH"),
-    pytest.mark.skipif(
-        not all(p.is_dir() for p in INCLUDES),
-        reason=f"needs the CUDA and TensorRT headers at {[str(p) for p in INCLUDES]}; "
-        f"CI has neither, which is why nothing there compiles these apps",
-    ),
-]
+# doc: long the header-to-package map, and the round it cost
+#: A header a package ships, and the package that ships it -- consulted only after the probe
+#: has failed, to turn a CUDA-internal include error into an apt line. `crt/host_defines.h` is
+#: the one that cost a round: `cuda-cudart-dev` ships `cuda_runtime.h` but not the `crt/`
+#: headers it includes (#133 round 5), and a dev box's full toolkit cannot see that.
+_HEADER_PACKAGES: tuple[tuple[str, str], ...] = (
+    ("crt/host_defines.h", "cuda-crt-<major>-<minor> (headers only, ~881 KB, no nvcc)"),
+    # `cuda_runtime.h` includes this one and `cuda_runtime_api.h` the other; same package, and
+    # both are named so a partial install cannot produce a message that looks complete.
+    ("crt/host_config.h", "cuda-crt-<major>-<minor>"),
+    ("NvInferPlugin.h", "libnvinfer-headers-plugin-dev"),
+    ("NvInfer.h", "libnvinfer-headers-dev"),
+    ("cuda_runtime.h", "cuda-cudart-dev-<major>-<minor>"),
+)
 
 
+# doc: long why this asks the compiler and not the filesystem
+def _absent_headers(table: tuple[tuple[str, str], ...] = _HEADER_PACKAGES) -> list[str]:
+    """Which of :data:`_HEADER_PACKAGES` the COMPILER cannot find, one probe each.
+
+    Asked of `g++`, not of `is_file()`, for the reason `_PROBE` states thirty lines up: a
+    distribution puts these on the DEFAULT include path, where no `-I` names them. The first
+    version walked `_include_flags()` plus `/usr/include` -- and the runner's own apt packages
+    put TensorRT's headers under `/usr/include/x86_64-linux-gnu`, so `_headers_available()` was
+    True while this reported two of them absent (#133 round 6). Walking a list of roots trades
+    one confusing failure for a maintained list of layouts.
+
+    Only reached after the aggregate probe has already failed, so the cost is a handful of
+    subprocesses on a path that is about to end the job anyway.
+    """
+    if shutil.which("g++") is None:
+        # Reached at IMPORT time, because `needs_headers`'s `reason=` calls this -- so an
+        # unguarded `subprocess.run(["g++", ...])` here is a COLLECTION error rather than a
+        # skip, on any box without a toolchain. Which is the offline tier's own image. Found by
+        # rehearsing `env -i PATH=/tmp/nobin` after the per-header probe replaced the walk.
+        return []
+    absent: list[str] = []
+    for header, package in table:
+        done = subprocess.run(
+            ["g++", "-std=c++17", "-fsyntax-only", *_include_flags(), "-x", "c++", "-"],
+            input=f"#include <{header}>\nint main() {{ return 0; }}\n",
+            capture_output=True,
+            text=True,
+        )
+        if done.returncode != 0:
+            absent.append(f"{header} -> install {package}")
+    return absent
+
+
+def _missing_headers_reason() -> str:
+    reason = (
+        "needs g++ plus the CUDA and TensorRT headers, on the include path or under "
+        "CUDA_HOME / SHIPINFER_TENSORRT_DIR; without them nothing in this repository "
+        "compiles these apps"
+    )
+    absent = _absent_headers()
+    return reason if not absent else reason + ". Not found: " + "; ".join(absent)
+
+
+# doc: long which lanes are another job's, and what adding one costs
+#: External lanes a DIFFERENT CI job compiles, so this one may drop their units. `gstreamer`
+#: is `cpp-gst-lane`'s. Everything NOT in here is installed in this job -- `opencv` is, because
+#: `ingest/sources/replay.cpp` is compiled by nothing else anywhere (#133 round 4). A lane
+#: added here without a job named beside it is a unit going quietly uncovered.
+_COVERED_ELSEWHERE = frozenset({"gstreamer"})
+
+# doc: long the guard the module-level pytestmark used to carry, and what needs it
+#: `TestAFailureArrivesWithItsReason` is deliberately NOT `needs_headers`-gated -- it needs
+#: only a compiler -- but it shells out to `g++`, and the offline tier's image is a `-runtime`
+#: one with no toolchain. Without this the tier goes from clean to three raw tracebacks, which
+#: is this file's own complaint about checks that fail without saying why (#133 round 6).
+no_gpp = pytest.mark.skipif(shutil.which("g++") is None, reason="no g++ on PATH")
+
+#: Applied to the two COMPILE classes and not to the module: the guard tests below need `g++`
+#: and nothing else, so a module-level mark would have run them only on the `cpp-syntax`
+#: runner -- a harness whose own guards execute in one place is a harness nobody checks.
+
+needs_headers = pytest.mark.skipif(
+    not _headers_available() and not os.environ.get(_REQUIRE), reason=_missing_headers_reason()
+)
+
+
+@needs_headers
+def test_the_headers_are_present_where_they_are_required() -> None:
+    """Where CI installs them, a SKIP is the defect -- so it is a FAILURE with a reason.
+
+    The job used to assert this by grepping pytest's `-q` summary for "skipped", which is a
+    string match on output whose shape changes between versions, in a `| tee` pipeline whose
+    status was `tee`'s. A test that fails is the same statement without either problem.
+    """
+    if not os.environ.get(_REQUIRE):
+        pytest.skip(f"{_REQUIRE} is unset; this asserts what CI's cpp-syntax job installs")
+
+    assert _headers_available(), _missing_headers_reason()
+
+
+def _compiles(path: Path, extra: list[str]) -> tuple[bool, str]:
+    """`-fsyntax-only`: no link, no device, no measurement -- just "is this valid C++"."""
+    done = subprocess.run(
+        [
+            "g++",
+            "-std=c++17",
+            "-fsyntax-only",
+            f"-I{CSRC}",
+            *_include_flags(),
+            *extra,
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    # ` error:` and not `: error:` -- gcc spells a missing header `fatal error:`, which the
+    # narrower filter dropped, so the one failure this job exists to report arrived as a
+    # filename and a blank line. The stderr tail is the fallback: a check that fails without
+    # saying why is the same defect as a check that skips without saying why.
+    errors = [line for line in done.stderr.splitlines() if " error:" in line][:3]
+    return done.returncode == 0, "\n  ".join(errors or done.stderr.splitlines()[-3:])
+
+
+@no_gpp
+class TestAFailureArrivesWithItsReason:
+    """The whole thesis of this job, applied to itself: a red check has to say what broke.
+
+    The first version filtered gcc's stderr for `": error:"`. gcc spells a missing include
+    `fatal error:`, which that filter dropped — so the one failure this job exists to report
+    (a header the runner does not install) would have arrived as a filename followed by a
+    blank line, and a red main would have had to be reproduced by hand to be read.
+    """
+
+    def test_a_missing_header_is_reported_by_name(self, tmp_path: Path) -> None:
+        unit = tmp_path / "missing_header.cpp"
+        unit.write_text("#include <NoSuchHeaderExists.h>\nint main() { return 0; }\n")
+
+        ok, reason = _compiles(unit, [])
+
+        assert not ok
+        assert "NoSuchHeaderExists.h" in reason, "gcc says `fatal error:`, not `error:`"
+
+    def test_an_ordinary_error_is_still_reported(self, tmp_path: Path) -> None:
+        """The widened filter must not have lost the case the narrow one did catch."""
+        unit = tmp_path / "bad_syntax.cpp"
+        unit.write_text("int main() { return undeclared_thing; }\n")
+
+        ok, reason = _compiles(unit, [])
+
+        assert not ok
+        assert "undeclared_thing" in reason
+
+    def test_a_unit_that_compiles_reports_nothing(self, tmp_path: Path) -> None:
+        """Non-vacuity: the fallback tail must not invent a reason for a clean compile."""
+        unit = tmp_path / "fine.cpp"
+        unit.write_text("int main() { return 0; }\n")
+
+        assert _compiles(unit, []) == (True, "")
+
+
+@needs_headers
+class TestTheUnitsNothingCompiles:
+    """The eight `.cpp` files outside the offline build, which the app check does not reach."""
+
+    def test_there_are_some(self) -> None:
+        assert _uncompiled_units(), "no uncompiled unit found; this guard would be vacuous"
+
+    def test_each_one_compiles(self) -> None:
+        build = _build_module()
+        failures: list[str] = []
+        for unit in _uncompiled_units():
+            ok, errors = _compiles(unit, _lane_flags(build, unit))
+            if not ok:
+                failures.append(f"{unit.relative_to(ROOT)}:\n  {errors}")
+
+        assert not failures, "these do not compile:\n" + "\n".join(failures)
+
+    def test_replay_cpp_is_this_jobs_to_compile_and_nobody_elses(self) -> None:
+        """Checkable on any host, unlike the guard below, which needs the package absent.
+
+        `_COVERED_ELSEWHERE` is the whole judgement in this file: a lane in it is somebody
+        else's job, and a lane out of it must be installed HERE. `opencv` is out of it because
+        `ingest/sources/replay.cpp` is compiled by nothing else anywhere -- `cpp-gst-lane`
+        builds with `--with-external gstreamer`, which is the other one. So this pins the
+        reasoning rather than the environment: on a host that HAS libopencv-dev, the guard
+        below cannot tell a correct exclusion from a missing one.
+        """
+        build = _build_module()
+        replay = CSRC / "shipinfer" / "ingest" / "sources" / "replay.cpp"
+
+        assert replay.is_file(), "the unit this reasoning is about"
+        assert _lanes_needed(build, replay) == {"opencv"}, "it declares the opencv lane"
+        assert "opencv" not in _COVERED_ELSEWHERE, (
+            "opencv is not covered by another job, so the cpp-syntax job installs it; putting "
+            "it here would drop replay.cpp from every CI job at once"
+        )
+        assert "gstreamer" in _COVERED_ELSEWHERE, "and gstreamer IS cpp-gst-lane's"
+
+    def test_no_unit_is_dropped_for_a_missing_lane_where_this_is_required(self) -> None:
+        """The loud skip belongs on THIS leg, because this is the one it can fire on.
+
+        `EXTERNAL` declares lanes only for the two `ingest/sources` units, so `lanes_of(app)`
+        is empty for every app and the apps leg's version is unreachable by construction
+        (#133 round 4). Here it is reachable and it matters: without `libopencv-dev`,
+        `ingest/sources/replay.cpp` falls out and NOTHING in CI compiles it -- `cpp-gst-lane`
+        covers `gstreamer.cpp`, not that one -- which is this file's own thesis.
+        """
+        if not os.environ.get(_REQUIRE):
+            pytest.skip(f"{_REQUIRE} is unset; this asserts what CI's cpp-syntax job installs")
+
+        build = _build_module()
+        apps = set(_apps())
+        units = [p for p in sorted((CSRC / "shipinfer").rglob("*.cpp")) if p not in apps]
+        outside = [u for u in units if not build.offline_ready(build.include_closure(u), set())]
+        dropped = [
+            u.relative_to(ROOT).as_posix()
+            for u in outside
+            if not _lanes_available(build, u)
+            and not (_lanes_needed(build, u) <= _COVERED_ELSEWHERE)
+        ]
+
+        assert outside, "no unit is outside the offline build; this guard would be vacuous"
+        assert not dropped, (
+            f"these units were dropped for a missing external lane: {dropped}. Where this job "
+            f"runs, a drop is the hole it exists to close -- install the lane's `-dev` package, "
+            f"or add the lane to `_COVERED_ELSEWHERE` and name the job that compiles it"
+        )
+
+
+class TestThisFileStandsAlone:
+    """The `--noconftest -c /dev/null` in `ci.yml` is load-bearing, so it is asserted here.
+
+    Every `pytest` in this repository loads `tests/conftest.py`, which imports numpy, pydantic
+    and -- on the offline path -- torch, and `pyproject.toml`'s `--strict-config` additionally
+    demands pytest-asyncio and pytest-timeout. The `cpp-syntax` job's interpreter is
+    `setup-python`'s and has none of them, so it died at COLLECTION with rc=4 before one
+    `g++ -fsyntax-only` ran (#133 round 4). Installing torch into a headers-only job is ~200 MB
+    for nothing, so the job bypasses the suite's config -- and a bare flag in a workflow is a
+    knob a later edit removes without knowing why it was there. This is the why.
+    """
+
+    #: Everything this module may import: the standard library, plus pytest. `__future__` is
+    #: the compiler's, not a package -- listed because it is an import statement all the same.
+    _ALLOWED = frozenset(
+        {
+            "__future__",
+            "ast",
+            "functools",
+            "importlib",
+            "os",
+            "pathlib",
+            "pytest",
+            "re",
+            "shutil",
+            "subprocess",
+            "sys",
+            "types",
+        }
+    )
+
+    def test_a_missing_header_names_the_package_that_ships_it(self) -> None:
+        """Because the raw compiler error names a file nobody here has heard of.
+
+        `cuda-cudart-dev` ships `cuda_runtime.h` WITHOUT the `crt/` headers it includes, so the
+        first run on main failed with `crt/host_defines.h: No such file or directory` on all
+        three compile legs -- which reads as an NVIDIA packaging problem rather than as a short
+        apt line (#133 round 5). A dev box has a full toolkit and cannot see it, so the message
+        has to carry the answer.
+        """
+        headers = dict(_HEADER_PACKAGES)
+
+        assert "crt/host_defines.h" in headers, "the one that cost a round"
+        assert "cuda-crt" in headers["crt/host_defines.h"], "and it names cuda-crt"
+        assert set(headers) >= {"NvInfer.h", "NvInferPlugin.h", "cuda_runtime.h"}, (
+            "every header the probe includes needs a package beside it, or its absence "
+            "produces an error message with no action in it"
+        )
+
+    def test_the_reason_stays_plain_when_the_headers_are_there(self) -> None:
+        """On a box that has them, the reason must not grow a misleading `Not found` tail.
+
+        This is what caught round 6: the first version WALKED directories, and the runner's own
+        apt packages put TensorRT's headers under `/usr/include/x86_64-linux-gnu` -- on `g++`'s
+        default search list and in none of the roots it walked. So `_headers_available()` was
+        True while this reported two absent, and the job's first act on `main` was to fail for
+        a reason unrelated to any C++ in the tree.
+        """
+        if not _headers_available():
+            pytest.skip("this box has no headers; the tail is correct here")
+
+        assert "Not found" not in _missing_headers_reason()
+
+    def test_a_header_the_compiler_cannot_find_is_reported_with_its_package(self) -> None:
+        """The other direction, and checkable anywhere: the probe has to actually report."""
+        if shutil.which("g++") is None:
+            pytest.skip("no g++ on PATH; the probe returns nothing by design")
+
+        absent = _absent_headers((("definitely/not/here.h", "some-package"),))
+
+        assert absent == ["definitely/not/here.h -> install some-package"]
+
+    def test_this_file_needs_no_conftest(self) -> None:
+        """Its imports are stdlib plus pytest, so it runs on an interpreter with only pytest."""
+        import ast
+
+        source = Path(__file__).read_text(encoding="utf-8")
+        found: set[str] = set()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Import):
+                found.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                found.add(node.module.split(".")[0])
+
+        allowed = {name.split(".")[0] for name in self._ALLOWED}
+        assert found <= allowed, (
+            f"{sorted(found - allowed)} would need installing in the cpp-syntax job, which "
+            f"carries pytest and nothing else. Either keep this file self-contained or make "
+            f"ci.yml install the dev environment -- but not silently, because the job then "
+            f"fails at collection and the redness reads as a packaging problem"
+        )
+
+    def test_it_uses_no_fixture_of_ours(self) -> None:
+        """`--noconftest` also removes our fixtures, so this file may only use pytest's own."""
+        import ast
+
+        ours = {"repository", "server", "settings", "metrics", "device", "ops"}
+        source = Path(__file__).read_text(encoding="utf-8")
+        used: set[str] = set()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+                used.update(arg.arg for arg in node.args.args if arg.arg != "self")
+
+        assert not (used & ours), f"these come from conftest.py: {sorted(used & ours)}"
+        assert used <= {"tmp_path", "monkeypatch", "capsys", "caplog"}, (
+            f"unexpected fixtures {sorted(used)}; only pytest's built-ins survive "
+            f"--noconftest"
+        )
+
+
+@needs_headers
 class TestTheAppsOfflineCannotBuild:
     def test_there_is_at_least_one_of_them(self) -> None:
         """Without this the check below passes by having nothing to compile."""
@@ -68,26 +502,31 @@ class TestTheAppsOfflineCannotBuild:
     def test_each_one_still_compiles(self) -> None:
         """`-fsyntax-only`: no link, no device, no measurement -- just "is this valid C++".
 
-        One subprocess per app, ~2 s each on this host. It is the whole cost of never again
-        merging a translation unit that does not compile because no build reaches it.
+        Through the same lane reading as the unit check, so the two legs answer one question
+        one way -- and that reading is `lanes_of`, not `lanes_in`. Round 3 wrote "it changes
+        nothing today", reasoning from a dev box that has `libopencv-dev`; CI's runner does
+        not, so `cli/bench.cpp` hit the `continue` and was never compiled there. The job stayed
+        green with the app it exists for uncovered.
         """
+        build = _build_module()
         failures: list[str] = []
+        skipped: list[str] = []
         for app in _cuda_reaching_apps():
-            done = subprocess.run(
-                [
-                    "g++",
-                    "-std=c++17",
-                    "-fsyntax-only",
-                    f"-I{CSRC}",
-                    *(f"-I{path}" for path in INCLUDES),
-                    str(app),
-                ],
-                capture_output=True,
-                text=True,
-                cwd=ROOT,
-            )
-            if done.returncode != 0:
-                errors = [line for line in done.stderr.splitlines() if ": error:" in line][:3]
-                failures.append(f"{app.relative_to(ROOT)}:\n  " + "\n  ".join(errors))
+            if not _lanes_available(build, app):
+                skipped.append(app.relative_to(ROOT).as_posix())
+                continue
+            ok, errors = _compiles(app, _lane_flags(build, app))
+            if not ok:
+                failures.append(f"{app.relative_to(ROOT)}:\n  {errors}")
 
         assert not failures, "these do not compile:\n" + "\n".join(failures)
+        # ARMOUR, not live coverage: `EXTERNAL` declares lanes only for the two
+        # `ingest/sources` units, so `lanes_of(app)` is empty for every app today and
+        # `skipped` is always empty. The leg that can fire is
+        # `test_no_unit_is_dropped_for_a_missing_lane_where_this_is_required`.
+        if os.environ.get(_REQUIRE):
+            assert not skipped, (
+                f"these apps were skipped for a missing external lane: {skipped}. Where this "
+                f"job runs, a skip is the hole it exists to close -- install the lane's `-dev` "
+                f"package or narrow `EXTERNAL` so the unit does not claim it"
+            )
