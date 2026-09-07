@@ -2723,7 +2723,36 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
             SO BOTH PLANES NOW READ FROM RTSP, which is R55's first half on both sides. The
             decode is still SOFTWARE BGR on both: `ingest/sources/gstreamer.py:149` negotiates
             `video/x-raw,format=BGR`, so NV12-in-VRAM remains the whole of what is left.
-        (a-load) the design-load run from RTSP, on both planes, against the baseline;
+        (a-load) MEASURED 7 Sep on the C++ plane, and the result is a difference in KIND rather
+            than a ratio. 50 cameras x 20 fps x 70 s, five healthy GPUs (2-6; gpu7 is dead to
+            CUDA and 0-1 belong to another tenant), both arms in the same container with the
+            RTSP servers, `--stop-deadline-ms 60000` for the host arm because it cannot drain
+            in the manager's 5 s:
+                                        nvdec (NV12 in VRAM)   gstreamer (host BGR)
+              frames_read                        51 073                 11 639
+              frames_accepted                    26 223                    115
+              events_complete                    25 742                      0
+              queue_rejected                     23 860                 11 303
+            **The host path completes ZERO events at the design load** -- the software decode
+            saturates the box so hard that every stage times out at 5 s -- and the NVDEC path
+            completes 25 742 with 0 failures, balanced across all five GPUs. That is V156's
+            argument as a measurement: the host per-frame cost disappears on our side.
+            WORKER SWEEP, because the NVDEC arm sheds 47% at the pipeline queue and the sweep is
+            how the last plateau was found (per GPU -> events_complete):
+              12 -> 23 593    16 -> **27 009**    23 -> 25 742    32 -> 19 832    46 -> 16 836
+            So ~16/GPU here against 23/GPU for the fleet-wide queue, and `frames_read` FALLS as
+            workers rise (57.8k at 16, 39.0k at 46) -- the workers are competing with fifty
+            camera actors and two RTSP servers for the same container's CPU.
+            WHICH IS THE HONEST CEILING HERE: 27 009 complete in 70 s is 386/s on five GPUs, and
+            it is INGEST-LIMITED rather than GPU-limited. 57.8k read of 70k offered, with the
+            servers inside the measured container because the rootless bridge has no NAT
+            (`deploy/rootless/_container.sh`). CLAUDE.md says this: "the design load is more
+            than one interpreter can generate or serve". So this is not C1's >=5x figure -- it
+            is the route working at the design load, and the arm it beats is our own previous
+            one rather than the baseline.
+            LEFT for C1: the baseline arm at the same shape, and a generator that does not share
+            the container. Recorded as `DESIGN-LOAD-IS-INGEST-LIMITED` below.
+        (a-load-py) the Python plane's design-load run from RTSP, still owed;
         (b) make the RTSP path negotiate NV12 and keep it on the device as far as the current
             headers allow (`nvvideoconvert`'s NVMM hand-off is already why `_CONVERTERS` names
             it), so the remaining gap is exactly the missing package and not our code;
@@ -2732,6 +2761,23 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       Until (a) lands, every throughput number in this ledger carries the replay caveat, and
       C1's parity reading is against a baseline measured the same way -- like for like, but not
       the like R55 asks for.
+
+- [ ] **DESIGN-LOAD-IS-INGEST-LIMITED · opened 7 Sep by the (a-load) measurement above.** At
+      50x20 the C++ bench reads 57.8k of 70k offered and sheds 47% at the pipeline queue, while
+      the GPUs are not the constraint -- adding workers LOWERS both read and completed counts,
+      which is CPU contention between fifty camera actors, two in-container RTSP servers and the
+      worker pool. CLAUDE.md already states the cause: "the design load is more than one
+      interpreter can generate or serve; it needs the multi-process generator".
+      WHY THE SERVERS ARE IN THE MEASURED CONTAINER: the rootless daemon was installed
+      --skip-iptables, so its bridge has no NAT and a second container is unreachable
+      (`deploy/rootless/_container.sh`, and `scripts/cpp_bench_over_rtsp.sh` says so at length).
+      OPTIONS, none of them free: (a) serve RTSP from the HOST and reach it from the container
+      (needs host networking or a published port -- an operator/infra decision); (b) shard the
+      C++ bench into one process per GPU, mirroring `--runner fleet`, which also removes the
+      lane question entirely but changes what every recorded C++ number means; (c) accept the
+      ceiling and state it with every design-load figure.
+      C1's >=5x needs (a) or (b), because the baseline arm has to be handed the same load and
+      the harness cannot currently offer 1000 fps while also serving it.
 
 - [ ] **CONNECT-AND-PUMP-DISAGREE-ON-CONFIGERROR · #153 round 3, note 3.** #153 established
       that a `ConfigError` out of a source is a CONTRACT VIOLATION -- fatal for the camera, not
