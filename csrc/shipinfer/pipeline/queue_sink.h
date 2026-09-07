@@ -97,7 +97,8 @@ namespace shipinfer {
                 // two output surfaces at the third frame, under exactly the load the queue
                 // exists to serve.
                 work.device = frame.device.device;
-                work.surface = intake(work.device).take(frame.device);
+                work.surface =
+                    SurfaceIntake::take(intake(work.device), frame.device, work.tag.camera_id);
                 // RELEASED HERE, explicitly, and not left to a destructor: `put` takes
                 // `Frame&&`
                 // -- an rvalue REFERENCE -- so the caller's frame outlives this call and its
@@ -124,25 +125,44 @@ namespace shipinfer {
         }
 
       private:
-        // One intake per DEVICE rather than per camera: fifty cameras of one resolution share
-        // one free list, which is fifty times fewer idle buffers for the same steady state.
-        // Created on first use, because a device source may be configured for any GPU.
-        SurfaceIntake& intake(int device) {
+        // One intake per DEVICE rather than per camera: every camera on a GPU shares its free
+        // lists, which is far fewer idle buffers for the same steady state (the lists are keyed
+        // by size, so a mixed-resolution fleet still gets pool hits). Created on first use,
+        // because a device source may be configured for any GPU.
+        //
+        // A `shared_ptr` because a frame's surface holds one: the pool must outlive the sink on
+        // the unwind path, and `pipeline/surface_intake.h` states why at length.
+        std::shared_ptr<SurfaceIntake> intake(int device) {
             std::lock_guard<std::mutex> lock(intakes_mutex_);
-            std::unique_ptr<SurfaceIntake>& slot = intakes_[device];
-            if (!slot) slot = std::make_unique<SurfaceIntake>(device, pooled_);
-            return *slot;
+            std::shared_ptr<SurfaceIntake>& slot = intakes_[device];
+            if (!slot) slot = std::make_shared<SurfaceIntake>(device, pooled_);
+            return slot;
         }
 
+      public:
+        // Idle buffers held across every device and size. For the occupancy log, so a run
+        // reports whether the pool is doing anything rather than leaving it to an argument.
+        size_t pooled_buffers() const {
+            std::lock_guard<std::mutex> lock(intakes_mutex_);
+            size_t total = 0;
+            for (const auto& [device, intake] : intakes_) total += intake->pooled();
+            return total;
+        }
+
+      private:
         FairPriorityQueue<FrameWork>& queue_;
-        //: Idle buffers kept per device. The queue's capacity is the bound that matters: a
-        //: frame waiting in it holds one of these, so a pool that size never allocates in
-        //: steady state and nothing beyond it is worth holding.
+        //: IDLE buffers kept per device per size. Small on purpose: a buffer in flight is out
+        //: of the pool, so this bounds only how many are simultaneously unused -- which in
+        //: steady state is the difference between returns and takes, a handful. It was the
+        //: queue's capacity (256) when this landed, which is the bound on IN-FLIGHT buffers and
+        //: therefore never reached: nothing was ever freed and ~800 MB of idle NV12 per device
+        //: stayed for the life of the run. `pipeline_pool_size` in the occupancy log is how a
+        //: run says which of us is right.
         size_t pooled_;
         //: How many GPUs this process drives. A device frame needs exactly one; see `put`.
         size_t devices_;
-        std::mutex intakes_mutex_;
-        std::map<int, std::unique_ptr<SurfaceIntake>> intakes_;
+        mutable std::mutex intakes_mutex_;
+        std::map<int, std::shared_ptr<SurfaceIntake>> intakes_;
     };
 
 }  // namespace shipinfer

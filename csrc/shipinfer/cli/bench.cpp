@@ -439,6 +439,26 @@ int main(int argc, char** argv) {
                 if (why == DropReason::Closed) unread_at_stop.fetch_add(1);
             });
 
+        // DECLARED HERE, before the sampler that reports its pool and before the
+        // `JoinOnUnwind` that stops the workers -- so it is destroyed AFTER them. The surfaces
+        // hold their pool through a `shared_ptr` (`pipeline/surface_intake.h`), which makes the
+        // order not matter; having it right as well is cheap, and #160 round 1 was a lifetime
+        // argued from a declaration order that was the other way round.
+        //
+        // The pool's cap is `SurfaceIntake`'s own default, not the queue's capacity: it bounds
+        // IDLE buffers, and the queue's number bounds in-flight ones (`queue_sink.h`).
+        // The cap is DERIVED: the buffers that can be idle at once is bounded by how many can
+        // be in flight from the worker side, which is this device's worker count. Measured at
+        // 8 cameras on one GPU with 23 workers: the pool plateaus at 25 and a cap of 128 never
+        // frees, while 8 sat at its cap and churned a `cudaMalloc`/`cudaFree` per frame. A
+        // fixed number is wrong for a design-load run, so it scales with the pool that feeds
+        // it.
+        QueueSink sink(queue,
+                       static_cast<size_t>(std::max<int>(
+                           1, tuning.workers / static_cast<int>(options.devices.size()))) +
+                           8,
+                       options.devices.size());
+
         // -- the sampler: the same log shape as the other two systems ---------------------
         OccupancySampler sampler(
             options.log_path,
@@ -448,6 +468,9 @@ int main(int argc, char** argv) {
                 // silently read as empty — which is the right refusal and cost me one run.
                 std::map<std::string, long long> row;
                 row["pipeline_buffer_size"] = static_cast<long long>(queue.depth());
+                // The NV12 pool, in the same log: "is the cap buying anything" is a question a
+                // run should answer. Zero on every host run, which is the right answer there.
+                row["pipeline_pool_size"] = static_cast<long long>(sink.pooled_buffers());
                 for (const auto& [name, model] : models) {
                     row[name + "_buffer_size"] = static_cast<long long>(model->total_depth());
                 }
@@ -622,8 +645,6 @@ int main(int argc, char** argv) {
             camera.fps = options.fps;
             fleet.push_back(std::move(camera));
         }
-        QueueSink sink(queue, static_cast<size_t>(tuning.pipeline_queue),
-                       options.devices.size());
         IngestManager manager(std::move(fleet), sink);
 
         sampler.start();

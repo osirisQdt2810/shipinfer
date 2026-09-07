@@ -250,6 +250,20 @@ namespace {
         }
     };
 
+    // The `DeviceImage` a decoder would hand over for `surface`, geometry and all. A helper
+    // because three tests fill the same eight fields and a typo in one of them is a test that
+    // passes for the wrong reason.
+    DeviceImage a_device_image(const PaddedSurface& surface) {
+        DeviceImage image;
+        image.nv12 = surface.device.get();
+        image.height = PaddedSurface::height;
+        image.width = PaddedSurface::width;
+        image.pitch = PaddedSurface::stride;
+        image.uv_offset = PaddedSurface::uv_offset();
+        image.device = 0;
+        return image;
+    }
+
     // `nv12_letterbox_into` run over one surface, read back. What the KERNELS see, which is the
     // only definition of "the copy preserved the frame" that matters here.
     std::vector<float> letterboxed(const uint8_t* nv12, int stride, size_t uv_offset, int dst) {
@@ -282,8 +296,8 @@ namespace {
         image.owner = std::shared_ptr<const void>(source.device.get(),
                                                   [&](const void*) { slot_returned = true; });
 
-        SurfaceIntake intake(0, /*max_pooled=*/2);
-        DeviceSurface taken = intake.take(image);
+        auto intake = std::make_shared<SurfaceIntake>(0, /*max_pooled=*/2);
+        DeviceSurface taken = SurfaceIntake::take(intake, image, "cam");
         image.owner.reset();
         check(slot_returned, "taking a surface lets the decoder's slot go back at once");
         check(taken.uv_offset ==
@@ -306,25 +320,104 @@ namespace {
               "with no 0xFF padding byte anywhere in the output: brightest is " +
                   std::to_string(brightest));
 
-        check(intake.pooled() == 0, "a surface in hand is not in the pool");
+        check(intake->pooled() == 0, "a surface in hand is not in the pool");
         const void* reused = taken.nv12;
         taken.owner.reset();
         taken.nv12 = nullptr;
-        check(intake.pooled() == 1, "releasing it returns the buffer rather than freeing it");
-        DeviceSurface again = intake.take(image);
-        check(again.nv12 == reused && intake.pooled() == 0,
+        check(intake->pooled() == 1, "releasing it returns the buffer rather than freeing it");
+        DeviceSurface again = SurfaceIntake::take(intake, image, "cam");
+        check(again.nv12 == reused && intake->pooled() == 0,
               "and the next frame gets that buffer back -- a cudaMalloc per frame at a "
               "thousand frames a second is what this class exists to avoid");
 
         // The cap, which is the difference between a pool and a leak: a consumer that stalls
         // must not turn into unbounded VRAM.
-        DeviceSurface second = intake.take(image);
-        DeviceSurface third = intake.take(image);
+        DeviceSurface second = SurfaceIntake::take(intake, image, "cam");
+        DeviceSurface third = SurfaceIntake::take(intake, image, "cam");
         again.owner.reset();
         second.owner.reset();
         third.owner.reset();
-        check(intake.pooled() == 2, "and the pool holds at most what it was sized for: " +
-                                        std::to_string(intake.pooled()));
+        check(intake->pooled() == 2, "and the pool holds at most what it was sized for: " +
+                                         std::to_string(intake->pooled()));
+    }
+
+    // TWO RESOLUTIONS ON ONE GPU, which is an ordinary maritime fleet and what the first
+    // version could not do: it tracked ONE size, so an alternating pair retired the whole free
+    // list every frame -- a `cudaFree` per pooled buffer inside the lock and then a
+    // `cudaMalloc`, both device-synchronising, on the ingest thread. The class's own reuse
+    // check passed throughout, because it only ever handed it one size.
+    void test_two_resolutions_on_one_gpu_each_get_pool_hits() {
+        PaddedSurface big;
+        PaddedSurface small;  // same fixture; a smaller GEOMETRY is what makes it another size
+        DeviceImage wide = a_device_image(big);
+        DeviceImage narrow = a_device_image(small);
+        narrow.height = PaddedSurface::height / 2;  // half the plane, so half the buffer
+        narrow.uv_offset = static_cast<size_t>(PaddedSurface::stride) * narrow.height;
+
+        auto intake = std::make_shared<SurfaceIntake>(0, /*max_pooled=*/2);
+        DeviceSurface a = SurfaceIntake::take(intake, wide, "cam-wide");
+        DeviceSurface b = SurfaceIntake::take(intake, narrow, "cam-narrow");
+        const void* first_wide = a.nv12;
+        const void* first_narrow = b.nv12;
+        a.owner.reset();
+        b.owner.reset();
+        check(intake->pooled() == 2, "both sizes are held, not one at the other's expense: " +
+                                         std::to_string(intake->pooled()));
+
+        // ALTERNATING, which is the pattern that used to thrash. Both must be pool hits.
+        DeviceSurface again_wide = SurfaceIntake::take(intake, wide, "cam-wide");
+        DeviceSurface again_narrow = SurfaceIntake::take(intake, narrow, "cam-narrow");
+        check(again_wide.nv12 == first_wide && again_narrow.nv12 == first_narrow,
+              "and each resolution gets ITS OWN buffer back rather than a fresh allocation");
+        check(intake->pooled() == 0, "with both buckets now empty");
+        again_wide.owner.reset();
+        again_narrow.owner.reset();
+    }
+
+    // THE CONTRACT THE SINK'S LIFETIME RESTS ON, asserted where it lives rather than inferred
+    // from a run that did not crash. A raw `this` in the deleter does not crash on release:
+    // the freed pool still looks intact, `give_back` locks a destroyed mutex and returns, and
+    // every gate stays green -- which is exactly how round 1 shipped it. What IS observable is
+    // whether anything holds the pool, so that is what this checks.
+    void test_a_surface_holds_its_pool_alive() {
+        PaddedSurface decoded;
+        auto intake = std::make_shared<SurfaceIntake>(0, /*max_pooled=*/2);
+        std::weak_ptr<SurfaceIntake> watch = intake;
+        DeviceSurface surface = SurfaceIntake::take(intake, a_device_image(decoded), "cam");
+
+        intake.reset();  // the sink's reference goes, as it does on the unwind path
+        check(!watch.expired(),
+              "a live surface holds its pool alive -- with a raw pointer in the deleter this "
+              "is already gone and the release below locks a destroyed mutex");
+        surface.owner.reset();
+        check(watch.expired(), "and the last surface releasing lets the pool go");
+    }
+
+    // The pool must outlive the sink, because the sink is destroyed BEFORE the guard that stops
+    // the workers (`bench.cpp` declares `JoinOnUnwind` first and `QueueSink` last), so an
+    // unwind between `manager.start()` and `queue.close()` leaves worker threads holding
+    // surfaces whose pool has gone. The first version captured `this` and argued the opposite;
+    // with it, this test locks a destroyed mutex.
+    void test_a_surface_outlives_the_sink_that_made_it() {
+        PaddedSurface decoded;
+        DeviceSurface held;
+        {
+            FairPriorityQueue<FrameWork> queue("pipeline", 8, Overflow::Reject);
+            QueueSink sink(queue, /*pooled=*/2, /*devices=*/1);
+            Frame frame;
+            frame.tag = FrameTag{"cam", 1, 0};
+            frame.device = a_device_image(decoded);
+            frame.device.owner =
+                std::shared_ptr<const void>(decoded.device.get(), [](const void*) {});
+            sink.put(std::move(frame));
+            std::vector<FrameWork> batch = queue.get_batch(BatchWindow{4, 0}, 10);
+            check(batch.size() == 1, "one work item, carrying the sink's copy");
+            held = batch[0].surface;
+        }
+        // The sink, its queue and the work item are all destroyed now; this surface is not.
+        check(held.nv12 != nullptr, "the surface survives its sink");
+        held.owner.reset();  // returns the buffer to a pool that must still exist
+        check(true, "and releasing it afterwards runs the deleter against a live pool");
     }
 
     // The sink is where a frame becomes scheduled work, and it is the one place that decides
@@ -406,17 +499,22 @@ namespace {
         check(queue.stats().depth == 0, "and nothing is queued");
     }
 
+    // NO DEVICE NEEDED: the refusal happens before `gpuSetDevice` is reached, which is what
+    // lets this one run in the offline tier where the rest of the intake's gates cannot.
     void test_an_incomplete_surface_never_becomes_a_buffer() {
         DeviceImage image;  // no pointer, no geometry
-        SurfaceIntake intake(0);
+        auto intake = std::make_shared<SurfaceIntake>(0);
         std::string reason;
         try {
-            intake.take(image);
+            SurfaceIntake::take(intake, image, "cam42");
         } catch (const ConfigError& error) {
             reason = error.what();
         }
-        check(reason.find("incomplete") != std::string::npos,
-              "an incomplete surface is refused rather than sized: " + reason);
+        check(reason.find("incomplete") != std::string::npos &&
+                  reason.find("cam42") != std::string::npos,
+              "an incomplete surface is refused rather than sized, naming the camera an "
+              "operator would then go and look at: " +
+                  reason);
     }
 
     // Neither representation attached. A stage's `needs` is `FRAME_INPUT`, so the planner
@@ -613,10 +711,13 @@ int main() {
     test_a_skipped_branch_is_a_complete_frame();
     test_a_frame_carrying_only_a_surface_still_has_pixels();
     test_a_frame_with_no_pixels_is_refused_by_name();
+    test_an_incomplete_surface_never_becomes_a_buffer();
     if (has_device()) {
         test_the_pixel_seam_reads_a_padded_surface_as_a_surface();
         test_the_intake_frees_the_decoders_slot_and_keeps_the_pixels();
-        test_an_incomplete_surface_never_becomes_a_buffer();
+        test_two_resolutions_on_one_gpu_each_get_pool_hits();
+        test_a_surface_holds_its_pool_alive();
+        test_a_surface_outlives_the_sink_that_made_it();
         test_the_sink_turns_either_representation_into_one_work_item();
         test_a_device_frame_across_two_gpus_is_refused_by_name();
         scratch_pool_reuses_only_released_buffers();

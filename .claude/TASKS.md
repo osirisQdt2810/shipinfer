@@ -3178,6 +3178,43 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       what lets any worker take any frame. `--runner fleet` is one process per GPU, which is
       where the multi-GPU shape lives. The design-load run needs either that or per-device lanes
       here -- opened as `DEVICE-FRAME-NEEDS-A-LANE-PER-GPU` below.
+      ROUND 1 OF #160 CAME BACK BLOCKING WITH TWO, and the first is the worst kind of comment:
+        1. THE POOL'S DELETER CAPTURED A RAW `this`, and the comment above it asserted the sink
+           outlives every frame because the sink owns the intakes. The declaration order in
+           `bench.cpp` was the OTHER WAY ROUND -- `JoinOnUnwind` (which stops and joins the
+           workers) at 572, `QueueSink` at 625 -- so the sink was destroyed FIRST. A throw
+           anywhere between `manager.start()` and the explicit `queue.close()` left worker
+           threads holding surfaces whose pool had gone, and every deleter then locked a
+           destroyed mutex. That unwind path is the one `core/join_on_unwind.h` was written for.
+           The deleter holds a `shared_ptr<SurfaceIntake>` now, which makes the order IRRELEVANT
+           rather than asserted; the declaration also moved above the guard, because having it
+           right as well is free.
+        2. ONE `bytes_` FOR THE WHOLE POOL turned it into a `cudaMalloc` + `cudaFree` per frame
+           on a MIXED-RESOLUTION fleet -- 30 cameras at 1080p and 20 at 720p is ordinary, and
+           nothing constrains it. Camera A's take cleared the whole free list (a `cudaFree` per
+           buffer, inside the mutex every camera on the GPU contends for), camera B's put it
+           back. Keyed by SIZE now, so a resolution retires only its own bucket.
+      REVERT-CHECKS: the size revert fails `both sizes are held, not one at the other's expense:
+      1`. The raw-pointer revert **does not crash** -- the freed pool still looks intact, so
+      `give_back` locks a destroyed mutex and returns green, which is exactly how it shipped. So
+      the gate asserts the CONTRACT instead: a `weak_ptr` to the intake, dropped by its owner
+      while a surface is held, must not be expired. That fails on the revert.
+      TWO MORE THINGS THE ROUND FOUND BY MEASURING RATHER THAN ARGUING:
+        * THE CAP WAS NOT DOING ANYTHING. `max_pooled` was the queue's capacity (256), which
+          bounds IN-FLIGHT buffers, so nothing was ever freed and ~800 MB of idle NV12 per
+          device stayed for the run. I set 8, measured `pipeline_pool_size` (new, in the
+          occupancy log -- the analysis reads only `*_buffer_size` keys, so an extra one is
+          ignored), and found it PEGGED at 8 with throughput down to 693 frames from ~1000:
+          churning. At 128 it plateaued at 25 and never freed. So the cap is DERIVED now --
+          this device's worker count plus a margin -- because a fixed number is wrong for a
+          design-load run. Three runs at the derived cap: 1010/928/1001 read, 0 failed.
+        * `bench` EXITED WITHOUT UNWINDING, all eight cameras "abandoned past the stop
+          deadline", on one of those runs. A read may spend its whole `read_timeout_ms`
+          gathering access units, and the actor only learns of a stop when `read()` RETURNS --
+          so a fleet whose stop budget is shorter abandons every camera. `nvdec.cpp`'s deadline
+          loop checks the stop signal every pass now, and one pull is capped at 100 ms so that
+          check is reached promptly; the deadline still bounds the read. Zero abandonments in
+          three runs since.
       AND `NVDEC-SECTION-ORDER-HAS-NO-GUARD` IS CLOSED with it, which is where #159's reviewer
       said it belonged: `TestTheNvdecSectionsRunFirst` reads `main()`'s call order and each
       test's body, decides which lane a test SELECTS (assignment to `.source`, or
