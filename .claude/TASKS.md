@@ -2613,6 +2613,22 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
 
 ---
 
+- [ ] **CI-SYNTAX-COVERAGE-GAPS · two non-blocking findings from #133 round 3, kept rather
+      than folded into a round-4 fix.**
+      (1) `csrc/shipinfer/obs/sampler.cpp` is compiled by NOTHING. It IS `offline_ready`, so no
+      app's closure reaches it and `cpp-offline` never builds it -- and `_uncompiled_units()`
+      filters to `not offline_ready`, so the new syntax leg excludes it BY CONSTRUCTION. The
+      reviewer's read is right and it is the ticket's own thesis: the predicate wants to be "in
+      no built closure", not "not offline-ready". Deferred because it grows the set to units
+      that need no CUDA headers while the class is `@needs_headers`-gated, so the gating wants
+      rethinking with it -- a round-4 fix is the wrong place for that.
+      (2) `_headers_available()` runs a `g++` subprocess when the module is imported, so a
+      plain offline `pytest` collection pays one cached spawn even though the classes then
+      skip. A lazy string condition or a session-scoped fixture avoids it.
+
+- [!] **PHASE-D-NV12 · OPERATOR (when phase D opens): rebuild `shipinfer-gst:jammy` with `libgstreamer-plugins-bad1.0-dev` (gstcuda headers)? This box cannot `docker build` — the documented run+commit dance needs your go.** NVDEC-into-VRAM decode (both planes) — needs the DataPool carrier (arch.md §3/§8) AND an image
+      rebuild: `shipinfer-gst:jammy` lacks `libgstreamer-plugins-bad1.0-dev` (gstcuda/GstCudaMemory headers), and this
+      box can't `docker build` (the documented run+commit dance). Do not start before phase D opens.**
 - [~] **R55-BENCH-SOURCE · MY BENCH NUMBERS DO NOT MEET R55, and the operator had to ask.**
       Every measurement in this stretch -- including the C1 parity number (944 against 971.3) --
       ran `--source replay`: JPEGs decoded from disk on the CPU, with the harness printing

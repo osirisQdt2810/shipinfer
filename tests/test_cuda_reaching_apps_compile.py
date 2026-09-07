@@ -87,9 +87,24 @@ def _cuda_reaching_apps() -> list[Path]:
     ]
 
 
-def _lanes_available(build, closure: set[Path]) -> bool:
-    """Whether every external lane this unit needs is installed, asked of `pkg-config`."""
-    for lane in build.lanes_in(closure):
+# doc: long why a syntax check reads `lanes_of` and not `lanes_in`, which cost `bench.cpp`
+def _lanes_needed(build, unit: Path) -> set[str]:
+    """The lanes COMPILING this unit needs -- `lanes_of`, deliberately not `lanes_in`.
+
+    `lanes_in(closure)` is documented as wider on purpose: "compiling `cli/bench.cpp` needs no
+    OpenCV header, but *linking* it needs `replay.cpp`'s object". `-fsyntax-only` never links,
+    so gating a compile-only check on a link-time fact skipped the one app this whole file
+    exists to compile -- everywhere `libopencv-dev` is absent, which is exactly CI's runner
+    (#133 round 3). Measured here: `lanes_in(closure(bench.cpp))` is `{'opencv'}` while
+    `lanes_of(bench.cpp)` is empty, and no HEADER in that closure declares a lane at all --
+    `EXTERNAL` names only `replay.cpp` and `gstreamer.cpp`, both `.cpp`.
+    """
+    return build.lanes_of(unit)
+
+
+def _lanes_available(build, unit: Path) -> bool:
+    """Whether every external lane COMPILING this unit needs is installed, per `pkg-config`."""
+    for lane in _lanes_needed(build, unit):
         try:
             build.pkg_config_flags(lane)
         except SystemExit:
@@ -99,11 +114,11 @@ def _lanes_available(build, closure: set[Path]) -> bool:
     return True
 
 
-def _lane_flags(build, closure: set[Path]) -> list[str]:
+def _lane_flags(build, unit: Path) -> list[str]:
     """The `-I` flags an external lane needs, asked of `pkg-config` through `build_csrc.py`."""
     return [
         flag
-        for lane in build.lanes_in(closure)
+        for lane in _lanes_needed(build, unit)
         for flag in build.pkg_config_flags(lane)
         if flag.startswith("-I")
     ]
@@ -123,7 +138,7 @@ def _uncompiled_units() -> list[Path]:
     apps = set(_apps())
     units = [p for p in sorted((CSRC / "shipinfer").rglob("*.cpp")) if p not in apps]
     outside = [u for u in units if not build.offline_ready(build.include_closure(u), set())]
-    return [u for u in outside if _lanes_available(build, build.include_closure(u))]
+    return [u for u in outside if _lanes_available(build, u)]
 
 
 @functools.cache
@@ -241,8 +256,7 @@ class TestTheUnitsNothingCompiles:
         build = _build_module()
         failures: list[str] = []
         for unit in _uncompiled_units():
-            extra = _lane_flags(build, build.include_closure(unit))
-            ok, errors = _compiles(unit, extra)
+            ok, errors = _compiles(unit, _lane_flags(build, unit))
             if not ok:
                 failures.append(f"{unit.relative_to(ROOT)}:\n  {errors}")
 
@@ -261,19 +275,29 @@ class TestTheAppsOfflineCannotBuild:
         """`-fsyntax-only`: no link, no device, no measurement -- just "is this valid C++".
 
         Through the same lane reading as the unit check, so the two legs answer one question
-        one way. It changes nothing today -- `cli/bench.cpp` reaches opencv only through
-        `replay.cpp`, and `ingest/sources/replay.h` keeps `<opencv2/...>` behind a pimpl -- but
-        the day a header exposes a lane type, this leg would go RED on a runner without that
-        package where the unit leg skips.
+        one way -- and that reading is `lanes_of`, not `lanes_in`. Round 3 wrote "it changes
+        nothing today", reasoning from a dev box that has `libopencv-dev`; CI's runner does
+        not, so `cli/bench.cpp` hit the `continue` and was never compiled there. The job stayed
+        green with the app it exists for uncovered.
         """
         build = _build_module()
         failures: list[str] = []
+        skipped: list[str] = []
         for app in _cuda_reaching_apps():
-            closure = build.include_closure(app)
-            if not _lanes_available(build, closure):
+            if not _lanes_available(build, app):
+                skipped.append(app.relative_to(ROOT).as_posix())
                 continue
-            ok, errors = _compiles(app, _lane_flags(build, closure))
+            ok, errors = _compiles(app, _lane_flags(build, app))
             if not ok:
                 failures.append(f"{app.relative_to(ROOT)}:\n  {errors}")
 
         assert not failures, "these do not compile:\n" + "\n".join(failures)
+        # LOUD, because by this job's own thesis a silent skip is the defect. `continue` used
+        # to be the whole story: the job stayed green on a list of three with `bench.cpp`
+        # never compiled, and `-rs` said nothing because no `pytest.skip` was ever called.
+        if os.environ.get(_REQUIRE):
+            assert not skipped, (
+                f"these apps were skipped for a missing external lane: {skipped}. Where this "
+                f"job runs, a skip is the hole it exists to close -- install the lane's `-dev` "
+                f"package or narrow `EXTERNAL` so the unit does not claim it"
+            )
