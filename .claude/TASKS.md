@@ -2625,6 +2625,12 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       (2) `_headers_available()` runs a `g++` subprocess when the module is imported, so a
       plain offline `pytest` collection pays one cached spawn even though the classes then
       skip. A lazy string condition or a session-scoped fixture avoids it.
+      (3) the compile legs drop `-Wall -Wextra` and `-DSHIPINFER_OMITTED_LANES`, which the real
+      build passes (`build_csrc.py:472-489`). Harmless today -- the `#ifdef` branch in
+      `ingest/omitted_lanes.h` is covered by `cpp-offline` -- but a syntax check that compiles a
+      DIFFERENT configuration than the build is a gap. Not taken in a fix round: widening the
+      flags can only be judged by running it on the runner, and #133 has been red-on-first-run
+      three times for exactly that reason (rounds 2, 5, 6).
       ROUND 5: `cuda-cudart-dev-12-6` ships `cuda_runtime.h` WITHOUT the `crt/` headers it
       includes -- `cuda_runtime_api.h` includes `crt/host_defines.h`, `cuda_runtime.h` includes
       `crt/host_config.h`, both from `Source: cuda-nvcc`, and nothing depends on them under
@@ -2636,6 +2642,22 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       now ends `Not found: crt/host_defines.h -> install cuda-crt-...` instead of a compiler
       error about a file nobody here has heard of. A dev box's full toolkit cannot see any of
       these, which is exactly why the answer belongs in the failure.
+      ROUND 6, and I caused this one in round 5: `_absent_headers()` WALKED DIRECTORIES while
+      the file's own `_PROBE` comment says the point is to ask the COMPILER, because a
+      distribution puts these headers on the DEFAULT include path where no `-I` names them. The
+      runner's apt packages put TensorRT's under `/usr/include/x86_64-linux-gnu`, so
+      `_headers_available()` was True while `_absent_headers()` reported two absent, and the
+      ungated `test_the_reason_stays_plain_when_the_headers_are_there` would have failed on the
+      first post-merge run. Now one `g++ -fsyntax-only` per header, only after the aggregate
+      probe has failed -- and guarded on `shutil.which("g++")`, because `needs_headers`'s
+      `reason=` calls it at IMPORT time, so an unguarded spawn was a COLLECTION error on any
+      box without a toolchain. That last one I found by rehearsing `env -i PATH=/tmp/nobin`,
+      which is the rehearsal I should have run in round 5.
+      ROUND 6b: the module-level `pytestmark` had carried a `g++` guard and I dropped it;
+      `TestAFailureArrivesWithItsReason` is deliberately ungated and shells out to `g++`, so
+      the offline tier -- whose image is a `-runtime` one with no toolchain -- went from clean
+      to three raw tracebacks. `no_gpp` restores it. Verified: `env -i PATH=/tmp/nobin` gives
+      3 passed / 12 skipped, all named, instead of an error.
       ROUND 4 CLOSED THE OTHER TWO NOTES rather than deferring them: `replay.cpp` was compiled
       by NOTHING in CI (its opencv lane was unresolvable on the runner and it fell out with no
       assertion naming it, while `cpp-gst-lane` covers only `gstreamer.cpp`) -- `libopencv-dev`

@@ -162,25 +162,46 @@ def _headers_available() -> bool:
 #: headers it includes (#133 round 5), and a dev box's full toolkit cannot see that.
 _HEADER_PACKAGES: tuple[tuple[str, str], ...] = (
     ("crt/host_defines.h", "cuda-crt-<major>-<minor> (headers only, ~881 KB, no nvcc)"),
+    # `cuda_runtime.h` includes this one and `cuda_runtime_api.h` the other; same package, and
+    # both are named so a partial install cannot produce a message that looks complete.
+    ("crt/host_config.h", "cuda-crt-<major>-<minor>"),
     ("NvInferPlugin.h", "libnvinfer-headers-plugin-dev"),
     ("NvInfer.h", "libnvinfer-headers-dev"),
     ("cuda_runtime.h", "cuda-cudart-dev-<major>-<minor>"),
 )
 
 
-def _absent_headers() -> list[str]:
-    """Which of :data:`_HEADER_PACKAGES` cannot be found under the flags we would pass.
+# doc: long why this asks the compiler and not the filesystem
+def _absent_headers(table: tuple[tuple[str, str], ...] = _HEADER_PACKAGES) -> list[str]:
+    """Which of :data:`_HEADER_PACKAGES` the COMPILER cannot find, one probe each.
 
-    A directory walk and not a compile, because this runs only after the compiler has already
-    said no: the job's failure message is worth more than one more subprocess.
+    Asked of `g++`, not of `is_file()`, for the reason `_PROBE` states thirty lines up: a
+    distribution puts these on the DEFAULT include path, where no `-I` names them. The first
+    version walked `_include_flags()` plus `/usr/include` -- and the runner's own apt packages
+    put TensorRT's headers under `/usr/include/x86_64-linux-gnu`, so `_headers_available()` was
+    True while this reported two of them absent (#133 round 6). Walking a list of roots trades
+    one confusing failure for a maintained list of layouts.
+
+    Only reached after the aggregate probe has already failed, so the cost is a handful of
+    subprocesses on a path that is about to end the job anyway.
     """
-    roots = [Path(flag[2:]) for flag in _include_flags() if flag.startswith("-I")]
-    roots += [Path("/usr/include"), Path("/usr/local/include")]
-    return [
-        f"{header} -> install {package}"
-        for header, package in _HEADER_PACKAGES
-        if not any((root / header).is_file() for root in roots)
-    ]
+    if shutil.which("g++") is None:
+        # Reached at IMPORT time, because `needs_headers`'s `reason=` calls this -- so an
+        # unguarded `subprocess.run(["g++", ...])` here is a COLLECTION error rather than a
+        # skip, on any box without a toolchain. Which is the offline tier's own image. Found by
+        # rehearsing `env -i PATH=/tmp/nobin` after the per-header probe replaced the walk.
+        return []
+    absent: list[str] = []
+    for header, package in table:
+        done = subprocess.run(
+            ["g++", "-std=c++17", "-fsyntax-only", *_include_flags(), "-x", "c++", "-"],
+            input=f"#include <{header}>\nint main() {{ return 0; }}\n",
+            capture_output=True,
+            text=True,
+        )
+        if done.returncode != 0:
+            absent.append(f"{header} -> install {package}")
+    return absent
 
 
 def _missing_headers_reason() -> str:
@@ -200,9 +221,17 @@ def _missing_headers_reason() -> str:
 #: added here without a job named beside it is a unit going quietly uncovered.
 _COVERED_ELSEWHERE = frozenset({"gstreamer"})
 
+# doc: long the guard the module-level pytestmark used to carry, and what needs it
+#: `TestAFailureArrivesWithItsReason` is deliberately NOT `needs_headers`-gated -- it needs
+#: only a compiler -- but it shells out to `g++`, and the offline tier's image is a `-runtime`
+#: one with no toolchain. Without this the tier goes from clean to three raw tracebacks, which
+#: is this file's own complaint about checks that fail without saying why (#133 round 6).
+no_gpp = pytest.mark.skipif(shutil.which("g++") is None, reason="no g++ on PATH")
+
 #: Applied to the two COMPILE classes and not to the module: the guard tests below need `g++`
 #: and nothing else, so a module-level mark would have run them only on the `cpp-syntax`
 #: runner -- a harness whose own guards execute in one place is a harness nobody checks.
+
 needs_headers = pytest.mark.skipif(
     not _headers_available() and not os.environ.get(_REQUIRE), reason=_missing_headers_reason()
 )
@@ -246,6 +275,7 @@ def _compiles(path: Path, extra: list[str]) -> tuple[bool, str]:
     return done.returncode == 0, "\n  ".join(errors or done.stderr.splitlines()[-3:])
 
 
+@no_gpp
 class TestAFailureArrivesWithItsReason:
     """The whole thesis of this job, applied to itself: a red check has to say what broke.
 
@@ -401,11 +431,27 @@ class TestThisFileStandsAlone:
         )
 
     def test_the_reason_stays_plain_when_the_headers_are_there(self) -> None:
-        """On a box that has them, the reason must not grow a misleading `Not found` tail."""
+        """On a box that has them, the reason must not grow a misleading `Not found` tail.
+
+        This is what caught round 6: the first version WALKED directories, and the runner's own
+        apt packages put TensorRT's headers under `/usr/include/x86_64-linux-gnu` -- on `g++`'s
+        default search list and in none of the roots it walked. So `_headers_available()` was
+        True while this reported two absent, and the job's first act on `main` was to fail for
+        a reason unrelated to any C++ in the tree.
+        """
         if not _headers_available():
             pytest.skip("this box has no headers; the tail is correct here")
 
         assert "Not found" not in _missing_headers_reason()
+
+    def test_a_header_the_compiler_cannot_find_is_reported_with_its_package(self) -> None:
+        """The other direction, and checkable anywhere: the probe has to actually report."""
+        if shutil.which("g++") is None:
+            pytest.skip("no g++ on PATH; the probe returns nothing by design")
+
+        absent = _absent_headers((("definitely/not/here.h", "some-package"),))
+
+        assert absent == ["definitely/not/here.h -> install some-package"]
 
     def test_this_file_needs_no_conftest(self) -> None:
         """Its imports are stdlib plus pytest, so it runs on an interpreter with only pytest."""
