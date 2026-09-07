@@ -40,6 +40,9 @@ namespace shipinfer {
         //: The ceiling, which is about a typo rather than about the hardware: an NV12 1080p
         //: surface is ~3 MB, so 64 is ~200 MB for one camera and fifty of those is the box.
         constexpr int kMaxSurfaces = 64;
+        //: How long ONE pull may block, so the loop checks the stop signal at least this
+        //: often. Not the read timeout: that is the deadline across access units.
+        constexpr int kPullSliceMs = 100;
 
         void unref_sample(GstSample* sample) {
             if (sample != nullptr) gst_sample_unref(sample);
@@ -453,12 +456,23 @@ namespace shipinfer {
         const auto deadline = std::chrono::steady_clock::now() +
                               std::chrono::milliseconds(config().read_timeout_ms);
         while (d.ready.empty()) {
+            // THE STOP SIGNAL IS CHECKED EVERY PASS, not only between reads. A read may spend
+            // its whole `read_timeout_ms` gathering access units, and the actor only learns of
+            // a stop when `read()` returns -- so a fleet whose stop budget is shorter than that
+            // abandons every camera and `bench` exits without unwinding. Measured: eight
+            // cameras, "did not stop within 0ms", no summary printed at all.
+            if (stop().is_set()) return std::nullopt;
             const auto left = deadline - std::chrono::steady_clock::now();
             if (left <= std::chrono::steady_clock::duration::zero()) {
                 return std::nullopt;  // quiet, not over: an empty read, which the actor counts
             }
+            // ONE PULL IS CAPPED so the stop check above is reached promptly: without it a
+            // quiet camera blocks for the whole remaining deadline in a single pull and the
+            // check runs once. The DEADLINE is still what bounds the read -- this only decides
+            // how often the loop comes back up for air.
             const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(left).count();
-            feed_one_access_unit(d, static_cast<uint64_t>(ns));
+            feed_one_access_unit(
+                d, std::min<uint64_t>(static_cast<uint64_t>(ns), kPullSliceMs * 1000000ull));
         }
         return map_next(d);
     }
@@ -566,7 +580,10 @@ namespace shipinfer {
             [](const IngestConfig& config, FrameCounter& counter,
                StopSignal& stop) -> std::unique_ptr<FrameSource> {
                 return std::make_unique<NvdecSource>(config, counter, stop);
-            });
+            },
+            // DEVICE FRAMES, declared: the only source that answers from `do_read_device`, and
+            // the fact a caller needs before any camera connects (`ingest/registry.h`).
+            /*device_frames=*/true);
 
     }  // namespace
 

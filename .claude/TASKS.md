@@ -3134,28 +3134,171 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       and `ops.cu` are one-line pointers to it. `test_dataplane`'s fixtures are unchanged and
       still right -- the kernel must honour the offset it is handed -- but they no longer
       attribute an above-the-plane offset to NVDEC, which is the retracted claim.
-- [ ] **NVDEC-SECTION-ORDER-HAS-NO-GUARD · #159 round 2, note 3.** `test_ingest.cpp`'s NVDEC
-      sections run before anything else in that binary touches GStreamer, and that ORDER is what
-      makes a missing `initialise_gstreamer()` visible -- but the only thing holding it is a
-      comment saying "do not move these back down", which is what #156 relied on too. That file
-      is not gst-linked so it cannot assert `!gst_is_initialized()` itself; the reviewer's
-      suggestion is a text-order assertion in `tests/test_build_csrc.py` (the three NVDEC calls
-      appear in `main()` before any call whose body reaches the gst lane), which would fail on a
-      plain runner rather than only inside `jammy-nvdec`. Deferred out of #159 on the reviewer's
-      own advice ("worth considering with the carrier work, not here"): the mechanical part is
-      deciding what "reaches the gst lane" means from text without a hand-kept list, which is
-      the two-place edit the lane-table checks exist to avoid.
-
-      LEFT: the CARRIER, and #156 round 2 asked for its plan in writing rather than at the
-      design load, which is fair -- so: `ulNumOutputSurfaces = 2` caps in-flight surfaces per
-      camera at two, and a fair queue exists to HOLD frames, so a surface must not travel
-      through it. Raising the pool to the queue depth is per-camera VRAM times fifty;
-      shortening the queue gives up the fairness this project is about. So the hand-off COPIES,
-      which is what DeepStream does between the decoder's NVMM pool and `nvvideoconvert`'s: the
-      sink copies the surface into an NV12 device buffer the work item owns and releases the
-      surface at once. ~3 MB device-to-device for 1080p against ~6 MB down AND 6 MB up for the
-      host round trip this route exists to remove -- so "tren vram het" holds and the decoder's
-      pool stays bounded by decode depth. Then the design-load run.**
+      **THE ROUTE RUNS END TO END, 7 Sep, and this is what V156 asked for.** `rtsp -> H.264
+      bitstream -> NVDEC -> NV12 surface in VRAM -> one device-to-device copy -> the fair queue
+      -> the graph (`nv12_letterbox_into`, `nv12_crop_resize_into`) -> events`, with NO host
+      pixel copy anywhere in it. All four models busy, 0 failed, 0 dropped, 0 rejected.
+      LIKE-FOR-LIKE against the host BGR path -- same GPU, same cameras, same 30 s -- and I took
+      FIVE RUNS OF EACH rather than one, because the first pair said +17%/+22% and that was two
+      lucky runs. This box is shared and the spread is wide:
+                          nvdec (NV12 in VRAM)        gstreamer (host BGR)
+        frames_read       median 1026  (931..1054)    median  960  (840..968)
+        events_complete   median 1002  (916..1041)    median  929  (802..939)
+        events_incomplete median   23  ( 18..  33)    median   46  ( 23.. 59)
+      So **+6.9% read, +7.9% complete, and HALF the reassembly timeouts** -- not the +17% two
+      runs suggested, and worth saying because I would have shipped that number. The
+      read/complete ranges overlap at the edges (nvdec's worst 931 against BGR's best 968); the
+      timeout counts barely do. At this load nothing is saturated (1200 offered; nvdec 85%, BGR
+      80%), so this is the INGEST cost and not the GPU. Not 5x and not meant to be: that needs
+      the design load, which needs the item below.
+      THE ARTEFACT DID NOT SAY WHICH SOURCE IT RAN, which is how two runs 16% apart could not
+      be told apart without trusting shell history. `meta.config.source` now records it, as the
+      Python harness's `summary.json` already did.
+      THE CARRIER, as promised to #156 round 2 in writing rather than discovered at the design
+      load: `pipeline/surface_intake.h` copies the surface into a POOLED NV12 device buffer and
+      the sink releases the decode slot before the frame is queued. Why a copy at all --
+      `ulNumOutputSurfaces = 2` caps in-flight surfaces per camera at two, and a fair queue
+      exists to HOLD frames; raising the pool to the queue depth is per-camera VRAM times
+      fifty, and shortening the queue gives up the fairness this project is about. DeepStream
+      does the same between the decoder's NVMM pool and `nvvideoconvert`'s (V86).
+      `QueueSink` and `FrameWork` moved OUT of `cli/bench.cpp` into `pipeline/queue_sink.h` to
+      be testable at all -- an anonymous-namespace type in a composition root was fine while
+      `put` was six lines, and it now chooses between two representations, copies out of a pool
+      and refuses a shape that cannot work. That move paid immediately: the new gate caught the
+      surface being held until the ACTOR'S NEXT READ, because `put` takes `Frame&&` (a
+      reference) and the release had been left to a destructor -- one extra slot out of a pool
+      of two, per camera, for as long as a queue holds frames.
+      `test_pipeline` 19 -> 50 checks, 0 failures. Revert-checks: the one-plane copy replaced by
+      a single `bytes` memcpy fails at `brightest is 1.000000` (the 0xFF padding sentinel, in
+      the output) and on the byte-identical comparison; `has_pixels()` back to `image_` alone
+      fails the planner check; the seam passing `state.width()` as the stride fails both NV12
+      paths.
+      ONE GPU PER PROCESS FOR A DEVICE FRAME, refused in the sink by name. Not a shortcut:
+      ADR-004 says a frame stays where it was decoded, and this bench's ONE fleet-wide queue is
+      what lets any worker take any frame. `--runner fleet` is one process per GPU, which is
+      where the multi-GPU shape lives. The design-load run needs either that or per-device lanes
+      here -- opened as `DEVICE-FRAME-NEEDS-A-LANE-PER-GPU` below.
+      ROUND 1 OF #160 CAME BACK BLOCKING WITH TWO, and the first is the worst kind of comment:
+        1. THE POOL'S DELETER CAPTURED A RAW `this`, and the comment above it asserted the sink
+           outlives every frame because the sink owns the intakes. The declaration order in
+           `bench.cpp` was the OTHER WAY ROUND -- `JoinOnUnwind` (which stops and joins the
+           workers) at 572, `QueueSink` at 625 -- so the sink was destroyed FIRST. A throw
+           anywhere between `manager.start()` and the explicit `queue.close()` left worker
+           threads holding surfaces whose pool had gone, and every deleter then locked a
+           destroyed mutex. That unwind path is the one `core/join_on_unwind.h` was written for.
+           The deleter holds a `shared_ptr<SurfaceIntake>` now, which makes the order IRRELEVANT
+           rather than asserted; the declaration also moved above the guard, because having it
+           right as well is free.
+        2. ONE `bytes_` FOR THE WHOLE POOL turned it into a `cudaMalloc` + `cudaFree` per frame
+           on a MIXED-RESOLUTION fleet -- 30 cameras at 1080p and 20 at 720p is ordinary, and
+           nothing constrains it. Camera A's take cleared the whole free list (a `cudaFree` per
+           buffer, inside the mutex every camera on the GPU contends for), camera B's put it
+           back. Keyed by SIZE now, so a resolution retires only its own bucket.
+      REVERT-CHECKS: the size revert fails `both sizes are held, not one at the other's expense:
+      1`. The raw-pointer revert **does not crash** -- the freed pool still looks intact, so
+      `give_back` locks a destroyed mutex and returns green, which is exactly how it shipped. So
+      the gate asserts the CONTRACT instead: a `weak_ptr` to the intake, dropped by its owner
+      while a surface is held, must not be expired. That fails on the revert.
+      TWO MORE THINGS THE ROUND FOUND BY MEASURING RATHER THAN ARGUING:
+        * THE CAP WAS NOT DOING ANYTHING. `max_pooled` was the queue's capacity (256), which
+          bounds IN-FLIGHT buffers, so nothing was ever freed and ~800 MB of idle NV12 per
+          device stayed for the run. I set 8, measured `pipeline_pool_size` (new, in the
+          occupancy log -- the analysis reads only `*_buffer_size` keys, so an extra one is
+          ignored), and found it PEGGED at 8 with throughput down to 693 frames from ~1000:
+          churning. At 128 it plateaued at 25 and never freed. So the cap is DERIVED now --
+          this device's worker count plus a margin -- because a fixed number is wrong for a
+          design-load run. Three runs at the derived cap: 1010/928/1001 read, 0 failed.
+        * `bench` EXITED WITHOUT UNWINDING, all eight cameras "abandoned past the stop
+          deadline", on one of those runs. A read may spend its whole `read_timeout_ms`
+          gathering access units, and the actor only learns of a stop when `read()` RETURNS --
+          so a fleet whose stop budget is shorter abandons every camera. `nvdec.cpp`'s deadline
+          loop checks the stop signal every pass now, and one pull is capped at 100 ms so that
+          check is reached promptly; the deadline still bounds the read. Zero abandonments in
+          three runs since.
+      ROUND 2 FOUND THE GUARD'S PREDICATE WRONG, and it is the right kind of finding: I had
+      written `devices > 1`, and what makes a device frame unusable is not HOW MANY GPUs a
+      process drives but whether the frame's GPU is one of them. `--devices 3 --source nvdec` --
+      an ordinary choice when gpu0 is busy -- has every camera decoding on gpu0 because nothing
+      set their `device` option, `devices == 1` so the sink accepts, and the worker bound to
+      gpu3 then throws PER FRAME, FOREVER: the exact outcome the sink's refusal exists to
+      replace with one health line. It takes the device SET now and refuses a frame from outside
+      it, `bench.cpp` assigns each camera's decoder device from the run's list, and the test
+      runs OFFLINE (the refusal precedes any CUDA call, so a dummy pointer is enough) -- which
+      is where a wrong predicate should have been caught.
+      AND THE LEDGER SAID THE OPPOSITE OF THE BODY, which is worth recording as its own mistake:
+      the whole 100-line route narrative had been appended INSIDE the
+      `NVDEC-SECTION-ORDER-HAS-NO-GUARD` item, leaving it `[ ]` while the body said it closed --
+      so the Stop hook would have kept re-blocking on a guard that exists and passes, and
+      `PHASE-D-NV12` recorded nothing about the route running. Moved here, where it belongs.
+      NOTES TAKEN: why this is not `WorkerScratch` is now IN the header (single-threaded, keyed
+      by name, throws past its cap -- an ingest pool can accept none of the three); the stale
+      claim that a size change empties the pool is corrected, and the bucket-retirement rule the
+      reviewer offered is NOT added, deliberately -- a stale bucket is bounded (~93 MB per 1080p
+      size at the derived cap), a source refuses a resolution change mid-stream so a size only
+      appears across a reconnect, and a rule without a least-recently-taken clock would drop a
+      bucket a camera still wants. Stated in the header rather than guessed at. Also: the
+      `graph/state.h` claim that `pixels.h` is the only thing that asks which representation
+      (the sink asks once on the way in), the `// doc: long` markers the surrounding `csrc/`
+      uses, and a `FEATURE_LOG.md` entry for the whole route.
+      ROUND 3: I HAD REPLACED A PREDICATE THAT SHOULD HAVE BEEN JOINED. Round 2 swapped
+      `devices > 1` for set membership, and each catches a case the other misses -- membership
+      alone accepts `--devices 0,1 --source nvdec`, where round 2's own camera assignment SPREADS
+      the cameras across both, every frame passes the sink, and then half of them are pulled by
+      a worker on the other GPU: ~50% `frames_failed` with every camera reporting `Streaming`
+      and the advice buried in five stderr lines. Both now, and the offline gate carries both
+      halves -- the second one (`devices={0,1}`, a frame on gpu0, IN the set and still
+      unschedulable) fails on round 2's code.
+      The test catches `std::exception` rather than `ConfigError` deliberately: without the
+      refusal the frame is ACCEPTED and the intake then copies from the test's host pointer, so
+      a narrower catch terminated the binary instead of printing a named failure.
+      NOTES: an over-cap buffer's `cudaFree` no longer runs inside the mutex every camera on the
+      GPU contends for (the same shape round 1 fixed for the resolution case, on the path a
+      design-load run actually takes); `<algorithm>` and `<vector>` are included rather than
+      arriving transitively; and `produces_device_frames` has a gate that asks EVERY registered
+      source rather than a list -- which found that the first version of that test terminated a
+      binary without the opencv lane, because it asked about `replay` unconditionally.
+      AND `NVDEC-SECTION-ORDER-HAS-NO-GUARD` IS CLOSED with it, which is where #159's reviewer
+      said it belonged: `TestTheNvdecSectionsRunFirst` reads `main()`'s call order and each
+      test's body, decides which lane a test SELECTS (assignment to `.source`, or
+      `SOURCES().contains`) from `omitted_lanes.h`'s table rather than a hand-kept list, and
+      refuses any gst-lane call before the last NVDEC one. Offline, 0.3 s, no compiler.
+      Narrowing "mentions" to "selects" was the whole of the work: a redaction test that puts
+      `"gstreamer"` in an error message reaches no library, and the first version flagged it.
+      REVERT-CHECK: move the three calls back down and it names
+      `test_an_unsupported_codec_is_refused_before_a_thread_starts`,
+      `test_the_gstreamer_source_where_it_is_linked` and
+      `test_a_decoded_pixel_over_a_real_rtsp_session`.**
+- [x] **NVDEC-SECTION-ORDER-HAS-NO-GUARD · DONE 7 Sep, with the carrier (#160), which is where
+      #159's reviewer said it belonged.** `TestTheNvdecSectionsRunFirst` in
+      `tests/test_build_csrc.py` reads `test_ingest.cpp`'s `main()` call order and each test's
+      body and refuses any gst-lane call before the last NVDEC one -- offline, 0.3 s, no
+      GStreamer and no compiler, so it fails on a plain runner where the hazard is invisible.
+      THE MECHANICAL PART, which was the reason to defer it: what "reaches the gst lane" means
+      from text, without a hand-kept list. The lane's registered NAMES come from
+      `omitted_lanes.h`'s table, and a test USES a lane when it SELECTS the source
+      (`.source = "<name>"`, or `SOURCES().contains("<name>")`). Narrowing "mentions" to
+      "selects" was the whole of the work: the first version read bare string literals and
+      flagged `test_no_ingest_error_carries_a_credential_in_its_message`, which puts
+      `"gstreamer"` in an error message and reaches no library at all.
+      REVERT-CHECK: move the three NVDEC calls back down and it names
+      `test_an_unsupported_codec_is_refused_before_a_thread_starts`,
+      `test_the_gstreamer_source_where_it_is_linked` and
+      `test_a_decoded_pixel_over_a_real_rtsp_session` -- the three that would initialise
+      GStreamer on the NVDEC source's behalf.
+      ORIGINAL: #159 round 2, note 3.
+- [ ] **DEVICE-FRAME-NEEDS-A-LANE-PER-GPU · the design load's blocker, opened 7 Sep.** A device
+      frame cannot move (ADR-004), so a worker on another GPU cannot take it -- and `cli/bench`
+      keeps ONE fleet-wide fair queue precisely so any worker can take any frame, which is what
+      makes it fair across cameras rather than within a device. The two are incompatible in one
+      process, and the sink refuses the combination by name today.
+      Cross-device fairness is UNACHIEVABLE for device frames rather than merely unimplemented,
+      which is what makes a queue per device the right shape here and not a regression: fair
+      across the cameras assigned to a GPU, with the assignment doing the cross-device balance
+      (which is the placement problem this project already owns). The deployment already works
+      this way -- `--runner fleet` is one shard process per GPU.
+      Needed for: the C++ design-load run at 50 x 20 over 8 GPUs, and therefore for C1's >=5x.
+      Also a two-plane question (the Python plane's fleet gets it from processes, so the sync
+      rule may be satisfied already -- check before building).
 - [x] **CSRC-TOPOLOGY-Q · ANSWERED 4 Sep as ADR-020, by me, under V154 ("làm theo hướng bạn
       nghĩ là tốt nhất"). NO `csrc/topology/` and no `csrc/runners/`: the chain stays a Python
       declaration and the C++ plane receives a RESOLVED PLAN.** Three reasons, none of them

@@ -14,8 +14,11 @@
 #include "shipinfer/pipeline/graph/stage.h"
 #include "shipinfer/pipeline/graph/stages.h"
 #include "shipinfer/pipeline/graph/state.h"
+#include "shipinfer/pipeline/queue_sink.h"
 #include "shipinfer/pipeline/reassembly/collector.h"
+#include "shipinfer/pipeline/surface_intake.h"
 #include "shipinfer/runtime/containment.h"
+#include "shipinfer/runtime/ops.h"
 
 namespace {
 
@@ -128,7 +131,7 @@ namespace {
               "and is non-empty, so a `needs` on it is met too");
         check(state.device() == 3, "on the device it was decoded on (ADR-004)");
         check(state.surface().uv_offset == static_cast<size_t>(384) * 256,
-              "with the coded-height uv_offset carried, not derived");
+              "with the uv_offset CARRIED rather than derived (`ingest/frame.h`)");
         check(state.image() == nullptr, "and no host image: exactly one representation");
 
         state.release_image();
@@ -138,13 +141,13 @@ namespace {
     }
 
     // The seam picks by representation, and the fixture is built so that picking wrong is
-    // VISIBLE rather than merely wrong-looking: the surface is padded (stride > width, chroma
-    // at the coded height) and every padding byte is a sentinel. A read that ignored the stride
-    // -- which is what routing an NV12 frame through the BGR entry point does -- pulls the
-    // sentinel into the output.
+    // VISIBLE rather than merely wrong-looking: the surface is padded -- stride above the
+    // width, and a chroma offset above the luma the reader would derive -- with every padding
+    // byte a sentinel. A read that ignored the stride, which is what routing an NV12 frame
+    // through the BGR entry point does, pulls the sentinel into the output.
     void test_the_pixel_seam_reads_a_padded_surface_as_a_surface() {
-        const int src_h = 90, src_w = 160, stride = 192, coded_h = 96, dst = 32;
-        const size_t uv_offset = static_cast<size_t>(stride) * coded_h;
+        const int src_h = 90, src_w = 160, stride = 192, plane_h = 96, dst = 32;
+        const size_t uv_offset = static_cast<size_t>(stride) * plane_h;
         std::vector<uint8_t> host(uv_offset + static_cast<size_t>(stride) * src_h / 2, 0xFF);
         // The image proper: a mid-grey ramp well away from the sentinel, chroma neutral.
         for (int y = 0; y < src_h; ++y) {
@@ -216,6 +219,339 @@ namespace {
               "a crop out of the surface carries the image and not the padding: " +
                   std::to_string(ordinary));
         check(degenerate == 0.f, "and a zero-area box is black rather than a launch failure");
+    }
+
+    // One padded NV12 surface on the device, plus its host bytes. Every byte the image does not
+    // occupy is 0xFF -- the stride padding, and the gap between the last image row and the
+    // plane's end -- so a copy that carried the padding into the middle of its buffer, or read
+    // the chroma from the wrong offset, shows up as a bright pixel rather than a subtle one.
+    struct PaddedSurface {
+        static constexpr int height = 90, width = 160, stride = 192, plane = 96;
+        static size_t uv_offset() { return static_cast<size_t>(stride) * plane; }
+        static size_t bytes() { return uv_offset() + static_cast<size_t>(stride) * height / 2; }
+
+        std::vector<uint8_t> host;
+        DeviceBuffer device;
+
+        PaddedSurface() : host(bytes(), 0xFF), device(bytes()) {
+            for (int y = 0; y < height; ++y) {
+                for (int x = 0; x < width; ++x) {
+                    host[static_cast<size_t>(y) * stride + x] =
+                        static_cast<uint8_t>(30 + (x * 3 + y) % 60);
+                }
+            }
+            for (int y = 0; y < height / 2; ++y) {
+                for (int x = 0; x < width; ++x) {
+                    host[uv_offset() + static_cast<size_t>(y) * stride + x] =
+                        static_cast<uint8_t>(x % 2 ? 120 : 136);
+                }
+            }
+            GPU_CHECK(gpuMemcpy(device.get(), host.data(), host.size(), gpuMemcpyHostToDevice));
+        }
+    };
+
+    // The `DeviceImage` a decoder would hand over for `surface`, geometry and all. A helper
+    // because three tests fill the same eight fields and a typo in one of them is a test that
+    // passes for the wrong reason.
+    DeviceImage a_device_image(const PaddedSurface& surface) {
+        DeviceImage image;
+        image.nv12 = surface.device.get();
+        image.height = PaddedSurface::height;
+        image.width = PaddedSurface::width;
+        image.pitch = PaddedSurface::stride;
+        image.uv_offset = PaddedSurface::uv_offset();
+        image.device = 0;
+        return image;
+    }
+
+    // `nv12_letterbox_into` run over one surface, read back. What the KERNELS see, which is the
+    // only definition of "the copy preserved the frame" that matters here.
+    std::vector<float> letterboxed(const uint8_t* nv12, int stride, size_t uv_offset, int dst) {
+        DeviceBuffer out(static_cast<size_t>(3) * dst * dst * sizeof(float));
+        nv12_letterbox_into(nv12, PaddedSurface::height, PaddedSurface::width, stride,
+                            uv_offset, out.as<float>(), dst, dst, /*swap_rb=*/true, 0.f,
+                            nullptr);
+        GPU_CHECK(gpuStreamSynchronize(nullptr));
+        std::vector<float> got(static_cast<size_t>(3) * dst * dst);
+        GPU_CHECK(gpuMemcpy(got.data(), out.get(), out.bytes(), gpuMemcpyDeviceToHost));
+        return got;
+    }
+
+    // The intake's whole job, in the order it matters: the decoder's slot goes back, the pixels
+    // do not change, and the buffer is reused instead of allocated per frame.
+    void test_the_intake_frees_the_decoders_slot_and_keeps_the_pixels() {
+        PaddedSurface source;
+        bool slot_returned = false;
+
+        DeviceImage image;
+        image.nv12 = source.device.get();
+        image.height = PaddedSurface::height;
+        image.width = PaddedSurface::width;
+        image.pitch = PaddedSurface::stride;
+        image.uv_offset = PaddedSurface::uv_offset();
+        image.device = 0;
+        // Stands in for `cuvidUnmapVideoFrame`: what a real surface's release does is give a
+        // slot out of a pool of two back, and the point of the intake is that it happens before
+        // the frame is queued rather than after a worker is done with it.
+        image.owner = std::shared_ptr<const void>(source.device.get(),
+                                                  [&](const void*) { slot_returned = true; });
+
+        auto intake = std::make_shared<SurfaceIntake>(0, /*max_pooled=*/2);
+        DeviceSurface taken = SurfaceIntake::take(intake, image, "cam");
+        image.owner.reset();
+        check(slot_returned, "taking a surface lets the decoder's slot go back at once");
+        check(taken.uv_offset ==
+                  static_cast<size_t>(PaddedSurface::stride) * PaddedSurface::height,
+              "and what comes out is TIGHT -- the source padding is not carried along: " +
+                  std::to_string(taken.uv_offset));
+
+        const int dst = 32;
+        const std::vector<float> before =
+            letterboxed(source.device.as<uint8_t>(), PaddedSurface::stride,
+                        PaddedSurface::uv_offset(), dst);
+        const std::vector<float> after =
+            letterboxed(taken.nv12, taken.stride, taken.uv_offset, dst);
+        check(before == after,
+              "and the kernels see exactly the same frame through the copy -- same kernel, "
+              "same inputs, so anything but bit-identical is a copy that lost or moved bytes");
+        float brightest = 0.f;
+        for (float value : after) brightest = std::max(brightest, value);
+        check(brightest < 0.5f,
+              "with no 0xFF padding byte anywhere in the output: brightest is " +
+                  std::to_string(brightest));
+
+        check(intake->pooled() == 0, "a surface in hand is not in the pool");
+        const void* reused = taken.nv12;
+        taken.owner.reset();
+        taken.nv12 = nullptr;
+        check(intake->pooled() == 1, "releasing it returns the buffer rather than freeing it");
+        DeviceSurface again = SurfaceIntake::take(intake, image, "cam");
+        check(again.nv12 == reused && intake->pooled() == 0,
+              "and the next frame gets that buffer back -- a cudaMalloc per frame at a "
+              "thousand frames a second is what this class exists to avoid");
+
+        // The cap, which is the difference between a pool and a leak: a consumer that stalls
+        // must not turn into unbounded VRAM.
+        DeviceSurface second = SurfaceIntake::take(intake, image, "cam");
+        DeviceSurface third = SurfaceIntake::take(intake, image, "cam");
+        again.owner.reset();
+        second.owner.reset();
+        third.owner.reset();
+        check(intake->pooled() == 2, "and the pool holds at most what it was sized for: " +
+                                         std::to_string(intake->pooled()));
+    }
+
+    // TWO RESOLUTIONS ON ONE GPU, which is an ordinary maritime fleet and what the first
+    // version could not do: it tracked ONE size, so an alternating pair retired the whole free
+    // list every frame -- a `cudaFree` per pooled buffer inside the lock and then a
+    // `cudaMalloc`, both device-synchronising, on the ingest thread. The class's own reuse
+    // check passed throughout, because it only ever handed it one size.
+    void test_two_resolutions_on_one_gpu_each_get_pool_hits() {
+        PaddedSurface big;
+        PaddedSurface small;  // same fixture; a smaller GEOMETRY is what makes it another size
+        DeviceImage wide = a_device_image(big);
+        DeviceImage narrow = a_device_image(small);
+        narrow.height = PaddedSurface::height / 2;  // half the plane, so half the buffer
+        narrow.uv_offset = static_cast<size_t>(PaddedSurface::stride) * narrow.height;
+
+        auto intake = std::make_shared<SurfaceIntake>(0, /*max_pooled=*/2);
+        DeviceSurface a = SurfaceIntake::take(intake, wide, "cam-wide");
+        DeviceSurface b = SurfaceIntake::take(intake, narrow, "cam-narrow");
+        const void* first_wide = a.nv12;
+        const void* first_narrow = b.nv12;
+        a.owner.reset();
+        b.owner.reset();
+        check(intake->pooled() == 2, "both sizes are held, not one at the other's expense: " +
+                                         std::to_string(intake->pooled()));
+
+        // ALTERNATING, which is the pattern that used to thrash. Both must be pool hits.
+        DeviceSurface again_wide = SurfaceIntake::take(intake, wide, "cam-wide");
+        DeviceSurface again_narrow = SurfaceIntake::take(intake, narrow, "cam-narrow");
+        check(again_wide.nv12 == first_wide && again_narrow.nv12 == first_narrow,
+              "and each resolution gets ITS OWN buffer back rather than a fresh allocation");
+        check(intake->pooled() == 0, "with both buckets now empty");
+        again_wide.owner.reset();
+        again_narrow.owner.reset();
+    }
+
+    // THE CONTRACT THE SINK'S LIFETIME RESTS ON, asserted where it lives rather than inferred
+    // from a run that did not crash. A raw `this` in the deleter does not crash on release:
+    // the freed pool still looks intact, `give_back` locks a destroyed mutex and returns, and
+    // every gate stays green -- which is exactly how round 1 shipped it. What IS observable is
+    // whether anything holds the pool, so that is what this checks.
+    void test_a_surface_holds_its_pool_alive() {
+        PaddedSurface decoded;
+        auto intake = std::make_shared<SurfaceIntake>(0, /*max_pooled=*/2);
+        std::weak_ptr<SurfaceIntake> watch = intake;
+        DeviceSurface surface = SurfaceIntake::take(intake, a_device_image(decoded), "cam");
+
+        intake.reset();  // the sink's reference goes, as it does on the unwind path
+        check(!watch.expired(),
+              "a live surface holds its pool alive -- with a raw pointer in the deleter this "
+              "is already gone and the release below locks a destroyed mutex");
+        surface.owner.reset();
+        check(watch.expired(), "and the last surface releasing lets the pool go");
+    }
+
+    // The pool must outlive the sink, because the sink is destroyed BEFORE the guard that stops
+    // the workers (`bench.cpp` declares `JoinOnUnwind` first and `QueueSink` last), so an
+    // unwind between `manager.start()` and `queue.close()` leaves worker threads holding
+    // surfaces whose pool has gone. The first version captured `this` and argued the opposite;
+    // with it, this test locks a destroyed mutex.
+    void test_a_surface_outlives_the_sink_that_made_it() {
+        PaddedSurface decoded;
+        DeviceSurface held;
+        {
+            FairPriorityQueue<FrameWork> queue("pipeline", 8, Overflow::Reject);
+            QueueSink sink(queue, /*pooled=*/2, /*devices=*/{0});
+            Frame frame;
+            frame.tag = FrameTag{"cam", 1, 0};
+            frame.device = a_device_image(decoded);
+            frame.device.owner =
+                std::shared_ptr<const void>(decoded.device.get(), [](const void*) {});
+            sink.put(std::move(frame));
+            std::vector<FrameWork> batch = queue.get_batch(BatchWindow{4, 0}, 10);
+            check(batch.size() == 1, "one work item, carrying the sink's copy");
+            held = batch[0].surface;
+        }
+        // The sink, its queue and the work item are all destroyed now; this surface is not.
+        check(held.nv12 != nullptr, "the surface survives its sink");
+        held.owner.reset();  // returns the buffer to a pool that must still exist
+        check(true, "and releasing it afterwards runs the deleter against a live pool");
+    }
+
+    // The sink is where a frame becomes scheduled work, and it is the one place that decides
+    // between the two pixel representations. Three questions, and the third is the one an
+    // operator meets.
+    void test_the_sink_turns_either_representation_into_one_work_item() {
+        FairPriorityQueue<FrameWork> queue("pipeline", 16, Overflow::Reject);
+        QueueSink sink(queue, /*pooled=*/4, /*devices=*/{0});
+
+        // -- a host frame: the pixels stay on the host and the worker uploads them ----------
+        std::vector<uint8_t> pixels(8 * 8 * 3, 7);
+        Frame host;
+        host.tag = FrameTag{"cam", 1, 0};
+        host.image.pixels = pixels.data();
+        host.image.height = 8;
+        host.image.width = 8;
+        sink.put(std::move(host));
+        std::vector<FrameWork> batch = queue.get_batch(BatchWindow{4, 0}, 10);
+        check(batch.size() == 1 && batch[0].device < 0,
+              "a host frame becomes a work item with no device, which any worker may take");
+        check(batch[0].frame.pixels == pixels.data() && batch[0].surface.empty(),
+              "carrying the library's pixels and no surface");
+        check(batch[0].state != nullptr && batch[0].state->available().empty(),
+              "and NO pixels on the state yet -- the worker attaches them after uploading");
+
+        // -- a device frame: copied out of the decoder's pool, and on the state at once -----
+        PaddedSurface decoded;
+        bool slot_returned = false;
+        Frame device;
+        device.tag = FrameTag{"cam", 2, 0};
+        device.device.nv12 = decoded.device.get();
+        device.device.height = PaddedSurface::height;
+        device.device.width = PaddedSurface::width;
+        device.device.pitch = PaddedSurface::stride;
+        device.device.uv_offset = PaddedSurface::uv_offset();
+        device.device.device = 0;
+        device.device.owner = std::shared_ptr<const void>(
+            decoded.device.get(), [&](const void*) { slot_returned = true; });
+        sink.put(std::move(device));
+        check(slot_returned,
+              "a device frame gives the decode slot back BEFORE it is queued -- a pool of two "
+              "output surfaces cannot survive a queue that holds frames");
+        batch = queue.get_batch(BatchWindow{4, 0}, 10);
+        check(batch.size() == 1 && batch[0].device == 0 && !batch[0].surface.empty(),
+              "and becomes a work item bound to the device it was decoded on");
+        check(batch[0].state != nullptr && batch[0].state->available().size() == 1,
+              "with the pixels already on the state: there is nothing to upload");
+        check(batch[0].surface.nv12 != decoded.device.as<uint8_t>(),
+              "and they are the sink's copy, not the decoder's surface");
+    }
+
+    // NO DEVICE NEEDED, and that is worth the dummy pointer: the refusal happens before
+    // `SurfaceIntake::take` and therefore before any CUDA call, so this runs in the offline
+    // tier where a wrong predicate would otherwise only show up on a GPU box.
+    void test_a_device_frame_from_a_gpu_this_process_lacks_is_refused_by_name() {
+        FairPriorityQueue<FrameWork> queue("pipeline", 16, Overflow::Reject);
+        QueueSink sink(queue, /*pooled=*/4, /*devices=*/{1, 2});
+        uint8_t nothing = 0;  // never read: `empty()` asks only that it is non-null
+        Frame frame;
+        frame.tag = FrameTag{"cam09", 3, 0};
+        frame.device.nv12 = &nothing;
+        frame.device.height = PaddedSurface::height;
+        frame.device.width = PaddedSurface::width;
+        frame.device.pitch = PaddedSurface::stride;
+        frame.device.uv_offset = PaddedSurface::uv_offset();
+        frame.device.device = 0;  // a process driving {1, 2} has no worker for it
+        frame.device.owner = std::shared_ptr<const void>(&nothing, [](const void*) {});
+        std::string reason;
+        try {
+            sink.put(std::move(frame));
+        } catch (const ConfigError& error) {
+            reason = error.what();
+        }
+        // A `ConfigError` and not a drop, because `CameraActor` refuses one fatally: the camera
+        // stops with this text in its health line rather than failing every frame forever.
+        // THE SET AND NOT THE COUNT is what this pins. `devices > 1` was the first predicate
+        // and it accepts exactly this frame -- one GPU, and the wrong one -- which is the
+        // `--devices 3 --source nvdec` case where every frame then failed in the worker.
+        check(reason.find("cam09") != std::string::npos &&
+                  reason.find("gpu0") != std::string::npos &&
+                  reason.find("1,2") != std::string::npos,
+              "a GPU this process does not drive is refused, naming the camera, its GPU and "
+              "the ones there are: " +
+                  reason);
+        check(queue.stats().depth == 0, "and nothing is queued");
+
+        // AND THE OTHER HALF, which set membership alone accepts: the frame IS on a GPU this
+        // process drives, and is still unschedulable, because the queue is fleet-wide and any
+        // worker may take it -- so half of them land on the wrong GPU. `--devices 0,1
+        // --source nvdec` builds exactly this, and it came out as ~50% `frames_failed` with
+        // every camera reporting `Streaming` (#160 round 3).
+        FairPriorityQueue<FrameWork> pair("pipeline", 16, Overflow::Reject);
+        QueueSink across(pair, /*pooled=*/4, /*devices=*/{0, 1});
+        Frame second;
+        second.tag = FrameTag{"cam10", 4, 0};
+        second.device.nv12 = &nothing;
+        second.device.height = PaddedSurface::height;
+        second.device.width = PaddedSurface::width;
+        second.device.pitch = PaddedSurface::stride;
+        second.device.uv_offset = PaddedSurface::uv_offset();
+        second.device.device = 0;  // IN the set {0, 1}, and still not schedulable
+        second.device.owner = std::shared_ptr<const void>(&nothing, [](const void*) {});
+        std::string spread;
+        try {
+            across.put(std::move(second));
+        } catch (const std::exception& error) {
+            // `std::exception` and not `ConfigError`, so the assertion below FAILS rather than
+            // the binary terminating when the refusal is missing: the frame is then accepted
+            // and the intake tries to copy from this test's host pointer.
+            spread = error.what();
+        }
+        check(spread.find("cam10") != std::string::npos &&
+                  spread.find("0,1") != std::string::npos,
+              "two GPUs in one process is refused too, even for a frame on one of them: " +
+                  spread);
+        check(pair.stats().depth == 0, "and nothing is queued for it either");
+    }
+
+    // NO DEVICE NEEDED: the refusal happens before `gpuSetDevice` is reached, which is what
+    // lets this one run in the offline tier where the rest of the intake's gates cannot.
+    void test_an_incomplete_surface_never_becomes_a_buffer() {
+        DeviceImage image;  // no pointer, no geometry
+        auto intake = std::make_shared<SurfaceIntake>(0);
+        std::string reason;
+        try {
+            SurfaceIntake::take(intake, image, "cam42");
+        } catch (const ConfigError& error) {
+            reason = error.what();
+        }
+        check(reason.find("incomplete") != std::string::npos &&
+                  reason.find("cam42") != std::string::npos,
+              "an incomplete surface is refused rather than sized, naming the camera an "
+              "operator would then go and look at: " +
+                  reason);
     }
 
     // Neither representation attached. A stage's `needs` is `FRAME_INPUT`, so the planner
@@ -412,8 +748,15 @@ int main() {
     test_a_skipped_branch_is_a_complete_frame();
     test_a_frame_carrying_only_a_surface_still_has_pixels();
     test_a_frame_with_no_pixels_is_refused_by_name();
+    test_an_incomplete_surface_never_becomes_a_buffer();
+    test_a_device_frame_from_a_gpu_this_process_lacks_is_refused_by_name();
     if (has_device()) {
         test_the_pixel_seam_reads_a_padded_surface_as_a_surface();
+        test_the_intake_frees_the_decoders_slot_and_keeps_the_pixels();
+        test_two_resolutions_on_one_gpu_each_get_pool_hits();
+        test_a_surface_holds_its_pool_alive();
+        test_a_surface_outlives_the_sink_that_made_it();
+        test_the_sink_turns_either_representation_into_one_work_item();
         scratch_pool_reuses_only_released_buffers();
         scratch_pool_refuses_unbounded_growth();
     } else {

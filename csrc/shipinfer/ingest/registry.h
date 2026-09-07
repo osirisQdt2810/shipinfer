@@ -34,7 +34,8 @@ namespace shipinfer {
     class SourceRegistry {
       public:
         void add(const std::string& name, const std::vector<std::string>& aliases,
-                 const std::string& description, SourceFactory factory);
+                 const std::string& description, SourceFactory factory,
+                 bool device_frames = false);
         // The canonical name for a name or alias; throws `ConfigError` naming the alternatives,
         // because "unknown video source 'gstremaer'" with no list is a twenty-minute detour.
         std::string canonical(const std::string& name) const;
@@ -43,11 +44,23 @@ namespace shipinfer {
         std::vector<std::string> names() const;
         std::vector<std::pair<std::string, std::string>> describe() const;
         bool contains(const std::string& name) const;
+        // doc: long why a DECLARATION and not a question asked of an instance
+        // Whether this source answers from `do_read_device` -- pixels that stay on the GPU
+        // they were decoded on, and therefore cannot be handed to a worker on another one
+        // (ADR-004). Throws `ConfigError` for an unknown name, as `canonical` does.
+        //
+        // Declared here rather than asked of a `FrameSource` because the answer is needed
+        // BEFORE any source exists: a caller sizing its queues has to know whether one
+        // fleet-wide queue is legal for this run, and building a source to find out would
+        // connect to a camera. `FrameCounter::latch_where` is the per-camera runtime latch and
+        // it answers one frame too late for that.
+        bool produces_device_frames(const std::string& name) const;
 
       private:
         struct Entry {
             std::string description;
             SourceFactory factory;
+            bool device_frames = false;
         };
         std::map<std::string, Entry> entries_;
         std::map<std::string, std::string> by_alias_;
@@ -65,9 +78,12 @@ namespace shipinfer {
 
     // One of these at the bottom of each source file is the `@SOURCES.register(...)`.
     struct SourceRegistrar {
+        // `device_frames` defaults to false, so a host source's registrar is unchanged and a
+        // device one states the fact at the point that already states the name.
         SourceRegistrar(const std::string& name, const std::vector<std::string>& aliases,
-                        const std::string& description, SourceFactory factory) {
-            SOURCES().add(name, aliases, description, std::move(factory));
+                        const std::string& description, SourceFactory factory,
+                        bool device_frames = false) {
+            SOURCES().add(name, aliases, description, std::move(factory), device_frames);
         }
     };
 
