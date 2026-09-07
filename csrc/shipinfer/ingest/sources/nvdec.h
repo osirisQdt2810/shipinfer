@@ -17,6 +17,15 @@
 // time, so this unit has no build-time driver dependency and a box without one fails at load
 // with a message rather than at link. That is `runtime/native.py`'s arrangement (ADR-003).
 //
+// WHY THIS UNIT NAMES CUDA DIRECTLY, WHERE `core/platform.h` SAYS IT IS THE ONLY ONE THAT MAY
+// -----------------------------------------------------------------------------------------
+// A stated departure rather than an oversight (ADR-014, and the house rule that an unexplained
+// one is a reinvention). `platform.h` exists to alias what CUDA and ROCm both have, and NVDEC
+// has no HIP counterpart at all -- an alias for `cuvidMapVideoFrame` would be a fiction with
+// one implementation. The lane is opt-in, so a ROCm build never compiles this unit and the
+// promise `platform.h` protects is untouched; a ROCm video path would be its own source beside
+// this one, named for its own decoder.
+//
 // THIS UNIT IS AN EXTERNAL LANE, like `sources/gstreamer.*` and `sources/replay.*`
 // --------------------------------------------------------------------------------
 // `scripts/build_csrc.py` follows a header to the `.cpp` beside it, so one `#include` of this
@@ -31,7 +40,9 @@
 //   the stream does not start within `open_timeout_ms`        -> SourceOpenError (retryable)
 //   EOS, a bus ERROR, a cuvid decode failure                  -> FrameDecodeError (reconnect)
 //   a 10-bit stream, which P016 and not NV12 would carry      -> ConfigError (fatal, no retry)
-//   libnvcuvid absent, or no CUDA device                      -> SourceUnavailableError (fatal)
+//   `hwaccel: false`, or `surfaces` outside 1..64               -> ConfigError (fatal, no
+//   retry) libnvcuvid absent, or no CUDA device                      -> SourceUnavailableError
+//   (fatal)
 //
 // **EOS ON A CAMERA IS A FAULT**, as it is for the GStreamer source: a live stream that ends
 // has broken, so this never overrides `is_exhausted()`.
@@ -55,9 +66,12 @@ namespace shipinfer {
     //   max_buffers  appsink queue depth for the BITSTREAM, default 2. Access units are small,
     //                so this is about latency rather than memory: a deep queue means the
     //                decoder works on stale pictures.
-    //   surfaces     decode surfaces cuvid allocates, default 4. Its own floor is what the
-    //                stream's DPB needs; more buys pipelining and costs VRAM per camera, which
-    //                at fifty cameras is the number that matters.
+    //   surfaces     decode surfaces cuvid allocates, default 4, 1..64. A FLOOR and never a
+    //                ceiling: the sequence callback raises it to the stream's own
+    //                `min_num_decode_surfaces`, because nobody knows a camera's reference depth
+    //                from the outside and too few is either a refusal or corrupted output.
+    //                More than the stream needs buys pipelining and costs VRAM per camera,
+    //                which at fifty cameras is the number that matters.
     //   device       which GPU decodes, default 0. One actor thread owns this source and its
     //                context for the source's whole life (ADR-002).
     //

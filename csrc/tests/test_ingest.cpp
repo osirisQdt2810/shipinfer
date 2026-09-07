@@ -2750,6 +2750,89 @@ namespace {
         again.reset();
     }
 
+    // A REORDERED STREAM, which is what a real camera sends and what no fixture here produced
+    // until now: `-bf 3 -refs 3` instead of the default `-bf 0 -tune zerolatency`, whose decode
+    // order equals its display order.
+    //
+    // Two things need it. Round 1's one-slot `ready` overwrote a picture per reorder flush and
+    // counted it into a field nothing read, so a B-frame camera delivered a fraction of its fps
+    // with `frames_read` climbing and health saying Streaming -- and a stream with no
+    // reordering can never show that. And a decode-surface pool is sized for REFERENCE DEPTH,
+    // which is the other thing `-bf 0` hides.
+    //
+    // The assertion is a RATE, because that is the observable: every displayable picture
+    // arrives, so five seconds of a 15 fps stream is ~75 frames. With one slot the group of
+    // four collapses to one and the same window yields well under half of that.
+    void test_a_reordered_stream_delivers_every_picture() {
+        if (!SOURCES().contains("nvdec")) {
+            skip("no nvdec source in this binary (see the section above)");
+            return;
+        }
+        const int fps = 15;
+        const double window = 5.0;
+        testsupport::RtspLoopback loopback;
+        const std::string missing = loopback.start(320, 250, fps, /*bframes=*/3);
+        if (!missing.empty()) {
+            skip("no RTSP loopback on this host: " + missing);
+            return;
+        }
+        FrameCounter counter("nvdec-reordered");
+        StopSignal stop;
+        IngestConfig config = a_camera("nvdec-reordered");
+        config.uri = loopback.uri();
+        config.source = "nvdec";
+        config.codec = "h264";
+        config.open_timeout_ms = 20000;
+        config.read_timeout_ms = 2000;
+        // ONE surface asked for, deliberately: the knob is a floor and the sequence callback
+        // raises it to the stream's own `min_num_decode_surfaces` (NVIDIA's `NvDecoder` returns
+        // that value from the callback for the same reason). A ceiling here would either have
+        // `cuvidCreateDecoder` refuse this stream or leave the parser reusing a picture index
+        // that is still a reference.
+        config.options["surfaces"] = "1";
+        std::unique_ptr<FrameSource> source = create_source(config, counter, stop);
+        try {
+            source->open();
+        } catch (const SourceUnavailableError& error) {
+            skip(std::string("no NVDEC on this host: ") + error.what());
+            return;
+        }
+        std::string raised;
+        int delivered = 0;
+        // Warm up past the first IDR before the clock starts, so the connect and the first GOP
+        // are not counted against the rate.
+        const Clock::time_point ready = Clock::now() + 30s;
+        while (delivered == 0 && Clock::now() < ready) {
+            if (source->read()) delivered = 1;
+        }
+        check(delivered == 1, "a reordered stream decodes at all, on a floored surface pool");
+        delivered = 0;
+        const Clock::time_point until =
+            Clock::now() + std::chrono::milliseconds(static_cast<int>(window * 1000));
+        while (Clock::now() < until) {
+            try {
+                if (source->read()) ++delivered;
+            } catch (const IngestError& error) {
+                raised = error.what();
+                break;
+            }
+        }
+        const int expected = static_cast<int>(fps * window);
+        check(raised.empty(), "and no read raised over the window: " + raised);
+        check(delivered * 2 >= expected,
+              "and every displayed picture arrives -- a one-slot decoder loses the reorder "
+              "flush: " +
+                  std::to_string(delivered) + " frames in " + std::to_string(window) +
+                  "s of a " + std::to_string(fps) +
+                  " fps stream (want >= " + std::to_string(expected / 2) + ")");
+        // Printed, not only asserted, the way section P prints its PIXEL line: the number is
+        // the evidence, and a threshold that passes tells you nothing about the margin.
+        std::printf("REORDERED: %d frames in %.0fs of a %d fps B-frame stream (want >= %d)\n",
+                    delivered, window, fps, expected / 2);
+        source.reset();
+        loopback.stop();
+    }
+
     // The two ways a stream stops being usable, which a pull timeout alone cannot tell apart --
     // and telling them apart wrongly is the whole of #156 round 1's GStreamer half. An
     // unreachable camera must FAIL TO OPEN (counted, backed off, visible in health) rather than
@@ -3068,6 +3151,7 @@ int main() {
     test_a_decoded_pixel_over_a_real_rtsp_session();
     test_a_device_surface_over_a_real_rtsp_session();
     test_an_unreachable_camera_and_a_broken_one_are_told_apart();
+    test_a_reordered_stream_delivers_every_picture();
 
     std::printf("%d checks, %d failure(s), %d skipped\n", checks, failures, skips);
     return failures == 0 ? 0 : 1;

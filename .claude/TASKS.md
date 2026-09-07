@@ -2997,6 +2997,44 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       the closure walker cannot see (it attributes lanes to `.cpp` units). So
       `TestOnlyGstLaneUnitsReachTheBus` derives the allowed set from the lane table and both its
       checks fail when `frame.h` includes it.
+      ROUND 2 CAME BACK BLOCKING WITH ONE, and it was the field I never read:
+      `CUVIDEOFORMAT::min_num_decode_surfaces` is what cuvid fills in to say how deep the DPB
+      has to be, and `pfnSequenceCallback`'s return value is not a boolean -- 0 fails, 1 means
+      "keep yours", and **> 1 OVERRIDES the parser's `ulMaxNumDecodeSurfaces`**. Returning 1
+      left the parser cycling through however many indices the knob happened to say, which for
+      a camera whose SPS wants six is either a retryable refusal (reconnect forever, the exact
+      shape the 10-bit branch was added to prevent) or a picture index reused while it is still
+      a reference -- corrupt output with `frames_read` climbing. NVIDIA's `NvDecoder` creates
+      the parser with 1 and returns `min_num_decode_surfaces` here for precisely this reason
+      (V86: read the reference first). The knob is a FLOOR now, with a ceiling of 64 because
+      `surfaces: 400` is a typo that costs VRAM per camera and nothing else.
+      Notes taken with it: `hwaccel: false` on an `nvdec` camera is now REFUSED rather than
+      ignored (this source is the video engine by definition; falling back would hand the graph
+      a host frame from a source whose contract is that it never produces one); the
+      `platform.h`-is-the-only-header departure is stated in the header with its reason (NVDEC
+      has no HIP counterpart, so an alias would be a fiction with one implementation, and the
+      lane is opt-in so a ROCm build never compiles the unit); and `CUVIDPROCPARAMS::
+      output_stream` staying 0 now records the dependency that makes it safe -- every stream in
+      `csrc/` is `gpuStreamCreate`'s, which is blocking and therefore ordered against the
+      legacy default stream, and a non-blocking stream (what `torch.cuda.Stream` creates) would
+      need it set.
+      THE FIXTURE GREW A REORDERED VARIANT, because two of these findings could not be checked
+      without one: `scripts/rtsp_serve.py --bframes N` (and `RtspLoopback::start(..., bframes)`)
+      encodes with `-bf N -refs 3` and drops `-tune zerolatency`, WHICH FORCES B-FRAMES OFF --
+      the line that would have made the flag a silent no-op, and the one
+      `tests/test_rtsp_serve.py` now pins. Verified with ffprobe: the default fixture is 1 I +
+      9 P, the new one 1 I + 3 P + 6 B. Cached under its own name, for the reason the frame rate
+      already is.
+      `test_ingest` 287 -> 290 checks, 0 failures, and `REORDERED: 72 frames in 5s of a 15 fps
+      B-frame stream` printed as evidence rather than only asserted.
+      TWO FIXES HAVE NO REVERT-CHECK AND I MEASURED THAT RATHER THAN ASSUMING IT. Reverting the
+      DPB floor (knob as ceiling, `return 1`) still decodes the reordered fixture: cuvid
+      tolerates `ulNumDecodeSurfaces = 1` here, and the corruption mode is not observable from a
+      gate that asserts geometry. Reverting the deque to round 1's one slot also still delivers
+      72 frames -- with `ulMaxDisplayDelay = 0` ("display as soon as decoded") cuvid does not
+      accumulate a reorder buffer, so a multi-display parse never happens on this stream. Both
+      fixes are kept on the reference implementation's authority and on the field cuvid
+      provides, not on a red test, and the PR body says so.
       LEFT: the graph branch to `nv12_letterbox_into`, which `QueueSink`'s refusal is holding
       the door for, and then the design-load run.**
 - [x] **CSRC-TOPOLOGY-Q · ANSWERED 4 Sep as ADR-020, by me, under V154 ("làm theo hướng bạn

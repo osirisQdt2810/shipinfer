@@ -3,6 +3,7 @@
 #include <gst/app/gstappsink.h>
 #include <gst/gst.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <deque>
@@ -36,6 +37,9 @@ namespace shipinfer {
         //: Surfaces cuvid allocates. Its floor is the stream's DPB; more buys pipelining and
         //: costs VRAM per camera, which at fifty cameras is the number that matters.
         constexpr int kDefaultSurfaces = 4;
+        //: The ceiling, which is about a typo rather than about the hardware: an NV12 1080p
+        //: surface is ~3 MB, so 64 is ~200 MB for one camera and fifty of those is the box.
+        constexpr int kMaxSurfaces = 64;
 
         void unref_sample(GstSample* sample) {
             if (sample != nullptr) gst_sample_unref(sample);
@@ -166,6 +170,19 @@ namespace shipinfer {
                             "-bit; this source decodes 8-bit NV12 only (P016 is unimplemented)";
             return 0;
         }
+        // THE STREAM'S OWN DPB, as a FLOOR under the knob and never a ceiling over it.
+        // `min_num_decode_surfaces` is the one field cuvid fills in to say "this many or
+        // decoding is wrong", and nobody knows a camera's reference depth from the outside: an
+        // H.264 main stream with three references and three B-frames needs six, so a default of
+        // four made `cuvidCreateDecoder` refuse -- and refuse RETRYABLY, which is the
+        // reconnect-forever shape the 10-bit branch above exists to prevent. Worse when the
+        // create tolerates the low count: the PARSER stays capped, hands a picture index back
+        // while it is still a reference, and the output is corrupted with `frames_read`
+        // climbing and nothing red anywhere.
+        const unsigned needed =
+            std::max(static_cast<unsigned>(self->surfaces),
+                     static_cast<unsigned>(format->min_num_decode_surfaces));
+        self->surfaces = static_cast<int>(needed);  // `on_display`'s bound reads this
         CUVIDDECODECREATEINFO create{};
         create.CodecType = format->codec;
         create.ChromaFormat = format->chroma_format;
@@ -180,7 +197,7 @@ namespace shipinfer {
         // exactly that -- one surface delivered, then "cuvidMapVideoFrame failed".
         create.ulNumOutputSurfaces = 2;
         create.ulCreationFlags = cudaVideoCreate_PreferCUVID;
-        create.ulNumDecodeSurfaces = static_cast<unsigned>(self->surfaces);
+        create.ulNumDecodeSurfaces = needed;
         create.vidLock = session.lock;
         create.ulWidth = format->coded_width;
         create.ulHeight = format->coded_height;
@@ -206,7 +223,12 @@ namespace shipinfer {
             self->failure = "cuvidCreateDecoder refused this stream";
             return 0;
         }
-        return 1;
+        // `> 1` OVERRIDES THE PARSER'S `ulMaxNumDecodeSurfaces`, which is what this return
+        // value is for -- 0 is fail and 1 is "succeeded, keep yours". NVIDIA's own
+        // `NvDecoder::HandleVideoSequence` creates the parser with 1 and returns
+        // `min_num_decode_surfaces` here for exactly this reason; returning 1 leaves the parser
+        // cycling through however many indices the knob happened to say.
+        return static_cast<int>(needed);
     }
 
     int CUDAAPI NvdecSource::Decoder::on_decode(void* user, CUVIDPICPARAMS* picture) {
@@ -283,10 +305,24 @@ namespace shipinfer {
         Session& session = *decoder->session;
         decoder->surfaces =
             option_int(config().camera_id, config().options, "surfaces", kDefaultSurfaces);
-        if (decoder->surfaces < 1) {
-            throw ConfigError(
-                "camera '" + config().camera_id +
-                "': surfaces must be >= 1 (cuvid needs at least the stream's DPB)");
+        // A FLOOR, so the range is stated at both ends: 1 is "let the stream decide" (the
+        // sequence callback raises it to `min_num_decode_surfaces`), and the ceiling is there
+        // because `surfaces: 400` is a typo that costs VRAM per camera and nothing else.
+        if (decoder->surfaces < 1 || decoder->surfaces > kMaxSurfaces) {
+            throw ConfigError("camera '" + config().camera_id + "': surfaces must be 1.." +
+                              std::to_string(kMaxSurfaces) +
+                              " (the stream's own DPB is the floor; more buys pipelining and "
+                              "costs VRAM per camera)");
+        }
+        // REFUSED, not silently ignored. This source IS the hardware decoder, so
+        // `hwaccel: false` on it is a contradiction rather than a preference -- and honouring
+        // it by falling back would hand the graph a host frame from a source whose whole
+        // contract is that it never produces one. The sibling is the software path.
+        if (!config().hwaccel) {
+            throw ConfigError("camera '" + config().camera_id +
+                              "': hwaccel is false on an 'nvdec' camera, which decodes on the "
+                              "video engine by definition; use the 'gstreamer' source for a "
+                              "software or a negotiated decoder");
         }
 
         // -- the driver, dlopen'd ---------------------------------------------------------
@@ -474,6 +510,12 @@ namespace shipinfer {
 
         CUdeviceptr frame = 0;
         unsigned pitch = 0;
+        // `output_stream` LEFT AT 0, deliberately, and this is the dependency that makes it
+        // safe: every stream in `csrc/` comes from `gpuStreamCreate` (`core/platform.h`), which
+        // is BLOCKING and therefore ordered against the legacy default stream cuvid's
+        // post-processing lands on. A consumer reading this surface on a NON-blocking stream --
+        // which is what `torch.cuda.Stream` creates -- would need this set to that stream, and
+        // the failure would be intermittent torn frames rather than anything red.
         CUVIDPROCPARAMS proc{};
         proc.progressive_frame = picture.progressive_frame;
         proc.second_field = picture.repeat_first_field + 1;
