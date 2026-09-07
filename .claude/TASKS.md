@@ -2666,7 +2666,25 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
            the batched twin (`imgproc/image_ops.cu::nv12_letterbox_batch`).
         4. Straight into the TensorRT input binding. No host round trip anywhere.
       So the kernels are done and what is missing is the CARRIER. Sequenced under
-      `R55-BENCH-SOURCE`.**
+      `R55-BENCH-SOURCE`.
+      THE PIPELINE HALF DONE 7 Sep on `feat/bitstream-pipeline`: `build_pipeline` can describe
+      a BITSTREAM pipeline -- `rtspsrc ! rtph264depay ! h264parse !
+      video/x-h264,stream-format=byte-stream,alignment=au ! appsink`, with no decoder, no
+      converter and no scaler. `alignment=au` is not decoration: NVDEC's parser takes whole
+      access units and half of one is a decode error. Refuses `codec: auto` (decodebin IS a
+      decoder) and any `width`/`height` (nothing decoded to scale; the letterbox is the device
+      kernel), because a pipeline that quietly decoded would measure the route this replaces and
+      look like it worked. h265 falls out of the existing tables. `test_ingest` 229 -> 234.
+      AND IT NEGOTIATES FOR REAL, which a string test cannot show: `gst-launch` on that exact
+      line against a live `rtsp_serve.py` reached `num-buffers=30` and exited cleanly after
+      5.82 s -- thirty access units at 5 fps is six seconds, so nothing stalled or dropped.
+      THE SIZE ARGUMENT, MEASURED on the committed 2K person fixture: an encoded access unit
+      averages 172 736 bytes against a decoded 1920x1080 BGR frame's 6 220 800 -- **36x less
+      data crossing to the host per frame**, before NV12 halves the decoded side again. (Ten
+      distinct frames with frequent keyframes, so a real stream is better than 36x, not worse.)
+      That is V156's argument as a number.
+      LEFT: the NVDEC source itself (feed those access units to `cuvidParseVideoData`, map the
+      surface, hand back a `DeviceImage`), and the graph branch to `nv12_letterbox_into`.**
 - [x] **CSRC-TOPOLOGY-Q · ANSWERED 4 Sep as ADR-020, by me, under V154 ("làm theo hướng bạn
       nghĩ là tốt nhất"). NO `csrc/topology/` and no `csrc/runners/`: the chain stays a Python
       declaration and the C++ plane receives a RESOLVED PLAN.** Three reasons, none of them
