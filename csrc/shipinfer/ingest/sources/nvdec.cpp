@@ -15,8 +15,8 @@
 #include "shipinfer/core/options.h"
 #include "shipinfer/core/types.h"
 #include "shipinfer/ingest/registry.h"
-#include "shipinfer/ingest/sources/gstreamer_bus.h"
 #include "shipinfer/ingest/sources/gstreamer_pipeline.h"
+#include "shipinfer/ingest/sources/gstreamer_shared.h"
 
 // The dynlink variants: these declare the API and `dlopen` `libnvcuvid.so` at run time, so this
 // unit links against no driver library and a box without one fails at load with a message.
@@ -388,6 +388,12 @@ namespace shipinfer {
         }
 
         // -- the bitstream ----------------------------------------------------------------
+        // FIRST, because `gst_parse_launch` below is the first GStreamer call this unit makes
+        // and nothing else in the process need have made one. Missing until the bench ran with
+        // `--source nvdec`: eighteen `gst_is_initialized()` assertions and a segfault, in a
+        // binary whose `test_ingest` had always passed because its GStreamer section ran first
+        // and initialised the library on this unit's behalf.
+        initialise_gstreamer();
         PipelineOptions options;
         options.bitstream = true;
         options.codec = config().codec.empty() ? "h264" : config().codec;

@@ -117,7 +117,7 @@ class TestTheParityBinaryStaysOffline:
 
 
 class TestOnlyGstLaneUnitsReachTheBus:
-    """``sources/gstreamer_bus.h`` includes ``gst/gst.h``, and no other header in the tree does.
+    """``sources/gstreamer_shared.h`` includes ``gst/gst.h``, and no other header here does.
 
     The closure walker attributes a lane to a ``.cpp`` unit, so it cannot see that a *header*
     needs somebody's ``-dev`` package: an offline unit that included this one would fail with
@@ -127,7 +127,7 @@ class TestOnlyGstLaneUnitsReachTheBus:
 
     #: The lane package every unit allowed to reach that header already declares.
     PACKAGE = "gstreamer-1.0"
-    HEADER = CSRC / "shipinfer" / "ingest" / "sources" / "gstreamer_bus.h"
+    HEADER = CSRC / "shipinfer" / "ingest" / "sources" / "gstreamer_shared.h"
 
     def _allowed(self, build_csrc: ModuleType) -> set[Path]:
         """The lane units carrying ``gstreamer-1.0`` — derived, so a third source is covered."""
@@ -163,7 +163,8 @@ class TestOnlyGstLaneUnitsReachTheBus:
         )
 
     def test_both_sources_shipped_today_do_reach_it(self, build_csrc: ModuleType) -> None:
-        """Not vacuous: the two copies of the bus drain #156 found are the reason it is shared."""
+        """Not vacuous: the two copies #156 found -- of the bus drain, and then of `gst_init` --
+        are the reason this header exists."""
         for name in ("gstreamer.cpp", "nvdec.cpp"):
             unit = CSRC / "shipinfer" / "ingest" / "sources" / name
             assert self.HEADER in build_csrc.include_closure(unit), name

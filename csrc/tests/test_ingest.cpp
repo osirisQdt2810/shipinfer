@@ -3137,6 +3137,16 @@ int main() {
     test_a_refused_add_pays_the_abandonment_debt();
     test_stop_charges_one_deadline_to_the_fleet_not_one_per_camera();
 
+    // THE NVDEC SECTIONS FIRST -- BEFORE ANYTHING ELSE HERE TOUCHES GSTREAMER, and the order
+    // IS the check. Nothing above this line makes a GStreamer call, so this is the only place
+    // that can ask whether `sources/nvdec.cpp` initialises the library ITSELF; the answer used
+    // to be no, and with the plugin probe and the GStreamer source running first it was
+    // invisible. It surfaced as eighteen `gst_is_initialized()` assertions and a segfault the
+    // first time the bench ran `--source nvdec`. Do not move these back down.
+    test_a_device_surface_over_a_real_rtsp_session();
+    test_an_unreachable_camera_and_a_broken_one_are_told_apart();
+    test_a_reordered_stream_delivers_every_picture();
+
     test_the_exact_pipeline_line_per_codec();
     test_the_gl_trap_and_the_deepstream_nvmm_handoff();
     test_a_property_gstreamer_has_no_value_for_is_omitted();
@@ -3149,9 +3159,6 @@ int main() {
     test_a_missing_source_and_an_omitted_lane_are_different_questions();
     test_the_gstreamer_source_where_it_is_linked();
     test_a_decoded_pixel_over_a_real_rtsp_session();
-    test_a_device_surface_over_a_real_rtsp_session();
-    test_an_unreachable_camera_and_a_broken_one_are_told_apart();
-    test_a_reordered_stream_delivers_every_picture();
 
     std::printf("%d checks, %d failure(s), %d skipped\n", checks, failures, skips);
     return failures == 0 ? 0 : 1;

@@ -3054,6 +3054,19 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `has_pixels()` back to `image_ != nullptr` fails "an NV12 surface satisfies FRAME_INPUT";
       the seam passing `state.width()` as the stride fails with `brightest is 1.000000` in both
       the letterbox and the crop -- the sentinel, in the output.
+      THE FIRST BENCH RUN OVER `--source nvdec` SEGFAULTED, and the cause is the one thing
+      `test_ingest` structurally could not see: **`sources/nvdec.cpp` never called `gst_init`**.
+      Eighteen `gst_is_initialized()` assertions out of `gst_parse_launch`, then exit 139. The
+      unit had always passed its own gate because that binary ran the GStreamer sections first
+      and initialised the library on its behalf -- a test that passes because of its neighbours.
+      So `initialise_gstreamer()` moved into the shared header (which is `gstreamer_shared.h`
+      now: it arrived as `gstreamer_bus.h` for the bus drain alone, and the second thing both
+      units need proved that name too narrow), and **the NVDEC sections now run BEFORE anything
+      in that binary touches GStreamer** -- the order is the check, and it says so where it
+      would be undone. REVERT-CHECK with the new order: the assertions and `exit status: 139`;
+      with the old order the same revert is 290 checks, 0 failures, which is exactly the point.
+      Found by RUNNING it (V86's sibling lesson): three reviews and my own reading had all gone
+      past it, because every test in the tree exercised it only after something else had.
       LEFT: the CARRIER, and #156 round 2 asked for its plan in writing rather than at the
       design load, which is fair -- so: `ulNumOutputSurfaces = 2` caps in-flight surfaces per
       camera at two, and a fair queue exists to HOLD frames, so a surface must not travel
