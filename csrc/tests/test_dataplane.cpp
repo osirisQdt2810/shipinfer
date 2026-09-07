@@ -471,11 +471,12 @@ namespace {
         return dst;
     }
 
-    // One comparison, run for a tight buffer and for an NVDEC-shaped one. `coded_h` above
-    // `src_h` is the case that matters and the case nothing covered: NVDEC decodes 1080p at a
-    // coded height of 1088, so its chroma plane starts at `stride * 1088` while the displayed
-    // height is 1080. The old kernel assumed `stride * src_h` and would have taken the chroma
-    // from the last eight rows of the LUMA plane -- right brightness, wrong colour, always.
+    // One comparison, run for a tight buffer and for one whose `uv_offset` is ABOVE the luma
+    // plane. That second case is the one that matters and the one nothing covered: the kernel
+    // must honour the offset it is handed rather than derive it, and the old one derived
+    // `stride * src_h` -- taking the chroma from the last rows of the LUMA plane, right
+    // brightness and wrong colour, always. (No producer here reports such an offset; #159
+    // retracted the claim that NVDEC did. What is being tested is the kernel's contract.)
     double nv12_worst_difference(int src_h, int src_w, int stride, int coded_h, int dst) {
         const size_t uv_offset = static_cast<size_t>(stride) * static_cast<size_t>(coded_h);
         std::vector<uint8_t> host(uv_offset + static_cast<size_t>(stride) * src_h / 2);
@@ -567,7 +568,8 @@ namespace {
 
     void test_the_nv12_crop_kernel_agrees_with_the_reference() {
         // A PADDED surface, because that is what NVDEC hands back and the padding is what the
-        // kernel could get wrong: 90 displayed rows decoded at 96, the 1080/1088 relationship.
+        // kernel could get wrong: 90 rows of image inside a 96-row plane, so the offset the
+        // kernel is handed is above the luma it would derive.
         const int src_h = 90, src_w = 160, stride = 192, coded_h = 96, dst = 32;
         const size_t uv_offset = static_cast<size_t>(stride) * coded_h;
         std::vector<uint8_t> host(uv_offset + static_cast<size_t>(stride) * src_h / 2);
@@ -628,8 +630,8 @@ namespace {
     }
 
     void test_the_nv12_kernel_addresses_a_padded_surface() {
-        // 90 displayed rows decoded at 96 -- the same relationship 1080/1088 has, small enough
-        // to keep the fixture cheap. The stride is padded too, as NVDEC's is.
+        // 90 rows of image inside a 96-row plane, small enough to keep the fixture cheap: an
+        // offset above what a derivation would compute. The stride is padded too.
         const double padded = nv12_worst_difference(90, 160, 192, 96, 64);
         if (padded < 0) {
             skip("no CUDA device for the NV12 padded-surface test");

@@ -535,25 +535,13 @@ namespace shipinfer {
         image.height = d.display_height;
         image.width = d.display_width;
         image.pitch = static_cast<int>(pitch);
-        // doc: long the coded height is NOT this, and #156 shipped believing it was
+        // doc: long this unit's own measurement, which is where the rule was settled
         // THE OUTPUT SURFACE'S HEIGHT, which is `ulTargetHeight` -- the display extent, because
-        // nothing here resizes. **#156 used the CODED height and that was wrong**, argued at
-        // length in its own body and past three reviews. The distinction: the coded height
-        // (1088 for 1080p) sizes the DECODE surfaces, which an application never sees;
-        // `cuvidMapVideoFrame` hands back a post-processed OUTPUT surface at the target extent,
-        // whose chroma plane is at `pitch * ulTargetHeight` and which ends there plus a half.
-        //
-        // MEASURED, because reading either from a comment is how the first version happened.
-        // On a 1080p camera, probing both offsets out of a real mapped surface:
+        // nothing here resizes. #156 used the CODED height; probing both out of a real mapped
+        // surface is what settled it, and the rule now lives once in `ingest/frame.h`:
         //
         //   PROBE pitch=2048 display=1920x1080 coded_h=1088
         //         at_coded=cudaErrorInvalidValue  at_display=cudaSuccess
-        //
-        // The coded read is 8 rows -- `pitch * 8` bytes -- past the end of the mapping, which
-        // is why it faulted rather than returning wrong pixels. Nothing in the tree had ever
-        // read this plane: `test_ingest` may not dereference a device pointer and asserted the
-        // OFFSET, `test_dataplane` reads synthetic buffers, and `QueueSink` refused device
-        // frames. The first thing that read it was the bench, and it stopped at once.
         image.uv_offset = static_cast<size_t>(pitch) * static_cast<size_t>(d.display_height);
         image.device = d.device_index;
         // Unmaps on release, and holds the DECODER alive to do it. NVDEC hands out a slot from

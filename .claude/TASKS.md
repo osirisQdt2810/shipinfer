@@ -3106,6 +3106,22 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       above it, so a producer wrong UPWARD is caught by nothing until something reads the bytes.
       That is exactly what happened, and `test_device_frame.cpp` now says so where it asserts
       the limit.
+      ROUND 3 FOUND TWO MORE, and one was the same defect as round 2's a layer up:
+      `ingest/base.cpp`'s refusal message -- the one a device-source author actually READS at
+      run time when `DeviceImage::empty()` rejects their surface -- said "for NVDEC that is
+      pitch * CODED height". A producer trips it, follows it, and `empty()` then PASSES, because
+      it only refuses an offset inside the plane. The bug reintroduced by the fix's own error
+      string. The other was `ops.cu`'s comment sitting directly above `nv12 + uv_offset`: two
+      other lines in that file were corrected and this one, the first thing a reader of the
+      arithmetic sees, was not.
+      AND THE COMMENT-VOLUME NOTE WAS RIGHT, so I took it. The corrected claim had been restated
+      at length in six places -- `frame.h`, `nvdec.cpp`, `ops.h`, `state.h` and two test files --
+      which is the same drift failure as one copy of a mistake, pointed the other way, and it
+      is against CONVENTIONS.md's own cap. `ingest/frame.h` is the ONE canonical statement now,
+      with the probe output; `nvdec.cpp` keeps only its own measurement, and `ops.h`, `state.h`
+      and `ops.cu` are one-line pointers to it. `test_dataplane`'s fixtures are unchanged and
+      still right -- the kernel must honour the offset it is handed -- but they no longer
+      attribute an above-the-plane offset to NVDEC, which is the retracted claim.
 - [ ] **NVDEC-SECTION-ORDER-HAS-NO-GUARD · #159 round 2, note 3.** `test_ingest.cpp`'s NVDEC
       sections run before anything else in that binary touches GStreamer, and that ORDER is what
       makes a missing `initialise_gstreamer()` visible -- but the only thing holding it is a

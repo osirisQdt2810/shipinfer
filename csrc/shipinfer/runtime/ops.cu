@@ -150,9 +150,8 @@ namespace shipinfer {
                                                     float x_f, float* bgr) {
             const int xi = max(0, min(src_w - 1, static_cast<int>(x_f)));
             const int yi = max(0, min(src_h - 1, static_cast<int>(y_f)));
-            // `uv_offset`, not `stride * src_h`: NVDEC's surface is decoded at a CODED height
-            // rounded up past the display one, so its chroma plane does not begin where the
-            // luma plane's last displayed row ends. See `runtime/ops.h`.
+            // `uv_offset` and not a derivation: the plane's offset belongs to the buffer,
+            // and a kernel that guessed it reads luma as chroma. `ingest/frame.h`.
             const uint8_t* uv = nv12 + uv_offset;
 
             // BT.601 limited range, which is what H.264 from an IP camera carries.

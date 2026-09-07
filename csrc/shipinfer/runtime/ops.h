@@ -62,13 +62,8 @@ namespace shipinfer {
     // PARAMETER and not a derivation, because the CALLER knows and this kernel cannot: the
     // plane's offset is a property of the buffer it was decoded into, and a kernel that guessed
     // it would read luma rows as chroma -- correct brightness, wrong colour, on every frame,
-    // looking exactly like a model problem.
-    //
-    // For a tight buffer, and for a `cuvidMapVideoFrame` output surface, that is
-    // `stride * src_h`. **Not the coded height**, which #156 believed and #159 measured:
-    // the coded extent (1088 for 1080p) sizes the DECODE surfaces an application never sees,
-    // while the mapped OUTPUT surface is at the target extent and ends a half-plane past it.
-    // Reading at `stride * coded_height` there is `stride * 8` bytes past the mapping.
+    // looking exactly like a model problem. `stride * src_h` for every producer in this tree;
+    // `ingest/frame.h` states that once, with the measurement behind it.
     LetterboxMap nv12_letterbox_into(const uint8_t* nv12_device, int src_h, int src_w,
                                      int stride, size_t uv_offset, float* dst_device, int dst_h,
                                      int dst_w, bool swap_rb, float pad_value,

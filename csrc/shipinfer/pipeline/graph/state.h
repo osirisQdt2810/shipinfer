@@ -54,17 +54,9 @@ namespace shipinfer {
     // interleaved chroma plane `uv_offset` bytes in, `stride` bytes per row.
     //
     // `uv_offset` is carried and not derived, which is the whole reason this is a struct rather
-    // than a pointer: the offset is a property of the buffer the frame was decoded into, and a
-    // consumer that derived it would read luma rows as chroma -- right brightness, wrong
-    // colour, on every frame, looking exactly like a model problem (#155, and the reason
-    // `runtime/ops.h` takes it as a parameter).
-    //
-    // What it is NOT is the coded height, which this comment claimed when #158 merged. That is
-    // the extent of the DECODE surfaces, which nothing above the decoder sees; a
-    // `cuvidMapVideoFrame` output surface is at the target extent and its plane is
-    // `stride * height`. #159 measured it -- reading at the coded offset is `stride * 8` bytes
-    // past the end of the mapping. A tight buffer's is the same value for its own reason, so
-    // both producers shipped today agree on the number and neither derives it.
+    // than a pointer. `ingest/frame.h` is where that rule and its measurement live -- one copy,
+    // because this comment claimed the opposite when #158 merged and six copies of a correction
+    // drift the same way one copy of a mistake did.
     //
     // `owner` is what keeps those bytes alive. For an NVDEC surface it unmaps a slot out of a
     // small pool, so dropping it early does not free the pixels -- it lets the next picture
