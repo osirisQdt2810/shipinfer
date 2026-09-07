@@ -975,20 +975,24 @@ hook down, for when the operator asked to see something before it is executed.
       C1's >=5x needs this answered first: a baseline arm compared against a route running at
       58% of our own previous per-GPU figure would measure the wrong thing.
 
-- [!] **CI-CPP-JOBS-ARE-POST-MERGE · DONE, OPEN AS #162, AND IT NEEDS YOUR MANUAL MERGE.**
-      OPERATOR: please merge https://github.com/osirisQdt2810/shipinfer/pull/162 -- I do
-      not merge into `main` myself. Everything real is green on it, including the three `cpp /`
-      jobs it exists to add, which is the gate proving itself on its own PR:
-        Tests (py3.10) pass   cpp / C++ offline tier (no driver)          pass
-        Tests (py3.12) pass   cpp / C++ units nothing else compiles       pass
-        PR description pass   cpp / C++ gst lane (section O + the pixel)  pass
-        Claude review  FAIL (28 s)
-      The review failure is CLAUDE.md's known permanent exception and its own message says so:
-      "Workflow validation failed. The workflow file must exist and have identical content to
-      the version on the repository's default branch." #162 adds `.github/workflows/cpp.yml`,
-      so the review action refuses by design and auto-merge cannot gate on it.
-      Rebased onto `main` twice (8 Sep) because ledger commits to `main` kept conflicting with
-      it -- see V159. It is `MERGEABLE` at f95493c.
+- [x] **CI-CPP-JOBS-ARE-POST-MERGE · DONE 7 Sep, open as #162 (needs a MANUAL merge: it edits
+      `.github/workflows/**`, so the review job cannot mint a token).** The three C++ tiers are
+      a REUSABLE workflow now -- `.github/workflows/cpp.yml`, `on: workflow_call` -- and both
+      `ci.yml` and `pr-pipeline.yml` call it, with `merge` gating on it. A red C++ tier blocks
+      an auto-merge exactly as a red test does.
+      NOT A COPY, deliberately: mirroring ~150 lines of load-bearing comments into a second file
+      is the two-place edit this repo keeps paying for, and `workflow_call` is GitHub's own
+      answer. The job NAMES are unchanged, so the several places that cite `cpp-syntax` and
+      `cpp-gst-lane` by name (`tests/test_cuda_reaching_apps_compile.py` most of all) still read
+      true.
+      THE RATCHET, because the gate is one line of YAML and nothing else would notice its
+      removal: `TestTheCppTiersGatePullRequests` asserts the tiers are defined once and called
+      by both, and that `merge.needs` contains `cpp`. Both revert-checks red -- dropping `cpp`
+      from `needs` gives "auto-merge does not wait for the C++ tiers", and inlining the jobs in
+      `ci.yml` gives "defines its own C++ jobs instead of calling the shared ones".
+      This is the incident's other half: `cpp-syntax` closed "nothing compiles it" and this
+      closes "it merged anyway". Today's own #156 is the proof it was still open -- a missing
+      `gst_init` merged and was found by a bench run rather than by CI.
       ORIGINAL: #133 review round 3, note 3 — every C++ job lives in
       `ci.yml` (push to `main`), and `pr-pipeline.yml` has none at all. So an undeclared
       `std::mutex` in `bench.cpp` still MERGES and then reddens main, which is the exact

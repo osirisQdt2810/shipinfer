@@ -1,0 +1,167 @@
+# THE C++ TIERS, called by BOTH ci.yml (push to main) and pr-pipeline.yml (every PR).
+#
+# WHY A REUSABLE WORKFLOW AND NOT A COPY. These three jobs lived only in `ci.yml`, which runs on
+# a PUSH TO MAIN -- so an undeclared `std::mutex` in `bench.cpp` merged and then reddened main,
+# which is the incident that opened `CSRC-BENCH-UNCOMPILED`. The new `cpp-syntax` job closed the
+# "nothing compiles it" half and not the "it merged" half. Mirroring them into `pr-pipeline.yml`
+# by copy would be ~150 lines of dense, load-bearing comments in two places, and the second copy
+# drifts: `workflow_call` is GitHub's own answer to exactly that, one definition and two
+# triggers.
+#
+# Each job is unchanged from the version that lived in `ci.yml`; only the `on:` moved.
+name: C++ tiers
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  cpp-offline:
+    name: C++ offline tier (no driver)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the CUDA-free test binaries with g++ alone
+        # `--offline` builds only the apps whose include closure never reaches `core/platform.h`:
+        # no nvcc, no CUDA, no TensorRT. These are the scheduler's fairness invariants, the
+        # instance/model seam and the containment gate — the C++ plane's counterpart of the
+        # Python offline tier, and the tests most worth running on a machine with no driver.
+        run: python scripts/build_csrc.py --offline
+      - name: Run them
+        run: |
+          set -e
+          # Run every offline binary the build produced rather than a fixed name list: the
+          # csrc/ tree mirrors the Python packages (arch.md §9), so a package rename renames
+          # its test binary too, and a hard-coded name would fail main the moment it lands.
+          # The count guard keeps a build that produced nothing from passing silently.
+          # Executables only: the build leaves test_<name>.o beside each binary.
+          binaries=()
+          for candidate in csrc/build/test_*; do
+            [[ -x "$candidate" && "$candidate" != *.o ]] && binaries+=("$candidate")
+          done
+          test "${#binaries[@]}" -ge 4 || { echo "expected at least 4 offline binaries, found ${#binaries[@]}"; exit 1; }
+          for binary in "${binaries[@]}"; do
+            echo "== $binary"
+            "$binary"
+          done
+
+  cpp-syntax:
+    name: C++ units nothing else compiles (headers only, no driver)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # pytest is NOT in this interpreter by default -- it comes from the `dev` extra, which
+      # only the `test` job installs. Without this the step ran `No module named pytest` and,
+      # behind a `| tee`, reported success: the job could never fail for the reason it exists.
+      - name: Install pytest
+        run: pip install pytest
+      # `cli/bench.cpp` reaches `core/platform.h`, so `--offline` refuses it and NOTHING here
+      # compiled it -- the hole that let a `std::mutex` be used in its sink without being
+      # declared, found by a reviewer rather than by a build. Eight implementation units are
+      # in the same position, including `backends/tensorrt/engine.cpp`. `-fsyntax-only` needs
+      # the two HEADER sets and no driver, no nvcc and no GPU, which is why this is an
+      # ordinary runner rather than the device tier.
+      - name: Install the CUDA and TensorRT headers
+        run: |
+          set -euxo pipefail
+          # `2404`, not `noble`: NVIDIA's repo paths are `ubuntu<major><minor>`.
+          release=$(. /etc/os-release && echo "${VERSION_ID//./}")
+          wget -q "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${release}/x86_64/cuda-keyring_1.1-1_all.deb"
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -qq
+          # Headers only: `cuda-cudart-dev` brings `cuda_runtime.h`, `libnvinfer-headers-dev`
+          # brings `NvInfer.h`, and the PLUGIN package brings `NvInferPlugin.h` -- which
+          # `backends/tensorrt/engine.cpp` includes for `initLibNvInferPlugins` and which
+          # NVIDIA does not ship in the first one. Without it this job is red on its first
+          # run, and a dev-box rehearsal cannot see it: `/usr/local/TensorRT` has the plugin
+          # headers, only the runner's package set is short. No runtime, no nvcc, ~40 MB.
+          # PINNED to TensorRT 10: this tree has no `NV_TENSORRT_MAJOR` guard, so an
+          # unpinned major would break main's CI with no commit to blame.
+          # `libopencv-dev` is not a CUDA header and belongs here anyway: without it
+          # `ingest/sources/replay.cpp` -- one of the eight -- has an unresolvable lane and
+          # falls out of the check, and NOTHING else in CI compiles it (`cpp-gst-lane` covers
+          # `gstreamer.cpp`, not this one). That is this ticket's own thesis, so the ~50 MB is
+          # the price of the ticket being true (#133 round 4).
+          # `cuda-crt-12-6` (881 KB, headers only, no nvcc binary): `cuda-cudart-dev` ships
+          # `cuda_runtime.h` WITHOUT the `crt/` headers it includes -- `cuda_runtime_api.h`
+          # includes `crt/host_defines.h` and `cuda_runtime.h` includes `crt/host_config.h`,
+          # both from `Source: cuda-nvcc`, and nothing here depends on them under
+          # `--no-install-recommends`. Without it all three compile legs are red on the first
+          # run on main, naming a CUDA-internal header, which reads as an NVIDIA packaging
+          # problem rather than as "this job never worked" (#133 round 5).
+          sudo apt-get install -y --no-install-recommends \
+            cuda-cudart-dev-12-6 cuda-crt-12-6 "libnvinfer-headers-dev=10.*" \
+            "libnvinfer-headers-plugin-dev=10.*" libopencv-dev
+      - name: Syntax-check every unit the offline build cannot reach
+        shell: bash          # -> `bash --noprofile --norc -eo pipefail`, so a pipe cannot mask
+        env:
+          # `cuda-cudart-dev-12-6` installs under a versioned prefix, and the test's probe
+          # reads CUDA_HOME exactly as `scripts/build_csrc.py` does.
+          CUDA_HOME: /usr/local/cuda-12.6
+          # A SKIP is the hole this job exists to close, so here it is a FAILURE with a
+          # reason -- asserted by a test rather than by grepping pytest's `-q` summary, whose
+          # shape changes between versions and whose exit status a pipe used to swallow.
+          SHIPINFER_REQUIRE_CSRC_HEADERS: "1"
+        # `--noconftest -c /dev/null`, and NOT because the suite's config is inconvenient.
+        # Every `pytest` in this repo loads `tests/conftest.py`, which imports numpy, pydantic
+        # and -- on the offline path, which is this job's -- torch, and `pyproject.toml`'s
+        # `--strict-config` additionally demands pytest-asyncio and pytest-timeout. This
+        # interpreter is `setup-python`'s, so none of them are here: the job died at COLLECTION
+        # with rc=4 before one `g++ -fsyntax-only` ran, and the redness would have read as a
+        # packaging problem while the eight units stayed compiled by nothing (#133 round 4).
+        #
+        # Installing torch into a headers-only syntax job is ~200 MB for nothing. This file is
+        # deliberately self-contained -- stdlib plus pytest, `tmp_path` and no fixture of ours
+        # -- and `test_this_file_needs_no_conftest` asserts that, so the knob cannot be removed
+        # later without something going red.
+        run: |
+          python -m pytest tests/test_cuda_reaching_apps_compile.py \
+            -q -rs -p no:cacheprovider --noconftest -c /dev/null
+
+  cpp-gst-lane:
+    name: C++ gst lane (section O + the pixel)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      # NO setup-python here, deliberately (the job's first main run failed on this): the
+      # loopback resolves `python3` on PATH to spawn scripts/rtsp_serve.py, and
+      # setup-python's hermetic interpreter shadows the system one — which is the only
+      # python that can see apt's python3-gi/gir typelibs. ModuleNotFoundError: 'gi', the
+      # pixel skips, and the grep gate goes red exactly as designed. The system python3 on
+      # ubuntu-latest runs build_csrc.py fine.
+      - name: Install the gstreamer lane's packages
+        # The dev pair is what `--with-external gstreamer` pkg-configs; the rest is what
+        # section P's loopback needs at runtime: the RTSP server (PyGObject + its typelib),
+        # software decode for the h264 stream, and ffmpeg for the JPEG fixtures. Mirrors
+        # deploy/rootless/gst-image.sh minus the DeepStream-adjacent extras.
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev             gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad             gstreamer1.0-libav gstreamer1.0-rtsp             python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0             gir1.2-gst-rtsp-server-1.0 ffmpeg
+      - name: Build the gst lane (still g++ alone — no CUDA, no TensorRT)
+        run: python scripts/build_csrc.py --offline --with-external gstreamer
+      - name: Run it, and require the pixel
+        # `grep PIXEL` is load-bearing: a run where section P silently skipped would still
+        # print a green count, and a green count that looked at no pixel is the failure
+        # mode #48 added the PIXEL line to prevent. stdout carries the line; the count and
+        # any SKIPs stay visible in the log either way.
+        run: |
+          set -o pipefail
+          ./csrc/build/test_ingest 2>&1 | tee /tmp/gst-lane.log
+          grep -q "PIXEL:" /tmp/gst-lane.log
