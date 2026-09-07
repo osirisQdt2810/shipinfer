@@ -2601,9 +2601,18 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
         * `src/shipinfer/ingest/sources/gstreamer.py:149` negotiates `video/x-raw,format=BGR`
           and `:355` copies the sample into numpy -- so even the working RTSP path is BGR on
           the CPU today, not NV12 in VRAM.
+      (a) IS ALREADY POSSIBLE, verified 7 Sep by doing it: `SHIPINFER_TEST_IMAGE=shipinfer-gst:jammy
+      CONTAINER_MOUNT=rw run.sh` with `SHIPINFER_TENSORRT_DIR=/tensorrt python
+      scripts/build_csrc.py --with-external gstreamer` builds clean, omits NO lane, links
+      `libgstreamer-1.0.so.0` into `csrc/build/bench`, and `test_ingest` goes 229 checks/3
+      skipped (host) -> **256 checks, 0 failures, 1 skipped**, printing
+      `PIXEL: 3 frames of 320x240 over RTSP, 256 distinct byte values, consecutive frames
+      differ: yes`. So the C++ plane reads REAL RTSP pixels end to end and always could -- what
+      was missing is that the host build has no gstreamer, so every bench run I took used the
+      only source that build links, `replay`. The gap was in my run recipe, not in the plane.
       SPLIT, and the first two halves are mine:
-        (a) compile the C++ gst lane and take an RTSP-sourced measurement on BOTH planes,
-            stating plainly that the decode is software BGR;
+        (a) take the RTSP-sourced measurement on BOTH planes with that build, stating plainly
+            that the decode is software BGR;
         (b) make the RTSP path negotiate NV12 and keep it on the device as far as the current
             headers allow (`nvvideoconvert`'s NVMM hand-off is already why `_CONVERTERS` names
             it), so the remaining gap is exactly the missing package and not our code;
