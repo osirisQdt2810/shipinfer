@@ -2684,7 +2684,23 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       distinct frames with frequent keyframes, so a real stream is better than 36x, not worse.)
       That is V156's argument as a number.
       LEFT: the NVDEC source itself (feed those access units to `cuvidParseVideoData`, map the
-      surface, hand back a `DeviceImage`), and the graph branch to `nv12_letterbox_into`.**
+      surface, hand back a `DeviceImage`), and the graph branch to `nv12_letterbox_into`.
+      EXCEPT ONE OF THEM WAS WRONG FOR THE VERY SURFACE IT NAMES, found 7 Sep while wiring
+      this: `nv12_letterbox_into` computed the chroma plane's address as `stride * src_h`. NVDEC
+      decodes at a CODED height rounded up -- **1088 for 1080p** -- so its chroma begins at
+      `stride * 1088` while `src_h` is 1080, and reading it at `stride * src_h` takes the chroma
+      from the last EIGHT ROWS OF THE LUMA PLANE. Right brightness, wrong colour, on every
+      frame, looking like a model problem.
+      IT SURVIVED because the one test used a padded STRIDE (192 vs 160) with a TIGHT uv offset,
+      and the readable reference beside it computed the same `stride * src_h` -- wrong in the
+      same direction as the kernel, which is the one way a parity test proves nothing.
+      FIXED on `feat/nvdec-surfaces`: `uv_offset` is a PARAMETER (bytes from the buffer start),
+      the reference takes it too, and the kernel refuses a `uv_offset` inside the luma plane or
+      a `stride` under the width. `test_dataplane` 47 -> 50 checks, and the new padded case is
+      run at 90 displayed rows decoded at 96 -- the same relationship 1080/1088 has.
+      REVERT-CHECK ON A REAL GPU: put `stride * src_h` back and the padded case fails with
+      `got 1, wanted 0 +- 0.0001` -- a MAXIMUM-magnitude error on a 0..1 scale, so the chroma
+      was entirely wrong rather than slightly off. Restored: 50 checks, 0 failures, 0 skipped.**
 - [x] **CSRC-TOPOLOGY-Q · ANSWERED 4 Sep as ADR-020, by me, under V154 ("làm theo hướng bạn
       nghĩ là tốt nhất"). NO `csrc/topology/` and no `csrc/runners/`: the chain stays a Python
       declaration and the C++ plane receives a RESOLVED PLAN.** Three reasons, none of them
