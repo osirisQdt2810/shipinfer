@@ -84,6 +84,19 @@ namespace {
         explicit QueueSink(FairPriorityQueue<FrameWork>& queue) : queue_(queue) {}
 
         void put(Frame&& frame) override {
+            // REFUSED until the graph can read one. This sink carries `frame.image` and would
+            // DROP `frame.device`, so the first NVDEC source would produce a 0x0 work item per
+            // frame with nothing red and nothing logged -- the detect stage letterboxing an
+            // empty image while the fleet reported 50 streaming (#153 round 3, note 1). The
+            // ordering this enforces: `nv12_letterbox_into` gets wired into the graph BEFORE
+            // any source that can populate the field.
+            if (frame.on_device()) {
+                throw ConfigError(
+                    "camera '" + frame.tag.camera_id +
+                    "': this sink carries host frames only, and a device frame would be "
+                    "silently dropped. Wire the NV12 device path into the graph first "
+                    "(PHASE-D-NV12)");
+            }
             FrameWork work;
             work.tag = frame.tag;
             work.frame = std::move(frame.image);

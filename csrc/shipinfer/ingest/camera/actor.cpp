@@ -264,6 +264,22 @@ namespace shipinfer {
         std::optional<Frame> frame;
         try {
             frame = source_->read();
+        } catch (const ConfigError& error) {
+            // FATAL FOR THIS CAMERA, and not a reconnect. A `ConfigError` out of `read()` is a
+            // contract violation -- today, a source whose pixels changed which memory they live
+            // in (`FrameCounter::latch_where`) -- and reconnecting around one is a hot loop
+            // about a bug. Caught BEFORE the generic handler below, which catches
+            // `std::exception` and would back off and retry it forever (#153 round 1).
+            //
+            // AND IT IS THE SAME SHAPE AS `connect()`'s `SourceUnavailableError` above, so it
+            // does the same four things. `record_failure` alone leaves the camera `Degraded`
+            // and `state_is_final()` false, so `run()`'s exit relabels it `Stopped` -- "stopped
+            // on request" -- and `manager.cpp`'s summary counts only `Unhealthy`, so a fleet
+            // with a permanently dead camera reads `streaming: 49, unhealthy: 0` and looks
+            // exactly like one an operator decommissioned. `last_error` cannot separate them
+            // either: it is written on every transient failure a camera recovered from
+            // (#153 round 2).
+            return refuse_fatally(error.what());
         } catch (const std::exception& error) {
             record_failure(error.what());
             const double delay = backoff_.next_delay();
@@ -285,8 +301,37 @@ namespace shipinfer {
             consecutive_failures_ = 0;
             last_error_.clear();
         }
-        publish(std::move(*frame));
+        // INSIDE a `ConfigError` handler, because `publish` is where a sink refuses -- and a
+        // sink's `ConfigError` used to escape `publish` (which catches only `QueueFullError`
+        // and `RequestCancelledError`), escape `pump`, and land in `run()`'s generic handler:
+        // record_failure, teardown, back off, retry. With `backoff_.reset()` and the counter
+        // clear having already run above, that is a MIN-BACKOFF HOT LOOP reporting
+        // Streaming/Degraded, `frames_read` climbing and `frames_published` flat at zero, and
+        // the fleet summary saying `unhealthy: 0` -- the outcome round 2 fixed, arriving
+        // through the armour round 3 added (#153 round 4).
+        try {
+            publish(std::move(*frame));
+        } catch (const ConfigError& error) {
+            return refuse_fatally(error.what());
+        }
         return true;
+    }
+
+    bool CameraActor::refuse_fatally(const std::string& reason) {
+        // The four steps `connect()`'s `SourceUnavailableError` takes, shared by the two places
+        // that need them so they cannot drift: a contract violation is fatal for this camera,
+        // and it has to PAGE rather than read as one somebody decommissioned.
+        record_failure(reason);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            fatal_ = true;
+        }
+        set_state(CameraState::Unhealthy);
+        shout("camera " + config_.camera_id + ": stopping, not reconnecting (" +
+              redact_in(reason) + ")");
+        teardown();
+        stop_.set();
+        return false;
     }
 
     bool CameraActor::on_empty_read(const FrameSource& source) {

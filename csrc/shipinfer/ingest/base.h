@@ -65,6 +65,9 @@ namespace shipinfer {
         // Throws:
         //   SourceOpenError: called before `open()`.
         //   FrameDecodeError: the stream ended or the decoder failed.
+        //   ConfigError: this camera's pixels changed which memory they live in
+        //     (`FrameCounter::latch_where`). A contract violation, so `CameraActor::pump`
+        //     stops the camera rather than reconnecting around it.
         std::optional<Frame> read();
 
         // Release everything. Idempotent, and safe after a failed `open()`.
@@ -98,7 +101,30 @@ namespace shipinfer {
         // Connect, and call `set_format` with what was actually negotiated.
         virtual void do_open() = 0;
         // One image as HWC BGR uint8 with its `owner` set, or nothing if none is available yet.
+        //
+        // STILL PURE, deliberately, now that `do_read_device` exists beside it: a device-only
+        // source writes one line of `return std::nullopt;` and the compiler makes it choose.
+        // Defaulting both and checking at run time that one was overridden is not possible --
+        // "not overridden" and "no frame yet" are the same answer from here -- so the check
+        // would have to be a count, which cannot tell a quiet stream from a missing hook.
         virtual std::optional<HostFrame> do_read() = 0;
+        // doc: long the second hook, why it is defaulted, and what stops a source using both
+        // One image in DEVICE memory -- NV12 with its `owner` set -- for a source that decodes
+        // straight into VRAM and never brings the pixels back (V156: `rtsp -> nv12 -> tren
+        // vram het`). Nothing by default, which is every source that answers `do_read`.
+        //
+        // A CAMERA ANSWERS FROM ONE HOOK FOR ITS WHOLE LIFE. `read()` latches which on the
+        // first frame and refuses a change -- and the reason is NOT the cost of a branch, which
+        // at 1000 fps is free and which `Frame::on_device()` already is. It is that where the
+        // pixels live is a PLAN-CONSTRUCTION fact: the chain is built once from it, so it
+        // cannot change under a chain that is already running.
+        //
+        // The honest objection is that falling back to software decode keeps 1 of 50 cameras
+        // alive where refusing kills it. Refusing anyway, because the alternative is that
+        // camera silently feeding a graph built for device frames -- and the operator learns
+        // from `CameraHealth` either way, which is the difference between a stopped camera and
+        // a wrong one.
+        virtual std::optional<DeviceImage> do_read_device() { return std::nullopt; }
         // Release resources. Must tolerate being called after a partial `do_open`.
         virtual void do_close() = 0;
 

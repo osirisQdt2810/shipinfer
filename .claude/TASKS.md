@@ -2651,6 +2651,14 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       C1's parity reading is against a baseline measured the same way -- like for like, but not
       the like R55 asks for.
 
+- [ ] **CONNECT-AND-PUMP-DISAGREE-ON-CONFIGERROR · #153 round 3, note 3.** #153 established
+      that a `ConfigError` out of a source is a CONTRACT VIOLATION -- fatal for the camera, not
+      a reconnect -- and wired that into `CameraActor::pump`. `connect()` did not get the same
+      treatment: `FrameSource`'s constructor throws `ConfigError` on a counter/camera mismatch
+      (`ingest/base.cpp:14`), inside `factory_(...)`, where `connect()`'s generic handler backs
+      off and retries it forever. Same class, same hot loop, one function along. The fix is the
+      same four lines `SourceUnavailableError` already gets there.
+
 - [~] **PHASE-D-NV12 · OPENED by V156 (critical path now, not a deferred phase), and THE ITEM'S
       OWN PREMISE WAS WRONG -- measured 7 Sep by installing the package it named.**
       `libgstreamer-plugins-bad1.0-dev` installs fine and gives NEITHER `gstreamer-cuda-1.0`
@@ -2715,7 +2723,100 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       supplies the chroma address and there is nothing to infer. No shipvision work is owed.
       THE TWO SHAPES ARE THE LESSON: two pointers cannot be wrong; one pointer plus a DERIVED
       second is what made a padded surface unrepresentable. An explicit `uv_offset` is the
-      one-pointer form of the same guarantee.**
+      one-pointer form of the same guarantee.
+      THE IMAGE IS READY: `shipinfer-gst:jammy-nvdec`, baked 7 Sep by `docker run` +
+      `docker commit` on top of `shipinfer-gst:jammy` (a NEW tag, per V157, so the shared
+      12.6 GB image is untouched if this turns out wrong). It carries `libffmpeg-nvenc-dev`
+      -> `ffnvcodec` 11.1.5.1 with `dynlink_cuviddec.h` / `dynlink_nvcuvid.h` / `dynlink_cuda.h`
+      / `dynlink_loader.h`. The DYNLINK variants are better than plain headers here: they
+      `dlopen` `libnvcuvid.so` at run time, so the build has no driver dependency and a box
+      without one fails at load with a message rather than at link -- the same arrangement
+      `runtime/native.py` uses (ADR-003).
+      CARRIER HALF 1 DONE 7 Sep on `feat/device-frame-carrier`: `DeviceImage` in
+      `ingest/frame.h` (device pointer + geometry + PITCH + device index + an `owner` that
+      unmaps the surface), `Frame::device` beside `Frame::image`, a second `stamp` overload
+      sharing one counter, and `do_read_device()` on `FrameSource` -- DEFAULTED, so every
+      existing source is unchanged. `read()` latches which hook a source answers from on its
+      first frame and REFUSES a change, because the plausible way that happens is a reconnect
+      falling back to software decode and moving the whole graph onto the slow path silently.
+      `test_device_frame` is 21 checks, offline, revert-checked twice (drop the latch -> 3 red;
+      drop the `pitch < width` guard -> 1 red).
+      ROUND 1 (both findings real, both revert-checked): the latch was on the SOURCE, which is
+      a PER-CONNECTION object -- its own header says the reconnect state lives outside it -- so
+      it reset on every reconnect and the plausible failure was the one it could not catch (the
+      stream hiccups, the rebuilt source finds the hardware decoder busy, falls back to
+      software, the graph moves onto the host path silently). It is `FrameCounter`'s now, which
+      is per-camera and already passed by reference. AND `CameraActor::pump` caught
+      `std::exception` and backed off, so `ConfigError` was indistinguishable from a decode
+      error and retried forever -- a hot loop around a bug; a contract violation now STOPS that
+      camera and only that camera. Revert-checks: per-source semantics -> the reconnect case
+      goes red while the within-connection one still passes (exactly what the reviewer
+      measured); drop the `ConfigError` handler -> the actor rebuilds in a loop, 3 builds and
+      counting.
+      ROUND 2 (both findings real, both revert-checked): the fatal path left the camera
+      reporting `Stopped` -- "stopped on request" -- because `record_failure` alone leaves it
+      `Degraded` with `state_is_final()` false, so `run()`'s exit relabels it and
+      `manager.cpp`'s summary (which counts only `Unhealthy`) reads `streaming: 49,
+      unhealthy: 0` for a fleet with a permanently dead camera. Indistinguishable from one an
+      operator decommissioned, and `last_error` cannot separate them because it is written on
+      every transient failure too. It now does the SAME FOUR THINGS `connect()`'s
+      `SourceUnavailableError` peer does -- `fatal_`, `set_state(Unhealthy)`, `teardown`,
+      `stop_.set()`. And `DeviceImage::empty()` rejects `device < 0`, the field's own default,
+      for the same reason it rejects `pitch < width`. Revert-checks: 5 now, one per guard.
+      AND THE BODY WAS EVIDENCE FROM A SUPERSEDED COMMIT -- it pasted `21 checks` where the
+      binary prints 27, and named none of round 1's three tests. Rewritten from the diff, with
+      every `Test*` name grepped against `git diff origin/main` (2 hits each). That is the house
+      rule that has now cost four PR bodies.
+      ROUND 3, and the sharpest of the three: `read()` NEVER CALLED `empty()`. It was defensive
+      documentation. `Frame::on_device()` is DEFINED as `!device.empty()`, so an
+      engaged-but-invalid surface was not rejected -- it was silently reclassified as a HOST
+      frame with a null pixel pointer, and `Frame`'s own "exactly one of `image` and `device` is
+      populated" became ZERO. Downstream reads as healthy the whole way: `pump()` resets the
+      backoff and publishes, and the detect stage letterboxes a 0x0 image while the fleet
+      reports 50 streaming. AND ROUND 2 MADE IT WORSE -- adding `device < 0` to `empty()`
+      widened the set that got laundered. Checked at the seam now, with `ConfigError`; 4 checks
+      go red when the guard is removed.
+      NOTE 1 TAKEN AS ARMOUR, because it is a sequencing hazard and not a style point: every
+      sink today carries `frame.image` and DROPS `frame.device`, so the first NVDEC source would
+      have produced a 0x0 work item per frame with nothing red. `QueueSink::put` refuses a
+      device frame by name, which enforces the ordering -- the graph branch lands BEFORE any
+      source that can populate the field.
+      NOTE 2: the latch's justification was the weakest available ("a branch per frame", which
+      at 1000 fps is free and which `on_device()` already is). The honest argument is that where
+      the pixels live is a PLAN-CONSTRUCTION fact -- the chain is built once from it -- and the
+      comment says that now, along with the reasonable objection it overrides.
+      NOTE 4 WAS NOT A STALE NUMBER: `test_ingest` prints 239 on an `--offline` build and 238
+      on a full one, stable five runs each. The extra check is the opencv row of the lane table,
+      which only runs where that lane is OMITTED -- #146's mechanism exactly. Both numbers are
+      right; the count is build-dependent, and the body says so instead of picking one.
+      NOTE 5: `where_latched()`/`reads_device()` are documented FOR A TEST only now -- the
+      counter is not thread-safe, so a report reading them would race the actor that stamps.
+      ROUND 4, and it is a CONTRADICTION BETWEEN MY OWN TWO PRs: #155 made `uv_offset` a
+      parameter of `nv12_letterbox_into` because NVDEC's chroma is at `pitch * CODED height`,
+      and then #153 shipped a carrier WITHOUT the field whose docstring prescribed
+      `pitch * height` -- the exact derivation #155 rejects. The kernel's guard is
+      `uv_offset >= pitch * height`, which the derived value satisfies EXACTLY, so nothing
+      downstream could catch it: every frame of every camera would have had the last eight luma
+      rows read as chroma. `DeviceImage` carries `uv_offset` now and `empty()` rejects one
+      inside the luma plane.
+      AND THE LIMIT IS STATED rather than papered over: `pitch * height` EXACTLY is accepted,
+      because a genuinely tight surface has its chroma there and this struct has no coded height
+      to compare against. What the field buys is that the offset must be STATED and can no
+      longer be derived; checking 1088 against what cuvid reported is the NVDEC source's gate.
+      ROUND 4b: the `QueueSink` armour round 3 added threw from `publish()`, which is OUTSIDE
+      pump's `ConfigError` handler -- so it escaped into `run()`'s generic one, and with
+      `backoff_.reset()` and the counter clear already run that iteration it was a MIN-BACKOFF
+      HOT LOOP reporting Streaming/Degraded, `frames_published` flat at zero, fleet summary
+      `unhealthy: 0`. The outcome round 2 fixed, arriving through round 3's armour. The four
+      steps are `refuse_fatally()` now, shared by the read refusal and the sink's so they cannot
+      drift. Revert-check: 5 offers in the window instead of <= 2.
+      TWO PLANES, and the answer is "this seam exists once, by design": Python's
+      `FrameSource._do_read` gets NO device counterpart. Python's host round trip IS the wall
+      V156 removes -- `runtime/ops.h` already says the Python path "could not do this without a
+      host round trip" -- so a `DeviceImage` there would be a field nothing could ever fill.
+      The parity harness compares EVENTS, and those stay byte-identical because the tag and the
+      records do not know where the pixels were.
+      LEFT: the NVDEC source itself, and the graph branch to `nv12_letterbox_into`.**
 - [x] **CSRC-TOPOLOGY-Q · ANSWERED 4 Sep as ADR-020, by me, under V154 ("làm theo hướng bạn
       nghĩ là tốt nhất"). NO `csrc/topology/` and no `csrc/runners/`: the chain stays a Python
       declaration and the C++ plane receives a RESOLVED PLAN.** Three reasons, none of them
