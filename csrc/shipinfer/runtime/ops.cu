@@ -146,11 +146,14 @@ namespace shipinfer {
         // This is what NVDEC hands back, and converting it to BGR first would cost a 6 MB
         // temporary per 1080p frame — at 1000 frames a second that is 6 GB/s of pure waste.
         __device__ __forceinline__ void nv12_to_bgr(const uint8_t* nv12, int src_h, int src_w,
-                                                    int stride, float y_f, float x_f,
-                                                    float* bgr) {
+                                                    int stride, size_t uv_offset, float y_f,
+                                                    float x_f, float* bgr) {
             const int xi = max(0, min(src_w - 1, static_cast<int>(x_f)));
             const int yi = max(0, min(src_h - 1, static_cast<int>(y_f)));
-            const uint8_t* uv = nv12 + static_cast<size_t>(stride) * src_h;
+            // `uv_offset`, not `stride * src_h`: NVDEC's surface is decoded at a CODED height
+            // rounded up past the display one, so its chroma plane does not begin where the
+            // luma plane's last displayed row ends. See `runtime/ops.h`.
+            const uint8_t* uv = nv12 + uv_offset;
 
             // BT.601 limited range, which is what H.264 from an IP camera carries.
             const float Y = (static_cast<float>(nv12[yi * stride + xi]) - 16.f) * 1.164383f;
@@ -169,9 +172,10 @@ namespace shipinfer {
         // is no Python twin for NV12 input (the Python plane decodes to BGR first), so the
         // readable reference for this one lives in `test_dataplane.cpp` and says so.
         __global__ void nv12_letterbox_kernel(const uint8_t* nv12, int src_h, int src_w,
-                                              int stride, float* dst, int dst_h, int dst_w,
-                                              int pad_x, int pad_y, int new_w, int new_h,
-                                              bool swap_rb, float pad_value) {
+                                              int stride, size_t uv_offset, float* dst,
+                                              int dst_h, int dst_w, int pad_x, int pad_y,
+                                              int new_w, int new_h, bool swap_rb,
+                                              float pad_value) {
             const int x = blockIdx.x * blockDim.x + threadIdx.x;
             const int y = blockIdx.y * blockDim.y + threadIdx.y;
             if (x >= dst_w || y >= dst_h) return;
@@ -183,7 +187,7 @@ namespace shipinfer {
             const float sy = source_coordinate(y, pad_y, src_h, new_h);
 
             float bgr[3] = {0.f, 0.f, 0.f};
-            if (inside) nv12_to_bgr(nv12, src_h, src_w, stride, sy, sx, bgr);
+            if (inside) nv12_to_bgr(nv12, src_h, src_w, stride, uv_offset, sy, sx, bgr);
             for (int c = 0; c < 3; ++c) {
                 const int src_c = swap_rb ? (2 - c) : c;
                 dst[c * plane + y * dst_w + x] = inside ? bgr[src_c] / 255.f : pad_value;
@@ -238,14 +242,30 @@ namespace shipinfer {
     }
 
     LetterboxMap nv12_letterbox_into(const uint8_t* nv12_device, int src_h, int src_w,
-                                     int stride, float* dst_device, int dst_h, int dst_w,
-                                     bool swap_rb, float pad_value, gpuStream_t stream) {
+                                     int stride, size_t uv_offset, float* dst_device, int dst_h,
+                                     int dst_w, bool swap_rb, float pad_value,
+                                     gpuStream_t stream) {
+        if (stride < src_w) {
+            throw ConfigError("nv12_letterbox_into: stride " + std::to_string(stride) +
+                              " is narrower than the width " + std::to_string(src_w) +
+                              "; a row cannot fit, so every row would read into the next");
+        }
+        if (uv_offset < static_cast<size_t>(stride) * static_cast<size_t>(src_h)) {
+            // Below the luma plane's own size the chroma would overlap it. Refused rather than
+            // clamped: the two plausible values are `stride * src_h` (tight) and
+            // `stride * coded_h` (NVDEC), and anything smaller is a mis-filled surface.
+            throw ConfigError("nv12_letterbox_into: uv_offset " + std::to_string(uv_offset) +
+                              " is inside the luma plane (" + std::to_string(stride) + " x " +
+                              std::to_string(src_h) +
+                              "); pass `stride * src_h` for a tight buffer or "
+                              "`stride * coded_height` for an NVDEC surface");
+        }
         const LetterboxMap map = fit(src_h, src_w, dst_h, dst_w);
         const dim3 block(16, 16);
         const dim3 grid((dst_w + block.x - 1) / block.x, (dst_h + block.y - 1) / block.y);
         nv12_letterbox_kernel<<<grid, block, 0, stream>>>(
-            nv12_device, src_h, src_w, stride, dst_device, dst_h, dst_w, map.pad_x, map.pad_y,
-            map.new_w, map.new_h, swap_rb, pad_value);
+            nv12_device, src_h, src_w, stride, uv_offset, dst_device, dst_h, dst_w, map.pad_x,
+            map.pad_y, map.new_w, map.new_h, swap_rb, pad_value);
         GPU_CHECK(gpuGetLastError());
         return map;
     }
