@@ -1657,6 +1657,43 @@ namespace {
               "be > 1\" from a fifty-camera fleet is a search where this is an answer");
     }
 
+    // A `ConfigError` out of the FACTORY is fatal, exactly as one out of `read()` is. #153
+    // established that for `pump` and `connect()` did not get it, so the commonest instance --
+    // `FrameSource`'s constructor refusing a counter that belongs to another camera
+    // (`ingest/base.cpp`) -- reached the generic handler and was retried forever. Same class of
+    // fault, same hot loop, one function along.
+    void test_a_config_error_from_the_factory_stops_the_camera() {
+        CountingSink sink;
+        const IngestConfig config = a_camera("cam3");
+        int attempts = 0;
+        CameraActor actor(config, sink,
+                          [&attempts](const IngestConfig& asked, FrameCounter& counter,
+                                      StopSignal& stop) -> std::unique_ptr<FrameSource> {
+                              ++attempts;
+                              // What a real source's constructor does when the counter it was
+                              // handed is another camera's; a `ConfigError` either way.
+                              (void)counter;
+                              (void)stop;
+                              throw ConfigError("camera '" + asked.camera_id +
+                                                "': frame counter belongs to camera 'other'");
+                          });
+        actor.start();
+        const Clock::time_point deadline = Clock::now() + 5s;
+        while (actor.is_running() && Clock::now() < deadline) {
+            std::this_thread::sleep_for(10ms);
+        }
+        check(!actor.is_running(),
+              "a ConfigError from the factory stops the camera rather than backing off");
+        check(attempts == 1, "and it is not retried even once: " + std::to_string(attempts));
+        const CameraHealth health = actor.health();
+        check(health.state == CameraState::Unhealthy,
+              "the camera reads UNHEALTHY, which pages -- not Stopped, which reads as one "
+              "somebody decommissioned");
+        check(health.last_error.find("cam3") != std::string::npos,
+              "and the reason names the camera: " + health.last_error);
+        actor.stop(1000ms);
+    }
+
     void test_a_camera_added_during_stop_never_keeps_running() {
         // `add_camera` starts its actor outside the lock, so a concurrent stop() can strip
         // the map in the window — and the stop request it sent was aimed at a thread that
@@ -3137,6 +3174,7 @@ int main() {
     test_config_bounds_match_the_python_plane();
 
     test_a_directly_built_actor_names_the_camera_in_its_refusal();
+    test_a_config_error_from_the_factory_stops_the_camera();
     test_a_camera_added_during_stop_never_keeps_running();
     test_the_managers_death_leaks_the_abandoned_rather_than_freeing_them();
     test_two_concurrent_stops_both_report_the_one_abandonment();
