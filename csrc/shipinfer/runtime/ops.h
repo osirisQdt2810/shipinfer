@@ -53,11 +53,22 @@ namespace shipinfer {
                           const float* boxes_device, int count, float* dst_device, int dst_h,
                           int dst_w, bool swap_rb, gpuStream_t stream);
 
+    // doc: long the UV offset, and the padded surface that made it a parameter
     // NV12 (as NVDEC and the RTSP path produce) straight to a letterboxed float NCHW row,
     // without an intermediate BGR image. The Python path could not do this without a host round
     // trip, and at 1000 frames a second a 1080p BGR temporary is 6 MB of pure waste per frame.
+    //
+    // `uv_offset` is where the interleaved chroma plane starts, in BYTES from `nv12_device`. It
+    // is a PARAMETER and not `stride * src_h`, which is what this computed until the NVDEC path
+    // was written: NVDEC decodes at a CODED height rounded up (1088 for 1080p, and the pitch is
+    // padded too), so its chroma plane begins at `stride * 1088` while `src_h` is 1080. Reading
+    // it at `stride * src_h` takes the chroma from the last eight rows of the LUMA plane --
+    // correct brightness, wrong colour, on every frame. It looks like a model problem.
+    //
+    // For a tight buffer, pass `stride * src_h`; for an NVDEC surface, `stride * coded_height`.
     LetterboxMap nv12_letterbox_into(const uint8_t* nv12_device, int src_h, int src_w,
-                                     int stride, float* dst_device, int dst_h, int dst_w,
-                                     bool swap_rb, float pad_value, gpuStream_t stream);
+                                     int stride, size_t uv_offset, float* dst_device, int dst_h,
+                                     int dst_w, bool swap_rb, float pad_value,
+                                     gpuStream_t stream);
 
 }  // namespace shipinfer

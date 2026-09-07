@@ -439,12 +439,15 @@ namespace {
     // NV12 input — the Python plane decodes to BGR first — so this reference is the readable
     // statement of what the kernel is meant to do, and says so.
     std::vector<float> nv12_letterbox_reference(const std::vector<uint8_t>& nv12, int src_h,
-                                                int src_w, int stride, int dst_h, int dst_w,
-                                                bool swap_rb, float pad_value,
-                                                LetterboxMap map) {
+                                                int src_w, int stride, size_t uv_offset,
+                                                int dst_h, int dst_w, bool swap_rb,
+                                                float pad_value, LetterboxMap map) {
         std::vector<float> dst(static_cast<size_t>(3) * dst_h * dst_w, pad_value);
         const int plane = dst_h * dst_w;
-        const uint8_t* uv = nv12.data() + static_cast<size_t>(stride) * src_h;
+        // Where the caller says the chroma is, not where a tight buffer would put it. This
+        // read `stride * src_h`, in both halves, which is why the padded-surface case below
+        // could not fail: the reference was wrong in the same direction as the kernel.
+        const uint8_t* uv = nv12.data() + uv_offset;
         for (int y = map.pad_y; y < map.pad_y + map.new_h; ++y) {
             for (int x = map.pad_x; x < map.pad_x + map.new_w; ++x) {
                 const float sx = torch_source(x, map.pad_x, src_w, map.new_w);
@@ -468,9 +471,89 @@ namespace {
         return dst;
     }
 
+    // One comparison, run for a tight buffer and for an NVDEC-shaped one. `coded_h` above
+    // `src_h` is the case that matters and the case nothing covered: NVDEC decodes 1080p at a
+    // coded height of 1088, so its chroma plane starts at `stride * 1088` while the displayed
+    // height is 1080. The old kernel assumed `stride * src_h` and would have taken the chroma
+    // from the last eight rows of the LUMA plane -- right brightness, wrong colour, always.
+    double nv12_worst_difference(int src_h, int src_w, int stride, int coded_h, int dst) {
+        const size_t uv_offset = static_cast<size_t>(stride) * static_cast<size_t>(coded_h);
+        std::vector<uint8_t> host(uv_offset + static_cast<size_t>(stride) * src_h / 2);
+        for (size_t i = 0; i < host.size(); ++i)
+            host[i] = static_cast<uint8_t>(16 + (i * 29) % 220);
+
+        uint8_t* device_src = nullptr;
+        float* device_dst = nullptr;
+        if (gpuMalloc(&device_src, host.size()) != gpuSuccess) return -1.0;
+        gpuMalloc(&device_dst, static_cast<size_t>(3) * dst * dst * sizeof(float));
+        gpuMemcpy(device_src, host.data(), host.size(), gpuMemcpyHostToDevice);
+
+        const LetterboxMap map =
+            nv12_letterbox_into(device_src, src_h, src_w, stride, uv_offset, device_dst, dst,
+                                dst, true, 0.5f, nullptr);
+        gpuDeviceSynchronize();
+        std::vector<float> got(static_cast<size_t>(3) * dst * dst);
+        gpuMemcpy(got.data(), device_dst, got.size() * sizeof(float), gpuMemcpyDeviceToHost);
+        const auto want = nv12_letterbox_reference(host, src_h, src_w, stride, uv_offset, dst,
+                                                   dst, true, 0.5f, map);
+        gpuFree(device_src);
+        gpuFree(device_dst);
+
+        double worst = 0;
+        for (size_t i = 0; i < got.size(); ++i)
+            worst = std::max(worst, static_cast<double>(std::fabs(got[i] - want[i])));
+        return worst;
+    }
+
+    void test_the_nv12_kernel_addresses_a_padded_surface() {
+        // 90 displayed rows decoded at 96 -- the same relationship 1080/1088 has, small enough
+        // to keep the fixture cheap. The stride is padded too, as NVDEC's is.
+        const double padded = nv12_worst_difference(90, 160, 192, 96, 64);
+        if (padded < 0) {
+            skip("no CUDA device for the NV12 padded-surface test");
+            return;
+        }
+
+        check_near(padded, 0.0, 1e-4,
+                   "an NVDEC-shaped surface: the chroma plane starts at stride * CODED height");
+
+        // And a tight buffer still works, which is what a non-NVDEC caller passes.
+        check_near(nv12_worst_difference(90, 160, 192, 90, 64), 0.0, 1e-4,
+                   "a tight buffer: uv_offset == stride * src_h");
+    }
+
+    void test_the_nv12_kernel_refuses_a_surface_it_cannot_address() {
+        bool refused = false;
+        std::string message;
+        try {
+            // Inside the luma plane, so the chroma would overlap it.
+            (void)nv12_letterbox_into(nullptr, 90, 160, 192, 192ULL * 80, nullptr, 64, 64, true,
+                                      0.5f, nullptr);
+        } catch (const ConfigError& error) {
+            refused = true;
+            message = error.what();
+        }
+        check(refused && message.find("inside the luma plane") != std::string::npos,
+              "a uv_offset below the luma plane's own size is refused: " + message);
+
+        refused = false;
+        message.clear();
+        try {
+            (void)nv12_letterbox_into(nullptr, 90, 160, 100, 100ULL * 90, nullptr, 64, 64, true,
+                                      0.5f, nullptr);
+        } catch (const ConfigError& error) {
+            refused = true;
+            message = error.what();
+        }
+        check(
+            refused && message.find("narrower than the width") != std::string::npos,
+            "and a stride narrower than the width, which reads into the next row: " + message);
+    }
+
     void test_the_nv12_letterbox_kernel_agrees_with_the_reference() {
         const int src_h = 90, src_w = 160, stride = 192,
                   dst = 64;  // a padded stride, as NVDEC gives
+        const size_t uv_offset = static_cast<size_t>(stride) * src_h;
         std::vector<uint8_t> host(static_cast<size_t>(stride) * src_h * 3 / 2);
         for (size_t i = 0; i < host.size(); ++i)
             host[i] = static_cast<uint8_t>(16 + (i * 29) % 220);
@@ -484,13 +567,14 @@ namespace {
         gpuMalloc(&device_dst, static_cast<size_t>(3) * dst * dst * sizeof(float));
         gpuMemcpy(device_src, host.data(), host.size(), gpuMemcpyHostToDevice);
 
-        const LetterboxMap map = nv12_letterbox_into(device_src, src_h, src_w, stride,
-                                                     device_dst, dst, dst, true, 0.5f, nullptr);
+        const LetterboxMap map =
+            nv12_letterbox_into(device_src, src_h, src_w, stride, uv_offset, device_dst, dst,
+                                dst, true, 0.5f, nullptr);
         gpuDeviceSynchronize();
         std::vector<float> got(static_cast<size_t>(3) * dst * dst);
         gpuMemcpy(got.data(), device_dst, got.size() * sizeof(float), gpuMemcpyDeviceToHost);
-        const auto want =
-            nv12_letterbox_reference(host, src_h, src_w, stride, dst, dst, true, 0.5f, map);
+        const auto want = nv12_letterbox_reference(host, src_h, src_w, stride, uv_offset, dst,
+                                                   dst, true, 0.5f, map);
 
         double worst = 0;
         for (size_t i = 0; i < got.size(); ++i)
@@ -592,6 +676,8 @@ int main() {
     test_the_letterbox_kernel_agrees_with_the_reference();
     test_the_crop_kernel_agrees_with_the_reference();
     test_the_nv12_letterbox_kernel_agrees_with_the_reference();
+    test_the_nv12_kernel_addresses_a_padded_surface();
+    test_the_nv12_kernel_refuses_a_surface_it_cannot_address();
     test_a_degenerate_box_yields_a_black_crop();
     test_a_capture_during_attach_is_a_consistent_snapshot();
 
