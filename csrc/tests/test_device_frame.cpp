@@ -151,8 +151,6 @@ namespace {
         const std::optional<Frame> first = source.read();
         check(first && first->on_device(), "the first frame came off the device");
 
-        // The plausible way this happens for real: a reconnect falls back to software decode
-        // and the whole graph quietly moves onto the slow path.
         source.next_is_device = false;
         bool refused = false;
         std::string message;
@@ -164,9 +162,63 @@ namespace {
         }
 
         check(refused, "changing hook is refused, not accepted silently");
-        check(message.find("do_read after answering from do_read_device") != std::string::npos,
+        check(message.find("do_read after this camera had answered from do_read_device") !=
+                  std::string::npos,
               "and the message names BOTH answers: " + message);
         check(message.find("cam0") != std::string::npos, "and the camera");
+    }
+
+    void the_latch_survives_a_RECONNECT_which_is_its_whole_motivation() {
+        // #153 round 1: the latch was on the SOURCE, and a source is a per-connection object --
+        // its own header says the reconnect state lives outside it. So the plausible failure
+        // was the one it could not catch: the stream hiccups, the actor throws the source away,
+        // the new one finds the hardware decoder busy and falls back to software, and the graph
+        // moves onto the host path with nothing said. Two successive sources, ONE counter,
+        // exactly as `CameraActor` rebuilds through `factory_(config_, counter_, stop_)`.
+        FrameCounter counter("cam0");
+        StopSignal stop;
+        {
+            SwitchingSource first(a_camera("cam0"), counter, stop);
+            first.open();
+            const std::optional<Frame> frame = first.read();
+            check(frame && frame->on_device(), "connection 1 decoded into VRAM");
+        }
+        check(counter.where_latched() && counter.reads_device(),
+              "and the CAMERA remembers that, not the source that is now destroyed");
+
+        SwitchingSource second(a_camera("cam0"), counter, stop);
+        second.next_is_device = false;  // the reconnect fell back to software decode
+        second.open();
+        bool refused = false;
+        std::string message;
+        try {
+            (void)second.read();
+        } catch (const ConfigError& error) {
+            refused = true;
+            message = error.what();
+        }
+
+        check(refused, "the rebuilt source is refused, which is the case that matters");
+        check(message.find("software decode") != std::string::npos,
+              "and the message names the plausible cause: " + message);
+    }
+
+    void the_frame_id_still_advances_across_the_rebuild() {
+        // The latch lives beside the frame id now, so this is worth pinning together: one
+        // counter per camera for its whole life is what ADR-002 relies on.
+        FrameCounter counter("cam2");
+        StopSignal stop;
+        {
+            SwitchingSource first(a_camera("cam2"), counter, stop);
+            first.open();
+            (void)first.read();
+        }
+        SwitchingSource second(a_camera("cam2"), counter, stop);
+        second.open();
+        const std::optional<Frame> frame = second.read();
+
+        check(frame && frame->tag.frame_id == 1,
+              "a reconnect does not restart the frame id at zero");
     }
 
     void a_host_only_source_never_touches_the_device_hook() {
@@ -194,6 +246,8 @@ int main() {
     the_stamp_is_the_same_key_wherever_the_pixels_are();
     the_owner_is_what_unmaps_the_surface();
     a_source_answers_from_ONE_hook_for_its_whole_life();
+    the_latch_survives_a_RECONNECT_which_is_its_whole_motivation();
+    the_frame_id_still_advances_across_the_rebuild();
     a_host_only_source_never_touches_the_device_hook();
     std::printf("%d checks, %d failure(s)\n", checks, failures);
     return failures == 0 ? 0 : 1;

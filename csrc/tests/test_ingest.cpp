@@ -986,6 +986,71 @@ namespace {
               "which is what makes drop_ratio a number an operator can act on");
     }
 
+    // A source that decodes into VRAM on its first connection and into host memory on the
+    // next -- the reconnect fallback `FrameCounter::latch_where` exists to refuse.
+    class FallsBackToSoftware : public FrameSource {
+      public:
+        FallsBackToSoftware(IngestConfig config, FrameCounter& counter, StopSignal& stop,
+                            std::atomic<int>& builds)
+            : FrameSource(std::move(config), counter, stop),
+              device_(builds.fetch_add(1) == 0) {}
+
+      protected:
+        void do_open() override { set_format(1080, 1920, 20.0); }
+        void do_close() override {}
+        std::optional<DeviceImage> do_read_device() override {
+            if (!device_) return std::nullopt;
+            // One frame, then the stream ends -- which is what makes the actor reconnect and
+            // build the software-decoding source below it. Without that the fallback never
+            // happens and this test passes for the wrong reason.
+            if (delivered_) throw FrameDecodeError(config().camera_id, "stream hiccup");
+            delivered_ = true;
+            DeviceImage image;
+            image.nv12 = reinterpret_cast<const void*>(0x1000ULL);
+            image.height = 1080;
+            image.width = 1920;
+            image.pitch = 2048;
+            image.device = 0;
+            return image;
+        }
+        std::optional<HostFrame> do_read() override {
+            HostFrame frame;
+            frame.pixels = pixels_.data();
+            frame.height = 1;
+            frame.width = 1;
+            return frame;
+        }
+
+      private:
+        bool device_;
+        bool delivered_ = false;
+        std::array<uint8_t, 3> pixels_{{1, 2, 3}};
+    };
+
+    void test_a_camera_whose_pixels_move_off_the_device_STOPS_rather_than_retrying() {
+        // #153 round 1: `pump()` caught `std::exception` and backed off, so a contract
+        // violation was indistinguishable from a decode error and retried forever -- a hot
+        // loop around a bug. It is fatal for the camera now, and only for that camera.
+        std::atomic<int> builds{0};
+        CountingSink sink;
+        SourceFactory factory = [&builds](const IngestConfig& config, FrameCounter& counter,
+                                          StopSignal& stop) -> std::unique_ptr<FrameSource> {
+            return std::make_unique<FallsBackToSoftware>(config, counter, stop, builds);
+        };
+        CameraActor actor(a_camera("cam0"), sink, factory);
+        actor.start();
+        for (int i = 0; i < 400 && actor.is_running(); ++i) std::this_thread::sleep_for(5ms);
+
+        check(!actor.is_running(),
+              "the actor stopped instead of reconnecting around a contract violation");
+        check(builds.load() <= 2, "and it did not rebuild in a loop: " +
+                                      std::to_string(builds.load()) + " build(s)");
+        const CameraHealth health = actor.health();
+        check(health.last_error.find("property of the camera") != std::string::npos,
+              "with the reason on the camera's health: " + health.last_error);
+        actor.stop();
+    }
+
     void test_a_closed_sink_finishes_the_actor() {
         FakeScript script;
         script.on_read = [](int) { return 1; };
@@ -2657,6 +2722,7 @@ int main() {
     test_an_exhausted_source_finishes();
 
     test_a_full_sink_is_a_drop_charged_to_this_camera();
+    test_a_camera_whose_pixels_move_off_the_device_STOPS_rather_than_retrying();
     test_a_closed_sink_finishes_the_actor();
     test_an_accepting_sink_publishes_everything();
 

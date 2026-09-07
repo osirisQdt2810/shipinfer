@@ -97,6 +97,38 @@ namespace shipinfer {
         const std::string& camera_id() const { return camera_id_; }
         // The id the next `stamp` will use.
         int64_t next_frame_id() const { return next_; }
+        // doc: long the latch lives here because it has to outlive one connection
+        // Remember, then enforce, whether this CAMERA's pixels arrive on the device.
+        //
+        // ON THE COUNTER, not on the source, and the source's own header says why: "a source
+        // is not expected to survive an error. The actor throws it away and builds a new one,
+        // which is why the reconnect state -- the backoff, the frame counter, the stop
+        // signal -- lives outside it". A latch inside a source resets on every reconnect, and
+        // A RECONNECT IS THE WHOLE SCENARIO: the stream hiccups, the new source finds the
+        // hardware decoder busy, falls back to software, and the graph moves onto the host
+        // path silently. Which is exactly what this exists to refuse.
+        //
+        // Throws ConfigError naming both answers. `CameraActor::pump` treats that as fatal for
+        // the camera rather than reconnecting, because retrying a contract violation is a hot
+        // loop around a bug.
+        void latch_where(bool on_device) {
+            if (!where_latched_) {
+                where_latched_ = true;
+                reads_device_ = on_device;
+                return;
+            }
+            if (reads_device_ == on_device) return;
+            throw ConfigError(
+                "camera '" + camera_id_ + "': a source answered from do_read" +
+                (on_device ? "_device" : "") + " after this camera had answered from do_read" +
+                (reads_device_ ? "_device" : "") +
+                "; where a camera's pixels live is a property of the camera, and the chain is "
+                "built once from it -- most plausibly a reconnect fell back to software "
+                "decode");
+        }
+        // Whether this camera has answered yet, and from where. For a test and for a report.
+        bool where_latched() const { return where_latched_; }
+        bool reads_device() const { return reads_device_; }
         // How many frames this counter has stamped, across every reconnect.
         uint64_t stamped() const { return stamped_; }
 
@@ -136,6 +168,8 @@ namespace shipinfer {
         std::string camera_id_;
         int64_t next_ = 0;
         uint64_t stamped_ = 0;
+        bool where_latched_ = false;
+        bool reads_device_ = false;
     };
 
 }  // namespace shipinfer

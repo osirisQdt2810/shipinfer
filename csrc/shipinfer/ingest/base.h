@@ -65,6 +65,9 @@ namespace shipinfer {
         // Throws:
         //   SourceOpenError: called before `open()`.
         //   FrameDecodeError: the stream ended or the decoder failed.
+        //   ConfigError: this camera's pixels changed which memory they live in
+        //     (`FrameCounter::latch_where`). A contract violation, so `CameraActor::pump`
+        //     stops the camera rather than reconnecting around it.
         std::optional<Frame> read();
 
         // Release everything. Idempotent, and safe after a failed `open()`.
@@ -98,6 +101,12 @@ namespace shipinfer {
         // Connect, and call `set_format` with what was actually negotiated.
         virtual void do_open() = 0;
         // One image as HWC BGR uint8 with its `owner` set, or nothing if none is available yet.
+        //
+        // STILL PURE, deliberately, now that `do_read_device` exists beside it: a device-only
+        // source writes one line of `return std::nullopt;` and the compiler makes it choose.
+        // Defaulting both and checking at run time that one was overridden is not possible --
+        // "not overridden" and "no frame yet" are the same answer from here -- so the check
+        // would have to be a count, which cannot tell a quiet stream from a missing hook.
         virtual std::optional<HostFrame> do_read() = 0;
         // doc: long the second hook, why it is defaulted, and what stops a source using both
         // One image in DEVICE memory -- NV12 with its `owner` set -- for a source that decodes
@@ -116,11 +125,6 @@ namespace shipinfer {
         // Record what the stream actually negotiated. Called from `do_open`.
         void set_format(int height, int width, double fps);
 
-      private:
-        // Remember, and then enforce, which read hook this source answers from.
-        void latch_where(bool on_device);
-
-      protected:
         StopSignal& stop() const { return stop_; }
         FrameCounter& counter() const { return counter_; }
 
@@ -129,9 +133,6 @@ namespace shipinfer {
         FrameCounter& counter_;
         StopSignal& stop_;
         bool is_open_ = false;
-        // Which hook this source answers from, latched on its first frame. See `latch_where`.
-        bool where_latched_ = false;
-        bool reads_device_ = false;
         int height_ = 0;
         int width_ = 0;
         double fps_ = 0.0;

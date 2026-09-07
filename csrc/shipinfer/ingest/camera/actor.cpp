@@ -264,6 +264,20 @@ namespace shipinfer {
         std::optional<Frame> frame;
         try {
             frame = source_->read();
+        } catch (const ConfigError& error) {
+            // FATAL FOR THIS CAMERA, and not a reconnect. A `ConfigError` out of `read()` is a
+            // contract violation -- today, a source whose pixels changed which memory they live
+            // in (`FrameCounter::latch_where`) -- and reconnecting around one is a hot loop
+            // about a bug. The fleet keeps its other cameras; this one stops and says why,
+            // which is `CameraHealth`'s job. Caught BEFORE the generic handler below, which
+            // would otherwise back off and retry it forever: that handler catches
+            // `std::exception`, so the two were indistinguishable and the reason given for
+            // choosing `ConfigError` did not hold (#153 round 1).
+            record_failure(error.what());
+            shout("camera " + config_.camera_id + ": stopping, not reconnecting (" +
+                  redact_in(error.what()) + ")");
+            teardown();
+            return false;
         } catch (const std::exception& error) {
             record_failure(error.what());
             const double delay = backoff_.next_delay();

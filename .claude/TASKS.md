@@ -2725,6 +2725,24 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       falling back to software decode and moving the whole graph onto the slow path silently.
       `test_device_frame` is 21 checks, offline, revert-checked twice (drop the latch -> 3 red;
       drop the `pitch < width` guard -> 1 red).
+      ROUND 1 (both findings real, both revert-checked): the latch was on the SOURCE, which is
+      a PER-CONNECTION object -- its own header says the reconnect state lives outside it -- so
+      it reset on every reconnect and the plausible failure was the one it could not catch (the
+      stream hiccups, the rebuilt source finds the hardware decoder busy, falls back to
+      software, the graph moves onto the host path silently). It is `FrameCounter`'s now, which
+      is per-camera and already passed by reference. AND `CameraActor::pump` caught
+      `std::exception` and backed off, so `ConfigError` was indistinguishable from a decode
+      error and retried forever -- a hot loop around a bug; a contract violation now STOPS that
+      camera and only that camera. Revert-checks: per-source semantics -> the reconnect case
+      goes red while the within-connection one still passes (exactly what the reviewer
+      measured); drop the `ConfigError` handler -> the actor rebuilds in a loop, 3 builds and
+      counting.
+      TWO PLANES, and the answer is "this seam exists once, by design": Python's
+      `FrameSource._do_read` gets NO device counterpart. Python's host round trip IS the wall
+      V156 removes -- `runtime/ops.h` already says the Python path "could not do this without a
+      host round trip" -- so a `DeviceImage` there would be a field nothing could ever fill.
+      The parity harness compares EVENTS, and those stay byte-identical because the tag and the
+      records do not know where the pixels were.
       LEFT: the NVDEC source itself, and the graph branch to `nv12_letterbox_into`.**
 - [x] **CSRC-TOPOLOGY-Q · ANSWERED 4 Sep as ADR-020, by me, under V154 ("làm theo hướng bạn
       nghĩ là tốt nhất"). NO `csrc/topology/` and no `csrc/runners/`: the chain stays a Python
