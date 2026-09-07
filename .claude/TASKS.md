@@ -2625,10 +2625,16 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       (2) `_headers_available()` runs a `g++` subprocess when the module is imported, so a
       plain offline `pytest` collection pays one cached spawn even though the classes then
       skip. A lazy string condition or a session-scoped fixture avoids it.
+      ROUND 4 CLOSED THE OTHER TWO NOTES rather than deferring them: `replay.cpp` was compiled
+      by NOTHING in CI (its opencv lane was unresolvable on the runner and it fell out with no
+      assertion naming it, while `cpp-gst-lane` covers only `gstreamer.cpp`) -- `libopencv-dev`
+      is in the apt step now and `_COVERED_ELSEWHERE` states which lanes are another job's, one
+      test pins that reasoning on any host and another fails where a unit is dropped. And the
+      app leg's loud skip was unreachable by construction, because `EXTERNAL` declares lanes
+      only for the two `ingest/sources` units so `lanes_of(app)` is empty for every app; the
+      machinery moved to the UNIT leg, where it can fire, and the app leg keeps its copy as
+      armour with its reachability stated.
 
-- [!] **PHASE-D-NV12 · OPERATOR (when phase D opens): rebuild `shipinfer-gst:jammy` with `libgstreamer-plugins-bad1.0-dev` (gstcuda headers)? This box cannot `docker build` — the documented run+commit dance needs your go.** NVDEC-into-VRAM decode (both planes) — needs the DataPool carrier (arch.md §3/§8) AND an image
-      rebuild: `shipinfer-gst:jammy` lacks `libgstreamer-plugins-bad1.0-dev` (gstcuda/GstCudaMemory headers), and this
-      box can't `docker build` (the documented run+commit dance). Do not start before phase D opens.**
 - [~] **R55-BENCH-SOURCE · MY BENCH NUMBERS DO NOT MEET R55, and the operator had to ask.**
       Every measurement in this stretch -- including the C1 parity number (944 against 971.3) --
       ran `--source replay`: JPEGs decoded from disk on the CPU, with the harness printing

@@ -163,6 +163,13 @@ def _missing_headers_reason() -> str:
     )
 
 
+# doc: long which lanes are another job's, and what adding one costs
+#: External lanes a DIFFERENT CI job compiles, so this one may drop their units. `gstreamer`
+#: is `cpp-gst-lane`'s. Everything NOT in here is installed in this job -- `opencv` is, because
+#: `ingest/sources/replay.cpp` is compiled by nothing else anywhere (#133 round 4). A lane
+#: added here without a job named beside it is a unit going quietly uncovered.
+_COVERED_ELSEWHERE = frozenset({"gstreamer"})
+
 #: Applied to the two COMPILE classes and not to the module: the guard tests below need `g++`
 #: and nothing else, so a module-level mark would have run them only on the `cpp-syntax`
 #: runner -- a harness whose own guards execute in one place is a harness nobody checks.
@@ -262,6 +269,126 @@ class TestTheUnitsNothingCompiles:
 
         assert not failures, "these do not compile:\n" + "\n".join(failures)
 
+    def test_replay_cpp_is_this_jobs_to_compile_and_nobody_elses(self) -> None:
+        """Checkable on any host, unlike the guard below, which needs the package absent.
+
+        `_COVERED_ELSEWHERE` is the whole judgement in this file: a lane in it is somebody
+        else's job, and a lane out of it must be installed HERE. `opencv` is out of it because
+        `ingest/sources/replay.cpp` is compiled by nothing else anywhere -- `cpp-gst-lane`
+        builds with `--with-external gstreamer`, which is the other one. So this pins the
+        reasoning rather than the environment: on a host that HAS libopencv-dev, the guard
+        below cannot tell a correct exclusion from a missing one.
+        """
+        build = _build_module()
+        replay = CSRC / "shipinfer" / "ingest" / "sources" / "replay.cpp"
+
+        assert replay.is_file(), "the unit this reasoning is about"
+        assert _lanes_needed(build, replay) == {"opencv"}, "it declares the opencv lane"
+        assert "opencv" not in _COVERED_ELSEWHERE, (
+            "opencv is not covered by another job, so the cpp-syntax job installs it; putting "
+            "it here would drop replay.cpp from every CI job at once"
+        )
+        assert "gstreamer" in _COVERED_ELSEWHERE, "and gstreamer IS cpp-gst-lane's"
+
+    def test_no_unit_is_dropped_for_a_missing_lane_where_this_is_required(self) -> None:
+        """The loud skip belongs on THIS leg, because this is the one it can fire on.
+
+        `EXTERNAL` declares lanes only for the two `ingest/sources` units, so `lanes_of(app)`
+        is empty for every app and the apps leg's version is unreachable by construction
+        (#133 round 4). Here it is reachable and it matters: without `libopencv-dev`,
+        `ingest/sources/replay.cpp` falls out and NOTHING in CI compiles it -- `cpp-gst-lane`
+        covers `gstreamer.cpp`, not that one -- which is this file's own thesis.
+        """
+        if not os.environ.get(_REQUIRE):
+            pytest.skip(f"{_REQUIRE} is unset; this asserts what CI's cpp-syntax job installs")
+
+        build = _build_module()
+        apps = set(_apps())
+        units = [p for p in sorted((CSRC / "shipinfer").rglob("*.cpp")) if p not in apps]
+        outside = [u for u in units if not build.offline_ready(build.include_closure(u), set())]
+        dropped = [
+            u.relative_to(ROOT).as_posix()
+            for u in outside
+            if not _lanes_available(build, u)
+            and not (_lanes_needed(build, u) <= _COVERED_ELSEWHERE)
+        ]
+
+        assert outside, "no unit is outside the offline build; this guard would be vacuous"
+        assert not dropped, (
+            f"these units were dropped for a missing external lane: {dropped}. Where this job "
+            f"runs, a drop is the hole it exists to close -- install the lane's `-dev` package, "
+            f"or add the lane to `_COVERED_ELSEWHERE` and name the job that compiles it"
+        )
+
+
+class TestThisFileStandsAlone:
+    """The `--noconftest -c /dev/null` in `ci.yml` is load-bearing, so it is asserted here.
+
+    Every `pytest` in this repository loads `tests/conftest.py`, which imports numpy, pydantic
+    and -- on the offline path -- torch, and `pyproject.toml`'s `--strict-config` additionally
+    demands pytest-asyncio and pytest-timeout. The `cpp-syntax` job's interpreter is
+    `setup-python`'s and has none of them, so it died at COLLECTION with rc=4 before one
+    `g++ -fsyntax-only` ran (#133 round 4). Installing torch into a headers-only job is ~200 MB
+    for nothing, so the job bypasses the suite's config -- and a bare flag in a workflow is a
+    knob a later edit removes without knowing why it was there. This is the why.
+    """
+
+    #: Everything this module may import: the standard library, plus pytest. `__future__` is
+    #: the compiler's, not a package -- listed because it is an import statement all the same.
+    _ALLOWED = frozenset(
+        {
+            "__future__",
+            "ast",
+            "functools",
+            "importlib",
+            "os",
+            "pathlib",
+            "pytest",
+            "re",
+            "shutil",
+            "subprocess",
+            "sys",
+            "types",
+        }
+    )
+
+    def test_this_file_needs_no_conftest(self) -> None:
+        """Its imports are stdlib plus pytest, so it runs on an interpreter with only pytest."""
+        import ast
+
+        source = Path(__file__).read_text(encoding="utf-8")
+        found: set[str] = set()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Import):
+                found.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                found.add(node.module.split(".")[0])
+
+        allowed = {name.split(".")[0] for name in self._ALLOWED}
+        assert found <= allowed, (
+            f"{sorted(found - allowed)} would need installing in the cpp-syntax job, which "
+            f"carries pytest and nothing else. Either keep this file self-contained or make "
+            f"ci.yml install the dev environment -- but not silently, because the job then "
+            f"fails at collection and the redness reads as a packaging problem"
+        )
+
+    def test_it_uses_no_fixture_of_ours(self) -> None:
+        """`--noconftest` also removes our fixtures, so this file may only use pytest's own."""
+        import ast
+
+        ours = {"repository", "server", "settings", "metrics", "device", "ops"}
+        source = Path(__file__).read_text(encoding="utf-8")
+        used: set[str] = set()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+                used.update(arg.arg for arg in node.args.args if arg.arg != "self")
+
+        assert not (used & ours), f"these come from conftest.py: {sorted(used & ours)}"
+        assert used <= {"tmp_path", "monkeypatch", "capsys", "caplog"}, (
+            f"unexpected fixtures {sorted(used)}; only pytest's built-ins survive "
+            f"--noconftest"
+        )
+
 
 @needs_headers
 class TestTheAppsOfflineCannotBuild:
@@ -292,9 +419,10 @@ class TestTheAppsOfflineCannotBuild:
                 failures.append(f"{app.relative_to(ROOT)}:\n  {errors}")
 
         assert not failures, "these do not compile:\n" + "\n".join(failures)
-        # LOUD, because by this job's own thesis a silent skip is the defect. `continue` used
-        # to be the whole story: the job stayed green on a list of three with `bench.cpp`
-        # never compiled, and `-rs` said nothing because no `pytest.skip` was ever called.
+        # ARMOUR, not live coverage: `EXTERNAL` declares lanes only for the two
+        # `ingest/sources` units, so `lanes_of(app)` is empty for every app today and
+        # `skipped` is always empty. The leg that can fire is
+        # `test_no_unit_is_dropped_for_a_missing_lane_where_this_is_required`.
         if os.environ.get(_REQUIRE):
             assert not skipped, (
                 f"these apps were skipped for a missing external lane: {skipped}. Where this "

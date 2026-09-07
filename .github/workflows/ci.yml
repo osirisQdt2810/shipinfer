@@ -158,9 +158,14 @@ jobs:
           # headers, only the runner's package set is short. No runtime, no nvcc, ~40 MB.
           # PINNED to TensorRT 10: this tree has no `NV_TENSORRT_MAJOR` guard, so an
           # unpinned major would break main's CI with no commit to blame.
+          # `libopencv-dev` is not a CUDA header and belongs here anyway: without it
+          # `ingest/sources/replay.cpp` -- one of the eight -- has an unresolvable lane and
+          # falls out of the check, and NOTHING else in CI compiles it (`cpp-gst-lane` covers
+          # `gstreamer.cpp`, not this one). That is this ticket's own thesis, so the ~50 MB is
+          # the price of the ticket being true (#133 round 4).
           sudo apt-get install -y --no-install-recommends \
             cuda-cudart-dev-12-6 "libnvinfer-headers-dev=10.*" \
-            "libnvinfer-headers-plugin-dev=10.*"
+            "libnvinfer-headers-plugin-dev=10.*" libopencv-dev
       - name: Syntax-check every unit the offline build cannot reach
         shell: bash          # -> `bash --noprofile --norc -eo pipefail`, so a pipe cannot mask
         env:
@@ -171,7 +176,21 @@ jobs:
           # reason -- asserted by a test rather than by grepping pytest's `-q` summary, whose
           # shape changes between versions and whose exit status a pipe used to swallow.
           SHIPINFER_REQUIRE_CSRC_HEADERS: "1"
-        run: python -m pytest tests/test_cuda_reaching_apps_compile.py -q -rs -p no:cacheprovider
+        # `--noconftest -c /dev/null`, and NOT because the suite's config is inconvenient.
+        # Every `pytest` in this repo loads `tests/conftest.py`, which imports numpy, pydantic
+        # and -- on the offline path, which is this job's -- torch, and `pyproject.toml`'s
+        # `--strict-config` additionally demands pytest-asyncio and pytest-timeout. This
+        # interpreter is `setup-python`'s, so none of them are here: the job died at COLLECTION
+        # with rc=4 before one `g++ -fsyntax-only` ran, and the redness would have read as a
+        # packaging problem while the eight units stayed compiled by nothing (#133 round 4).
+        #
+        # Installing torch into a headers-only syntax job is ~200 MB for nothing. This file is
+        # deliberately self-contained -- stdlib plus pytest, `tmp_path` and no fixture of ours
+        # -- and `test_this_file_needs_no_conftest` asserts that, so the knob cannot be removed
+        # later without something going red.
+        run: |
+          python -m pytest tests/test_cuda_reaching_apps_compile.py \
+            -q -rs -p no:cacheprovider --noconftest -c /dev/null
 
   cpp-gst-lane:
     name: C++ gst lane (section O + the pixel)
