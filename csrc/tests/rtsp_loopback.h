@@ -232,11 +232,18 @@ namespace shipinfer::testsupport {
 
         // Serve one camera of `width` x `height` at `fps`, looping ten distinct frames.
         //
+        // `bframes` asks for a REORDERED stream with a reference depth of three, which is what
+        // a real camera sends and what the default fixture deliberately is not (`-bf 0` keeps
+        // decode order equal to display order, so a check can assert on frame content). A
+        // decoder's surface pool is sized for reference depth, and too small a pool either
+        // refuses the stream or reuses a picture index still held as a reference -- neither of
+        // which any fixture without this could produce.
+        //
         // Returns "" once the port accepts connections; otherwise the reason this host cannot
         // serve, for a counted skip. **It does not throw and does not check**: "this host has
         // no PyGObject" is not a failure of the code under test, and a test binary that aborted
         // on it would stop being runnable on the driverless host the offline tier exists for.
-        std::string start(int width, int height, int fps);
+        std::string start(int width, int height, int fps, int bframes = 0);
 
         // `rtsp://127.0.0.1:<port>/cam0`; empty until `start` has returned "".
         const std::string& uri() const { return uri_; }
@@ -253,7 +260,7 @@ namespace shipinfer::testsupport {
         std::filesystem::path dir_;
     };
 
-    inline std::string RtspLoopback::start(int width, int height, int fps) {
+    inline std::string RtspLoopback::start(int width, int height, int fps, int bframes) {
         // 1. The server. Found from this binary's own path — `csrc/build/test_ingest` sits two
         //    directories under the repository root — so the test works from a copied tree (the
         //    container run copies `csrc/` and `scripts/` into /tmp) with nothing to configure.
@@ -313,11 +320,11 @@ namespace shipinfer::testsupport {
         // 4. The server itself, which encodes those JPEGs once and packetises them forever.
         port_ = detail::free_port();
         if (port_ <= 0) return "could not get a free TCP port on 127.0.0.1";
-        server_ =
-            detail::spawn({"python3", script, "--streams", "1", "--port", std::to_string(port_),
-                           "--fps", std::to_string(fps), "--data", frames.string(), "--fixture",
-                           (dir_ / "fixture.h264").string()},
-                          log_);
+        server_ = detail::spawn(
+            {"python3", script, "--streams", "1", "--port", std::to_string(port_), "--fps",
+             std::to_string(fps), "--data", frames.string(), "--fixture",
+             (dir_ / "fixture.h264").string(), "--bframes", std::to_string(bframes)},
+            log_);
         if (server_ < 0) return "could not fork the RTSP server";
 
         // 5. Ready when the port answers. A server that exits instead — `python3` without

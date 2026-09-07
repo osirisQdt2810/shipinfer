@@ -2602,6 +2602,341 @@ namespace {
     // *host* one: can this machine serve RTSP at all (ffmpeg, a `python3` with PyGObject, the
     // `gst-rtsp-server` typelib). Either answer being no is a counted skip carrying the reason,
     // never a silent pass: in `shipinfer-gst:jammy` both are yes and these checks run.
+    // Q. A surface in VRAM, over the same real RTSP session
+    // =====================================================================================
+    //
+    // Section P proves a decoded PIXEL arrives on the host. This proves the thing V156 asked
+    // for: a surface that never left the device. Same loopback server, same `SOURCES()` route
+    // (no `sources/nvdec.h` in this file -- the offline-closure invariant holds for three
+    // units now), and the assertions are on the GEOMETRY, because nothing here may dereference
+    // a device pointer: that is `runtime/`'s job and `test_dataplane`'s.
+    //
+    // The one that matters is `uv_offset > pitch * height`. A padded surface is what NVDEC
+    // hands back, and the difference between its coded height and its displayed one is
+    // precisely what `nv12_letterbox_into` cannot infer -- so a source reporting the derived
+    // value would produce right brightness and wrong colour with nothing red anywhere.
+    void test_a_device_surface_over_a_real_rtsp_session() {
+        if (!SOURCES().contains("nvdec")) {
+            skip(
+                "no device surface without the nvdec source: this binary does not link it "
+                "(build with `--with-external nvdec` inside shipinfer-gst:jammy-nvdec)");
+            return;
+        }
+        const int width = 320;
+        // 250 AND NOT 240, deliberately: H.264 codes in 16x16 macroblocks, so 240 is already a
+        // multiple of 16 and its coded height EQUALS its displayed one -- `uv_offset` and
+        // `pitch * height` come out identical and the assertion below cannot fail. 250 is even
+        // (x264 needs that) and rounds up to 256, which is the shape a 1080p camera has when
+        // it codes at 1088. Found by writing the check against 240 first and watching it read
+        // `122880 > 122880`.
+        const int height = 250;
+        const int fps = 15;
+
+        testsupport::RtspLoopback loopback;
+        const std::string unavailable = loopback.start(width, height, fps);
+        if (!unavailable.empty()) {
+            skip("no RTSP loopback on this host: " + unavailable);
+            return;
+        }
+
+        StopSignal stop;
+        FrameCounter counter("nvdec-loopback");
+        IngestConfig config = a_camera("nvdec-loopback");
+        config.uri = loopback.uri();
+        config.source = "nvdec";
+        config.codec = "h264";
+        config.open_timeout_ms = 20000;
+        config.read_timeout_ms = 2000;
+
+        std::unique_ptr<FrameSource> source = create_source(config, counter, stop);
+        std::string failed;
+        try {
+            source->open();
+        } catch (const SourceUnavailableError& error) {
+            // No driver on this box: a counted skip, because "cannot decode here" and "decodes
+            // wrongly" are different answers and only one of them is this check's business.
+            skip(std::string("no NVDEC on this host: ") + error.what());
+            return;
+        } catch (const IngestError& error) {
+            failed = error.what();
+        }
+        check(failed.empty() && source->is_open(), "an nvdec source opens: " + failed);
+        if (!source->is_open()) return;
+
+        // ONE SURFACE AT A TIME, which is the source's contract and not a limitation of this
+        // check: a mapped surface is a slot out of a small pool, and holding three while asking
+        // for a fourth is what `cuvidMapVideoFrame failed` means. A real consumer maps, uses
+        // and releases -- so this keeps the geometry and drops the frame, which is also the
+        // only way to notice that the keepalive really does free the slot.
+        std::vector<DeviceImage> seen;  // geometry only; the owner is released each iteration
+        int delivered = 0;
+        std::string decode_error;
+        const Clock::time_point deadline = Clock::now() + 30s;
+        while (delivered < 3 && Clock::now() < deadline) {
+            try {
+                std::optional<Frame> frame = source->read();
+                if (!frame) continue;
+                ++delivered;
+                if (seen.empty()) {
+                    DeviceImage geometry = frame->device;
+                    geometry.owner.reset();  // keep the numbers, not the slot
+                    seen.push_back(geometry);
+                    check(frame->on_device(),
+                          "the frame is a DEVICE frame, which is the whole point");
+                    check(frame->image.empty(),
+                          "and carries no host image: exactly one is populated");
+                    check(frame->device.owner != nullptr,
+                          "with the keepalive that unmaps the surface");
+                }
+            } catch (const IngestError& error) {
+                decode_error = error.what();
+                break;
+            }
+        }
+        check(decode_error.empty(), "and no read raised: " + decode_error);
+        check(delivered == 3, "and delivers surfaces over the wire: got " +
+                                  std::to_string(delivered) + " of 3 within 30s");
+        if (seen.empty()) return;
+
+        const struct {
+            DeviceImage device;
+        } first{seen.front()};
+        check(first.device.height == height && first.device.width == width,
+              "with the DISPLAY extent the camera sent: " + std::to_string(first.device.width) +
+                  "x" + std::to_string(first.device.height));
+        check(first.device.pitch >= width,
+              "a pitch that can hold a row: " + std::to_string(first.device.pitch));
+        check(first.device.device >= 0, "and the device it belongs to");
+        // THE ASSERTION THIS SECTION EXISTS FOR. `pitch * height` is what a consumer derives
+        // when the carrier does not say; NVDEC's chroma is past that, because the surface is
+        // decoded at a coded height rounded up. 250 rounds to 256 on this fixture.
+        const size_t derived =
+            static_cast<size_t>(first.device.pitch) * static_cast<size_t>(first.device.height);
+        check(first.device.uv_offset > derived,
+              "and a uv_offset PAST the derived one -- the coded height is taller than the "
+              "displayed one: " +
+                  std::to_string(first.device.uv_offset) + " > " + std::to_string(derived));
+        check(first.device.uv_offset % static_cast<size_t>(first.device.pitch) == 0,
+              "and it is a whole number of rows");
+
+        // A SURFACE OUTLIVING ITS SOURCE, which is not hypothetical: `DeviceImage::owner`
+        // exists because a reconnect replaces the source while a worker still holds a frame,
+        // and releasing one calls back into cuvid. Held across the source's destruction on
+        // purpose. Round 1 captured a raw function table here, so this sequence freed the
+        // table and then called through it -- a use-after-free in whichever thread happened
+        // to drop the last frame, which is a crash nowhere near its cause (#156 round 1).
+        std::shared_ptr<const void> outlives;
+        while (!outlives && Clock::now() < deadline) {
+            std::optional<Frame> frame = source->read();
+            if (frame) outlives = frame->device.owner;
+        }
+        check(outlives != nullptr, "one more surface, to hold across the source's destruction");
+        source.reset();  // the decoder, the context lock and the function tables go with it
+        check(outlives.use_count() == 1, "the held surface is the last reference to itself");
+        outlives.reset();  // unmaps, on this thread, through a decoder that must still exist
+
+        // The assertion is not "it did not crash" -- that is what the process surviving says.
+        // It is that the deferred teardown left the DEVICE usable: a second source on the same
+        // GPU opens and decodes, so the primary context was released once and the surface pool
+        // really did go back.
+        std::unique_ptr<FrameSource> again = create_source(config, counter, stop);
+        again->open();
+        bool decoded = false;
+        const Clock::time_point retry = Clock::now() + 30s;
+        while (!decoded && Clock::now() < retry) {
+            if (again->read()) decoded = true;
+        }
+        check(decoded, "and a new source on the same device decodes afterwards");
+        again.reset();
+    }
+
+    // A REORDERED STREAM, which is what a real camera sends and what no fixture here produced
+    // until now: `-bf 3 -refs 3` instead of the default `-bf 0 -tune zerolatency`, whose decode
+    // order equals its display order.
+    //
+    // Two things need it. Round 1's one-slot `ready` overwrote a picture per reorder flush and
+    // counted it into a field nothing read, so a B-frame camera delivered a fraction of its fps
+    // with `frames_read` climbing and health saying Streaming -- and a stream with no
+    // reordering can never show that. And a decode-surface pool is sized for REFERENCE DEPTH,
+    // which is the other thing `-bf 0` hides.
+    //
+    // The assertion is a RATE, because that is the observable: every displayable picture
+    // arrives, so five seconds of a 15 fps stream is ~75 frames. With one slot the group of
+    // four collapses to one and the same window yields well under half of that.
+    void test_a_reordered_stream_delivers_every_picture() {
+        if (!SOURCES().contains("nvdec")) {
+            skip("no nvdec source in this binary (see the section above)");
+            return;
+        }
+        const int fps = 15;
+        const double window = 5.0;
+        testsupport::RtspLoopback loopback;
+        const std::string missing = loopback.start(320, 250, fps, /*bframes=*/3);
+        if (!missing.empty()) {
+            skip("no RTSP loopback on this host: " + missing);
+            return;
+        }
+        FrameCounter counter("nvdec-reordered");
+        StopSignal stop;
+        IngestConfig config = a_camera("nvdec-reordered");
+        config.uri = loopback.uri();
+        config.source = "nvdec";
+        config.codec = "h264";
+        config.open_timeout_ms = 20000;
+        config.read_timeout_ms = 2000;
+        // ONE surface asked for, deliberately: the knob is a floor and the sequence callback
+        // raises it to the stream's own `min_num_decode_surfaces` (NVIDIA's `NvDecoder` returns
+        // that value from the callback for the same reason). A ceiling here would either have
+        // `cuvidCreateDecoder` refuse this stream or leave the parser reusing a picture index
+        // that is still a reference.
+        config.options["surfaces"] = "1";
+        std::unique_ptr<FrameSource> source = create_source(config, counter, stop);
+        try {
+            source->open();
+        } catch (const SourceUnavailableError& error) {
+            skip(std::string("no NVDEC on this host: ") + error.what());
+            return;
+        }
+        std::string raised;
+        int delivered = 0;
+        // Warm up past the first IDR before the clock starts, so the connect and the first GOP
+        // are not counted against the rate.
+        const Clock::time_point ready = Clock::now() + 30s;
+        while (delivered == 0 && Clock::now() < ready) {
+            if (source->read()) delivered = 1;
+        }
+        check(delivered == 1, "a reordered stream decodes at all, on a floored surface pool");
+        delivered = 0;
+        const Clock::time_point until =
+            Clock::now() + std::chrono::milliseconds(static_cast<int>(window * 1000));
+        while (Clock::now() < until) {
+            try {
+                if (source->read()) ++delivered;
+            } catch (const IngestError& error) {
+                raised = error.what();
+                break;
+            }
+        }
+        const int expected = static_cast<int>(fps * window);
+        check(raised.empty(), "and no read raised over the window: " + raised);
+        check(delivered * 2 >= expected,
+              "and every displayed picture arrives -- a one-slot decoder loses the reorder "
+              "flush: " +
+                  std::to_string(delivered) + " frames in " + std::to_string(window) +
+                  "s of a " + std::to_string(fps) +
+                  " fps stream (want >= " + std::to_string(expected / 2) + ")");
+        // Printed, not only asserted, the way section P prints its PIXEL line: the number is
+        // the evidence, and a threshold that passes tells you nothing about the margin.
+        std::printf("REORDERED: %d frames in %.0fs of a %d fps B-frame stream (want >= %d)\n",
+                    delivered, window, fps, expected / 2);
+        source.reset();
+        loopback.stop();
+    }
+
+    // The two ways a stream stops being usable, which a pull timeout alone cannot tell apart --
+    // and telling them apart wrongly is the whole of #156 round 1's GStreamer half. An
+    // unreachable camera must FAIL TO OPEN (counted, backed off, visible in health) rather than
+    // report success and never deliver; a camera that breaks mid-stream must raise with the
+    // peer's own reason rather than go quiet and be diagnosed as a slow network five empty
+    // reads later.
+    void test_an_unreachable_camera_and_a_broken_one_are_told_apart() {
+        if (!SOURCES().contains("nvdec")) {
+            skip("no nvdec source in this binary (see the section above)");
+            return;
+        }
+        StopSignal stop;
+
+        // -- unreachable: nothing is listening, and no server is needed to prove it ---------
+        // A counter is named for its camera and refuses any other, so each half brings its own.
+        FrameCounter dead_counter("nvdec-unreachable");
+        IngestConfig unreachable = a_camera("nvdec-unreachable");
+        unreachable.uri = "rtsp://127.0.0.1:9/none";  // the discard port: refused, not filtered
+        unreachable.source = "nvdec";
+        unreachable.codec = "h264";
+        unreachable.open_timeout_ms = 4000;
+        std::unique_ptr<FrameSource> dead = create_source(unreachable, dead_counter, stop);
+        std::string opened_anyway;
+        try {
+            dead->open();
+            opened_anyway = "open() returned";
+        } catch (const SourceUnavailableError& error) {
+            skip(std::string("no NVDEC on this host: ") + error.what());
+            return;
+        } catch (const SourceOpenError&) {
+            // The retryable answer, which is the right one: PLAYING is asynchronous, so
+            // `rtspsrc` has not sent DESCRIBE when `set_state` returns and ASYNC says nothing
+            // about the URI, the credential or the route.
+        }
+        check(opened_anyway.empty() && !dead->is_open(),
+              "an unreachable camera fails open() rather than reporting success: " +
+                  opened_anyway);
+
+        // -- broken mid-stream: open on a real server, then take the server away ------------
+        testsupport::RtspLoopback loopback;
+        const std::string missing = loopback.start(320, 250, 15);
+        if (!missing.empty()) {
+            skip("no RTSP loopback on this host: " + missing);
+            return;
+        }
+        FrameCounter counter("nvdec-broken");
+        IngestConfig config = a_camera("nvdec-broken");
+        config.uri = loopback.uri();
+        config.source = "nvdec";
+        config.codec = "h264";
+        config.open_timeout_ms = 20000;
+        config.read_timeout_ms = 1000;
+        std::unique_ptr<FrameSource> source = create_source(config, counter, stop);
+        source->open();
+        check(source->is_open(), "a reachable one opens");
+
+        const Clock::time_point first_frame = Clock::now() + 30s;
+        bool streaming = false;
+        while (!streaming && Clock::now() < first_frame) {
+            if (source->read()) streaming = true;
+        }
+        check(streaming, "and streams");
+        loopback.stop();
+
+        std::string reason;
+        const Clock::time_point deadline = Clock::now() + 20s;
+        while (reason.empty() && Clock::now() < deadline) {
+            try {
+                source->read();
+            } catch (const IngestError& error) {
+                reason = error.what();
+            }
+        }
+        // The bus is the only place the peer's own words are. Without draining it the reads
+        // just return "nothing yet" and the reconnect happens through the empty-read budget,
+        // wearing the wrong diagnosis.
+        check(!reason.empty(),
+              "and a server that goes away raises rather than going quiet: " + reason);
+
+        // THE READ TIMEOUT IS A KNOB, not a constant. Round 1 pulled with a hardcoded 100 ms,
+        // which against `empty_reads_before_reconnect` (5) tears a camera down in half a second
+        // -- before a 2 s GOP has delivered its first picture. Timed on a read that comes back
+        // EMPTY: the peer's messages are off the bus by then, so that read spends its whole
+        // deadline waiting and its duration is the knob, observable from out here.
+        double waited = -1.0;
+        for (int attempt = 0; attempt < 6 && waited < 0.0; ++attempt) {
+            const Clock::time_point started = Clock::now();
+            try {
+                if (!source->read()) {
+                    waited = std::chrono::duration<double>(Clock::now() - started).count();
+                }
+            } catch (const IngestError&) {
+                continue;  // more of the peer's words; the bus empties in a bounded number
+            }
+        }
+        const double budget = 0.8 * config.read_timeout_ms / 1000.0;
+        check(waited > budget,
+              "and an empty read spends read_timeout_ms rather than a "
+              "constant: waited " +
+                  std::to_string(waited) + "s of a " + std::to_string(config.read_timeout_ms) +
+                  "ms budget");
+        source.reset();
+    }
+
     void test_a_decoded_pixel_over_a_real_rtsp_session() {
         if (!SOURCES().contains("gstreamer")) {
             skip(
@@ -2814,6 +3149,9 @@ int main() {
     test_a_missing_source_and_an_omitted_lane_are_different_questions();
     test_the_gstreamer_source_where_it_is_linked();
     test_a_decoded_pixel_over_a_real_rtsp_session();
+    test_a_device_surface_over_a_real_rtsp_session();
+    test_an_unreachable_camera_and_a_broken_one_are_told_apart();
+    test_a_reordered_stream_delivers_every_picture();
 
     std::printf("%d checks, %d failure(s), %d skipped\n", checks, failures, skips);
     return failures == 0 ? 0 : 1;

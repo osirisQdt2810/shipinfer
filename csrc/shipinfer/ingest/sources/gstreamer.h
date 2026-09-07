@@ -95,9 +95,6 @@ namespace shipinfer {
         // *negotiated* size rather than the requested one is what makes a silently ignored
         // `width`/`height` visible.
         void negotiate_from_appsink();
-        // Ask the bus why a read came back empty. A timeout means "keep waiting"; an EOS or an
-        // ERROR means this stream is over, and throws.
-        void raise_if_stream_ended();
 
         struct Graph;
         std::unique_ptr<Graph> graph_;
