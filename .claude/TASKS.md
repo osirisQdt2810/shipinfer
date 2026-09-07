@@ -2811,11 +2811,38 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
 
 ---
 
-- [!] **CI-SYNTAX-COVERAGE-GAPS · DONE, ON #162, SO IT MERGES WHEN THAT DOES.** Same ask as
-      `CI-CPP-JOBS-ARE-POST-MERGE` above and the same PR: nothing here needs work, it needs
-      the manual merge that a `.github/workflows/**` change cannot get from auto-merge.
+- [x] **CI-SYNTAX-COVERAGE-GAPS · DONE 7 Sep, folded into #162 (which needs a manual merge --
+      it edits `.github/workflows/**`).** All three, each with a revert-check:
+      (1) `_uncompiled_units()`'s predicate is now "IN NO BUILT CLOSURE" rather than "not
+          offline-ready", which is the ticket's own thesis. `obs/sampler.cpp` is offline-READY,
+          so the old predicate filtered it out, and no app the offline build compiles reaches
+          it -- **one unit, compiled by nothing, excluded from the check that exists to find
+          exactly that**. Verified by enumeration before changing anything: it is the ONLY such
+          unit. The deferral's worry (the wider set brings in units needing no CUDA headers
+          while the class is `needs_headers`-gated) is answered by SPLITTING the class:
+          `TestTheDriverlessUnitsNothingCompiles` runs wherever `g++` does, which is more
+          coverage rather than less. REVERT: `obs/sampler.cpp is compiled by nothing`.
+      (2) `_headers_available()` no longer runs at import. A `skipif` evaluates its condition
+          AND its reason then, and both shell out to `g++`, so a plain offline `pytest` paid a
+          compiler spawn for classes it was about to skip. It is a session fixture now, and
+          `test_nothing_probes_the_compiler_at_import` walks the AST for a module-level call --
+          REVERT: `['_headers_available'] runs at import`.
+      (3) the compile legs carry `-Wall -Wextra` and `-DSHIPINFER_OMITTED_LANES`, the latter
+          derived from the lanes `pkg-config` can actually resolve HERE rather than
+          `frozenset()`, which would have told a unit compiled WITH opencv that opencv was
+          omitted. Gated by compiling a unit that `#error`s without the define, because reading
+          the flag list back would only restate `_build_flags`. REVERT: the `#error` fires.
+      AND THE SAME FILE'S DROP GUARD HAD BEEN RED ON MAIN SINCE 15:52, which I did not notice
+      until this item made me run it with `SHIPINFER_REQUIRE_CSRC_HEADERS=1`: #156 landed the
+      `nvdec` lane and nothing in CI could resolve `ffnvcodec`, so `nvdec.cpp` was dropped for a
+      missing lane and `cpp-syntax` failed. **Five consecutive red runs on main.** The fix keeps
+      the guard's meaning rather than silencing it: `cpp-gst-lane` installs
+      `libffmpeg-nvenc-dev` and BUILDS `--with-external nvdec` (it already carries GStreamer,
+      which that lane also needs), and `nvdec` joins `gstreamer` in `_COVERED_ELSEWHERE` with
+      that job named beside it. `libnvcuvid` is not needed: the unit dlopen's it, which is why
+      it builds on a runner with no GPU.
       ORIGINAL: two non-blocking findings from #133 round 3, kept rather
-      than folded into a round-4 fix.**
+      than folded into a round-4 fix.
       (1) `csrc/shipinfer/obs/sampler.cpp` is compiled by NOTHING. It IS `offline_ready`, so no
       app's closure reaches it and `cpp-offline` never builds it -- and `_uncompiled_units()`
       filters to `not offline_ready`, so the new syntax leg excludes it BY CONSTRUCTION. The

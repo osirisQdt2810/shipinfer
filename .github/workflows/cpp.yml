@@ -146,16 +146,26 @@ jobs:
       # python that can see apt's python3-gi/gir typelibs. ModuleNotFoundError: 'gi', the
       # pixel skips, and the grep gate goes red exactly as designed. The system python3 on
       # ubuntu-latest runs build_csrc.py fine.
-      - name: Install the gstreamer lane's packages
-        # The dev pair is what `--with-external gstreamer` pkg-configs; the rest is what
-        # section P's loopback needs at runtime: the RTSP server (PyGObject + its typelib),
-        # software decode for the h264 stream, and ffmpeg for the JPEG fixtures. Mirrors
-        # deploy/rootless/gst-image.sh minus the DeepStream-adjacent extras.
+      - name: Install the gstreamer and nvdec lanes' packages
+        # The dev pair is what `--with-external gstreamer` pkg-configs and
+        # `libffmpeg-nvenc-dev` (nv-codec-headers) is what `--with-external nvdec` adds; the
+        # rest is what section P's loopback needs at runtime: the RTSP server (PyGObject + its
+        # typelib), software decode for the h264 stream, and ffmpeg for the JPEG fixtures.
+        # Mirrors deploy/rootless/gst-image.sh minus the DeepStream-adjacent extras.
+        #
+        # THE NVDEC LANE IS HERE AND NOT IN `cpp-syntax` because this job already carries
+        # GStreamer, which that lane also needs, and because BUILDING it is stronger than a
+        # syntax check. It landed with #156 and nothing in CI could resolve `ffnvcodec`, so
+        # `cpp-syntax`'s own drop guard failed and main was red for five runs before anyone
+        # looked. `libnvcuvid` is a DRIVER library and is NOT needed: the unit dlopen's it at
+        # run time, which is the whole reason it can be built on a runner with no GPU.
         run: |
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev             gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad             gstreamer1.0-libav gstreamer1.0-rtsp             python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0             gir1.2-gst-rtsp-server-1.0 ffmpeg
-      - name: Build the gst lane (still g++ alone — no CUDA, no TensorRT)
-        run: python scripts/build_csrc.py --offline --with-external gstreamer
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev             gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad             gstreamer1.0-libav gstreamer1.0-rtsp             python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0             gir1.2-gst-rtsp-server-1.0 ffmpeg libffmpeg-nvenc-dev
+      - name: Build both lanes (still g++ alone — no CUDA, no TensorRT, no driver)
+        run: |
+          python scripts/build_csrc.py --offline \
+            --with-external gstreamer --with-external nvdec
       - name: Run it, and require the pixel
         # `grep PIXEL` is load-bearing: a run where section P silently skipped would still
         # print a green count, and a green count that looked at no pixel is the failure
