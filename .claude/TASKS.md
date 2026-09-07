@@ -3088,6 +3088,36 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       non-16-multiple height still earns its place, for the opposite reason to the one #156
       gave: the surface's plane is `pitch * 250` while the stream codes at 256, so a source
       reporting the coded value is caught rather than agreeing by coincidence.
+      ROUND 2 FOUND TWO MORE COPIES OF THE WRONG CLAIM, and both were worse places than the
+      ones I had fixed. `runtime/ops.cu`'s guard printed "pass `stride * coded_height` for an
+      NVDEC surface" ON THE FAILURE PATH -- remediation advice pointing at the faulting value,
+      so the next producer to trip that guard would have followed the message straight into the
+      bug I had just measured. And `ingest/frame.h`, the DECLARATION SITE of the field, still
+      stated the inverted rule in capitals: the first thing a new `DeviceImage` producer reads.
+      Both corrected with the measurement; the prose copies in `test_device_frame.cpp` and
+      `test_ingest.cpp` too. The reviewer's argument for blocking is the one I had used myself
+      one round earlier -- leaving one copy standing is how it comes back -- and `frame.h` is
+      more load-bearing than the `state.h` copy I had reached into #158 to fix.
+      NOTED, and both are real limits rather than fixes: `uv_offset == pitch * height` in
+      section Q is a tautology against the current source (both sides trace to
+      `display_height`), earning its place only as a pin against reintroducing the coded value
+      -- and it cannot catch a producer that gets height and offset wrong together. And
+      `DeviceImage::empty()` refuses an offset INSIDE the luma plane and accepts anything at or
+      above it, so a producer wrong UPWARD is caught by nothing until something reads the bytes.
+      That is exactly what happened, and `test_device_frame.cpp` now says so where it asserts
+      the limit.
+- [ ] **NVDEC-SECTION-ORDER-HAS-NO-GUARD · #159 round 2, note 3.** `test_ingest.cpp`'s NVDEC
+      sections run before anything else in that binary touches GStreamer, and that ORDER is what
+      makes a missing `initialise_gstreamer()` visible -- but the only thing holding it is a
+      comment saying "do not move these back down", which is what #156 relied on too. That file
+      is not gst-linked so it cannot assert `!gst_is_initialized()` itself; the reviewer's
+      suggestion is a text-order assertion in `tests/test_build_csrc.py` (the three NVDEC calls
+      appear in `main()` before any call whose body reaches the gst lane), which would fail on a
+      plain runner rather than only inside `jammy-nvdec`. Deferred out of #159 on the reviewer's
+      own advice ("worth considering with the carrier work, not here"): the mechanical part is
+      deciding what "reaches the gst lane" means from text without a hand-kept list, which is
+      the two-place edit the lane-table checks exist to avoid.
+
       LEFT: the CARRIER, and #156 round 2 asked for its plan in writing rather than at the
       design load, which is fair -- so: `ulNumOutputSurfaces = 2` caps in-flight surfaces per
       camera at two, and a fair queue exists to HOLD frames, so a surface must not travel

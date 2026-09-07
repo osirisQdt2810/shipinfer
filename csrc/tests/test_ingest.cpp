@@ -1010,7 +1010,7 @@ namespace {
             image.height = 1080;
             image.width = 1920;
             image.pitch = 2048;
-            image.uv_offset = 2048ULL * 1088;  // the CODED height, as NVDEC reports it
+            image.uv_offset = 2048ULL * 1080;  // one luma plane, which is what NVDEC reports
             image.device = 0;
             return image;
         }

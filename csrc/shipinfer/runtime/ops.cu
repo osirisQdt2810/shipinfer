@@ -258,9 +258,10 @@ namespace shipinfer {
         }
 
         // The layout rule, shared by both NV12 entry points so they cannot disagree about
-        // what a surface is. Refused rather than clamped: the plausible `uv_offset` values are
-        // `stride * src_h` (tight) and `stride * coded_h` (NVDEC), and anything smaller is a
-        // mis-filled surface whose chroma overlaps its own luma.
+        // what a surface is. Refused rather than clamped: `stride * src_h` is where the chroma
+        // plane begins for every producer in this tree -- a tight buffer and a
+        // `cuvidMapVideoFrame` output surface alike -- and anything smaller is a mis-filled
+        // surface whose chroma overlaps its own luma.
         void require_nv12_layout(const char* who, int src_h, int src_w, int stride,
                                  size_t uv_offset) {
             if (stride < src_w) {
@@ -272,8 +273,8 @@ namespace shipinfer {
                 throw ConfigError(std::string(who) + ": uv_offset " +
                                   std::to_string(uv_offset) + " is inside the luma plane (" +
                                   std::to_string(stride) + " x " + std::to_string(src_h) +
-                                  "); pass `stride * src_h` for a tight buffer or "
-                                  "`stride * coded_height` for an NVDEC surface");
+                                  "); pass `stride * src_h` -- which is the answer for a "
+                                  "tight buffer and for a mapped decoder surface alike");
             }
         }
 
