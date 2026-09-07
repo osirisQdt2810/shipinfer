@@ -1,3 +1,4 @@
+// doc: long why this left `cli/bench.cpp`, which is the reason it can be tested at all
 // ONE FRAME'S WORTH OF SCHEDULED WORK, and the sink that makes it.
 //
 // Lifted out of `cli/bench.cpp` so it can be tested. It was an anonymous-namespace type in a
@@ -66,30 +67,44 @@ namespace shipinfer {
     // (ADR-005).
     class QueueSink : public FrameSink {
       public:
-        QueueSink(FairPriorityQueue<FrameWork>& queue, size_t pooled, size_t devices)
-            : queue_(queue), pooled_(pooled), devices_(devices) {}
+        // `devices` is the GPU list this process drives, in `--devices` order. The SET and not
+        // the count, because what makes a device frame unusable is not how many GPUs a process
+        // has -- it is whether the frame's GPU is one of them.
+        QueueSink(FairPriorityQueue<FrameWork>& queue, size_t pooled, std::vector<int> devices)
+            : queue_(queue), pooled_(pooled), devices_(std::move(devices)) {}
 
         void put(Frame&& frame) override {
             FrameWork work;
             work.tag = frame.tag;
             if (frame.on_device()) {
-                // ONE PROCESS, ONE GPU, for a device frame -- and it is ADR-004 rather than a
-                // shortcut: a frame stays where it was decoded, so a worker on another GPU
-                // cannot take it, and this bench's ONE fleet-wide fair queue is what lets any
-                // worker take any frame (which is the property that makes it fair across
-                // cameras rather than within a device). The deployment shape already resolves
-                // it: `--runner fleet` is one shard process per GPU, so a camera is decoded and
-                // processed on the same one. Refused HERE, in the sink, so `CameraActor` stops
-                // the camera with the reason in health instead of failing every frame.
-                if (devices_ > 1) {
+                // doc: long the predicate this needs, and the one it had
+                // A DEVICE FRAME MUST BE ON A GPU THIS PROCESS DRIVES, and it is ADR-004 rather
+                // than a shortcut: a frame stays where it was decoded, so a worker on another
+                // GPU cannot take it, while this bench's ONE fleet-wide queue is what lets any
+                // worker take any frame (the property that makes it fair across cameras rather
+                // than within a device). One process, one GPU, for the device path; the
+                // deployment shape already resolves it -- `--runner fleet` is one shard per
+                // GPU.
+                //
+                // THE SET, NOT THE COUNT. The first version refused on `devices > 1`, which
+                // cannot see the case it exists for: `--devices 3 --source nvdec` on this box
+                // (an ordinary choice when gpu0 is busy) has every camera decoding on gpu0
+                // because nothing sets their `device` option, `devices == 1` so the sink
+                // accepts, and the worker bound to gpu3 then throws per frame, forever -- the
+                // exact outcome this refusal exists to replace with one health line.
+                if (std::find(devices_.begin(), devices_.end(), frame.device.device) ==
+                    devices_.end()) {
+                    std::string given;
+                    for (int device : devices_) {
+                        given += (given.empty() ? "" : ",") + std::to_string(device);
+                    }
                     throw ConfigError(
-                        "camera '" + frame.tag.camera_id +
-                        "': a device frame cannot be scheduled across " +
-                        std::to_string(devices_) +
-                        " GPUs from one process -- the frame stays where it was decoded "
-                        "(ADR-004) and this queue is fleet-wide. Use `--runner fleet` (one "
-                        "process per GPU) for the multi-GPU shape, or give this bench a "
-                        "single `--devices`");
+                        "camera '" + frame.tag.camera_id + "': its frames are decoded on gpu" +
+                        std::to_string(frame.device.device) +
+                        ", which this process does not drive (it has " + given +
+                        ") -- a frame stays where it was decoded (ADR-004). Point the camera's "
+                        "`device` option at one of those, or run one process per GPU "
+                        "(`--runner fleet`)");
                 }
                 // COPIED OUT HERE, on the actor's thread, and the decode slot given back
                 // before this frame is queued -- `pipeline/surface_intake.h` argues why at
@@ -159,8 +174,9 @@ namespace shipinfer {
         //: stayed for the life of the run. `pipeline_pool_size` in the occupancy log is how a
         //: run says which of us is right.
         size_t pooled_;
-        //: How many GPUs this process drives. A device frame needs exactly one; see `put`.
-        size_t devices_;
+        //: The GPUs this process drives, in `--devices` order. A device frame must be on one
+        //: of them; see `put`.
+        std::vector<int> devices_;
         mutable std::mutex intakes_mutex_;
         std::map<int, std::shared_ptr<SurfaceIntake>> intakes_;
     };

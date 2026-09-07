@@ -20,14 +20,13 @@ namespace shipinfer {
 
     void SurfaceIntake::give_back(std::unique_ptr<DeviceBuffer> buffer) {
         std::lock_guard<std::mutex> lock(mutex_);
-        std::vector<std::unique_ptr<DeviceBuffer>>& bucket = free_[buffer->bytes()];
-        if (bucket.size() >= max_pooled_) {
-            // Freed instead, and its empty bucket with it -- a size nothing is holding must not
-            // leave a map entry behind for the life of the process.
-            if (bucket.empty()) free_.erase(buffer->bytes());
-            return;
+        auto bucket = free_.find(buffer->bytes());
+        if (bucket == free_.end()) {
+            free_.emplace(buffer->bytes(), std::vector<std::unique_ptr<DeviceBuffer>>{});
+            bucket = free_.find(buffer->bytes());
         }
-        bucket.push_back(std::move(buffer));
+        if (bucket->second.size() >= max_pooled_) return;  // freed instead of pooled
+        bucket->second.push_back(std::move(buffer));
     }
 
     DeviceSurface SurfaceIntake::take(const std::shared_ptr<SurfaceIntake>& self,
@@ -61,7 +60,6 @@ namespace shipinfer {
             if (bucket != self->free_.end() && !bucket->second.empty()) {
                 buffer = std::move(bucket->second.back());
                 bucket->second.pop_back();
-                if (bucket->second.empty()) self->free_.erase(bucket);
             }
         }
         if (!buffer) buffer = std::make_unique<DeviceBuffer>(bytes);

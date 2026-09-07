@@ -439,6 +439,7 @@ int main(int argc, char** argv) {
                 if (why == DropReason::Closed) unread_at_stop.fetch_add(1);
             });
 
+        // doc: long the declaration order is load-bearing here, and #160 got it backwards
         // DECLARED HERE, before the sampler that reports its pool and before the
         // `JoinOnUnwind` that stops the workers -- so it is destroyed AFTER them. The surfaces
         // hold their pool through a `shared_ptr` (`pipeline/surface_intake.h`), which makes the
@@ -457,7 +458,7 @@ int main(int argc, char** argv) {
                        static_cast<size_t>(std::max<int>(
                            1, tuning.workers / static_cast<int>(options.devices.size()))) +
                            8,
-                       options.devices.size());
+                       options.devices);
 
         // -- the sampler: the same log shape as the other two systems ---------------------
         OccupancySampler sampler(
@@ -643,6 +644,14 @@ int main(int argc, char** argv) {
                                       : uris[static_cast<size_t>(c)];
             camera.source = options.source;
             camera.fps = options.fps;
+            // WHICH GPU DECODES, and it has to be said rather than defaulted: a device source
+            // takes it from this option and its default is 0, so `--devices 3` had every camera
+            // decoding on a GPU this process does not drive. Only for a source that produces
+            // device frames, because the others refuse an option they do not know.
+            if (SOURCES().produces_device_frames(options.source)) {
+                camera.options["device"] = std::to_string(
+                    options.devices[static_cast<size_t>(c) % options.devices.size()]);
+            }
             fleet.push_back(std::move(camera));
         }
         IngestManager manager(std::move(fleet), sink);

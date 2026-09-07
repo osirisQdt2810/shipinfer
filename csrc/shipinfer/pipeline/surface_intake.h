@@ -1,3 +1,4 @@
+// doc: long the copy is the design decision here, and it needs its alternatives stated
 // A DECODER'S SURFACE IN, A SURFACE THE PIPELINE OWNS OUT — and the decoder's slot back at
 // once.
 //
@@ -35,6 +36,7 @@
 
 namespace shipinfer {
 
+    // doc: long the thread contract and the lifetime contract, both of which shipped wrong
     // ONE GPU'S intake, shared by every camera decoding on it -- so `take` is called
     // concurrently by every one of those actor threads, and everything shared is under
     // `mutex_`. (It said "one camera's intake, not thread-safe to call" when this landed, which
@@ -48,6 +50,13 @@ namespace shipinfer {
     // workers, so a throw between `manager.start()` and `queue.close()` destroys the pool while
     // worker threads still hold surfaces, and every deleter then locks a destroyed mutex. There
     // is no cycle to worry about: the free list holds buffers, never surfaces.
+    // doc: long why this is not `WorkerScratch`, which is the other device-buffer pool here
+    // WHY NOT `WorkerScratch` (`pipeline/graph/stages.h`), which also reuses `DeviceBuffer`s
+    // under a cap: it is single-threaded by design (one worker owns one, ADR-002), it keys by
+    // NAME rather than by size, and it THROWS past its cap. An ingest-side pool can accept none
+    // of the three -- every camera on a GPU shares this one, a mixed-resolution fleet needs the
+    // size to be the key, and a burst must free a buffer rather than fail a frame. Same
+    // primitive, different contract; a shared base would be one class with two behaviours.
     class SurfaceIntake {
       public:
         // `device` is the GPU the decoder is on, and the one every buffer is allocated on: a
@@ -86,8 +95,16 @@ namespace shipinfer {
         int device_;
         size_t max_pooled_;
         mutable std::mutex mutex_;
-        //: Size -> the buffers of that size waiting to be reused. A resolution change retires
-        //: only its own bucket, and a fleet of two resolutions gets pool hits for both.
+        //: Size -> the buffers of that size waiting to be reused, so a fleet of two
+        //: resolutions gets pool hits for both instead of retiring each other's.
+        //:
+        //: NOTHING RETIRES A STALE BUCKET, and that is a decision rather than an omission: a
+        //: camera that reconnects at a new resolution leaves its old size pooled for the run.
+        //: Bounded -- `max_pooled` x distinct sizes x frame bytes, so ~93 MB per stale 1080p
+        //: bucket at the derived cap -- and a source refuses a resolution change mid-stream,
+        //: so a size only appears across a reconnect. A retirement rule needs a
+        //: least-recently-taken clock to avoid dropping a bucket a camera still wants, which
+        //: is more machinery than a bounded, stated cost is worth until a run shows otherwise.
         std::map<size_t, std::vector<std::unique_ptr<DeviceBuffer>>> free_;
     };
 

@@ -38,11 +38,12 @@
 namespace shipinfer {
 
     void SourceRegistry::add(const std::string& name, const std::vector<std::string>& aliases,
-                             const std::string& description, SourceFactory factory) {
+                             const std::string& description, SourceFactory factory,
+                             bool device_frames) {
         if (entries_.count(name) != 0 || by_alias_.count(name) != 0) {
             throw ConfigError("video source " + name + " is registered twice");
         }
-        entries_[name] = Entry{description, std::move(factory)};
+        entries_[name] = Entry{description, std::move(factory), device_frames};
         for (const std::string& alias : aliases) {
             if (entries_.count(alias) != 0 || by_alias_.count(alias) != 0) {
                 throw ConfigError("video source alias " + alias + " is already taken");
@@ -75,6 +76,13 @@ namespace shipinfer {
 
     bool SourceRegistry::contains(const std::string& name) const {
         return entries_.count(name) != 0 || by_alias_.count(name) != 0;
+    }
+
+    bool SourceRegistry::produces_device_frames(const std::string& name) const {
+        // Through `canonical`, so an alias answers the same as the name and an unknown one
+        // gets that function's message with the alternatives in it rather than a bare `false`
+        // -- which a caller would read as "this source hands over host frames".
+        return entries_.at(canonical(name)).device_frames;
     }
 
     std::unique_ptr<FrameSource> SourceRegistry::build(const std::string& name,
