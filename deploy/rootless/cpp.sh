@@ -27,6 +27,19 @@ if [ ! -d "$TRT_DIR/lib" ]; then
   exit 1
 fi
 
+# The container's command. Normally the built binary; `SHIPINFER_CPP_COMMAND` replaces it so a
+# run that needs SOMETHING ELSE IN THE SAME CONTAINER can have it -- an RTSP bench has to start
+# its own servers on loopback, and a second container cannot be reached from this one (the
+# rootless daemon runs --skip-iptables, so the bridge has no NAT: see `_container.sh`). One
+# knob and one container beats a second entry point that drifts from this one.
+if [ -n "${SHIPINFER_CPP_COMMAND:-}" ]; then
+  # Deliberately word-split: the value is a command line, not a path.
+  # shellcheck disable=SC2206
+  CPP_COMMAND=(${SHIPINFER_CPP_COMMAND})
+else
+  CPP_COMMAND=("/work/csrc/build/${SHIPINFER_CPP_BINARY:-bench}")
+fi
+
 mount_libs=()
 path_libs=""
 if [ -d "$LIBS" ]; then
@@ -41,4 +54,4 @@ exec docker run --rm --pid=host "${GPU_DEVICES[@]}" \
   -v "$TRT_DIR:/tensorrt:ro" \
   "${mount_libs[@]}" \
   -w /work "$IMAGE" \
-  "/work/csrc/build/${SHIPINFER_CPP_BINARY:-bench}" "$@"
+  "${CPP_COMMAND[@]}" "$@"

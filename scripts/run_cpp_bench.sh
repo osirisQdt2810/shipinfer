@@ -59,8 +59,24 @@ SHIPINFER_PIPELINE__WORKERS="${SHIPINFER_BENCH_WORKERS:-$((WORKERS_PER_GPU * NGP
 
 # `set -e` would abort on a non-zero exit before the status is printed, so the run that most
 # needs reading — a timeout (124), a crash — would leave no line and no summary. Capture it.
+# R55/V156: the source is a knob because the mandate is RTSP, and `replay` is the shape the
+# host build can run (its gstreamer lane needs `libgstreamer1.0-dev`, which only the bench
+# image has). `gstreamer` routes through `cpp_bench_over_rtsp.sh`, which starts the servers in
+# the SAME container and hands the bench one URI per camera.
+SOURCE="${SHIPINFER_BENCH_SOURCE:-replay}"
+if [ "$SOURCE" = "replay" ]; then
+  SOURCE_ARGS=(--source replay)
+else
+  SOURCE_ARGS=(--source "$SOURCE")
+  # The wrapper reads `--cameras`/`--fps` off the argv below rather than from the environment,
+  # so nothing has to be threaded through `docker run` and the servers cannot disagree with
+  # the fleet.
+  export SHIPINFER_CPP_COMMAND="bash /work/scripts/cpp_bench_over_rtsp.sh"
+fi
+
 status=0
 timeout "${SHIPINFER_BENCH_TIMEOUT:-900}" "$REPO/deploy/rootless/cpp.sh" \
+  "${SOURCE_ARGS[@]}" \
   --person-frames /work/benchmarks/baseline/data/person_2K \
   --ship-frames   /work/benchmarks/baseline/data/ship_2K \
   --plan          "/work/.artifacts/cpp/${LABEL}.plan" \
