@@ -3035,8 +3035,35 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       accumulate a reorder buffer, so a multi-display parse never happens on this stream. Both
       fixes are kept on the reference implementation's authority and on the field cuvid
       provides, not on a red test, and the PR body says so.
-      LEFT: the graph branch to `nv12_letterbox_into`, which `QueueSink`'s refusal is holding
-      the door for, and then the design-load run.**
+      THE GRAPH READS A SURFACE, 7 Sep on `feat/graph-nv12-pixels`, and the shape is ONE SEAM
+      rather than a branch per stage. `pipeline/graph/pixels.h` -- `letterbox_frame` and
+      `crop_frame` -- is the only place the two representations are told apart; `DetectStage`
+      and `CropStage` call it and no longer name an op. That was the design question worth
+      getting right: the alternative branches in two stages today and in every stage that needs
+      pixels later, so a third representation (P016 for a 10-bit camera, or a decoder handing
+      back RGBA) could arrive half-wired. `FrameState::DeviceSurface` carries the pointer, the
+      stride and `uv_offset` -- carried and not derived, for #155's reason -- plus the
+      keepalive, and `has_pixels()` is what makes `FRAME_INPUT` true for either. That last one
+      is the silent failure: with `image_` alone an NV12 frame looks like a frame with no
+      pixels, so the planner skips the detector on every frame and produces complete frames
+      with no detections, every count downstream agreeing with itself.
+      GPU EVIDENCE: `test_pipeline` 19 -> 32 checks, 0 failures. The fixture is PADDED -- 90
+      rows decoded at 96, stride 192 over 160 -- with **every padding byte 0xFF**, so a
+      stride-blind read is visible rather than merely wrong: 0xFF luma converts to ~1.0 and the
+      image's own ramp tops out at ~0.11. REVERT-CHECKS, two, each breaking one thing:
+      `has_pixels()` back to `image_ != nullptr` fails "an NV12 surface satisfies FRAME_INPUT";
+      the seam passing `state.width()` as the stride fails with `brightest is 1.000000` in both
+      the letterbox and the crop -- the sentinel, in the output.
+      LEFT: the CARRIER, and #156 round 2 asked for its plan in writing rather than at the
+      design load, which is fair -- so: `ulNumOutputSurfaces = 2` caps in-flight surfaces per
+      camera at two, and a fair queue exists to HOLD frames, so a surface must not travel
+      through it. Raising the pool to the queue depth is per-camera VRAM times fifty;
+      shortening the queue gives up the fairness this project is about. So the hand-off COPIES,
+      which is what DeepStream does between the decoder's NVMM pool and `nvvideoconvert`'s: the
+      sink copies the surface into an NV12 device buffer the work item owns and releases the
+      surface at once. ~3 MB device-to-device for 1080p against ~6 MB down AND 6 MB up for the
+      host round trip this route exists to remove -- so "tren vram het" holds and the decoder's
+      pool stays bounded by decode depth. Then the design-load run.**
 - [x] **CSRC-TOPOLOGY-Q · ANSWERED 4 Sep as ADR-020, by me, under V154 ("làm theo hướng bạn
       nghĩ là tốt nhất"). NO `csrc/topology/` and no `csrc/runners/`: the chain stays a Python
       declaration and the C++ plane receives a RESOLVED PLAN.** Three reasons, none of them
