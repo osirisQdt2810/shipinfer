@@ -985,6 +985,20 @@ credential -- not for a design call I am able to make and defend.
 It does not retire the confirmations that exist for safety: merging someone else's PR,
 deleting a pushed branch, anything outward-facing or hard to reverse.
 
+### V155 · 7 Sep 2026 — tiếp tục; còn vướng gì, kết quả thế nào, tôi giúp được gì
+
+> tiếp tục, bạn còn vướng ở cái gì không? hiện tại kết quả thế nào rồi và tôi giúp được cái gì không?
+
+Three questions at once, and the third is the one with a standing shape: **when the operator
+asks what they can help with, the answer is the `[!]` list** -- the ledger already holds every
+item that is genuinely theirs, so the reply is to read it back, sorted by what it unblocks,
+rather than to invent a fresh list.
+
+Arrived with the ledger clear of `[ ]` and `[~]` for the first time in this stretch: eight PRs
+merged (#144-#151), fourteen `[!]` items, and C1 measured at parity (944 against the baseline's
+971.3) with its >=5x target marked as a question for exactly this moment. Not a new instruction
+so much as the moment the `[!]` queue was supposed to be waiting for.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken

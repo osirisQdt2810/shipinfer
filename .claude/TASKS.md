@@ -2584,6 +2584,35 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
 
 ---
 
+- [ ] **R55-BENCH-SOURCE · MY BENCH NUMBERS DO NOT MEET R55, and the operator had to ask.**
+      Every measurement in this stretch -- including the C1 parity number (944 against 971.3) --
+      ran `--source replay`: JPEGs decoded from disk on the CPU, with the harness printing
+      `source: replay  (decode path NOT measured)` in its own header. R55 (user.md §3, with
+      V137) makes RTSP ingest in subfaceid's GPU NV12/YUV form MANDATORY for test and
+      benchmark. So the scenario is wrong, and the number is a number for a different
+      experiment.
+      VERIFIED 7 Sep, inside `shipinfer-gst:jammy`, so the split is measured and not guessed:
+        * `gstreamer-1.0`, `gstreamer-app-1.0`, `gstreamer-video-1.0` -> YES. The C++ gst lane
+          CAN be compiled on this box (`build_csrc.py --with-external gstreamer`), which is
+          what the build's own WARNING has been saying.
+        * nvcodec plugin present (114 features incl. `nvh264dec`) -> hardware DECODE is there.
+        * `gstreamer-cuda-1.0` / `/usr/include/gstreamer-1.0/gst/cuda` -> ABSENT. The zero-copy
+          CUDA-memory hand-off cannot be BUILT without `libgstreamer-plugins-bad1.0-dev`.
+        * `src/shipinfer/ingest/sources/gstreamer.py:149` negotiates `video/x-raw,format=BGR`
+          and `:355` copies the sample into numpy -- so even the working RTSP path is BGR on
+          the CPU today, not NV12 in VRAM.
+      SPLIT, and the first two halves are mine:
+        (a) compile the C++ gst lane and take an RTSP-sourced measurement on BOTH planes,
+            stating plainly that the decode is software BGR;
+        (b) make the RTSP path negotiate NV12 and keep it on the device as far as the current
+            headers allow (`nvvideoconvert`'s NVMM hand-off is already why `_CONVERTERS` names
+            it), so the remaining gap is exactly the missing package and not our code;
+        (c) the zero-copy NV12-in-VRAM carrier -- BLOCKED on `PHASE-D-NV12` below, which is the
+            operator's one-package image rebuild.
+      Until (a) lands, every throughput number in this ledger carries the replay caveat, and
+      C1's parity reading is against a baseline measured the same way -- like for like, but not
+      the like R55 asks for.
+
 - [!] **PHASE-D-NV12 · OPERATOR (when phase D opens): rebuild `shipinfer-gst:jammy` with `libgstreamer-plugins-bad1.0-dev` (gstcuda headers)? This box cannot `docker build` — the documented run+commit dance needs your go.** NVDEC-into-VRAM decode (both planes) — needs the DataPool carrier (arch.md §3/§8) AND an image
       rebuild: `shipinfer-gst:jammy` lacks `libgstreamer-plugins-bad1.0-dev` (gstcuda/GstCudaMemory headers), and this
       box can't `docker build` (the documented run+commit dance). Do not start before phase D opens.**
