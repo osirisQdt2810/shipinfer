@@ -859,6 +859,15 @@ hook down, for when the operator asked to see something before it is executed.
       for a reason worth keeping — it scales the appearance EMA by detection confidence, and
       MOT17 public detections carry a *constant* score, so on that benchmark the flag has no
       effect and a study sampling it would report its own sampler's spread as a finding.
+- [ ] **CI-CPP-JOBS-ARE-POST-MERGE** (#133 review round 3, note 3) — every C++ job lives in
+      `ci.yml` (push to `main`), and `pr-pipeline.yml` has none at all. So an undeclared
+      `std::mutex` in `bench.cpp` still MERGES and then reddens main, which is the exact
+      incident that opened `CSRC-BENCH-UNCOMPILED` -- the new `cpp-syntax` job closes the
+      "nothing compiles it" half and not the "it merged" half. Repo-wide rather than a
+      regression: `cpp-offline` and `cpp-gst-lane` are in the same place. Mirroring the three
+      C++ jobs into `pr-pipeline.yml` is the change that actually prevents it, and it edits
+      `.github/workflows/**`, so it needs a manual merge too.
+
 - [!] **C9 · OPERATOR: where does the NV12 work live?** The primary shipvision checkout has no dirty files, so the claimed 1021 uncommitted lines are not there — point at the clone that holds them, or C9 gets re-scoped as not-yet-written (phase D consumes it either way). CHECKED 28 Aug: the primary checkout has NO dirty files (the claimed 1021
       uncommitted lines are not there; three ancient WIP stashes exported to scratchpad/nms-pinned-reference/ as
       patches, two unpushed branches backup-pushed). If the NV12 work exists it is in a clone this session cannot see —
@@ -2143,6 +2152,13 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `bash -e {0}` has no `pipefail` and `pytest` was not installed; r2: the job never
       installed `NvInferPlugin.h`, which `engine.cpp` includes and NVIDIA ships separately, so
       the job would have been red on its first run on main). Original:
+      SCOPE GREW in round 1, correctly: the check covers the EIGHT implementation units the
+      offline build cannot reach as well as the apps, since `-fsyntax-only` on an app does not
+      parse the `.cpp` files in its closure -- `backends/tensorrt/engine.cpp`, where
+      `initLibNvInferPlugins` lives, was compiled by nothing either. Two of them need an
+      external lane and are skipped where `pkg-config` says it is absent, which is the answer
+      `build_csrc.py` gives. Rehearsed in three states against the real tree: rc=0 with
+      headers and good code, rc=1 with the headers absent, rc=1 on a real compile error.
       `cli/bench.cpp` is compiled by NOTHING in CI, and it took a
       reviewer reading a diff to find that out (#129 round 4).** Its include closure reaches
       `core/platform.h`, so `build_csrc.py --offline` excludes it and `ci.yml`'s `cpp-offline`
@@ -2159,6 +2175,17 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       doing. A PR editing `.github/workflows/**` cannot pass the review job (CLAUDE.md), so it
       needs a hand merge and the body has to say so.
 
+      ROUND 3 (5 Sep): **VERDICT APPROVE**, after two rounds that both found real defects --
+      r1 the check could not fail (`bash -e {0}` has no `pipefail`, and `pytest` was not
+      installed), r2 the job never installed `NvInferPlugin.h` which `engine.cpp` includes, so
+      it would have been RED on its first run on main, and `": error:"` did not match gcc's
+      `fatal error:` so the failure arrived as a filename and a blank line. Both reproduced
+      before fixing, the second against a TensorRT tree with exactly the plugin package
+      removed. Round 3's five non-blocking notes are taken (the docstring that said the
+      opposite of what the file does; the module-level `pytestmark` that skipped the harness's
+      OWN guard tests everywhere but the CI runner -- they need only `g++`, and 3 of them now
+      run offline; `@functools.cache` on `_build_module`; the app leg reading lanes the way
+      the unit leg does; `codename` renamed `release`). STILL NEEDS THE OPERATOR'S MERGE.
 - [x] **P5-A-ALLOC · BOTH HALVES MERGED 4 Sep: #134 (the allocation half, 2.37x, APPROVE
       round 1) and #135 (the cross-plane record gate, three rounds).** SECOND HALF still open (below): cross-plane comparing
       `build_records` rather than hand-assembled events. It is UNBLOCKED now -- #132 made the
@@ -2585,6 +2612,61 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       the containment gate itself and the hook should know its name.
 
 ---
+
+- [ ] **CI-SYNTAX-COVERAGE-GAPS · two non-blocking findings from #133 round 3, kept rather
+      than folded into a round-4 fix.**
+      (1) `csrc/shipinfer/obs/sampler.cpp` is compiled by NOTHING. It IS `offline_ready`, so no
+      app's closure reaches it and `cpp-offline` never builds it -- and `_uncompiled_units()`
+      filters to `not offline_ready`, so the new syntax leg excludes it BY CONSTRUCTION. The
+      reviewer's read is right and it is the ticket's own thesis: the predicate wants to be "in
+      no built closure", not "not offline-ready". Deferred because it grows the set to units
+      that need no CUDA headers while the class is `@needs_headers`-gated, so the gating wants
+      rethinking with it -- a round-4 fix is the wrong place for that.
+      (2) `_headers_available()` runs a `g++` subprocess when the module is imported, so a
+      plain offline `pytest` collection pays one cached spawn even though the classes then
+      skip. A lazy string condition or a session-scoped fixture avoids it.
+      (3) the compile legs drop `-Wall -Wextra` and `-DSHIPINFER_OMITTED_LANES`, which the real
+      build passes (`build_csrc.py:472-489`). Harmless today -- the `#ifdef` branch in
+      `ingest/omitted_lanes.h` is covered by `cpp-offline` -- but a syntax check that compiles a
+      DIFFERENT configuration than the build is a gap. Not taken in a fix round: widening the
+      flags can only be judged by running it on the runner, and #133 has been red-on-first-run
+      three times for exactly that reason (rounds 2, 5, 6).
+      ROUND 5: `cuda-cudart-dev-12-6` ships `cuda_runtime.h` WITHOUT the `crt/` headers it
+      includes -- `cuda_runtime_api.h` includes `crt/host_defines.h`, `cuda_runtime.h` includes
+      `crt/host_config.h`, both from `Source: cuda-nvcc`, and nothing depends on them under
+      `--no-install-recommends`. So all three compile legs would have been RED on the first run
+      on main, naming a CUDA-internal header, which reads as an NVIDIA packaging problem rather
+      than as "this job never worked". `cuda-crt-12-6` added (881 KB, headers only, no nvcc).
+      THIRD TIME IN THIS SHAPE, so the durable part is the MESSAGE: `_HEADER_PACKAGES` maps
+      each header the probe needs to the package that ships it, and a required-headers failure
+      now ends `Not found: crt/host_defines.h -> install cuda-crt-...` instead of a compiler
+      error about a file nobody here has heard of. A dev box's full toolkit cannot see any of
+      these, which is exactly why the answer belongs in the failure.
+      ROUND 6, and I caused this one in round 5: `_absent_headers()` WALKED DIRECTORIES while
+      the file's own `_PROBE` comment says the point is to ask the COMPILER, because a
+      distribution puts these headers on the DEFAULT include path where no `-I` names them. The
+      runner's apt packages put TensorRT's under `/usr/include/x86_64-linux-gnu`, so
+      `_headers_available()` was True while `_absent_headers()` reported two absent, and the
+      ungated `test_the_reason_stays_plain_when_the_headers_are_there` would have failed on the
+      first post-merge run. Now one `g++ -fsyntax-only` per header, only after the aggregate
+      probe has failed -- and guarded on `shutil.which("g++")`, because `needs_headers`'s
+      `reason=` calls it at IMPORT time, so an unguarded spawn was a COLLECTION error on any
+      box without a toolchain. That last one I found by rehearsing `env -i PATH=/tmp/nobin`,
+      which is the rehearsal I should have run in round 5.
+      ROUND 6b: the module-level `pytestmark` had carried a `g++` guard and I dropped it;
+      `TestAFailureArrivesWithItsReason` is deliberately ungated and shells out to `g++`, so
+      the offline tier -- whose image is a `-runtime` one with no toolchain -- went from clean
+      to three raw tracebacks. `no_gpp` restores it. Verified: `env -i PATH=/tmp/nobin` gives
+      3 passed / 12 skipped, all named, instead of an error.
+      ROUND 4 CLOSED THE OTHER TWO NOTES rather than deferring them: `replay.cpp` was compiled
+      by NOTHING in CI (its opencv lane was unresolvable on the runner and it fell out with no
+      assertion naming it, while `cpp-gst-lane` covers only `gstreamer.cpp`) -- `libopencv-dev`
+      is in the apt step now and `_COVERED_ELSEWHERE` states which lanes are another job's, one
+      test pins that reasoning on any host and another fails where a unit is dropped. And the
+      app leg's loud skip was unreachable by construction, because `EXTERNAL` declares lanes
+      only for the two `ingest/sources` units so `lanes_of(app)` is empty for every app; the
+      machinery moved to the UNIT leg, where it can fire, and the app leg keeps its copy as
+      armour with its reachability stated.
 
 - [~] **R55-BENCH-SOURCE · MY BENCH NUMBERS DO NOT MEET R55, and the operator had to ask.**
       Every measurement in this stretch -- including the C1 parity number (944 against 971.3) --
