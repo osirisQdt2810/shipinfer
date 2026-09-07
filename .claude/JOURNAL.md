@@ -1,5 +1,33 @@
 # Journal
 
+## 2026-09-07 — V156's route, end to end, and two bugs only running it could find
+
+Seven PRs merged (#133, #155→#159, #161) and two open (#160 the carrier, plus a built-not-opened
+`feat/device-lanes`). The route V156 named runs: `rtsp -> H.264 bitstream -> NVDEC -> NV12 in
+VRAM -> one device-to-device copy -> the fair queue -> the graph -> events`, with no host pixel
+copy anywhere in it.
+
+**The lesson of the day, twice over: no gate had ever read the bytes.** `uv_offset` was the
+CODED height where `cuvidMapVideoFrame` puts the plane at the DISPLAY height — `pitch * 8` past
+the end of the mapping — and I had argued the coded-height claim at length in a PR body, a
+ledger entry, a kernel docstring and the carrier's declaration site. It went past three reviews.
+`test_ingest` may not dereference a device pointer so it asserted the OFFSET (with `>`, which
+passes on exactly the unreadable value); `test_dataplane` reads synthetic buffers; `QueueSink`
+refused device frames. Three green gates, none touching the byte in question. The first thing
+that read it was the bench, and it stopped at once. Same shape for `gst_init`: the NVDEC unit
+never called it, and its own gate passed because the GStreamer sections ran first and
+initialised the library on its behalf — a test that passed because of its neighbours.
+
+**What I would do differently:** when a claim is about a byte, find something that reads the
+byte before writing the third comment about it.
+
+Measured, five runs per arm because the first pair said +17% and that was luck: +6.9% frames
+read and half the reassembly timeouts against the host BGR path, at 8 cameras x 5 fps on one
+A5000 where nothing is saturated. The 5x needs the design load, which needs one fair queue per
+GPU (a device frame cannot move) and seven healthy GPUs free — this box has four, and gpu7 is
+dead to CUDA (`cudaSetDevice` returns 100 while `nvidia-smi` lists it happily), which cost three
+runs before I probed for it.
+
 ## 2026-09-05 (later) — the benchmark was measuring a machine nobody configured
 
 **P5-B**, and the survey found more than the ledger claimed. `run_cpp_bench.sh` passed
