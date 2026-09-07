@@ -194,6 +194,89 @@ namespace shipinfer {
             }
         }
 
+        // The BGR crop kernel's geometry, with NV12 sampling at the four taps. Kept beside it
+        // rather than templated: the two differ only in how a pixel is fetched, and a reader
+        // comparing them line for line is the check that they agree about boxes.
+        __global__ void nv12_crop_resize_kernel(const uint8_t* nv12, int src_h, int src_w,
+                                                int stride, size_t uv_offset,
+                                                const float* boxes, int count, float* dst,
+                                                int dst_h, int dst_w, bool swap_rb) {
+            const int x = blockIdx.x * blockDim.x + threadIdx.x;
+            const int y = blockIdx.y * blockDim.y + threadIdx.y;
+            const int n = blockIdx.z;
+            if (x >= dst_w || y >= dst_h || n >= count) return;
+
+            const int x1 = static_cast<int>(fminf(fmaxf(boxes[n * 4 + 0], 0.f), src_w - 1.f));
+            const int y1 = static_cast<int>(fminf(fmaxf(boxes[n * 4 + 1], 0.f), src_h - 1.f));
+            const int x2 = static_cast<int>(fminf(fmaxf(boxes[n * 4 + 2], 0.f), src_w - 1.f));
+            const int y2 = static_cast<int>(fminf(fmaxf(boxes[n * 4 + 3], 0.f), src_h - 1.f));
+            const int box_w = x2 - x1;
+            const int box_h = y2 - y1;
+
+            const int plane = dst_h * dst_w;
+            float* out = dst + static_cast<size_t>(n) * 3 * plane;
+
+            if (box_w <= 0 || box_h <= 0) {
+                for (int c = 0; c < 3; ++c) out[c * plane + y * dst_w + x] = 0.f;
+                return;
+            }
+
+            const float lx =
+                fmaxf(0.f, (static_cast<float>(x) + 0.5f) * static_cast<float>(box_w) /
+                                   static_cast<float>(dst_w) -
+                               0.5f);
+            const float ly =
+                fmaxf(0.f, (static_cast<float>(y) + 0.5f) * static_cast<float>(box_h) /
+                                   static_cast<float>(dst_h) -
+                               0.5f);
+            const int px0 = min(static_cast<int>(lx), box_w - 1);
+            const int py0 = min(static_cast<int>(ly), box_h - 1);
+            const int px1 = min(px0 + 1, box_w - 1);
+            const int py1 = min(py0 + 1, box_h - 1);
+            const float wx = lx - static_cast<float>(px0);
+            const float wy = ly - static_cast<float>(py0);
+            const int sx0 = x1 + px0, sx1 = x1 + px1, sy0 = y1 + py0, sy1 = y1 + py1;
+
+            // Converted at the taps and interpolated in BGR, which is what the BGR twin does:
+            // interpolating in YUV first and converting once would be cheaper and would not
+            // match, and matching the readable implementation is the contract here.
+            float p00[3], p01[3], p10[3], p11[3];
+            nv12_to_bgr(nv12, src_h, src_w, stride, uv_offset, static_cast<float>(sy0),
+                        static_cast<float>(sx0), p00);
+            nv12_to_bgr(nv12, src_h, src_w, stride, uv_offset, static_cast<float>(sy0),
+                        static_cast<float>(sx1), p01);
+            nv12_to_bgr(nv12, src_h, src_w, stride, uv_offset, static_cast<float>(sy1),
+                        static_cast<float>(sx0), p10);
+            nv12_to_bgr(nv12, src_h, src_w, stride, uv_offset, static_cast<float>(sy1),
+                        static_cast<float>(sx1), p11);
+            for (int c = 0; c < 3; ++c) {
+                const int src_c = swap_rb ? (2 - c) : c;
+                const float value = (p00[src_c] * (1.f - wx) + p01[src_c] * wx) * (1.f - wy) +
+                                    (p10[src_c] * (1.f - wx) + p11[src_c] * wx) * wy;
+                out[c * plane + y * dst_w + x] = value / 255.f;
+            }
+        }
+
+        // The layout rule, shared by both NV12 entry points so they cannot disagree about
+        // what a surface is. Refused rather than clamped: the plausible `uv_offset` values are
+        // `stride * src_h` (tight) and `stride * coded_h` (NVDEC), and anything smaller is a
+        // mis-filled surface whose chroma overlaps its own luma.
+        void require_nv12_layout(const char* who, int src_h, int src_w, int stride,
+                                 size_t uv_offset) {
+            if (stride < src_w) {
+                throw ConfigError(std::string(who) + ": stride " + std::to_string(stride) +
+                                  " is narrower than the width " + std::to_string(src_w) +
+                                  "; a row cannot fit, so every row would read into the next");
+            }
+            if (uv_offset < static_cast<size_t>(stride) * static_cast<size_t>(src_h)) {
+                throw ConfigError(std::string(who) + ": uv_offset " +
+                                  std::to_string(uv_offset) + " is inside the luma plane (" +
+                                  std::to_string(stride) + " x " + std::to_string(src_h) +
+                                  "); pass `stride * src_h` for a tight buffer or "
+                                  "`stride * coded_height` for an NVDEC surface");
+            }
+        }
+
         LetterboxMap fit(int src_h, int src_w, int dst_h, int dst_w) {
             LetterboxMap map;
             map.scale = std::min(static_cast<float>(dst_w) / static_cast<float>(src_w),
@@ -245,21 +328,7 @@ namespace shipinfer {
                                      int stride, size_t uv_offset, float* dst_device, int dst_h,
                                      int dst_w, bool swap_rb, float pad_value,
                                      gpuStream_t stream) {
-        if (stride < src_w) {
-            throw ConfigError("nv12_letterbox_into: stride " + std::to_string(stride) +
-                              " is narrower than the width " + std::to_string(src_w) +
-                              "; a row cannot fit, so every row would read into the next");
-        }
-        if (uv_offset < static_cast<size_t>(stride) * static_cast<size_t>(src_h)) {
-            // Below the luma plane's own size the chroma would overlap it. Refused rather than
-            // clamped: the two plausible values are `stride * src_h` (tight) and
-            // `stride * coded_h` (NVDEC), and anything smaller is a mis-filled surface.
-            throw ConfigError("nv12_letterbox_into: uv_offset " + std::to_string(uv_offset) +
-                              " is inside the luma plane (" + std::to_string(stride) + " x " +
-                              std::to_string(src_h) +
-                              "); pass `stride * src_h` for a tight buffer or "
-                              "`stride * coded_height` for an NVDEC surface");
-        }
+        require_nv12_layout("nv12_letterbox_into", src_h, src_w, stride, uv_offset);
         const LetterboxMap map = fit(src_h, src_w, dst_h, dst_w);
         const dim3 block(16, 16);
         const dim3 grid((dst_w + block.x - 1) / block.x, (dst_h + block.y - 1) / block.y);
@@ -268,6 +337,21 @@ namespace shipinfer {
             map.pad_y, map.new_w, map.new_h, swap_rb, pad_value);
         GPU_CHECK(gpuGetLastError());
         return map;
+    }
+
+    void nv12_crop_resize_into(const uint8_t* nv12_device, int src_h, int src_w, int stride,
+                               size_t uv_offset, const float* boxes_device, int count,
+                               float* dst_device, int dst_h, int dst_w, bool swap_rb,
+                               gpuStream_t stream) {
+        if (count <= 0) return;  // no boxes is not an error; a frame can have no detections
+        require_nv12_layout("nv12_crop_resize_into", src_h, src_w, stride, uv_offset);
+        const dim3 block(16, 16);
+        const dim3 grid((dst_w + block.x - 1) / block.x, (dst_h + block.y - 1) / block.y,
+                        static_cast<unsigned>(count));
+        nv12_crop_resize_kernel<<<grid, block, 0, stream>>>(nv12_device, src_h, src_w, stride,
+                                                            uv_offset, boxes_device, count,
+                                                            dst_device, dst_h, dst_w, swap_rb);
+        GPU_CHECK(gpuGetLastError());
     }
 
 }  // namespace shipinfer

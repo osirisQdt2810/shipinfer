@@ -2898,7 +2898,29 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       host round trip" -- so a `DeviceImage` there would be a field nothing could ever fill.
       The parity harness compares EVENTS, and those stay byte-identical because the tag and the
       records do not know where the pixels were.
-      LEFT: the NVDEC source itself, and the graph branch to `nv12_letterbox_into`.**
+      THE CROP HALF OF THE GRAPH BRANCH NEEDED A KERNEL THAT DID NOT EXIST, found 7 Sep on
+      `feat/graph-device-frame` before writing the branch: `crop_resize_into` indexes an HWC BGR
+      array, and there was no NV12 twin. So a graph fed an NVDEC surface would have had to
+      convert the whole frame once -- ~6 MB of device temporary per 1080p frame, 6 GB/s at the
+      design load, which is exactly the cost `nv12_letterbox_into` exists to avoid one stage
+      earlier. The NV12 path would have stopped at the detector, and "xu ly tren vram toan bo"
+      would have been true of one stage out of four.
+      `nv12_crop_resize_into` now: the BGR twin's geometry with NV12 sampling at the four taps,
+      converted at the taps and interpolated in BGR because that is what the BGR twin does and
+      matching the readable implementation is the contract. Its reference in `test_dataplane` is
+      a SEPARATE function rather than a shared one, deliberately -- #155 is the round that
+      proved sharing the arithmetic hides the bug in both halves.
+      GPU EVIDENCE: `test_dataplane` 50 -> 53 checks, 0 failures, on a padded surface (90 rows
+      decoded at 96, the 1080/1088 relationship) with three boxes -- ordinary, clipped at the
+      origin, and zero-area. The degenerate one is asserted black SEPARATELY and the ordinary
+      one asserted non-black, because "matches the reference" could otherwise mean "both
+      produce nothing". REVERT-CHECK: break only the crop kernel's chroma addressing to the
+      derived `stride * src_h` and it fails at 0.875 on a 0..1 scale; restored, 0 failures.
+      `require_nv12_layout` is shared by both NV12 entry points now, so the stride and
+      `uv_offset` rules are stated once.
+      LEFT: the NVDEC source (open as #156), the graph branch itself -- `FrameState` carrying
+      the surface, the detect and crop stages branching on it, and `QueueSink` accepting a
+      device frame -- and then the design-load run.**
 - [x] **CSRC-TOPOLOGY-Q · ANSWERED 4 Sep as ADR-020, by me, under V154 ("làm theo hướng bạn
       nghĩ là tốt nhất"). NO `csrc/topology/` and no `csrc/runners/`: the chain stays a Python
       declaration and the C++ plane receives a RESOLVED PLAN.** Three reasons, none of them
