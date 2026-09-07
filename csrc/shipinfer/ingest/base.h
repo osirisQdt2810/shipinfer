@@ -99,12 +99,28 @@ namespace shipinfer {
         virtual void do_open() = 0;
         // One image as HWC BGR uint8 with its `owner` set, or nothing if none is available yet.
         virtual std::optional<HostFrame> do_read() = 0;
+        // doc: long the second hook, why it is defaulted, and what stops a source using both
+        // One image in DEVICE memory -- NV12 with its `owner` set -- for a source that decodes
+        // straight into VRAM and never brings the pixels back (V156: `rtsp -> nv12 -> tren
+        // vram het`). Nothing by default, which is every source that answers `do_read`.
+        //
+        // A SOURCE ANSWERS FROM ONE HOOK FOR ITS WHOLE LIFE. `read()` latches which on the
+        // first frame and refuses a change, because a chain that saw both would need a branch
+        // per frame on a fact that is a property of the camera -- and a source that answered
+        // host on a reconnect after answering device would silently move the whole graph back
+        // onto the slow path with nothing said.
+        virtual std::optional<DeviceImage> do_read_device() { return std::nullopt; }
         // Release resources. Must tolerate being called after a partial `do_open`.
         virtual void do_close() = 0;
 
         // Record what the stream actually negotiated. Called from `do_open`.
         void set_format(int height, int width, double fps);
 
+      private:
+        // Remember, and then enforce, which read hook this source answers from.
+        void latch_where(bool on_device);
+
+      protected:
         StopSignal& stop() const { return stop_; }
         FrameCounter& counter() const { return counter_; }
 
@@ -113,6 +129,9 @@ namespace shipinfer {
         FrameCounter& counter_;
         StopSignal& stop_;
         bool is_open_ = false;
+        // Which hook this source answers from, latched on its first frame. See `latch_where`.
+        bool where_latched_ = false;
+        bool reads_device_ = false;
         int height_ = 0;
         int width_ = 0;
         double fps_ = 0.0;

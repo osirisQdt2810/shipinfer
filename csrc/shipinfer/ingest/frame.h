@@ -37,10 +37,49 @@ namespace shipinfer {
         bool empty() const { return pixels == nullptr || height <= 0 || width <= 0; }
     };
 
+    // doc: long a device image needs no CUDA header, and why the pitch is here
+    // A decoded image in DEVICE memory: NV12, as NVDEC produces it.
+    //
+    // NO ACCELERATOR HEADER IS NEEDED TO HOLD ONE, which is what keeps `ingest/` free of them
+    // (`HostFrame` above makes the same promise). A device pointer is an address; only reading
+    // it needs CUDA, and that happens in `runtime/`, where `nv12_letterbox_into` already takes
+    // exactly this shape.
+    //
+    // `pitch` is separate from `width` because NVDEC's surfaces are padded: the Y plane's rows
+    // are `pitch` bytes apart and the interleaved UV plane follows at `pitch * height`.
+    // Assuming `pitch == width` reads the next row's left edge into this row's right edge, a
+    // skew that looks like a decoder bug rather than an arithmetic one.
+    struct DeviceImage {
+        const void* nv12 = nullptr;
+        int height = 0;
+        int width = 0;
+        int pitch = 0;
+        //: Which device the pointer belongs to. A frame decoded on GPU 3 is unreadable from a
+        //: worker bound to GPU 1, and ADR-002 says one thread never touches another's memory,
+        //: so the consumer checks rather than assumes.
+        int device = -1;
+        // Kept alive for as long as this frame exists, the way `HostFrame::owner` is -- and
+        // here it is what UNMAPS the decoder's surface, because NVDEC hands out a slot from a
+        // small pool and reuses it as soon as it is released. Dropping this early does not
+        // free the pixels, it lets the next frame overwrite them.
+        std::shared_ptr<const void> owner;
+
+        bool empty() const {
+            return nv12 == nullptr || height <= 0 || width <= 0 || pitch < width;
+        }
+    };
+
     // A tagged frame: what a source produces and a sink consumes.
+    //
+    // EXACTLY ONE of `image` and `device` is populated. A source decodes to host memory or to
+    // VRAM for its whole life, never both, and `FrameSource::read` latches which on the first
+    // frame and refuses a change -- see `ingest/base.cpp`.
     struct Frame {
         FrameTag tag;
         HostFrame image;
+        DeviceImage device;
+
+        bool on_device() const { return !device.empty(); }
     };
 
     // Stamps decoded images with a monotonic, per-camera frame id and both clocks.
@@ -67,18 +106,33 @@ namespace shipinfer {
         // place that knows when the frame actually existed. A timestamp taken later measures
         // the queue, not the camera.
         Frame stamp(HostFrame image) {
+            Frame frame = tagged();
+            frame.image = std::move(image);
+            return frame;
+        }
+
+        // The same stamp for a frame that never left the device. One counter for both, because
+        // the `(camera_id, frame_id)` key ADR-002 relies on does not care where the pixels are.
+        Frame stamp(DeviceImage image) {
+            Frame frame = tagged();
+            frame.device = std::move(image);
+            return frame;
+        }
+
+      private:
+        // The tag and the advance, shared by both `stamp` overloads so the two cannot drift on
+        // which clocks they read or when the id moves.
+        Frame tagged() {
             Frame frame;
             frame.tag.camera_id = camera_id_;
             frame.tag.frame_id = next_;
             frame.tag.captured_ns = monotonic_ns();
             frame.tag.captured_unix_ns = unix_ns();
-            frame.image = std::move(image);
             ++next_;
             ++stamped_;
             return frame;
         }
 
-      private:
         std::string camera_id_;
         int64_t next_ = 0;
         uint64_t stamped_ = 0;

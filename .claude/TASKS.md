@@ -2707,7 +2707,25 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       supplies the chroma address and there is nothing to infer. No shipvision work is owed.
       THE TWO SHAPES ARE THE LESSON: two pointers cannot be wrong; one pointer plus a DERIVED
       second is what made a padded surface unrepresentable. An explicit `uv_offset` is the
-      one-pointer form of the same guarantee.**
+      one-pointer form of the same guarantee.
+      THE IMAGE IS READY: `shipinfer-gst:jammy-nvdec`, baked 7 Sep by `docker run` +
+      `docker commit` on top of `shipinfer-gst:jammy` (a NEW tag, per V157, so the shared
+      12.6 GB image is untouched if this turns out wrong). It carries `libffmpeg-nvenc-dev`
+      -> `ffnvcodec` 11.1.5.1 with `dynlink_cuviddec.h` / `dynlink_nvcuvid.h` / `dynlink_cuda.h`
+      / `dynlink_loader.h`. The DYNLINK variants are better than plain headers here: they
+      `dlopen` `libnvcuvid.so` at run time, so the build has no driver dependency and a box
+      without one fails at load with a message rather than at link -- the same arrangement
+      `runtime/native.py` uses (ADR-003).
+      CARRIER HALF 1 DONE 7 Sep on `feat/device-frame-carrier`: `DeviceImage` in
+      `ingest/frame.h` (device pointer + geometry + PITCH + device index + an `owner` that
+      unmaps the surface), `Frame::device` beside `Frame::image`, a second `stamp` overload
+      sharing one counter, and `do_read_device()` on `FrameSource` -- DEFAULTED, so every
+      existing source is unchanged. `read()` latches which hook a source answers from on its
+      first frame and REFUSES a change, because the plausible way that happens is a reconnect
+      falling back to software decode and moving the whole graph onto the slow path silently.
+      `test_device_frame` is 21 checks, offline, revert-checked twice (drop the latch -> 3 red;
+      drop the `pitch < width` guard -> 1 red).
+      LEFT: the NVDEC source itself, and the graph branch to `nv12_letterbox_into`.**
 - [x] **CSRC-TOPOLOGY-Q · ANSWERED 4 Sep as ADR-020, by me, under V154 ("làm theo hướng bạn
       nghĩ là tốt nhất"). NO `csrc/topology/` and no `csrc/runners/`: the chain stays a Python
       declaration and the C++ plane receives a RESOLVED PLAN.** Three reasons, none of them
