@@ -73,7 +73,8 @@ gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
 gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
 gir1.2-gst-rtsp-server-1.0 libgstrtspserver-1.0-0 gstreamer1.0-rtsp \
-libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libopencv-dev ffmpeg"
+libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libopencv-dev ffmpeg \
+libffmpeg-nvenc-dev"
 
 PIP_PACKAGES="pydantic pydantic-settings typer pyyaml pytest pytest-timeout pytest-asyncio \
 fastapi httpx starlette uvicorn anyio opencv-python-headless scipy"

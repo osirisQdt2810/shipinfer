@@ -66,6 +66,7 @@ namespace shipinfer {
         // whole mechanism go quiet — which is the old behaviour, silently restored.
         static const std::vector<std::pair<std::string, std::vector<std::string>>> kTable = {
             {"gstreamer", {"gstreamer", "gst"}},
+            {"nvdec", {"nvdec", "nvv12", "cuvid"}},
             {"opencv", {"replay", "file", "video"}},
         };
         // Bracketed with commas at both ends so a lane name is matched whole: without it,

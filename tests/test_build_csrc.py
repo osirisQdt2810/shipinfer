@@ -120,12 +120,17 @@ class TestTheDefineSaysWhatIsMissing:
     """``-DSHIPINFER_OMITTED_LANES`` is the whole contract with the C++ side."""
 
     def test_the_lanes_left_out_are_the_ones_named(self, build_csrc: ModuleType) -> None:
-        assert build_csrc.lane_defines(frozenset()) == [
-            '-DSHIPINFER_OMITTED_LANES="gstreamer,opencv"'
-        ]
+        # Derived from `EXTERNAL` rather than spelled out, because a literal here means adding
+        # a lane is a two-place edit and the second place gets forgotten -- which is the exact
+        # class of drift `TestTheLaneTablesAgree` above exists to catch one file along. The
+        # SHAPE is what matters: sorted, comma-joined, quoted.
+        every = ",".join(sorted(build_csrc.EXTERNAL))
+        assert build_csrc.lane_defines(frozenset()) == [f'-DSHIPINFER_OMITTED_LANES="{every}"']
+        without_gstreamer = ",".join(sorted(set(build_csrc.EXTERNAL) - {"gstreamer"}))
         assert build_csrc.lane_defines(frozenset({"gstreamer"})) == [
-            '-DSHIPINFER_OMITTED_LANES="opencv"'
+            f'-DSHIPINFER_OMITTED_LANES="{without_gstreamer}"'
         ]
+        assert "gstreamer" in every and "opencv" in every, "the two that have always been there"
 
     def test_a_build_with_every_lane_defines_an_empty_list(
         self, build_csrc: ModuleType

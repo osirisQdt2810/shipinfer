@@ -2602,6 +2602,126 @@ namespace {
     // *host* one: can this machine serve RTSP at all (ffmpeg, a `python3` with PyGObject, the
     // `gst-rtsp-server` typelib). Either answer being no is a counted skip carrying the reason,
     // never a silent pass: in `shipinfer-gst:jammy` both are yes and these checks run.
+    // Q. A surface in VRAM, over the same real RTSP session
+    // =====================================================================================
+    //
+    // Section P proves a decoded PIXEL arrives on the host. This proves the thing V156 asked
+    // for: a surface that never left the device. Same loopback server, same `SOURCES()` route
+    // (no `sources/nvdec.h` in this file -- the offline-closure invariant holds for three
+    // units now), and the assertions are on the GEOMETRY, because nothing here may dereference
+    // a device pointer: that is `runtime/`'s job and `test_dataplane`'s.
+    //
+    // The one that matters is `uv_offset > pitch * height`. A padded surface is what NVDEC
+    // hands back, and the difference between its coded height and its displayed one is
+    // precisely what `nv12_letterbox_into` cannot infer -- so a source reporting the derived
+    // value would produce right brightness and wrong colour with nothing red anywhere.
+    void test_a_device_surface_over_a_real_rtsp_session() {
+        if (!SOURCES().contains("nvdec")) {
+            skip(
+                "no device surface without the nvdec source: this binary does not link it "
+                "(build with `--with-external nvdec` inside shipinfer-gst:jammy-nvdec)");
+            return;
+        }
+        const int width = 320;
+        // 250 AND NOT 240, deliberately: H.264 codes in 16x16 macroblocks, so 240 is already a
+        // multiple of 16 and its coded height EQUALS its displayed one -- `uv_offset` and
+        // `pitch * height` come out identical and the assertion below cannot fail. 250 is even
+        // (x264 needs that) and rounds up to 256, which is the shape a 1080p camera has when
+        // it codes at 1088. Found by writing the check against 240 first and watching it read
+        // `122880 > 122880`.
+        const int height = 250;
+        const int fps = 15;
+
+        testsupport::RtspLoopback loopback;
+        const std::string unavailable = loopback.start(width, height, fps);
+        if (!unavailable.empty()) {
+            skip("no RTSP loopback on this host: " + unavailable);
+            return;
+        }
+
+        StopSignal stop;
+        FrameCounter counter("nvdec-loopback");
+        IngestConfig config = a_camera("nvdec-loopback");
+        config.uri = loopback.uri();
+        config.source = "nvdec";
+        config.codec = "h264";
+        config.open_timeout_ms = 20000;
+        config.read_timeout_ms = 2000;
+
+        std::unique_ptr<FrameSource> source = create_source(config, counter, stop);
+        std::string failed;
+        try {
+            source->open();
+        } catch (const SourceUnavailableError& error) {
+            // No driver on this box: a counted skip, because "cannot decode here" and "decodes
+            // wrongly" are different answers and only one of them is this check's business.
+            skip(std::string("no NVDEC on this host: ") + error.what());
+            return;
+        } catch (const IngestError& error) {
+            failed = error.what();
+        }
+        check(failed.empty() && source->is_open(), "an nvdec source opens: " + failed);
+        if (!source->is_open()) return;
+
+        // ONE SURFACE AT A TIME, which is the source's contract and not a limitation of this
+        // check: a mapped surface is a slot out of a small pool, and holding three while asking
+        // for a fourth is what `cuvidMapVideoFrame failed` means. A real consumer maps, uses
+        // and releases -- so this keeps the geometry and drops the frame, which is also the
+        // only way to notice that the keepalive really does free the slot.
+        std::vector<DeviceImage> seen;  // geometry only; the owner is released each iteration
+        int delivered = 0;
+        std::string decode_error;
+        const Clock::time_point deadline = Clock::now() + 30s;
+        while (delivered < 3 && Clock::now() < deadline) {
+            try {
+                std::optional<Frame> frame = source->read();
+                if (!frame) continue;
+                ++delivered;
+                if (seen.empty()) {
+                    DeviceImage geometry = frame->device;
+                    geometry.owner.reset();  // keep the numbers, not the slot
+                    seen.push_back(geometry);
+                    check(frame->on_device(),
+                          "the frame is a DEVICE frame, which is the whole point");
+                    check(frame->image.empty(),
+                          "and carries no host image: exactly one is populated");
+                    check(frame->device.owner != nullptr,
+                          "with the keepalive that unmaps the surface");
+                }
+            } catch (const IngestError& error) {
+                decode_error = error.what();
+                break;
+            }
+        }
+        check(decode_error.empty(), "and no read raised: " + decode_error);
+        check(delivered == 3, "and delivers surfaces over the wire: got " +
+                                  std::to_string(delivered) + " of 3 within 30s");
+        if (seen.empty()) return;
+
+        const struct {
+            DeviceImage device;
+        } first{seen.front()};
+        check(first.device.height == height && first.device.width == width,
+              "with the DISPLAY extent the camera sent: " + std::to_string(first.device.width) +
+                  "x" + std::to_string(first.device.height));
+        check(first.device.pitch >= width,
+              "a pitch that can hold a row: " + std::to_string(first.device.pitch));
+        check(first.device.device >= 0, "and the device it belongs to");
+        // THE ASSERTION THIS SECTION EXISTS FOR. `pitch * height` is what a consumer derives
+        // when the carrier does not say; NVDEC's chroma is past that, because the surface is
+        // decoded at a coded height rounded up. 240 rounds to 256 on this fixture.
+        const size_t derived =
+            static_cast<size_t>(first.device.pitch) * static_cast<size_t>(first.device.height);
+        check(first.device.uv_offset > derived,
+              "and a uv_offset PAST the derived one -- the coded height is taller than the "
+              "displayed one: " +
+                  std::to_string(first.device.uv_offset) + " > " + std::to_string(derived));
+        check(first.device.uv_offset % static_cast<size_t>(first.device.pitch) == 0,
+              "and it is a whole number of rows");
+
+        source->close();
+    }
+
     void test_a_decoded_pixel_over_a_real_rtsp_session() {
         if (!SOURCES().contains("gstreamer")) {
             skip(
@@ -2814,6 +2934,7 @@ int main() {
     test_a_missing_source_and_an_omitted_lane_are_different_questions();
     test_the_gstreamer_source_where_it_is_linked();
     test_a_decoded_pixel_over_a_real_rtsp_session();
+    test_a_device_surface_over_a_real_rtsp_session();
 
     std::printf("%d checks, %d failure(s), %d skipped\n", checks, failures, skips);
     return failures == 0 ? 0 : 1;

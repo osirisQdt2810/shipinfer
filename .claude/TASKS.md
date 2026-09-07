@@ -2918,9 +2918,36 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       derived `stride * src_h` and it fails at 0.875 on a 0..1 scale; restored, 0 failures.
       `require_nv12_layout` is shared by both NV12 entry points now, so the stride and
       `uv_offset` rules are stated once.
-      LEFT: the NVDEC source (open as #156), the graph branch itself -- `FrameState` carrying
-      the surface, the detect and crop stages branching on it, and `QueueSink` accepting a
-      device frame -- and then the design-load run.**
+      THE NVDEC SOURCE WORKS, 7 Sep on `feat/nvdec-source`, and V156's route is real:
+      RTSP -> H.264 bitstream on the host -> `cuvidParseVideoData` -> NVDEC -> a `DeviceImage`
+      that never left VRAM. `test_ingest` 241 -> 279 in `shipinfer-gst:jammy-nvdec` on a GPU,
+      0 failures, and the gate asserts the GEOMETRY rather than any pixel (nothing in that file
+      may dereference a device pointer): display extent 320x250, a pitch that holds a row, a
+      device index, the unmap keepalive, and **`uv_offset > pitch * height`** -- 250 rounds to a
+      coded 256, so the chroma really is past where a derivation would look.
+      FIVE THINGS THE FIRST DRAFT GOT WRONG, all found by running it:
+        * `#define FFNV_DYNLINK_CUDA_H` before including `dynlink_cuda.h` -- that macro is the
+          header's OWN include guard, so predefining it made the include a no-op and took
+          `CUresult`, `CUdeviceptr` and half of `CuvidFunctions` with it.
+        * the parser callbacks were free functions and `Decoder` is private to `NvdecSource`;
+          static members solve it, and cuvid calls them SYNCHRONOUSLY from
+          `cuvidParseVideoData`, so the whole decoder is lock-free on the actor's own thread.
+        * no CURRENT context: retaining the primary context does not make it current, so
+          `cuvidCreateDecoder` refused -- a message about the stream for a fault in the caller.
+          `cuCtxPushCurrent` (the dynlink loader carries no setter), pushed once and popped in
+          `close()`, plus a `vidLock` because cuvid's own engine touches the context too.
+        * `ulNumOutputSurfaces = 1` delivered exactly ONE frame: a consumer holds a mapped
+          surface while the next is mapped, so one output surface fails the second map. Two now,
+          and the contract -- one mapped surface at a time -- is stated in the header.
+        * the gate's first fixture was 320x240, and 240 is already a multiple of 16, so its
+          coded height EQUALS its displayed one and `uv_offset > pitch * height` read
+          `122880 > 122880`. 250 is the shape a 1080p camera has when it codes at 1088.
+      THE LANE: `EXTERNAL["nvdec"]` (ffnvcodec + the two GStreamer packages), the
+      `omitted_lanes.h` row, and `libffmpeg-nvenc-dev` in `gst-image.sh` so a `FORCE=1` rebake
+      reproduces the image. The host build omits the lane with the full hint and the gate skips
+      by name -- 241 checks / 4 skipped there against 279 / 1 in the image.
+      LEFT: the graph branch to `nv12_letterbox_into`, which `QueueSink`'s refusal is holding
+      the door for, and then the design-load run.**
 - [x] **CSRC-TOPOLOGY-Q · ANSWERED 4 Sep as ADR-020, by me, under V154 ("làm theo hướng bạn
       nghĩ là tốt nhất"). NO `csrc/topology/` and no `csrc/runners/`: the chain stays a Python
       declaration and the C++ plane receives a RESOLVED PLAN.** Three reasons, none of them
