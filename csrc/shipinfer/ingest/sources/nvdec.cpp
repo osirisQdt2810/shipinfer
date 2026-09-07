@@ -15,8 +15,8 @@
 #include "shipinfer/core/options.h"
 #include "shipinfer/core/types.h"
 #include "shipinfer/ingest/registry.h"
-#include "shipinfer/ingest/sources/gstreamer_bus.h"
 #include "shipinfer/ingest/sources/gstreamer_pipeline.h"
+#include "shipinfer/ingest/sources/gstreamer_shared.h"
 
 // The dynlink variants: these declare the API and `dlopen` `libnvcuvid.so` at run time, so this
 // unit links against no driver library and a box without one fails at load with a message.
@@ -113,10 +113,9 @@ namespace shipinfer {
         bool context_pushed = false;
         CUvideoparser parser = nullptr;
 
-        //: What the SEQUENCE callback reported, which is the only place the coded height is
-        //: stated. `uv_offset` is `pitch * coded_height`, and nothing else knows it: the
-        //: display rect is smaller, and the pitch says nothing about the padding.
-        int coded_height = 0;
+        //: What the SEQUENCE callback reported. The OUTPUT surface's extent, which is the
+        //: display rect because nothing here resizes -- see `map_next` on why the coded height
+        //: is not this and is not kept.
         int display_height = 0;
         int display_width = 0;
         int surfaces = kDefaultSurfaces;
@@ -213,11 +212,6 @@ namespace shipinfer {
 
         self->display_width = static_cast<int>(create.ulTargetWidth);
         self->display_height = static_cast<int>(create.ulTargetHeight);
-        // KEPT, because it is the only statement of where the chroma plane begins. The
-        // output surface is `ulTargetHeight` tall in the display sense and padded to the
-        // coded height in memory: `uv_offset = pitch * coded_height`, and getting that
-        // wrong reads luma rows as chroma (`runtime/ops.h`).
-        self->coded_height = static_cast<int>(format->coded_height);
 
         if (self->cuvid->cuvidCreateDecoder(&session.decoder, &create) != CUDA_SUCCESS) {
             self->failure = "cuvidCreateDecoder refused this stream";
@@ -388,6 +382,12 @@ namespace shipinfer {
         }
 
         // -- the bitstream ----------------------------------------------------------------
+        // FIRST, because `gst_parse_launch` below is the first GStreamer call this unit makes
+        // and nothing else in the process need have made one. Missing until the bench ran with
+        // `--source nvdec`: eighteen `gst_is_initialized()` assertions and a segfault, in a
+        // binary whose `test_ingest` had always passed because its GStreamer section ran first
+        // and initialised the library on this unit's behalf.
+        initialise_gstreamer();
         PipelineOptions options;
         options.bitstream = true;
         options.codec = config().codec.empty() ? "h264" : config().codec;
@@ -535,12 +535,14 @@ namespace shipinfer {
         image.height = d.display_height;
         image.width = d.display_width;
         image.pitch = static_cast<int>(pitch);
-        // THE CODED HEIGHT, not the display one. The surface is padded, so the chroma plane
-        // begins past the last displayed luma row -- 1088 for 1080p. `pitch * height` here
-        // would read the last eight luma rows as chroma on every frame, and
-        // `nv12_letterbox_into`'s own guard cannot catch it because that value satisfies it
-        // exactly (#153 round 4, #155).
-        image.uv_offset = static_cast<size_t>(pitch) * static_cast<size_t>(d.coded_height);
+        // doc: long this unit's own measurement, which is where the rule was settled
+        // THE OUTPUT SURFACE'S HEIGHT, which is `ulTargetHeight` -- the display extent, because
+        // nothing here resizes. #156 used the CODED height; probing both out of a real mapped
+        // surface is what settled it, and the rule now lives once in `ingest/frame.h`:
+        //
+        //   PROBE pitch=2048 display=1920x1080 coded_h=1088
+        //         at_coded=cudaErrorInvalidValue  at_display=cudaSuccess
+        image.uv_offset = static_cast<size_t>(pitch) * static_cast<size_t>(d.display_height);
         image.device = d.device_index;
         // Unmaps on release, and holds the DECODER alive to do it. NVDEC hands out a slot from
         // a pool of `surfaces`, so holding this is what stops the next picture overwriting

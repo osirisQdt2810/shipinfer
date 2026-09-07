@@ -150,9 +150,8 @@ namespace shipinfer {
                                                     float x_f, float* bgr) {
             const int xi = max(0, min(src_w - 1, static_cast<int>(x_f)));
             const int yi = max(0, min(src_h - 1, static_cast<int>(y_f)));
-            // `uv_offset`, not `stride * src_h`: NVDEC's surface is decoded at a CODED height
-            // rounded up past the display one, so its chroma plane does not begin where the
-            // luma plane's last displayed row ends. See `runtime/ops.h`.
+            // `uv_offset` and not a derivation: the plane's offset belongs to the buffer,
+            // and a kernel that guessed it reads luma as chroma. `ingest/frame.h`.
             const uint8_t* uv = nv12 + uv_offset;
 
             // BT.601 limited range, which is what H.264 from an IP camera carries.
@@ -258,9 +257,10 @@ namespace shipinfer {
         }
 
         // The layout rule, shared by both NV12 entry points so they cannot disagree about
-        // what a surface is. Refused rather than clamped: the plausible `uv_offset` values are
-        // `stride * src_h` (tight) and `stride * coded_h` (NVDEC), and anything smaller is a
-        // mis-filled surface whose chroma overlaps its own luma.
+        // what a surface is. Refused rather than clamped: `stride * src_h` is where the chroma
+        // plane begins for every producer in this tree -- a tight buffer and a
+        // `cuvidMapVideoFrame` output surface alike -- and anything smaller is a mis-filled
+        // surface whose chroma overlaps its own luma.
         void require_nv12_layout(const char* who, int src_h, int src_w, int stride,
                                  size_t uv_offset) {
             if (stride < src_w) {
@@ -272,8 +272,8 @@ namespace shipinfer {
                 throw ConfigError(std::string(who) + ": uv_offset " +
                                   std::to_string(uv_offset) + " is inside the luma plane (" +
                                   std::to_string(stride) + " x " + std::to_string(src_h) +
-                                  "); pass `stride * src_h` for a tight buffer or "
-                                  "`stride * coded_height` for an NVDEC surface");
+                                  "); pass `stride * src_h` -- which is the answer for a "
+                                  "tight buffer and for a mapped decoder surface alike");
             }
         }
 

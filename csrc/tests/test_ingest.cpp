@@ -1010,7 +1010,7 @@ namespace {
             image.height = 1080;
             image.width = 1920;
             image.pitch = 2048;
-            image.uv_offset = 2048ULL * 1088;  // the CODED height, as NVDEC reports it
+            image.uv_offset = 2048ULL * 1080;  // one luma plane, which is what NVDEC reports
             image.device = 0;
             return image;
         }
@@ -2611,10 +2611,12 @@ namespace {
     // units now), and the assertions are on the GEOMETRY, because nothing here may dereference
     // a device pointer: that is `runtime/`'s job and `test_dataplane`'s.
     //
-    // The one that matters is `uv_offset > pitch * height`. A padded surface is what NVDEC
-    // hands back, and the difference between its coded height and its displayed one is
-    // precisely what `nv12_letterbox_into` cannot infer -- so a source reporting the derived
-    // value would produce right brightness and wrong colour with nothing red anywhere.
+    // The one that matters is `uv_offset`, and #159 corrected what it should be: a mapped
+    // OUTPUT surface's chroma is at `pitch * height`, because `cuvidMapVideoFrame` post-
+    // processes to the target extent and the coded height belongs to the decode surfaces an
+    // application never sees. This file may not dereference a device pointer, so it pins the
+    // number and the bench proves the plane can be read -- which is the division of labour
+    // that let #156's wrong value through three reviews.
     void test_a_device_surface_over_a_real_rtsp_session() {
         if (!SOURCES().contains("nvdec")) {
             skip(
@@ -2623,12 +2625,13 @@ namespace {
             return;
         }
         const int width = 320;
-        // 250 AND NOT 240, deliberately: H.264 codes in 16x16 macroblocks, so 240 is already a
-        // multiple of 16 and its coded height EQUALS its displayed one -- `uv_offset` and
-        // `pitch * height` come out identical and the assertion below cannot fail. 250 is even
-        // (x264 needs that) and rounds up to 256, which is the shape a 1080p camera has when
-        // it codes at 1088. Found by writing the check against 240 first and watching it read
-        // `122880 > 122880`.
+        // 250 AND NOT 240, still deliberately, though not for the reason #156 gave. That
+        // argument was that a coded height above the displayed one is what makes the
+        // `uv_offset` assertion capable of failing -- which was true of the assertion it
+        // wrote, and that assertion was wrong (see below). What a non-16-multiple height is
+        // good for now is the opposite: the OUTPUT surface's plane is `pitch * 250` even though
+        // the stream codes at 256, so a source that reported the coded value here would be
+        // caught rather than agreeing by coincidence.
         const int height = 250;
         const int fps = 15;
 
@@ -2707,17 +2710,22 @@ namespace {
         check(first.device.pitch >= width,
               "a pitch that can hold a row: " + std::to_string(first.device.pitch));
         check(first.device.device >= 0, "and the device it belongs to");
-        // THE ASSERTION THIS SECTION EXISTS FOR. `pitch * height` is what a consumer derives
-        // when the carrier does not say; NVDEC's chroma is past that, because the surface is
-        // decoded at a coded height rounded up. 250 rounds to 256 on this fixture.
-        const size_t derived =
+        // THE ASSERTION THIS SECTION EXISTS FOR, and it was asserting the WRONG VALUE until
+        // #159. `cuvidMapVideoFrame` hands back a post-processed OUTPUT surface at the target
+        // extent, so its chroma plane is at `pitch * height` and the mapping ends a half-plane
+        // past that. The coded height (1088 for 1080p) sizes the DECODE surfaces, which an
+        // application never sees -- #156 used it here and the first read of a real chroma plane
+        // faulted `pitch * 8` bytes past the end. Measured, in `map_next`'s comment.
+        //
+        // This file may not dereference a device pointer, so it pins the OFFSET and the bench
+        // is what proves the plane is readable. Pinning the number is still worth it: the old
+        // assertion was `>`, so it passed on exactly the value that could not be read.
+        const size_t plane =
             static_cast<size_t>(first.device.pitch) * static_cast<size_t>(first.device.height);
-        check(first.device.uv_offset > derived,
-              "and a uv_offset PAST the derived one -- the coded height is taller than the "
-              "displayed one: " +
-                  std::to_string(first.device.uv_offset) + " > " + std::to_string(derived));
-        check(first.device.uv_offset % static_cast<size_t>(first.device.pitch) == 0,
-              "and it is a whole number of rows");
+        check(first.device.uv_offset == plane,
+              "and a uv_offset of exactly one luma plane -- the OUTPUT surface's extent is the "
+              "display one, not the coded one: " +
+                  std::to_string(first.device.uv_offset) + " vs " + std::to_string(plane));
 
         // A SURFACE OUTLIVING ITS SOURCE, which is not hypothetical: `DeviceImage::owner`
         // exists because a reconnect replaces the source while a worker still holds a frame,
@@ -3137,6 +3145,16 @@ int main() {
     test_a_refused_add_pays_the_abandonment_debt();
     test_stop_charges_one_deadline_to_the_fleet_not_one_per_camera();
 
+    // THE NVDEC SECTIONS FIRST -- BEFORE ANYTHING ELSE HERE TOUCHES GSTREAMER, and the order
+    // IS the check. Nothing above this line makes a GStreamer call, so this is the only place
+    // that can ask whether `sources/nvdec.cpp` initialises the library ITSELF; the answer used
+    // to be no, and with the plugin probe and the GStreamer source running first it was
+    // invisible. It surfaced as eighteen `gst_is_initialized()` assertions and a segfault the
+    // first time the bench ran `--source nvdec`. Do not move these back down.
+    test_a_device_surface_over_a_real_rtsp_session();
+    test_an_unreachable_camera_and_a_broken_one_are_told_apart();
+    test_a_reordered_stream_delivers_every_picture();
+
     test_the_exact_pipeline_line_per_codec();
     test_the_gl_trap_and_the_deepstream_nvmm_handoff();
     test_a_property_gstreamer_has_no_value_for_is_omitted();
@@ -3149,9 +3167,6 @@ int main() {
     test_a_missing_source_and_an_omitted_lane_are_different_questions();
     test_the_gstreamer_source_where_it_is_linked();
     test_a_decoded_pixel_over_a_real_rtsp_session();
-    test_a_device_surface_over_a_real_rtsp_session();
-    test_an_unreachable_camera_and_a_broken_one_are_told_apart();
-    test_a_reordered_stream_delivers_every_picture();
 
     std::printf("%d checks, %d failure(s), %d skipped\n", checks, failures, skips);
     return failures == 0 ? 0 : 1;

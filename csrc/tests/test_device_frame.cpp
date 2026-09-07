@@ -30,9 +30,11 @@ namespace {
         }
     }
 
-    //: A plausible NVDEC surface: 1080p displayed, decoded at a CODED height of 1088, padded
-    //: to a 2048-byte pitch, on device 3. The coded height is the point -- `pitch * 1088` is
-    //: where the chroma is, and `pitch * 1080` is where a derivation would look for it.
+    //: A 1080p surface with a padded 2048-byte pitch, on device 3. `uv_offset` here is
+    //: DELIBERATELY LARGER than the plane (`pitch * 1088`, the coded height): this file tests
+    //: the carrier's own predicate, and what it must show is that an offset ABOVE the luma
+    //: plane is accepted -- which is why a producer that gets this wrong upward is caught by
+    //: nothing here. #159 is the round where that mattered: the real value is `pitch * 1080`.
     DeviceImage a_surface(std::shared_ptr<const void> owner = nullptr) {
         DeviceImage image;
         image.nv12 = reinterpret_cast<const void*>(0xdeadbeef000ULL);
@@ -115,19 +117,17 @@ namespace {
         inside_luma.uv_offset = 2048ULL * 1079;  // one row short: the chroma would overlap
         check(inside_luma.empty(), "a chroma offset inside the luma plane is mis-filled");
 
-        // AND THE LIMIT OF THIS CHECK, stated rather than papered over: `pitch * height`
-        // EXACTLY is legal, because a genuinely tight surface has its chroma right there --
-        // and this struct has no coded height, so it cannot tell that from an NVDEC surface
-        // whose filler forgot the padding. What the field buys is that the offset must be
-        // STATED: it can no longer be derived downstream, which is where `runtime/ops.cu`'s
-        // guard (also `>= pitch * height`) was satisfied exactly by the wrong value and threw
-        // nothing (#153 round 4). The NVDEC source's own gate is what checks 1088 against
-        // what cuvid reported.
+        // AND THE LIMIT OF THIS CHECK, stated rather than papered over: this predicate
+        // refuses an offset INSIDE the luma plane and accepts anything at or above it, so it
+        // cannot tell a correct surface from one whose offset is too LARGE. #159 is what that
+        // limit cost -- the NVDEC source filled `pitch * coded_height`, every gate stayed
+        // green, and the first read of the plane faulted past the end of the mapping. What the
+        // field buys is that the offset must be STATED rather than derived downstream; what
+        // checks the value is the producer's own gate plus something that reads the bytes.
         DeviceImage genuinely_tight = a_surface();
         genuinely_tight.uv_offset = 2048ULL * 1080;
         check(!genuinely_tight.empty(),
-              "`pitch * height` is a tight surface, which is legal -- the carrier cannot see a "
-              "coded height it was never told");
+              "`pitch * height` is legal, and is what every producer here reports (#159)");
         DeviceImage tight = a_surface();
         tight.pitch = tight.width;
         check(!tight.empty(), "but pitch == width is legal: an unpadded surface");

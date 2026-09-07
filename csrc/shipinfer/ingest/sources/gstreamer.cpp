@@ -13,8 +13,8 @@
 #include "shipinfer/core/options.h"
 #include "shipinfer/core/types.h"
 #include "shipinfer/ingest/registry.h"
-#include "shipinfer/ingest/sources/gstreamer_bus.h"
 #include "shipinfer/ingest/sources/gstreamer_pipeline.h"
+#include "shipinfer/ingest/sources/gstreamer_shared.h"
 
 namespace shipinfer {
 
@@ -47,50 +47,6 @@ namespace shipinfer {
             char buffer[32];
             std::snprintf(buffer, sizeof(buffer), "%g", seconds);
             return buffer;
-        }
-
-        // Initialise GStreamer exactly once per process, whoever asks first.
-        //
-        // The Python loader (`runtime/gstreamer.py`) holds a lock around the *import* as well,
-        // because PyGObject resolves `gi.repository` members lazily and a concurrent first
-        // touch has come back as "'GLib' object has no attribute 'Idle'". C++ has no such race
-        // — the library is bound at link time — but `gst_init` must still happen exactly once,
-        // and fifty camera threads reach this at start-up together.
-        //
-        // `gst_init_check` rather than `gst_init`: `gst_init` terminates the process when it
-        // fails, and a server must not `exit(1)` because a plugin registry was unwritable. A
-        // throw out of the lambda leaves the flag unset, so the next camera legitimately
-        // retries.
-        void initialise_gstreamer() {
-            static std::once_flag once;
-            std::call_once(once, [] {
-                // `rtspsrc` asks GIO for a proxy resolver before it connects, and GIO's default
-                // on a desktop-less system is libproxy, which throws a C++
-                // `std::runtime_error("Unable to read configuration")` when it finds no
-                // GSettings or D-Bus to read. Uncaught across the C boundary that is
-                // `terminate` for the whole process, which is how the first containerised RTSP
-                // run died with fifty cameras connected and zero frames decoded. GIO's
-                // documented override selects its no-op resolver instead. The trailing `0` is
-                // `overwrite=false` — the exact `os.environ.setdefault` of
-                // `runtime/gstreamer.py:57`, so an operator who has configured a real proxy
-                // keeps it.
-                ::setenv("GIO_USE_PROXY_RESOLVER", "dummy", 0);
-                GError* error = nullptr;
-                if (gst_init_check(nullptr, nullptr, &error) == FALSE) {
-                    const std::string reason = (error != nullptr && error->message != nullptr)
-                                                   ? error->message
-                                                   : "(no message)";
-                    if (error != nullptr) g_error_free(error);
-                    // Fatal on purpose: a GStreamer that cannot initialise will not start
-                    // working on its own, so the actor must not spend a reconnect budget on it.
-                    // Note what is *not* here — the Python plane's "PyGObject is not
-                    // importable" case. This unit links against `libgstreamer-1.0`, so a
-                    // missing runtime is a link failure, not something a camera can discover at
-                    // connect time. A missing *plugin* is still discoverable, and
-                    // `select_decoder` / `select_converter` raise the same error for it.
-                    throw SourceUnavailableError("gstreamer", "gst_init failed: " + reason);
-                }
-            });
         }
 
         // Is this element installed on this host? The probe behind `select_decoder` and

@@ -3054,6 +3054,86 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `has_pixels()` back to `image_ != nullptr` fails "an NV12 surface satisfies FRAME_INPUT";
       the seam passing `state.width()` as the stride fails with `brightest is 1.000000` in both
       the letterbox and the crop -- the sentinel, in the output.
+      THE FIRST BENCH RUN OVER `--source nvdec` SEGFAULTED, and the cause is the one thing
+      `test_ingest` structurally could not see: **`sources/nvdec.cpp` never called `gst_init`**.
+      Eighteen `gst_is_initialized()` assertions out of `gst_parse_launch`, then exit 139. The
+      unit had always passed its own gate because that binary ran the GStreamer sections first
+      and initialised the library on its behalf -- a test that passes because of its neighbours.
+      So `initialise_gstreamer()` moved into the shared header (which is `gstreamer_shared.h`
+      now: it arrived as `gstreamer_bus.h` for the bus drain alone, and the second thing both
+      units need proved that name too narrow), and **the NVDEC sections now run BEFORE anything
+      in that binary touches GStreamer** -- the order is the check, and it says so where it
+      would be undone. REVERT-CHECK with the new order: the assertions and `exit status: 139`;
+      with the old order the same revert is 290 checks, 0 failures, which is exactly the point.
+      Found by RUNNING it (V86's sibling lesson): three reviews and my own reading had all gone
+      past it, because every test in the tree exercised it only after something else had.
+      AND THE SECOND BUG THE SAME RUN FOUND IS THE BIGGER ONE: **`uv_offset` was the CODED
+      height and it should be the DISPLAY height.** #156 argued the coded-height claim at
+      length -- in its body, in this ledger, in `runtime/ops.h`'s docstring -- and it went past
+      three reviews. It is wrong. `cuvidMapVideoFrame` hands back a post-processed OUTPUT
+      surface at the TARGET extent; the coded height (1088 for 1080p) sizes the DECODE surfaces
+      an application never sees. MEASURED, by probing both offsets out of a real mapped surface
+      rather than reading a header:
+        PROBE pitch=2048 display=1920x1080 coded_h=1088
+              at_coded=cudaErrorInvalidValue  at_display=cudaSuccess
+      The coded read is `pitch * 8` bytes past the end of the mapping -- so it FAULTED rather
+      than returning wrong pixels, which is the only lucky part.
+      WHY NOTHING CAUGHT IT, and this is the lesson worth keeping: no test in the tree had ever
+      READ that plane. `test_ingest` may not dereference a device pointer, so it asserted the
+      OFFSET -- with `>`, which passes on exactly the unreadable value. `test_dataplane` reads
+      synthetic buffers where the offset is whatever the fixture says. `QueueSink` refused
+      device frames, so the graph never saw one. Three gates, all green, none of them touching
+      the byte in question. The first thing that read it was the bench, and it stopped at once.
+      REVERT-CHECK: `FAIL: ... 131072 vs 128000`, on the 320x250 fixture. The fixture's
+      non-16-multiple height still earns its place, for the opposite reason to the one #156
+      gave: the surface's plane is `pitch * 250` while the stream codes at 256, so a source
+      reporting the coded value is caught rather than agreeing by coincidence.
+      ROUND 2 FOUND TWO MORE COPIES OF THE WRONG CLAIM, and both were worse places than the
+      ones I had fixed. `runtime/ops.cu`'s guard printed "pass `stride * coded_height` for an
+      NVDEC surface" ON THE FAILURE PATH -- remediation advice pointing at the faulting value,
+      so the next producer to trip that guard would have followed the message straight into the
+      bug I had just measured. And `ingest/frame.h`, the DECLARATION SITE of the field, still
+      stated the inverted rule in capitals: the first thing a new `DeviceImage` producer reads.
+      Both corrected with the measurement; the prose copies in `test_device_frame.cpp` and
+      `test_ingest.cpp` too. The reviewer's argument for blocking is the one I had used myself
+      one round earlier -- leaving one copy standing is how it comes back -- and `frame.h` is
+      more load-bearing than the `state.h` copy I had reached into #158 to fix.
+      NOTED, and both are real limits rather than fixes: `uv_offset == pitch * height` in
+      section Q is a tautology against the current source (both sides trace to
+      `display_height`), earning its place only as a pin against reintroducing the coded value
+      -- and it cannot catch a producer that gets height and offset wrong together. And
+      `DeviceImage::empty()` refuses an offset INSIDE the luma plane and accepts anything at or
+      above it, so a producer wrong UPWARD is caught by nothing until something reads the bytes.
+      That is exactly what happened, and `test_device_frame.cpp` now says so where it asserts
+      the limit.
+      ROUND 3 FOUND TWO MORE, and one was the same defect as round 2's a layer up:
+      `ingest/base.cpp`'s refusal message -- the one a device-source author actually READS at
+      run time when `DeviceImage::empty()` rejects their surface -- said "for NVDEC that is
+      pitch * CODED height". A producer trips it, follows it, and `empty()` then PASSES, because
+      it only refuses an offset inside the plane. The bug reintroduced by the fix's own error
+      string. The other was `ops.cu`'s comment sitting directly above `nv12 + uv_offset`: two
+      other lines in that file were corrected and this one, the first thing a reader of the
+      arithmetic sees, was not.
+      AND THE COMMENT-VOLUME NOTE WAS RIGHT, so I took it. The corrected claim had been restated
+      at length in six places -- `frame.h`, `nvdec.cpp`, `ops.h`, `state.h` and two test files --
+      which is the same drift failure as one copy of a mistake, pointed the other way, and it
+      is against CONVENTIONS.md's own cap. `ingest/frame.h` is the ONE canonical statement now,
+      with the probe output; `nvdec.cpp` keeps only its own measurement, and `ops.h`, `state.h`
+      and `ops.cu` are one-line pointers to it. `test_dataplane`'s fixtures are unchanged and
+      still right -- the kernel must honour the offset it is handed -- but they no longer
+      attribute an above-the-plane offset to NVDEC, which is the retracted claim.
+- [ ] **NVDEC-SECTION-ORDER-HAS-NO-GUARD · #159 round 2, note 3.** `test_ingest.cpp`'s NVDEC
+      sections run before anything else in that binary touches GStreamer, and that ORDER is what
+      makes a missing `initialise_gstreamer()` visible -- but the only thing holding it is a
+      comment saying "do not move these back down", which is what #156 relied on too. That file
+      is not gst-linked so it cannot assert `!gst_is_initialized()` itself; the reviewer's
+      suggestion is a text-order assertion in `tests/test_build_csrc.py` (the three NVDEC calls
+      appear in `main()` before any call whose body reaches the gst lane), which would fail on a
+      plain runner rather than only inside `jammy-nvdec`. Deferred out of #159 on the reviewer's
+      own advice ("worth considering with the carrier work, not here"): the mechanical part is
+      deciding what "reaches the gst lane" means from text without a hand-kept list, which is
+      the two-place edit the lane-table checks exist to avoid.
+
       LEFT: the CARRIER, and #156 round 2 asked for its plan in writing rather than at the
       design load, which is fair -- so: `ulNumOutputSurfaces = 2` caps in-flight surfaces per
       camera at two, and a fair queue exists to HOLD frames, so a surface must not travel
