@@ -13,6 +13,7 @@
 #include "shipinfer/core/options.h"
 #include "shipinfer/core/types.h"
 #include "shipinfer/ingest/registry.h"
+#include "shipinfer/ingest/sources/gstreamer_bus.h"
 #include "shipinfer/ingest/sources/gstreamer_pipeline.h"
 
 namespace shipinfer {
@@ -264,7 +265,7 @@ namespace shipinfer {
         if (sample == nullptr) {
             // Nothing within the timeout. Distinguish "quiet" from "over" by asking the bus: an
             // EOS or an ERROR means reconnect, a timeout means keep waiting.
-            raise_if_stream_ended();
+            raise_if_stream_ended(camera_id(), graph_->pipeline);
             return std::nullopt;
         }
 
@@ -336,31 +337,6 @@ namespace shipinfer {
         // gone.
         frame.owner = std::move(pixels);
         return frame;
-    }
-
-    void GStreamerSource::raise_if_stream_ended() {
-        GstBus* bus = gst_element_get_bus(graph_->pipeline);
-        if (bus == nullptr) return;
-        GstMessage* message = gst_bus_pop_filtered(
-            bus, static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_EOS));
-        gst_object_unref(bus);
-        if (message == nullptr) return;
-
-        std::string reason = "end of stream";
-        if (GST_MESSAGE_TYPE(message) != GST_MESSAGE_EOS) {
-            GError* error = nullptr;
-            gchar* debug = nullptr;
-            gst_message_parse_error(message, &error, &debug);
-            reason = (error != nullptr && error->message != nullptr) ? error->message
-                                                                     : "(no message)";
-            // The debug string is where GStreamer puts the element that failed and the file and
-            // line it failed at, which is the half of the message worth having.
-            reason += " (" + std::string(debug != nullptr ? debug : "") + ")";
-            if (error != nullptr) g_error_free(error);
-            g_free(debug);
-        }
-        gst_message_unref(message);
-        throw FrameDecodeError(camera_id(), reason);
     }
 
     void GStreamerSource::do_close() {

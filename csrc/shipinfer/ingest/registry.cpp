@@ -1,24 +1,27 @@
 // THE OFFLINE-CLOSURE INVARIANT — read before adding an include to any unit under `ingest/`.
 //
 // `scripts/build_csrc.py` decides what a binary needs by walking `#include "shipinfer/..."`
-// lines and following every header to the `.cpp` beside it. Two units under `sources/` reach
+// lines and following every header to the `.cpp` beside it. Three units under `sources/` reach
 // outside this tree, and **no unit under `ingest/` other than each one's own `.cpp` may include
 // its header**:
 //
 //   sources/replay.h      -> `core/platform.h` (the driver) and OpenCV
 //   sources/gstreamer.h   -> `libgstreamer-1.0` / `libgstreamer-app-1.0`
+//   sources/nvdec.h       -> the same, plus nv-codec-headers (`libnvcuvid` is dlopen'd)
 //
-// Including either here, in the registry every other unit reaches, would pull those
+// Including any of them here, in the registry every other unit reaches, would pull those
 // prerequisites into the closure of the whole ingest plane, and the offline C++ tier would stop
 // building on a machine with no CUDA and no `-dev` package. (`sources/gstreamer_pipeline.h` is
-// the pure sibling of the second one and is free of all of it — anything may include that.)
+// the pure sibling and is free of all of it — anything may include that.
+// `sources/gstreamer_bus.h`, shared by the last two, is NOT: it includes `gst/gst.h`, and
+// `tests/test_build_csrc.py::TestOnlyGstLaneUnitsReachTheBus` is what holds that line.)
 //
 // That is why this registry is populated by file-scope registrars in the source files
 // themselves and knows the name of none of them. The visible consequence, and it is the right
 // one: an offline binary's registry legitimately contains no *real* source, because both of the
 // ones shipped today live in units an offline build does not compile. `--with-external
-// gstreamer` opts the second one back in for the container that has GStreamer, which is how its
-// registry tests get to run at all.
+// gstreamer` opts one back in for the container that has GStreamer, which is how its registry
+// tests get to run at all.
 //
 // What that consequence must NOT do is arrive as "unknown video source".
 // `ingest/omitted_lanes.h` carries the build's own list of left-out lanes together with the

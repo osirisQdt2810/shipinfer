@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from scripts import rtsp_serve
 
 
@@ -46,3 +48,41 @@ class TestTheFixtureCacheIsKeyedByFrameRate:
         )
         assert rtsp_serve.default_fixture_path(data, 5).name == "person_2K-5fps.h264"
         assert rtsp_serve.default_fixture_path(data, 5).parent == tmp_path / ".rtsp"
+
+    def test_a_b_frame_fixture_is_its_own_file(self, tmp_path: Path) -> None:
+        """Same reason as the rate: two streams, one cache key, and the second run gets the
+        first's bitstream. A B-frame fixture is a DIFFERENT stream -- reordered, deeper
+        reference depth -- and serving it to a check that asserts decode order is display
+        order would fail for the wrong reason."""
+        data = tmp_path / "person_2K"
+        plain = rtsp_serve.default_fixture_path(data, 20)
+        reordered = rtsp_serve.default_fixture_path(data, 20, 3)
+        assert plain.name == "person_2K-20fps.h264", "the default spelling is unchanged"
+        assert reordered.name == "person_2K-20fps-bf3.h264"
+        assert plain != reordered
+
+    def test_bframes_drops_zerolatency_because_that_tune_forces_them_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The one line that would make the flag a no-op. ``-tune zerolatency`` sets
+        ``bframes=0`` inside x264 regardless of ``-bf``, so asking for three and leaving the
+        tune in place produces the same one-reference stream and the check that needed a deep
+        DPB passes on a fixture that never had one."""
+        data = tmp_path / "frames"
+        data.mkdir()
+        (data / "a.jpg").write_bytes(b"")
+        seen: list[list[str]] = []
+        monkeypatch.setattr(rtsp_serve.shutil, "which", lambda _: "/usr/bin/ffmpeg")
+        monkeypatch.setattr(
+            rtsp_serve.subprocess, "run", lambda command, **_: seen.append(command)
+        )
+
+        rtsp_serve.encode_fixture(data, tmp_path / "plain.h264", fps=20)
+        rtsp_serve.encode_fixture(data, tmp_path / "deep.h264", fps=20, bframes=3)
+
+        plain, deep = seen
+        assert "zerolatency" in plain and plain[plain.index("-bf") + 1] == "0"
+        assert "-refs" not in plain, "the default stream is unchanged, flag or no flag"
+        assert "zerolatency" not in deep, "the tune that would silently cancel -bf"
+        assert deep[deep.index("-bf") + 1] == "3"
+        assert deep[deep.index("-refs") + 1] == "3", "depth, which is what a DPB is sized for"

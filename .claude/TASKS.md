@@ -2918,9 +2918,125 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       derived `stride * src_h` and it fails at 0.875 on a 0..1 scale; restored, 0 failures.
       `require_nv12_layout` is shared by both NV12 entry points now, so the stride and
       `uv_offset` rules are stated once.
-      LEFT: the NVDEC source (open as #156), the graph branch itself -- `FrameState` carrying
-      the surface, the detect and crop stages branching on it, and `QueueSink` accepting a
-      device frame -- and then the design-load run.**
+      THE NVDEC SOURCE WORKS, 7 Sep on `feat/nvdec-source`, and V156's route is real:
+      RTSP -> H.264 bitstream on the host -> `cuvidParseVideoData` -> NVDEC -> a `DeviceImage`
+      that never left VRAM. `test_ingest` 241 -> 279 in `shipinfer-gst:jammy-nvdec` on a GPU,
+      0 failures, and the gate asserts the GEOMETRY rather than any pixel (nothing in that file
+      may dereference a device pointer): display extent 320x250, a pitch that holds a row, a
+      device index, the unmap keepalive, and **`uv_offset > pitch * height`** -- 250 rounds to a
+      coded 256, so the chroma really is past where a derivation would look.
+      FIVE THINGS THE FIRST DRAFT GOT WRONG, all found by running it:
+        * `#define FFNV_DYNLINK_CUDA_H` before including `dynlink_cuda.h` -- that macro is the
+          header's OWN include guard, so predefining it made the include a no-op and took
+          `CUresult`, `CUdeviceptr` and half of `CuvidFunctions` with it.
+        * the parser callbacks were free functions and `Decoder` is private to `NvdecSource`;
+          static members solve it, and cuvid calls them SYNCHRONOUSLY from
+          `cuvidParseVideoData`, so the whole decoder is lock-free on the actor's own thread.
+        * no CURRENT context: retaining the primary context does not make it current, so
+          `cuvidCreateDecoder` refused -- a message about the stream for a fault in the caller.
+          `cuCtxPushCurrent` (the dynlink loader carries no setter), pushed once and popped in
+          `close()`, plus a `vidLock` because cuvid's own engine touches the context too.
+        * `ulNumOutputSurfaces = 1` delivered exactly ONE frame: a consumer holds a mapped
+          surface while the next is mapped, so one output surface fails the second map. Two now,
+          and the contract -- one mapped surface at a time -- is stated in the header.
+        * the gate's first fixture was 320x240, and 240 is already a multiple of 16, so its
+          coded height EQUALS its displayed one and `uv_offset > pitch * height` read
+          `122880 > 122880`. 250 is the shape a 1080p camera has when it codes at 1088.
+      THE LANE: `EXTERNAL["nvdec"]` (ffnvcodec + the two GStreamer packages), the
+      `omitted_lanes.h` row, and `libffmpeg-nvenc-dev` in `gst-image.sh` so a `FORCE=1` rebake
+      reproduces the image. The host build omits the lane with the full hint and the gate skips
+      by name -- 241 checks / 4 skipped there against 279 / 1 in the image.
+      ROUND 1 CAME BACK BLOCKING WITH SIX, and every one was real -- checked against the code
+      before touching it, which is the rule that mattered here because they were not where I was
+      looking. The decode half (the `uv_offset` work, the pimpl, the taxonomy) was accepted as
+      it stood; **all six were in the GSTREAMER half, and each one was a place this source had
+      copied `sources/gstreamer.cpp` and dropped something that sibling does on purpose**:
+        1. `open()` reported success on `GST_STATE_CHANGE_ASYNC`. `rtspsrc` has not sent
+           DESCRIBE at that point, so a stale password gave a camera the fleet reported UP that
+           never delivered a frame; `open_timeout_ms` was never read. Now blocks on
+           `gst_element_get_state`, as the sibling has all along.
+        2. a hardcoded 100 ms pull ignored `read_timeout_ms`. Worse than an unused knob: with
+           `empty_reads_before_reconnect` = 5 the actor tore the source down in half a second,
+           before a 2 s GOP could deliver its first picture, and blamed the network. The port is
+           not "use the knob for the pull" -- on the sibling one pull IS one frame, here a frame
+           is N access units (SPS/PPS/SEI carry no picture) -- so `read_timeout_ms` is now a
+           DEADLINE ACROSS the access units and the loop is what bounds the read.
+        3. nothing ever read the bus, so a mid-stream peer reset (camera reboot, switch flap)
+           came out as "5 consecutive empty reads" with GStreamer's own words dropped. The
+           sibling's drain is now SHARED -- `sources/gstreamer_bus.h`, lifted out of the second
+           copy rather than pasted into it.
+        4. the appsink ref was leaked on every open: `gst_bin_get_by_name` is (transfer full)
+           and the comment said "owned by the pipeline". One `GstAppSink` with its pad, caps and
+           queued access units stranded per reconnect, forever, in a 24/7 process.
+        5. the keepalive captured a RAW function table and a raw decoder handle. `QueueSink`'s
+           refusal was the only thing making that safe, and it comes off next. Fixed by a
+           `Session` the frame's deleter holds a reference to: the decoder cannot outrun the last
+           mapped surface, and both the release and the teardown PUSH THE CONTEXT themselves, so
+           a worker thread may be the one that drops the last frame.
+        6. the one-slot `ready` overwrote a picture and counted it into a field nothing read.
+           A parse can display more than one picture (a reorder flush), so a B-frame camera lost
+           frames with `frames_read` and `frames_dropped` both looking healthy. Now a deque
+           bounded by `surfaces` -- deliver them, do not count them. A display info is an INDEX,
+           not a mapped surface, which is why this is not a queue of GPU memory.
+      Plus the 10-bit note: NV12 is 8-bit, so a 10-bit stream needs P016 and got
+      "cuvidCreateDecoder refused this stream" -- retryable, so a permanent capability mismatch
+      reconnected forever. Now a `ConfigError` naming the depth, which stops the camera.
+      GPU EVIDENCE: `test_ingest` 279 -> 287 checks, 0 failures, and FOUR REVERT-CHECKS, each
+      breaking one fix alone in `shipinfer-gst:jammy-nvdec`:
+        (1) `FAIL: an unreachable camera fails open() rather than reporting success: open()
+            returned`
+        (2) `FAIL: ... an empty read spends read_timeout_ms rather than a constant: waited
+            0.000001s of a 1000ms budget`
+        (3) `FAIL: and a server that goes away raises rather than going quiet:` (empty reason)
+        (5) `Segmentation fault (core dumped)`, exit status 139, with no summary line at all --
+            the use-after-free, in the thread that dropped the frame.
+      Findings 4 and 6 have no assertion of their own and the body says so: a stranded
+      `GstAppSink` is not observable from the test binary without a leak tracer, and the deque
+      shows up only on a B-frame stream the loopback fixture does not produce.
+      The new `gstreamer_bus.h` is the FIRST header in this tree to include `gst/gst.h`, which
+      the closure walker cannot see (it attributes lanes to `.cpp` units). So
+      `TestOnlyGstLaneUnitsReachTheBus` derives the allowed set from the lane table and both its
+      checks fail when `frame.h` includes it.
+      ROUND 2 CAME BACK BLOCKING WITH ONE, and it was the field I never read:
+      `CUVIDEOFORMAT::min_num_decode_surfaces` is what cuvid fills in to say how deep the DPB
+      has to be, and `pfnSequenceCallback`'s return value is not a boolean -- 0 fails, 1 means
+      "keep yours", and **> 1 OVERRIDES the parser's `ulMaxNumDecodeSurfaces`**. Returning 1
+      left the parser cycling through however many indices the knob happened to say, which for
+      a camera whose SPS wants six is either a retryable refusal (reconnect forever, the exact
+      shape the 10-bit branch was added to prevent) or a picture index reused while it is still
+      a reference -- corrupt output with `frames_read` climbing. NVIDIA's `NvDecoder` creates
+      the parser with 1 and returns `min_num_decode_surfaces` here for precisely this reason
+      (V86: read the reference first). The knob is a FLOOR now, with a ceiling of 64 because
+      `surfaces: 400` is a typo that costs VRAM per camera and nothing else.
+      Notes taken with it: `hwaccel: false` on an `nvdec` camera is now REFUSED rather than
+      ignored (this source is the video engine by definition; falling back would hand the graph
+      a host frame from a source whose contract is that it never produces one); the
+      `platform.h`-is-the-only-header departure is stated in the header with its reason (NVDEC
+      has no HIP counterpart, so an alias would be a fiction with one implementation, and the
+      lane is opt-in so a ROCm build never compiles the unit); and `CUVIDPROCPARAMS::
+      output_stream` staying 0 now records the dependency that makes it safe -- every stream in
+      `csrc/` is `gpuStreamCreate`'s, which is blocking and therefore ordered against the
+      legacy default stream, and a non-blocking stream (what `torch.cuda.Stream` creates) would
+      need it set.
+      THE FIXTURE GREW A REORDERED VARIANT, because two of these findings could not be checked
+      without one: `scripts/rtsp_serve.py --bframes N` (and `RtspLoopback::start(..., bframes)`)
+      encodes with `-bf N -refs 3` and drops `-tune zerolatency`, WHICH FORCES B-FRAMES OFF --
+      the line that would have made the flag a silent no-op, and the one
+      `tests/test_rtsp_serve.py` now pins. Verified with ffprobe: the default fixture is 1 I +
+      9 P, the new one 1 I + 3 P + 6 B. Cached under its own name, for the reason the frame rate
+      already is.
+      `test_ingest` 287 -> 290 checks, 0 failures, and `REORDERED: 72 frames in 5s of a 15 fps
+      B-frame stream` printed as evidence rather than only asserted.
+      TWO FIXES HAVE NO REVERT-CHECK AND I MEASURED THAT RATHER THAN ASSUMING IT. Reverting the
+      DPB floor (knob as ceiling, `return 1`) still decodes the reordered fixture: cuvid
+      tolerates `ulNumDecodeSurfaces = 1` here, and the corruption mode is not observable from a
+      gate that asserts geometry. Reverting the deque to round 1's one slot also still delivers
+      72 frames -- with `ulMaxDisplayDelay = 0` ("display as soon as decoded") cuvid does not
+      accumulate a reorder buffer, so a multi-display parse never happens on this stream. Both
+      fixes are kept on the reference implementation's authority and on the field cuvid
+      provides, not on a red test, and the PR body says so.
+      LEFT: the graph branch to `nv12_letterbox_into`, which `QueueSink`'s refusal is holding
+      the door for, and then the design-load run.**
 - [x] **CSRC-TOPOLOGY-Q · ANSWERED 4 Sep as ADR-020, by me, under V154 ("làm theo hướng bạn
       nghĩ là tốt nhất"). NO `csrc/topology/` and no `csrc/runners/`: the chain stays a Python
       declaration and the C++ plane receives a RESOLVED PLAN.** Three reasons, none of them

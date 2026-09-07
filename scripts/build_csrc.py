@@ -116,6 +116,22 @@ EXTERNAL: dict[str, ExternalLane] = {
             "without `--with-external gstreamer` leaves this unit out entirely."
         ),
     ),
+    # The NVDEC source: RTSP -> H.264 bitstream on the host -> NVDEC -> NV12 in VRAM (V156).
+    # `ffnvcodec` is nv-codec-headers, and the DYNLINK variants are the ones this uses: they
+    # `dlopen` `libnvcuvid.so` at run time, so the build has no driver dependency and a box
+    # without one fails at load with a message rather than at link. `libnvcuvid` itself is a
+    # DRIVER library and is never a build-time package.
+    "nvdec": ExternalLane(
+        units=("shipinfer/ingest/sources/nvdec.cpp",),
+        packages=("ffnvcodec", "gstreamer-1.0", "gstreamer-app-1.0"),
+        hint=(
+            "install libffmpeg-nvenc-dev (nv-codec-headers) plus libgstreamer1.0-dev and "
+            "libgstreamer-plugins-base1.0-dev, or build inside shipinfer-gst:jammy-nvdec, "
+            "which has all three. The GStreamer half is there because this source takes its "
+            "bitstream off RTSP through the same appsink the BGR path uses; only the decode "
+            "is NVDEC's."
+        ),
+    ),
 }
 
 _PKG_CONFIG_CACHE: dict[str, list[str]] = {}

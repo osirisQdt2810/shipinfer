@@ -116,16 +116,74 @@ class TestTheParityBinaryStaysOffline:
         )
 
 
+class TestOnlyGstLaneUnitsReachTheBus:
+    """``sources/gstreamer_bus.h`` includes ``gst/gst.h``, and no other header in the tree does.
+
+    The closure walker attributes a lane to a ``.cpp`` unit, so it cannot see that a *header*
+    needs somebody's ``-dev`` package: an offline unit that included this one would fail with
+    ``gst/gst.h: No such file`` rather than the lane machinery's own message. That is why the
+    invariant stated at the top of ``ingest/registry.cpp`` is held here instead of by a comment.
+    """
+
+    #: The lane package every unit allowed to reach that header already declares.
+    PACKAGE = "gstreamer-1.0"
+    HEADER = CSRC / "shipinfer" / "ingest" / "sources" / "gstreamer_bus.h"
+
+    def _allowed(self, build_csrc: ModuleType) -> set[Path]:
+        """The lane units carrying ``gstreamer-1.0`` — derived, so a third source is covered."""
+        return {
+            CSRC / unit
+            for spec in build_csrc.EXTERNAL.values()
+            if self.PACKAGE in spec.packages
+            for unit in spec.units
+        }
+
+    def test_the_header_is_the_only_one_naming_gstreamer(self, build_csrc: ModuleType) -> None:
+        del build_csrc
+        offenders = [
+            path.relative_to(CSRC).as_posix()
+            for path in CSRC.rglob("*.h")
+            if path != self.HEADER and "#include <gst/" in path.read_text(errors="replace")
+        ]
+        assert offenders == [], (
+            f"{offenders} include a GStreamer header; only {self.HEADER.name} may, and only "
+            f"because every unit that can reach it declares the {self.PACKAGE} lane"
+        )
+
+    def test_every_unit_reaching_it_declares_the_lane(self, build_csrc: ModuleType) -> None:
+        allowed = self._allowed(build_csrc)
+        assert allowed, "no lane declares " + self.PACKAGE
+        reaching = {
+            path
+            for path in list(CSRC.rglob("*.cpp")) + list(CSRC.rglob("*.cu"))
+            if self.HEADER in build_csrc.include_closure(path)
+        }
+        assert reaching <= allowed, sorted(
+            p.relative_to(CSRC).as_posix() for p in reaching - allowed
+        )
+
+    def test_both_sources_shipped_today_do_reach_it(self, build_csrc: ModuleType) -> None:
+        """Not vacuous: the two copies of the bus drain #156 found are the reason it is shared."""
+        for name in ("gstreamer.cpp", "nvdec.cpp"):
+            unit = CSRC / "shipinfer" / "ingest" / "sources" / name
+            assert self.HEADER in build_csrc.include_closure(unit), name
+
+
 class TestTheDefineSaysWhatIsMissing:
     """``-DSHIPINFER_OMITTED_LANES`` is the whole contract with the C++ side."""
 
     def test_the_lanes_left_out_are_the_ones_named(self, build_csrc: ModuleType) -> None:
-        assert build_csrc.lane_defines(frozenset()) == [
-            '-DSHIPINFER_OMITTED_LANES="gstreamer,opencv"'
-        ]
+        # Derived from `EXTERNAL` rather than spelled out, because a literal here means adding
+        # a lane is a two-place edit and the second place gets forgotten -- which is the exact
+        # class of drift `TestTheLaneTablesAgree` above exists to catch one file along. The
+        # SHAPE is what matters: sorted, comma-joined, quoted.
+        every = ",".join(sorted(build_csrc.EXTERNAL))
+        assert build_csrc.lane_defines(frozenset()) == [f'-DSHIPINFER_OMITTED_LANES="{every}"']
+        without_gstreamer = ",".join(sorted(set(build_csrc.EXTERNAL) - {"gstreamer"}))
         assert build_csrc.lane_defines(frozenset({"gstreamer"})) == [
-            '-DSHIPINFER_OMITTED_LANES="opencv"'
+            f'-DSHIPINFER_OMITTED_LANES="{without_gstreamer}"'
         ]
+        assert "gstreamer" in every and "opencv" in every, "the two that have always been there"
 
     def test_a_build_with_every_lane_defines_an_empty_list(
         self, build_csrc: ModuleType

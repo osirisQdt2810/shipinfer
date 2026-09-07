@@ -60,7 +60,7 @@ DEFAULT_FPS = 20
 __all__ = ["RtspFixtureServer", "default_fixture_path", "encode_fixture", "stream_uri"]
 
 
-def default_fixture_path(data_dir: Path, fps: int) -> Path:
+def default_fixture_path(data_dir: Path, fps: int, bframes: int = 0) -> Path:
     """Where the encoded stream for ``data_dir`` at ``fps`` is cached — keyed by frame rate.
 
     The stream's own timing (the SPS written by ``ffmpeg -framerate``) is what paces playback,
@@ -68,11 +68,17 @@ def default_fixture_path(data_dir: Path, fps: int) -> Path:
     20 fps was served to the next run's ``--fps 5`` at 20 fps, and twelve "5 fps" cameras
     offered 240. One cache entry per rate, so the rate asked for is the rate served.
     """
-    return data_dir.parent / ".rtsp" / f"{data_dir.name}-{fps}fps.h264"
+    suffix = f"-{fps}fps" if bframes == 0 else f"-{fps}fps-bf{bframes}"
+    return data_dir.parent / ".rtsp" / f"{data_dir.name}{suffix}.h264"
 
 
 def encode_fixture(
-    data_dir: Path, out_path: Path, *, fps: int = DEFAULT_FPS, force: bool = False
+    data_dir: Path,
+    out_path: Path,
+    *,
+    fps: int = DEFAULT_FPS,
+    force: bool = False,
+    bframes: int = 0,
 ) -> Path:
     """Encode a directory of JPEGs into one H.264 elementary stream. Cached.
 
@@ -81,6 +87,12 @@ def encode_fixture(
     which for a reconnect test is the difference between a two-second reconnect and a
     ten-second one. ``-bf 0`` removes B-frames for the same reason: no reordering delay, and
     the decode order is the display order, so a test can assert on frame content.
+
+    ``bframes`` opts out of that, and is for the checks that need what a real camera sends
+    rather than what is easiest to assert on: reordering, and a reference depth deeper than
+    one. An NVDEC decoder sized for a one-reference stream either refuses such a stream or
+    reuses a picture index that is still a reference, and neither is visible without one.
+    ``-tune zerolatency`` forces B-frames off, so it is dropped when they are asked for.
 
     Raises:
         FileNotFoundError: no JPEGs, or no ffmpeg.
@@ -112,14 +124,14 @@ def encode_fixture(
         "libx264",
         "-preset",
         "veryfast",
-        "-tune",
-        "zerolatency",
+        *(() if bframes else ("-tune", "zerolatency")),
         "-pix_fmt",
         "yuv420p",
         "-g",
         str(fps),
         "-bf",
-        "0",
+        str(bframes),
+        *(("-refs", "3") if bframes else ()),
         "-f",
         "h264",
         str(out_path),
@@ -274,10 +286,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--user", default=None)
     parser.add_argument("--password", default=None)
     parser.add_argument("--print-uris", action="store_true", help="print the URIs and exit")
+    parser.add_argument(
+        "--bframes",
+        type=int,
+        default=0,
+        help="B-frames per GOP in the fixture (default 0). Non-zero also raises the reference "
+        "depth, which is what a decoder's surface pool has to be sized for.",
+    )
     args = parser.parse_args(argv)
 
-    fixture = args.fixture or default_fixture_path(args.data, args.fps)
-    encode_fixture(args.data, fixture, fps=args.fps)
+    fixture = args.fixture or default_fixture_path(args.data, args.fps, args.bframes)
+    encode_fixture(args.data, fixture, fps=args.fps, bframes=args.bframes)
 
     server = RtspFixtureServer(
         fixture,
