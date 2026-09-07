@@ -2624,9 +2624,30 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       C1's parity reading is against a baseline measured the same way -- like for like, but not
       the like R55 asks for.
 
-- [!] **PHASE-D-NV12 · OPERATOR (when phase D opens): rebuild `shipinfer-gst:jammy` with `libgstreamer-plugins-bad1.0-dev` (gstcuda headers)? This box cannot `docker build` — the documented run+commit dance needs your go.** NVDEC-into-VRAM decode (both planes) — needs the DataPool carrier (arch.md §3/§8) AND an image
-      rebuild: `shipinfer-gst:jammy` lacks `libgstreamer-plugins-bad1.0-dev` (gstcuda/GstCudaMemory headers), and this
-      box can't `docker build` (the documented run+commit dance). Do not start before phase D opens.**
+- [~] **PHASE-D-NV12 · OPENED by V156 (critical path now, not a deferred phase), and THE ITEM'S
+      OWN PREMISE WAS WRONG -- measured 7 Sep by installing the package it named.**
+      `libgstreamer-plugins-bad1.0-dev` installs fine and gives NEITHER `gstreamer-cuda-1.0`
+      nor `/usr/include/gstreamer-1.0/gst/cuda`. The reason: this image is **GStreamer 1.20.3**
+      (jammy), and `gst-plugins-bad`'s CUDA library only became a public pkg-config module in
+      **1.22**. So the approval this item was waiting for would have bought nothing. Baked it
+      in a throwaway container rather than asking, per V157, and threw the container away.
+      THE ROUTE THAT DOES WORK, and it is subfaceid's own (`docs/new-system-architecture.md`:
+      "RTSP pull -> HW decode (NVDEC) -> stamp (cam,frame)") -- NVDEC DIRECTLY, no GStreamer
+      CUDA library and no DeepStream pull:
+        1. RTSP -> H.264 BITSTREAM on the host (`rtspsrc ! rtph264depay ! h264parse ! appsink`).
+           A few KB per frame instead of a ~3 MB decoded frame, so the host cost collapses --
+           which is the whole of V156's argument.
+        2. NVDEC via `libnvcuvid` -> **NV12 in VRAM**. `libnvcuvid.so.560.35.05` is already on
+           this box (it is a DRIVER library), and the headers are one apt package away:
+           `libffmpeg-nvenc-dev` 11.1.5.1-1 IS in this image's apt (that is nv-codec-headers --
+           `nvcuvid.h`, `cuviddec.h`), verified 7 Sep.
+        3. `nv12_letterbox_into` -> letterboxed float NCHW, ON DEVICE. **ALREADY WRITTEN**:
+           `csrc/shipinfer/runtime/ops.h:59` / `ops.cu`, whose own comment says "NV12 (as NVDEC
+           and the RTSP path produce) straight to a letterboxed float NCHW row"; shipvision has
+           the batched twin (`imgproc/image_ops.cu::nv12_letterbox_batch`).
+        4. Straight into the TensorRT input binding. No host round trip anywhere.
+      So the kernels are done and what is missing is the CARRIER. Sequenced under
+      `R55-BENCH-SOURCE`.**
 - [x] **CSRC-TOPOLOGY-Q · ANSWERED 4 Sep as ADR-020, by me, under V154 ("làm theo hướng bạn
       nghĩ là tốt nhất"). NO `csrc/topology/` and no `csrc/runners/`: the chain stays a Python
       declaration and the C++ plane receives a RESOLVED PLAN.** Three reasons, none of them
