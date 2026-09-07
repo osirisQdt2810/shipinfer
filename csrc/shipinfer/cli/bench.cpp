@@ -22,6 +22,7 @@
 #include "shipinfer/core/join_on_unwind.h"
 #include "shipinfer/core/platform.h"
 #include "shipinfer/engine/model.h"
+#include "shipinfer/ingest/camera_uris.h"
 #include "shipinfer/ingest/manager.h"
 #include "shipinfer/ingest/sink.h"
 #include "shipinfer/ingest/sources/replay.h"
@@ -130,6 +131,10 @@ namespace {
         // this binary links today; naming it rather than hard-coding it is what makes the
         // GStreamer source a new file and nothing else.
         std::string source = "replay";
+        // One URI per camera, written by the control plane. Empty means the `replay` shape,
+        // where every even camera shares `--person-frames` because a folder of JPEGs IS
+        // shared by design; a real source needs one URI each (`ingest/camera_uris.h`).
+        std::string camera_uris;
         int det_instances = 2;
         int seg_instances = 1;
         int emb_instances = 2;
@@ -201,6 +206,8 @@ namespace {
                 options.batch_delay_us = std::stoi(next());
             else if (flag == "--source")
                 options.source = next();
+            else if (flag == "--camera-uris")
+                options.camera_uris = next();
             else if (flag == "--det-instances")
                 options.det_instances = std::stoi(next());
             else if (flag == "--seg-instances")
@@ -624,6 +631,12 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Read BEFORE the loop so a short list fails at start-up rather than on camera 27.
+        const std::vector<std::string> uris =
+            options.camera_uris.empty()
+                ? std::vector<std::string>{}
+                : read_camera_uris(options.camera_uris,
+                                   static_cast<size_t>(std::max(options.cameras, 0)));
         std::vector<IngestConfig> fleet;
         for (int c = 0; c < options.cameras; ++c) {
             char name[32];
@@ -633,7 +646,11 @@ int main(int argc, char** argv) {
             // Half the fleet on person frames and half on ship frames, exactly as the baseline
             // splits its source workers — the mix of content decides how many crops the
             // detector produces, so it has to be the same or it is not the same experiment.
-            camera.uri = (c % 2 == 0) ? options.person_frames : ship_frames;
+            // A URI list carries that split itself: whoever writes it puts the person streams
+            // first, exactly as `harness/shipinfer.py::_rtsp_cameras` does, so both planes get
+            // the mix from one place instead of each deriving it.
+            camera.uri = uris.empty() ? ((c % 2 == 0) ? options.person_frames : ship_frames)
+                                      : uris[static_cast<size_t>(c)];
             camera.source = options.source;
             camera.fps = options.fps;
             fleet.push_back(std::move(camera));
