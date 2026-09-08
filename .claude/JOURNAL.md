@@ -1,5 +1,46 @@
 # Journal
 
+## 2026-09-08 (later) — four ratchets fired and four were right; every bug was a false green
+
+#162 merged (**main had been red since 7 Sep 13:27** -- `nvdec.cpp` was compiled by nothing in
+CI, which is how #156's missing `gst_init` merged), then #166, #167, #168. #169 is green and
+waits on a manual merge. Ledger: 0 open and unblocked.
+
+**Integration-checked `main` itself**, because every number I had quoted was measured on a
+branch. GPUs 2/3/6, 30 cameras -- ten per GPU, matching 50-on-5 -- gives **141 events/s per
+GPU against the replay route's 135**, 0 failed, 0 incomplete, **0 collector timeouts** (every
+earlier run had 6-73, so those were host-CPU contention with fifty actors, not GPU).
+
+**THE LESSON, and it is one sentence: every real bug today was something green that was not
+green BECAUSE of my change.** The stale `uv_offset`; a data race with `frames_failed` at 0 and
+every event completing; a test that was never written (a hook refused the compound command, so
+the edit never ran and I read the *next* command's "8 passed" as proof); a counter populated
+with no reader; a fix that landed in the shard child instead of the parent; and a lane fix that
+passed locally only because this box has the submodule CI deliberately omits. The
+revert-check separated all of them, and the three times I skipped it are the three times I was
+wrong. For the last one the discipline is the same but the axis is different -- reproduce the
+ENVIRONMENT, not the code: pointing the lane at an absent root with the require flag set gave
+CI's failure verbatim.
+
+**Tracking, de-risked by probing before writing anything.** I assumed linking shipvision from
+the parent needed CMake and a pkg-config lane. It is four `.cpp` files and one `-I`, no CUDA --
+so the correctness-critical half of tracking is OFFLINE-tier testable, which was not obvious.
+`pipeline/tracking/shard.{h,cpp}` ports the ordering guard read out of
+`topology/elements/track.py`: 41 checks, both revert-checks proven (7 failures without the
+refusal, 10 when cameras share a tracker). Getting the second to FAIL rather than ABORT took
+two passes -- an escaping exception, especially from a thread, is a crash with no summary line.
+
+**Four ratchets fired on #169 and all four were right**: the lane-table agreement (its parser
+turned `{}` into `{''}`, unexercised until a lane owned no source), the pinned cpp job set, the
+covered-elsewhere set, and the apps-leg armour whose own comment said "`skipped` is always
+empty". Where one was worth strengthening I did: "is a job actually building this lane?" is now
+derived from `cpp.yml` rather than a literal set, so the next lane needs no edit there.
+
+**The process failure I repeated four times, twice after writing the rule down:** a ledger
+commit to `main` *describing* an open PR conflicts with that PR's branch, and a conflicting PR
+gets **no CI runs at all** -- it looks queued, not broken. The fix that holds is structural: put
+the record on `main` before opening, and keep the branch clear of `TASKS.md` entirely.
+
 ## 2026-09-08 — the barrier was real, and removing it wrongly was faster than removing it right
 
 Four PRs merged (#163 the per-GPU lanes, #164 the decoder's output stream, #165 the Python stop
