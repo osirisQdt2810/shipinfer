@@ -1138,6 +1138,27 @@ hook down, for when the operator asked to see something before it is executed.
         (c) A SUB-METRIC WHERE THE COMPARISON IS LIKE-FOR-LIKE -- e.g. detect-only throughput on
             whole frames, or the per-frame preprocessing cost -- with the >=5x stated against
             that rather than against end-to-end events.
+            **PART OF (c) IS NOW MEASURED, 8 Sep, from the #164 run's own per-stage counters --
+            no new benchmark, just arithmetic I had not done.** Five GPUs, 70 s, `--source
+            nvdec`, the same run that gives 47 109 events:
+              ship_detector     47 117 invocations   673.1/s   134.6 per GPU
+              person_embedder   29 968               428.1/s    85.6
+              ship_embedder     24 049               343.6/s    68.7
+              ship_segmenter    24 049               343.6/s    68.7
+              TOTAL            125 183              1788.3/s   357.7
+            Against the baseline's 959.8 img/s SATURATED on the same five GPUs:
+              end-to-end events   673.0/s  ->  **0.70x**
+              stage invocations  1788.3/s  ->  **1.86x**
+            2.66 model executions per frame on our side, 1 per image on theirs.
+            AND 1.86x IS A LOWER BOUND, which is the honest caveat: `ship_detector` equals
+            `frames_accepted` exactly, so these are per-frame INVOCATIONS, and one embedder
+            invocation batches ~15 crops while one baseline image is one model pass. The
+            crop-level ratio is the number (c) actually wants and it is **NOT MEASURABLE
+            TODAY** -- the bench emits no crop counter (`event-edge.log` has 27 counters and
+            none of them counts rows into a model). So (c)'s blocker is one counter, not a new
+            harness: `ModelStage` sets `payload.rows` at `stages.cpp:230` and nothing sums it.
+            NOT DONE UNASKED, because a metric invented to make a target look met is worse than
+            an unmet target -- if (c) is your answer, say so and the counter is a small PR.
       WHAT IS NOT IN DOUBT, whichever you pick: the route V156 named works and is measured
       (`PHASE-D-NV12`), the host-decode arm of OUR OWN plane completes ZERO events at this load
       where the NVDEC arm completes 37 758, and the one-line `output_stream` fix took us from
