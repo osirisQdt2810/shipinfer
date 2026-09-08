@@ -21,6 +21,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "analyse_cpp.py"
 BENCH = ROOT / "csrc" / "shipinfer" / "cli" / "bench.cpp"
+DRIVER = ROOT / "scripts" / "run_cpp_bench.sh"
 
 
 def _load(path: Path, name: str) -> ModuleType:
@@ -104,6 +105,37 @@ class TestTheCeilingEachModuleIsScoredAgainst:
         found = analyse_cpp.capacities(META, _Samples("something_new"))
 
         assert found["something_new"] == 12
+
+
+class TestTheDriverDoesNotHideTheChainLine:
+    """The standard driver's summary must show which slots did NOT run.
+
+    `bench` announces them on stderr at start-up -- `chain 'x': 5 stage(s), not run here:
+    decode track mtmc output` -- and `run_cpp_bench.sh` greps the log into a summary with an
+    alternation anchored on COUNTER names. So the line was in every log and in none of the
+    summaries, and a reader of the documented output could quote a throughput number from a
+    run whose chain was missing `track` and `mtmc` without ever seeing it. That happened,
+    repeatedly, before this test existed.
+    """
+
+    def test_the_summary_grep_includes_the_chain_line(self) -> None:
+        body = DRIVER.read_text("utf-8")
+        greps = [line for line in body.splitlines() if line.startswith("grep -E")]
+
+        assert greps, "no summary grep in the driver any more; this test is guarding nothing"
+        assert any("chain " in line for line in greps), (
+            "scripts/run_cpp_bench.sh greps the run log into its summary and the alternation "
+            "does not include `chain `, so the slots this plane did not run are filtered out "
+            "of the one output a reader actually sees:\n  " + "\n  ".join(greps)
+        )
+
+    def test_the_binary_still_prints_it_with_that_prefix(self) -> None:
+        """The other half of the pair: a grep for `chain ` is only worth having while the
+        binary still writes that prefix, and the two live in different languages."""
+        assert '"chain \'"' in BENCH.read_text("utf-8"), (
+            "csrc/shipinfer/cli/bench.cpp no longer starts that line with `chain '`, so the "
+            "driver's grep above matches nothing"
+        )
 
 
 class TestEveryKeyTheAnalyserReadsIsOneTheBinaryWrites:
