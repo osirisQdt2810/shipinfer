@@ -125,22 +125,34 @@ namespace shipinfer {
         // consumer needing to know about it. What comes out of here is tight.
         //
         // doc: long the stream this runs on, and the drain the default stream cost
-        // ON THIS INTAKE'S OWN BLOCKING STREAM, not the legacy default one. Both orderings hold
-        // either way -- cuvid's post-processing lands on stream 0 (`ingest/sources/nvdec.cpp`)
-        // and a stream from `gpuStreamCreate` is BLOCKING, so it waits for stream 0's work
-        // before it starts. What changes is the other direction: a synchronous `gpuMemcpy` on
-        // the default stream makes every OTHER blocking stream wait too, so each copy drained
-        // the whole device -- all ~23 worker streams on that GPU -- and at the design load that
-        // is ~1460 full-device synchronisations a second on the ingest threads. Waiting on this
-        // stream alone keeps the ordering and drops the drain.
+        // ON THIS INTAKE'S OWN BLOCKING STREAM, not the legacy default one. A synchronous
+        // `gpuMemcpy` on the default stream makes every OTHER blocking stream wait too, so each
+        // copy drained the whole device -- all 23 worker streams on that GPU -- and at the
+        // design load that is ~1460 full-device synchronisations a second on the ingest
+        // threads. Waiting on this stream alone drops the drain.
+        //
+        // THE ORDERING IS NOT INHERITED, and this comment used to claim it was: it said
+        // cuvid's post-processing lands on stream 0 and a blocking stream waits for stream 0,
+        // so the copies were ordered for free. Both clauses stopped being true when the
+        // post-processing moved to its own non-blocking stream (#164), and a blocking stream is
+        // ordered against the LEGACY DEFAULT stream only in any case. The edge is the
+        // producer's event, below.
         gpuStream_t stream = static_cast<gpuStream_t>(self->stream());
+        // WAITED FOR ON THE DEVICE, not the host: the producer recorded `ready` on whatever
+        // stream wrote these bytes (`ingest/frame.h`), and this orders that write before the
+        // two copies without the ingest thread blocking twice. Absent for a producer whose
+        // bytes are already final, and then there is nothing to wait for.
+        if (image.ready != nullptr) {
+            GPU_CHECK(gpuStreamWaitEvent(stream, static_cast<gpuEvent_t>(image.ready), 0));
+        }
         GPU_CHECK(
             gpuMemcpyAsync(buffer->get(), image.nv12, luma, gpuMemcpyDeviceToDevice, stream));
         GPU_CHECK(gpuMemcpyAsync(buffer->as<uint8_t>() + luma,
                                  static_cast<const uint8_t*>(image.nv12) + image.uv_offset,
                                  luma / 2, gpuMemcpyDeviceToDevice, stream));
         // WAITED FOR, and it has to be: the caller drops `image.owner` the moment this returns,
-        // which lets NVDEC reuse the surface these copies are still reading.
+        // which lets NVDEC reuse the surface these copies are still reading. This orders
+        // COPY -> UNMAP and nothing else -- the other direction is the event above.
         GPU_CHECK(gpuStreamSynchronize(stream));
 
         DeviceSurface surface;

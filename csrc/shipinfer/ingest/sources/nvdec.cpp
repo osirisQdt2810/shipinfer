@@ -8,9 +8,11 @@
 #include <cstring>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "shipinfer/core/options.h"
 #include "shipinfer/core/types.h"
@@ -64,10 +66,27 @@ namespace shipinfer {
             CUcontext context = nullptr;
             CUvideoctxlock lock = nullptr;
             CUvideodecoder decoder = nullptr;
+            //: Where cuvid's POST-PROCESSING runs. Left at 0 it is the legacy default stream,
+            //: and every stream in `csrc/` is `gpuStreamCreate`'s -- which is BLOCKING, so each
+            //: mapped frame made all 23 worker streams on that GPU wait. See `map_next`.
+            CUstream output = nullptr;
+            //: The events that say a mapped surface's bytes are final, POOLED rather than made
+            //: per frame: `cuEventCreate` is a driver call and this happens ~195 times a
+            //: second per camera. A frame's keepalive returns its own, so by the time this is
+            //: destroyed every event issued is back here -- the deleter holds the `Session`.
+            std::mutex events_mu;
+            std::vector<CUevent> events;
 
             ~Session() {
                 const bool pushed = on_context();
+                // THE DECODER FIRST, before the stream it was handed and the events recorded
+                // on that stream. `cuStreamDestroy` defers the release until pending work
+                // finishes, so the other order survives -- but handing cuvid a stream and then
+                // destroying it under a live decoder is backwards, and #164's review said so.
                 if (decoder != nullptr) cuvid->cuvidDestroyDecoder(decoder);
+                for (CUevent event : events) cuda->cuEventDestroy(event);
+                events.clear();
+                if (output != nullptr) cuda->cuStreamDestroy(output);
                 if (lock != nullptr) cuvid->cuvidCtxLockDestroy(lock);
                 if (pushed) off_context();
                 // The PRIMARY context is released, not destroyed: it is shared with the runtime
@@ -83,6 +102,32 @@ namespace shipinfer {
                 const bool pushed = on_context();
                 cuvid->cuvidUnmapVideoFrame(decoder, frame);
                 if (pushed) off_context();
+            }
+
+            // One event out of the pool, or a new one. `nullptr` on failure rather than a
+            // throw: the caller is about to map a surface and wants one error path, not two.
+            CUevent acquire_event() {
+                {
+                    std::lock_guard<std::mutex> held(events_mu);
+                    if (!events.empty()) {
+                        CUevent reused = events.back();
+                        events.pop_back();
+                        return reused;
+                    }
+                }
+                CUevent made = nullptr;
+                // TIMING DISABLED, because nothing times these: it is the cheaper event, and
+                // the only question asked of it is "has the post-processing finished".
+                const bool pushed = on_context();
+                const CUresult status = cuda->cuEventCreate(&made, CU_EVENT_DISABLE_TIMING);
+                if (pushed) off_context();
+                return status == CUDA_SUCCESS ? made : nullptr;
+            }
+
+            void release_event(CUevent event) {
+                if (event == nullptr) return;
+                std::lock_guard<std::mutex> held(events_mu);
+                events.push_back(event);
             }
 
           private:
@@ -362,6 +407,25 @@ namespace shipinfer {
                                                       "'s context current");
         }
         decoder->context_pushed = true;
+        // doc: long the stream cuvid post-processes on, and the barrier stream 0 was
+        // ITS OWN STREAM, NOT THE DEFAULT ONE. `cuvidMapVideoFrame`'s post-processing runs on
+        // `CUVIDPROCPARAMS::output_stream`, and 0 means the LEGACY DEFAULT stream -- which
+        // every blocking stream in this process waits for. Every stream in `csrc/` comes from
+        // `gpuStreamCreate` (`core/platform.h`) and is therefore blocking, so each mapped frame
+        // was a device-wide barrier against all 23 worker streams on that GPU: at ~195 frames a
+        // second per GPU, 195 barriers a second, none of them ours.
+        //
+        // NON-BLOCKING, deliberately: a blocking stream here would keep the barrier in the
+        // other direction. That makes this stream unordered against every other one, so each
+        // mapped frame carries an EVENT recorded here and its consumer waits on that -- see
+        // `map_next`. The intake's own `gpuStreamSynchronize` is the far end of the chain (it
+        // orders copy -> unmap) and was never this one; #164's review caught that reading.
+        if (session.cuda->cuStreamCreate(&session.output, CU_STREAM_NON_BLOCKING) !=
+            CUDA_SUCCESS) {
+            throw SourceUnavailableError("nvdec",
+                                         "could not create the decoder's output "
+                                         "stream");
+        }
         // A lock, because cuvid's own decode thread touches the context too: the parser
         // callbacks are synchronous but the decoder's internal engine is not, and the docs
         // require a `vidLock` wherever a context is shared. Cheap, and skipping it is the kind
@@ -522,21 +586,25 @@ namespace shipinfer {
         const CUVIDPARSERDISPINFO picture = d.ready.front();
         d.ready.pop_front();
 
+        // ACQUIRED BEFORE THE MAP, so the failure paths stay short: nothing is mapped yet, and
+        // once it is the frame's own keepalive is what returns both the slot and this.
+        CUevent ready = d.session->acquire_event();
+        if (ready == nullptr) {
+            throw FrameDecodeError(config().camera_id,
+                                   "could not create the decoder's ready event");
+        }
+
         CUdeviceptr frame = 0;
         unsigned pitch = 0;
-        // `output_stream` LEFT AT 0, deliberately, and this is the dependency that makes it
-        // safe: every stream in `csrc/` comes from `gpuStreamCreate` (`core/platform.h`), which
-        // is BLOCKING and therefore ordered against the legacy default stream cuvid's
-        // post-processing lands on. A consumer reading this surface on a NON-blocking stream --
-        // which is what `torch.cuda.Stream` creates -- would need this set to that stream, and
-        // the failure would be intermittent torn frames rather than anything red.
         CUVIDPROCPARAMS proc{};
         proc.progressive_frame = picture.progressive_frame;
         proc.second_field = picture.repeat_first_field + 1;
         proc.top_field_first = picture.top_field_first;
         proc.unpaired_field = picture.repeat_first_field < 0;
+        proc.output_stream = d.session->output;  // not stream 0; see `do_open` and below
         if (d.cuvid->cuvidMapVideoFrame(d.session->decoder, picture.picture_index, &frame,
                                         &pitch, &proc) != CUDA_SUCCESS) {
+            d.session->release_event(ready);
             throw FrameDecodeError(config().camera_id, "cuvidMapVideoFrame failed");
         }
 
@@ -566,9 +634,27 @@ namespace shipinfer {
         // and the release would call through a freed function table. `unmap` pushes the
         // context itself, so any thread may be the one that drops the last reference.
         std::shared_ptr<Session> session = d.session;
-        image.owner = std::shared_ptr<const void>(
-            reinterpret_cast<const void*>(frame),
-            [session, frame](const void*) { session->unmap(frame); });
+        image.owner = std::shared_ptr<const void>(reinterpret_cast<const void*>(frame),
+                                                  [session, frame, ready](const void*) {
+                                                      session->unmap(frame);
+                                                      session->release_event(ready);
+                                                  });
+
+        // THE PRODUCER-TO-CONSUMER EDGE, and it has to be explicit now that the
+        // post-processing is off stream 0. Two non-default streams have NO implicit ordering --
+        // a stream from `gpuStreamCreate` is blocking, and a blocking stream is ordered against
+        // the LEGACY DEFAULT stream only -- so the intake's copies could otherwise start while
+        // cuvid is still writing this surface. The symptom would be a torn frame with
+        // `frames_failed` at 0 and every event still completing, which is why the edge is an
+        // event and not a comment. RECORDED AFTER the keepalive exists: a failure here unmaps
+        // and returns the event through that one path rather than a second copy of it.
+        //
+        // The wait is `SurfaceIntake::take`'s, on the device. See `ingest/frame.h::ready`.
+        if (d.cuda->cuEventRecord(ready, d.session->output) != CUDA_SUCCESS) {
+            throw FrameDecodeError(config().camera_id,
+                                   "could not record the decoder's ready event");
+        }
+        image.ready = ready;
         return image;
     }
 
