@@ -258,7 +258,11 @@ def _missing_headers_reason() -> str:
 #: anyone looked. Adding the lane to `cpp-gst-lane` (which already has the GStreamer packages,
 #: and needs only nv-codec-headers on top) is the fix that keeps the guard's meaning: a dropped
 #: unit is still the hole this job exists to close.
-_COVERED_ELSEWHERE = frozenset({"gstreamer", "nvdec"})
+#: `shipvision` is `cpp-shipvision-lane`'s, and it is the one lane no `-dev` package could
+#: satisfy: it is an in-tree submodule this job checks out with `submodules: false`, on
+#: purpose (the offline tier must pass without the kernels). So its unit is dropped here and
+#: compiled there, by name, with the submodule fetched over anonymous https.
+_COVERED_ELSEWHERE = frozenset({"gstreamer", "nvdec", "shipvision"})
 
 # doc: long the guard the module-level pytestmark used to carry, and what needs it
 #: `TestAFailureArrivesWithItsReason` is deliberately NOT `needs_headers`-gated -- it needs
@@ -488,9 +492,20 @@ class TestTheUnitsNothingCompiles:
             "opencv is not covered by another job, so the cpp-syntax job installs it; putting "
             "it here would drop replay.cpp from every CI job at once"
         )
-        assert {"gstreamer", "nvdec"} == _COVERED_ELSEWHERE, (
-            "and those two ARE cpp-gst-lane's -- it builds both lanes, so a third entry here "
-            "without a job building it is a unit going quietly uncovered"
+        # DERIVED, not pinned: the old `== {"gstreamer", "nvdec"}` said its own reason was
+        # "a third entry without a job building it is a unit going quietly uncovered", and
+        # that PROPERTY is what is worth asserting. A literal set needs editing for every
+        # legitimate lane and says nothing about the job, which is the half that can be gone.
+        workflow = (ROOT / ".github" / "workflows" / "cpp.yml").read_text(encoding="utf-8")
+        unbuilt = [
+            lane
+            for lane in sorted(_COVERED_ELSEWHERE)
+            if f"--with-external {lane}" not in workflow
+        ]
+        assert not unbuilt, (
+            f"{unbuilt} are excused from this job as 'covered elsewhere', but no job in "
+            f"cpp.yml builds them (`--with-external <lane>`), so their units are compiled by "
+            f"nothing anywhere -- which is the hole this whole file exists to close"
         )
 
     def test_no_unit_is_dropped_for_a_missing_lane_where_this_is_required(self) -> None:
