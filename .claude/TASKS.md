@@ -1250,7 +1250,8 @@ hook down, for when the operator asked to see something before it is executed.
       AND THE CHOICE IS NOW BETWEEN TWO, not three: (b) is eliminated on evidence above. If you
       want (b) anyway, what I need from you is the images or the weights, not a decision.
 
-- [ ] **CSRC-GRAPH-HAS-NO-TRACKING · opened 8 Sep, and it is a whole per-frame seam missing on
+- [ ] **CSRC-GRAPH-HAS-NO-TRACKING · FOUNDATION BUILT AND PARKED on `feat/csrc-track-stage`
+      (pushed, NO PR -- see the end of this item). Opened 8 Sep, a whole per-frame seam missing on
       one plane rather than a gap in a number.** The Python plane has REAL `track` and `mtmc`
       elements -- `topology/elements/track.py` holds per-camera `TrackerShard`s over
       shipvision's trackers, and the sharding is a CORRECTNESS constraint there (two cameras on
@@ -1281,11 +1282,31 @@ hook down, for when the operator asked to see something before it is executed.
       project is for (`CLAUDE.md`: detect, segment, embed, RECOGNISE, and hand tracklets on).
       Every throughput number in this ledger is therefore measured on a chain SHORTER than the
       deployed one, and adding the seam ADDS work to our side of `C1`'s ratio.
-      NOT STARTED, and deliberately not started at the end of a long session: it needs the
-      tracker's per-camera state, its ordering guard, and a cross-plane parity case (same
-      inputs -> same track ids), which is a feature and not a patch. `C2c`/`C2d` are the
-      shipvision-side and Python-side halves and are both closed; this is the C++ half nobody
-      opened.
+      WHERE IT STANDS, 8 Sep -- `feat/csrc-track-stage` carries the long record; the short one:
+        * PROVEN BY PROBE: shipvision's C++ ByteTrack links to the parent with **g++ alone** --
+          four `.cpp` files and one `-I`, no CUDA, no CMake, no pkg-config -- and tracks
+          correctly (ten frames, two stable ids, Kalman correction visible). So the tracker is
+          CUDA-FREE and the correctness-critical half belongs in the OFFLINE tier, which was
+          not obvious before the probe.
+        * BUILT: `csrc/shipinfer/pipeline/tracking/shard.{h,cpp}`, one tracker per camera plus
+          the ordering guard ported from `topology/elements/track.py` rather than guessed.
+          `csrc/tests/test_tracking_shard.cpp` is 41 checks, 0 failures, with BOTH
+          revert-checks proven: 7 failures across 4 tests without the refusal, 10 across 5 when
+          every camera shares a tracker.
+        * BLOCKED ON A BUILD CHANGE, not on a question: `build_csrc.py --offline` FAILS on that
+          branch, because `shard.cpp` is in a closure and nothing puts shipvision on the
+          include path. `ExternalLane` is `pkg-config`-only and needs an INCLUDE-ROOT axis and
+          an EXTRA-SOURCES axis (the test app must link shipvision's four objects); one alone
+          is not enough -- `packages=()` fixes `--offline` and still breaks a full build.
+          Its CI job needs `.github/workflows/**` too, so it merges manually as #162 did.
+        * **DO NOT OPEN A PR from that branch until the lane lands** -- it would redden
+          `cpp-offline` at once. A pushed branch triggers nothing (`ci.yml` is push-to-main,
+          `pr-pipeline.yml` is pull_request), which is why parking it is safe.
+        * The offline pytest tier passes at 3690 on that branch and that is NOT a
+          contradiction: the Python tests compute the build's PLAN, not the compiler's answer.
+          The tiers are layered correctly; do not "fix" the green.
+      `C2c`/`C2d` are the shipvision-side and Python-side halves and are both closed; this is
+      the C++ half nobody opened.
 
 - [!] **C1 · WAITING ON `C1-WHAT-IS-THE-5x-AGAINST?` ABOVE, which is the operator's one
       question: both arms are now measured (baseline 959.8 SATURATED, ours 539 complete, same
