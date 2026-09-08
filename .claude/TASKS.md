@@ -1244,8 +1244,24 @@ hook down, for when the operator asked to see something before it is executed.
             events are 114.7/GPU here against 127 on GPUs 2-6 and 141 on an idle 2/3/6. This is
             a MORE CONTENDED set -- two other users were resident throughout, and the segmenter
             and embedder spreads are 13-14% against the detector's 3.1%, with GPU 6 lowest --
-            so it measures the box, not the code. The rows RATIOS are what survive contention,
-            because both sides of them come from the same run.
+            so it measures the box, not the code.
+            **I THEN OVERCLAIMED AND CORRECTED IT, which is worth keeping because it is the
+            session's own recurring mistake.** I wrote that "the rows ratios survive contention
+            because both sides of them come from the same run". FALSE: only our side did. The
+            baseline's 959.8 was measured on GPUs 2-6 on a different day, so all three ratios
+            crossed GPU sets -- exactly the apples-to-oranges I had been objecting to elsewhere.
+            SO I MEASURED THE BASELINE ON THE SAME FIVE GPUs, and the fix confirms the numbers
+            rather than changing them: **960.2 img/s SATURATED** on 0/1/3/4/6 (det 485.8 + seg
+            474.4) against 959.8 on 2-6 -- **0.04% apart**. The baseline is insensitive to which
+            five GPUs it gets, because at saturation it is bound by the engines and not the
+            scheduling, which is also why it is a capacity and not a floor.
+            LIKE-FOR-LIKE NOW, both arms on 0/1/3/4/6 on the same busy box:
+              baseline   960.2 img/s SATURATED  =  192.0 rows/s/GPU (one model per image)
+              ours       573 events/s (114.7/GPU), 6 935 rows/s (1 387/GPU)
+              -> events 0.60x   rows 7.22x   pixels 1.87x
+            The harness printed its own caveat on both runs ("host: load 25/48 cpus <- BUSY ...
+            treat the ratio as indicative only"), which is the right warning and is why the
+            EVENTS figure is the softest of the three: it is the one a CPU-bound stage moves.
             **AND A CAVEAT THAT QUALIFIES EVERY NUMBER IN THIS ITEM, which I have been getting
             wrong in my own reports all day.** I have been calling this "the whole chain" and
             "the perception graph end to end". IT IS NOT. `cli/bench.cpp` stamps every run with
