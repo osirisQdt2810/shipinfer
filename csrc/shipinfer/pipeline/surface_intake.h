@@ -65,6 +65,10 @@ namespace shipinfer {
         // `max_pooled` is per SIZE, because that is what a bucket is: a fleet of mixed
         // resolutions holds one cap's worth of each rather than one cap between them.
         explicit SurfaceIntake(int device, size_t max_pooled = 8);
+        ~SurfaceIntake();
+
+        SurfaceIntake(const SurfaceIntake&) = delete;
+        SurfaceIntake& operator=(const SurfaceIntake&) = delete;
 
         // `image` copied into a pooled buffer. The returned surface owns that buffer and
         // returns it to the pool when the last reference goes -- and holds `self` so the pool
@@ -91,6 +95,27 @@ namespace shipinfer {
         // alternating frame: a `cudaMalloc` plus a `cudaFree` per frame, inside the mutex every
         // camera on the GPU contends for, which is precisely what this class exists to prevent.
         void give_back(std::unique_ptr<DeviceBuffer> buffer);
+        // doc: long the thread contract this got wrong, in the class that warned about it
+        // This intake's stream, created ONCE however many threads arrive together. Called from
+        // `take`, with the device already current -- and by EVERY camera actor on this GPU, not
+        // by one: the intakes are keyed by device and `bench` round-robins cameras over
+        // `--devices`, so ten actor threads share one of these at the design load.
+        //
+        // The first version was a plain `if (stream_ == nullptr)`, on a class whose own header
+        // says an unguarded field is what it was warning about. Ten threads all read null, all
+        // created a stream, all wrote the field: nine handles unreachable and leaked for the
+        // life of the process, per GPU, per run -- plus a data race on the pointer itself.
+        // `std::call_once` rather than the pool mutex, because this runs ~1000 times a second
+        // and a second acquisition of that lock per frame is a cost with no reason.
+        void* stream();
+
+        //: This intake's own stream, so the copies do not drain the whole device. Created on
+        //: first use because it must be made with `device_` current, and destroyed the same
+        //: way. `gpuStream_t` is not named here -- `core/platform.h` is the only header that
+        //: may name a vendor runtime -- so it travels as an opaque pointer, which is what it
+        //: is on both backends.
+        void* stream_ = nullptr;
+        std::once_flag stream_once_;
 
         int device_;
         size_t max_pooled_;

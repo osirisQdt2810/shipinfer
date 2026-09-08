@@ -82,6 +82,15 @@ namespace {
         int emb_instances = 2;
         int ship_emb_instances = 1;
         double sample_interval_s = 1.0;
+        // doc: long why this is a knob at all, and why the DEFAULT stays what a server wants
+        //: How long the fleet has to drain, charged ONCE to the fleet (`IngestManager::stop`).
+        //: 5000 is the manager's own default and is what a server wants -- past it a camera's
+        //: thread is detached rather than joined, deliberately, so a shutdown cannot hang.
+        //: It is a flag because a SATURATED measurement needs longer: at 50x20 on the host
+        //: path, 48 of 50 camera threads are inside a software decode of a 2K frame when the
+        //: signal arrives, the budget is gone before they are joined, and the bench exits
+        //: without a summary -- so the run that most needs reading produces no numbers.
+        int stop_deadline_ms = 5000;
     };
 
     // How this binary's flags fill `BenchEngines`, which is the only place they are read.
@@ -160,6 +169,8 @@ namespace {
                 options.ship_emb_instances = std::stoi(next());
             else if (flag == "--sample-interval")
                 options.sample_interval_s = std::stod(next());
+            else if (flag == "--stop-deadline-ms")
+                options.stop_deadline_ms = std::stoi(next());
             else
                 throw ConfigError("unknown flag " + flag);
         }
@@ -432,10 +443,35 @@ int main(int argc, char** argv) {
         // frames_read - frames_accepted is otherwise a number the reader has to explain by
         // hand.
         std::atomic<uint64_t> unread_at_stop{0};
-        FairPriorityQueue<FrameWork> queue(
-            "pipeline", static_cast<size_t>(tuning.pipeline_queue), Overflow::Reject,
-            tuning.enqueue_block_timeout_ms, true,
-            [&unread_at_stop](FrameWork&&, DropReason why) {
+        // ONE LANE, unless this run's source hands over device pixels -- in which case a frame
+        // cannot move between GPUs (ADR-004) and each worker must see only its own GPU's
+        // cameras. `pipeline/queue_sink.h` argues why one lane is the default and what the
+        // per-GPU shape gives up. Asked of the REGISTRY rather than of a source, because the
+        // lanes have to exist before any camera connects.
+        const bool device_lanes = SOURCES().produces_device_frames(options.source);
+        // doc: long a lane with no consumer, and why it cannot be found by running it
+        // A LANE NEEDS A WORKER, refused here rather than discovered as a drop count. Workers
+        // are bound `w % devices.size()`, so `workers` below the device count leaves the last
+        // lanes with NO CONSUMER for the life of the run: their cameras' frames fill the lane
+        // and are then rejected forever, with every camera reporting `Streaming` and no error
+        // anywhere. `setting workers 4` is an ordinary value -- it is what the parity fixtures
+        // use -- and `--devices 0,1,2,3,4` is an ordinary invocation.
+        //
+        // This is the one starvation shape that CANNOT be found by running it: it looks exactly
+        // like ordinary backpressure. #160 refused it as a side effect of refusing every
+        // multi-GPU device run; the lanes made that refusal unnecessary and this one necessary.
+        if (device_lanes && tuning.workers < static_cast<int>(options.devices.size())) {
+            throw ConfigError(
+                "a device source needs at least one worker per GPU: " +
+                std::to_string(tuning.workers) + " worker(s) for " +
+                std::to_string(options.devices.size()) +
+                " GPU(s) would leave the last lane(s) with no consumer, and their cameras' "
+                "frames rejected for the life of the run. Raise `pipeline.workers`, or give "
+                "this bench fewer `--devices`");
+        }
+        PipelineLanes lanes(
+            options.devices, device_lanes, static_cast<size_t>(tuning.pipeline_queue),
+            tuning.enqueue_block_timeout_ms, [&unread_at_stop](FrameWork&&, DropReason why) {
                 if (why == DropReason::Closed) unread_at_stop.fetch_add(1);
             });
 
@@ -454,7 +490,7 @@ int main(int argc, char** argv) {
         // frees, while 8 sat at its cap and churned a `cudaMalloc`/`cudaFree` per frame. A
         // fixed number is wrong for a design-load run, so it scales with the pool that feeds
         // it.
-        QueueSink sink(queue,
+        QueueSink sink(lanes,
                        static_cast<size_t>(std::max<int>(
                            1, tuning.workers / static_cast<int>(options.devices.size()))) +
                            8,
@@ -468,7 +504,7 @@ int main(int argc, char** argv) {
                 // on, and a log with the wrong suffix is refused outright rather than
                 // silently read as empty — which is the right refusal and cost me one run.
                 std::map<std::string, long long> row;
-                row["pipeline_buffer_size"] = static_cast<long long>(queue.depth());
+                row["pipeline_buffer_size"] = static_cast<long long>(lanes.depth());
                 // The NV12 pool, in the same log: "is the cap buying anything" is a question a
                 // run should answer. Zero on every host run, which is the right answer there.
                 row["pipeline_pool_size"] = static_cast<long long>(sink.pooled_buffers());
@@ -493,8 +529,14 @@ int main(int argc, char** argv) {
         const BatchWindow frame_window(1, 0);
         std::atomic<int> failures_shouted{0};
         for (int w = 0; w < tuning.workers; ++w) {
-            const int device = options.devices[static_cast<size_t>(w) % options.devices.size()];
-            workers.emplace_back([&, device]() {
+            const size_t slot = static_cast<size_t>(w) % options.devices.size();
+            const int device = options.devices[slot];
+            // The lane this worker pulls from: its own GPU's when there is one per GPU, and the
+            // single fleet-wide one otherwise. `slot` indexes `options.devices` and
+            // `PipelineLanes` was built from that same list in that order, which is what makes
+            // the two agree without a lookup.
+            const size_t lane_index = device_lanes ? slot : 0;
+            workers.emplace_back([&, device, lane_index]() {
                 try {
                     GPU_CHECK(gpuSetDevice(device));
                     WorkerScratch scratch(Device::cuda(device));
@@ -509,6 +551,7 @@ int main(int argc, char** argv) {
                     Dag dag = build_dag(planned, models, scratch,
                                         std::chrono::milliseconds(tuning.stage_timeout_ms));
 
+                    PipelineLanes::Queue& queue = lanes.lane(lane_index);
                     while (!stopping.load()) {
                         auto batch = queue.get_batch(frame_window);
                         if (batch.empty()) {
@@ -536,9 +579,10 @@ int main(int argc, char** argv) {
                                             std::to_string(item.device) +
                                             " and this worker is on gpu" +
                                             std::to_string(device) +
-                                            ": a device frame cannot move (ADR-004). Run one "
-                                            "process per GPU (`--runner fleet`), or give this "
-                                            "bench a single `--devices`");
+                                            ": a device frame cannot move (ADR-004), and a "
+                                            "lane per GPU is supposed to make this "
+                                            "unreachable -- so it is a lane/worker mapping "
+                                            "fault, not a configuration one");
                                     }
                                 } else {
                                     const size_t bytes =
@@ -596,7 +640,7 @@ int main(int argc, char** argv) {
         JoinOnUnwind join_on_unwind(stopping);
         for (std::thread& worker : workers) join_on_unwind.watch(worker);
         join_on_unwind.watch(sweeper);
-        join_on_unwind.wake_with([&queue]() { queue.close(); });
+        join_on_unwind.wake_with([&lanes]() { lanes.close(); });
 
         // -- cameras ----------------------------------------------------------------------
         const std::string ship_frames =
@@ -666,7 +710,8 @@ int main(int argc, char** argv) {
         // Read before the fleet is torn down: `stop()` forgets its actors, as the Python
         // manager does, so a stopped manager has no per-camera numbers left to report.
         const std::map<std::string, CameraHealth> camera_health = manager.health();
-        const size_t abandoned = manager.stop();
+        const size_t abandoned =
+            manager.stop(std::chrono::milliseconds(options.stop_deadline_ms));
         if (abandoned != 0) {
             // An abandoned actor's detached thread still holds references into this frame —
             // the sink and the queue above all. Unwinding the stack now would free them under
@@ -679,7 +724,7 @@ int main(int argc, char** argv) {
             std::_Exit(1);
         }
         stopping.store(true);
-        queue.close();
+        lanes.close();
         for (auto& worker : workers) worker.join();
         // After the workers: a model stopped while a worker still had a frame in hand failed
         // that frame's embedder request as 'instance stopped' and sealed it Incomplete at
@@ -695,7 +740,7 @@ int main(int argc, char** argv) {
             dropped += health.frames_dropped;
             published += health.frames_published;
         }
-        const auto stats = queue.stats();
+        const auto stats = lanes.stats();
 
         // Printed in the same shape the Python driver prints, so a human comparing two runs
         // is comparing two identical reports.
