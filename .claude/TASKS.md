@@ -997,7 +997,11 @@ hook down, for when the operator asked to see something before it is executed.
       where the NVDEC arm completes 37 758, and the one-line `output_stream` fix took us from
       368 to 539 (`NV12-ROUTE-SATURATES-AT-78-PER-GPU`, on `perf/nvdec-output-stream`).
 
-- [~] **C1 · ANSWERED BY V156: the >=5x target STANDS, and my "unreachable by construction"
+- [!] **C1 · WAITING ON `C1-WHAT-IS-THE-5x-AGAINST?` ABOVE, which is the operator's one
+      question: both arms are now measured (baseline 959.8 SATURATED, ours 539 complete, same
+      five GPUs, same 70 s) and the two are not comparable in either direction. Everything C1
+      could do without that answer is done. Original: ANSWERED BY V156: the >=5x target STANDS,
+      and my "unreachable by construction"
       argument was wrong on its premise.** I argued that the counting simulation runs the same
       engines on the same GPUs, so both sides are GPU-bound at ~950-970 img/s and no scheduling
       finds 5x. The premise was "the same work" -- and V156's instruction is precisely to STOP
@@ -2708,7 +2712,8 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       machinery moved to the UNIT leg, where it can fire, and the app leg keeps its copy as
       armour with its reachability stated.
 
-- [~] **R55-BENCH-SOURCE · MY BENCH NUMBERS DO NOT MEET R55, and the operator had to ask.**
+- [x] **R55-BENCH-SOURCE · DONE 8 Sep. MY BENCH NUMBERS DID NOT MEET R55, and the operator had
+      to ask.**
       Every measurement in this stretch -- including the C1 parity number (944 against 971.3) --
       ran `--source replay`: JPEGs decoded from disk on the CPU, with the harness printing
       `source: replay  (decode path NOT measured)` in its own header. R55 (user.md §3, with
@@ -2763,15 +2768,32 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
             SO BOTH PLANES NOW READ FROM RTSP, which is R55's first half on both sides. The
             decode is still SOFTWARE BGR on both: `ingest/sources/gstreamer.py:149` negotiates
             `video/x-raw,format=BGR`, so NV12-in-VRAM remains the whole of what is left.
-        (a-load) the design-load run from RTSP, on both planes, against the baseline;
-        (b) make the RTSP path negotiate NV12 and keep it on the device as far as the current
-            headers allow (`nvvideoconvert`'s NVMM hand-off is already why `_CONVERTERS` names
-            it), so the remaining gap is exactly the missing package and not our code;
-        (c) the zero-copy NV12-in-VRAM carrier -- BLOCKED on `PHASE-D-NV12` below, which is the
-            operator's one-package image rebuild.
-      Until (a) lands, every throughput number in this ledger carries the replay caveat, and
-      C1's parity reading is against a baseline measured the same way -- like for like, but not
-      the like R55 asks for.
+        (a-load) DONE 8 Sep for the C++ plane and MEASURED IMPOSSIBLE for the Python one.
+            C++, 50x20x70s on five GPUs, `--source nvdec`: 51 073 read, 37 758 events complete
+            (539/s) with the `output_stream` fix, 0 failures, balanced across all five. The same
+            shape through the HOST-decode arm of our own plane completes **ZERO** events -- the
+            software decode saturates the box and every stage times out at 5 s.
+            PYTHON: 22.1 img/s offered against 1000 in one process, 1.6..6.5 per shard against
+            200 each under `--topology fleet`, and still short at a fifth of the load. The
+            harness REFUSES to report a number rather than quoting a throughput against a load
+            nobody offered, and its own message names the cause. So R55's design load is met by
+            the C++ plane only -- which is the two-planes rationale as a measurement.
+        (b) MOOT, and the measurement is why. This asked the PYTHON plane's RTSP path to
+            negotiate NV12 "as far as the current headers allow", so the remaining gap would be
+            the missing package rather than our code. (a-load-py) says that path cannot offer
+            the design load at all -- ~15 img/s per shard, and worse with more cameras because
+            the cost is per camera, not per frame. Negotiating NV12 there would move a wall
+            nobody reaches. The C++ NVDEC source is what (b) was reaching for, and it exists.
+        (c) DONE, as #160: `pipeline/surface_intake.h` copies the mapped surface into a pooled
+            NV12 device buffer and gives the decode slot back before the frame is queued.
+            "Zero-copy" turned out to be the wrong goal -- a surface is a slot out of a pool of
+            two, and a fair queue exists to HOLD frames -- so the design is ONE device-to-device
+            copy, which is what DeepStream does between its own pools. ~3 MB against ~6 MB down
+            AND 6 MB up for the host round trip, and measured at 0.07% of an A5000's bandwidth.
+      SO R55 IS MET on the plane that can meet it, and every throughput number in this ledger
+      after 7 Sep names its source (`meta.config.source`) rather than leaving the reader to
+      trust a shell history. What is left is not R55's -- it is
+      `C1-WHAT-IS-THE-5x-AGAINST?`, which is the operator's.
 
 - [x] **CONNECT-AND-PUMP-DISAGREE-ON-CONFIGERROR · DONE 7 Sep, open as #161.** `connect()` now
       catches `ConfigError` and calls the same `refuse_fatally` the `read()` path uses, so the
@@ -2793,7 +2815,20 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       off and retries it forever. Same class, same hot loop, one function along. The fix is the
       same four lines `SourceUnavailableError` already gets there.
 
-- [~] **PHASE-D-NV12 · OPENED by V156 (critical path now, not a deferred phase), and THE ITEM'S
+- [x] **PHASE-D-NV12 · DONE 8 Sep. Seven PRs (#155, #156, #157, #158, #159, #160, #161), the
+      route running end to end, and the design load measured. V156's line is real:
+      `rtsp -> H.264 bitstream -> NVDEC -> NV12 in VRAM -> one D2D copy -> the fair queue -> the
+      graph -> events`, with no host pixel copy anywhere in it. 50x20x70s on five GPUs: 51 073
+      read, 37 758 events complete, 0 failures, balanced across all five -- against ZERO
+      completed events for the host-decode arm of the same plane at the same load.
+      THE ITEM'S ORIGINAL BLOCKER WAS FALSE, and that is the first thing this taught: it waited
+      on an operator image rebuild for `gst-plugins-bad`'s CUDA library, and `libnvcuvid` needs
+      no package at all -- nv-codec-headers' dynlink variants `dlopen` it, so a driver library
+      was the answer to a question asked about a `-dev` package.
+      WHAT REMAINS IS NOT THIS ITEM'S: `C1-WHAT-IS-THE-5x-AGAINST?` (the operator's), and the
+      per-lane buffering and shared-stream notes recorded under
+      `DEVICE-FRAME-NEEDS-A-LANE-PER-GPU`.
+      ORIGINAL: OPENED by V156 (critical path now, not a deferred phase), and THE ITEM'S
       OWN PREMISE WAS WRONG -- measured 7 Sep by installing the package it named.**
       `libgstreamer-plugins-bad1.0-dev` installs fine and gives NEITHER `gstreamer-cuda-1.0`
       nor `/usr/include/gstreamer-1.0/gst/cuda`. The reason: this image is **GStreamer 1.20.3**
