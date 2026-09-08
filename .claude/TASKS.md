@@ -1225,6 +1225,27 @@ hook down, for when the operator asked to see something before it is executed.
             SO THE CHOICE IS YOURS AND IT IS NOW A CHOICE WITH NUMBERS: 0.70x (events), 2.03x
             (pixels through a model), 7.7x (rows through a model). I am not picking the one
             that clears the target.
+            **CORROBORATED 8 Sep on a DIFFERENT five-GPU set, with the counter merged rather
+            than on a branch** -- GPUs 0/1/3/4/6 (2 and 5 were another tenant's), 50x20x70 s,
+            40 131 events, 0 failed:
+              stage             reqs      rows   rows/req   per-device spread
+              ship_detector    40 148    40 148      1.0      3.1%
+              ship_segmenter   19 805    54 375      2.7     13.6%
+              person_embedder  26 536   336 569     12.7      9.0%
+              ship_embedder    19 805    54 375      2.7     14.0%
+              TOTAL           106 294   485 467
+            RATIOS HOLD ACROSS THE TWO RUNS, which is the point of repeating it on other
+            silicon: **7.2x rows** (was 7.7x) and **1.87x pixels** (was 2.03x). Same ordering,
+            same conclusion -- rows clears 5x and pixels does not -- so the spread between the
+            two weightings is a property of the workload and not of one run's GPUs.
+            THE DETECTOR'S SELF-CHECK HELD EXACTLY AGAIN: 40 148 requests and 40 148 rows, all
+            five devices, so the counter is still counting rows and not echoing requests.
+            AND ONE NUMBER MOVED THAT IS NOT A REGRESSION, stated because it looks like one:
+            events are 114.7/GPU here against 127 on GPUs 2-6 and 141 on an idle 2/3/6. This is
+            a MORE CONTENDED set -- two other users were resident throughout, and the segmenter
+            and embedder spreads are 13-14% against the detector's 3.1%, with GPU 6 lowest --
+            so it measures the box, not the code. The rows RATIOS are what survive contention,
+            because both sides of them come from the same run.
             **AND A CAVEAT THAT QUALIFIES EVERY NUMBER IN THIS ITEM, which I have been getting
             wrong in my own reports all day.** I have been calling this "the whole chain" and
             "the perception graph end to end". IT IS NOT. `cli/bench.cpp` stamps every run with
