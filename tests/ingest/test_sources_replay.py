@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import threading
+import time
+from unittest import mock
+
 import numpy as np
 import pytest
 
@@ -47,6 +51,53 @@ class TestReplayPlayback:
         """A 200 fps replay of 6 frames must not take a second; it must also not be instant."""
         import time
 
+        camera = make_camera(uri=str(frame_dir), source="replay", fps=200.0, loop=False)
+        with ReplaySource(camera) as source:
+            started = time.perf_counter()
+            for _ in range(FRAME_COUNT):
+                source.read()
+            elapsed = time.perf_counter() - started
+        assert 0.01 < elapsed < 1.0, elapsed
+
+
+class TestReplayHonoursAStop:
+    """The pace wait is the other place a Python source could sit through a stop.
+
+    `PY-SOURCE-HAS-NO-STOP-SIGNAL` closed the GStreamer read; #165's review found this one
+    still open, and it is the same seam: `csrc/.../sources/replay.cpp` passes
+    `stop().wait_for(...)` into `pacer_.wait` and caps it at one `read_timeout_s`.
+    """
+
+    def test_a_stop_ends_the_pace_wait_instead_of_sleeping_it_out(self, make_camera, frame_dir):
+        # 1 fps, so an un-interruptible wait would sit here for a second per frame.
+        camera = make_camera(uri=str(frame_dir), source="replay", fps=1.0, loop=False)
+        stop = threading.Event()
+        with ReplaySource(camera, stop=stop) as source:
+            assert source.read() is not None, "the first frame is due immediately"
+            stop.set()
+            started = time.perf_counter()
+            assert source._do_read() is None, "a stop ends the wait with no frame"
+            elapsed = time.perf_counter() - started
+        assert elapsed < 0.2, f"it returned in {elapsed:.3f}s rather than waiting out 1 s"
+
+    def test_a_frame_period_over_the_read_timeout_is_an_empty_read(
+        self, make_camera, frame_dir
+    ):
+        """`replay.cpp`'s own branch: waiting the budget and then answering with a frame the
+        actor asked for `due_s` ago is worse than answering empty."""
+        camera = make_camera(uri=str(frame_dir), source="replay", fps=1.0, loop=False)
+        stop = threading.Event()
+        with ReplaySource(camera, stop=stop) as source:
+            assert source.read() is not None
+            # A read timeout well under the 1 s frame period.
+            with mock.patch.object(type(source), "read_timeout_s", property(lambda self: 0.05)):
+                started = time.perf_counter()
+                assert source._do_read() is None, "over budget answers empty"
+                elapsed = time.perf_counter() - started
+        assert 0.03 < elapsed < 0.5, f"it waited {elapsed:.3f}s, not the ~0.05 s budget"
+
+    def test_with_no_stop_event_the_pacer_still_paces(self, make_camera, frame_dir):
+        """The additive half: nothing is required to pass a stop, and pacing is unchanged."""
         camera = make_camera(uri=str(frame_dir), source="replay", fps=200.0, loop=False)
         with ReplaySource(camera) as source:
             started = time.perf_counter()

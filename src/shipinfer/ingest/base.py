@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import abc
 import contextlib
+import threading
 from typing import ClassVar
 
 import numpy as np
@@ -57,15 +58,22 @@ class FrameSource(abc.ABC):
     #: instead of implying an NVDEC path that does not exist.
     supports_hwaccel: ClassVar[bool] = False
 
+    #: The fleet's stop event, handed down by `CameraActor`. A CLASS default rather than only
+    #: an instance attribute, so `stopping` answers on an instance built without `__init__` --
+    #: which is how the offline tests construct a source with no GStreamer to hand.
+    _stop: threading.Event | None = None
+
     def __init__(
         self,
         config: CameraConfig,
         counter: FrameCounter | None = None,
         *,
         settings: IngestSettings | None = None,
+        stop: threading.Event | None = None,
     ) -> None:
         self.config = config
         self.settings = settings
+        self._stop = stop
         self.counter = counter or FrameCounter(config.camera_id, config.first_frame_id)
         if self.counter.camera_id != config.camera_id:
             raise ConfigurationError(
@@ -91,6 +99,23 @@ class FrameSource(abc.ABC):
     @property
     def read_timeout_s(self) -> float:
         return resolve_read_timeout_s(self.settings)
+
+    # doc: long why a source needs this at all, and what it cost not to have it
+    @property
+    def stopping(self) -> bool:
+        """Whether the fleet has asked this camera to finish.
+
+        A source that blocks for its whole ``read_timeout_s`` -- five seconds by default --
+        makes the actor learn of a stop only when ``_do_read`` RETURNS, so a fleet whose stop
+        budget is shorter abandons the camera and detaches its thread. The C++ plane hit exactly
+        that at the design load: 43 of 50 cameras "did not stop within 0ms" and the bench exited
+        without a summary. Its ``FrameSource`` is constructed with a ``StopSignal&`` and checks
+        it between read slices; this is the same seam (CLAUDE.md, two planes one architecture).
+
+        ``False`` when no event was passed, which is every direct construction in a test and
+        every caller that predates this: a source that cannot be asked to stop simply is not.
+        """
+        return self._stop is not None and self._stop.is_set()
 
     @property
     def open_timeout_s(self) -> float:

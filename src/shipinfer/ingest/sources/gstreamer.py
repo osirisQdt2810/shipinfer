@@ -345,12 +345,17 @@ class GStreamerSource(FrameSource):
         full timeout before reconnecting. ``csrc/…/sources/gstreamer.cpp`` does the same, and
         a per-frame seam that differs between the planes is what CLAUDE.md's rule is for.
 
-        The C++ source also checks its stop signal between slices; this one cannot, because a
-        Python ``FrameSource`` is not given one -- see ``PY-SOURCE-HAS-NO-STOP-SIGNAL``.
+        The stop signal is checked every slice too, for the same reason: the actor learns of a
+        stop only when this returns. Both halves of the seam now match the C++ source's.
         """
         gst = self._gst
         deadline = time.monotonic() + max(self.read_timeout_s, 0.001)
         while True:
+            # THE STOP IS CHECKED EVERY SLICE, which is the whole reason the slices exist on
+            # this plane too: the actor learns of a stop only when this returns, so a read that
+            # spends five seconds is a camera the fleet abandons and detaches.
+            if self.stopping:
+                return None
             left = deadline - time.monotonic()
             if left <= 0:
                 # The pure-timeout case: the bus was empty after every slice, so this camera

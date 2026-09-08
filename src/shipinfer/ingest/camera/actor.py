@@ -459,7 +459,11 @@ class CameraActor:
         self.metrics.frames_published.inc(camera=self.camera_id)
 
     def _default_factory(self, config: CameraConfig, counter: FrameCounter) -> FrameSource:
-        return create_source(config, counter, settings=self.settings)
+        # THE ACTOR'S OWN STOP EVENT, handed down. Without it a source blocking on a read
+        # learns of a stop only when it returns -- up to `read_timeout_s` -- and this actor's
+        # `stop()` then abandons the thread. An injected factory does not have to pass one;
+        # `FrameSource.stopping` is False when nothing was given, which is what a test wants.
+        return create_source(config, counter, settings=self.settings, stop=self._stop)
 
     # -- bookkeeping -------------------------------------------------------------------
 

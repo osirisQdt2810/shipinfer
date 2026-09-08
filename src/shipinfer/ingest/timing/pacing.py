@@ -57,24 +57,37 @@ class DeadlinePacer:
         """Start the schedule from now. Called when a source opens or reopens."""
         self._deadline = self._monotonic()
 
-    def wait(self) -> None:
-        """Block until the next frame is due.
+    # doc: long the interrupt, because a pacer that cannot be interrupted holds a stop
+    def wait(self, interrupt: Callable[[float], bool] | None = None) -> bool:
+        """Block until the next frame is due. ``True`` if ``interrupt`` cut it short.
 
         Returns immediately, without advancing time, when the loop is already late: the
         deadline is reset to *now* rather than left in the past, so lateness is absorbed
         instead of being repaid as a burst.
+
+        ``interrupt`` is given the seconds owed and returns whether it was woken rather
+        than timing out -- ``Event.wait`` has exactly that shape. This is the same seam as
+        ``csrc/…/sources/replay.cpp``'s ``pacer_.wait``, which takes the same callback: a
+        pacer that only ``sleep``s makes a stop wait out the whole frame period, and at
+        1 fps that is a second per camera on every shutdown. **The deadline does not advance
+        on an interrupted wait**, so the frame schedule survives one.
         """
         if not self.enabled:
-            return
+            return False
         if self._deadline == 0.0:
             self.reset()
-        self._deadline += self.interval_s
         now = self._monotonic()
-        if self._deadline > now:
-            self._sleep(self._deadline - now)
+        due = self._deadline + self.interval_s
+        if due > now:
+            if interrupt is not None and interrupt(due - now):
+                return True
+            if interrupt is None:
+                self._sleep(due - now)
+            self._deadline = due
         else:
             self.behind += 1
             self._deadline = now
+        return False
 
     def __repr__(self) -> str:
         rate = 1.0 / self.interval_s if self.enabled else 0.0
