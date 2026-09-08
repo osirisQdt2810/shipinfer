@@ -1193,12 +1193,38 @@ hook down, for when the operator asked to see something before it is executed.
             AND 1.86x IS A LOWER BOUND, which is the honest caveat: `ship_detector` equals
             `frames_accepted` exactly, so these are per-frame INVOCATIONS, and one embedder
             invocation batches ~15 crops while one baseline image is one model pass. The
-            crop-level ratio is the number (c) actually wants and it is **NOT MEASURABLE
-            TODAY** -- the bench emits no crop counter (`event-edge.log` has 27 counters and
-            none of them counts rows into a model). So (c)'s blocker is one counter, not a new
-            harness: `ModelStage` sets `payload.rows` at `stages.cpp:230` and nothing sums it.
-            NOT DONE UNASKED, because a metric invented to make a target look met is worse than
-            an unmet target -- if (c) is your answer, say so and the counter is a small PR.
+            crop-level ratio is the number (c) actually wants.
+            **MEASURED 8 Sep, and I was wrong twice about how hard it was.** I wrote that
+            "nothing sums it": FALSE -- `ModelInstance` has summed `stats().rows` all along
+            (`engine/instance.cpp:257`), and the C++ bench simply never PRINTED it. And I wrote
+            that adding it would be "a metric invented to make a target look met", which
+            conflated two things: CHOOSING the comparison is yours, making the plane's work
+            rate observable is mine. So it is emitted now (`per_device_rows`), and the Python
+            plane got the same counter because it did not even sum it (the sync rule).
+            30 cameras x 20 fps x 70 s on GPUs 2/3/6, rows into each model:
+              ship_detector     25 963 rows    371/s    640x640 each
+              ship_segmenter    35 951 rows    514/s    640x640
+              person_embedder  213 223 rows   3046/s    256x128   (12.7 crops per request)
+              ship_embedder     35 951 rows    514/s    256x128   (2.8 per request)
+              TOTAL            311 088 rows   4444/s
+            A SELF-CHECK FELL OUT OF IT: `ship_detector`'s rows EQUAL its requests exactly
+            (6168/10210/9585 both ways), because one frame is one row -- so the counter is
+            demonstrably counting rows and not re-reporting requests.
+            THE LOPSIDED SPLIT IS NOT A BALANCING BUG: GPU 2 carried another user's 22 GB job
+            for part of the run (`tts26`), so it took 6168 detections against 10210 and 9585 on
+            the free devices and the policy correctly shifted work off it. It also makes the
+            per-GPU ratios below CONSERVATIVE -- they divide by three whole GPUs when one was
+            only partly available, so contention understates our side rather than flattering it.
+            AND (c) IS NOT ONE NUMBER, which is the finding that matters. Per GPU, against the
+            baseline's 959.8 img/s on five GPUs = 192 rows/s/GPU through one model:
+              model ROWS per second     1 481  vs 192      -> **7.7x**
+              model PIXELS per second   1.60e8 vs 7.86e7   -> **2.03x**
+            The spread is the whole point: 7.7x counts a 256x128 crop as equal to a 640x640
+            frame, and 12.7 of our rows per request are crops. Weighting by input pixels is the
+            more defensible of the two and it does NOT reach 5x. End-to-end events are 0.70x.
+            SO THE CHOICE IS YOURS AND IT IS NOW A CHOICE WITH NUMBERS: 0.70x (events), 2.03x
+            (pixels through a model), 7.7x (rows through a model). I am not picking the one
+            that clears the target.
       WHAT IS NOT IN DOUBT, whichever you pick: the route V156 named works and is measured
       (`PHASE-D-NV12`), the host-decode arm of OUR OWN plane completes ZERO events at this load
       where the NVDEC arm completes 37 758, and the one-line `output_stream` fix took us from

@@ -788,13 +788,27 @@ int main(int argc, char** argv) {
         std::cout << "event_bytes " << event_bytes.load() << "\n";
         // Requests executed per model per device — the per-device breakdown a PR needs
         // (ADR-006), now read from the instances themselves.
+        //
+        // ROWS AS WELL AS REQUESTS, and the pair is the point: a request is one stage
+        // INVOCATION and a row is one image into the model, so the detector's two are equal
+        // while an embedder's differ by the crop fan-out. Reporting only requests understates
+        // this plane's work against a one-model-per-image baseline by whatever that fan-out is
+        // -- `C1-WHAT-IS-THE-5x-AGAINST?` could put no number on its own like-for-like
+        // candidate because of it. `ModelInstance` has summed `rows` all along
+        // (`engine/instance.cpp`); nothing printed it.
         for (const auto& [name, model] : models) {
             std::map<int, uint64_t> by_device;
+            std::map<int, uint64_t> rows_by_device;
             for (const auto& instance : model->instances()) {
                 by_device[instance->device().index] += instance->stats().requests;
+                rows_by_device[instance->device().index] += instance->stats().rows;
             }
             std::cout << "per_device " << name;
             for (const auto& [device, count] : by_device)
+                std::cout << " " << device << ":" << count;
+            std::cout << "\n";
+            std::cout << "per_device_rows " << name;
+            for (const auto& [device, count] : rows_by_device)
                 std::cout << " " << device << ":" << count;
             std::cout << "\n";
         }

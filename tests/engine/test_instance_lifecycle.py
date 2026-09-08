@@ -100,13 +100,54 @@ def _wait_for(predicate, timeout_s: float = 5.0, poll_s: float = 0.01) -> bool:
     return False
 
 
-def _item() -> WorkItem:
+def _item(rows: int = 1) -> WorkItem:
     request = InferenceRequest(
         model_name="m",
-        inputs={"x": Tensor.from_numpy(np.zeros((1, 4), dtype=np.float32))},
+        inputs={"x": Tensor.from_numpy(np.zeros((rows, 4), dtype=np.float32))},
         context=RequestContext(camera_id="cam0", frame_id=0),
     )
     return WorkItem(request, ResponseFuture(request))
+
+
+class TestStatsSeparateRowsFromRequests:
+    """A request is one invocation; a row is one image. The pair is what says what ran.
+
+    The C++ instance has summed both all along (`engine/instance.cpp`) and this side reported
+    only `requests`, so a crop fan-out was invisible here -- an embedder handed fifteen crops
+    in one request looked like one unit of work, the same as a detector handed one frame.
+    `C1-WHAT-IS-THE-5x-AGAINST?` could put no number on its own like-for-like candidate for
+    exactly that reason.
+    """
+
+    def test_a_multi_row_request_counts_rows_not_just_requests(self) -> None:
+        backend = SpyBackend()
+        instance = _instance(backend)
+        instance.start()
+        try:
+            for item in (_item(rows=3), _item(rows=2)):
+                instance.enqueue(item)
+                item.future.result(timeout=5.0)
+            stats = instance.stats()
+            assert stats["requests"] == 2, stats
+            assert stats["rows"] == 5, "3 + 2 rows across two requests: " + repr(stats)
+        finally:
+            instance.stop()
+
+    def test_single_row_requests_make_the_two_agree(self) -> None:
+        """The contrast, so the test above is not passing on a constant: a detector gets one
+        frame per request, and there `rows == requests` is correct rather than a bug."""
+        backend = SpyBackend()
+        instance = _instance(backend)
+        instance.start()
+        try:
+            for _ in range(3):
+                item = _item()
+                instance.enqueue(item)
+                item.future.result(timeout=5.0)
+            stats = instance.stats()
+            assert stats["rows"] == stats["requests"] == 3, stats
+        finally:
+            instance.stop()
 
 
 class TestBackendTeardownOnStop:

@@ -146,6 +146,11 @@ class ShipInferResult:
     requests_rejected: dict[str, float] = field(default_factory=dict)
     #: model -> device -> requests executed. The per-device breakdown a PR needs.
     per_device: dict[str, dict[str, int]] = field(default_factory=dict)
+    #: model -> device -> ROWS executed, which is not the same number. A request is one stage
+    #: invocation; a row is one image into the model, so the detector's two are equal while an
+    #: embedder's differ by the crop fan-out. Reporting only requests understates this plane
+    #: against a one-model-per-image baseline by exactly that fan-out.
+    per_device_rows: dict[str, dict[str, int]] = field(default_factory=dict)
     instances: dict[str, int] = field(default_factory=dict)
     ops: str = ""
     stages: tuple[str, ...] = ()
@@ -430,13 +435,17 @@ def run_shipinfer(
         requests = {n: metrics.requests_total.value(model=n) for n in handles}
         rejected = {n: metrics.requests_rejected.value(model=n) for n in handles}
         per_device: dict[str, dict[str, int]] = {}
+        per_device_rows: dict[str, dict[str, int]] = {}
         for name, handle in handles.items():
             breakdown: dict[str, int] = {}
+            rows: dict[str, int] = {}
             for instance in handle.instances:
                 stats = instance.stats()
                 device = str(stats["device"])
                 breakdown[device] = breakdown.get(device, 0) + int(stats["requests"])
+                rows[device] = rows.get(device, 0) + int(stats["rows"])
             per_device[name] = breakdown
+            per_device_rows[name] = rows
 
         return ShipInferResult(
             log=log,
@@ -463,6 +472,7 @@ def run_shipinfer(
             requests_total=requests,
             requests_rejected=rejected,
             per_device=per_device,
+            per_device_rows=per_device_rows,
             instances={n: len(h.instances) for n, h in handles.items()},
             ops=str(runner.health()["ops"]),
             stages=stages,
