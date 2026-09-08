@@ -932,6 +932,22 @@ hook down, for when the operator asked to see something before it is executed.
       finally measuring the thing it claims to. Note the idle box also shows 68 000 read is
       975/s against the design load's 1000 -- 97.5% offered and read -- so the earlier 51 073
       was the box being shared, not the route.
+      INTEGRATION-CHECKED ON `main` AT cc9fe99+#162, 8 Sep, after everything merged -- because
+      every number above was measured on a branch and "the pieces compose" is its own claim.
+      GPUs 4-5 had another tenant's work by then, so this ran on 2/3/6 with 30 cameras: TEN
+      CAMERAS PER GPU, the same per-GPU load as 50-on-5, which is what makes it comparable.
+        frames_read 41 224   frames_accepted 29 676   frames_failed 0
+        events_complete 29 676   events_incomplete 0   collector_timeouts 0
+        queue_rejected 11 445    startup 3.09 s
+        per_device ship_detector 2:9909 3:9998 6:9769   (2.3% spread)
+      **141.3 events/s per GPU** -- above the five-GPU 134.6 and above the replay route's
+      recorded 135, so the NV12 route is no longer behind the path it was 59% of two days ago.
+      And note what is ZERO: incomplete events and collector timeouts, both. Every earlier run
+      in this item had 6-73 timeouts; three GPUs at ten cameras each is the first configuration
+      where nothing times out at all, which says the earlier ones were contending for host CPU
+      with fifty camera actors rather than for GPU.
+      Device tiers on the same commit: `test_ingest` 299/0, `test_pipeline` 75/0,
+      `test_dataplane` 53/0, `test_device_frame` 33/0.
       SWEPT FOR THE SAME CLASS OF BUG, 8 Sep, because finding one instance is a reason to look
       for the others rather than to stop. Every stream the data plane creates:
         `nvdec.cpp:423`          the decoder's output   NON-BLOCKING   <- the one that bit us
