@@ -1262,6 +1262,21 @@ hook down, for when the operator asked to see something before it is executed.
             The harness printed its own caveat on both runs ("host: load 25/48 cpus <- BUSY ...
             treat the ratio as indicative only"), which is the right warning and is why the
             EVENTS figure is the softest of the three: it is the one a CPU-bound stage moves.
+            **AND PIXELS IS NOT A WORK MEASURE, which matters if you pick it.** It weights a
+            row by input AREA, so it treats a 640x640 detector row and a 256x128 embedder row
+            as 12.5:1 -- but a detector backbone and an embedding CNN differ in FLOPs per pixel
+            too, by a factor nothing here measures. So 1.87x is "pixels into a model", not
+            "work done", and it is only the MORE DEFENSIBLE of the two available weightings
+            rather than a defensible one outright.
+            WHY THERE IS NO BETTER RATIO ON OFFER, checked rather than assumed: the honest
+            measure would be GPU-seconds per arm. `InstanceStats::ewma_latency_us` holds
+            exactly that on our side and `cli/bench.cpp` does not emit it -- fixable in an
+            afternoon -- but `sim_pipeline_v2` reports no GPU-time counterpart at all, so there
+            would be nothing to divide by. A ratio needs both halves, and only one exists.
+            SO THE THREE NUMBERS ARE THE THREE THAT CAN BE HAD: 0.60x (frames end to end),
+            1.87x (pixels through a model, an area proxy), 7.22x (rows through a model, which
+            counts a crop and a frame alike). Pick the one that matches what the >=5x is meant
+            to promise; none of them is the same claim.
             **AND A CAVEAT THAT QUALIFIES EVERY NUMBER IN THIS ITEM, which I have been getting
             wrong in my own reports all day.** I have been calling this "the whole chain" and
             "the perception graph end to end". IT IS NOT. `cli/bench.cpp` stamps every run with
