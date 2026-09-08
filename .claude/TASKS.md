@@ -3587,8 +3587,22 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       prevents its regression -- same for `--stop-deadline-ms`.
       `test_pipeline` 60 -> 74 checks; the Python plane's slicing has two of its own.
 
-- [ ] **PY-SOURCE-HAS-NO-STOP-SIGNAL · opened 8 Sep by #163 round 2, and it is the stop half of
-      a two-plane seam.** The C++ `FrameSource` is constructed with a `StopSignal&` and its
+- [x] **PY-SOURCE-HAS-NO-STOP-SIGNAL · DONE 8 Sep on `feat/py-source-stop-signal`, held behind
+      #163 because it edits the same `_do_read`.** The plumbing was the whole of it, and it is
+      ADDITIVE: `FrameSource.__init__` takes a keyword-only `stop: threading.Event | None`,
+      `create_source` forwards it, and `CameraActor._default_factory` hands down the event it
+      already had. Every source forwards `**kwargs`, so none of the three needed touching; an
+      injected test factory passes nothing and `stopping` is False, which is what a test wants.
+      `_stop` is a CLASS default rather than only an instance attribute, because the offline
+      tests build a source with `object.__new__` (no GStreamer to hand) and `stopping` has to
+      answer on one of those.
+      `sources/gstreamer.py` checks it every slice, so both halves of that seam now match the
+      C++ source's -- the slicing (#163) and the stop.
+      REVERT-CHECK: remove the check and `a stop already set means no pull at all` fails with 50
+      pulls where there should be none. The test also sets the event MID-READ and asserts
+      exactly one more slice, not the whole timeout.
+      ORIGINAL: opened 8 Sep by #163 round 2, and it is the stop half of a two-plane seam.
+      The C++ `FrameSource` is constructed with a `StopSignal&` and its
       GStreamer and NVDEC sources check it between read slices, so a fleet's stop is observed
       within 100 ms. The PYTHON `FrameSource` is never given one (`ingest/base.py`'s ctor takes
       `config`, `counter`, `settings`), so a Python camera's stop is observed only when

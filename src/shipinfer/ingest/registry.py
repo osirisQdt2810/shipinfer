@@ -13,6 +13,8 @@ is not installed". Those are different problems with different fixes.
 
 from __future__ import annotations
 
+import threading
+
 from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.registry import Registry
 from shipinfer.core.settings.ingest import CameraConfig, IngestSettings
@@ -32,6 +34,7 @@ def create_source(
     counter: FrameCounter | None = None,
     *,
     settings: IngestSettings | None = None,
+    stop: threading.Event | None = None,
 ) -> FrameSource:
     """Build the source this camera asks for.
 
@@ -52,4 +55,4 @@ def create_source(
         extra=log_context(camera_id=config.camera_id),
     )
     source_cls = SOURCES.get(name)
-    return source_cls(config, counter, settings=settings)
+    return source_cls(config, counter, settings=settings, stop=stop)
