@@ -1299,12 +1299,19 @@ hook down, for when the operator asked to see something before it is executed.
           an EXTRA-SOURCES axis (the test app must link shipvision's four objects); one alone
           is not enough -- `packages=()` fixes `--offline` and still breaks a full build.
           Its CI job needs `.github/workflows/**` too, so it merges manually as #162 did.
-        * **DO NOT OPEN A PR from that branch until the lane lands** -- it would redden
-          `cpp-offline` at once. A pushed branch triggers nothing (`ci.yml` is push-to-main,
-          `pr-pipeline.yml` is pull_request), which is why parking it is safe.
-        * The offline pytest tier passes at 3690 on that branch and that is NOT a
-          contradiction: the Python tests compute the build's PLAN, not the compiler's answer.
-          The tiers are layered correctly; do not "fix" the green.
+        * THE LANE LANDED and PR 1 is **OPEN AS #169**, no `automerge` label: it adds
+          `cpp-shipvision-lane` to `cpp.yml`, so the review job cannot mint a token and it
+          needs a MANUAL merge exactly as #133 and #162 did.
+          `ExternalLane` gained `include_root` + `sources` (one without the other is silent in
+          both directions, now a test), and `link_flags` had to stop dropping `-I` for such a
+          lane -- its sources are COMPILED on the link line, so without the include path they
+          gave four `fatal error: shipvision/mot/pool.h` on a link whose compile had been
+          perfectly happy. Two ratchets fired and both were right: `omitted_lanes.h::kTable`
+          must name every lane (this one owns no source, so its row is `{}` and the test now
+          asserts that emptiness is CORRECT), and the cpp job set is pinned exactly so a
+          deleted tier is caught.
+          `csrc/build/test_tracking_shard`, built by the real build system: 41 checks, 0
+          failures. `--offline` alone still omits the lane and names it. Offline pytest 3693.
       `C2c`/`C2d` are the shipvision-side and Python-side halves and are both closed; this is
       the C++ half nobody opened.
 
