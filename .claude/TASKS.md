@@ -995,20 +995,24 @@ hook down, for when the operator asked to see something before it is executed.
       C1's >=5x needs this answered first: a baseline arm compared against a route running at
       58% of our own previous per-GPU figure would measure the wrong thing.
 
-- [!] **CI-CPP-JOBS-ARE-POST-MERGE · DONE, OPEN AS #162, AND IT NEEDS YOUR MANUAL MERGE.**
-      OPERATOR: please merge https://github.com/osirisQdt2810/shipinfer/pull/162 -- I do
-      not merge into `main` myself. Everything real is green on it, including the three `cpp /`
-      jobs it exists to add, which is the gate proving itself on its own PR:
-        Tests (py3.10) pass   cpp / C++ offline tier (no driver)          pass
-        Tests (py3.12) pass   cpp / C++ units nothing else compiles       pass
-        PR description pass   cpp / C++ gst lane (section O + the pixel)  pass
-        Claude review  FAIL (28 s)
-      The review failure is CLAUDE.md's known permanent exception and its own message says so:
-      "Workflow validation failed. The workflow file must exist and have identical content to
-      the version on the repository's default branch." #162 adds `.github/workflows/cpp.yml`,
-      so the review action refuses by design and auto-merge cannot gate on it.
-      Rebased onto `main` twice (8 Sep) because ledger commits to `main` kept conflicting with
-      it -- see V159. It is `MERGEABLE` at f95493c.
+- [x] **CI-CPP-JOBS-ARE-POST-MERGE · DONE 7 Sep, open as #162 (needs a MANUAL merge: it edits
+      `.github/workflows/**`, so the review job cannot mint a token).** The three C++ tiers are
+      a REUSABLE workflow now -- `.github/workflows/cpp.yml`, `on: workflow_call` -- and both
+      `ci.yml` and `pr-pipeline.yml` call it, with `merge` gating on it. A red C++ tier blocks
+      an auto-merge exactly as a red test does.
+      NOT A COPY, deliberately: mirroring ~150 lines of load-bearing comments into a second file
+      is the two-place edit this repo keeps paying for, and `workflow_call` is GitHub's own
+      answer. The job NAMES are unchanged, so the several places that cite `cpp-syntax` and
+      `cpp-gst-lane` by name (`tests/test_cuda_reaching_apps_compile.py` most of all) still read
+      true.
+      THE RATCHET, because the gate is one line of YAML and nothing else would notice its
+      removal: `TestTheCppTiersGatePullRequests` asserts the tiers are defined once and called
+      by both, and that `merge.needs` contains `cpp`. Both revert-checks red -- dropping `cpp`
+      from `needs` gives "auto-merge does not wait for the C++ tiers", and inlining the jobs in
+      `ci.yml` gives "defines its own C++ jobs instead of calling the shared ones".
+      This is the incident's other half: `cpp-syntax` closed "nothing compiles it" and this
+      closes "it merged anyway". Today's own #156 is the proof it was still open -- a missing
+      `gst_init` merged and was found by a bench run rather than by CI.
       ORIGINAL: #133 review round 3, note 3 — every C++ job lives in
       `ci.yml` (push to `main`), and `pr-pipeline.yml` has none at all. So an undeclared
       `std::mutex` in `bench.cpp` still MERGES and then reddens main, which is the exact
@@ -2853,11 +2857,38 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
 
 ---
 
-- [!] **CI-SYNTAX-COVERAGE-GAPS · DONE, ON #162, SO IT MERGES WHEN THAT DOES.** Same ask as
-      `CI-CPP-JOBS-ARE-POST-MERGE` above and the same PR: nothing here needs work, it needs
-      the manual merge that a `.github/workflows/**` change cannot get from auto-merge.
+- [x] **CI-SYNTAX-COVERAGE-GAPS · DONE 7 Sep, folded into #162 (which needs a manual merge --
+      it edits `.github/workflows/**`).** All three, each with a revert-check:
+      (1) `_uncompiled_units()`'s predicate is now "IN NO BUILT CLOSURE" rather than "not
+          offline-ready", which is the ticket's own thesis. `obs/sampler.cpp` is offline-READY,
+          so the old predicate filtered it out, and no app the offline build compiles reaches
+          it -- **one unit, compiled by nothing, excluded from the check that exists to find
+          exactly that**. Verified by enumeration before changing anything: it is the ONLY such
+          unit. The deferral's worry (the wider set brings in units needing no CUDA headers
+          while the class is `needs_headers`-gated) is answered by SPLITTING the class:
+          `TestTheDriverlessUnitsNothingCompiles` runs wherever `g++` does, which is more
+          coverage rather than less. REVERT: `obs/sampler.cpp is compiled by nothing`.
+      (2) `_headers_available()` no longer runs at import. A `skipif` evaluates its condition
+          AND its reason then, and both shell out to `g++`, so a plain offline `pytest` paid a
+          compiler spawn for classes it was about to skip. It is a session fixture now, and
+          `test_nothing_probes_the_compiler_at_import` walks the AST for a module-level call --
+          REVERT: `['_headers_available'] runs at import`.
+      (3) the compile legs carry `-Wall -Wextra` and `-DSHIPINFER_OMITTED_LANES`, the latter
+          derived from the lanes `pkg-config` can actually resolve HERE rather than
+          `frozenset()`, which would have told a unit compiled WITH opencv that opencv was
+          omitted. Gated by compiling a unit that `#error`s without the define, because reading
+          the flag list back would only restate `_build_flags`. REVERT: the `#error` fires.
+      AND THE SAME FILE'S DROP GUARD HAD BEEN RED ON MAIN SINCE 15:52, which I did not notice
+      until this item made me run it with `SHIPINFER_REQUIRE_CSRC_HEADERS=1`: #156 landed the
+      `nvdec` lane and nothing in CI could resolve `ffnvcodec`, so `nvdec.cpp` was dropped for a
+      missing lane and `cpp-syntax` failed. **Five consecutive red runs on main.** The fix keeps
+      the guard's meaning rather than silencing it: `cpp-gst-lane` installs
+      `libffmpeg-nvenc-dev` and BUILDS `--with-external nvdec` (it already carries GStreamer,
+      which that lane also needs), and `nvdec` joins `gstreamer` in `_COVERED_ELSEWHERE` with
+      that job named beside it. `libnvcuvid` is not needed: the unit dlopen's it, which is why
+      it builds on a runner with no GPU.
       ORIGINAL: two non-blocking findings from #133 round 3, kept rather
-      than folded into a round-4 fix.**
+      than folded into a round-4 fix.
       (1) `csrc/shipinfer/obs/sampler.cpp` is compiled by NOTHING. It IS `offline_ready`, so no
       app's closure reaches it and `cpp-offline` never builds it -- and `_uncompiled_units()`
       filters to `not offline_ready`, so the new syntax leg excludes it BY CONSTRUCTION. The

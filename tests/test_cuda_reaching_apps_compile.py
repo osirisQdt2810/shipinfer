@@ -124,21 +124,53 @@ def _lane_flags(build, unit: Path) -> list[str]:
     ]
 
 
+# doc: long the predicate is "in no built closure", and the narrower one it replaced
+def _offline_built_units() -> set[Path]:
+    """Every `.cpp` the `--offline` build actually compiles: the closure of each app it builds.
+
+    Which is the question, and it took a round to say so. `-fsyntax-only` on an APP does not
+    parse the `.cpp` files in its closure, so a unit is compiled only if some app the offline
+    build BUILDS links it -- not merely if the unit itself is offline-ready.
+    """
+    build = _build_module()
+    built: set[Path] = set()
+    for app in _apps():
+        closure = build.include_closure(app)
+        if build.offline_ready(closure, set()):
+            built |= {path for path in closure if path.suffix == ".cpp"}
+    return built
+
+
+# doc: long the predicate this replaced excluded the one unit the ticket was opened for
 def _uncompiled_units() -> list[Path]:
     """Implementation units nothing in this repository compiles, lanes permitting.
 
-    `-fsyntax-only` on an APP does not parse the `.cpp` files in its closure, so the eight
-    units outside the offline build were covered by nothing even with the apps checked --
-    including `backends/tensorrt/engine.cpp`, where `initLibNvInferPlugins` lives. Two need an
-    external lane (opencv, gstreamer) and are skipped where it is absent, which is the answer
-    `build_csrc.py` gives. `.cpp` only: `runtime/ops.cu` stays covered by nothing here,
-    because `g++` cannot parse CUDA and `nvcc` is the device tier's job.
+    IN NO BUILT CLOSURE, not "not offline-ready" -- which is the ticket's own thesis and what
+    the first version got wrong. `obs/sampler.cpp` IS offline-ready, so that predicate filtered
+    it out; no app the offline build compiles reaches it, so `cpp-offline` never built it
+    either. One unit, compiled by nothing, excluded from the check that exists to find exactly
+    that (#133 round 3, note 1).
+
+    Units needing an external lane are skipped where it is absent, which is the answer
+    `build_csrc.py` gives. `.cpp` only: `runtime/ops.cu` stays covered by nothing here, because
+    `g++` cannot parse CUDA and `nvcc` is the device tier's job.
     """
     build = _build_module()
     apps = set(_apps())
+    built = _offline_built_units()
     units = [p for p in sorted((CSRC / "shipinfer").rglob("*.cpp")) if p not in apps]
-    outside = [u for u in units if not build.offline_ready(build.include_closure(u), set())]
-    return [u for u in outside if _lanes_available(build, u)]
+    return [u for u in units if u not in built and _lanes_available(build, u)]
+
+
+def _needs_driver_headers(unit: Path) -> bool:
+    """Whether compiling this unit reaches a vendor header, so the class gate can be per-unit.
+
+    `core/platform.h` is the one header allowed to name a vendor runtime, and
+    `build_csrc.py::needs_accelerator` keys on exactly that. Splitting on it is what lets the
+    units that need NO driver headers -- `obs/sampler.cpp` and the policies -- be checked on a
+    plain runner instead of only on the one that installs CUDA's.
+    """
+    return _build_module().needs_accelerator(_build_module().include_closure(unit))
 
 
 @functools.cache
@@ -216,10 +248,17 @@ def _missing_headers_reason() -> str:
 
 # doc: long which lanes are another job's, and what adding one costs
 #: External lanes a DIFFERENT CI job compiles, so this one may drop their units. `gstreamer`
-#: is `cpp-gst-lane`'s. Everything NOT in here is installed in this job -- `opencv` is, because
+#: and `nvdec` are both `cpp-gst-lane`'s, which builds `--with-external gstreamer --with-external
+#: nvdec`. Everything NOT in here is installed in this job -- `opencv` is, because
 #: `ingest/sources/replay.cpp` is compiled by nothing else anywhere (#133 round 4). A lane
 #: added here without a job named beside it is a unit going quietly uncovered.
-_COVERED_ELSEWHERE = frozenset({"gstreamer"})
+#:
+#: `nvdec` arrived RED: #156 landed the lane and nothing in CI could resolve `ffnvcodec`, so
+#: this file's own drop guard failed and `cpp-syntax` was red on main for five runs before
+#: anyone looked. Adding the lane to `cpp-gst-lane` (which already has the GStreamer packages,
+#: and needs only nv-codec-headers on top) is the fix that keeps the guard's meaning: a dropped
+#: unit is still the hole this job exists to close.
+_COVERED_ELSEWHERE = frozenset({"gstreamer", "nvdec"})
 
 # doc: long the guard the module-level pytestmark used to carry, and what needs it
 #: `TestAFailureArrivesWithItsReason` is deliberately NOT `needs_headers`-gated -- it needs
@@ -232,9 +271,21 @@ no_gpp = pytest.mark.skipif(shutil.which("g++") is None, reason="no g++ on PATH"
 #: and nothing else, so a module-level mark would have run them only on the `cpp-syntax`
 #: runner -- a harness whose own guards execute in one place is a harness nobody checks.
 
-needs_headers = pytest.mark.skipif(
-    not _headers_available() and not os.environ.get(_REQUIRE), reason=_missing_headers_reason()
-)
+
+# doc: long why this is a fixture and not a `skipif`, which probed at import time
+#: Applied with `@pytest.mark.usefixtures`, because a `skipif` evaluates its condition -- and
+#: its `reason` -- WHEN THE MODULE IS IMPORTED. Both call `_headers_available()`, which shells
+#: out to `g++`: so a plain offline `pytest` collecting this file paid a compiler spawn for
+#: classes it was about to skip, on every run, including on a box with no `g++` where the
+#: answer is known without asking. As a fixture the probe happens only if one of these tests
+#: actually runs (#133 round 3, note 2).
+@pytest.fixture(scope="session")
+def csrc_headers() -> None:
+    if not _headers_available() and not os.environ.get(_REQUIRE):
+        pytest.skip(_missing_headers_reason())
+
+
+needs_headers = pytest.mark.usefixtures("csrc_headers")
 
 
 @needs_headers
@@ -251,6 +302,40 @@ def test_the_headers_are_present_where_they_are_required() -> None:
     assert _headers_available(), _missing_headers_reason()
 
 
+# doc: long the flags this passes are the BUILD's, and the two it used to drop
+def _build_flags() -> list[str]:
+    """`-Wall -Wextra` and `-DSHIPINFER_OMITTED_LANES`, which `scripts/build_csrc.py` passes.
+
+    A syntax check that compiles a unit under different flags from the build is checking a
+    different translation unit. The define is the one that matters: `ingest/omitted_lanes.h`
+    has an `#ifdef` branch on it, so without it this leg parsed the OTHER side of that branch
+    from the one every real binary compiles. `lane_defines(frozenset())` is the shape the
+    build passes when no lane is enabled, which is this check's situation for every unit whose
+    lanes `pkg-config` could not resolve -- and the value is derived from `EXTERNAL` rather
+    than written here, so adding a lane cannot leave this behind.
+    """
+    return ["-Wall", "-Wextra", *_build_module().lane_defines(_resolvable_lanes())]
+
+
+@functools.cache
+def _resolvable_lanes() -> frozenset[str]:
+    """The external lanes `pkg-config` can answer for on THIS host.
+
+    Which is what `--with-external` would be given here, so `lane_defines` names the lanes
+    this check genuinely left out. Spelling `frozenset()` instead would tell a unit compiled
+    WITH opencv that opencv was omitted -- a define that contradicts the compile it labels.
+    """
+    build = _build_module()
+    resolvable = set()
+    for lane in build.EXTERNAL:
+        try:
+            build.pkg_config_flags(lane)
+        except (SystemExit, FileNotFoundError):
+            continue
+        resolvable.add(lane)
+    return frozenset(resolvable)
+
+
 def _compiles(path: Path, extra: list[str]) -> tuple[bool, str]:
     """`-fsyntax-only`: no link, no device, no measurement -- just "is this valid C++"."""
     done = subprocess.run(
@@ -259,6 +344,7 @@ def _compiles(path: Path, extra: list[str]) -> tuple[bool, str]:
             "-std=c++17",
             "-fsyntax-only",
             f"-I{CSRC}",
+            *_build_flags(),
             *_include_flags(),
             *extra,
             str(path),
@@ -311,10 +397,62 @@ class TestAFailureArrivesWithItsReason:
 
         assert _compiles(unit, []) == (True, "")
 
+    def test_the_builds_own_defines_reach_the_compile(self, tmp_path: Path) -> None:
+        """`-DSHIPINFER_OMITTED_LANES` is not decoration: `ingest/omitted_lanes.h` has an
+        `#ifdef` branch on it, so a check that omits it parses the OTHER side of that branch
+        from the one every real binary compiles. Asserted by compiling a unit that REQUIRES
+        the define rather than by reading the flag list back, which would only restate
+        `_build_flags`.
+        """
+        unit = tmp_path / "needs_the_define.cpp"
+        unit.write_text(
+            "#ifndef SHIPINFER_OMITTED_LANES\n"
+            '#error "the syntax check must pass the build\'s own defines"\n'
+            "#endif\n"
+            "int main() { return 0; }\n"
+        )
+
+        ok, errors = _compiles(unit, [])
+
+        assert ok, errors
+
+
+@no_gpp
+class TestTheDriverlessUnitsNothingCompiles:
+    """The subset needing no vendor header, checked on ANY box with a compiler.
+
+    Split out of the class below, which is `needs_headers`-gated: widening the predicate to "in
+    no built closure" brought in units that reach no vendor header at all, and gating those on
+    CUDA's headers would have run them only on the one runner that installs them. A harness
+    whose checks execute in one place is a harness nobody checks -- the same argument the marks
+    above make about themselves.
+    """
+
+    def test_each_one_compiles(self) -> None:
+        build = _build_module()
+        units = [u for u in _uncompiled_units() if not _needs_driver_headers(u)]
+        assert units, "no driverless uncompiled unit; this guard would be vacuous"
+        failures: list[str] = []
+        for unit in units:
+            ok, errors = _compiles(unit, _lane_flags(build, unit))
+            if not ok:
+                failures.append(f"{unit.relative_to(ROOT)}:\n  {errors}")
+
+        assert not failures, "these do not compile:\n" + "\n".join(failures)
+
+    def test_the_sampler_is_one_of_them(self) -> None:
+        """Non-vacuity, named: `obs/sampler.cpp` is the unit this widening was opened for."""
+        sampler = CSRC / "shipinfer" / "obs" / "sampler.cpp"
+        assert sampler in _uncompiled_units(), (
+            "obs/sampler.cpp is compiled by nothing -- it is offline-ready, so the old "
+            "`not offline_ready` predicate excluded it, and no app the offline build compiles "
+            "reaches it either"
+        )
+
 
 @needs_headers
 class TestTheUnitsNothingCompiles:
-    """The eight `.cpp` files outside the offline build, which the app check does not reach."""
+    """The `.cpp` files outside the offline build that DO reach a vendor header."""
 
     def test_there_are_some(self) -> None:
         assert _uncompiled_units(), "no uncompiled unit found; this guard would be vacuous"
@@ -323,6 +461,8 @@ class TestTheUnitsNothingCompiles:
         build = _build_module()
         failures: list[str] = []
         for unit in _uncompiled_units():
+            if not _needs_driver_headers(unit):
+                continue  # the class above, on a runner that needs no CUDA packages
             ok, errors = _compiles(unit, _lane_flags(build, unit))
             if not ok:
                 failures.append(f"{unit.relative_to(ROOT)}:\n  {errors}")
@@ -335,9 +475,9 @@ class TestTheUnitsNothingCompiles:
         `_COVERED_ELSEWHERE` is the whole judgement in this file: a lane in it is somebody
         else's job, and a lane out of it must be installed HERE. `opencv` is out of it because
         `ingest/sources/replay.cpp` is compiled by nothing else anywhere -- `cpp-gst-lane`
-        builds with `--with-external gstreamer`, which is the other one. So this pins the
-        reasoning rather than the environment: on a host that HAS libopencv-dev, the guard
-        below cannot tell a correct exclusion from a missing one.
+        builds the other two. So this pins the reasoning rather than the environment: on a host
+        that HAS libopencv-dev, the guard below cannot tell a correct exclusion from a missing
+        one.
         """
         build = _build_module()
         replay = CSRC / "shipinfer" / "ingest" / "sources" / "replay.cpp"
@@ -348,7 +488,10 @@ class TestTheUnitsNothingCompiles:
             "opencv is not covered by another job, so the cpp-syntax job installs it; putting "
             "it here would drop replay.cpp from every CI job at once"
         )
-        assert "gstreamer" in _COVERED_ELSEWHERE, "and gstreamer IS cpp-gst-lane's"
+        assert {"gstreamer", "nvdec"} == _COVERED_ELSEWHERE, (
+            "and those two ARE cpp-gst-lane's -- it builds both lanes, so a third entry here "
+            "without a job building it is a unit going quietly uncovered"
+        )
 
     def test_no_unit_is_dropped_for_a_missing_lane_where_this_is_required(self) -> None:
         """The loud skip belongs on THIS leg, because this is the one it can fire on.
@@ -471,6 +614,33 @@ class TestThisFileStandsAlone:
             f"carries pytest and nothing else. Either keep this file self-contained or make "
             f"ci.yml install the dev environment -- but not silently, because the job then "
             f"fails at collection and the redness reads as a packaging problem"
+        )
+
+    def test_nothing_probes_the_compiler_at_import(self) -> None:
+        """The header probe shells out to `g++`, so it must not run when the module is merely
+        collected: a plain offline `pytest` paid a compiler spawn for classes it then skipped.
+        A `skipif` did exactly that -- its condition AND its reason are evaluated at import --
+        which is why the gate is a fixture (#133 round 3, note 2).
+        """
+        import ast
+
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        inside: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                for child in ast.walk(node):
+                    inside.add(id(child))
+        eager = [
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"_headers_available", "_missing_headers_reason"}
+            and id(node) not in inside
+        ]
+        assert eager == [], (
+            f"{eager} runs at import, so collecting this file spawns a compiler even where "
+            f"every class using it is about to skip"
         )
 
     def test_it_uses_no_fixture_of_ours(self) -> None:

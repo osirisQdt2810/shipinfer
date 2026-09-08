@@ -1046,6 +1046,45 @@ def _sections(path: Path, heading: str) -> list[tuple[str, int]]:
     ]
 
 
+class TestTheCppTiersGatePullRequests:
+    """The three C++ tiers must block a PR, not only redden `main` after it merged.
+
+    They lived in `ci.yml` alone, which runs on a push to main -- so an undeclared `std::mutex`
+    in `bench.cpp` merged and then broke main (`CSRC-BENCH-UNCOMPILED`). One definition in
+    `cpp.yml`, `workflow_call`ed from both, and `merge` gating on it. This is the ratchet: the
+    gate is one line in a YAML file and nothing else would notice its removal.
+    """
+
+    @property
+    def _workflows(self) -> Path:
+        return Path(__file__).resolve().parents[1] / ".github" / "workflows"
+
+    def _load(self, name: str) -> dict:
+        import yaml
+
+        return yaml.safe_load((self._workflows / name).read_text())
+
+    def test_the_tiers_are_defined_once_and_called_by_both(self) -> None:
+        shared = self._load("cpp.yml")
+        # `on:` parses as the boolean True in YAML 1.1, which is why this reads it that way.
+        assert "workflow_call" in (shared.get("on") or shared[True])
+        assert set(shared["jobs"]) == {"cpp-offline", "cpp-syntax", "cpp-gst-lane"}
+        for caller in ("ci.yml", "pr-pipeline.yml"):
+            jobs = self._load(caller)["jobs"]
+            assert "cpp" in jobs, f"{caller} does not run the C++ tiers"
+            assert jobs["cpp"]["uses"].endswith("cpp.yml"), (
+                f"{caller} defines its own C++ jobs instead of calling the shared ones, which "
+                f"is the copy that drifts"
+            )
+
+    def test_the_merge_gate_waits_for_them(self) -> None:
+        merge = self._load("pr-pipeline.yml")["jobs"]["merge"]
+        assert "cpp" in merge["needs"], (
+            "auto-merge does not wait for the C++ tiers, so a red one merges anyway -- which "
+            "is the whole of CI-CPP-JOBS-ARE-POST-MERGE"
+        )
+
+
 # doc: long the forward-only rule and its grandfathered counts have to be written down
 class TestTheProjectsMarkdownKeepsItsCaps:
     """A `FEATURE_LOG.md` entry is 15 lines and an ADR is 30 — **forward-only**.
