@@ -9,6 +9,8 @@ Runs with no GStreamer installed, by design.
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from shipinfer.core.errors import ConfigurationError, SourceUnavailableError
@@ -344,6 +346,40 @@ class TestTheReadTimeoutIsSpentInSlices:
         assert pulls[0] == int(
             0.1 * 1_000_000_000
         ), "and that slice is 100 ms rather than the whole 5 s read timeout"
+
+    def test_a_stop_ends_the_read_without_waiting_out_the_timeout(self, monkeypatch):
+        """The half that had no Python counterpart until `PY-SOURCE-HAS-NO-STOP-SIGNAL`.
+
+        A read that spends its whole `read_timeout_s` is a camera the fleet abandons: the actor
+        only learns of a stop when `_do_read` returns, and `stop()`'s budget is shorter than
+        five seconds. Checked every slice, so the read ends within one.
+        """
+        pulls: list[int] = []
+        stop = threading.Event()
+        source, _ = self._source(monkeypatch, pulls, lambda self: None)
+        source._stop = stop
+
+        stop.set()
+        assert source._do_read() is None
+        assert pulls == [], "a stop already set means no pull at all"
+
+        stop.clear()
+        assert source._do_read() is None  # the ordinary timeout path, for contrast
+        before = len(pulls)
+        assert before > 0, "and a running camera does pull"
+
+        # Set mid-read: the loop must notice on its next pass rather than at the deadline.
+        original = source._appsink.try_pull_sample
+
+        def stop_after_one(timeout):
+            stop.set()
+            return original(timeout)
+
+        source._appsink.try_pull_sample = stop_after_one
+        assert source._do_read() is None
+        assert (
+            len(pulls) == before + 1
+        ), f"one more slice, not the whole timeout: {len(pulls) - before} pulls after the stop"
 
     def test_a_quiet_camera_still_spends_its_whole_timeout(self, monkeypatch):
         """The other half: an empty bus means keep waiting, and the DEADLINE is what bounds
