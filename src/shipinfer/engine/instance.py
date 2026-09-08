@@ -105,6 +105,9 @@ class ModelInstance:
         self._ewma_latency_us = 0.0
         self._executed_batches = 0
         self._executed_requests = 0
+        #: Rows, not requests: one request may carry many crops, so these differ by
+        #: the fan-out and only the pair says what the model actually did.
+        self._executed_rows = 0
         # One timer for the life of the instance, not one per batch. `PhaseTimer` documents
         # that its CUDA events are reused *because* allocating a pair per phase per batch
         # would be ~5000 allocations a second at the design point and would make the
@@ -446,6 +449,7 @@ class ModelInstance:
     ) -> None:
         self._executed_batches += 1
         self._executed_requests += batch.request_count
+        self._executed_rows += batch.size
         # EWMA rather than a running mean: the placement policies want "how loaded is this
         # instance *now*", and a lifetime average stops responding after an hour of uptime.
         self._ewma_latency_us = (
@@ -509,6 +513,9 @@ class ModelInstance:
             "queue": self._queue.stats().as_dict(),
             "batches": self._executed_batches,
             "requests": self._executed_requests,
+            #: Its C++ twin has summed this all along (`engine/instance.cpp`); this
+            #: side had only `requests`, so a crop fan-out was invisible here.
+            "rows": self._executed_rows,
             "failed_batches": self._failed_batches,
             #: Times this worker had to wait for an execution slot. Non-zero means the
             #: model's rate limiter is actually binding, which is the only way to tell a

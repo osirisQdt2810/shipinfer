@@ -266,6 +266,15 @@ namespace {
               "each caller gets exactly its own rows back");
         check(engine->executes.load() == 1 && engine->last_rows.load() == 4,
               "one execute of four rows: the two requests were batched");
+        // check: ROWS AND REQUESTS ARE DIFFERENT NUMBERS, and this is the one test that
+        // already sets up a case where they differ -- three rows and one, in two requests.
+        // The bench reported only `requests` until 8 Sep, so a crop fan-out was invisible in
+        // the per-device table and `C1-WHAT-IS-THE-5x-AGAINST?` could put no number on its own
+        // like-for-like candidate. `stats().rows` was summed here all along; nothing read it.
+        check(instance.stats().requests == 2 && instance.stats().rows == 4,
+              "and the stats keep them apart: 2 requests, 4 rows, got " +
+                  std::to_string(instance.stats().requests) + " and " +
+                  std::to_string(instance.stats().rows));
         instance.stop();
     }
 
