@@ -17,6 +17,7 @@ this one can use the video engine when it is there and still start when it is no
 
 from __future__ import annotations
 
+import time
 from typing import Any, ClassVar
 
 import numpy as np
@@ -330,15 +331,46 @@ class GStreamerSource(FrameSource):
         if ok_h and ok_w:
             self._set_format(height, width, fps)
 
+    #: How long ONE pull may block, so the loop below asks the bus at least this often. Not
+    #: the read timeout, which is still the deadline for the whole read.
+    _PULL_SLICE_S: ClassVar[float] = 0.1
+
+    # doc: long the slicing, the seam it shares with the C++ source, and the half it cannot
     def _do_read(self) -> np.ndarray | None:
+        """One frame, or ``None`` for a camera that is merely quiet.
+
+        The timeout is spent in SLICES and the bus is asked after every empty one. A single
+        pull of the whole ``read_timeout_s`` is simpler and was what this did -- but then an
+        EOS is only noticed when that pull returns, so a camera whose stream ended sat out the
+        full timeout before reconnecting. ``csrc/…/sources/gstreamer.cpp`` does the same, and
+        a per-frame seam that differs between the planes is what CLAUDE.md's rule is for.
+
+        The C++ source also checks its stop signal between slices; this one cannot, because a
+        Python ``FrameSource`` is not given one -- see ``PY-SOURCE-HAS-NO-STOP-SIGNAL``.
+        """
         gst = self._gst
-        sample = _try_pull_sample(self._appsink, int(self.read_timeout_s * gst.SECOND))
-        if sample is None:
-            # Nothing within the timeout. Distinguish "quiet" from "over" by asking the bus:
-            # an EOS or ERROR message means reconnect, a timeout means keep waiting.
+        deadline = time.monotonic() + max(self.read_timeout_s, 0.001)
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                # The pure-timeout case: the bus was empty after every slice, so this camera
+                # is quiet rather than over and the actor's empty-read budget decides.
+                return None
+            # doc: long the zero-nanosecond slice, and the test whose fake clock found it
+            # A SLICE THAT ROUNDS TO ZERO NANOSECONDS IS THE DEADLINE. Without this the tail
+            # of every timed-out read is a busy spin: `int(1e-16 * 1e9)` is 0, the pull returns
+            # at once, `left` stays positive, and the loop turns until the clock catches up.
+            # Found by the test below, whose fake clock advances by exactly what each pull was
+            # given -- which is what a blocking pull does and what made the spin visible.
+            slice_ns = int(min(left, self._PULL_SLICE_S) * gst.SECOND)
+            if slice_ns <= 0:
+                return None
+            sample = _try_pull_sample(self._appsink, slice_ns)
+            if sample is not None:
+                return self._sample_to_array(sample)
+            # Quiet, or over? Only the bus knows -- and it is asked EVERY slice, because
+            # asking once at the end is what made an EOS take the whole timeout to see.
             self._raise_if_stream_ended()
-            return None
-        return self._sample_to_array(sample)
 
     def _raise_if_stream_ended(self) -> None:
         gst = self._gst

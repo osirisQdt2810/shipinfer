@@ -859,6 +859,30 @@ hook down, for when the operator asked to see something before it is executed.
       for a reason worth keeping — it scales the appearance EMA by detection confidence, and
       MOT17 public detections carry a *constant* score, so on that benchmark the flag has no
       effect and a study sampling it would report its own sampler's spread as a finding.
+- [ ] **NV12-ROUTE-SATURATES-AT-78-PER-GPU · opened 7 Sep, and it is C1's remaining question.**
+      I first wrote this item down as "ingest-limited" and A SCALING RUN SAYS OTHERWISE, which
+      is why it is worth doing before theorising. Five GPUs, 16 workers/GPU, `--source nvdec`:
+        cameras   offered/s   frames_read        events_complete   rate     rejected
+          10          200     11 007 (92%)          10 990        183/s          0
+          25          500     20 960 (70%)          20 066        334/s         48
+          50         1000     57 725 (82%)          27 116        387/s     29 367
+      Completion flattens at **~390/s on five GPUs = 78/s per GPU** while ingest keeps
+      delivering 825/s, and the queue sheds the difference. So the PIPELINE is the limit at the
+      design load, not the generator -- and the recorded `--source replay` figure is 944/s on
+      seven GPUs, **135/s per GPU**. The NV12 route is at 58% of that per GPU.
+      WHAT IT IS NOT: the intake's copies. They were synchronous on the legacy default stream,
+      which drains the whole device -- ~1460 full-device syncs a second at this load -- and I
+      moved them to the intake's own blocking stream expecting that to be it. 27 116 against
+      27 009: unchanged. Kept anyway (an ingest thread should not drain a GPU, and the reviewer
+      flagged it), but claimed as nothing.
+      THE CANDIDATES LEFT, in the order I would measure them: the NV12 kernels themselves
+      (`nv12_letterbox_into` and `nv12_crop_resize_into` do four chroma taps and a conversion
+      per output pixel where the BGR twins do one load -- `benchmarks/kernels.py` is the tier
+      that answers this); the D2D copy per frame; and the worker count, which peaked at 16/GPU
+      here against 23/GPU for the fleet-wide queue and may simply want re-sweeping per lane.
+      C1's >=5x needs this answered first: a baseline arm compared against a route running at
+      58% of our own previous per-GPU figure would measure the wrong thing.
+
 - [ ] **CI-CPP-JOBS-ARE-POST-MERGE** (#133 review round 3, note 3) — every C++ job lives in
       `ci.yml` (push to `main`), and `pr-pipeline.yml` has none at all. So an undeclared
       `std::mutex` in `bench.cpp` still MERGES and then reddens main, which is the exact
@@ -3361,7 +3385,129 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       `test_a_decoded_pixel_over_a_real_rtsp_session` -- the three that would initialise
       GStreamer on the NVDEC source's behalf.
       ORIGINAL: #159 round 2, note 3.
-- [ ] **DEVICE-FRAME-NEEDS-A-LANE-PER-GPU · the design load's blocker, opened 7 Sep.** A device
+- [x] **DEVICE-FRAME-NEEDS-A-LANE-PER-GPU · DONE 7 Sep on `feat/device-lanes`.**
+      `pipeline/queue_sink.h` grows `PipelineLanes`: ONE fair queue by default, one per GPU when
+      the run's source hands over device pixels. #160's refusal loses its COUNT half with it --
+      `--devices 0,1 --source nvdec` is the ordinary case now, not an unsatisfiable one.
+      THE SHAPE, and why not the other two. A device filter inside `FairPriorityQueue` (skip a
+      lane whose head belongs to another GPU) is smaller and I nearly wrote it -- but the
+      first-phase wait uses `notify_one`, so a worker woken for a frame it cannot take drains
+      nothing while the worker that could never wakes. That is a lost-wakeup hazard in the one
+      component this project exists to get right. Process-per-GPU is the DEPLOYMENT's answer
+      (`--runner fleet`, and the Python plane's `InProcessRunner` owns a single `device`, so the
+      two-plane sync rule is satisfied by construction there) and needs no lanes; the lanes
+      exist for the HEAD-TO-HEAD, where the baseline is one process across N GPUs and a
+      like-for-like measurement has to be too. THAT is the whole reason.
+      Cross-device fairness for device frames is UNACHIEVABLE rather than unimplemented (a frame
+      cannot move, ADR-004), so a lane per GPU gives up nothing that was available. What it
+      needs instead is that the cameras be SPREAD -- `bench.cpp` assigns each camera's decoder
+      device round-robin over the run's GPUs, and that assignment IS the cross-device balance.
+      Left at the default it was invisible and total: all sixteen cameras on gpu0,
+      `ship_detector 0:3974 1:20 2:16 3:12`, 910 frames rejected by one lane with three empty.
+      Found by running it.
+      EVIDENCE, 16 cameras x 10 fps x 40 s on four GPUs, `--source nvdec`:
+        frames_read 5073, accepted 5089, complete 4979, incomplete 110, rejected 0, failed 0
+        per_device ship_detector 0:1321 1:1262 2:1193 3:1313   <- within 10% across four GPUs
+      Same shape through the HOST path, one lane, unchanged: 3552 read, 3301 complete, still
+      balanced (827/833/900/894) because any worker takes any frame there.
+      ALSO HERE, because the design-load run could not complete without it: `sources/gstreamer.cpp`
+      spends its read timeout in 100 ms slices and checks the stop signal between them (43 of 50
+      cameras abandoned past the fleet's stop deadline, `bench` exiting with no summary -- the
+      same fix `nvdec.cpp` already had), and `--stop-deadline-ms` so a saturated arm can be
+      drained and therefore READ.
+      ROUND 1 CAME BACK BLOCKING WITH TWO, and the first is the one my own header warned about:
+        1. `SurfaceIntake::stream()` was a lazily created UNGUARDED FIELD on a class whose
+           docstring says an unguarded field is what it was warning against -- and the comment I
+           put on it restated the thread contract that same docstring had already corrected. The
+           intakes are keyed by DEVICE and `bench` round-robins cameras over `--devices`, so ten
+           actor threads share one at the design load: all ten read null, all ten created a
+           stream, all ten wrote the field. Nine handles unreachable and leaked per GPU per run,
+           plus a plain data race on the pointer. `std::call_once` now, and not the pool mutex,
+           because this runs ~1000 times a second.
+        2. DROPPING THE COUNT-HALF REFUSAL made `workers < devices` a silent, permanent
+           starvation. Workers bind `w % devices.size()`, so `setting workers 4` (which is what
+           the parity fixtures use) with `--devices 0,1,2,3,4` leaves lane 4 with NO CONSUMER:
+           its cameras' frames fill it and are rejected for the life of the run, every camera
+           reporting `Streaming`, no error anywhere. And it is the one starvation shape that
+           CANNOT be found by running it -- it looks exactly like backpressure. #160 refused it
+           as a side effect of refusing every multi-GPU device run; the lanes made that refusal
+           unnecessary and this one necessary. Refused at start-up now, naming both numbers.
+      NOTES TAKEN: `stats()` sums all FOUR per-camera maps (`expired_by_camera` was missing --
+      latent, because `FrameWork::expired()` is false by construction, which is exactly why it
+      would have gone missing silently); `peak`'s summing is now named as the choice it is;
+      `~SurfaceIntake` puts the calling thread's device back (a surface holds `self`, so the last
+      reference can be dropped by a thread that is not this GPU's); and `lane_of`'s two refusals
+      plus the whole of `stats()` have offline gates.
+      ROUND 2 CAME BACK BLOCKING WITH TWO, and the first was MY OWN FIX making things worse:
+        1. THE SLICED PULL ASKED THE BUS ONLY AFTER THE DEADLINE, so an EOS -- which the single
+           full-timeout pull reported on its FIRST null return -- took the entire
+           `read_timeout_ms` to notice, spinning through fifty slices to get there. Slower to
+           detect AND busier while detecting, on the run whose own body names the CPU as the
+           contended resource. And my comment said "`nvdec.cpp` does the same for the same
+           reason, and the two must not differ about it" while they differed in exactly this:
+           nvdec asks per slice, from inside `feed_one_access_unit`. Both ask per slice now.
+        2. THE TWO-PLANE RULE. `sources/gstreamer.py` still did the single full-timeout pull, so
+           the Python plane kept the bug this PR fixes -- a per-frame data-plane seam, and the
+           rule is explicit that a PR changing one plane says so and opens the item for the
+           other. PORTED rather than deferred: the Python source slices and asks the bus every
+           slice too. The STOP half has no Python counterpart -- a Python `FrameSource` is never
+           given a stop signal -- so that half is `PY-SOURCE-HAS-NO-STOP-SIGNAL` below.
+      AND MY OWN NEW TEST FOUND A THIRD, ON BOTH PLANES: a slice that rounds to ZERO nanoseconds
+      makes the pull return at once while `left` stays positive, so the tail of every timed-out
+      read is a busy spin -- `int(1e-16 * 1e9)` is 0. Visible only because the test's fake clock
+      advances by exactly what each pull was given, which is what a blocking pull does; with a
+      real clock it terminates and just burns CPU. A zero slice is the deadline now, both sides.
+      NOTES TAKEN, including the two I had recorded rather than fixed:
+        * PER-LANE CAPACITY IS THE FLEET'S, DIVIDED. Each lane had the full `pipeline_queue`, so
+          a five-GPU device run held 5x the frames a single-lane one does -- ~800 MB of queued
+          NV12 per device instead of ~160, and a proportionally deeper queue wait. The reviewer's
+          argument is the one I had missed: LATENCY is one of this project's two stated
+          bottlenecks, so this was not only a like-for-like problem for the baseline arm, it was
+          the wrong default.
+          AND I NEARLY ARGUED BACK ON A MISREADING. The first divided run came in at 25 217 --
+          28 565 against "37 758 before", which looked like a 27% throughput price, and I was
+          about to answer a non-blocking note with a measurement. The 37 758 was the
+          OUTPUT_STREAM build on the follow-up branch, not a full-capacity one on this branch.
+          Two more runs settled it: divided 25 217 / 26 547 / 28 565 / 30 036 against full-lane
+          25 742 / 29 416 on the same branch -- overlapping ranges, so the division costs
+          NOTHING measurable at this load and buys the latency and the VRAM. Comparing against a
+          number from a different build is exactly the mistake `meta.config.source` was added to
+          stop, one axis over.
+        * `--devices 0,0` is refused: a duplicate builds a lane `lane_of` can never return, whose
+          worker spins on `get_batch` timeouts for the run.
+        * `~SurfaceIntake`'s device guard covers the WHOLE destructor now, members included --
+          restoring before `free_`'s buffers are freed was the first version, and `cudaFree`
+          being address-based is luck rather than design.
+        * the two stale comments this change contradicts: `queue_sink.h`'s "a queue per device
+          would make it fair only within a device" (true for HOST frames, which is why one lane
+          is still the default) and `bench.cpp`'s "give this bench a single `--devices`", which
+          is no longer the remedy.
+      STILL RECORDED RATHER THAN FIXED: one shared stream convoys every camera on a GPU -- `take`
+      enqueues on the intake's single stream and synchronises it, so camera A returns only after
+      its nine peers' copies have finished. A stream per CALLING THREAD would decouple it, and it
+      is on `NV12-ROUTE-SATURATES`'s candidate list. And the `workers < devices` refusal has no
+      gate: it lives in a composition root, its message is quoted in the body, and nothing
+      prevents its regression -- same for `--stop-deadline-ms`.
+      `test_pipeline` 60 -> 74 checks; the Python plane's slicing has two of its own.
+
+- [ ] **PY-SOURCE-HAS-NO-STOP-SIGNAL · opened 8 Sep by #163 round 2, and it is the stop half of
+      a two-plane seam.** The C++ `FrameSource` is constructed with a `StopSignal&` and its
+      GStreamer and NVDEC sources check it between read slices, so a fleet's stop is observed
+      within 100 ms. The PYTHON `FrameSource` is never given one (`ingest/base.py`'s ctor takes
+      `config`, `counter`, `settings`), so a Python camera's stop is observed only when
+      `_do_read` RETURNS -- up to `read_timeout_s`, which is 5 s by default. `CameraActor` holds
+      a `threading.Event` it cannot hand down.
+      WHAT IT COSTS: the same abandonment the C++ plane had before #163 -- 43 of 50 cameras
+      "did not stop within 0ms" and the bench exiting without a summary. On the Python plane it
+      shows as `stop()` returning False and a detached thread.
+      THE FIX is plumbing rather than design: `FrameSource.__init__` takes the actor's event (or
+      a small `StopSignal` mirroring the C++ one), `SourceFactory` grows a parameter, and each
+      Python source checks it where its C++ twin does. Every existing source ignores it, so the
+      change is additive; the factory signature is the only wide edit, and
+      `tests/ingest/test_registry.py` pins it.
+      NOT URGENT: the Python plane cannot offer the design load anyway (`R55-BENCH-SOURCE`
+      (a-load-py)), so the abandonment it prevents is not currently reachable at scale.
+      ORIGINAL: the design load's blocker, opened 7 Sep. A device
       frame cannot move (ADR-004), so a worker on another GPU cannot take it -- and `cli/bench`
       keeps ONE fleet-wide fair queue precisely so any worker can take any frame, which is what
       makes it fair across cameras rather than within a device. The two are incompatible in one

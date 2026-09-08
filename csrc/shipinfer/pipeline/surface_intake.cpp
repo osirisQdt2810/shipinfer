@@ -11,6 +11,41 @@ namespace shipinfer {
     SurfaceIntake::SurfaceIntake(int device, size_t max_pooled)
         : device_(device), max_pooled_(max_pooled) {}
 
+    namespace {
+
+        // doc: long the guard has to cover the MEMBERS' destruction, not just the stream's
+        // `device_` current for a scope, and the caller's device back after it. A surface holds
+        // `self`, so the last reference can be dropped by a thread that is not this GPU's -- an
+        // unwind, or a sweeper -- and a destructor that silently rebinds a thread's current
+        // device is a landmine under ADR-002 even where today's callers make it a no-op.
+        //
+        // A GUARD rather than a line at the end, because the pooled `DeviceBuffer`s in `free_`
+        // are freed AFTER the destructor body: restoring before that ran was the first version,
+        // and `cudaFree` being address-based under unified addressing is luck, not design.
+        struct OnDevice {
+            int previous = 0;
+            bool changed = false;
+
+            explicit OnDevice(int device) {
+                if (gpuGetDevice(&previous) != gpuSuccess) previous = device;
+                changed = previous != device && gpuSetDevice(device) == gpuSuccess;
+            }
+            ~OnDevice() {
+                if (changed) gpuSetDevice(previous);  // best effort: an exception may be flying
+            }
+        };
+
+    }  // namespace
+
+    SurfaceIntake::~SurfaceIntake() {
+        // Declared FIRST, so it outlives the members destroyed after this body returns.
+        const OnDevice on_device(device_);
+        if (stream_ != nullptr) {
+            gpuStreamDestroy(static_cast<gpuStream_t>(stream_));
+            stream_ = nullptr;
+        }
+    }
+
     size_t SurfaceIntake::pooled() const {
         std::lock_guard<std::mutex> lock(mutex_);
         size_t total = 0;
@@ -34,6 +69,19 @@ namespace shipinfer {
                 bucket.push_back(std::move(buffer));
             }
         }
+    }
+
+    void* SurfaceIntake::stream() {
+        // ONCE, whoever arrives first, with `device_` already current (`take` sets it): a
+        // stream belongs to the device that was current when it was made, and this class is the
+        // only thing that knows which that is. A throw leaves the flag unset, so the next
+        // caller legitimately retries rather than using a null stream.
+        std::call_once(stream_once_, [this] {
+            gpuStream_t created = nullptr;
+            GPU_CHECK(gpuStreamCreate(&created));
+            stream_ = created;
+        });
+        return stream_;
     }
 
     DeviceSurface SurfaceIntake::take(const std::shared_ptr<SurfaceIntake>& self,
@@ -76,14 +124,24 @@ namespace shipinfer {
         // in one go would carry that padding into the middle of this buffer and leave every
         // consumer needing to know about it. What comes out of here is tight.
         //
-        // SYNCHRONOUS, on the legacy default stream, which is correct here and deliberate:
-        // cuvid's post-processing lands on stream 0 (`ingest/sources/nvdec.cpp`) and every
-        // stream in `csrc/` is blocking, so the ordering is free. It is two device-wide sync
-        // points per frame on an ingest thread; invisible at 8x5, and worth watching at 50x20.
-        GPU_CHECK(gpuMemcpy(buffer->get(), image.nv12, luma, gpuMemcpyDeviceToDevice));
-        GPU_CHECK(gpuMemcpy(buffer->as<uint8_t>() + luma,
-                            static_cast<const uint8_t*>(image.nv12) + image.uv_offset, luma / 2,
-                            gpuMemcpyDeviceToDevice));
+        // doc: long the stream this runs on, and the drain the default stream cost
+        // ON THIS INTAKE'S OWN BLOCKING STREAM, not the legacy default one. Both orderings hold
+        // either way -- cuvid's post-processing lands on stream 0 (`ingest/sources/nvdec.cpp`)
+        // and a stream from `gpuStreamCreate` is BLOCKING, so it waits for stream 0's work
+        // before it starts. What changes is the other direction: a synchronous `gpuMemcpy` on
+        // the default stream makes every OTHER blocking stream wait too, so each copy drained
+        // the whole device -- all ~23 worker streams on that GPU -- and at the design load that
+        // is ~1460 full-device synchronisations a second on the ingest threads. Waiting on this
+        // stream alone keeps the ordering and drops the drain.
+        gpuStream_t stream = static_cast<gpuStream_t>(self->stream());
+        GPU_CHECK(
+            gpuMemcpyAsync(buffer->get(), image.nv12, luma, gpuMemcpyDeviceToDevice, stream));
+        GPU_CHECK(gpuMemcpyAsync(buffer->as<uint8_t>() + luma,
+                                 static_cast<const uint8_t*>(image.nv12) + image.uv_offset,
+                                 luma / 2, gpuMemcpyDeviceToDevice, stream));
+        // WAITED FOR, and it has to be: the caller drops `image.owner` the moment this returns,
+        // which lets NVDEC reuse the surface these copies are still reading.
+        GPU_CHECK(gpuStreamSynchronize(stream));
 
         DeviceSurface surface;
         surface.nv12 = buffer->as<uint8_t>();

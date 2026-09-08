@@ -402,8 +402,9 @@ namespace {
         PaddedSurface decoded;
         DeviceSurface held;
         {
-            FairPriorityQueue<FrameWork> queue("pipeline", 8, Overflow::Reject);
-            QueueSink sink(queue, /*pooled=*/2, /*devices=*/{0});
+            PipelineLanes lanes({0}, /*per_device=*/false, 8, 50, nullptr);
+            QueueSink sink(lanes, /*pooled=*/2, /*devices=*/{0});
+            PipelineLanes::Queue& queue = lanes.lane(0);
             Frame frame;
             frame.tag = FrameTag{"cam", 1, 0};
             frame.device = a_device_image(decoded);
@@ -420,12 +421,95 @@ namespace {
         check(true, "and releasing it afterwards runs the deleter against a live pool");
     }
 
+    // The lanes' own contract, which the sink leans on: a lane index IS the device's position
+    // in the list this run was given, so a worker can use its own index into `--devices`
+    // without a lookup. And one lane takes everything, which is what makes the default
+    // indistinguishable from the single fleet-wide queue it replaced.
+    void test_a_lane_is_its_devices_position_in_the_run() {
+        PipelineLanes per_gpu({3, 4, 5}, /*per_device=*/true, 8, 50, nullptr);
+        check(per_gpu.count() == 3, "one lane per GPU");
+        check(per_gpu.lane_of(3, "cam") == 0 && per_gpu.lane_of(4, "cam") == 1 &&
+                  per_gpu.lane_of(5, "cam") == 2,
+              "and a device's lane is its position in `--devices`, not its index");
+
+        PipelineLanes single({3, 4, 5}, /*per_device=*/false, 8, 50, nullptr);
+        check(single.count() == 1, "`per_device` false is one lane whatever the GPU list says");
+        check(single.lane_of(-1, "cam") == 0 && single.lane_of(5, "cam") == 0 &&
+                  single.lane_of(99, "cam") == 0,
+              "which takes a host frame, a listed GPU and an unlisted one alike");
+    }
+
+    // `lane_of`'s two refusals and `stats()`'s aggregation, both new with the lanes and both
+    // unchecked until #163 round 1 -- where one of the four per-camera maps turned out to be
+    // missing from the sum. Offline: `PipelineLanes` needs no device to be constructed.
+    void test_the_lanes_refuse_what_they_cannot_place_and_sum_what_they_hold() {
+        // CAPACITY 8 FOR TWO LANES, so each gets 4: `pipeline_queue` is the FLEET's number and
+        // the lanes divide it, which is what stops a per-GPU run holding N times the frames a
+        // single-lane one does. Asserted below rather than assumed.
+        PipelineLanes lanes({1, 2}, /*per_device=*/true, 8, 50, nullptr);
+        check(lanes.stats().capacity == 8,
+              "the fleet's capacity is what was asked for, divided across the lanes: " +
+                  std::to_string(lanes.stats().capacity));
+
+        std::string unlisted;
+        try {
+            lanes.lane_of(7, "cam-elsewhere");
+        } catch (const ConfigError& error) {
+            unlisted = error.what();
+        }
+        check(unlisted.find("cam-elsewhere") != std::string::npos &&
+                  unlisted.find("gpu7") != std::string::npos,
+              "a device with no lane names the camera and the GPU: " + unlisted);
+
+        std::string host;
+        try {
+            lanes.lane_of(-1, "cam-host");
+        } catch (const ConfigError& error) {
+            host = error.what();
+        }
+        check(host.find("cam-host") != std::string::npos &&
+                  host.find("host frame") != std::string::npos,
+              "and a HOST frame in a per-GPU lane set is refused rather than placed at "
+              "random -- it means the registry and the lanes disagree: " +
+                  host);
+
+        // SUMMED ACROSS LANES, which is what lets a reader compare two runs without knowing how
+        // many lanes one of them had. Filled by hand so the sum is checkable: two lanes of
+        // capacity 4, three items in one and one in the other.
+        for (int i = 0; i < 3; ++i) {
+            FrameWork work;
+            work.tag = FrameTag{"cam-a", i, 0};
+            work.device = 1;
+            check(lanes.lane(0).put(std::move(work)) == PutStatus::Accepted, "lane 0 accepts");
+        }
+        FrameWork one;
+        one.tag = FrameTag{"cam-b", 0, 0};
+        one.device = 2;
+        check(lanes.lane(1).put(std::move(one)) == PutStatus::Accepted, "and lane 1 accepts");
+
+        const QueueStats total = lanes.stats();
+        check(total.depth == 4 && lanes.depth() == 4,
+              "the depth is both lanes' together: " + std::to_string(total.depth));
+        check(total.accepted == 4, "and the counters add up across lanes");
+        check(total.depth_by_camera.at("cam-a") == 3 && total.depth_by_camera.at("cam-b") == 1,
+              "with per-camera attribution surviving the sum, which is ADR-005's whole point");
+        // THE FOURTH MAP CANNOT BE REACHED FROM HERE, and that is stated rather than faked:
+        // `expired_by_camera` is filled only when `drop_expired_` sees `item.expired(now)`, and
+        // `FrameWork::expired()` returns false by construction (a frame into the detector has
+        // no deadline). It is summed in `stats()` for symmetry with the other three -- #163's
+        // review found it missing -- and removing it again leaves this test green. Which is the
+        // point of saying so: the guard here is the reviewer's eye, not this check.
+        check(total.expired_by_camera.empty(), "and nothing expires here, by construction");
+        lanes.close();
+    }
+
     // The sink is where a frame becomes scheduled work, and it is the one place that decides
     // between the two pixel representations. Three questions, and the third is the one an
     // operator meets.
     void test_the_sink_turns_either_representation_into_one_work_item() {
-        FairPriorityQueue<FrameWork> queue("pipeline", 16, Overflow::Reject);
-        QueueSink sink(queue, /*pooled=*/4, /*devices=*/{0});
+        PipelineLanes lanes({0}, /*per_device=*/false, 16, 50, nullptr);
+        QueueSink sink(lanes, /*pooled=*/4, /*devices=*/{0});
+        PipelineLanes::Queue& queue = lanes.lane(0);
 
         // -- a host frame: the pixels stay on the host and the worker uploads them ----------
         std::vector<uint8_t> pixels(8 * 8 * 3, 7);
@@ -473,8 +557,8 @@ namespace {
     // `SurfaceIntake::take` and therefore before any CUDA call, so this runs in the offline
     // tier where a wrong predicate would otherwise only show up on a GPU box.
     void test_a_device_frame_from_a_gpu_this_process_lacks_is_refused_by_name() {
-        FairPriorityQueue<FrameWork> queue("pipeline", 16, Overflow::Reject);
-        QueueSink sink(queue, /*pooled=*/4, /*devices=*/{1, 2});
+        PipelineLanes lanes({1, 2}, /*per_device=*/true, 16, 50, nullptr);
+        QueueSink sink(lanes, /*pooled=*/4, /*devices=*/{1, 2});
         uint8_t nothing = 0;  // never read: `empty()` asks only that it is non-null
         Frame frame;
         frame.tag = FrameTag{"cam09", 3, 0};
@@ -502,38 +586,23 @@ namespace {
               "a GPU this process does not drive is refused, naming the camera, its GPU and "
               "the ones there are: " +
                   reason);
-        check(queue.stats().depth == 0, "and nothing is queued");
+        check(lanes.stats().depth == 0, "and nothing is queued");
 
-        // AND THE OTHER HALF, which set membership alone accepts: the frame IS on a GPU this
-        // process drives, and is still unschedulable, because the queue is fleet-wide and any
-        // worker may take it -- so half of them land on the wrong GPU. `--devices 0,1
-        // --source nvdec` builds exactly this, and it came out as ~50% `frames_failed` with
-        // every camera reporting `Streaming` (#160 round 3).
-        FairPriorityQueue<FrameWork> pair("pipeline", 16, Overflow::Reject);
-        QueueSink across(pair, /*pooled=*/4, /*devices=*/{0, 1});
-        Frame second;
-        second.tag = FrameTag{"cam10", 4, 0};
-        second.device.nv12 = &nothing;
-        second.device.height = PaddedSurface::height;
-        second.device.width = PaddedSurface::width;
-        second.device.pitch = PaddedSurface::stride;
-        second.device.uv_offset = PaddedSurface::uv_offset();
-        second.device.device = 0;  // IN the set {0, 1}, and still not schedulable
-        second.device.owner = std::shared_ptr<const void>(&nothing, [](const void*) {});
-        std::string spread;
-        try {
-            across.put(std::move(second));
-        } catch (const std::exception& error) {
-            // `std::exception` and not `ConfigError`, so the assertion below FAILS rather than
-            // the binary terminating when the refusal is missing: the frame is then accepted
-            // and the intake tries to copy from this test's host pointer.
-            spread = error.what();
-        }
-        check(spread.find("cam10") != std::string::npos &&
-                  spread.find("0,1") != std::string::npos,
-              "two GPUs in one process is refused too, even for a frame on one of them: " +
-                  spread);
-        check(pair.stats().depth == 0, "and nothing is queued for it either");
+        // AND THE CASE #160 HAD TO REFUSE IS THE ORDINARY ONE NOW. With a fleet-wide queue,
+        // `--devices 0,1 --source nvdec` was unschedulable -- the cameras are spread across
+        // both and half the frames are pulled by a worker on the other GPU -- so the sink
+        // refused it on the COUNT as well as on membership. One lane per GPU is what makes it
+        // work, and the refusal above is membership only.
+        //
+        // Asserted through the LANES rather than through `put`, and that is not a dodge: what
+        // changed is the mapping, and a `put` that gets past the refusal goes on to copy in the
+        // intake -- which needs a real device buffer and would drag this offline check onto a
+        // GPU. The refusal half above needs no device precisely because it returns first.
+        PipelineLanes pair_lanes({0, 1}, /*per_device=*/true, 16, 50, nullptr);
+        check(pair_lanes.count() == 2 && pair_lanes.lane_of(0, "c") == 0 &&
+                  pair_lanes.lane_of(1, "c") == 1,
+              "two GPUs in one process is schedulable now -- each has its own lane, which is "
+              "what #160 had to refuse outright");
     }
 
     // NO DEVICE NEEDED: the refusal happens before `gpuSetDevice` is reached, which is what
@@ -750,6 +819,8 @@ int main() {
     test_a_frame_with_no_pixels_is_refused_by_name();
     test_an_incomplete_surface_never_becomes_a_buffer();
     test_a_device_frame_from_a_gpu_this_process_lacks_is_refused_by_name();
+    test_a_lane_is_its_devices_position_in_the_run();
+    test_the_lanes_refuse_what_they_cannot_place_and_sum_what_they_hold();
     if (has_device()) {
         test_the_pixel_seam_reads_a_padded_surface_as_a_surface();
         test_the_intake_frees_the_decoders_slot_and_keeps_the_pixels();

@@ -39,7 +39,10 @@ namespace shipinfer {
     //
     // Keeping one fleet-wide fair queue matters more than saving the copy: fairness across
     // cameras is the thing this project exists to get right, and a queue per device would make
-    // it fair only within a device.
+    // it fair only within a device. THAT REMAINS TRUE FOR HOST FRAMES, which is why one lane
+    // is still the default -- but a DEVICE frame cannot move (ADR-004), so cross-device
+    // fairness is unachievable for it rather than merely given up. `PipelineLanes` below is
+    // that argument, and the per-GPU shape is the only one it applies to.
     struct FrameWork {
         FrameTag tag;
         std::shared_ptr<FrameState> state;
@@ -59,6 +62,146 @@ namespace shipinfer {
         bool expired(int64_t) const { return false; }
     };
 
+    // doc: long why a lane per GPU exists at all, and why the default is still ONE queue
+    // ONE FAIR QUEUE, OR ONE PER GPU WHEN FRAMES CANNOT MOVE BETWEEN THEM.
+    //
+    // The default is one, and that is the design: a frame whose pixels are on the host can be
+    // taken by any worker, so a busy camera's backlog is worked off by whichever GPU is idle.
+    // That is what makes the queue fair across CAMERAS rather than within a device, and it is
+    // the failure this project exists to fix.
+    //
+    // A device frame cannot move (ADR-004), so a worker on another GPU cannot take it and
+    // cross-device fairness is UNACHIEVABLE rather than unimplemented. One lane per GPU is then
+    // the best available shape: fair across the cameras assigned to a GPU, with the assignment
+    // doing the cross-device balance -- which is the placement problem this project owns
+    // anyway. The alternative, a device filter inside `FairPriorityQueue`, would put a
+    // lost-wakeup hazard into the one component whose correctness this project is about.
+    //
+    // The deployment does not need this: `--runner fleet` is one shard process per GPU, and the
+    // Python plane's `InProcessRunner` owns a single device by construction. It exists for the
+    // HEAD-TO-HEAD, where the baseline is one process across N GPUs and a like-for-like
+    // measurement has to be too.
+    class PipelineLanes {
+      public:
+        using Queue = FairPriorityQueue<FrameWork>;
+        using OnDrop = std::function<void(FrameWork&&, DropReason)>;
+
+        // `per_device` false gives one lane whatever `devices` says. `devices` is the run's GPU
+        // list in the order the workers were bound to it, so a lane index IS a worker's index
+        // into that list.
+        PipelineLanes(std::vector<int> devices, bool per_device, size_t capacity,
+                      int block_timeout_ms, OnDrop on_drop)
+            : devices_(std::move(devices)) {
+            // A DEVICE LISTED TWICE would build a lane `lane_of` can never return, whose
+            // worker then spins on `get_batch` timeouts for the life of the run. Nonsense
+            // invocation (`--devices 0,0`), and cheaper to refuse than to explain.
+            for (size_t i = 0; i < devices_.size(); ++i) {
+                for (size_t j = i + 1; j < devices_.size(); ++j) {
+                    if (devices_[i] != devices_[j]) continue;
+                    throw ConfigError("gpu" + std::to_string(devices_[i]) +
+                                      " is listed twice: a duplicate would build a lane "
+                                      "nothing can be placed in, and a worker that never "
+                                      "receives a frame");
+                }
+            }
+            const size_t count = per_device ? std::max<size_t>(devices_.size(), 1) : 1;
+            // doc: long the capacity is the FLEET's, divided -- not each lane's
+            // DIVIDED ACROSS THE LANES, so `pipeline_queue` keeps meaning what it meant: the
+            // frames this process will hold. Giving each lane the full number multiplied the
+            // fleet's buffering by the device count -- at the design load, where the queues
+            // ARE at capacity, ~800 MB of queued NV12 per device instead of ~160 -- and a
+            // proportionally deeper wait per frame. Latency is one of this project's two stated
+            // bottlenecks, so that is not only a like-for-like problem for the baseline arm; it
+            // is the wrong default. At least one, because a lane with no room is a camera that
+            // can never publish.
+            const size_t per_lane = std::max<size_t>(capacity / count, 1);
+            for (size_t i = 0; i < count; ++i) {
+                lanes_.push_back(std::make_unique<Queue>(
+                    count == 1 ? "pipeline" : "pipeline" + std::to_string(i), per_lane,
+                    Overflow::Reject, block_timeout_ms, true, on_drop));
+            }
+        }
+
+        size_t count() const { return lanes_.size(); }
+        Queue& lane(size_t index) { return *lanes_.at(index); }
+
+        // Which lane a frame decoded on `device` belongs to. A host frame (`device < 0`) and
+        // any device at all go to lane 0 when there is only one, which is the whole point of
+        // the single-lane default being indistinguishable from the old behaviour.
+        //
+        // Throws `ConfigError` for a device this run was not given: a frame from GPU 5 in a
+        // `--devices 0,1` run has nowhere to go, and silently dropping it or picking a lane
+        // would hand a worker another GPU's pointer.
+        size_t lane_of(int device, const std::string& camera) const {
+            if (lanes_.size() == 1) return 0;
+            if (device < 0) {
+                // A host frame in a per-device run. Unreachable through `bench`, which asks
+                // the registry whether this run's source is a device one before it sizes the
+                // lanes -- so reaching here means the two disagree, which is worth a message
+                // rather than a lane picked at random.
+                throw ConfigError("camera '" + camera +
+                                  "': a host frame reached a per-GPU lane set, which only a "
+                                  "device source should have asked for");
+            }
+            for (size_t i = 0; i < devices_.size(); ++i) {
+                if (devices_[i] == device) return i;
+            }
+            throw ConfigError("camera '" + camera + "': its frames were decoded on gpu" +
+                              std::to_string(device) +
+                              ", which this run was not given; there is no lane for them");
+        }
+
+        // Summed across lanes, because a reader comparing two runs must not have to know how
+        // many lanes one of them had.
+        size_t depth() const {
+            size_t total = 0;
+            for (const auto& lane : lanes_) total += lane->depth();
+            return total;
+        }
+        QueueStats stats() const {
+            QueueStats total;
+            for (const auto& lane : lanes_) {
+                const QueueStats one = lane->stats();
+                total.depth += one.depth;
+                total.capacity += one.capacity;
+                total.accepted += one.accepted;
+                total.rejected += one.rejected;
+                total.evicted += one.evicted;
+                total.expired += one.expired;
+                // SUMMED, and that is a choice worth naming: it is the sum of each lane's high
+                // water mark, which is a depth that was never observed all at once. `std::max`
+                // would understate the fleet just as badly. Summed because the question a
+                // reader asks of it -- "did any lane get deep" -- is answered by a number that
+                // moves when one does, and the per-lane truth is one `lane(i).stats()` away.
+                total.peak += one.peak;
+                for (const auto& [camera, n] : one.rejected_by_camera) {
+                    total.rejected_by_camera[camera] += n;
+                }
+                for (const auto& [camera, n] : one.evicted_by_camera) {
+                    total.evicted_by_camera[camera] += n;
+                }
+                for (const auto& [camera, n] : one.depth_by_camera) {
+                    total.depth_by_camera[camera] += n;
+                }
+                // ALL FOUR MAPS, not three. `expired_by_camera` is latent today --
+                // `FrameWork::expired()` returns false and `bench` does not print it -- and
+                // that is exactly why it would have gone missing silently the day either
+                // changes. Per-camera attribution of every outcome is what ADR-005 is.
+                for (const auto& [camera, n] : one.expired_by_camera) {
+                    total.expired_by_camera[camera] += n;
+                }
+            }
+            return total;
+        }
+        void close() {
+            for (auto& lane : lanes_) lane->close();
+        }
+
+      private:
+        std::vector<int> devices_;
+        std::vector<std::unique_ptr<Queue>> lanes_;
+    };
+
     // The bridge from the ingest plane to the fair queue: a `FrameSink` that turns a tagged
     // frame into one queue entry.
     //
@@ -72,8 +215,8 @@ namespace shipinfer {
         // `devices` is the GPU list this process drives, in `--devices` order. The SET and not
         // the count, because what makes a device frame unusable is not how many GPUs a process
         // has -- it is whether the frame's GPU is one of them.
-        QueueSink(FairPriorityQueue<FrameWork>& queue, size_t pooled, std::vector<int> devices)
-            : queue_(queue), pooled_(pooled), devices_(std::move(devices)) {}
+        QueueSink(PipelineLanes& lanes, size_t pooled, std::vector<int> devices)
+            : lanes_(lanes), pooled_(pooled), devices_(std::move(devices)) {}
 
         void put(Frame&& frame) override {
             FrameWork work;
@@ -88,17 +231,16 @@ namespace shipinfer {
                 // deployment shape already resolves it -- `--runner fleet` is one shard per
                 // GPU.
                 //
-                // BOTH PREDICATES, and each caught a real case the other misses. `devices > 1`
-                // alone cannot see `--devices 3 --source nvdec` -- an ordinary choice when gpu0
-                // is busy -- where every camera decodes on gpu0, the count is 1, and the worker
-                // bound to gpu3 throws per frame forever. Set membership alone cannot see
-                // `--devices 0,1`, where the cameras ARE spread across the two, every frame
-                // passes, and then half of them are pulled by a worker on the other GPU: ~50%
-                // `frames_failed` with every camera reporting `Streaming`. Both are the same
-                // outcome this refusal exists to replace with one health line, and both are
-                // unsatisfiable for the same reason -- a fleet-wide queue plus a frame that
-                // cannot move (ADR-004) works for exactly one GPU.
-                if (devices_.size() != 1 || devices_.front() != frame.device.device) {
+                // doc: long the count half of this refusal is what the lanes made unnecessary
+                // MEMBERSHIP ONLY NOW, and dropping the count half is the point of the lanes.
+                // #160 needed both: a fleet-wide queue plus a frame that cannot move (ADR-004)
+                // is unsatisfiable for more than one GPU, so `--devices 0,1 --source nvdec`
+                // had half of every camera's frames pulled by a worker on the other GPU. With
+                // one lane per GPU that case is the ORDINARY one -- each worker sees only its
+                // own GPU's cameras -- and what remains unsatisfiable is a frame from a GPU
+                // this process does not drive at all, which `lane_of` has no lane for.
+                if (std::find(devices_.begin(), devices_.end(), frame.device.device) ==
+                    devices_.end()) {
                     std::string given;
                     for (int device : devices_) {
                         given += (given.empty() ? "" : ",") + std::to_string(device);
@@ -134,9 +276,15 @@ namespace shipinfer {
                 work.state = std::make_shared<FrameState>(work.tag, work.frame.height,
                                                           work.frame.width, 0.0f);
             }
-            const PutStatus status = queue_.put(std::move(work));
+            // THE LANE THIS FRAME'S PIXELS CAN BE WORKED ON. One lane means "any worker",
+            // which is every host run; a device run has one per GPU, and this is the only
+            // place that maps a frame onto one -- the refusal above has already established
+            // that the device is one this process drives.
+            PipelineLanes::Queue& queue =
+                lanes_.lane(lanes_.lane_of(work.device, work.tag.camera_id));
+            const PutStatus status = queue.put(std::move(work));
             if (status == PutStatus::Rejected) {
-                const QueueStats stats = queue_.stats();
+                const QueueStats stats = queue.stats();
                 throw QueueFullError("pipeline queue is full", stats.depth, stats.capacity);
             }
             if (status == PutStatus::Closed) {
@@ -170,7 +318,7 @@ namespace shipinfer {
         }
 
       private:
-        FairPriorityQueue<FrameWork>& queue_;
+        PipelineLanes& lanes_;
         //: IDLE buffers kept per device per size. Small on purpose: a buffer in flight is out
         //: of the pool, so this bounds only how many are simultaneously unused -- which in
         //: steady state is the difference between returns and takes, a handful. It was the

@@ -281,6 +281,81 @@ class TestInitialisationIsSerialised:
         assert os.environ["GIO_USE_PROXY_RESOLVER"] == "gnome"
 
 
+class TestTheReadTimeoutIsSpentInSlices:
+    """An EOS must be noticed on the FIRST empty slice, not after the whole read timeout.
+
+    The C++ source's first version of this slicing asked the bus only after the deadline ran
+    out, so a stream that had ended sat out `read_timeout_ms` — spinning through fifty pulls —
+    where the single full-timeout pull used to report it at once. Slower to detect and busier
+    while detecting. Both planes ask per slice now, and this pins the Python one.
+    """
+
+    def _source(self, monkeypatch, pulls: list[int], on_bus, timeout_s: float = 5.0):
+        """A `GStreamerSource` with only what `_do_read` touches, so no GStreamer is needed.
+
+        `read_timeout_s` is a property on the base class, so it is patched there rather than
+        assigned -- which is also the point: the seam under test reads the same knob a
+        deployment sets.
+        """
+        from shipinfer.core.errors import FrameDecodeError
+        from shipinfer.ingest.sources import gstreamer
+
+        # A FAKE CLOCK THE SINK ADVANCES, because a real `try_pull_sample` BLOCKS for its
+        # timeout and this one returns at once: with the wall clock the loop spun 333 000
+        # times in 0.35 s, which measures the fake rather than the code. Advancing the clock
+        # by exactly the timeout the pull was given is what a blocking pull does.
+        now = [1000.0]
+        monkeypatch.setattr(gstreamer.time, "monotonic", lambda: now[0])
+
+        class Sink:
+            def try_pull_sample(self, timeout):
+                pulls.append(timeout)
+                now[0] += timeout / 1_000_000_000
+                return
+
+        source = object.__new__(gstreamer.GStreamerSource)
+        source._gst = type("Gst", (), {"SECOND": 1_000_000_000})()
+        source._appsink = Sink()
+        monkeypatch.setattr(
+            gstreamer.GStreamerSource, "read_timeout_s", property(lambda self: timeout_s)
+        )
+        monkeypatch.setattr(
+            gstreamer.GStreamerSource, "_raise_if_stream_ended", on_bus, raising=True
+        )
+        return source, FrameDecodeError
+
+    def test_an_ended_stream_raises_on_the_first_empty_slice(self, monkeypatch):
+        pulls: list[int] = []
+
+        def ended(self):
+            from shipinfer.core.errors import FrameDecodeError
+
+            raise FrameDecodeError("cam", "end of stream")
+
+        source, FrameDecodeError = self._source(monkeypatch, pulls, ended)
+
+        with pytest.raises(FrameDecodeError):
+            source._do_read()
+
+        assert len(pulls) == 1, (
+            f"the bus is asked after the FIRST empty slice, not after the deadline: "
+            f"{len(pulls)} pulls"
+        )
+        assert pulls[0] == int(
+            0.1 * 1_000_000_000
+        ), "and that slice is 100 ms rather than the whole 5 s read timeout"
+
+    def test_a_quiet_camera_still_spends_its_whole_timeout(self, monkeypatch):
+        """The other half: an empty bus means keep waiting, and the DEADLINE is what bounds
+        the read. Sliced or not, `read()` must not come back early and burn an empty read."""
+        pulls: list[int] = []
+        source, _ = self._source(monkeypatch, pulls, lambda self: None, timeout_s=0.35)
+
+        assert source._do_read() is None
+        assert 3 <= len(pulls) <= 5, f"~0.35 s in 100 ms slices: {len(pulls)} pulls"
+        assert sum(pulls) <= int(0.36 * 1_000_000_000), "and no slice overruns the deadline"
+
+
 class TestPullingASampleDoesNotDependOnTheTypelib:
     """`GstApp.AppSink.try_pull_sample` is a method only when the GstApp typelib is loaded;
     the `try-pull-sample` signal always exists. The first containerised RTSP run that reached

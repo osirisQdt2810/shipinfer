@@ -3,6 +3,8 @@
 #include <gst/app/gstappsink.h>
 #include <gst/gst.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -43,6 +45,10 @@ namespace shipinfer {
         // `%g`, which is the format the Python message uses (`{self.open_timeout_s:g}`): "10"
         // rather than the "10.000000" `std::to_string(double)` would put in front of an
         // operator.
+        //: How long ONE pull may block, so the loop checks the stop signal at least this
+        //: often. Not the read timeout: that is still the deadline for the whole read.
+        constexpr int kPullSliceMs = 100;
+
         std::string seconds_text(double seconds) {
             char buffer[32];
             std::snprintf(buffer, sizeof(buffer), "%g", seconds);
@@ -216,12 +222,43 @@ namespace shipinfer {
         // because the appsink's methods exist only when the GstApp typelib has been loaded;
         // this unit links `gstreamer-app-1.0` directly, so the call is either there at link
         // time or the build failed.
-        GstSample* sample = gst_app_sink_try_pull_sample(
-            graph_->appsink, static_cast<GstClockTime>(config().read_timeout_s() * GST_SECOND));
+        // doc: long the pull is SLICED so a stop is noticed, which the design load demanded
+        // THE READ TIMEOUT IS SPENT IN SLICES, and the stop signal is checked between them. One
+        // pull of `read_timeout_s` (5 s by default) is simpler and was what this did -- but the
+        // actor only learns of a stop when `read()` RETURNS, so a fleet whose stop budget is
+        // shorter abandons the camera. Measured at the design load: 43 of 50 cameras "did not
+        // stop within 0ms" and `bench` exited without unwinding. The DEADLINE is unchanged; the
+        // slice only decides how often the loop comes up for air. `sources/nvdec.cpp` does the
+        // same for the same reason, and the two must not differ about it.
+        GstSample* sample = nullptr;
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(std::max(1, config().read_timeout_ms));
+        while (sample == nullptr) {
+            if (stop().is_set()) return std::nullopt;
+            const auto left = deadline - std::chrono::steady_clock::now();
+            if (left <= std::chrono::steady_clock::duration::zero()) break;
+            // A SLICE OF ZERO NANOSECONDS IS THE DEADLINE, not a pull. Without this the tail
+            // of every timed-out read is a busy spin: the pull returns at once, `left` stays
+            // positive, and the loop turns until the clock catches up. The Python twin had the
+            // same shape and its test is what found it.
+            const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(left).count();
+            const int64_t slice = std::min<int64_t>(ns, kPullSliceMs * 1000000LL);
+            if (slice <= 0) break;
+            sample =
+                gst_app_sink_try_pull_sample(graph_->appsink, static_cast<GstClockTime>(slice));
+            // THE BUS IS ASKED PER SLICE, and this is what the first version of the slicing got
+            // wrong: it asked only after the whole deadline had run out, so an EOS -- which the
+            // single full-timeout pull used to report on its FIRST null return -- took the
+            // entire `read_timeout_ms` to notice, spinning through fifty slices to get there.
+            // Slower to detect AND busier while detecting, on the run whose own body names the
+            // CPU as the contended resource. `nvdec.cpp` asks inside its own loop for exactly
+            // this reason, and the comment above claims the two do not differ about it.
+            if (sample == nullptr) raise_if_stream_ended(camera_id(), graph_->pipeline);
+        }
         if (sample == nullptr) {
-            // Nothing within the timeout. Distinguish "quiet" from "over" by asking the bus: an
-            // EOS or an ERROR means reconnect, a timeout means keep waiting.
-            raise_if_stream_ended(camera_id(), graph_->pipeline);
+            // The pure-timeout case: the loop asked the bus after every null slice and it was
+            // empty each time, so this camera is quiet rather than over and the actor's
+            // empty-read budget is what decides.
             return std::nullopt;
         }
 
