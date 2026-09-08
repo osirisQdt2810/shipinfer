@@ -975,7 +975,21 @@ hook down, for when the operator asked to see something before it is executed.
       C1's >=5x needs this answered first: a baseline arm compared against a route running at
       58% of our own previous per-GPU figure would measure the wrong thing.
 
-- [ ] **CI-CPP-JOBS-ARE-POST-MERGE** (#133 review round 3, note 3) — every C++ job lives in
+- [!] **CI-CPP-JOBS-ARE-POST-MERGE · DONE, OPEN AS #162, AND IT NEEDS YOUR MANUAL MERGE.**
+      OPERATOR: please merge https://github.com/osirisQdt2810/shipinfer/pull/162 -- I do
+      not merge into `main` myself. Everything real is green on it, including the three `cpp /`
+      jobs it exists to add, which is the gate proving itself on its own PR:
+        Tests (py3.10) pass   cpp / C++ offline tier (no driver)          pass
+        Tests (py3.12) pass   cpp / C++ units nothing else compiles       pass
+        PR description pass   cpp / C++ gst lane (section O + the pixel)  pass
+        Claude review  FAIL (28 s)
+      The review failure is CLAUDE.md's known permanent exception and its own message says so:
+      "Workflow validation failed. The workflow file must exist and have identical content to
+      the version on the repository's default branch." #162 adds `.github/workflows/cpp.yml`,
+      so the review action refuses by design and auto-merge cannot gate on it.
+      Rebased onto `main` twice (8 Sep) because ledger commits to `main` kept conflicting with
+      it -- see V159. It is `MERGEABLE` at f95493c.
+      ORIGINAL: #133 review round 3, note 3 — every C++ job lives in
       `ci.yml` (push to `main`), and `pr-pipeline.yml` has none at all. So an undeclared
       `std::mutex` in `bench.cpp` still MERGES and then reddens main, which is the exact
       incident that opened `CSRC-BENCH-UNCOMPILED` -- the new `cpp-syntax` job closes the
@@ -2793,7 +2807,10 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
 
 ---
 
-- [ ] **CI-SYNTAX-COVERAGE-GAPS · two non-blocking findings from #133 round 3, kept rather
+- [!] **CI-SYNTAX-COVERAGE-GAPS · DONE, ON #162, SO IT MERGES WHEN THAT DOES.** Same ask as
+      `CI-CPP-JOBS-ARE-POST-MERGE` above and the same PR: nothing here needs work, it needs
+      the manual merge that a `.github/workflows/**` change cannot get from auto-merge.
+      ORIGINAL: two non-blocking findings from #133 round 3, kept rather
       than folded into a round-4 fix.**
       (1) `csrc/shipinfer/obs/sampler.cpp` is compiled by NOTHING. It IS `offline_ready`, so no
       app's closure reaches it and `cpp-offline` never builds it -- and `_uncompiled_units()`
