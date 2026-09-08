@@ -2,6 +2,7 @@
 // device: fake stages that mark names on the state, and the real Dag, FrameState and collector.
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -339,6 +340,58 @@ namespace {
         third.owner.reset();
         check(intake->pooled() == 2, "and the pool holds at most what it was sized for: " +
                                          std::to_string(intake->pooled()));
+    }
+
+    // THE PRODUCER'S EVENT, which is the only ordering the intake has and the only kind of
+    // test that can catch its absence. #164 moved cuvid's post-processing off stream 0 onto a
+    // non-blocking stream and the copies here kept running on the intake's blocking one -- two
+    // non-default streams with no relationship, because a blocking stream is ordered against
+    // the LEGACY DEFAULT stream only. Nothing went red: the counters cannot see a torn frame.
+    //
+    // So: queue enough work on a non-blocking producer stream that the surface's own write is
+    // still pending when `take` is called, and assert the bytes that come out are the ones
+    // written LAST. Without the `gpuStreamWaitEvent` this reads the pre-fill instead.
+    void test_the_intake_waits_for_the_producers_event() {
+        constexpr uint8_t stale = 0x11, fresh = 0x5a;
+        PaddedSurface source;
+        GPU_CHECK(gpuMemset(source.device.get(), stale, source.device.bytes()));
+
+        gpuStream_t producer = nullptr;
+        GPU_CHECK(gpuStreamCreateWithFlags(&producer, gpuStreamNonBlocking));
+        // ~4 GB of writes ahead of the one that matters -- milliseconds against the copies'
+        // microseconds, so "it happened to finish first" is not what a pass means here.
+        DeviceBuffer ballast(64u << 20);
+        for (int pass = 0; pass < 64; ++pass) {
+            GPU_CHECK(gpuMemsetAsync(ballast.get(), pass, ballast.bytes(), producer));
+        }
+        GPU_CHECK(gpuMemsetAsync(source.device.get(), fresh, source.device.bytes(), producer));
+
+        gpuEvent_t ready = nullptr;
+        GPU_CHECK(gpuEventCreateWithFlags(&ready, gpuEventDisableTiming));
+        GPU_CHECK(gpuEventRecord(ready, producer));
+
+        DeviceImage image = a_device_image(source);
+        image.ready = ready;
+
+        auto intake = std::make_shared<SurfaceIntake>(0, /*max_pooled=*/2);
+        DeviceSurface taken = SurfaceIntake::take(intake, image, "cam");
+
+        const size_t luma = static_cast<size_t>(PaddedSurface::stride) * PaddedSurface::height;
+        std::vector<uint8_t> got(luma + luma / 2, 0);
+        GPU_CHECK(gpuMemcpy(got.data(), taken.nv12, got.size(), gpuMemcpyDeviceToHost));
+        size_t torn = 0;
+        for (uint8_t byte : got) {
+            if (byte != fresh) ++torn;
+        }
+        check(torn == 0,
+              "the intake waits for the producer's event, so what it copied is the write that "
+              "event marks -- " +
+                  std::to_string(torn) + " of " + std::to_string(got.size()) +
+                  " bytes came from the previous frame");
+
+        taken.owner.reset();
+        GPU_CHECK(gpuEventDestroy(ready));
+        GPU_CHECK(gpuStreamDestroy(producer));
     }
 
     // TWO RESOLUTIONS ON ONE GPU, which is an ordinary maritime fleet and what the first
@@ -824,6 +877,7 @@ int main() {
     if (has_device()) {
         test_the_pixel_seam_reads_a_padded_surface_as_a_surface();
         test_the_intake_frees_the_decoders_slot_and_keeps_the_pixels();
+        test_the_intake_waits_for_the_producers_event();
         test_two_resolutions_on_one_gpu_each_get_pool_hits();
         test_a_surface_holds_its_pool_alive();
         test_a_surface_outlives_the_sink_that_made_it();

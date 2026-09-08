@@ -40,10 +40,18 @@ using gpuEvent_t = hipEvent_t;
     #define gpuMemcpyDeviceToDevice hipMemcpyDeviceToDevice
     #define gpuMemcpyPeerAsync hipMemcpyPeerAsync
     #define gpuMemcpyDeviceToHost hipMemcpyDeviceToHost
+    #define gpuMemset hipMemset
     #define gpuMemsetAsync hipMemsetAsync
     #define gpuStreamCreate hipStreamCreate
+    #define gpuStreamCreateWithFlags hipStreamCreateWithFlags
+    #define gpuStreamNonBlocking hipStreamNonBlocking
     #define gpuStreamDestroy hipStreamDestroy
     #define gpuStreamSynchronize hipStreamSynchronize
+    #define gpuStreamWaitEvent hipStreamWaitEvent
+    #define gpuEventCreateWithFlags hipEventCreateWithFlags
+    #define gpuEventDisableTiming hipEventDisableTiming
+    #define gpuEventRecord hipEventRecord
+    #define gpuEventDestroy hipEventDestroy
     #define gpuDeviceSynchronize hipDeviceSynchronize
     #define gpuHostAlloc hipHostMalloc
     #define gpuHostAllocDefault hipHostMallocDefault
@@ -71,10 +79,18 @@ using gpuEvent_t = cudaEvent_t;
     #define gpuMemcpyDeviceToDevice cudaMemcpyDeviceToDevice
     #define gpuMemcpyPeerAsync cudaMemcpyPeerAsync
     #define gpuMemcpyDeviceToHost cudaMemcpyDeviceToHost
+    #define gpuMemset cudaMemset
     #define gpuMemsetAsync cudaMemsetAsync
     #define gpuStreamCreate cudaStreamCreate
+    #define gpuStreamCreateWithFlags cudaStreamCreateWithFlags
+    #define gpuStreamNonBlocking cudaStreamNonBlocking
     #define gpuStreamDestroy cudaStreamDestroy
     #define gpuStreamSynchronize cudaStreamSynchronize
+    #define gpuStreamWaitEvent cudaStreamWaitEvent
+    #define gpuEventCreateWithFlags cudaEventCreateWithFlags
+    #define gpuEventDisableTiming cudaEventDisableTiming
+    #define gpuEventRecord cudaEventRecord
+    #define gpuEventDestroy cudaEventDestroy
     #define gpuDeviceSynchronize cudaDeviceSynchronize
     #define gpuHostAlloc cudaHostAlloc
     #define gpuHostAllocDefault cudaHostAllocDefault
