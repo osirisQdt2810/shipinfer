@@ -1250,8 +1250,15 @@ hook down, for when the operator asked to see something before it is executed.
       AND THE CHOICE IS NOW BETWEEN TWO, not three: (b) is eliminated on evidence above. If you
       want (b) anyway, what I need from you is the images or the weights, not a decision.
 
-- [ ] **CSRC-GRAPH-HAS-NO-TRACKING · FOUNDATION BUILT AND PARKED on `feat/csrc-track-stage`
-      (pushed, NO PR -- see the end of this item). Opened 8 Sep, a whole per-frame seam missing on
+- [!] **CSRC-GRAPH-HAS-NO-TRACKING · OPERATOR: please merge #169 (PR 1 of 3) -- it adds a
+      `cpp.yml` job, so `Auto-merge` stays SKIPPED however green the rest is, exactly as #133
+      and #162.** PRs 2 and 3 build on its `TrackerShard` and would have to STACK on an
+      unmerged branch, which CLAUDE.md warns against by name ("if PR #2 is already stacked on
+      #1's branch the fix has to be threaded through both"), so I am not opening them. This is
+      not a design question -- PR 2's target already exists (`ObjectRecord::track_id` is an
+      `optional<int64_t>` in `core/events/schema.h` and `body_track_id_vec`/`ship_track_id_vec`
+      are already emitted, always null today), so it is a stage plus that fill, and PR 3 is
+      `mtmc`. Opened 8 Sep, a whole per-frame seam missing on
       one plane rather than a gap in a number.** The Python plane has REAL `track` and `mtmc`
       elements -- `topology/elements/track.py` holds per-camera `TrackerShard`s over
       shipvision's trackers, and the sharding is a CORRECTNESS constraint there (two cameras on
