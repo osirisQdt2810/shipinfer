@@ -932,10 +932,25 @@ hook down, for when the operator asked to see something before it is executed.
       finally measuring the thing it claims to. Note the idle box also shows 68 000 read is
       975/s against the design load's 1000 -- 97.5% offered and read -- so the earlier 51 073
       was the box being shared, not the route.
-      STILL ON THE CANDIDATE LIST for the last 6%: the intake's ONE SHARED STREAM per GPU,
-      which convoys every camera on it -- camera A's `take` returns only after its nine peers'
-      copies have finished -- and the D2D copy itself. A stream per calling thread would
-      decouple the first.
+      THE SHARED-STREAM CANDIDATE IS CLOSED, and the answer is NO -- measured 8 Sep rather than
+      reasoned about, which is the only reason I am not still recommending it. The hypothesis
+      was good: `SurfaceIntake` keeps ONE stream per GPU, `take` ends in
+      `gpuStreamSynchronize`, so camera A's frame returned only after its nine peers' copies
+      finished -- and #164's event wait should have made it worse still, by putting one camera's
+      decode dependency in front of everybody else's copies. A stream per calling thread
+      decouples that. Built it (`std::unordered_map<std::thread::id, void*>`, its own mutex,
+      created outside the lock), 75 pipeline checks green, `frames_failed` 0, and:
+                              events_complete       collector_timeouts   frames_read
+        one shared stream     42 014 / 47 109              7 / 8         68 043 / 68 161
+        one stream per thread 30 438 / 24 525            147 / 206       65 539 / 64 568
+      **-38% on the mean** (44 562 -> 27 482), timeouts up twentyfold, and `frames_read` down
+      too. Far outside the run-to-run range, so this is not noise.
+      WHY, as far as the numbers say: a GPU has a small number of copy engines, so ten streams
+      do not make ten parallel copies -- they queue on the same DMA hardware with ten times the
+      scheduling overhead, and the shared stream's "convoy" was really batching that the
+      hardware wanted. The convoy was the cheaper arrangement, not the expensive one.
+      So the last ~6% is NOT the shared stream. What is left on the list is the D2D copy
+      itself, and the honest position is that 127/135 per GPU may simply be what this costs.
       ORIGINAL: opened 7 Sep, and it is C1's remaining question.
       I first wrote this item down as "ingest-limited" and A SCALING RUN SAYS OTHERWISE, which
       is why it is worth doing before theorising. Five GPUs, 16 workers/GPU, `--source nvdec`:
