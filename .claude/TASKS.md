@@ -2337,8 +2337,13 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
             header promises "by ANY stopper"). Fix: `thread_abandoned_` as
             `std::atomic<bool>` so the lockless self-stop path can read it; + a line
             keeping the header honest either way.
-- [!] **CSRC-BENCH-UNCOMPILED · BOTH HALVES BUILT and OPEN as PR #133, VERDICT APPROVE
-      (5 Sep) — OPERATOR: this one needs your MANUAL MERGE.** It edits
+- [x] **CSRC-BENCH-UNCOMPILED · MERGED as #133 (026f2a5), 7 Sep 13:06 UTC — the operator did
+      the manual merge and this `[!]` was simply stale, caught in the 8 Sep sweep.** And the
+      item's other half was answered the hard way the same day: `cpp-syntax` closed "nothing
+      compiles it", but #156's missing `gst_init` still MERGED and was found by a bench run, so
+      "it merged anyway" needed `CI-CPP-JOBS-ARE-POST-MERGE` (#162) on top of this.
+      ORIGINAL, kept because the two review rounds are the record: OPEN as PR #133, VERDICT
+      APPROVE (5 Sep) — needed a MANUAL MERGE. It edits
       `.github/workflows/**`, which CLAUDE.md records as a permanent exception to the review
       gate: the review job cannot mint a token for a workflow change, so `Auto-merge` stays
       SKIPPED however green the rest is. Tests green on both interpreters, review APPROVE
