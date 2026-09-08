@@ -93,7 +93,7 @@ import json
 import os
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -455,6 +455,40 @@ def measure_shipinfer(
     return run, ours
 
 
+# doc: long why the pair is printed by ONE function, which is #168's review round 2
+def _print_device_table(
+    heading: Sequence[str],
+    per_device: Mapping[str, Mapping[str, int]],
+    per_device_rows: Mapping[str, Mapping[str, int]],
+) -> None:
+    """Print the per-device breakdown -- requests and rows -- for either caller.
+
+    ONE function and not two, because there are two of these tables (a shard child's own and
+    the sharded parent's aggregate) and round 1 of this change added rows to the child's
+    only. The parent's is the table the DEFAULT runner shows, so the fix missed the one
+    output it existed to fix. A shared printer makes "print one of the pair and not the
+    other" impossible by construction, which is the argument `aggregate` already makes for
+    summing them in one pass.
+
+    Rows go on their own line and only when they DIFFER from requests: a detector gets one
+    frame per request so the two are equal and a second identical line is noise, while an
+    embedder's gap IS the crop fan-out.
+    """
+    if not per_device:
+        return
+    for line in heading:
+        print(line)
+    for model, devices in sorted(per_device.items()):
+        # `d` is already a device string (`cuda:0`), and inside a shard child it is the
+        # child's logical ordinal; the parent's table relabels to physical GPUs.
+        spread = "  ".join(f"{d}={n}" for d, n in sorted(devices.items()))
+        print(f"  {model:<18} {spread}")
+        rows = per_device_rows.get(model, {})
+        if rows and rows != devices:
+            spread = "  ".join(f"{d}={n}" for d, n in sorted(rows.items()))
+            print(f"  {'  (rows)':<18} {spread}")
+
+
 def measure_shipinfer_in_full(
     cfg: BenchConfig,
     out_dir: Path,
@@ -500,20 +534,11 @@ def measure_shipinfer_in_full(
         # Cross-checked against what came out of the far end. The buffer-growth method
         # cannot tell a flat queue from a refused one, and an emitted-event count can.
         shipinfer.reconcile(result, ours.images_per_s)
-    if result.per_device:
-        print("\nper-device execution (the balancing evidence):")
-        for model, devices in sorted(result.per_device.items()):
-            # `d` is already a device string (`cuda:0`), and inside a shard child it is the
-            # child's logical ordinal; the parent's table relabels to physical GPUs.
-            spread = "  ".join(f"{d}={n}" for d, n in sorted(devices.items()))
-            print(f"  {model:<18} {spread}")
-            # Rows on their own line rather than a second table, and only when they DIFFER
-            # from requests: for a one-frame-one-row detector they are equal and a second
-            # identical line is noise. Where they differ, the gap IS the crop fan-out.
-            rows = result.per_device_rows.get(model, {})
-            if rows and rows != devices:
-                spread = "  ".join(f"{d}={n}" for d, n in sorted(rows.items()))
-                print(f"  {'  (rows)':<18} {spread}")
+    _print_device_table(
+        ["\nper-device execution (the balancing evidence):"],
+        result.per_device,
+        result.per_device_rows,
+    )
     offered = shipinfer.offered_rates(cfg, result)
     capacity = shipinfer.per_module_capacity(cfg, instances=result.instances)
     return run, ours, result, offered, capacity
@@ -560,12 +585,14 @@ def measure_sharded(
             f"offered {row['offered_total']:g}  achieved {row['achieved']:.1f}  {rate}  "
             f"{row['verdict']}"
         )
-    if agg["per_device"]:
-        print("\nper-device execution (the balancing evidence; under `service` a request that")
-        print("left its shard is counted where it ran):")
-        for model, devices in sorted(agg["per_device"].items()):
-            spread = "  ".join(f"{d}={n}" for d, n in sorted(devices.items()))
-            print(f"  {model:<18} {spread}")
+    _print_device_table(
+        [
+            "\nper-device execution (the balancing evidence; under `service` a request that",
+            "left its shard is counted where it ran):",
+        ],
+        agg["per_device"],
+        agg.get("per_device_rows", {}),
+    )
     detail = "; ".join(
         f"shard {r['shard']} gpu{r['gpus']}: "
         + ("no number" if r["images_per_s"] is None else f"{r['images_per_s']:.1f} img/s")

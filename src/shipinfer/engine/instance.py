@@ -90,8 +90,8 @@ class ModelInstance:
         self._stop_lock = threading.Lock()
         self._stopped = False
         self._abandoned = False
-        #: Whether this instance's readiness was counted, so shutdown cannot decrement a
-        #: gauge it never incremented and drive it negative.
+        # Whether this instance's readiness was counted, so shutdown cannot decrement a
+        # gauge it never incremented and drive it negative.
         self._counted_ready = False
         self._running = threading.Event()
         self._ready = threading.Event()
@@ -517,9 +517,9 @@ class ModelInstance:
             # side had only `requests`, so a crop fan-out was invisible here.
             "rows": self._executed_rows,
             "failed_batches": self._failed_batches,
-            #: Times this worker had to wait for an execution slot. Non-zero means the
-            #: model's rate limiter is actually binding, which is the only way to tell a
-            #: limiter that is shaping a burst from one that is configured and never reached.
+            # Times this worker had to wait for an execution slot. Non-zero means the
+            # model's rate limiter is actually binding, which is the only way to tell a
+            # limiter that is shaping a burst from one that is configured and never reached.
             "rate_limit_waits": self._rate_limit_waits,
             "ewma_latency_us": round(self._ewma_latency_us, 1),
             "backend": self._backend.stats(),
