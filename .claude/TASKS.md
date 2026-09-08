@@ -3587,8 +3587,9 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       prevents its regression -- same for `--stop-deadline-ms`.
       `test_pipeline` 60 -> 74 checks; the Python plane's slicing has two of its own.
 
-- [x] **PY-SOURCE-HAS-NO-STOP-SIGNAL · DONE 8 Sep on `feat/py-source-stop-signal`, held behind
-      #163 because it edits the same `_do_read`.** The plumbing was the whole of it, and it is
+- [x] **PY-SOURCE-HAS-NO-STOP-SIGNAL · DONE 8 Sep as #165, and it turned out to be TWO places:
+      the GStreamer read and the replay pacer.** Held behind #163, which edited the same
+      `_do_read`. The plumbing is the first half, and it is
       ADDITIVE: `FrameSource.__init__` takes a keyword-only `stop: threading.Event | None`,
       `create_source` forwards it, and `CameraActor._default_factory` hands down the event it
       already had. Every source forwards `**kwargs`, so none of the three needed touching; an
@@ -3601,6 +3602,25 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       REVERT-CHECK: remove the check and `a stop already set means no pull at all` fails with 50
       pulls where there should be none. The test also sets the event MID-READ and asserts
       exactly one more slice, not the whole timeout.
+      AND THE SEAM WAS WIDER THAN THIS ITEM SAID -- #165's review found the second half, so the
+      `[x]` above would have overclaimed. `ReplaySource` does not block on a READ, it blocks on
+      the PACE WAIT: `DeadlinePacer.wait()` took no interrupt and just slept, while
+      `csrc/.../sources/replay.cpp` passes `stop().wait_for(...)` into `pacer_.wait` and caps it
+      at one `read_timeout_s`. Smaller than the GStreamer case -- bounded by the frame period,
+      so 50 ms at 20 fps rather than 5 s -- but a SECOND per camera at 1 fps, which replay runs
+      at. Fixed rather than narrowed: `wait(interrupt)` now takes the same callback shape the
+      C++ pacer does and reports whether it was cut short, the deadline does NOT advance on an
+      interrupted wait, and `_pace_wait` reproduces `replay.cpp`'s over-budget branch exactly --
+      a period longer than the budget is an EMPTY READ, because waiting the budget and then
+      answering with a frame the actor asked for `due_s` ago is worse. `TestReplayHonoursAStop`,
+      three tests; the two behaviour ones go red on the revert ("a stop ends the wait with no
+      frame", "over budget answers empty") and the additive one stays green, which is the shape
+      it should have.
+      STATED SO IT IS DELIBERATE, not forgotten: `PyAvSource._do_read` is a single blocking
+      `next()` on a PyAV generator. There is no loop to slice and no timeout to pass, so no
+      Python-side stop check is possible -- interrupting it means a demuxer-level option
+      (`timeout`/`interrupt_callback`), which is its own item and has never been the bench
+      path. `pyav` is the portable fallback; `gstreamer` and `nvdec` are the measured routes.
       ORIGINAL: opened 8 Sep by #163 round 2, and it is the stop half of a two-plane seam.
       The C++ `FrameSource` is constructed with a `StopSignal&` and its
       GStreamer and NVDEC sources check it between read slices, so a fleet's stop is observed

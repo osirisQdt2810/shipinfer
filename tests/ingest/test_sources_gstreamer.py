@@ -9,6 +9,8 @@ Runs with no GStreamer installed, by design.
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from shipinfer.core.errors import ConfigurationError, SourceUnavailableError
@@ -352,8 +354,6 @@ class TestTheReadTimeoutIsSpentInSlices:
         only learns of a stop when `_do_read` returns, and `stop()`'s budget is shorter than
         five seconds. Checked every slice, so the read ends within one.
         """
-        import threading
-
         pulls: list[int] = []
         stop = threading.Event()
         source, _ = self._source(monkeypatch, pulls, lambda self: None)
@@ -369,7 +369,6 @@ class TestTheReadTimeoutIsSpentInSlices:
         assert before > 0, "and a running camera does pull"
 
         # Set mid-read: the loop must notice on its next pass rather than at the deadline.
-        source._stop = stop
         original = source._appsink.try_pull_sample
 
         def stop_after_one(timeout):

@@ -220,10 +220,38 @@ class ReplaySource(FrameSource):
 
     # -- reading -----------------------------------------------------------------------
 
+    # doc: long the cap, which is the actor's contract rather than the pacer's preference
+    def _pace_wait(self) -> bool:
+        """Hold until the next frame is due; ``True`` if the fleet asked us to stop first.
+
+        CAPPED AT ONE ``read_timeout_s``, exactly as ``replay.cpp``'s twin is: the actor's
+        contract is that a read answers within one, so a source that slept a 40 s frame
+        period would make a stop request take 40 s to land. Below ``1 / read_timeout_s`` fps
+        a replay source therefore reports empty reads and the actor eventually reconnects
+        it -- harmless, because the library is cached, and visible in ``empty_reads``.
+        """
+        stop = self._stop
+        if stop is None:
+            self._pacer.wait()
+            return False
+        budget = self.read_timeout_s
+
+        def interrupt(due_s: float) -> bool:
+            # OVER BUDGET COUNTS AS INTERRUPTED, which is `replay.cpp`'s own branch and not a
+            # convenience: waiting the budget and then reading anyway would answer the actor
+            # with a frame it asked for `due_s` ago. An empty read is the honest answer.
+            if due_s > budget:
+                stop.wait(budget)
+                return True
+            return stop.wait(due_s)
+
+        return self._pacer.wait(interrupt)
+
     def _do_read(self) -> np.ndarray | None:
         if self._exhausted:
             return None
-        self._pacer.wait()
+        if self._pace_wait():
+            return None
         image = self._next_image()
         if image is None:
             if self.config.loop:
