@@ -1258,14 +1258,24 @@ hook down, for when the operator asked to see something before it is executed.
       `pipeline/graph/from_plan.cpp` and `graph/plan.cpp` is **0**, `ldd csrc/build/bench` links
       no shipvision library, and `cli/bench.cpp` stamps every run with its own disclaimer --
       `"note": "C++ data plane; tracking and fused kernels are NOT in this measurement"`.
-      So a resolved plan can carry `node track track shipvision` and the C++ graph silently
-      builds a chain that stops at the embedders. That is the shape of failure this repo keeps
-      paying for: the plan validates, the run succeeds, and the missing third of the work is
-      invisible unless somebody reads the note.
-      HOW IT GOT PAST THE GATE: `tests/test_two_planes.py` lists `pipeline` as MIRRORED, which
-      is true at PACKAGE granularity -- both planes have one -- and the test asks nothing about
-      elements. So this is not a test that broke; it is a seam the inventory cannot see, which
-      is worth saying because the inventory exists precisely to stop this.
+      **AND THE PLANE IS NOT SILENT ABOUT IT -- I WAS WRONG ABOUT THAT, AND THE CORRECTION IS
+      THE INTERESTING PART.** I first wrote that the graph "silently builds a chain that stops
+      at the embedders". It does not: `plan_stages()` collects every slot it cannot run into
+      `PlanStages::unsupported` and `cli/bench.cpp:365` prints them in the FIRST LINE of every
+      run's stderr:
+        chain 'ship_person_cpu': 5 stage(s), not run here: decode track mtmc output
+      That line was in every log I took today. My greps filtered it out, and I then described
+      the runs as "the whole chain" in report after report. The defect was mine, not the
+      plane's -- it told me exactly what it was not doing and I did not read it.
+      READ IT PROPERLY, the four names are not equivalent: `decode` and `output` are not
+      missing at all, they are simply not Dag STAGES -- decode is the ingest source and output
+      is the event writer, both outside the graph. `track` and `mtmc` are the two that do no
+      work anywhere in the C++ plane.
+      SO WHAT IS ACTUALLY WORTH FIXING is narrower than a gate: the plane declares the gap on
+      stderr, but nothing FAILS and no artefact records it -- the JSONL summary carries
+      `stages` and a note, not `unsupported`, so a throughput number can be quoted from a run
+      whose chain was missing a third of its stages without that fact travelling with it. A
+      seam-inventory test would not have caught this either, since nothing was undeclared.
       WHY IT MATTERS BEYOND TIDINESS: CLAUDE.md's sync rule is that a per-frame Python seam is
       not finished until C++ carries it, and "hand tracklets downstream" is a third of what the
       project is for (`CLAUDE.md`: detect, segment, embed, RECOGNISE, and hand tracklets on).

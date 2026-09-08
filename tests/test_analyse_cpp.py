@@ -137,6 +137,23 @@ class TestEveryKeyTheAnalyserReadsIsOneTheBinaryWrites:
             f"the judge as a KeyError, after the run that produced the artefact"
         )
 
+    def test_the_slots_the_plane_did_not_run_are_in_the_record(self) -> None:
+        """`stages` says what WAS wired; without its complement a reader cannot subtract.
+
+        The plane already prints `not run here: decode track mtmc output` on stderr at
+        start-up, and that line did not survive into the artefact -- so a throughput number
+        could be quoted from a run whose chain was missing `track` and `mtmc` with nothing in
+        the record to say so. It could, and it was, repeatedly, in this session's own reports.
+        """
+        written = self._written()
+
+        assert "stages" in written, "the half that was always there"
+        assert "unsupported" in written, (
+            "`meta_json` must write the slots this plane could not run, not only the ones it "
+            "did: `benchmarks/harness/sampler.py`'s contract is that the omission travels "
+            "with the data, and half a list is not the omission"
+        )
+
     def test_the_key_this_pr_renamed_is_covered_by_that(self) -> None:
         """The regression itself: `buffer_capacity` was read here and is written nowhere."""
         assert "buffer_capacity" not in self._written()
