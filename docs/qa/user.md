@@ -1033,6 +1033,23 @@ it settles the image question the same way V154 settled design questions -- the 
 I do that under a NEW tag rather than mutating the shared 12.6 GB image, so the old one is
 still there if the new one is wrong.
 
+### V158 · 8 Sep 2026 — tiếp tục
+
+> tiếp tục
+
+The session had been restarted mid-turn; nothing new is asked, so V157's grant still governs
+and the next open ledger item is the answer.
+
+### V159 · 8 Sep 2026 — PR #162 đang conflict
+
+> PR #162 đang bị This branch has conflicts that must be resolved
+
+Cause was mine and it is the second time in two days: `.claude/TASKS.md` commits went straight
+to `main` while two branches held their own edits to the same region, so GitHub could not
+compute either merge commit. #163 hit it first. The lesson is narrow and worth keeping -- a
+ledger edit on `main` conflicts with every open branch that closes an item, so while branches
+are in flight the ledger entry belongs ON the branch that earns it.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
