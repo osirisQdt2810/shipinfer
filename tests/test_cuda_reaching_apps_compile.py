@@ -509,11 +509,11 @@ class TestTheUnitsNothingCompiles:
         )
 
     def test_no_unit_is_dropped_for_a_missing_lane_where_this_is_required(self) -> None:
-        """The loud skip belongs on THIS leg, because this is the one it can fire on.
+        """The loud skip belongs on THIS leg, and BOTH legs can now fire.
 
-        `EXTERNAL` declares lanes only for the two `ingest/sources` units, so `lanes_of(app)`
-        is empty for every app and the apps leg's version is unreachable by construction
-        (#133 round 4). Here it is reachable and it matters: without `libopencv-dev`,
+        It used to say the apps leg was "unreachable by construction" -- true until the
+        `shipvision` lane declared a test app, and a comment asserting a dead invariant is
+        what cost #169 a round. Here it is reachable and it matters: without `libopencv-dev`,
         `ingest/sources/replay.cpp` falls out and NOTHING in CI compiles it -- `cpp-gst-lane`
         covers `gstreamer.cpp`, not that one -- which is this file's own thesis.
         """
@@ -698,17 +698,21 @@ class TestTheAppsOfflineCannotBuild:
         skipped: list[str] = []
         for app in _cuda_reaching_apps():
             if not _lanes_available(build, app):
-                skipped.append(app.relative_to(ROOT).as_posix())
+                # Covered elsewhere is not a hole: `_COVERED_ELSEWHERE` names the lanes
+                # another cpp.yml job builds, and the same reading applies to an APP as to a
+                # unit. `test_tracking_shard.cpp` is the first app to declare a lane at all.
+                if not _lanes_needed(build, app) <= _COVERED_ELSEWHERE:
+                    skipped.append(app.relative_to(ROOT).as_posix())
                 continue
             ok, errors = _compiles(app, _lane_flags(build, app))
             if not ok:
                 failures.append(f"{app.relative_to(ROOT)}:\n  {errors}")
 
         assert not failures, "these do not compile:\n" + "\n".join(failures)
-        # ARMOUR, not live coverage: `EXTERNAL` declares lanes only for the two
-        # `ingest/sources` units, so `lanes_of(app)` is empty for every app today and
-        # `skipped` is always empty. The leg that can fire is
-        # `test_no_unit_is_dropped_for_a_missing_lane_where_this_is_required`.
+        # ARMOUR THAT HAS NOW FIRED, on #169: it used to say `skipped` was always empty
+        # because no app declared a lane, and the `shipvision` lane declares a test app. The
+        # exclusion above is what keeps this meaning something -- a skip is a hole UNLESS a
+        # named job compiles it, the same judgement the unit leg makes.
         if os.environ.get(_REQUIRE):
             assert not skipped, (
                 f"these apps were skipped for a missing external lane: {skipped}. Where this "
