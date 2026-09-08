@@ -184,6 +184,7 @@ def _summary(
     saturated: bool = False,
     binding=None,
     per_device=None,
+    per_device_rows=None,
 ) -> dict:
     return {
         "shard": shard,
@@ -198,6 +199,7 @@ def _summary(
             "binding_module": binding,
         },
         "per_device": per_device or {},
+        "per_device_rows": per_device_rows or {},
     }
 
 
@@ -223,6 +225,37 @@ class TestTheSumTheParentReports:
         )
         assert agg["images_per_s"] is None and agg["verdict"] == "UNMEASURED"
 
+    def test_rows_add_up_across_shards_too_and_are_not_the_request_counts(self) -> None:
+        """The last mile the #167 review found: `per_device_rows` was populated on the result
+        and then dropped at the shard boundary, so the only mode that can generate the design
+        load printed the requests table exactly as before."""
+        agg = shards.aggregate(
+            [
+                _summary(
+                    0,
+                    3,
+                    1.0,
+                    "SUSTAINED",
+                    per_device={"person_embedder": {"cuda:3": 40}},
+                    per_device_rows={"person_embedder": {"cuda:3": 500}},
+                ),
+                _summary(
+                    1,
+                    4,
+                    1.0,
+                    "SUSTAINED",
+                    per_device={"person_embedder": {"cuda:4": 10}},
+                    per_device_rows={"person_embedder": {"cuda:4": 130}},
+                ),
+            ]
+        )
+        assert agg["per_device"] == {"person_embedder": {"cuda:3": 40, "cuda:4": 10}}
+        assert agg["per_device_rows"] == {"person_embedder": {"cuda:3": 500, "cuda:4": 130}}
+        assert agg["per_device_rows"] != agg["per_device"], (
+            "the pair has to stay distinct through the aggregation -- summing rows into the "
+            "requests bucket is exactly the bug this guards"
+        )
+
     def test_per_device_counts_add_up_across_shards_where_the_work_ran(self) -> None:
         agg = shards.aggregate(
             [
@@ -244,3 +277,50 @@ class TestTheSumTheParentReports:
         assert shards._relabel({"m": {"cuda:0": 7, "cpu": 1}}, gpus=(4,)) == {
             "m": {"cuda:4": 7, "cpu": 1}
         }
+
+
+class TestTheDeviceTableIsPrintedByOneFunction:
+    """Both tables come out of `_print_device_table`, and rows appear only when they differ.
+
+    Round 1 of #168 added the rows line to `measure_shipinfer_in_full`, which under the
+    default runner executes in the shard CHILD -- so the sharded parent's aggregated table,
+    the one the runner actually shows, still printed requests only. The review caught it. One
+    printer for both callers is what makes "print one of the pair and not the other"
+    impossible rather than merely unintended.
+    """
+
+    def _printed(self, capsys, per_device, per_device_rows) -> list[str]:
+        from benchmarks import run_bench
+
+        run_bench._print_device_table(["HEAD"], per_device, per_device_rows)
+        return capsys.readouterr().out.splitlines()
+
+    def test_rows_are_shown_when_they_differ_from_requests(self, capsys) -> None:
+        out = self._printed(
+            capsys,
+            {"person_embedder": {"cuda:3": 40}},
+            {"person_embedder": {"cuda:3": 500}},
+        )
+        assert out[0] == "HEAD"
+        assert "cuda:3=40" in out[1]
+        assert any("(rows)" in line and "cuda:3=500" in line for line in out), out
+
+    def test_rows_are_suppressed_when_they_equal_requests(self, capsys) -> None:
+        """A detector gets one frame per request, so a second identical line is noise. This is
+        the one design decision in the change and the one most likely to be "simplified"."""
+        out = self._printed(
+            capsys,
+            {"ship_detector": {"cuda:3": 40}},
+            {"ship_detector": {"cuda:3": 40}},
+        )
+        assert not any("(rows)" in line for line in out), out
+
+    def test_an_absent_rows_table_prints_the_requests_table_unchanged(self, capsys) -> None:
+        """An older shard child sends no `per_device_rows`; the parent must still print."""
+        out = self._printed(capsys, {"ship_detector": {"cuda:3": 40}}, {})
+        assert "cuda:3=40" in out[1]
+        assert not any("(rows)" in line for line in out), out
+
+    def test_nothing_at_all_prints_no_heading(self, capsys) -> None:
+        """The heading was inside the old `if`, so an empty table must stay silent."""
+        assert self._printed(capsys, {}, {}) == []

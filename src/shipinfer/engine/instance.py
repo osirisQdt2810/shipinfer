@@ -90,8 +90,8 @@ class ModelInstance:
         self._stop_lock = threading.Lock()
         self._stopped = False
         self._abandoned = False
-        #: Whether this instance's readiness was counted, so shutdown cannot decrement a
-        #: gauge it never incremented and drive it negative.
+        # Whether this instance's readiness was counted, so shutdown cannot decrement a
+        # gauge it never incremented and drive it negative.
         self._counted_ready = False
         self._running = threading.Event()
         self._ready = threading.Event()
@@ -105,8 +105,8 @@ class ModelInstance:
         self._ewma_latency_us = 0.0
         self._executed_batches = 0
         self._executed_requests = 0
-        #: Rows, not requests: one request may carry many crops, so these differ by
-        #: the fan-out and only the pair says what the model actually did.
+        # Rows, not requests: one request may carry many crops, so these differ by
+        # the fan-out and only the pair says what the model actually did.
         self._executed_rows = 0
         # One timer for the life of the instance, not one per batch. `PhaseTimer` documents
         # that its CUDA events are reused *because* allocating a pair per phase per batch
@@ -513,13 +513,13 @@ class ModelInstance:
             "queue": self._queue.stats().as_dict(),
             "batches": self._executed_batches,
             "requests": self._executed_requests,
-            #: Its C++ twin has summed this all along (`engine/instance.cpp`); this
-            #: side had only `requests`, so a crop fan-out was invisible here.
+            # Its C++ twin has summed this all along (`engine/instance.cpp`); this
+            # side had only `requests`, so a crop fan-out was invisible here.
             "rows": self._executed_rows,
             "failed_batches": self._failed_batches,
-            #: Times this worker had to wait for an execution slot. Non-zero means the
-            #: model's rate limiter is actually binding, which is the only way to tell a
-            #: limiter that is shaping a burst from one that is configured and never reached.
+            # Times this worker had to wait for an execution slot. Non-zero means the
+            # model's rate limiter is actually binding, which is the only way to tell a
+            # limiter that is shaping a burst from one that is configured and never reached.
             "rate_limit_waits": self._rate_limit_waits,
             "ewma_latency_us": round(self._ewma_latency_us, 1),
             "backend": self._backend.stats(),

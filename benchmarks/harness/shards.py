@@ -231,18 +231,24 @@ def aggregate(summaries: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         (s["throughput"]["binding_module"] for s in summaries if s["throughput"]["saturated"]),
         None,
     )
+    # Both tables, summed the same way: a shard's rows are as much its own as its requests,
+    # and dropping one of the pair here is what made the counter invisible in the only mode
+    # that can generate the design load (#167 review, note 1).
     per_device: dict[str, dict[str, int]] = {}
+    per_device_rows: dict[str, dict[str, int]] = {}
     for summary in summaries:
-        for model, devices in summary.get("per_device", {}).items():
-            bucket = per_device.setdefault(model, {})
-            for device, count in devices.items():
-                bucket[device] = bucket.get(device, 0) + int(count)
+        for key, into in (("per_device", per_device), ("per_device_rows", per_device_rows)):
+            for model, devices in summary.get(key, {}).items():
+                bucket = into.setdefault(model, {})
+                for device, count in devices.items():
+                    bucket[device] = bucket.get(device, 0) + int(count)
     return {
         "images_per_s": total,
         "verdict": worst,
         "saturated": saturated,
         "binding_module": binding,
         "per_device": per_device,
+        "per_device_rows": per_device_rows,
         "shards": [
             {
                 "shard": s["shard"],
@@ -324,6 +330,7 @@ def _child_main(argv: Sequence[str] | None = None) -> int:
         "throughput": ours.as_dict(),
         "verdict": run.verdict,
         "per_device": _relabel(result.per_device, gpus),
+        "per_device_rows": _relabel(result.per_device_rows, gpus),
         "requests_total": result.requests_total,
         "requests_rejected": result.requests_rejected,
         "frames_read": result.frames_read,

@@ -210,6 +210,7 @@ namespace {
     // month apart could differ in every window and say the same thing.
     std::string meta_json(const Options& options, const ResolvedPlan& plan,
                           const std::vector<std::string>& stages,
+                          const std::vector<std::string>& unsupported,
                           const std::vector<BenchModel>& models) {
         const PlanSettings& tuning = *plan.settings;
         std::ostringstream out;
@@ -253,6 +254,15 @@ namespace {
         out << "], \"stages\": [";
         for (size_t i = 0; i < stages.size(); ++i)
             out << (i ? ", " : "") << "\"" << stages[i] << "\"";
+        // AND THE SLOTS THIS PLANE DID NOT RUN, which is the half the contract above asks for
+        // and the half that was missing: `stages` says what WAS wired, and a reader without
+        // the chain file beside them cannot subtract. It is printed on stderr at start-up
+        // ("not run here: decode track mtmc output") and that line does not survive into the
+        // artefact, so a throughput number could be quoted from a run whose chain was missing
+        // a third of its stages with nothing in the record to say so. It could, and I did.
+        out << "], \"unsupported\": [";
+        for (size_t i = 0; i < unsupported.size(); ++i)
+            out << (i ? ", " : "") << "\"" << unsupported[i] << "\"";
         out << "], \"note\": \"C++ data plane; tracking and fused kernels are NOT in this "
                "measurement\"}}";
         return out.str();
@@ -513,7 +523,8 @@ int main(int argc, char** argv) {
                 }
                 return row;
             },
-            options.sample_interval_s, meta_json(options, plan, stage_names, specs));
+            options.sample_interval_s,
+            meta_json(options, plan, stage_names, planned.unsupported, specs));
 
         // -- workers ----------------------------------------------------------------------
         std::atomic<bool> stopping{false};
