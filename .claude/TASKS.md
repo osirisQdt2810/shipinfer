@@ -932,6 +932,26 @@ hook down, for when the operator asked to see something before it is executed.
       finally measuring the thing it claims to. Note the idle box also shows 68 000 read is
       975/s against the design load's 1000 -- 97.5% offered and read -- so the earlier 51 073
       was the box being shared, not the route.
+      SWEPT FOR THE SAME CLASS OF BUG, 8 Sep, because finding one instance is a reason to look
+      for the others rather than to stop. Every stream the data plane creates:
+        `nvdec.cpp:423`          the decoder's output   NON-BLOCKING   <- the one that bit us
+        `surface_intake.cpp:81`  the intake's copies    blocking
+        `graph/stages.cpp:17`    a worker's scratch     blocking
+        `backends/tensorrt/engine.cpp:164`  the engine  blocking
+      TWO BLOCKING STREAMS ARE NOT ORDERED AGAINST EACH OTHER either -- each is ordered against
+      the LEGACY DEFAULT stream, which says nothing about the other -- so `stages.cpp`'s
+      scratch handing a buffer to `engine.cpp`'s stream is the same shape as the bug. It is
+      SAFE, and by a host sync rather than by luck: `scratch_.synchronise()` runs immediately
+      after every `letterbox_frame` (stages.cpp:126) and every `crop_frame` (:227), and
+      `SurfaceIntake::take` synchronises before it returns. So every cross-stream handoff in
+      the plane pays a `gpuStreamSynchronize` except nvdec -> intake, which is now the event.
+      One instance, fixed, and the sweep says so rather than assuming it.
+      A CANDIDATE THAT FALLS OUT OF THE SWEEP, recorded and NOT taken: those host syncs are two
+      full GPU waits per frame on the worker thread. Replacing them with events is the same
+      trade #164 just won -- but the buffer crosses into the model pool's thread and its own
+      stream, so the edge would have to travel through the backend contract, and today's lesson
+      is that removing a sync without adding an edge is how the race happened. Worth a
+      measurement before any code; NOT worth inventing at the end of a session.
       THE SHARED-STREAM CANDIDATE IS CLOSED, and the answer is NO -- measured 8 Sep rather than
       reasoned about, which is the only reason I am not still recommending it. The hypothesis
       was good: `SurfaceIntake` keeps ONE stream per GPU, `take` ends in

@@ -2760,6 +2760,17 @@ namespace {
                           "and carries no host image: exactly one is populated");
                     check(frame->device.owner != nullptr,
                           "with the keepalive that unmaps the surface");
+                    // check: THE READINESS EVENT, because a producer that forgets it is a
+                    // SILENT race -- `SurfaceIntake::take` skips its `gpuStreamWaitEvent`
+                    // when `ready` is null, which is right for a synchronous producer and
+                    // catastrophic for this one. #164 shipped the race for one review round
+                    // and no counter saw it: 25 920 of 25 920 bytes came from the previous
+                    // frame with `frames_failed` at 0. Only the producer can be checked here,
+                    // so it is checked here.
+                    check(frame->device.ready != nullptr,
+                          "and the event that says its bytes are final: cuvid post-processes "
+                          "asynchronously, so a null `ready` means the intake copies without "
+                          "waiting and the graph gets a half-written plane");
                 }
             } catch (const IngestError& error) {
                 decode_error = error.what();
