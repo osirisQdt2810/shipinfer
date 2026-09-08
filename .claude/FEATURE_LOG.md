@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-08 — the device-frame contract carries its own readiness (#163-#165)
+
+The ingest-to-pipeline seam grew a field and the accelerator seam grew eight aliases, so this is
+a seam change rather than a fix. `DeviceImage::ready` is an opaque event a producer records on
+whatever stream wrote the bytes; `SurfaceIntake::take` waits on it before its copies. #164 moved
+the post-processing off stream 0 for a 29% gain and thereby deleted the only ordering the copies
+had -- a blocking stream is ordered against the LEGACY DEFAULT stream only, so two non-default
+streams have none. Reproduced at 25 920 of 25 920 bytes stale with every counter green.
+
+Also: one fair queue per GPU, because a device frame cannot move (#163); the Python stop seam
+level with C++ in both halves, sliced read and pacer interrupt (#165); `core/platform.h` plus
+`gpuStreamWaitEvent` and seven siblings, both branches. 78 -> 127 events/s per GPU against
+replay's 135. A per-thread intake stream measured -38% and was rejected: few copy engines, so
+streams queue with more overhead.
+
 ## 2026-09-07 — RTSP to targets without the pixels ever leaving the GPU (V156's route)
 
 `rtsp -> nv12 -> trên vram hết -> xử lý trên vram toàn bộ`, in five PRs: two NV12 kernels that

@@ -1,5 +1,51 @@
 # Journal
 
+## 2026-09-08 — the barrier was real, and removing it wrongly was faster than removing it right
+
+Four PRs merged (#163 the per-GPU lanes, #164 the decoder's output stream, #165 the Python stop
+seam) and #162 waiting on a manual merge. The NV12 route went from **78 to 127 events/s per GPU
+against the replay path's 135** -- 59% to 94% -- and 68 000 of a possible 70 000 frames read at
+the design load, which is 97.5% offered and read.
+
+**The lesson of the day: an implicit ordering you did not write is still an ordering you
+depend on.** `CUVIDPROCPARAMS::output_stream` was 0, the legacy default stream, so every
+`cuvidMapVideoFrame` was a device-wide barrier against 23 worker streams -- 195 a second per
+GPU, none of them ours. Moving it to a non-blocking stream bought +25%. It was also a data race:
+`SurfaceIntake`'s stream comes from `gpuStreamCreate`, and **a blocking stream is implicitly
+ordered against the legacy default stream only** -- it has no relationship with an arbitrary
+non-blocking one. The comment I deleted as wrong had named that dependency; it was wrong only
+about which stream to name.
+
+The review caught it, and the reproduction is the part worth keeping: with the write still
+queued, **25 920 of 25 920 bytes** came from the previous frame. Every byte, not a torn seam --
+and `frames_failed` 0 with every event completing, because no counter inspects a pixel. Fixed
+with a pooled `CUevent` on the output stream and one `gpuStreamWaitEvent` in the intake.
+
+**And the correct version is faster than the racy one** (44 532 -> 47 109), which neither the
+reviewer nor I expected -- the review predicted the honest number would be *lower*. Reading a
+surface while cuvid writes it contends for those bytes, so deferring the copy until the write
+lands beats racing it. `collector_timeouts` fell ten-fold, which is the same effect from the
+latency side.
+
+**A negative result worth as much as the fix.** The reviewer and my own ledger both named the
+intake's one-stream-per-GPU as the next candidate: `take` ends in `gpuStreamSynchronize`, so a
+camera waited on its nine peers' copies. Built it per thread: **-38%** (44 562 -> 27 482),
+timeouts up twentyfold. A GPU has few copy engines, so ten streams queue on the same DMA
+hardware with ten times the scheduling overhead -- the "convoy" was batching the hardware
+wanted. Candidate closed, prototype thrown away.
+
+**Two process failures, both mine, both now mechanised.** Ledger commits straight to `main`
+conflicted with every open branch that closed an item, and GitHub silently issues **no
+`pull_request` runs at all** for a conflicting PR -- #163 sat with no CI and #162 needed two
+rebases (V159). And `pre-commit` run by absolute path leaves the venv off `PATH`, so
+`language: system` hooks print "Executable `clang-format` not found" and the run still ends
+"0 failed"; I read that as "CI does not run clang-format" and lost a round to it.
+
+C1 is still the operator's one question, but narrower: candidate (b), the previous system, is
+**not runnable here** -- no local image, `docker build` refused by this kernel (reproduced with
+`unshare`), no weights, registry does not resolve. So it is a request for artefacts, not a
+measurement.
+
 ## 2026-09-07 — V156's route, end to end, and two bugs only running it could find
 
 Seven PRs merged (#133, #155→#159, #161) and two open (#160 the carrier, plus a built-not-opened
