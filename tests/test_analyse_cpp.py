@@ -21,6 +21,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "analyse_cpp.py"
 BENCH = ROOT / "csrc" / "shipinfer" / "cli" / "bench.cpp"
+DRIVER = ROOT / "scripts" / "run_cpp_bench.sh"
 
 
 def _load(path: Path, name: str) -> ModuleType:
@@ -106,6 +107,37 @@ class TestTheCeilingEachModuleIsScoredAgainst:
         assert found["something_new"] == 12
 
 
+class TestTheDriverDoesNotHideTheChainLine:
+    """The standard driver's summary must show which slots did NOT run.
+
+    `bench` announces them on stderr at start-up -- `chain 'x': 5 stage(s), not run here:
+    decode track mtmc output` -- and `run_cpp_bench.sh` greps the log into a summary with an
+    alternation anchored on COUNTER names. So the line was in every log and in none of the
+    summaries, and a reader of the documented output could quote a throughput number from a
+    run whose chain was missing `track` and `mtmc` without ever seeing it. That happened,
+    repeatedly, before this test existed.
+    """
+
+    def test_the_summary_grep_includes_the_chain_line(self) -> None:
+        body = DRIVER.read_text("utf-8")
+        greps = [line for line in body.splitlines() if line.startswith("grep -E")]
+
+        assert greps, "no summary grep in the driver any more; this test is guarding nothing"
+        assert any("chain " in line for line in greps), (
+            "scripts/run_cpp_bench.sh greps the run log into its summary and the alternation "
+            "does not include `chain `, so the slots this plane did not run are filtered out "
+            "of the one output a reader actually sees:\n  " + "\n  ".join(greps)
+        )
+
+    def test_the_binary_still_prints_it_with_that_prefix(self) -> None:
+        """The other half of the pair: a grep for `chain ` is only worth having while the
+        binary still writes that prefix, and the two live in different languages."""
+        assert '"chain \'"' in BENCH.read_text("utf-8"), (
+            "csrc/shipinfer/cli/bench.cpp no longer starts that line with `chain '`, so the "
+            "driver's grep above matches nothing"
+        )
+
+
 class TestEveryKeyTheAnalyserReadsIsOneTheBinaryWrites:
     """The cross-language check that P5-C needed and did not have.
 
@@ -135,6 +167,23 @@ class TestEveryKeyTheAnalyserReadsIsOneTheBinaryWrites:
             f"scripts/analyse_cpp.py reads {sorted(read - written)} from a run record, and "
             f"csrc/shipinfer/cli/bench.cpp writes {sorted(written)}. A renamed key travels to "
             f"the judge as a KeyError, after the run that produced the artefact"
+        )
+
+    def test_the_slots_the_plane_did_not_run_are_in_the_record(self) -> None:
+        """`stages` says what WAS wired; without its complement a reader cannot subtract.
+
+        The plane already prints `not run here: decode track mtmc output` on stderr at
+        start-up, and that line did not survive into the artefact -- so a throughput number
+        could be quoted from a run whose chain was missing `track` and `mtmc` with nothing in
+        the record to say so. It could, and it was, repeatedly, in this session's own reports.
+        """
+        written = self._written()
+
+        assert "stages" in written, "the half that was always there"
+        assert "unsupported" in written, (
+            "`meta_json` must write the slots this plane could not run, not only the ones it "
+            "did: `benchmarks/harness/sampler.py`'s contract is that the omission travels "
+            "with the data, and half a list is not the omission"
         )
 
     def test_the_key_this_pr_renamed_is_covered_by_that(self) -> None:

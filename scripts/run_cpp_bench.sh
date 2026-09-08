@@ -88,7 +88,12 @@ timeout "${SHIPINFER_BENCH_TIMEOUT:-900}" "$REPO/deploy/rootless/cpp.sh" \
   --log-jsonl "/work/.artifacts/cpp/${LABEL}.jsonl" \
   "$@" > "$REPO/.artifacts/cpp/${LABEL}.log" 2>&1 || status=$?
 echo "exit=$status"
-grep -E '^(startup_s|frames_read|frames_dropped|frames_accepted|frames_failed|events_emitted|events_complete|events_incomplete|queue_rejected|collector_)' \
+# `chain ` FIRST, and it is not decoration: that line names the slots this plane did not run
+# ("chain 'x': 5 stage(s), not run here: decode track mtmc output"). It was in every log and
+# in none of these summaries, because this alternation is anchored on counter names -- so a
+# reader of THIS output, which is the documented one, could quote a throughput number from a
+# run whose chain was missing `track` and `mtmc` without ever seeing that. That happened.
+grep -E '^(chain |startup_s|frames_read|frames_dropped|frames_accepted|frames_failed|events_emitted|events_complete|events_incomplete|queue_rejected|collector_)' \
   "$REPO/.artifacts/cpp/${LABEL}.log" || true
 echo "--- final occupancy ---"
 tail -1 "$REPO/.artifacts/cpp/${LABEL}.jsonl"
