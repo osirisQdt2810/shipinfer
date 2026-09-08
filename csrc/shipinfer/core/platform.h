@@ -52,6 +52,7 @@ using gpuEvent_t = hipEvent_t;
     #define gpuHostRegisterDefault hipHostRegisterDefault
     #define gpuHostUnregister hipHostUnregister
     #define gpuSetDevice hipSetDevice
+    #define gpuGetDevice hipGetDevice
     #define gpuGetDeviceCount hipGetDeviceCount
     #define gpuGetLastError hipGetLastError
 #else
@@ -82,6 +83,7 @@ using gpuEvent_t = cudaEvent_t;
     #define gpuHostRegisterDefault cudaHostRegisterDefault
     #define gpuHostUnregister cudaHostUnregister
     #define gpuSetDevice cudaSetDevice
+    #define gpuGetDevice cudaGetDevice
     #define gpuGetDeviceCount cudaGetDeviceCount
     #define gpuGetLastError cudaGetLastError
 #endif
