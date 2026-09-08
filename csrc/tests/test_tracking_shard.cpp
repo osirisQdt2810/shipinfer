@@ -63,8 +63,8 @@ namespace {
             check(out.ids.size() == 1, "one id per detection");
             if (frame == 0) {
                 first = out.ids[0];
-                check(first > 0, "and a confirmed track has a positive id: " +
-                                     std::to_string(first));
+                check(first > 0,
+                      "and a confirmed track has a positive id: " + std::to_string(first));
             } else {
                 check(out.ids[0] == first,
                       "the same object keeps the same id across frames: got " +
@@ -99,11 +99,10 @@ namespace {
               "two cameras interleaving the same frame ids is the ORDINARY case and must not "
               "trip the ordering guard -- one shared high-water mark does exactly that: " +
                   refused);
-        check(shard.stats().cameras == 2, "one tracker per camera, built lazily: " +
-                                              std::to_string(shard.stats().cameras));
-        check(shard.stats().out_of_order == 0,
-              "and nothing is counted as a reordering: " +
-                  std::to_string(shard.stats().out_of_order));
+        check(shard.stats().cameras == 2,
+              "one tracker per camera, built lazily: " + std::to_string(shard.stats().cameras));
+        check(shard.stats().out_of_order == 0, "and nothing is counted as a reordering: " +
+                                                   std::to_string(shard.stats().out_of_order));
     }
 
     void test_each_cameras_ids_start_from_its_own_pool() {
@@ -111,6 +110,7 @@ namespace {
         // number from 1, so two cameras' first objects carry the SAME id. A shared pool would
         // hand the second camera a different number -- or, worse, the first camera's id, which
         // is a real identity reported where nothing happened.
+        //
         // Same reason as above for the catch: a shared high-water mark makes the second
         // camera's frame 0 a "replay", and an escaping throw is a crash rather than a red.
         TrackerShard shard(fast_confirm());
@@ -163,9 +163,9 @@ namespace {
         check(refused, "63 frames behind is a reordering and is refused");
 
         std::string reset_camera;
-        const TrackUpdate out = shard.update(
-            "cam0", 1000 - 64, {a_box(10.f)},
-            [&](const std::string& camera) { reset_camera = camera; });
+        const TrackUpdate out =
+            shard.update("cam0", 1000 - 64, {a_box(10.f)},
+                         [&](const std::string& camera) { reset_camera = camera; });
         check(out.ids.size() == 1, "64 frames behind is a RESTARTED STREAM and is accepted");
         check(reset_camera == "cam0", "and the callback names the camera: " + reset_camera);
         const TrackerShardStats stats = shard.stats();
@@ -187,8 +187,9 @@ namespace {
         } catch (const InferenceError&) {
             refused = true;
         }
-        check(!refused, "frames 1 and 2 continue the restarted stream rather than being "
-                        "measured against the abandoned 500");
+        check(!refused,
+              "frames 1 and 2 continue the restarted stream rather than being "
+              "measured against the abandoned 500");
     }
 
     void test_a_reset_that_is_disabled_refuses_every_regression() {
@@ -213,8 +214,8 @@ namespace {
         TrackerShard shard(fast_confirm());
         check(!shard.reset_if_present("never-seen"),
               "a camera with no tracker reports nothing to reset");
-        check(shard.stats().cameras == 0, "and no tracker was built: " +
-                                              std::to_string(shard.stats().cameras));
+        check(shard.stats().cameras == 0,
+              "and no tracker was built: " + std::to_string(shard.stats().cameras));
 
         shard.update("cam0", 0, {a_box(10.f)});
         check(shard.reset_if_present("cam0"), "a camera with one reports that it was reset");
@@ -233,8 +234,9 @@ namespace {
         } catch (const InferenceError&) {
             refused = true;
         }
-        check(!refused, "after an explicit reset, frame 0 is the new stream's first and is "
-                        "not measured against the old high water");
+        check(!refused,
+              "after an explicit reset, frame 0 is the new stream's first and is "
+              "not measured against the old high water");
     }
 
     // -- threading ------------------------------------------------------------------------
@@ -255,8 +257,7 @@ namespace {
                 try {
                     for (int64_t frame = 0; frame < 6; ++frame) {
                         const TrackUpdate out = shard.update(
-                            name, frame,
-                            {a_box(10.f + 5.f * static_cast<float>(frame))});
+                            name, frame, {a_box(10.f + 5.f * static_cast<float>(frame))});
                         if (frame == 0) first_ids[static_cast<size_t>(camera)] = out.ids[0];
                     }
                 } catch (const std::exception& error) {
@@ -271,13 +272,13 @@ namespace {
         }
         check(first_error.empty(),
               "fifty cameras on their own monotonic streams raise nothing: " + first_error);
-        check(shard.stats().cameras == 50,
-              "fifty concurrent cameras give fifty trackers: " +
-                  std::to_string(shard.stats().cameras));
+        check(shard.stats().cameras == 50, "fifty concurrent cameras give fifty trackers: " +
+                                               std::to_string(shard.stats().cameras));
         bool all_first = true;
         for (const int id : first_ids) all_first = all_first && id == 1;
-        check(all_first, "and each camera's first track is id 1 in its OWN pool -- a shared "
-                         "pool would have handed out fifty different numbers");
+        check(all_first,
+              "and each camera's first track is id 1 in its OWN pool -- a shared "
+              "pool would have handed out fifty different numbers");
         check(shard.stats().out_of_order == 0 && shard.stats().implicit_resets == 0,
               "with no spurious reordering under concurrency");
     }

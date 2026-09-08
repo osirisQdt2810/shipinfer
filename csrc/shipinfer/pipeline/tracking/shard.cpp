@@ -56,8 +56,7 @@ namespace shipinfer {
                 ++camera.out_of_order;
                 throw InferenceError(
                     "camera '" + camera_id + "': frame " + std::to_string(frame_id) +
-                    " reached the tracker after frame " +
-                    std::to_string(camera.last_frame_id) +
+                    " reached the tracker after frame " + std::to_string(camera.last_frame_id) +
                     ". Tracking is stateful and ordered; replaying a frame double-ages every "
                     "track and double-counts the hit that promotes one, so this frame is "
                     "published without track ids rather than with wrong ones");
