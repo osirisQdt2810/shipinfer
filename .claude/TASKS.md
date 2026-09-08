@@ -1225,6 +1225,22 @@ hook down, for when the operator asked to see something before it is executed.
             SO THE CHOICE IS YOURS AND IT IS NOW A CHOICE WITH NUMBERS: 0.70x (events), 2.03x
             (pixels through a model), 7.7x (rows through a model). I am not picking the one
             that clears the target.
+            **AND A CAVEAT THAT QUALIFIES EVERY NUMBER IN THIS ITEM, which I have been getting
+            wrong in my own reports all day.** I have been calling this "the whole chain" and
+            "the perception graph end to end". IT IS NOT. `cli/bench.cpp` stamps every run with
+            its own disclaimer -- `"note": "C++ data plane; tracking and fused kernels are NOT
+            in this measurement"` -- and `graph/from_plan.cpp` and `graph/plan.cpp` contain ZERO
+            occurrences of `track` or `mtmc`, so those two plan nodes are simply not built into
+            the C++ graph. `ldd csrc/build/bench` links no shipvision library either.
+            WHAT IS ACTUALLY MEASURED: decode -> detect -> segment -> embed_person ->
+            embed_ship -> reassembly -> JSON events. That is genuinely "video in, targets out"
+            per V156, and the four models are the GPU work -- but "hand tracklets downstream",
+            which is a third of what this project is for, is not in any number above.
+            WHICH WAY IT CUTS, stated rather than glossed: adding track/mtmc would ADD work on
+            our side of the ratio and add latency, so 0.70x/2.03x/7.7x are all measured on a
+            chain SHORTER than the deployed one. If the >=5x is meant to cover the whole system
+            then none of these three numbers is yet the answer, and the missing piece is a
+            measurement rather than a decision.
       WHAT IS NOT IN DOUBT, whichever you pick: the route V156 named works and is measured
       (`PHASE-D-NV12`), the host-decode arm of OUR OWN plane completes ZERO events at this load
       where the NVDEC arm completes 37 758, and the one-line `output_stream` fix took us from
@@ -1233,6 +1249,33 @@ hook down, for when the operator asked to see something before it is executed.
       So the arithmetic on (a) has moved: 637 against the baseline's 959.8 is 66%, not 56%.
       AND THE CHOICE IS NOW BETWEEN TWO, not three: (b) is eliminated on evidence above. If you
       want (b) anyway, what I need from you is the images or the weights, not a decision.
+
+- [ ] **CSRC-GRAPH-HAS-NO-TRACKING · opened 8 Sep, and it is a whole per-frame seam missing on
+      one plane rather than a gap in a number.** The Python plane has REAL `track` and `mtmc`
+      elements -- `topology/elements/track.py` holds per-camera `TrackerShard`s over
+      shipvision's trackers, and the sharding is a CORRECTNESS constraint there (two cameras on
+      one tracker invent identities). The C++ plane has neither: `grep -c 'track|mtmc'` over
+      `pipeline/graph/from_plan.cpp` and `graph/plan.cpp` is **0**, `ldd csrc/build/bench` links
+      no shipvision library, and `cli/bench.cpp` stamps every run with its own disclaimer --
+      `"note": "C++ data plane; tracking and fused kernels are NOT in this measurement"`.
+      So a resolved plan can carry `node track track shipvision` and the C++ graph silently
+      builds a chain that stops at the embedders. That is the shape of failure this repo keeps
+      paying for: the plan validates, the run succeeds, and the missing third of the work is
+      invisible unless somebody reads the note.
+      HOW IT GOT PAST THE GATE: `tests/test_two_planes.py` lists `pipeline` as MIRRORED, which
+      is true at PACKAGE granularity -- both planes have one -- and the test asks nothing about
+      elements. So this is not a test that broke; it is a seam the inventory cannot see, which
+      is worth saying because the inventory exists precisely to stop this.
+      WHY IT MATTERS BEYOND TIDINESS: CLAUDE.md's sync rule is that a per-frame Python seam is
+      not finished until C++ carries it, and "hand tracklets downstream" is a third of what the
+      project is for (`CLAUDE.md`: detect, segment, embed, RECOGNISE, and hand tracklets on).
+      Every throughput number in this ledger is therefore measured on a chain SHORTER than the
+      deployed one, and adding the seam ADDS work to our side of `C1`'s ratio.
+      NOT STARTED, and deliberately not started at the end of a long session: it needs the
+      tracker's per-camera state, its ordering guard, and a cross-plane parity case (same
+      inputs -> same track ids), which is a feature and not a patch. `C2c`/`C2d` are the
+      shipvision-side and Python-side halves and are both closed; this is the C++ half nobody
+      opened.
 
 - [!] **C1 · WAITING ON `C1-WHAT-IS-THE-5x-AGAINST?` ABOVE, which is the operator's one
       question: both arms are now measured (baseline 959.8 SATURATED, ours 539 complete, same

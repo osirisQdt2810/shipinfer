@@ -184,6 +184,7 @@ def _summary(
     saturated: bool = False,
     binding=None,
     per_device=None,
+    per_device_rows=None,
 ) -> dict:
     return {
         "shard": shard,
@@ -198,6 +199,7 @@ def _summary(
             "binding_module": binding,
         },
         "per_device": per_device or {},
+        "per_device_rows": per_device_rows or {},
     }
 
 
@@ -222,6 +224,37 @@ class TestTheSumTheParentReports:
             [_summary(0, 3, 100.0, "SUSTAINED"), _summary(1, 4, None, "UNMEASURED")]
         )
         assert agg["images_per_s"] is None and agg["verdict"] == "UNMEASURED"
+
+    def test_rows_add_up_across_shards_too_and_are_not_the_request_counts(self) -> None:
+        """The last mile the #167 review found: `per_device_rows` was populated on the result
+        and then dropped at the shard boundary, so the only mode that can generate the design
+        load printed the requests table exactly as before."""
+        agg = shards.aggregate(
+            [
+                _summary(
+                    0,
+                    3,
+                    1.0,
+                    "SUSTAINED",
+                    per_device={"person_embedder": {"cuda:3": 40}},
+                    per_device_rows={"person_embedder": {"cuda:3": 500}},
+                ),
+                _summary(
+                    1,
+                    4,
+                    1.0,
+                    "SUSTAINED",
+                    per_device={"person_embedder": {"cuda:4": 10}},
+                    per_device_rows={"person_embedder": {"cuda:4": 130}},
+                ),
+            ]
+        )
+        assert agg["per_device"] == {"person_embedder": {"cuda:3": 40, "cuda:4": 10}}
+        assert agg["per_device_rows"] == {"person_embedder": {"cuda:3": 500, "cuda:4": 130}}
+        assert agg["per_device_rows"] != agg["per_device"], (
+            "the pair has to stay distinct through the aggregation -- summing rows into the "
+            "requests bucket is exactly the bug this guards"
+        )
 
     def test_per_device_counts_add_up_across_shards_where_the_work_ran(self) -> None:
         agg = shards.aggregate(

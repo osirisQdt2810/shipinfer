@@ -507,6 +507,13 @@ def measure_shipinfer_in_full(
             # child's logical ordinal; the parent's table relabels to physical GPUs.
             spread = "  ".join(f"{d}={n}" for d, n in sorted(devices.items()))
             print(f"  {model:<18} {spread}")
+            # Rows on their own line rather than a second table, and only when they DIFFER
+            # from requests: for a one-frame-one-row detector they are equal and a second
+            # identical line is noise. Where they differ, the gap IS the crop fan-out.
+            rows = result.per_device_rows.get(model, {})
+            if rows and rows != devices:
+                spread = "  ".join(f"{d}={n}" for d, n in sorted(rows.items()))
+                print(f"  {'  (rows)':<18} {spread}")
     offered = shipinfer.offered_rates(cfg, result)
     capacity = shipinfer.per_module_capacity(cfg, instances=result.instances)
     return run, ours, result, offered, capacity
