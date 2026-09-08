@@ -324,9 +324,11 @@ gh pr create --base main --title "…" --body-file /tmp/pr-body.md --label autom
 
 ### CI: auto-review and auto-merge
 `.github/workflows/` holds `ci.yml` (offline suite + lint on main), `pr-pipeline.yml`
-(tests → Claude review → gated auto-merge), and `claude.yml` (`@claude` in comments).
-A PR auto-merges only when tests are green **and** the review verdict is APPROVE **and**
-the `automerge` label is present **and** the reviewed commit is still HEAD.
+(tests → Claude review → gated auto-merge), `cpp.yml` (the three C++ tiers, `workflow_call`ed
+by both of the above so a C++ break blocks the PR rather than reddening main after it merges),
+and `claude.yml` (`@claude` in comments).
+A PR auto-merges only when tests **and the C++ tiers** are green **and** the review verdict is
+APPROVE **and** the `automerge` label is present **and** the reviewed commit is still HEAD.
 Known permanent exception: a PR that edits `.github/workflows/**` cannot pass the review
 job, so those need a manual merge.
 

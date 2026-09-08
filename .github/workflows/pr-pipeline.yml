@@ -1,7 +1,7 @@
 # PR pipeline: tests + lint -> Claude review -> gated auto-merge.
 #
 # Merge gate — a PR auto-merges ONLY when ALL of these hold:
-#   1. tests + lint are green on the PR's head commit,
+#   1. tests + lint AND the three C++ tiers are green on the PR's head commit,
 #   2. the PR description carries every section of the template,
 #   3. the Claude review job produced an explicit APPROVE verdict for this run
 #      (a missing or garbled verdict counts as BLOCKING — the gate fails closed),
@@ -72,6 +72,16 @@ jobs:
           --to-ref HEAD
       - name: Run the offline test suite
         run: bash scripts/run_tests.sh
+
+  # THE C++ TIERS, gating the PR rather than only main. They lived in `ci.yml` alone, which
+  # runs on a PUSH TO MAIN, so a C++ break merged first and reddened main second -- the incident
+  # that opened `CSRC-BENCH-UNCOMPILED`, and the half its `cpp-syntax` job did not close. One
+  # definition in `cpp.yml`, called from both, because ~150 lines of load-bearing comments in
+  # two files is a copy that drifts.
+  #
+  # `merge` gates on this, so a red C++ tier blocks an auto-merge exactly as a red test does.
+  cpp:
+    uses: ./.github/workflows/cpp.yml
 
   pr-body:
     name: PR description
@@ -257,7 +267,7 @@ jobs:
 
   merge:
     name: Auto-merge
-    needs: [test, pr-body, review]
+    needs: [test, cpp, pr-body, review]
     if: needs.review.outputs.verdict == 'APPROVE' && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 5
