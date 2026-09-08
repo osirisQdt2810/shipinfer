@@ -1060,6 +1060,13 @@ With it, `main`'s `cpp-syntax` job stops dropping `nvdec.cpp` for a missing exte
 the red that had stood since 7 Sep 13:27 UTC -- and every C++ tier now gates a PR instead of
 reddening `main` after it merges.
 
+### V161 · 8 Sep 2026 — kết quả thế nào rồi
+
+> kết quả thế nào rồi
+
+Asked after a long unattended stretch (three watchdog nudges). Wants the bottom line, not the
+process: what shipped, what the numbers are, what is still waiting on them.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
