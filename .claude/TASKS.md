@@ -957,6 +957,46 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 6 · The final goal (V49)
 
+- [!] **C1-WHAT-IS-THE-5x-AGAINST? · OPERATOR, and it is one question with a measurement behind
+      it.** I ran both arms at the design load on the same five GPUs, 8 Sep, and the two numbers
+      are not comparable for a reason neither of us has decided yet.
+        baseline (`sim_pipeline_v2`, `--cameras 50 --fps 20 --seconds 70`):
+          det 479.8 + seg 480.0 = **TOTAL 959.8 img/s, SATURATED** (so a capacity, exact)
+        C++ plane, `--source nvdec` (RTSP -> NVDEC -> NV12 in VRAM), same GPUs, same 70 s:
+          **539 img/s complete** (37 758 events in 70 s)
+      So we are at 56% of it, not 5x ahead. TWO ASYMMETRIES, and they point OPPOSITE WAYS:
+        * IN OUR FAVOUR, and the harness says so in its own docstring: "one baseline image
+          passes through ONE model, while one ShipInfer frame passes through detect, then
+          conditional segmentation, then one or two embedders. Equal frames-per-second therefore
+          represents strictly more work on our side." The baseline is two disjoint one-model
+          pipelines (`BASELINE_ENTRY_MODULES = ("det", "seg")`); ours is a four-model chain with
+          per-object crops, reassembly and JSON events.
+        * AGAINST US: the baseline reads JPEGs from a folder and decodes each one on the host
+          (`cv::imread` per frame, then `cv::resize` + `copyMakeBorder` + `bgrToBlobCHW`). That
+          IS the host per-frame cost V156 says stays on its side -- and it still retired 959.8.
+      AND V156's OWN FAIRNESS CONDITION CANNOT BE MET BY THIS BASELINE. "cach bench cua ca
+      baseline va shipinfer phai giong nhau. dau vao la video dau ra la target" -- the baseline's
+      input is a folder of JPEGs. It has no decoder, no RTSP, and `benchmarks/harness/baseline.py`
+      says the submodule is READ-ONLY ("Nothing here edits it"). So it cannot be given video.
+      THE QUESTION, and I am not asking you to do work -- I am asking which comparison the >=5x
+      is against, because the candidates give opposite answers:
+        (a) THE COUNTING SIMULATION AS IT IS. Then >=5x means 4800 img/s on five GPUs against
+            its 959.8, our chain does 4x the model work per image, and I do not believe that is
+            reachable -- which is the argument V156 already overruled once, so I am not
+            re-making it; I am saying the number is 539 today and asking whether this is the
+            comparison.
+        (b) THE PREVIOUS SYSTEM in `references/` (subfaceid -> motservice -> mtmcservice), which
+            DOES read RTSP and does the whole chain. That is the system this project replaces,
+            and it is the only candidate that can be given video. I have not run it and do not
+            know whether it can be run here.
+        (c) A SUB-METRIC WHERE THE COMPARISON IS LIKE-FOR-LIKE -- e.g. detect-only throughput on
+            whole frames, or the per-frame preprocessing cost -- with the >=5x stated against
+            that rather than against end-to-end events.
+      WHAT IS NOT IN DOUBT, whichever you pick: the route V156 named works and is measured
+      (`PHASE-D-NV12`), the host-decode arm of OUR OWN plane completes ZERO events at this load
+      where the NVDEC arm completes 37 758, and the one-line `output_stream` fix took us from
+      368 to 539 (`NV12-ROUTE-SATURATES-AT-78-PER-GPU`, on `perf/nvdec-output-stream`).
+
 - [~] **C1 · ANSWERED BY V156: the >=5x target STANDS, and my "unreachable by construction"
       argument was wrong on its premise.** I argued that the counting simulation runs the same
       engines on the same GPUs, so both sides are GPU-bound at ~950-970 img/s and no scheduling
