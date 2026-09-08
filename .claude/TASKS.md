@@ -859,7 +859,62 @@ hook down, for when the operator asked to see something before it is executed.
       for a reason worth keeping — it scales the appearance EMA by detection confidence, and
       MOT17 public detections carry a *constant* score, so on that benchmark the flag has no
       effect and a study sampling it would report its own sampler's spread as a finding.
-- [ ] **NV12-ROUTE-SATURATES-AT-78-PER-GPU · opened 7 Sep, and it is C1's remaining question.**
+- [x] **NV12-ROUTE-SATURATES-AT-78-PER-GPU · ANSWERED 8 Sep, and the answer was one line.**
+      `CUVIDPROCPARAMS::output_stream` was 0, which is the LEGACY DEFAULT stream -- and every
+      stream in `csrc/` comes from `gpuStreamCreate`, which is BLOCKING. So each
+      `cuvidMapVideoFrame`'s post-processing was a device-wide barrier against all ~23 worker
+      streams on that GPU: at ~165 frames a second per GPU, 165 barriers a second, none of them
+      ours. cuvid now post-processes on its own NON-BLOCKING stream, and `SurfaceIntake` already
+      waits on its own stream before the frame is queued, which is the one consumer there is.
+      MEASURED, 50x20x70s on five GPUs, 23 workers/GPU. First on full per-lane capacity, then
+      RE-MEASURED on the divided capacity #163 round 2 landed, because a number from a different
+      build is not a comparison:
+        full per-lane   stream 0        25 742 .. 29 416 complete   (368 .. 420/s)
+        full per-lane   output stream   36 317 .. 37 758 complete   (519 .. 539/s)
+        divided         stream 0        25 217 .. 30 036 complete   (360 .. 429/s)
+        divided         output stream   36 127 .. 36 209 complete   (516 .. 517/s)
+      So the fix is worth ~+31% either way and the capacity division does not eat it -- which is
+      also what said the division costs nothing at this load.
+      **+26% against its own revert-check on the same build and box** (29 416 -> 37 758) with
+      `frames_read` identical either way (56 427 vs 57 491), so the difference is entirely
+      downstream of ingest. Against the original 25 742 it is +47%, and the route goes from 59%
+      of the replay path per GPU to **82%**.
+      WHAT IT WAS NOT, both measured before this and both kept anyway because they are right:
+        * THE NV12 KERNELS. Timed at the production shape (1080p -> 640, 15 crops -> 256x128):
+          `nv12_letterbox_into` 0.010 ms against the BGR twin's 0.015 (it reads 1.5 bytes per
+          pixel, not 3), and the crop 0.018 against 0.016. **0.028 ms per frame against 0.031**
+          -- the NV12 path is CHEAPER. At 825 fps that is 23 ms of GPU per second either way.
+          I had them first on the suspect list and they were the wrong suspect.
+        * `SurfaceIntake`'s copies, moved off the default stream in #163 for the same reasoning
+          one layer up. 27 116 against 27 009: nothing. Right to fix, claimed as nothing.
+      HOW IT WAS FOUND, because the order mattered: a LIKE-FOR-LIKE replay run on the same five
+      GPUs (659/s, 132/GPU -- matching the 135/GPU recorded on seven) established that the
+      deficit was real and not the box; a scaling run (10/25/50 cameras -> 183/334/387 per
+      second) established that the PIPELINE saturated rather than the generator, retracting what
+      I had written; and the kernel timings eliminated the obvious cause. Only then was the
+      remaining difference "the workers are doing less work with the same queue full", which
+      points at a barrier rather than a cost.
+      RE-PAIRED 8 Sep on the rebased head, GPUs 2-6 IDLE this time (15 MiB each) rather than
+      shared, which moved BOTH arms up and the ratio not at all -- and it is the pairing that
+      is the evidence, not either number alone:
+                              stream 0    output stream
+        frames_read             67 425          68 231     (1.2% apart)
+        frames_accepted         35 750          44 538
+        events_complete         35 686          44 532     **+24.8%**
+        collector_timeouts          64               6
+        queue_rejected          31 689          23 743
+      `frames_read` within 1.2% and `events_complete` up a quarter says the difference is
+      ENTIRELY DOWNSTREAM OF INGEST, which is the claim. Note what the idle box also bought:
+      68 231 read is 975/s against the design load's 1000 -- 97.5% offered and read -- so the
+      earlier 51 073 was the box being shared, not the route.
+      LEFT for C1: the baseline arm at the same shape. 44 532 over 70 s on five GPUs is 636/s,
+      **127/s per GPU against the replay route's recorded 135** -- 94%, from 59% before this.
+      A comparison is finally measuring the thing it claims to.
+      STILL ON THE CANDIDATE LIST for the last 6%: the intake's ONE SHARED STREAM per GPU,
+      which convoys every camera on it -- camera A's `take` returns only after its nine peers'
+      copies have finished -- and the D2D copy itself. A stream per calling thread would
+      decouple the first.
+      ORIGINAL: opened 7 Sep, and it is C1's remaining question.
       I first wrote this item down as "ingest-limited" and A SCALING RUN SAYS OTHERWISE, which
       is why it is worth doing before theorising. Five GPUs, 16 workers/GPU, `--source nvdec`:
         cameras   offered/s   frames_read        events_complete   rate     rejected
