@@ -1127,14 +1127,35 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 6 · The final goal (V49)
 
-- [!] **C1-WHAT-IS-THE-5x-AGAINST? · OPERATOR, and it is one question with a measurement behind
-      it.** I ran both arms at the design load on the same five GPUs, 8 Sep, and the two numbers
-      are not comparable for a reason neither of us has decided yet.
-        baseline (`sim_pipeline_v2`, `--cameras 50 --fps 20 --seconds 70`):
-          det 479.8 + seg 480.0 = **TOTAL 959.8 img/s, SATURATED** (so a capacity, exact)
-        C++ plane, `--source nvdec` (RTSP -> NVDEC -> NV12 in VRAM), same GPUs, same 70 s:
-          **539 img/s complete** (37 758 events in 70 s)
-      So we are at 56% of it, not 5x ahead. TWO ASYMMETRIES, and they point OPPOSITE WAYS:
+- [!] **C1-WHAT-IS-THE-5x-AGAINST? · OPERATOR, and it is one question with three measured
+      answers. THE CURRENT NUMBERS ARE HERE; everything below this block is the chronology of
+      how they were arrived at, and its early figures are SUPERSEDED by these.**
+      Both arms on the SAME five GPUs (0/1/3/4/6), 50x20x70 s, 8 Sep, box busy with two other
+      tenants throughout (the harness prints its own caveat):
+        baseline `sim_pipeline_v2`  960.2 img/s SATURATED (det 485.8 + seg 474.4) -- a capacity
+        C++ plane `--source nvdec`  573 events/s complete (40 131 in 70 s), 0 failed
+      THE THREE RATIOS, and they are three different claims rather than three estimates of one:
+        frames end to end      0.60x   -- the softest: a CPU-bound stage moves it, and the box
+                                          was loaded 25/48 on both runs
+        pixels into a model     1.87x   -- an AREA proxy, not work: it treats a 640x640
+                                          detector row and a 256x128 crop as 12.5:1 and ignores
+                                          that their FLOPs per pixel differ too
+        rows into a model       7.22x   -- counts a crop and a frame alike, and 12.7 of our rows
+                                          per request ARE crops
+      CORROBORATED on a second five-GPU set (2/3/6 earlier gave 7.7x / 2.03x), and the baseline
+      is GPU-set insensitive at saturation (959.8 on 2-6 against 960.2 here, 0.04% apart), so
+      the SPREAD between the weightings is a property of the workload, not of one run.
+      NO BETTER RATIO IS AVAILABLE, checked: GPU-seconds is the honest measure,
+      `InstanceStats::ewma_latency_us` holds ours and the bench does not print it -- but
+      `sim_pipeline_v2` reports no counterpart, so there is nothing to divide by.
+      ALL THREE ARE MEASURED ON A CHAIN WITHOUT `track`/`mtmc` (see
+      `CSRC-GRAPH-HAS-NO-TRACKING`), so adding that seam moves them in our favour.
+      CANDIDATE (b) IS OUT on evidence -- not runnable here, details below; it needs artefacts
+      from you rather than a decision.
+      -- the chronology follows --
+      THE FIRST PAIR I RAN, kept because the asymmetries it names still stand: baseline 959.8
+      SATURATED against 539 img/s complete (37 758 events) on GPUs 2-6, i.e. 56%.
+      TWO ASYMMETRIES, and they point OPPOSITE WAYS:
         * IN OUR FAVOUR, and the harness says so in its own docstring: "one baseline image
           passes through ONE model, while one ShipInfer frame passes through detect, then
           conditional segmentation, then one or two embedders. Equal frames-per-second therefore
