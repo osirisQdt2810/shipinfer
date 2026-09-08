@@ -1011,15 +1011,35 @@ hook down, for when the operator asked to see something before it is executed.
             comparison.
         (b) THE PREVIOUS SYSTEM in `references/` (subfaceid -> motservice -> mtmcservice), which
             DOES read RTSP and does the whole chain. That is the system this project replaces,
-            and it is the only candidate that can be given video. I have not run it and do not
-            know whether it can be run here.
+            and it is the only candidate that can be given video.
+            **NOT RUNNABLE ON THIS BOX -- settled 8 Sep by trying, so it is no longer a question
+            for you.** Three independent blockers, each reproduced rather than inferred:
+              1. NO IMAGE. All three composes carry `build:` plus a private-registry tag
+                 (`phucnp.dev/motservice:v1`, `test_substface_ins_1:latest`,
+                 `mtmcservice:v1.0.1`) and none is on this host.
+              2. THE IMAGE CANNOT BE BUILT HERE, and this is the hard one -- it is the same
+                 KERNEL LIMIT `deploy/rootless/setup.sh` documents, with no `--pid=host`
+                 equivalent for `docker build`:
+                     unshare --user --map-root-user --mount --pid --fork \
+                         sh -c 'mount -t proc proc /proc'
+                     mount: /proc: permission denied.
+              3. NO WEIGHTS. Zero `.engine`/`.plan`/`.onnx`/`.trt`/`.pt`/`.weights` files under
+                 any of the three, and the registry does not resolve
+                 (`lookup phucnp.dev: no such host`).
+            So (b) needs either a machine that can `docker build`, or the images and weights
+            from wherever that system was actually deployed. It is a request to you for
+            ARTEFACTS, not a measurement I can take.
         (c) A SUB-METRIC WHERE THE COMPARISON IS LIKE-FOR-LIKE -- e.g. detect-only throughput on
             whole frames, or the per-frame preprocessing cost -- with the >=5x stated against
             that rather than against end-to-end events.
       WHAT IS NOT IN DOUBT, whichever you pick: the route V156 named works and is measured
       (`PHASE-D-NV12`), the host-decode arm of OUR OWN plane completes ZERO events at this load
       where the NVDEC arm completes 37 758, and the one-line `output_stream` fix took us from
-      368 to 539 (`NV12-ROUTE-SATURATES-AT-78-PER-GPU`, on `perf/nvdec-output-stream`).
+      368 to 539, and the event-edge fix that round took it to **637 events/s -- 127/s per GPU
+      against the replay route's 135, so 94%** (`NV12-ROUTE-SATURATES-AT-78-PER-GPU`, on #164).
+      So the arithmetic on (a) has moved: 637 against the baseline's 959.8 is 66%, not 56%.
+      AND THE CHOICE IS NOW BETWEEN TWO, not three: (b) is eliminated on evidence above. If you
+      want (b) anyway, what I need from you is the images or the weights, not a decision.
 
 - [!] **C1 · WAITING ON `C1-WHAT-IS-THE-5x-AGAINST?` ABOVE, which is the operator's one
       question: both arms are now measured (baseline 959.8 SATURATED, ours 539 complete, same
