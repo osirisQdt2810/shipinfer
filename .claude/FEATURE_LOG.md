@@ -5,6 +5,20 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-08 — a run reports what it did and what it did NOT do (#167, #168)
+
+Two schema changes a consumer sees. A model instance now reports `rows` beside `requests` on
+BOTH planes -- one is a stage invocation, the other an image into the model, and they differ by
+the crop fan-out (12.7 for the person embedder, 1.0 for the detector, which is the counter's own
+self-check). Reporting only requests understated this plane against a one-model-per-image
+baseline by that factor, and `C1-WHAT-IS-THE-5x-AGAINST?` could put no number on its own
+candidate because of it.
+
+The run record also gained `"unsupported"` beside `"stages"`. The plane announced the slots it
+could not run on stderr, and that line reached neither the artefact nor the driver's summary --
+so a throughput number could be quoted from a chain missing `track` and `mtmc` with nothing
+saying so. It could, and it was. One line: a counter with no reader is not instrumentation.
+
 ## 2026-09-08 — the device-frame contract carries its own readiness (#163-#165)
 
 The ingest-to-pipeline seam grew a field and the accelerator seam grew eight aliases, so this is
