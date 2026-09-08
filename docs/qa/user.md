@@ -1050,6 +1050,16 @@ compute either merge commit. #163 hit it first. The lesson is narrow and worth k
 ledger edit on `main` conflicts with every open branch that closes an item, so while branches
 are in flight the ledger entry belongs ON the branch that earns it.
 
+### V160 · 8 Sep 2026 — PR #162 merged
+
+> tôi merge PR162 rồi nhé
+
+The manual merge I could not do myself (CLAUDE.md: do not merge into `main`; and a
+`.github/workflows/**` change cannot pass the review job, so auto-merge never gates on it).
+With it, `main`'s `cpp-syntax` job stops dropping `nvdec.cpp` for a missing external lane --
+the red that had stood since 7 Sep 13:27 UTC -- and every C++ tier now gates a PR instead of
+reddening `main` after it merges.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
