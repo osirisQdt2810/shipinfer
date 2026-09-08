@@ -84,6 +84,16 @@ namespace shipinfer {
         //: worker bound to GPU 1, and ADR-002 says one thread never touches another's memory,
         //: so the consumer checks rather than assumes.
         int device = -1;
+        //: The event that, once complete, says these bytes are FINAL -- `void*` so this
+        //: header still parses with no CUDA, cast to `gpuEvent_t` by whoever waits. A decoder
+        //: that post-processes into this surface ASYNCHRONOUSLY records one on its own stream,
+        //: and a consumer must wait on it before reading: two non-default streams have NO
+        //: implicit ordering, and a blocking stream is ordered against the LEGACY DEFAULT
+        //: stream only. Skip that wait and the surface is read half-written, with every
+        //: counter green and a torn frame the only symptom. `nullptr` from a producer whose
+        //: bytes are already final, and then there is nothing to wait for.
+        void* ready = nullptr;
+
         // Kept alive for as long as this frame exists, the way `HostFrame::owner` is -- and
         // here it is what UNMAPS the decoder's surface, because NVDEC hands out a slot from a
         // small pool and reuses it as soon as it is released. Dropping this early does not
