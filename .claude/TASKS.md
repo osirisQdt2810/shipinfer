@@ -1127,7 +1127,7 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 6 · The final goal (V49)
 
-- [ ] **OFFLINE-TIER-HAS-A-FLAKY-GATE · found 9 Sep by not believing a red, fix open as #171.**
+- [x] **OFFLINE-TIER-HAS-A-FLAKY-GATE · FIXED, MERGED AS #171 (9 Sep).**
       #170's `cpp-offline` went red on `test_join_on_unwind`, which my diff CANNOT reach: that
       unit's entire include closure is `join_on_unwind.h` and itself, checked rather than
       assumed. So it was pre-existing -- and on `main`, serially, on a loaded box: **4 failures
@@ -1164,10 +1164,19 @@ hook down, for when the operator asked to see something before it is executed.
       So the tier has ONE demonstrated flake and it is fixed. `test_join_on_unwind` was the
       real one precisely because it touches no files: its contention is pure thread scheduling,
       which is why it also failed 4/20 SERIALLY on main.
-      A SMALLER REAL HAZARD FALLS OUT, recorded not fixed: those fixed `/tmp` paths mean two
+      THE SMALLER HAZARD IS FIXED TOO, as its own change: those fixed `/tmp` paths mean two
       concurrent runs of the same binary on this SHARED box -- CI plus a local run, or a peer's
-      session -- corrupt each other for real. Not what CI sees today, and the fix is a
-      per-process temp path, which is a separate small change.
+      session -- corrupt each other for real. `csrc/tests/temp_path.h` makes every fixture path
+      carry the pid, and `test_camera_uris`'s per-call counter keeps its counter and gains the
+      pid: its own comment already said the path must be "distinct per call so two cases cannot
+      collide", which was the right intent one scope short.
+      PROVEN BY THE SWEEP THAT RAISED THE FALSE ALARM, which is the neat part -- the fix turns
+      that sweep from a generator of false alarms into a valid tool:
+        24 copies in parallel   before          after
+        test_event_parity       11 / 24         0 / 24
+        test_queue_parity        9 / 24         0 / 24
+        test_camera_uris         4 / 24         0 / 24
+        test_ingest_parity       2 / 24         0 / 24
 
 - [!] **NOT-GPU-BOUND-AT-FIVE-GPUS · MEASURED OUT, 9 Sep. OPERATOR: the RTSP arm under-reports
       us by up to ~17% because the harness generates its own load in-container, and fixing that
