@@ -21,7 +21,29 @@ if [ -n "${PYTHON:-}" ]; then
 elif [ -x "$REPO_ROOT/.venv/bin/python" ]; then
   PYTHON="$REPO_ROOT/.venv/bin/python"
 else
-  PYTHON="$(command -v python || command -v python3)"
+  # A GIT WORKTREE HAS NO `.venv` OF ITS OWN, and that is the failure above recurring: run
+  # from one, this fell through to the system interpreter and said "No module named pytest".
+  # The main worktree's venv is the one with the dependencies in it, and `--git-common-dir`
+  # is how you find it from any linked worktree (it points at the primary `.git`).
+  MAIN_ROOT="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  MAIN_ROOT="${MAIN_ROOT%/.git}"
+  if [ -n "$MAIN_ROOT" ] && [ -x "$MAIN_ROOT/.venv/bin/python" ]; then
+    PYTHON="$MAIN_ROOT/.venv/bin/python"
+  else
+    PYTHON="$(command -v python || command -v python3)"
+  fi
+fi
+
+# AND SAY WHICH PROBLEM IT IS. CI has no `.venv` and relies on `setup-python`'s interpreter,
+# so falling through is legitimate there -- what is not legitimate is the message it used to
+# fail with, because "No module named pytest" reads like a broken suite rather than a wrong
+# interpreter. This is the whole reason the search above exists, so it is asserted.
+if ! "$PYTHON" -c "import pytest" >/dev/null 2>&1; then
+  echo "run_tests.sh: $PYTHON has no pytest." >&2
+  echo "  Looked for a venv at $REPO_ROOT/.venv and, from a worktree, at the main" >&2
+  echo "  checkout's. Install the dev extra (\`pip install -e '.[dev,cli]'\`) or name an" >&2
+  echo "  interpreter: PYTHON=/path/to/python bash scripts/run_tests.sh" >&2
+  exit 1
 fi
 
 # Hide the GPUs, even on a box that has eight of them.
