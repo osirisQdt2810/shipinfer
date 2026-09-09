@@ -78,6 +78,11 @@ def child(q_in, q_out, owner: int, opener: int) -> None:
 
 
 def main() -> None:
+    from shipinfer.runtime import containment
+
+    # A measurement, so the container rule applies (CLAUDE.md). The gate lives in the process
+    # that would do the work, because a deny-list over command text cannot be made sound.
+    containment.require_container("the CUDA-IPC context probe")
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--owner", type=int, default=3)
     ap.add_argument("--opener", type=int, default=4)

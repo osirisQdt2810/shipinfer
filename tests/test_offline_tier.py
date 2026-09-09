@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 from pathlib import Path
 
@@ -77,6 +78,115 @@ class TestAskingTheDriverCannotAbortCollection:
         assert count == 0
         assert failure is not None and "CUDA driver initialization failed" in failure
         assert probe_device_count(lambda: 4) == (4, None)
+
+
+class TestEveryBenchmarkEntryPointGatesItself:
+    """A `benchmarks/` module you can run with `python -m` is a process that may measure.
+
+    `containment.py` is the enforcement point BECAUSE it runs inside that process -- CLAUDE.md
+    says so, and calls the `PreToolUse` hook an advisory fast path. That is a claim about which
+    files call it, so it is worth testing rather than repeating: three of the six did not, and
+    `run_bench.py` was one -- the tier the headline >=5x number comes from, where the advisory
+    hook was therefore the only guard. `link_probe.py` and `ipc_context_cost.py` were the
+    others. Derived from the tree, so a fourth tier is covered without editing this.
+    """
+
+    #: `benchmarks/baseline` is the counting-simulation SUBMODULE -- someone else's tree, and
+    #: full of `__main__` scripts. Excluded by name, because a glob that includes it passes on
+    #: a machine where CI's un-checked-out submodule is absent and fails on this box.
+    NOT_OURS = ("baseline", "tests")
+
+    def _entry_points(self) -> list[Path]:
+        root = Path(__file__).resolve().parents[1] / "benchmarks"
+        return sorted(
+            path
+            for path in root.rglob("*.py")
+            if not set(self.NOT_OURS) & set(path.parts)
+            and 'if __name__ == "__main__"' in path.read_text(encoding="utf-8")
+        )
+
+    def test_there_are_some(self) -> None:
+        """Without this, a glob that matched nothing would pass the assertion below."""
+        assert len(self._entry_points()) >= 6
+
+    def test_the_exclusion_is_the_submodule_and_nothing_of_ours(self) -> None:
+        """The exclusion is the risky half of a glob, so it is asserted rather than trusted:
+        every path it drops must be under `benchmarks/baseline` or a `tests` directory."""
+        root = Path(__file__).resolve().parents[1] / "benchmarks"
+        stray = [
+            path
+            for path in root.rglob("*.py")
+            if set(self.NOT_OURS) & set(path.parts)
+            and 'if __name__ == "__main__"' in path.read_text(encoding="utf-8")
+            and "baseline" not in path.parts
+            and "tests" not in path.parts
+        ]
+        assert not stray, f"the exclusion is dropping our own entry points: {stray}"
+
+    def test_each_one_calls_the_gate(self) -> None:
+        ungated = [
+            path.name
+            for path in self._entry_points()
+            if "require_container" not in path.read_text(encoding="utf-8")
+        ]
+        assert not ungated, (
+            f"{ungated} can be run with `python -m` and measure without asking "
+            "`runtime.containment`. The hook over command text is the advisory half; the "
+            "gate in the process is the enforcement point, and a benchmark that skips it "
+            "has neither."
+        )
+
+    #: Callees that constitute doing the work. A gate reached after one of these has already
+    #: let a model load or a device be touched.
+    #: `main` dispatches through `MEASURE[system]`, so the callee unparses to a subscript
+    #: rather than to a name -- matching only `measure_*` missed the one call that matters.
+    WORK = (
+        "MEASURE[",
+        "sweep_system",
+        "measure_baseline",
+        "measure_shipinfer",
+        "run_shipinfer",
+    )
+
+    def test_the_gate_is_called_before_the_work(self) -> None:
+        """The call has to precede the measurement, compared as CALLS in the entry function
+        rather than as text positions in the file.
+
+        Two drafts got that wrong in the two ways this repository spent a day on: "within N
+        characters of the top" pushed the gate ahead of `run_bench`'s own argv validation, so
+        a malformed command line raised a container error instead of its usage code; and
+        comparing the offset of `torch.cuda` tripped on an import above `main` -- a name
+        appearing is not a call happening, the hook's own defect.
+        """
+        for path in self._entry_points():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            entry = next(
+                (
+                    node
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name in {"main", "_child_main"}
+                ),
+                None,
+            )
+            assert entry is not None, f"{path.name} has an entry function this cannot find"
+            gate = [
+                node.lineno
+                for node in ast.walk(entry)
+                if isinstance(node, ast.Call) and "require_container" in ast.unparse(node.func)
+            ]
+            assert gate, f"{path.name}'s entry function does not call the gate"
+            work = [
+                node.lineno
+                for node in ast.walk(entry)
+                if isinstance(node, ast.Call)
+                and any(w in ast.unparse(node.func) for w in self.WORK)
+            ]
+            assert not [w for w in work if w < min(gate)], (
+                f"{path.name} calls the gate at line {min(gate)}, after work at "
+                f"{sorted(w for w in work if w < min(gate))}; an in-process gate has to run "
+                "before a device is touched"
+            )
 
 
 class TestEveryDeviceTierTestSitsUnderTheGate:
