@@ -544,6 +544,26 @@ def _is_shelling_out(func: ast.expr, bound: dict[str, str]) -> bool:
     return bool(_SHELLING_OUT_CALL.match(target))
 
 
+#: The one token that turns a blocked command into a question about it. Only the long form:
+#: `-h` is `--host` to some tools, and this list is matched against OUR blocked set today but
+#: has no reason to be the place a short-flag collision is discovered.
+HELP_FLAGS = frozenset({"--help"})
+
+
+def _is_help_query(args: list[str]) -> bool:
+    """Whether these arguments make the command print usage and exit.
+
+    `--help` short-circuits in argparse, typer/click and every runner in `BLOCKED_COMMANDS`,
+    so nothing is measured and no device is touched -- the same reading `nsys --version` got
+    in #179 and `build_engines.py --check` in #183: a question ABOUT a command is not a run
+    of it. Five ordinary spellings were refused without this, `shipinfer bench --help` among
+    them, which is how anyone finds out what the flag is called.
+
+    An EXACT token, never a prefix: `--help-me-run-this --cameras 50` is a run.
+    """
+    return any(arg in HELP_FLAGS for arg in args)
+
+
 def _blocked_word(commands: list[list[str]]) -> str | None:
     """The first of ``commands`` that runs something blocked, or None.
 
@@ -557,6 +577,8 @@ def _blocked_word(commands: list[list[str]]) -> str | None:
         if not tokens:
             continue
         exe, rest = tokens[0], tokens[1:]
+        if _is_help_query(rest):
+            continue
         base = exe.rsplit("/", 1)[-1]
         if base in BLOCKED_COMMANDS:
             if base in _TEST_RUNNERS and not _selects_device_tier(rest):
@@ -1012,6 +1034,11 @@ def verdict(command: str, cwd: str | None = None) -> str | None:
             continue
         exe, args = real_command(tokens)
         if exe is None:
+            continue
+        if _is_help_query(args):
+            # Before every check below it, because the refusals are spread over the executable,
+            # the subcommand, the `-m` module and the script's own imports -- and a help query
+            # is none of those things whichever branch would have caught it.
             continue
         indirect = _indirection(tokens)
         if indirect is not None:

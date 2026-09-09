@@ -24,6 +24,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -922,14 +923,83 @@ class TestADistributedLauncherIsDeviceWork:
         """
         assert refused(command) is None
 
-    def test_help_is_refused_the_way_trtexec_is(self) -> None:
-        """Stated rather than discovered: `torchrun --help` IS refused, and so are
-        `trtexec --help` and `polygraphy --help` on `main` -- `BLOCKED_COMMANDS` has no
-        inspection carve-out. `pytest --help` is allowed only because `_TEST_RUNNERS` gives
-        the offline tier one, and a distributed launcher has no offline tier."""
-        assert refused("torchrun --help") is not None
-        assert refused("trtexec --help") is not None
+    def test_help_is_a_question_and_not_a_run(self) -> None:
+        """THIS TEST ASSERTED THE OPPOSITE, and the change is deliberate.
+
+        It used to read "`BLOCKED_COMMANDS` has no inspection carve-out" -- a statement of the
+        status quo rather than an argument, and its one argument ("a distributed launcher has
+        no offline tier") is about `torchrun <script>` and not about `torchrun --help`, which
+        prints usage and exits. The hook already reads a query as inspection twice: `nsys
+        --version` (#179) and `build_engines.py --check` (#183).
+        """
+        assert refused("torchrun --help") is None
+        assert refused("trtexec --help") is None
         assert refused("pytest --help") is None
+        assert refused("torchrun --nproc_per_node=2 tests/runtime/test_native.py") is not None
+
+
+class TestAHelpQueryIsInspectionAndNotARun:
+    """`--help` short-circuits in argparse, typer/click and every runner on the list, so it
+    prints usage and exits: nothing measured, no device touched.
+
+    Five ordinary spellings were refused before this, and the one that mattered is
+    `shipinfer bench --help` -- which is how anyone finds out what the documented `--skew`
+    flag is actually called. A guard that blocks CHECKING the documentation is working against
+    the discipline it exists to serve.
+    """
+
+    ALLOWED: ClassVar[tuple[str, ...]] = (
+        "shipinfer bench --help",
+        "shipinfer serve --help",
+        "python -m shipinfer bench --help",
+        "python -m shipinfer serve --help",
+        "python scripts/build_engines.py --help",
+        "pytest -m gpu --help",
+        "shipinfer serve --http --port 8000 --help",
+        "timeout 60 shipinfer bench --help",
+        "torchrun --help",
+        "trtexec --help",
+    )
+
+    #: The same commands without the flag, so the carve-out is measured in BOTH directions --
+    #: four of #176's five rounds found a row loosened without noticing, because the evidence
+    #: listed only the rows that improved.
+    STILL_REFUSED: ClassVar[tuple[str, ...]] = (
+        "shipinfer bench person_embedder --cameras 50 --fps 20",
+        "shipinfer serve --http --port 8000",
+        "python -m shipinfer bench m --cameras 50",
+        "python scripts/build_engines.py --force",
+        "pytest -m gpu",
+        "torchrun --nproc_per_node=2 tests/runtime/test_native.py",
+    )
+
+    @pytest.mark.parametrize("command", ALLOWED)
+    def test_a_help_query_runs_anywhere(self, command: str) -> None:
+        assert refused(command) is None, command
+
+    @pytest.mark.parametrize("command", STILL_REFUSED)
+    def test_the_same_command_without_it_does_not(self, command: str) -> None:
+        assert refused(command) is not None, command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "shipinfer bench m --helpful --cameras 2",
+            "shipinfer bench m --cameras 50; shipinfer bench m --help",
+            "shipinfer bench --help && pytest -m gpu",
+            "echo --help; pytest -m gpu",
+        ],
+    )
+    def test_it_is_an_exact_token_in_the_segment_that_runs(self, command: str) -> None:
+        """A prefix would let `--helpful` through, and a whole-command scan would let a help
+        query in ONE segment excuse a run in another -- the mention-versus-invocation error
+        this file exists for, on the permissive side."""
+        assert refused(command) is not None, command
+
+    def test_only_the_long_form(self) -> None:
+        """`-h` is `--host` to some tools. This carve-out has no reason to be the place that
+        collision is discovered, so it takes the unambiguous spelling only."""
+        assert sorted(hook.HELP_FLAGS) == ["--help"]
 
 
 class TestAProfilerIsAWrapperAndNotABlockedName:
