@@ -111,6 +111,21 @@ dev = [
     "typer>=0.12",
     "rich>=13.7",
     "httpx>=0.27",               # TestClient transport for the HTTP facade
+    # AND THE FACADE ITSELF, because httpx alone cannot test it. MEASURED on ci.yml run
+    # 34344651408: 26 tests skipped there for `fastapi`/`uvicorn` and 16 for `cv2`, against 9
+    # skips in a local run -- so the KServe surface and the replay fixture writer were covered
+    # on developers' machines and on no machine that gates a merge. Same argument this file
+    # already makes for `grpcio` ("without these every proto test would skip there") and for
+    # `pillow`.
+    # THE THREE FLOORS BELOW MUST MATCH THE `server` EXTRA, and a test asserts it rather than
+    # a comment asking: `shipinfer[server]` would say it once, but that needs a pip newer than
+    # this box has to verify, and a pyproject CI cannot install reddens everything.
+    # Only the three: `video` would satisfy `cv2` too and bring `av` with it -- a package no
+    # test asks for, which would then first run in CI having never run on a developer's box.
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "anyio>=4.1",
+    "opencv-python-headless>=4.9",
     # `tests/launch/test_generated_floor.py` reads this file back to check the dependency
     # floors against the committed stubs. `tomllib` is stdlib from 3.11; on the 3.10 CI leg
     # the test would otherwise be skipped on the one axis most likely to resolve an old
