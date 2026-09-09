@@ -1455,7 +1455,7 @@ hook down, for when the operator asked to see something before it is executed.
       NUMBER rather than a question. DECIDED (V154): accept the under-report -- the generators'
       cost is measured per run, so a reader discounts it, and external RTSP would remove a cost
       we can now subtract while leaving the part that is ours untouched. Say so if you disagree.**
-      THE SPLIT, from #184's accounting (`scripts/host_cpu.py`, 50x20x70 s on GPUs 1/3/4/6 idle,
+      THE SPLIT, from #184's accounting (`scripts/host_cpu.py`, 50x20x70 s on five idle GPUs 1/3/4/5/6,
       two other tenants on the box):
         arm             events    bench cores   generator cores   total cores (of 48)
         nvdec (RTSP)    26 669       13.09           3.75              16.84
