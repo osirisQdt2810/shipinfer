@@ -1127,7 +1127,11 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 6 · The final goal (V49)
 
-- [ ] **NOT-GPU-BOUND-AT-FIVE-GPUS · opened 9 Sep, and it redirects where the next win is.**
+- [!] **NOT-GPU-BOUND-AT-FIVE-GPUS · MEASURED OUT, 9 Sep. OPERATOR: the RTSP arm under-reports
+      us by up to ~17% because the harness generates its own load in-container, and fixing that
+      is an infrastructure change (an RTSP source reachable from outside a rootless container
+      with no NAT). Accept the under-report, or is that worth doing?** Everything measurable
+      without that is done and below. Opened 9 Sep, and it redirects where the next win is.
       The route has been treated as GPU-limited all along and the two wins so far were GPU-side
       (the `output_stream` barrier, the intake's stream). `per_device_busy_pct` -- new, this
       item's enabler -- says that is no longer where the limit is. 50x20x70 s on FIVE IDLE GPUs
@@ -1167,13 +1171,34 @@ hook down, for when the operator asked to see something before it is executed.
       exactly what `PipelineSettings.queue_capacity`'s own docstring warns ("small on purpose:
       a deep queue in front of the pipeline converts a throughput problem into a latency one
       and then hides it"). That note is now measured rather than asserted.
-      SO THE EASY KNOB IS RULED OUT and the wall is host-side. What is NOT yet measured is
-      which host cost: the fifty camera actors, the two in-container RTSP servers, the 69
-      pipeline workers, or the reassembly. The cheap next cut is to drop the RTSP servers out
-      of the equation -- `--source replay` reads frames from disk with no server and no
-      per-camera GStreamer pipeline -- and compare occupancy at the same camera count. If
-      occupancy rises there, the servers and the decode threads are the cost; if it does not,
-      it is the workers or reassembly.
+      SO THE EASY KNOB IS RULED OUT and the wall is host-side. **THE NEXT CUT IS DONE TOO, and
+      it did not match either branch I predicted -- which is why it is worth reading.** Same
+      50x20x70 s, same five idle GPUs, `--source replay` (frames off disk, no RTSP server, no
+      per-camera GStreamer pipeline) against `--source nvdec`:
+                            nvdec      replay     change
+        frames_read        67 802      69 996   96.9% -> 100.0% of offered
+        events_complete    41 811      48 771     +16.6%
+        per GPU             119.5       139.3
+        queue_rejected     25 998      20 962     -19%
+        collector_timeouts     17           7
+        occupancy total %   475.6       464.1     -11.5 points
+      MORE THROUGHPUT WITH LESS MEASURED GPU TIME. I predicted occupancy would RISE if the host
+      were freed; it fell, and the reason is a property of my own new counter:
+      `InstanceStats::compute_us` is WALL TIME AROUND `execute()` (instance.cpp:187-194), so a
+      descheduled worker inflates it with the GPU doing nothing. Occupancy is therefore an
+      UPPER BOUND on GPU utilisation, and the real figure is lower than 68% of ceiling. That
+      makes "not GPU-bound" STRONGER, not weaker -- and it is now in the field's docstring so
+      nobody over-reads the number.
+      **AND PART OF THAT 16.6% IS A BENCHMARK ARTEFACT, NOT PRODUCT COST**, which matters for
+      `C1`: `cpp_bench_over_rtsp.sh` starts the two RTSP servers INSIDE THE SAME CONTAINER,
+      because the rootless daemon has no NAT and a second container cannot be reached. So the
+      run pays to GENERATE its own load. A real deployment has cameras on the network. The 16.6%
+      is therefore an upper bound on what our ingest path costs, split unknown between the
+      servers (ours to discount) and our own decode threads (ours to optimise), and separating
+      them needs an external generator this box's networking prevents.
+      WHAT IS LEFT, then, is not another knob but a choice about the harness: either accept that
+      the RTSP arm under-reports us by up to ~17%, or find a way to offer RTSP from outside the
+      container. Recorded rather than acted on, because the second is an infrastructure change.
       NOT A GPU PROBLEM, which is the redirection this item exists for: two wins in a row came
       from GPU-side fixes and a third one would be looking where the time is not.
       WHY IT MATTERS FOR `C1`: our events figure is depressed by host work the baseline does
