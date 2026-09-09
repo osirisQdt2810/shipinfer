@@ -1127,14 +1127,26 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 6 · The final goal (V49)
 
-- [ ] **PY-OFFLINE-FLAKE-SINK-DROP · one failure in one full-suite run, not yet explained.**
-      `tests/pipeline/test_runner.py::TestADroppedEventIsNotAPublishedOne::test_the_failure_reaches_the_metric_and_the_caller`
-      failed once while running the offline suite on #170's rebase. It is NOT #170's doing --
-      the revert-check ran both trees' full suites simultaneously and both were green (main
-      3690 passed, branch 3695 passed), and the test passed 5/5 alone. What makes it worth a
-      line rather than a shrug is the number: `wait_for` gives 10 s for three frames, so a
-      timeout is a stall, not slowness. Reproduce it under parallel contention the way #171's
-      flake was reproduced (that is the method that worked), then fix the stall or the test.
+- [~] **PY-OFFLINE-FLAKE-SINK-DROP · found, and it is THREE tests, not one. PR open.**
+      Not a stall: `wait_for(sink.failed == 3)` returned and the very next line read
+      `sink_failures` at **2.0**. A sink bumps its own counter INSIDE `emit`; the runner bumps
+      the `PipelineMetrics` counter after `emit` returns, so waiting on the first half and
+      asserting the second reads the pair mid-update. Reproduced 3 times in 132 runs of the
+      file under 16-way contention in the container -- and then, because a rare rate cannot
+      prove a fix (40/40 taught that), made deterministic: a plugin sleeping 50 ms inside
+      `Counter.inc` fails all three affected tests 5/5 before and passes all three 5/5 after.
+      Two of the three had never been seen failing; the widened window is what found them.
+      Fix: wait on the counter the test asserts on. Branch
+      `fix/pipeline-tests-wait-on-the-metric`.
+
+- [ ] **HOOK-REFUSES-A-LINTER-ON-A-TEST-FILE · a false refusal, twice in one session.**
+      `require_container.py`'s `script_touches_device` scans EVERY `.py` argument of a
+      `python` invocation, so `python scripts/hooks/check_docs.py tests/pipeline/test_runner.py`
+      is refused because the *data* file imports torch. The linter touches no accelerator. It
+      costs more than a retry: a refusal kills the whole `Bash` call, so the edits chained
+      before it never run -- which is how a heredoc edit was silently lost once already.
+      Fix: inspect only the program argument (the first non-flag `.py`, or `-m`'s module),
+      not the operands. Keep the deny-list's real teeth; this is over-blocking, not a bypass.
 
 - [x] **OFFLINE-TIER-HAS-A-FLAKY-GATE · FIXED, MERGED AS #171 (9 Sep).**
       #170's `cpp-offline` went red on `test_join_on_unwind`, which my diff CANNOT reach: that
