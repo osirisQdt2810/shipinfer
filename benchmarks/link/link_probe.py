@@ -91,6 +91,11 @@ def topo() -> str:
 
 
 def main() -> None:
+    from shipinfer.runtime import containment
+
+    # A measurement, so the container rule applies (CLAUDE.md). The gate lives in the process
+    # that would do the work, because a deny-list over command text cannot be made sound.
+    containment.require_container("the GPU link probe")
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--pairs", default="0-1,3-4,0-3,1-3,2-4,3-5,4-6")
     ap.add_argument("--iters", type=int, default=30)
