@@ -1749,8 +1749,30 @@ hook down, for when the operator asked to see something before it is executed.
       contend with them and measure noise.
       Suite 4098 passed, C++ offline tier all green (18 binaries).
 
-- [~] **WHICH-THREADS-SPEND-THE-HOST-CPU · the question `NOT-GPU-BOUND-AT-FIVE-GPUS` left
-      open, and the reason #198 and #200 exist.** That item measured the wall as host CPU --
+- [~] **WHICH-THREADS-SPEND-THE-HOST-CPU · ANSWERED, PR #201 (9 Sep), and the leading
+      hypothesis was WRONG.** Measured in the container at the design load -- 50x20x70 s,
+      RTSP -> NVDEC, GPUs 1/3/4/5/6 idle, 99.6% of the process's CPU accounted:
+        class                       cpu-s  threads  share  per thread
+        model instances (mdl-*)     577.6       35  51.6%       16.5
+        pipeline workers (pipe-*)   221.6      115  19.8%        1.9
+        gstreamer's own             211.1      203  18.9%        1.0
+        camera actors (cam-*)       100.5       51   9.0%        2.0
+        everything else               8.6       14   0.8%        0.6
+      `NOT-GPU-BOUND-AT-FIVE-GPUS` guessed "the worker pool stalls in bursts", i.e. the
+      PIPELINE WORKERS. They are 1.9 CPU-s each; the MODEL INSTANCE threads are 16.5 each,
+      nearly nine times more, and half the total. **The ten heaviest individual threads are all
+      ten `ship_segmenter` instances at 21-23 CPU-s**, ahead of the detector's 17 -- which is
+      where an optimisation should look, and it is not where two rounds of guessing pointed.
+      TWO MORE THINGS IT SETTLES: gstreamer's OWN threads are 18.9% (203 of them --
+      `rtpjitterbuffer`, `task*`, `rtpsession`, `timer`, `pool`), which is the "cost of being a
+      real camera" that item described in words and is SEPARATE from the RTSP servers' 161
+      CPU-s it already discounts; and it is NOT one hot device -- the five devices' instance
+      classes are within a few percent, so the load balance this project exists to fix is not
+      what spends the CPU.
+      WHAT A `ModelInstance` THREAD DOES WITH 16.5 CPU-SECONDS is the next question, and it is
+      a new one rather than a guess: its loop batches, submits to TensorRT and waits, so a
+      spinning wait would look exactly like this. NOT investigated here.
+      ORIGINAL: That item measured the wall as host CPU --
       38.4 ms of bench CPU per event on the RTSP arm, GPUs at 68% of ceiling, a shed that
       bursts rather than saturates -- and named its leading hypothesis without testing it:
       "fifty camera actors plus two RTSP servers plus 69 pipeline workers share 48 cores, so
