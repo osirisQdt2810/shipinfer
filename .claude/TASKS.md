@@ -1202,8 +1202,12 @@ hook down, for when the operator asked to see something before it is executed.
       heredoc and `-c` scans catch them for free. `accelerate` takes a subcommand, so it is
       judged the way `shipinfer` already is (`launch`/`test`/`estimate-memory` refused,
       `config`/`env` allowed -- refusing those is friction with no integrity gain). Ten rows
-      closed, none loosened. `torchrun --help` IS refused, exactly as `trtexec --help` already
-      is; asserted rather than discovered.
+      closed (eleven, counted from the matrix rather than remembered), none loosened.
+      `torchrun --help` IS refused, exactly as `trtexec --help` already is; asserted rather
+      than discovered. BOTH PR bodies are written and their test names grepped against their
+      own diffs, so they open the moment #176 merges -- they cannot open before it, because all
+      three branches edit `require_container.py` and a PR based on `main` would show #176's
+      diff too.
 
 - [x] **OCCUPANCY-INCLUDES-THE-WARMUP-WINDOW · MERGED AS #175 (9 Sep), first pass.**
       `compute_us` is cumulative and both readers divide by the full `--seconds`, while
