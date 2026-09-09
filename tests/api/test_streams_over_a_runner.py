@@ -347,13 +347,37 @@ class TestDeletingAStream:
             assert response.status_code == 200
             assert response.json() == {"clean": True}
 
+            # doc: long why the count is read after the pool drains and not after the DELETE
+            # THE JOIN BOUNDS THE PRODUCER, NOT THE SINK'S COUNTER. `clean=True` above is the
+            # ingest manager saying it *joined* the actor thread -- but the actor publishes
+            # synchronously into the fair lane, and `emitted` only ticks when a worker
+            # finishes the walk, so whatever is queued when the DELETE returns is still to
+            # come. A count read in the same breath ticks again: `assert 4 == 3`, which is how
+            # this reddened main the first time the file ran on CI (#186 stopped `tests/api/`
+            # skipping there for want of `fastapi`).
+            #
+            # SO THE POOL IS DRAINED FIRST, and the equality is kept. A tolerance would not
+            # do: the residue is bounded by the lane -- `queue_capacity=64, workers=1` here --
+            # so a number taken from one run is a bet on how long a shared runner stalls.
+            #
+            # ON THE MONOTONE COUNTERS AND NOT ON `in_flight`. That gauge is queue depth plus
+            # the workers' slots, and `_work` publishes its slot AFTER the dequeue: between
+            # `get_batch` returning and `inflight[slot] = batch` an item is in neither term
+            # and the gauge reads zero with a frame genuinely in flight. `walked` rises after
+            # the output element publishes and `accepted` is already final (the actor is
+            # joined), so their equality has no window that reads true early. The runner's
+            # own metrics docstring names this pair: "accepted 6, walked 6". The equality
+            # assumes this fixture's defaults -- `overflow_policy: reject` (a full lane
+            # charges `dropped`, never `accepted`) and `frame_deadline_ms: 0` (nothing
+            # expires) -- so a fixture that changed either would stall here instead, which
+            # is what the attached stats dict is for.
+            assert until(
+                lambda: (it := streamed.runner.stats()["items"])["walked"] == it["accepted"]
+            ), streamed.runner.stats()["items"]
             settled = streamed.sink().emitted
-            # The sleep is not what makes this deterministic, and it should not be read as
-            # one: `clean=True` above is the ingest manager saying it *joined* the actor
-            # thread, so nothing can publish after it and the assertion holds with no pause at
-            # all. What the pause is for is the opposite case -- an implementation that
-            # signalled the decoder and returned without waiting would need somewhere to be
-            # caught, and a check taken in the same breath as the DELETE would not catch it.
+            # The pause still earns its place, and it is the ORIGINAL reason: an
+            # implementation that signalled the decoder and returned without waiting has to
+            # have somewhere to be caught, and a live decoder adds ~25 frames here.
             time.sleep(0.05)
             assert streamed.sink().emitted == settled, "the decoder is still publishing"
             assert client.get("/streams").json() == {"streams": []}
