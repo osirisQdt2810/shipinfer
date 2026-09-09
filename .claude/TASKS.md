@@ -1682,10 +1682,19 @@ hook down, for when the operator asked to see something before it is executed.
       was host-bound, so "per second" and "per CPU-second" are not the same claim; (3) two runs
       rather than one sitting, n=1 each, on a box with other tenants and a measured 36.7% spread
       on events, so re-run interleaved before quoting a third digit.
-      OWED NEXT, and it is small: our PYTHON arm has no `command_cpu_s` -- #184 wrapped the C++
-      one and the system tier runs our plane in-process, so its own accounting is
-      `RUSAGE_SELF` plus `RUSAGE_CHILDREN` minus the baseline's. Then `compare()` can print the
-      CPU column for both systems instead of a reader assembling it from two logs.
+      THE OWED HALF IS DONE: PR #191 gives OUR arm the same line, from a shared
+      `harness/hostcpu.py` with TWO readings -- `children_since` for the baseline (a child the
+      harness supervises) and `since` (self AND children) for ours, because `single` runs the
+      plane in this process while the sharded topologies run it in children with the parent
+      serving RTSP. Taken in `measure_shipinfer`, the one dispatch point for both.
+      **AND A SIMULTANEOUS PAIR IN ONE LOG IS NOT ACHIEVABLE ON THIS BOX** -- tried three ways
+      and all three of the harness's own guards fired correctly: at 12x10 and 8x5 the
+      baseline's concurrent load starved our in-process generator below the offer gate, and at
+      a load small enough to avoid that the baseline logs too few samples to bound a growth
+      rate; `--topology fleet` at 50x20 failed all five shards the same way. The harness says
+      why in its own words -- "run one at a time to keep the GPUs uncontended". So INTERLEAVED
+      is not a convenience here, it is the only method that works, and `compare()`'s CPU column
+      would have nothing to fill both halves of in one run.
 
 - [!] **C1-WHAT-IS-THE-5x-AGAINST? · OPERATOR, and it is one question with three measured
       answers. THE CURRENT NUMBERS ARE HERE; everything below this block is the chronology of
