@@ -467,9 +467,10 @@ def _print_device_table(
     1 added rows to the child's table only; round 2 shared this function so the formatting
     could not diverge -- and round 3 still dropped occupancy, because a shared printer with
     three positional tables is still supplied one call site at a time. Now the caller hands
-    over the whole bag keyed by `DEVICE_TABLES`: the sharded parent passes its aggregate, the
-    single process passes `shipinfer.device_tables(result)`, and a fourth table reaches both
-    outputs without either call site changing.
+    over one bag keyed by `DEVICE_TABLES` -- `device_tables(result)` from a single process and
+    `device_tables_of(agg)` from the sharded parent, both built by walking that tuple rather
+    than by naming keys, so a fourth table reaches both outputs without either call site
+    changing.
 
     ONE function and not two, because there are two of these tables (a shard child's own and
     the sharded parent's aggregate) and round 1 of this change added rows to the child's
@@ -501,7 +502,11 @@ def _print_device_table(
         busy = tables.get("per_device_compute_us", {}).get(model, {})
         if busy and seconds > 0:
             spread = "  ".join(
-                f"{d}={us / (seconds * 1e6) * 100:.0f}%" for d, us in sorted(busy.items())
+                # One decimal, matching `cli/bench.cpp`'s `setprecision(1)`: at `:.0f` a
+                # light-load run's 3.5/3.6/3.7% came out as three identical cells and
+                # anything under 0.5% read as "idle" rather than "lightly loaded".
+                f"{d}={us / (seconds * 1e6) * 100:.1f}%"
+                for d, us in sorted(busy.items())
             )
             print(f"  {'  (busy)':<18} {spread}")
 
@@ -607,7 +612,7 @@ def measure_sharded(
             "\nper-device execution (the balancing evidence; under `service` a request that",
             "left its shard is counted where it ran):",
         ],
-        agg,
+        shipinfer.device_tables_of(agg),
         cfg.seconds,
     )
     detail = "; ".join(

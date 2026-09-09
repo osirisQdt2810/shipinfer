@@ -22,8 +22,10 @@ The split is either the launcher's plan (LPT by offered fps — balanced by cons
 is B doing its job) or an explicit `shard_cameras` — a crowded shard next to quiet ones, which
 is the shape B cannot fix and C exists for. Both go through the same code; the split is data.
 
-Every `shipinfer` import is inside a function, like the rest of the harness: the config,
-analysis and sampler modules stay importable with no torch, and so does this one.
+Every *product* `shipinfer` import is inside a function, like the rest of the harness, and the
+one module-scope `benchmarks.harness.shipinfer` import reaches only `shipinfer.core.metrics`
+through `histograms`: the config, analysis and sampler modules stay importable with no torch,
+and so does this one.
 """
 
 from __future__ import annotations

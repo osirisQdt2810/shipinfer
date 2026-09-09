@@ -529,6 +529,10 @@ class ModelInstance:
             # limiter that is shaping a burst from one that is configured and never reached.
             "rate_limit_waits": self._rate_limit_waits,
             "ewma_latency_us": round(self._ewma_latency_us, 1),
+            # Cumulative over the WHOLE run, warm-up included, while the throughput printed
+            # beside it is differenced against an at-warmup snapshot. So a percentage built
+            # from this understates the steady one -- `InstanceStats` in
+            # `csrc/shipinfer/engine/instance.h` carries the size of that and the ledger item.
             "compute_us": round(self._executed_compute_us, 1),
             "backend": self._backend.stats(),
         }

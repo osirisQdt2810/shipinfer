@@ -178,6 +178,16 @@ def device_tables(result: ShipInferResult) -> dict[str, dict[str, dict[str, floa
     return {name: getattr(result, name) for name in DEVICE_TABLES}
 
 
+def device_tables_of(mapping: Mapping[str, Any]) -> dict[str, dict[str, dict[str, float]]]:
+    """The same tables out of a shard aggregate, which carries other keys beside them.
+
+    Driven off `DEVICE_TABLES` and not spelled out, so this is not the key-picking the printer
+    stopped doing -- a fourth table arrives here without an edit. What it buys is an honest
+    signature at the call site: the printer's parameter really is only these tables.
+    """
+    return {name: mapping.get(name, {}) for name in DEVICE_TABLES}
+
+
 def _cameras(config: BenchConfig) -> list[dict[str, Any]]:
     """The cameras this process drives: all of them, or — for a shard child — its slice.
 

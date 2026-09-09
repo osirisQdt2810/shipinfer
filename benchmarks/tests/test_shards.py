@@ -421,7 +421,7 @@ class TestEveryPerDeviceTableCrossesTheShardBoundary:
         run_bench.measure_sharded(_config(seconds=70.0), Path("/nonexistent"))
 
         out = capsys.readouterr().out
-        assert "(busy)" in out and "cuda:3=50%" in out, out
+        assert "(busy)" in out and "cuda:3=50.0%" in out, out
 
 
 class TestOccupancyIsPrintedAsAPercentage:
@@ -445,7 +445,9 @@ class TestOccupancyIsPrintedAsAPercentage:
 
     def test_a_busy_line_appears_with_the_percentage(self, capsys) -> None:
         out = self._printed(capsys, 70.0, {"m": {"cuda:0": 49_000_000.0}})
-        assert any("(busy)" in line and "70%" in line for line in out), out
+        # One decimal, matching `cli/bench.cpp`: at `:.0f` a light-load run's 3.5/3.6/3.7%
+        # printed as three identical cells and anything under 0.5% read as "idle".
+        assert any("(busy)" in line and "70.0%" in line for line in out), out
 
     def test_no_wall_clock_means_no_busy_line(self, capsys) -> None:
         """Rather than print microseconds nobody can read, or divide by a zero."""

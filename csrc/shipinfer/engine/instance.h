@@ -38,6 +38,7 @@ namespace shipinfer {
         //: hardware spent -- check this before reading low occupancy as "the GPUs are idle".
         uint64_t failed_batches = 0;
         double ewma_latency_us = 0.0;
+        // doc: long the unit slip this line invites costs a roadmap decision, not a red run
         //: TOTAL execute time, summed rather than smoothed. `ewma_latency_us` answers "how
         //: loaded is this instance now", which is what a placement policy wants and what a
         //: profile cannot use: an EWMA times a batch count is not a total. Divided by the
@@ -51,6 +52,13 @@ namespace shipinfer {
         //: 16.6% MORE events with 11.5 points LESS occupancy, because the host was freer and
         //: `execute()` returned sooner. Read it as "not the bottleneck" with confidence and
         //: as "this much GPU" only with that caveat.
+        //:
+        //: OVER THE WHOLE WINDOW INCLUDING WARM-UP, unlike the throughput printed beside it:
+        //: this is cumulative and the readers divide by `--seconds`, while `read`/`emitted`/
+        //: `requests` are differenced against an at-warmup snapshot. Occupancy is lower while
+        //: the pipeline ramps, so the printed percentage UNDERSTATES the steady one -- the
+        //: only direction here that is not conservative. Ledger:
+        //: `OCCUPANCY-INCLUDES-THE-WARMUP-WINDOW`.
         double compute_us = 0.0;
     };
 
