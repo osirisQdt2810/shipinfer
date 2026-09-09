@@ -1766,7 +1766,20 @@ hook down, for when the operator asked to see something before it is executed.
       THE BOX IS FREE ENOUGH TO MEASURE, checked 9 Sep: GPUs 1/3/4/5/6 are at 15 MiB, which is
       the same five-GPU set every figure in `benchmarks/RESULTS.md` was taken on.
 
-- [~] **PYTHON-THREADS-ARE-UNNAMED-TO-THE-KERNEL · PR #200 (9 Sep) closes the seam.**
+- [x] **PYTHON-THREADS-ARE-UNNAMED-TO-THE-KERNEL · MERGED as #200 (9 Sep), APPROVE on round 3.
+      The seam is closed on both planes.**
+      ROUND 2 FOUND TWO THREADS I HAD MISSED AND, WORSE, A RATCHET THAT REPORTED THEM AS
+      COVERED. `ResultReader` and `RingIngress` (ADR-016's control channel, started by
+      `spill/mesh.py`) are `threading.Thread` SUBCLASSES, and `ast.Call` cannot see a
+      `ClassDef` -- so both still reported `python` to the kernel while
+      `test_every_python_thread_goes_through_the_factory` passed with a docstring saying
+      otherwise. A ratchet that keeps passing for a whole SPELLING records the property as
+      enforced when it is not, which is worse than no test. Both now name themselves as `run`'s
+      first statement (the AST checks FIRST, not merely present) and the subclass scan is
+      itself guarded. `RingIngress` was the one that mattered: a round-robin sweep over every
+      inbound lane with a zero timeout is host CPU by construction, and it was the thread the
+      whole exercise most wanted attributed. The plane has EIGHT threads; round 1's body said
+      six. Suite 4108 passed.
       `core/thread_name.py` mirrors the header: stdlib only, `pthread_setname_np` through
       `ctypes`, and `instance_thread_label` returns the SAME fifteen bytes as the C++ function
       for the same (model, device, index), so one `top -H` reads alike on both planes. Six call
