@@ -1687,7 +1687,7 @@ hook down, for when the operator asked to see something before it is executed.
       needs the gst image: `shipinfer.runtime.native` imports torch first, and torch's bundled
       libcudart satisfies `_C`'s link. Same mechanism, opposite outcome, one import apart.
 
-- [ ] **A-LAUNCHER-POINTED-AT-AN-ABSENT-SCRIPT-IS-ALLOWED · found 9 Sep while checking a
+- [~] **A-LAUNCHER-POINTED-AT-AN-ABSENT-SCRIPT-IS-ALLOWED · found 9 Sep while checking a
       review finding, and it is PRE-EXISTING on main.** `nsys profile python
       -mtorch.distributed.run --nproc_per_node=2 train.py` is allowed, with and without a
       `--help`, because `train.py` does not exist so nothing imports a device stack and the
@@ -1717,9 +1717,16 @@ hook down, for when the operator asked to see something before it is executed.
       It is the same rule as rounds 1 and 5 -- resolve the program to one name before judging
       it -- applied to a third place. A launcher with a script operand is device work whether
       or not the operand resolves, because it forks before it discovers the file is missing.
-      SEQUENCED behind #192, which owns `require_container.py` -- one file, one PR at a time.
+      UNBLOCKED 9 Sep: #192 merged (d1b808c), so `require_container.py` is free.
 
-- [~] **A-HELP-QUERY-WAS-REFUSED-AS-A-RUN · PR #192, found by hitting it.**
+- [x] **A-HELP-QUERY-WAS-REFUSED-AS-A-RUN · MERGED as #192 (d1b808c, 9 Sep) after EIGHT
+      review rounds, seven of which found a real `main=DENY -> HEAD=ALLOW` row.** APPROVE on
+      round 8. The landed rule: a `--help` query is inspection when the flag is the running
+      program's own (`_asks_for_help`) AND that program is KNOWN to answer for itself
+      (`answers_for_itself` -- `HELP_AWARE`, or its `-m` module when the program is an
+      interpreter). No source is read. The allow delta against main is EIGHT rows, every one a
+      name on that list; `python scripts/build_engines.py --help`, the row the PR was opened
+      for, refuses. Suite 4065 passed.
       `python -m shipinfer bench --help` was refused while I was checking the CLI against
       CLAUDE.md's description of it -- which is how anyone finds out what the documented
       `--skew` flag is called. **A guard that blocks CHECKING the documentation works against
