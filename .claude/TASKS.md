@@ -1711,6 +1711,28 @@ hook down, for when the operator asked to see something before it is executed.
       direction (a false refusal costs a sentence; a false allow costs a host CUDA context).
       Undocumented, it looks like the bug `_module_at` exists to prevent.
 
+- [ ] **TRACK-ELEMENT-SPLITS-ONE-IDENTITY-ABOUT-1-IN-100 · MEASURED 9 Sep, pre-existing, and
+      NOT mine.** `tests/topology/test_track_element.py::TestTrackOverTheRunner::
+      test_every_frame_reaches_the_sink_with_its_tag_and_its_tracks` failed once in a
+      full-suite run: `assert 2 == 1 ... where 2 = len({166, 167})` on "one stationary box
+      across four frames is one identity". Two CONSECUTIVE ids, so the tracker started a
+      second identity for a box that never moved.
+      THE RATE, measured rather than guessed, because a 1% flake in the offline tier gates
+      every merge: **1 failure in ~110 runs**, and it is not branch-dependent -- 80 clean runs
+      on `main` (30 isolated, 30 whole-file, 20 isolated under eight spinners of load) against
+      one failure in the branch's full suite and one in 15 isolated, then 30/30 clean on that
+      same branch. So a first read of "14/15 on the branch, 15/15 on main" was luck in both
+      directions; the honest figure is ~1% everywhere.
+      HYPOTHESIS, unproven: the element's config is `min_hits: 1, max_age: 3`, and the test
+      drives four frames through a RUNNER's worker pool, so a frame arriving late enough (or
+      out of order) opens a gap past `max_age` and the next detection is a new tracklet. The
+      test file's own docstring names out-of-order frames as one of the three failures it
+      exists to guard, which makes this the guard firing rather than a bad test.
+      WHY NOT FIXED HERE: it is a different feature from thread naming, and a tracker/runner
+      ordering race deserves its own diagnosis rather than a timeout bump. The ids being 166
+      and 167 also says the counter is process-wide, so the reproduction has to run the file
+      rather than the test.
+
 - [x] **THE-MEASURED-COMPARISON-WAS-NOT-WRITTEN-DOWN · MERGED as #196 (9 Sep), APPROVE.** The project's
       headline claim has been measured on both arms four ways, and none of it was anywhere a
       person reads: `benchmarks/README.md` is 207 lines about HOW to run the harness and
