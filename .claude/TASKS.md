@@ -1261,7 +1261,7 @@ hook down, for when the operator asked to see something before it is executed.
       METHOD, for whoever measures next: interleave the arms, three pairs minimum, and quote
       the pairwise ratios rather than the means -- the means hid the reversal here.
 
-- [~] **GSTREAMER-RTSP-CANNOT-FINISH-AT-THE-DESIGN-LOAD · PR #185. CORRECTED: this is the
+- [x] **GSTREAMER-RTSP-CANNOT-FINISH-AT-THE-DESIGN-LOAD · MERGED as #185 (fbab05b, 9 Sep) after one review round (a real data race in the hoisted read). CORRECTED: this is the
       HOST-DECODE arm, not the mandated route -- `sources/nvdec.h` says in its FIRST LINE that
       NVDEC into VRAM is V156's route, and `PHASE-D-NV12` is closed. I had it backwards in the
       first draft of #185 and in this item; the fix's value is unchanged, because any camera
