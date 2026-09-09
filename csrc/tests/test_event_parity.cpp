@@ -24,6 +24,7 @@
 #include "shipinfer/core/types.h"
 #include "tests/event_scenario.h"
 #include "tests/parity_files.h"
+#include "tests/temp_path.h"
 
 namespace {
 
@@ -118,7 +119,7 @@ namespace {
     }
 
     void test_a_malformed_scenario_is_refused_naming_the_line() {
-        const std::string path = "/tmp/shipinfer_event_parity_probe.scn";
+        const std::string path = tests::temp_path("event-parity-probe");
         {
             std::ofstream out(path);
             out << "scenario bad\ncamera cam0\nsprint cam0\n";

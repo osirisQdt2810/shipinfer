@@ -33,6 +33,7 @@
 #include "tests/parity_scenario.h"
 #include "tests/parity_trace.h"
 #include "tests/scripted_source.h"
+#include "tests/temp_path.h"
 
 namespace {
 
@@ -196,7 +197,7 @@ namespace {
     }
 
     void test_a_malformed_scenario_is_refused_naming_the_line() {
-        const std::string path = "/tmp/shipinfer_parity_malformed.scn";
+        const std::string path = tests::temp_path("parity-malformed");
         write_file(
             path,
             "scenario bad\nrecords_min 1\nempty_read_sleep_ms 0\nreconnect_initial_ms 2\n"
@@ -216,7 +217,7 @@ namespace {
     }
 
     void test_a_camera_that_never_finishes_is_refused() {
-        const std::string path = "/tmp/shipinfer_parity_endless.scn";
+        const std::string path = tests::temp_path("parity-endless");
         write_file(path,
                    "scenario endless\nrecords_min 1\nempty_read_sleep_ms 0\n"
                    "reconnect_initial_ms 2\nreconnect_max_ms 8\nreconnect_factor 2.0\n"
