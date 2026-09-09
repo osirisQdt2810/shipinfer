@@ -71,6 +71,13 @@ Enforced in two places, and the split matters:
   cannot be, and review found nine ordinary spellings past it — `( pytest -m gpu )`,
   `eval "..."`, `coverage run -m pytest`, `echo pytest | sh`. Fix bypasses when you find
   them, but do not add a rule that only the hook enforces.
+- **Loosening it is not the cheap direction, and "advisory" is why that is easy to misread**
+  (#192, five review rounds). `containment.py` covers the tiers it sees — pytest's conftest,
+  `serve`, `bench` — and **nothing** covers an ad-hoc `python -c "import torch; …"`, a
+  parser-less probe script, or `csrc/build/bench --cameras 50`, all of which the hook alone
+  gates. So a false refusal costs a sentence in a report; a false *allow* costs a host CUDA
+  context. Write an exception as **evidence that a command is safe**, never as "unless it
+  looks unsafe": every draft of the second shape needed another hole found for it.
 
 Per-command override `SHIPINFER_ALLOW_HOST_RUN=1`, only when the operator has said so, and
 say in the report that you used it. There is no session-wide switch: "I turned it off an hour
