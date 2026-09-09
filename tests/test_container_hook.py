@@ -894,6 +894,12 @@ class TestADistributedLauncherIsDeviceWork:
             "nsys profile python -mtorch.distributed.run --nproc_per_node=2 train.py",
             "python -m torch.distributed.run --nproc_per_node=2 train.py --help",
             'bash -c "python -m deepspeed --num_gpus 2 train.py"',
+            "python -m accelerate test",
+            # ANY `-m` value, not the first: the statement beside this rule already carries
+            # that comment for `coverage run -m pytest -m gpu`, and the first draft of this
+            # one read only `_module_argument` -- so the launcher hid one module in.
+            "python -m coverage run -m deepspeed --num_gpus 2 train.py",
+            "python -m cProfile -m torch.distributed.run --nproc_per_node=2 t.py",
         ],
     )
     def test_the_module_spelling_is_the_same_program(self, command: str) -> None:
@@ -908,10 +914,13 @@ class TestADistributedLauncherIsDeviceWork:
         assert refused(command) is not None, command
 
     def test_the_module_spelling_inside_a_heredoc_too(self) -> None:
-        """The lesson from #192's rounds 5-7, applied in the commit that fixes the first site:
-        `_module_argument` has more than one consumer, so the quoted path gets it as well."""
-        body = 'import subprocess\nsubprocess.run("python -m deepspeed --num_gpus 2 t.py", shell=True)'
-        assert refused("python - <<'EOF'\n" + body + "\nEOF") is not None
+        """Two consumers, one reading. #192 spent three rounds finding `_module_at`'s consumers
+        one at a time, so both got the rule here -- and then review found that both had been
+        given a reading this file documents as insufficient, hence the nested row below."""
+        plain = 'import subprocess\nsubprocess.run("python -m deepspeed --num_gpus 2 t.py", shell=True)'
+        nested = plain.replace("python -m deepspeed", "python -m coverage run -m deepspeed")
+        assert refused("python - <<'EOF'\n" + plain + "\nEOF") is not None
+        assert refused("python - <<'EOF'\n" + nested + "\nEOF") is not None
 
     @pytest.mark.parametrize(
         "command",
@@ -937,8 +946,15 @@ class TestADistributedLauncherIsDeviceWork:
     def test_the_accelerate_subcommands_that_only_read(self, sub: str) -> None:
         """`config` and `env` read and print. Refusing them would be friction with no
         integrity gain, which this module's own docstring says is how a hook gets switched
-        off -- the same reason `import torch; print(torch.__version__)` is allowed."""
+        off -- the same reason `import torch; print(torch.__version__)` is allowed.
+
+        BOTH SPELLINGS, because the module rule beside it once refused these: `accelerate` is
+        absent from `BLOCKED_COMMANDS` deliberately, so an unconditional `python -m accelerate`
+        deny was STRICTER than the console command it mirrors -- a false positive this file had
+        already ruled on, arriving through the other door.
+        """
         assert refused(f"accelerate {sub}") is None
+        assert refused(f"python -m accelerate {sub}") is None
 
     @pytest.mark.parametrize(
         "command",

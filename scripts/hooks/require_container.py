@@ -250,6 +250,22 @@ def _device_marker(args: list[str]) -> str:
     return f"-m {marker!r}" if marker else ""
 
 
+def _marker_positions(args: list[str]) -> list[tuple[int, str]]:
+    """Every ``-m`` value with the index of the token that FOLLOWS it, in either spelling.
+
+    The `(index of the next operand, name)` shape `_module_at` already uses, because a caller
+    that must read a subcommand needs to know where the value sat: `python -m accelerate
+    launch` is device work and `python -m accelerate env` is not.
+    """
+    found: list[tuple[int, str]] = []
+    for index, token in enumerate(args):
+        if token == "-m":
+            found.append((index + 2, args[index + 1] if index + 1 < len(args) else ""))
+        elif token.startswith("-m") and len(token) > 2 and not token.startswith("--"):
+            found.append((index + 1, token[2:]))
+    return found
+
+
 def _marker_expressions(args: list[str]) -> list[str]:
     """Every ``-m`` value in the argv, in either spelling.
 
@@ -257,13 +273,7 @@ def _marker_expressions(args: list[str]) -> list[str]:
     module and pytest's marker expression. Reading only the first found ``pytest`` and
     concluded the run was offline, so the device tier walked through.
     """
-    found: list[str] = []
-    for index, token in enumerate(args):
-        if token == "-m":
-            found.append(args[index + 1] if index + 1 < len(args) else "")
-        elif token.startswith("-m") and len(token) > 2 and not token.startswith("--"):
-            found.append(token[2:])
-    return found
+    return [value for _index, value in _marker_positions(args)]
 
 
 def _marker_expression(args: list[str]) -> str | None:
@@ -319,17 +329,30 @@ def _module_argument(args: list[str]) -> str | None:
     return None if found is None else found[1]
 
 
+# doc: long the three readings this took, one per review finding
 def _launcher_module(args: list[str]) -> str | None:
     """The distributed launcher a `-m` names, or None.
 
     `torchrun` is refused by NAME, and `python -m torch.distributed.run` is the same program:
     the module spelling was judged by nobody, so `python -m deepspeed --num_gpus 2 train.py`
-    reached a fork of device workers whenever the operand happened to be unreadable. Same
-    reasoning as the `root == "shipinfer"` case in `verdict`, on a different table. Unlike
-    `BLOCKED_MODULES` there is no offline tier to exempt -- a launcher has one mode.
+    reached a fork of device workers whenever the operand happened to be unreadable.
+
+    EVERY `-m` value, which is what `_marker_positions` is for -- `python -m coverage run -m
+    deepspeed` names `coverage` first, the hole the statement above this one's caller already
+    documents. And `accelerate` is judged by its SUBCOMMAND, because unlike the other four it
+    is absent from `BLOCKED_COMMANDS` on purpose: `env` and `config` read and print, the
+    console spelling allows them, and an unconditional module rule would be stricter than the
+    command it mirrors. Unlike `BLOCKED_MODULES` there is no offline tier to exempt.
     """
-    module = _module_argument(args)
-    return module if module in DISTRIBUTED_LAUNCHERS else None
+    for after, module in _marker_positions(args):
+        if module not in DISTRIBUTED_LAUNCHERS:
+            continue
+        if module != "accelerate":
+            return module
+        sub = next((a for a in args[after:] if not a.startswith("-")), None)
+        if sub in BLOCKED_ACCELERATE_SUBCOMMANDS:
+            return module
+    return None
 
 
 def _is_containerised(tokens: list[str]) -> bool:
@@ -579,9 +602,11 @@ HELP_AWARE = frozenset({"pytest", "py.test", "trtexec", "polygraphy", "shipinfer
 
 # doc: long why these get no help carve-out, and it is a measured hole rather than caution
 #: DISTRIBUTED LAUNCHERS, and the set serves TWO rules because both follow from what they are.
-#: (1) They fork device workers, one host CUDA context each -- so `BLOCKED_COMMANDS` refuses
-#: their console-script names and `_launcher_module` refuses the `-m` spelling of the same
-#: program. (2) THEY PASS THEIR TAIL THROUGH. `torchrun` and `deepspeed` declare the script's
+#: (1) They fork device workers, one host CUDA context each -- so their console names are
+#: refused (`BLOCKED_COMMANDS`, except `accelerate`, which is judged by
+#: `BLOCKED_ACCELERATE_SUBCOMMANDS` because `env` and `config` only read) and
+#: `_launcher_module` refuses the `-m` spelling of the same program by the same rule.
+#: (2) THEY PASS THEIR TAIL THROUGH. `torchrun` and `deepspeed` declare the script's
 #: arguments as `nargs=argparse.REMAINDER`, so every token after the script operand -- `--help`
 #: included -- is collected as the SCRIPT's and never reaches the launcher's own parser. The
 #: launcher then forks its workers, one host CUDA context each, which is what its
@@ -657,12 +682,12 @@ def _blocked_word(commands: list[list[str]]) -> str | None:
             launcher = _launcher_module(rest)
             if launcher is not None:
                 return launcher
-        # `python -m pytest -m gpu` inside a body is the device tier just as much as at the
-        # prompt, and `python -m pytest tests/core` is the tier ADR-001 exempts.
-        if (PYTHON_RE.search(base) or base == "python") and _selects_device_tier(rest):
-            module = _module_argument(rest)
-            if module in BLOCKED_MODULES:
-                return module
+            # `python -m pytest -m gpu` inside a body is the device tier just as much as at
+            # the prompt, and `python -m pytest tests/core` is the tier ADR-001 exempts.
+            if _selects_device_tier(rest):
+                module = _module_argument(rest)
+                if module in BLOCKED_MODULES:
+                    return module
     return None
 
 
@@ -1180,6 +1205,9 @@ def verdict(command: str, cwd: str | None = None) -> str | None:
 
         if PYTHON_RE.search(base) or base == "python":
             joined = " ".join(args)
+            launcher = _launcher_module(args)
+            if launcher is not None:
+                return f"`python -m {launcher}` forks the data plane on the host."
             # `_module_at` once, for both the name and the index the `shipinfer` branch
             # below needs -- it was called twice, which the review noted.
             found = _module_at(args)
@@ -1200,8 +1228,6 @@ def verdict(command: str, cwd: str | None = None) -> str | None:
                 )
                 if runner is not None and _selects_device_tier(args):
                     return f"`python -m {runner} {_device_marker(args)}` runs the device tier."
-                if module in DISTRIBUTED_LAUNCHERS:
-                    return f"`python -m {module}` forks the data plane on the host."
                 # `python -m shipinfer serve` is `shipinfer serve`. The check above it only
                 # ever fires when the EXECUTABLE is `shipinfer`, so the module spelling of the
                 # same command -- what `python -m shipinfer` exists for -- was judged by
