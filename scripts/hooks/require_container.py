@@ -595,7 +595,14 @@ def _asks_for_help(program: str, args: list[str]) -> bool:
     token is exact, so `--helpful` is a run. Resolve ``program`` to one name before calling
     this, or it answers for `_indirection` -- the one check argv must never answer for.
     """
-    if program in PASS_THROUGH_LAUNCHERS or any(a in PASS_THROUGH_LAUNCHERS for a in args):
+    if program in PASS_THROUGH_LAUNCHERS:
+        return False
+    # THE MODULE, RESOLVED, and not a scan for the name among the tokens: CPython takes
+    # `-mtorch.distributed.run` as ONE token, so the scan never saw the launcher and the
+    # attached spelling walked past what the spaced one hits. Stricter too -- the scan matched
+    # the name anywhere in argv, including as an option's value.
+    module = _module_at(args)
+    if module is not None and module[1] in PASS_THROUGH_LAUNCHERS:
         return False
     if _inline_source(args) is not None:
         return False
@@ -1066,6 +1073,14 @@ def shows_a_parser(program: str, args: list[str], cwd: str | None) -> bool:
     found = _module_at(args)
     if found is not None and found[1].split(".")[0] in HELP_AWARE:
         return True
+    # doc: long why a generous candidate list is safe for one reader and not for this one
+    # THE FILE HALF ONLY WHEN THE PROGRAM IS THE INTERPRETER. `_script_programs` is generous
+    # by contract -- "a bare `.py` option value looks exactly like a program" -- which is safe
+    # for `script_touches_device`, a fail-STRICT reader where a spurious candidate can only add
+    # a refusal. Here the polarity inverts: `csrc/build/bench --config cfg.py --help` let a
+    # `.py` sitting in argv as DATA vouch for the binary that runs, reopening round 4's case.
+    if not (PYTHON_RE.search(program) or program == "python"):
+        return False
     return any(ARGV_PARSER.search(body) for _program, body in _readable_programs(args, cwd))
 
 

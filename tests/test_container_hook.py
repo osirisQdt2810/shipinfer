@@ -1000,6 +1000,11 @@ class TestAHelpQueryIsInspectionAndNotARun:
         "csrc/build/test_dataplane --help",
         # The quoted path had no parser guard at all, because it has no `cwd` to read with.
         "python - <<'EOF'\nimport subprocess\nsubprocess.run(\"csrc/build/test_pipeline --help\", shell=True)\nEOF",
+        # Round 5's. CPython takes `-mtorch.distributed.run` as ONE token, so a scan for the
+        # launcher's name never saw it -- and the spaced spelling is already pinned above,
+        # which made two spellings of one command disagree.
+        "python -mtorch.distributed.run --nproc_per_node=2 scripts/build_engines.py --help",
+        "python -mtorch.distributed.launch --nproc_per_node=8 scripts/build_engines.py --help",
     )
 
     @pytest.mark.parametrize("command", ALLOWED)
@@ -1107,6 +1112,32 @@ class TestAHelpQueryIsInspectionAndNotARun:
             "csrc/build/test_pipeline --help",
         ):
             assert refused(command) is not None, command
+
+    def test_the_evidence_belongs_to_the_program_that_runs(self, tmp_path: Path) -> None:
+        """Round 5. `_script_programs` is generous by contract -- "a bare `.py` option value
+        looks exactly like a program" -- which is safe for `script_touches_device`, a
+        fail-STRICT reader where a spurious candidate can only add a refusal. Here the polarity
+        inverts, so a `.py` sitting in argv as DATA vouched for the binary that runs and
+        reopened round 4's case with one extra operand.
+        """
+        cfg = tmp_path / "cfg.py"
+        cfg.write_text("import argparse\n", encoding="utf-8")
+
+        assert refused(f"csrc/build/bench --config {cfg} --help") is not None
+        assert refused(f"csrc/build/bench --config {cfg} --cameras 50 --help") is not None
+
+    def test_the_attached_module_spelling_is_resolved(self) -> None:
+        """`python -mfoo` is one token, and this file already models that grammar in
+        `_module_at`. Scanning argv for the launcher's NAME missed it, so the attached spelling
+        walked past the exclusion the spaced one hits -- the "allowed typed and refused quoted"
+        defect `_blocked_word`'s docstring names, in a third spelling."""
+        spaced = (
+            "python -m torch.distributed.run --nproc_per_node=2 scripts/build_engines.py --help"
+        )
+        attached = spaced.replace("-m torch", "-mtorch")
+
+        assert refused(spaced) is not None
+        assert refused(attached) is not None, "the two spellings must not disagree"
 
     def test_the_carve_out_stops_at_a_double_dash(self) -> None:
         """Everything after `--` belongs to whatever the program is wrapping, so a `--help`
