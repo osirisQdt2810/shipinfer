@@ -1067,6 +1067,17 @@ reddening `main` after it merges.
 Asked after a long unattended stretch (three watchdog nudges). Wants the bottom line, not the
 process: what shipped, what the numbers are, what is still waiting on them.
 
+### V162 · 9 Sep 2026 — tiếp tục
+
+> tiếp tục
+
+Said after I had held twice, saying only a merge and a decision were left. #169 is still
+unmerged, so PRs 2-3 remain stacked behind it -- but "tiếp tục" from the operator outranks my
+own judgement that there was nothing to do. Re-read as: find work that does NOT need the merge.
+The honest candidate is the one I named and skipped, `InstanceStats::ewma_latency_us` not being
+emitted: it gives no C1 ratio (the baseline reports no counterpart) but it is the only measure
+of where our own per-stage time goes, and V157's grant covers it.
+
 ## 2. Reconstructed requests
 
 **These are not quotations.** Each item below is the assistant's own paraphrase, taken
