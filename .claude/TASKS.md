@@ -1182,7 +1182,7 @@ hook down, for when the operator asked to see something before it is executed.
       it. The lesson is the cheap one: measure the reported bug on the branch before writing
       the ledger entry that defers it.
 
-- [ ] **HOOK-MISSES-THE-PROFILER-AND-TRACER-WRAPPERS · found by sweeping, not by review.**
+- [~] **HOOK-MISSES-THE-PROFILER-AND-TRACER-WRAPPERS · groups 1 and 2 are PR #179.**
       Swept 33 spellings against the (b) branch rather than waiting for a reviewer to find
       them, which is what six rounds on #176 taught. Two groups are still open on `main`:
 
@@ -1207,9 +1207,17 @@ hook down, for when the operator asked to see something before it is executed.
 
       Deliberately a separate item from (b): #176 took six rounds because one PR bundled edits
       to helpers several callers share, and (1) and (2) touch `WRAPPERS`/`WRAPPER_SUBCOMMANDS`
-      that PR #177 is changing right now.
+      that PR #177 was changing at the time.
+      **(1) AND (2) ARE PR #179**, and the design held: WRAPPERS rather than
+      `BLOCKED_COMMANDS`, which is what lets `nsys --version`, `nsys status`,
+      `taskset -c 0-7 pytest tests/core -q` and `deploy/rootless/run.sh nsys profile …` fall out
+      allowed with no carve-out -- all asserted, because that is the half a blocked name would
+      have cost. 25 rows closed, zero loosened, zero false positives, both directions measured
+      on both revisions before opening. `flock <lockfile> <cmd>` is the one residue: a
+      POSITIONAL path, which needs a per-wrapper count -- a third shape, so its own change, and
+      `test_flock_is_still_open_and_why` keeps the gap visible.
 
-- [~] **HOOK-FAILS-OPEN-ON-SPELLINGS-IT-DOES-NOT-MODEL · (a)+(c) MERGED AS #177; (b) is PR #178.**
+- [x] **HOOK-FAILS-OPEN-ON-SPELLINGS-IT-DOES-NOT-MODEL · all three MERGED (#177, #178).**
       Open on `main` and untouched by #174: `python -m shipinfer serve` (the subcommand list is
       only consulted when `base == "shipinfer"`), bare `torchrun`, and `uv run pytest -m gpu`.
       Each is a launcher the hook does not model, and each reaches no `containment.py`.
