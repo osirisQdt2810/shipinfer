@@ -5487,8 +5487,22 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       merge. So a PR that un-skips tests should STRESS them, not just run them once -- 12 runs
       of `tests/api/` found no other race, and that sweep is what should have been in #186.
 
-- [ ] **A-REFUSED-ADD-RE-BANDS-A-CAMERA, INTERMITTENTLY · seen once 9 Sep, in the full suite
-      only, and not caused by anything in flight.**
+- [~] **A-REFUSED-ADD-RE-BANDS-A-CAMERA, INTERMITTENTLY · ROOT-CAUSED, and the refusal was
+      innocent. PR #189.** `_stop_ingest` cleared the placements BEFORE `manager.stop()`, and a
+      camera publishes until its thread is joined -- so its last frames found no placement and
+      were admitted at the FALLBACK band, landing after the test's `mark`. `drain()` already
+      stopped the manager first and cleared after; the stop path did the opposite, so two paths
+      doing the same thing disagreed about the order.
+      Nothing is misplaced (the queue is draining); the cost is a record naming a lane nobody
+      granted, and FOUR band tests in that file silently depending on which path ran. Both
+      halves fixed, and the new test asserts the ORDER rather than reading the queue -- a test
+      needing a frame inside the join window is the flake it replaces.
+      THE METHOD IS THE TRANSFERABLE PART: 60 isolated runs passed, so a `-k` loop would have
+      "proved" it fine. Reading `_stop_ingest` against `drain()` is what found it.
+      ONE PLANE, checked: `grep -rl Priority csrc/` finds the queues and `engine/request.h`
+      and no per-camera band table, because placement arrives through the control plane that
+      ADR-014 keeps in Python. No C++ seam owed.
+      ORIGINAL: seen once 9 Sep, in the full suite only, and not caused by anything in flight.
       `tests/runners/test_camera_lifecycle.py::TestThePriorityBandComesFromTheCameraConfig::
       test_a_refused_add_does_not_re_band_the_camera_that_is_already_running` failed with
       `assert {<Priority.NORMAL: 2>, <Priority.BACKGROUND: 3>} == {<Priority.BACKGROUND: 3>}`
