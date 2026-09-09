@@ -48,6 +48,15 @@ PERSON = [1.0, 1.0, 5.0, 7.0, 0.8, 0.0]
 
 
 def wait_for(predicate, timeout_s: float = 10.0, poll_s: float = 0.01) -> bool:
+    """Poll until ``predicate`` holds. **Wait on the counter the test asserts on.**
+
+    A sink bumps its own ``emitted``/``failed``/``drained_total`` *inside* ``emit``; the
+    runner bumps ``sink_failures`` and everything ``_record`` touches only after ``emit``
+    returns. Waiting on the sink and asserting one of those reads the pair mid-update. Rare
+    in the wild -- 3 failures in 132 runs under 16-way contention -- and every time with a
+    50 ms sleep in ``Counter.inc``/``Histogram.observe`` for every post-emit metric, which is
+    the search that found all four instances (a narrower one found three).
+    """
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if predicate():
@@ -426,12 +435,12 @@ class TestALateRefusalIsChargedToItsOwnFrame:
 
         publish(runner, 3)
 
-        assert wait_for(lambda: sink.emitted == 3), runner.health()
-        assert sink.failed == 0
-        assert runner.metrics.frames_emitted.value(camera="cam0") == 3, (
+        assert wait_for(lambda: runner.metrics.frames_emitted.value(camera="cam0") == 3), (
             "a frame the broker accepted was counted as dropped because an earlier one was "
-            "refused — the attribution bug, in the metric"
+            f"refused — the attribution bug, in the metric. {runner.health()}"
         )
+        assert sink.emitted == 3
+        assert sink.failed == 0
 
     def test_each_late_refusal_is_counted_once_under_the_sink_metric(self, runner_for) -> None:
         sink = self.LateRefusingSink()
@@ -440,9 +449,13 @@ class TestALateRefusalIsChargedToItsOwnFrame:
         publish(runner, 3)
 
         # Frames 0 and 1 are refused (each reported during the following emit); frame 2's
-        # verdict is still in flight when the run ends.
-        assert wait_for(lambda: sink.drained_total == 2), runner.health()
+        # verdict is still in flight when the run ends. `>=` waits and `==` asserts, so the
+        # predicate is not what would hide a third refusal.
+        assert wait_for(
+            lambda: runner.metrics.sink_failures.value(sink="late") >= 2
+        ), runner.health()
         assert runner.metrics.sink_failures.value(sink="late") == 2
+        assert sink.drained_total == 2
 
 
 class TestADroppedEventIsNotAPublishedOne:
@@ -492,8 +505,10 @@ class TestADroppedEventIsNotAPublishedOne:
 
         publish(runner, 3)
 
-        assert wait_for(lambda: sink.failed == 3), runner.health()
-        assert runner.metrics.sink_failures.value(sink="broken") == 3
+        assert wait_for(
+            lambda: runner.metrics.sink_failures.value(sink="broken") == 3
+        ), runner.health()
+        assert sink.failed == 3
         assert (
             runner.metrics.frames_emitted.value(camera="cam0") == 0
         ), "a frame nobody received was counted as emitted"
@@ -624,7 +639,12 @@ class TestObservability:
     def test_metrics_count_per_stage_and_per_camera(self, runner_for):
         runner = runner_for([SHIP, PERSON]).start()
         publish(runner, 3)
-        assert wait_for(lambda: runner.sink.emitted == 3)
+        # `objects_total` is charged in `_record`, so its window is the WIDEST of the four
+        # asserted here -- wait on both of its classes and none of the others can be short.
+        assert wait_for(
+            lambda: runner.metrics.objects_total.value(camera="cam0", object_class="ship") == 3
+            and runner.metrics.objects_total.value(camera="cam0", object_class="person") == 3
+        ), runner.health()
 
         metrics = runner.metrics
         assert metrics.frames_accepted.value(camera="cam0") == 3
