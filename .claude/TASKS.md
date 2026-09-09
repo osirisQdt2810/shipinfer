@@ -1206,11 +1206,16 @@ hook down, for when the operator asked to see something before it is executed.
       gpu` and `taskset 0xff pytest -m gpu` are the ONLY rows that moved. The test that
       documented the gap became the test that pins the fix.
 
-      Group (3) stays out, and is not worth a deny-list entry: `ssh localhost <cmd>`,
-      `tmux new -d '<cmd>'`, `screen -dm`, `script -c '<cmd>'`, `gdb --args`, `parallel`,
-      `find -exec` -- the command is one quoted token or an argv template, and CLAUDE.md
-      already says a deny-list over command text cannot be sound. `containment.py` is the
-      answer there.
+      **Group (3)'s claim was WRONG and I found it by testing my own ledger line rather than
+      re-reading it.** I wrote "the command is one quoted token or an argv template" of all
+      seven. Measured, that is true of only three: `script -c '<cmd>'`, `tmux new -d '<cmd>'`
+      and `find -exec … {} +`. `gdb --args pytest -m gpu`, `parallel pytest -m gpu` and
+      `screen -dm pytest -m gpu` are PLAIN token sequences -- ordinary wrappers, exactly like
+      `strace` -- so they are one `WRAPPERS` entry each.
+      `ssh <host> pytest -m gpu` is a fourth case and stays out for a REASON rather than for
+      difficulty: it runs on the remote host, and the hook cannot tell a loopback from a GPU
+      box that has the container, so refusing it would be a false positive on a legitimate
+      run. That distinction is worth keeping in the file.
 
 - [x] **HOOK-FAILS-OPEN-ON-SPELLINGS-IT-DOES-NOT-MODEL · all three MERGED (#177, #178).**
       Open on `main` and untouched by #174: `python -m shipinfer serve` (the subcommand list is
