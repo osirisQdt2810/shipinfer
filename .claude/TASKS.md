@@ -1182,7 +1182,7 @@ hook down, for when the operator asked to see something before it is executed.
       it. The lesson is the cheap one: measure the reported bug on the branch before writing
       the ledger entry that defers it.
 
-- [~] **HOOK-MISSES-A-WRAPPERS-POSITIONAL-OPERAND · PR #180; groups 1-2 MERGED AS #179.**
+- [~] **HOOK-MISSES-A-WRAPPERS-POSITIONAL-OPERAND · MERGED AS #179+#180; the residue is #181.**
       Groups (1) and (2) of the sweep are **PR #179** -- the NVIDIA tooling and the tracers,
       as WRAPPERS rather than blocked names, which is what lets `nsys --version`, `nsys
       status`, `taskset -c 0-7 pytest tests/core -q` and `deploy/rootless/run.sh nsys profile
@@ -1218,7 +1218,8 @@ hook down, for when the operator asked to see something before it is executed.
       run. That distinction is worth keeping in the file, so it is a TEST beside the three
       quoted cases rather than a comment -- conflating the two reasons is what this line got
       wrong. The three plain ones are BUILT on `fix/three-more-plain-wrappers`, held behind
-      #180: one `WRAPPERS` entry each plus value-flag rows for `gdb -ex`/`-x`/`-cd` and
+      #180 and now **PR #181**: one `WRAPPERS` entry each plus value-flag rows for
+      `gdb -ex`/`-x`/`-cd` and
       `parallel -j`/`-S`/`--results`, since `gdb -batch -ex run --args pytest -m gpu` is what
       someone actually types. Six rows closed, nothing loosened, and the allowed halves
       asserted: `gdb --version`, `parallel --version`, `gdb --args python -c 'print(1)'` and
