@@ -1659,6 +1659,18 @@ hook down, for when the operator asked to see something before it is executed.
       From a worktree: main says "No module named pytest", the branch says 14 passed. Five of
       six new tests fail against main's script.
 
+- [x] **THE-FUSED-KERNEL-PARITY-CLAIM-IS-ACTUALLY-VERIFIED · checked 9 Sep, nothing to fix.**
+      CLAUDE.md says "a fused kernel is only trustworthy if a readable implementation agrees
+      with it", and after finding 189 shipvision tests skipping on CI it was worth asking where
+      that agreement is actually checked. It is: `deploy/rootless/test.sh -m gpu
+      tests/runtime/test_ops_parity.py` is 6 passed, and inside that container
+      `is_native_available()` is True with `shipvision._C` loading from the submodule -- so
+      `_gpu_implementations()` really does include `native` and the parity tests compare it
+      against torch and the numpy oracle.
+      WORTH KNOWING WHY IT WORKS HERE and not for shipvision's own `-m native` tier, which
+      needs the gst image: `shipinfer.runtime.native` imports torch first, and torch's bundled
+      libcudart satisfies `_C`'s link. Same mechanism, opposite outcome, one import apart.
+
 - [ ] **A-LAUNCHER-POINTED-AT-AN-ABSENT-SCRIPT-IS-ALLOWED · found 9 Sep while checking a
       review finding, and it is PRE-EXISTING on main.** `nsys profile python
       -mtorch.distributed.run --nproc_per_node=2 train.py` is allowed, with and without a
@@ -1672,6 +1684,7 @@ hook down, for when the operator asked to see something before it is executed.
       against a path that DOES exist, which is the right shape and also why nobody noticed.
       IF IT IS FIXED: a launcher with a script operand is device work whether or not the
       operand resolves, because the launcher forks before it discovers the file is missing.
+      SEQUENCED behind #192, which owns `require_container.py` -- one file, one PR at a time.
 
 - [~] **A-HELP-QUERY-WAS-REFUSED-AS-A-RUN · PR #192, found by hitting it.**
       `python -m shipinfer bench --help` was refused while I was checking the CLI against
