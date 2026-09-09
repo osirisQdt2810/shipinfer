@@ -347,14 +347,14 @@ class TestAScriptsOperandsAreData:
         assert refused(f"python -m pytest {target} -m multigpu") is not None
 
 
-class TestAnExecutorModulesOperandIsAProgram:
+class TestAModulesOperandIsAProgramUnlessTheModuleOnlyReads:
     """`-m` ends CPython's option processing; it does not end EXECUTION.
 
-    The first version of this fix treated every module's operands as data, and so allowed
-    `python -m cProfile probe.py` -- a host measurement that leaves a CUDA context, which
-    `main` refused. A bypass this change would have ADDED, and one with nothing behind it:
-    `containment.py` is reached from `conftest.py` and from `serve`/`bench`, and a bare
-    `python -m cProfile probe.py` calls none of them (#174 review).
+    Two rounds of getting the DIRECTION wrong. First every module's operands were data, which
+    allowed `python -m cProfile probe.py`. Then eight executors were carved out, which still
+    failed OPEN for every module not on the list -- `-m unittest`, `-m torch.distributed.run`,
+    `-m IPython`, ten rows `main` refused. An allowlist of executors fixes instances; denying
+    by default and carving out the readers fixes the class, and is shorter.
     """
 
     @pytest.mark.parametrize(
@@ -368,6 +368,17 @@ class TestAnExecutorModulesOperandIsAProgram:
             "python -m runpy {p}",
             "python -m coverage run {p}",  # a subcommand before it
             "python -m memory_profiler {p}",
+            # Not on any list, and that is the point: these are the rows an allowlist of
+            # executors let through, and the worst of them starts TWO host CUDA contexts.
+            "python -m torch.distributed.run --nproc_per_node=2 {p}",
+            "python -m torchrun {p}",
+            "python -m unittest {p}",
+            "python -m unittest -v {p}",
+            "python -m nose2 {p}",
+            "python -m IPython {p}",
+            "python -m ipdb {p}",
+            "python -m line_profiler {p}",
+            "python -m yappi {p}",
         ],
     )
     def test_a_module_that_runs_its_operand_is_refused(self, template: str, tmp_path: Path):
@@ -375,12 +386,23 @@ class TestAnExecutorModulesOperandIsAProgram:
         probe.write_text("import torch\ntorch.cuda.init()\n")
         assert refused(template.format(p=probe)) is not None
 
-    def test_a_module_that_reads_its_operand_is_still_allowed(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "python -m black --check {p}",
+            "python -m isort --check {p}",
+            "python -m ruff check {p}",
+            "python -m py_compile {p}",
+            "python -m json.tool {p}",  # the dotted name, which the root alone would miss
+        ],
+    )
+    def test_a_module_that_reads_its_operand_is_allowed(self, template: str, tmp_path: Path):
         """The other half, pinned against the one above, because it is the same rule: what
-        RUNS is judged, what is merely READ is data."""
+        RUNS is judged, what is merely READ is data. This list is the whole carve-out, so a
+        module missing from it fails closed -- which is the direction two rounds got wrong."""
         target = tmp_path / "model.py"
         target.write_text("import torch\n")
-        assert refused(f"python -m black --check {target}") is None
+        assert refused(template.format(p=target)) is None
 
     def test_the_executors_own_dash_c_is_not_the_interpreters(self, tmp_path: Path) -> None:
         """`-m` already ended option processing, so a `-c` after the module name is always the
@@ -392,13 +414,18 @@ class TestAnExecutorModulesOperandIsAProgram:
         assert refused(f"python -m trace -c {probe}") is not None
 
     def test_an_options_value_is_not_the_program(self, tmp_path: Path) -> None:
-        """Two shapes. `--include=probe.py` is an option and must be skipped before the suffix
-        test; `-o out.py` is a bare value that looks exactly like a program, so the candidate
-        that is not a readable FILE is passed over rather than ending the scan."""
+        """Three shapes. `--include=probe.py` is an option, skipped before the suffix test.
+        `-o out.py` is a bare value that looks exactly like a program. And the same command
+        run TWICE: the first run creates `out.py`, so a scan that stopped at the first
+        *readable* candidate allowed the second -- a guard that changes its mind is worse than
+        one that is merely strict."""
         probe = tmp_path / "probe.py"
         probe.write_text("import torch\ntorch.cuda.init()\n")
+        out = tmp_path / "out.py"
         assert refused(f"python -m coverage run --include={probe} {probe}") is not None
-        assert refused(f"python -m cProfile -o {tmp_path / 'out.py'} {probe}") is not None
+        assert refused(f"python -m cProfile -o {out} {probe}") is not None
+        out.write_text("# written by the run above\n")
+        assert refused(f"python -m cProfile -o {out} {probe}") is not None
 
     def test_option_tokens_never_become_candidates(self) -> None:
         """`_script_programs` directly, and deliberately: skipping option tokens is not

@@ -527,30 +527,30 @@ def real_command(tokens: list[str]) -> tuple[str | None, list[str]]:
 #: `-m` is absent because `_module_at` decides it, and the decision is not one-sided.
 _PYTHON_VALUE_FLAGS = frozenset({"-W", "-X", "--check-hash-based-pycs"})
 
-#: Modules that RUN their operand rather than reading it: option processing ends at `-m`, but
-#: these `exec` what follows, so the operand is a PROGRAM. Treating every module's operands as
-#: data allowed `python -m cProfile probe.py`, a host measurement `main` refused -- and nothing
-#: stands behind it: a bare `python -m cProfile` reaches no `containment.py` (#174 review).
-_EXECUTOR_MODULES = frozenset(
-    {"cProfile", "profile", "pdb", "trace", "runpy", "coverage", "memory_profiler", "scalene"}
-)
+#: Modules that only READ their operand. Everything else is assumed to RUN it, because `-m`
+#: ends CPython's option processing and not execution -- and the fail-OPEN direction is the
+#: one that cost this file `-m cProfile`, then `-m unittest` and `-m torch.distributed.run`
+#: at once. An allowlist of executors fixes instances; this fixes the class (#174 review).
+_READER_MODULES = READ_ONLY_TOOL_MODULES | {"pytest", "py.test", "py_compile", "json.tool"}
 
 
 def _script_programs(args: list[str]) -> list[str]:
     """The ``.py`` file this command would RUN, as a candidate list.
 
     No module: the first non-flag operand, and nothing after it, since what follows is that
-    program's own argv -- a script's operands are DATA, which is what
-    `READ_ONLY_TOOL_MODULES` says for `python -m black <file>`. With an executor the operand
-    IS a program, so the scan goes past the module name skipping the executor's own options.
-    SEVERAL candidates there, because a bare `.py` option value looks exactly like a program
-    (`-o out.py probe.py`); the caller takes the first that is a readable file.
+    program's own argv -- a script's operands are DATA, which is what `_READER_MODULES` says
+    for `python -m black <file>`. Any OTHER module is assumed to run its operand, so the scan
+    goes past the module name skipping the module's own options. Several candidates there,
+    because a bare `.py` option value looks exactly like a program (`-o out.py probe.py`);
+    the caller reads them in order and judges the first that imports a device stack.
     """
     candidates: list[str] = []
     module = _module_at(args)
     if module is not None:
         start, name = module
-        if name.split(".")[0] not in _EXECUTOR_MODULES:
+        # The dotted name as well as the root: `json.tool` reads, `torch.distributed.run`
+        # runs, and only the full name tells them apart.
+        if name in _READER_MODULES or name.split(".")[0] in _READER_MODULES:
             return []
         for token in args[start:]:
             # `coverage run -m pytest ...` defers to the module branch. NOT `-c`: `-m` has
@@ -585,12 +585,12 @@ def _script_programs(args: list[str]) -> list[str]:
 def script_touches_device(args: list[str], cwd: str | None) -> str | None:
     """If a python invocation RUNS a local script that imports a device stack, name it.
 
-    The first candidate that is a readable file, and nothing after it. Only the PROGRAM is
-    judged: scanning every `.py` argument refused
-    `python scripts/hooks/check_docs.py tests/pipeline/test_runner.py` for the *input* file's
-    imports, and an offline `python -m pytest tests/<file>.py` for the same reason. Both are
-    allowed by the rule -- one is a linter, the other is the tier ADR-001 says runs anywhere --
-    and a refusal kills the whole `Bash` call, so an edit chained before one never ran.
+    Every candidate, until one imports a device stack. Stopping at the first READABLE one let
+    an earlier run's own output file decide: `-m cProfile -o out.py probe.py` was refused once
+    and allowed the next time. Only the PROGRAM is judged -- scanning every `.py` argument
+    refused a linter for its INPUT's imports, and an offline `python -m pytest tests/<file>.py`
+    for the same reason. Both are allowed by the rule, and a refusal kills the whole `Bash`
+    call, so an edit chained before one never ran.
     """
     root = Path(cwd) if cwd else Path.cwd()
     for program in _script_programs(args):
@@ -602,7 +602,8 @@ def script_touches_device(args: list[str], cwd: str | None) -> str | None:
             body = path.read_text(errors="replace")[:SCRIPT_READ_LIMIT]
         except OSError:
             continue
-        return program if DEVICE_IMPORT.search(body) else None
+        if DEVICE_IMPORT.search(body):
+            return program
     return None
 
 
