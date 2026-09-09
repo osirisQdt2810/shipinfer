@@ -756,8 +756,16 @@ int main(int argc, char** argv) {
             }
             std::cout << "frames_accepted " << accepted.load() << "\n";
             std::cout << "frames_failed " << failed.load() << "\n";
-            for (const auto& [camera, count] : open_refused_by_camera) {
-                std::cout << "open_refused_by_camera " << camera << " " << count << "\n";
+            // UNDER ITS MUTEX, and that is new here rather than pedantry: the old read stood
+            // after `stopping.store(true)` and the worker joins, so no writer existed and no
+            // lock was needed. The abandoned path calls this BEFORE either, with every worker
+            // still in `while (!stopping.load())` and the detached actor still pushing frames,
+            // so `collector.open` can refuse and insert a new key mid-iteration.
+            {
+                std::lock_guard<std::mutex> lock(refused_mutex);
+                for (const auto& [camera, count] : open_refused_by_camera) {
+                    std::cout << "open_refused_by_camera " << camera << " " << count << "\n";
+                }
             }
             std::cout << "events_emitted " << emitted.load() << "\n";
             std::cout << "queue_rejected " << stats.rejected << "\n";
@@ -782,6 +790,7 @@ int main(int argc, char** argv) {
                          "block on those very threads) and exiting without unwinding so "
                          "their threads keep valid references\n";
             report_ingest_and_queue();
+            // doc: long why this exit flushes by hand, and how the first draft failed
             // FLUSHED EXPLICITLY, because `_Exit` does not. It skips atexit and every stdio
             // buffer, and a run's stdout is redirected to a log -- so fully buffered. The
             // first version of this printed the whole report into a buffer that was then

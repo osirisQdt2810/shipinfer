@@ -2,10 +2,10 @@
 
 `cli/bench.cpp` cannot unwind when a camera is abandoned -- a detached thread still holds
 references into the frame -- so it `_Exit`s, and it used to do that before printing anything.
-Measured 9 Sep at 50 cameras x 20 fps x 70 s: the `gstreamer` arm abandons and reports NO
-counters, while `nvdec` at the same load on the same GPUs reports in full. The arm V137 and
-V156 mandate was therefore the one that could not be measured, and the cause was a shutdown
-detail rather than the route.
+Measured 9 Sep at 50 cameras x 20 fps x 70 s: `gstreamer` abandons and reports NO counters,
+while `nvdec` -- V156's route, per `sources/nvdec.h`'s first line -- reports in full at the
+same load. So what was lost is the host-decode fallback's reading, but the loss belongs to
+neither source: any camera that hangs past the deadline discards the whole run, on any arm.
 
 Two halves: the report is hoisted so both exits print the ingest and queue counters, and the
 fleet's stop deadline scales with the fleet rather than sharing a fixed 5 s between fifty
@@ -74,6 +74,33 @@ class TestOneReporterServesBothExits:
             "buffer that `_Exit` discards and the run reports nothing after all"
         )
 
+    def test_the_refused_map_is_read_under_its_mutex(self) -> None:
+        """The old read needed no lock BECAUSE OF WHERE IT STOOD -- after `stopping.store` and
+        the worker joins, so no writer existed. Hoisting it moved it before both, with every
+        worker still spinning and a detached actor still pushing frames, so a refused
+        `collector.open` can insert a new key mid-iteration. Positional safety does not
+        survive a move, which is why the invariant is pinned rather than the position.
+        """
+        lines = BENCH.read_text(encoding="utf-8").splitlines()
+        uses = [
+            n
+            for n, row in enumerate(lines)
+            # The declaration is the one mention that needs no lock, and it is the line that
+            # names the type -- so it is recognised by that rather than by its line number.
+            if "open_refused_by_camera" in row and "std::map<" not in row
+        ]
+
+        # A lower bound, not an exact count: the printed line names the counter in a string
+        # literal too, and pinning the number would break on a reworded message.
+        assert len(uses) >= 2, f"expected at least a write and a read, found {len(uses)}"
+        for n in uses:
+            near = "\n".join(lines[max(0, n - 4) : n])
+            assert "lock(refused_mutex)" in near, (
+                f"bench.cpp:{n + 1} touches `open_refused_by_camera` with no `refused_mutex` "
+                "in the four lines above it; the workers write it under that lock while the "
+                "abandoned path now reads it with them still running"
+            )
+
     def test_the_message_says_which_report_this_is(self) -> None:
         """Otherwise a reader takes a partial record for a full one -- and the counters that
         are missing are the ones a throughput claim is made from."""
@@ -98,7 +125,15 @@ class TestTheFleetsStopDeadlineScalesWithTheFleet:
             if row.startswith("STOP_MS=")
         )
         done = subprocess.run(
-            ["bash", "-c", f'CAMERAS={cameras}; {line}; echo "$STOP_MS"'],
+            # The override is UNSET first: the shipped line honours
+            # `SHIPINFER_BENCH_STOP_DEADLINE_MS`, so an operator shell that exports it would
+            # make the floor test fail and let the design-load test pass for the wrong reason.
+            [
+                "bash",
+                "-c",
+                f"unset SHIPINFER_BENCH_STOP_DEADLINE_MS; CAMERAS={cameras}; {line}; "
+                'echo "$STOP_MS"',
+            ],
             capture_output=True,
             text=True,
             check=True,

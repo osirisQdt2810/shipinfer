@@ -108,7 +108,7 @@ echo "exit=$status"
 # in none of these summaries, because this alternation is anchored on counter names -- so a
 # reader of THIS output, which is the documented one, could quote a throughput number from a
 # run whose chain was missing `track` and `mtmc` without ever seeing that. That happened.
-grep -E '^(chain |host cpu:|startup_s|frames_read|frames_dropped|frames_accepted|frames_failed|events_emitted|events_complete|events_incomplete|queue_rejected|collector_)' \
+grep -E '^(chain |bench: |host cpu:|startup_s|frames_read|frames_dropped|frames_accepted|frames_failed|events_emitted|events_complete|events_incomplete|queue_rejected|collector_)' \
   "$REPO/.artifacts/cpp/${LABEL}.log" || true
 echo "--- final occupancy ---"
 tail -1 "$REPO/.artifacts/cpp/${LABEL}.jsonl"
