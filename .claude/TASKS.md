@@ -1638,8 +1638,27 @@ hook down, for when the operator asked to see something before it is executed.
       reassembly -- which is why `events` is the softest of C1's three ratios and why the
       rows/pixels ones are the ones measuring model work.
 
-- [~] **THE-BASELINE-HAD-NO-DENOMINATOR · PR #190, and it gives `C1` a FOURTH ratio -- the
-      first one on a like-for-like denominator.** `C1` records in its own words that the honest
+- [x] **THE-BASELINE-HAD-NO-DENOMINATOR · MERGED as #190 (9 Sep), and it gives `C1` a FOURTH
+      ratio -- the first one on a like-for-like denominator. RE-RUN INTERLEAVED, so caveat (3)
+      below is now discharged: mean 3.94x over three pairs, and ONE DIGIT is what the spread
+      supports.**
+      THREE INTERLEAVED PAIRS (baseline, ours, baseline, ours, ... so a drift in the box's load
+      cannot favour one arm), 50x20x40 s, GPUs 1/3/4/5/6:
+        pass   our rows  r/ev  our CPU-s  ours r/CPU-s  base CPU-s  base r/CPU-s   ratio
+        a       240 180  12.1      669.6         358.7       478.5          87.2   4.11x
+        b       267 334  12.3      703.8         379.9       364.5         113.0   3.36x
+        c       241 268  12.0      657.1         367.2       497.5          84.2   4.36x
+        mean 3.94x, range 3.36-4.36, spread 25.3% of the mean -- so **~4x, one digit**.
+      AND THE SPREAD IS ALL ON THE BASELINE'S SIDE, which sharpens the caveat into a DIRECTION:
+      ours is 358.7 / 379.9 / 367.2 rows per CPU-s (5.8% spread) while the baseline is
+      87.2 / 113.0 / 84.2 (34%). Its reported throughput barely moves (957.5 / 947.1 / 956.6)
+      because that figure is ASSERTED from its configuration minus buffer growth -- this file's
+      own caveat -- so when the box starves it of CPU its CPU-seconds fall and its images do
+      not. That INFLATES its rows-per-CPU-second exactly when the box is busy, which is why
+      pass b (load 65.7) is both the baseline's best and the ratio's worst. **So ~4x is a
+      FLOOR**, and it errs in the baseline's favour, the same direction `compare()` already
+      warns about for the throughput ratios.
+      ORIGINAL: `C1` records in its own words that the honest
       comparison was unavailable: "GPU-seconds is the honest measure ... but `sim_pipeline_v2`
       reports no counterpart, so there is nothing to divide by". The binary reports none and is
       run unchanged on purpose. THE KERNEL REPORTS ONE, so `run_baseline` now reads
