@@ -421,6 +421,29 @@ def load_note(cfg: BenchConfig) -> str:
     return line
 
 
+# doc: long the denominator C1 could not have, and what its two numbers do and do not span
+def host_cpu_line(
+    system: str, cpu_s: float, elapsed_s: float, images_per_s: float | None
+) -> str:
+    """One line of host-CPU accounting, for a system that can report one.
+
+    `C1-WHAT-IS-THE-5x-AGAINST?` recorded that no like-for-like denominator existed --
+    "GPU-seconds is the honest measure ... but `sim_pipeline_v2` reports no counterpart, so
+    there is nothing to divide by". The kernel keeps a counterpart, so this prints it.
+
+    BOTH FIGURES SPAN THE WHOLE RUN, START-UP INCLUDED, and the per-image one therefore mixes
+    a numerator that paid for start-up with a denominator that did not. It is a comparison
+    between systems measured the same way, not an absolute per-image cost -- which is exactly
+    what a ratio needs and is why the caveat is printed with it rather than filed away.
+    """
+    cores = cpu_s / elapsed_s if elapsed_s > 0 else 0.0
+    line = f"{system} host cpu: {cpu_s:.1f} CPU-s over {elapsed_s:.1f} s = {cores:.2f} cores"
+    if images_per_s and elapsed_s > 0:
+        per_image_ms = cpu_s / (images_per_s * elapsed_s) * 1000.0
+        line += f", {per_image_ms:.2f} ms CPU/image (both spanning start-up)"
+    return line
+
+
 def measure_baseline(cfg: BenchConfig, out_dir: Path) -> tuple[RunAnalysis, SystemThroughput]:
     """One baseline run at one offered rate. Raises if it produced no samples."""
     print("\n=== baseline (counting-simulation, its own binary) ===", flush=True)
@@ -437,7 +460,9 @@ def measure_baseline(cfg: BenchConfig, out_dir: Path) -> tuple[RunAnalysis, Syst
         offered=dict.fromkeys(BASELINE_ENTRY_MODULES, cfg.offered_per_module),
         entries=BASELINE_ENTRY_MODULES,
     )
-    return run, system_throughput(run)
+    throughput = system_throughput(run)
+    print(host_cpu_line("baseline", result.cpu_s, result.elapsed_s, throughput.images_per_s))
+    return run, throughput
 
 
 def measure_shipinfer(
