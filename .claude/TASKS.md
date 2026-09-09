@@ -1638,6 +1638,19 @@ hook down, for when the operator asked to see something before it is executed.
       reassembly -- which is why `events` is the softest of C1's three ratios and why the
       rows/pixels ones are the ones measuring model work.
 
+- [~] **OUR-ARM-HAD-NO-HOST-CPU-LINE · PR #191, the owed half of the item below.** Both arms
+      print the same line now, from a shared `harness/hostcpu.py` with two readings:
+      `children_since` for the baseline (a child the harness supervises) and `since` -- self
+      AND children -- for ours, because `single` runs the plane in this process while the
+      sharded topologies run it in children with the parent serving RTSP. Children-only would
+      report ~0 for a `single` run, and a test asserts that difference rather than trusting the
+      comment. Taken in `measure_shipinfer`, the ONE dispatch point for both topologies.
+      The wiring guard reads CALLS through `ast`: its first draft grepped for
+      `host_cpu_line("shipinfer"`, `black` wrapped the call, and it failed on formatting
+      rather than meaning -- and I pushed it, because the `pytest` in the `&&` chain was piped
+      into `tail` and the chain read tail's status. Both fixed; the rule is now mechanical, no
+      piped command inside an `&&` chain.
+
 - [x] **THE-BASELINE-HAD-NO-DENOMINATOR · MERGED as #190 (9 Sep), and it gives `C1` a FOURTH
       ratio -- the first one on a like-for-like denominator. RE-RUN INTERLEAVED, so caveat (3)
       below is now discharged: mean 3.94x over three pairs, and ONE DIGIT is what the spread
