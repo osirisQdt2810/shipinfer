@@ -64,8 +64,10 @@ python /work/scripts/rtsp_serve.py --streams "$ship_half" --port "$SHIP_PORT" --
   --data "$SHIP" &
 ship_pid=$!
 
-# Killed on EVERY exit, including the bench's own failure: a leaked GLib main loop holds the
-# port and the next run's servers fail to bind, which reads as a bench problem.
+# Covers the SETUP below -- a failed bind or a URI listing that exits under `set -e` would
+# otherwise leak a GLib main loop that holds the port, and the next run's servers fail to bind
+# in a way that reads as a bench problem. It does not cover the run itself: the last line
+# `exec`s, which replaces this shell and its traps, and the container's exit reaps the servers.
 trap 'kill "$person_pid" "$ship_pid" 2>/dev/null || true; wait 2>/dev/null || true' EXIT
 
 # Polling the port answers the actual question. A fixed sleep is either too short -- every
@@ -94,4 +96,12 @@ done
     --data "$SHIP"
 } > "$URIS"
 
-exec "$BINARY" --camera-uris "$URIS" "$@"
+# THE TWO SERVERS ABOVE ARE A COST NO DEPLOYMENT PAYS. They generate this run's load inside
+# the bench's own container, so the events figure is depressed by their CPU --
+# `NOT-GPU-BOUND-AT-FIVE-GPUS` put that at up to ~17% and could not say how much was ours.
+# `host_cpu.py` separates the two, which turns that caveat into a number in every run.
+#
+# `run_cpp_bench.sh` wraps the replay arm the same way with no `--pid`, so `command_cpu_s`
+# from the two arms is directly comparable and their difference is our own decode cost.
+exec python /work/scripts/host_cpu.py --pid "$person_pid" --pid "$ship_pid" \
+  -- "$BINARY" --camera-uris "$URIS" "$@"
