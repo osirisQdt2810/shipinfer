@@ -48,6 +48,14 @@ PERSON = [1.0, 1.0, 5.0, 7.0, 0.8, 0.0]
 
 
 def wait_for(predicate, timeout_s: float = 10.0, poll_s: float = 0.01) -> bool:
+    """Poll until ``predicate`` holds. **Wait on the counter the test asserts on.**
+
+    A sink bumps its own ``emitted``/``failed``/``drained_total`` *inside* ``emit``; the
+    runner bumps the matching :class:`PipelineMetrics` counter only after ``emit`` returns.
+    Waiting on the sink and then asserting the metric reads that pair mid-update. Rare in
+    the wild -- 3 failures in 132 runs of this file under 16-way contention -- and every
+    time with a 50 ms sleep inside ``Counter.inc`` for those two counters.
+    """
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if predicate():
@@ -426,12 +434,12 @@ class TestALateRefusalIsChargedToItsOwnFrame:
 
         publish(runner, 3)
 
-        assert wait_for(lambda: sink.emitted == 3), runner.health()
-        assert sink.failed == 0
-        assert runner.metrics.frames_emitted.value(camera="cam0") == 3, (
+        assert wait_for(lambda: runner.metrics.frames_emitted.value(camera="cam0") == 3), (
             "a frame the broker accepted was counted as dropped because an earlier one was "
-            "refused — the attribution bug, in the metric"
+            f"refused — the attribution bug, in the metric. {runner.health()}"
         )
+        assert sink.emitted == 3
+        assert sink.failed == 0
 
     def test_each_late_refusal_is_counted_once_under_the_sink_metric(self, runner_for) -> None:
         sink = self.LateRefusingSink()
@@ -440,9 +448,13 @@ class TestALateRefusalIsChargedToItsOwnFrame:
         publish(runner, 3)
 
         # Frames 0 and 1 are refused (each reported during the following emit); frame 2's
-        # verdict is still in flight when the run ends.
-        assert wait_for(lambda: sink.drained_total == 2), runner.health()
+        # verdict is still in flight when the run ends. `>=` waits and `==` asserts, so the
+        # predicate is not what would hide a third refusal.
+        assert wait_for(
+            lambda: runner.metrics.sink_failures.value(sink="late") >= 2
+        ), runner.health()
         assert runner.metrics.sink_failures.value(sink="late") == 2
+        assert sink.drained_total == 2
 
 
 class TestADroppedEventIsNotAPublishedOne:
@@ -492,8 +504,10 @@ class TestADroppedEventIsNotAPublishedOne:
 
         publish(runner, 3)
 
-        assert wait_for(lambda: sink.failed == 3), runner.health()
-        assert runner.metrics.sink_failures.value(sink="broken") == 3
+        assert wait_for(
+            lambda: runner.metrics.sink_failures.value(sink="broken") == 3
+        ), runner.health()
+        assert sink.failed == 3
         assert (
             runner.metrics.frames_emitted.value(camera="cam0") == 0
         ), "a frame nobody received was counted as emitted"
