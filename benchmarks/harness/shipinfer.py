@@ -151,10 +151,11 @@ class ShipInferResult:
     #: embedder's differ by the crop fan-out. Reporting only requests understates this plane
     #: against a one-model-per-image baseline by exactly that fan-out.
     per_device_rows: dict[str, dict[str, int]] = field(default_factory=dict)
-    #: model -> device -> execute MICROSECONDS, summed. Over the steady window this
-    #: is occupancy, and occupancy is the only counter that distinguishes "the models
-    #: are the limit" from "the models are idle and something upstream is short".
-    per_device_compute_us: dict[str, dict[str, float]] = field(default_factory=dict)
+    #: model -> device -> OCCUPANCY, as a percentage of this run's STEADY window. Dividing
+    #: the cumulative microseconds by `--seconds` charged the warm-up's idle time to the busy
+    #: window -- ~7 points understated at 10 s of 70 s. Computed here because this is where
+    #: the window is known, and a shard has its own (`busy_pct`).
+    per_device_busy_pct: dict[str, dict[str, float]] = field(default_factory=dict)
     instances: dict[str, int] = field(default_factory=dict)
     ops: str = ""
     stages: tuple[str, ...] = ()
@@ -170,7 +171,44 @@ class ShipInferResult:
 #: `summary.json` -- deliberately the same string, so a table cannot reach the parent under a
 #: different name, and `_print_device_table` can be handed a whole aggregate. Adding a field
 #: and not listing it here is the omission #167 and #170 both made; a test now catches it.
-DEVICE_TABLES = ("per_device", "per_device_rows", "per_device_compute_us")
+DEVICE_TABLES = ("per_device", "per_device_rows", "per_device_busy_pct")
+
+
+def _summed_by_device(handles: Mapping[str, Any], key: str) -> dict[str, dict[str, float]]:
+    """One `ModelInstance.stats()` field, summed per model per device, at one instant."""
+    out: dict[str, dict[str, float]] = {}
+    for name, handle in handles.items():
+        totals: dict[str, float] = {}
+        for instance in handle.instances:
+            stats = instance.stats()
+            device = str(stats["device"])
+            totals[device] = totals.get(device, 0.0) + float(stats[key])
+        out[name] = totals
+    return out
+
+
+def busy_pct(
+    at_end: Mapping[str, Mapping[str, float]],
+    at_warmup: Mapping[str, Mapping[str, float]],
+    steady_s: float,
+) -> dict[str, dict[str, float]]:
+    """Occupancy over the STEADY window: `(end - warmup) / steady_s`, as a percentage.
+
+    Pure, because the mistake it exists to prevent is arithmetic. `compute_us` is cumulative,
+    so dividing the end value by `--seconds` charges the warm-up's idle time to the busy
+    window and understates. An empty result when there is no window, rather than a division
+    by zero or a percentage of nothing.
+    """
+    if steady_s <= 0.0:
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    for model, devices in at_end.items():
+        before = at_warmup.get(model, {})
+        out[model] = {
+            device: max(0.0, micros - before.get(device, 0.0)) / (steady_s * 1e6) * 100.0
+            for device, micros in devices.items()
+        }
+    return out
 
 
 def device_tables(result: ShipInferResult) -> dict[str, dict[str, dict[str, float]]]:
@@ -417,6 +455,10 @@ def run_shipinfer(
                 "emitted": int(runner.sink.emitted),
                 "accepted": int(runner.frames_accepted),
                 "requests": {n: server.metrics.requests_total.value(model=n) for n in handles},
+                # Occupancy is cumulative like the rest, so it belongs in the snapshot rather
+                # than only at the end: `busy_pct` subtracts the boundary and divides by the
+                # steady seconds, and dividing the end value by `--seconds` understated.
+                "compute_us": _summed_by_device(handles, "compute_us"),
                 # Per-bucket, so the boundary snapshot can be subtracted from the end one.
                 "stages": {
                     s: read_cell(runner.metrics.stage_latency_us, stage=s) for s in stages
@@ -450,6 +492,9 @@ def run_shipinfer(
                 "emitted": 0,
                 "accepted": 0,
                 "requests": {},
+                # Nothing to subtract, so occupancy is rated over the whole window -- which
+                # `steady_s` below is, on this path, and `steady_is_whole_run` says so.
+                "compute_us": {},
                 "stages": {},
             }
             warmup_taken = window_started
@@ -462,20 +507,16 @@ def run_shipinfer(
         rejected = {n: metrics.requests_rejected.value(model=n) for n in handles}
         per_device: dict[str, dict[str, int]] = {}
         per_device_rows: dict[str, dict[str, int]] = {}
-        per_device_compute_us: dict[str, dict[str, float]] = {}
         for name, handle in handles.items():
             breakdown: dict[str, int] = {}
             rows: dict[str, int] = {}
-            busy: dict[str, float] = {}
             for instance in handle.instances:
                 stats = instance.stats()
                 device = str(stats["device"])
                 breakdown[device] = breakdown.get(device, 0) + int(stats["requests"])
                 rows[device] = rows.get(device, 0) + int(stats["rows"])
-                busy[device] = busy.get(device, 0.0) + float(stats["compute_us"])
             per_device[name] = breakdown
             per_device_rows[name] = rows
-            per_device_compute_us[name] = busy
 
         return ShipInferResult(
             log=log,
@@ -503,7 +544,9 @@ def run_shipinfer(
             requests_rejected=rejected,
             per_device=per_device,
             per_device_rows=per_device_rows,
-            per_device_compute_us=per_device_compute_us,
+            per_device_busy_pct=busy_pct(
+                at_end["compute_us"], at_warmup["compute_us"], steady_s
+            ),
             instances={n: len(h.instances) for n, h in handles.items()},
             ops=str(runner.health()["ops"]),
             stages=stages,

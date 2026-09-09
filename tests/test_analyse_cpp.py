@@ -126,6 +126,23 @@ class TestTheBinaryReportsOccupancyAndNotRawMicroseconds:
             "batch count is not a total, which is the whole reason `compute_us` was added"
         )
 
+    def test_the_cpp_window_is_the_whole_run_because_it_has_no_warmup(self) -> None:
+        """Why the two planes divide by different windows, and the tripwire for the day they
+        should not. The Python harness has `warmup_s` and rates occupancy over the steady
+        window (`benchmarks/tests/test_occupancy_window.py`); this binary has no such flag, so
+        its whole run IS the measurement and `options.seconds` is the right divisor. If a
+        `--warmup` ever lands here, that divisor becomes the understatement the harness just
+        stopped making -- which is what this assertion is for.
+        """
+        body = BENCH.read_text("utf-8")
+
+        assert "--warmup" not in body, (
+            "cli/bench.cpp grew a warm-up window, so `per_device_busy_pct` now divides by a "
+            "window that contains idle time -- subtract a boundary snapshot the way "
+            "`benchmarks/harness/shipinfer.py`'s `busy_pct` does"
+        )
+        assert "options.seconds" in body, "the occupancy divisor is gone"
+
     def test_the_summed_time_exists_on_both_planes(self) -> None:
         """The sync rule (V88/V89): a per-frame counter on one plane and not the other is the
         gap that made the crop fan-out invisible for months."""

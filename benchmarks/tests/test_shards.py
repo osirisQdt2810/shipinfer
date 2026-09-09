@@ -185,7 +185,7 @@ def _summary(
     binding=None,
     per_device=None,
     per_device_rows=None,
-    per_device_compute_us=None,
+    per_device_busy_pct=None,
 ) -> dict:
     return {
         "shard": shard,
@@ -201,7 +201,7 @@ def _summary(
         },
         "per_device": per_device or {},
         "per_device_rows": per_device_rows or {},
-        "per_device_compute_us": per_device_compute_us or {},
+        "per_device_busy_pct": per_device_busy_pct or {},
     }
 
 
@@ -259,10 +259,14 @@ class TestTheSumTheParentReports:
         )
 
     def test_occupancy_adds_up_across_shards_too_and_is_not_truncated(self) -> None:
-        """The same last mile, one table further along. #170 round 1 populated
-        `per_device_compute_us` on the result and the parent's aggregate dropped it, exactly as
-        `per_device_rows` was dropped in #167 -- and microseconds are floats, so the `int()`
-        the old accumulator used would have floored each shard's share as well."""
+        """The same last mile, one table further along. #170 round 1 populated the occupancy
+        table on the result and the parent's aggregate dropped it, exactly as `per_device_rows`
+        was dropped in #167 -- and percentages are floats, so the `int()` the old accumulator
+        used would have floored each shard's share as well.
+
+        Summing percentages is a union rather than an addition, and that is a property of the
+        topology and not a coincidence: a shard IS a GPU, so no device is in two tables.
+        """
         agg = shards.aggregate(
             [
                 _summary(
@@ -271,7 +275,7 @@ class TestTheSumTheParentReports:
                     1.0,
                     "SUSTAINED",
                     per_device={"m": {"cuda:3": 40}},
-                    per_device_compute_us={"m": {"cuda:3": 49_000_000.5}},
+                    per_device_busy_pct={"m": {"cuda:3": 81.5}},
                 ),
                 _summary(
                     1,
@@ -279,13 +283,11 @@ class TestTheSumTheParentReports:
                     1.0,
                     "SUSTAINED",
                     per_device={"m": {"cuda:4": 10}},
-                    per_device_compute_us={"m": {"cuda:4": 12_500_000.25}},
+                    per_device_busy_pct={"m": {"cuda:4": 20.25}},
                 ),
             ]
         )
-        assert agg["per_device_compute_us"] == {
-            "m": {"cuda:3": 49_000_000.5, "cuda:4": 12_500_000.25}
-        }
+        assert agg["per_device_busy_pct"] == {"m": {"cuda:3": 81.5, "cuda:4": 20.25}}
 
     def test_per_device_counts_add_up_across_shards_where_the_work_ran(self) -> None:
         agg = shards.aggregate(
@@ -408,7 +410,7 @@ class TestEveryPerDeviceTableCrossesTheShardBoundary:
                 1.0,
                 "SUSTAINED",
                 per_device={"m": {"cuda:3": 40}},
-                per_device_compute_us={"m": {"cuda:3": 35_000_000.0}},
+                per_device_busy_pct={"m": {"cuda:3": 50.0}},
             ),
             log="/dev/null",
             offered={},
@@ -432,30 +434,31 @@ class TestOccupancyIsPrintedAsAPercentage:
     by the wrong thing, so the caller passes the wall clock and this prints a percentage.
     """
 
-    def _printed(self, capsys, seconds, compute_us) -> list[str]:
+    def _printed(self, capsys, busy) -> list[str]:
         from benchmarks import run_bench
 
         # `None` means the KEY is absent, which is what an older shard child actually sends --
         # an empty dict under the right name would be a different, easier case.
         tables = {"per_device": {"m": {"cuda:0": 10}}, "per_device_rows": {"m": {"cuda:0": 10}}}
-        if compute_us is not None:
-            tables["per_device_compute_us"] = compute_us
-        run_bench._print_device_table(["HEAD"], tables, seconds)
+        if busy is not None:
+            tables["per_device_busy_pct"] = busy
+        run_bench._print_device_table(["HEAD"], tables)
         return capsys.readouterr().out.splitlines()
 
     def test_a_busy_line_appears_with_the_percentage(self, capsys) -> None:
-        out = self._printed(capsys, 70.0, {"m": {"cuda:0": 49_000_000.0}})
+        out = self._printed(capsys, {"m": {"cuda:0": 70.0}})
         # One decimal, matching `cli/bench.cpp`: at `:.0f` a light-load run's 3.5/3.6/3.7%
         # printed as three identical cells and anything under 0.5% read as "idle".
         assert any("(busy)" in line and "70.0%" in line for line in out), out
 
-    def test_no_wall_clock_means_no_busy_line(self, capsys) -> None:
-        """Rather than print microseconds nobody can read, or divide by a zero."""
-        out = self._printed(capsys, 0.0, {"m": {"cuda:0": 49_000_000.0}})
+    def test_an_empty_table_means_no_busy_line(self, capsys) -> None:
+        """`busy_pct` returns `{}` when there is no window to divide by, and that has to
+        print as silence rather than as `0.0%`, which reads as "idle"."""
+        out = self._printed(capsys, {})
         assert not any("(busy)" in line for line in out), out
 
     def test_an_absent_table_is_fine(self, capsys) -> None:
         """A shard child from before this counter sends none, and the parent must still print."""
-        out = self._printed(capsys, 70.0, None)
+        out = self._printed(capsys, None)
         assert "cuda:0=10" in out[1]
         assert not any("(busy)" in line for line in out), out

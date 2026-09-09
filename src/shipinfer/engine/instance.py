@@ -529,10 +529,10 @@ class ModelInstance:
             # limiter that is shaping a burst from one that is configured and never reached.
             "rate_limit_waits": self._rate_limit_waits,
             "ewma_latency_us": round(self._ewma_latency_us, 1),
-            # Cumulative over the WHOLE run, warm-up included, while the throughput printed
-            # beside it is differenced against an at-warmup snapshot. So a percentage built
-            # from this understates the steady one -- `InstanceStats` in
-            # `csrc/shipinfer/engine/instance.h` carries the size of that and the ledger item.
+            # Cumulative, so a reader divides it by a window and has to pick the right one:
+            # the bench harness differences it against an at-warmup snapshot (`busy_pct`),
+            # because charging the ramp's idle time to the busy window understated occupancy
+            # by ~7 points at 10 s of 70 s. `InstanceStats` in `csrc/.../instance.h` agrees.
             "compute_us": round(self._executed_compute_us, 1),
             "backend": self._backend.stats(),
         }
