@@ -1182,7 +1182,24 @@ hook down, for when the operator asked to see something before it is executed.
       it. The lesson is the cheap one: measure the reported bug on the branch before writing
       the ledger entry that defers it.
 
-- [~] **HOOK-MISSES-A-WRAPPERS-POSITIONAL-OPERAND · MERGED AS #179+#180; the residue is #181.**
+- [~] **THE-SYSTEM-TIER-DID-NOT-GATE-ITSELF · PR #182, and it is the other half of the rule.**
+      CLAUDE.md answers the hook's unsoundness with "`runtime/containment.py` is the gate,
+      because it runs in the process that would do the work". I repeated that sentence all day;
+      #176's reviewer checked it and found `benchmarks/run_bench.py` calls it NOWHERE. Checking
+      properly: THREE of six entry points did not -- `run_bench.py` (the system tier, where the
+      headline >=5x comes from, so the advisory hook was the only guard), `link/link_probe.py`
+      (times peer-to-peer copies) and `link/ipc_context_cost.py` (a CUDA-IPC slab across two
+      processes). `harness/shards.py`'s `python -m` child gets it too, since a parent's gate
+      does not reach a child process.
+      In `run_bench.py` the call sits AFTER the argv validation: a malformed command line
+      deserves its usage error, and the offline suite asserts those return 2 -- my first draft
+      gated on line one and broke that. The test is derived from the tree (`__main__` block =>
+      must gate, and must gate before the work, compared as CALLS via `ast`, not text offsets).
+      Verified BOTH ways: the host refuses with the evidence line, and a real sharded run
+      inside the container completes rc=0 with the gate silent -- a gate that refuses the
+      sanctioned route would be worse than none.
+
+- [x] **HOOK-MISSES-A-WRAPPERS-POSITIONAL-OPERAND · MERGED AS #179, #180, #181.**
       Groups (1) and (2) of the sweep are **PR #179** -- the NVIDIA tooling and the tracers,
       as WRAPPERS rather than blocked names, which is what lets `nsys --version`, `nsys
       status`, `taskset -c 0-7 pytest tests/core -q` and `deploy/rootless/run.sh nsys profile
