@@ -1182,7 +1182,7 @@ hook down, for when the operator asked to see something before it is executed.
       it. The lesson is the cheap one: measure the reported bug on the branch before writing
       the ledger entry that defers it.
 
-- [~] **THE-ENGINE-BUILD-DID-NOT-GATE-ITSELF · PR #183, and it is the LAST entry in the list.**
+- [x] **THE-ENGINE-BUILD-DID-NOT-GATE-ITSELF · MERGED as #183 (4d8a6c2, 9 Sep). Last entry in the list.**
       CLAUDE.md's container list is "the GPU test tiers, every benchmark, `shipinfer
       bench|serve`, and any engine build". #182 closed the benchmarks; measuring the rest of
       the list found `scripts/build_engines.py` calling the gate NOWHERE, while its own
@@ -1701,6 +1701,15 @@ hook down, for when the operator asked to see something before it is executed.
       want (b) anyway, what I need from you is the images or the weights, not a decision.
 
 - [!] **CSRC-GRAPH-HAS-NO-TRACKING · OPERATOR: please merge #169 (PR 1 of 3) -- it adds a
+      **A SPLIT WAS TRIED AND MEASURED OUT, 9 Sep -- do not re-attempt it.** The idea was to
+      take the 8 non-workflow paths onto main so PRs 2 and 3 stop waiting, leaving #169 as
+      `cpp.yml` alone. It cannot be done, and the reason is a guard working: with main's
+      `_COVERED_ELSEWHERE`, `SHIPINFER_REQUIRE_CSRC_HEADERS=1 pytest
+      tests/test_cuda_reaching_apps_compile.py` fails 2 -- "these apps were skipped for a
+      missing external lane: ['csrc/tests/test_tracking_shard.cpp']" -- because no job in
+      `cpp.yml` builds the `shipvision` lane. Excusing it instead trips the SAME file's
+      derived assertion, which requires `--with-external <lane>` to appear in `cpp.yml` for
+      every excused lane. The tracker and its CI job are one change BY CONSTRUCTION.
       `cpp.yml` job, so `Auto-merge` stays SKIPPED however green the rest is, exactly as #133
       and #162.** PRs 2 and 3 build on its `TrackerShard` and would have to STACK on an
       unmerged branch, which CLAUDE.md warns against by name ("if PR #2 is already stacked on
