@@ -366,7 +366,11 @@ class TestDeletingAStream:
             # and the gauge reads zero with a frame genuinely in flight. `walked` rises after
             # the output element publishes and `accepted` is already final (the actor is
             # joined), so their equality has no window that reads true early. The runner's
-            # own metrics docstring names this pair: "accepted 6, walked 6".
+            # own metrics docstring names this pair: "accepted 6, walked 6". The equality
+            # assumes this fixture's defaults -- `overflow_policy: reject` (a full lane
+            # charges `dropped`, never `accepted`) and `frame_deadline_ms: 0` (nothing
+            # expires) -- so a fixture that changed either would stall here instead, which
+            # is what the attached stats dict is for.
             assert until(
                 lambda: (it := streamed.runner.stats()["items"])["walked"] == it["accepted"]
             ), streamed.runner.stats()["items"]
