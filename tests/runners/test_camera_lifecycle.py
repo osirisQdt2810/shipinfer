@@ -1034,10 +1034,15 @@ class TestThePriorityBandComesFromTheCameraConfig:
             mark = len(queue.bands)
             runner.add_camera(CameraSpec("cam-x", "injected://x", priority=None))
             assert until(lambda: queue.bands_since(mark, "cam-x")), queue.bands
+            # Read before the stop, for the reason
+            # `test_a_refused_add_does_not_re_band_the_camera_that_is_already_running`
+            # spells out: `stop()` ends every placement, so a frame published before
+            # the join is admitted at the fallback band and lands after `mark`.
+            after = queue.bands_since(mark, "cam-x")
         finally:
             runner.stop(timeout_s=5.0)
 
-        assert queue.bands_since(mark, "cam-x") == {Priority.NORMAL}
+        assert after == {Priority.NORMAL}
         assert sources.band_of("cam-x") is Priority.NORMAL
 
     def test_a_drain_releases_every_placed_band_with_its_camera(self) -> None:
@@ -1064,10 +1069,15 @@ class TestThePriorityBandComesFromTheCameraConfig:
             mark = len(queue.bands)
             runner.add_camera(CameraSpec("cam-x", "injected://x"))
             assert until(lambda: queue.bands_since(mark, "cam-x")), queue.bands
+            # Read before the stop, for the reason
+            # `test_a_refused_add_does_not_re_band_the_camera_that_is_already_running`
+            # spells out: `stop()` ends every placement, so a frame published before
+            # the join is admitted at the fallback band and lands after `mark`.
+            after = queue.bands_since(mark, "cam-x")
         finally:
             runner.stop(timeout_s=5.0)
 
-        assert queue.bands_since(mark, "cam-x") == {Priority.NORMAL}
+        assert after == {Priority.NORMAL}
         assert sources.band_of("cam-x") is Priority.NORMAL
 
     def test_a_refused_add_does_not_re_band_the_camera_that_is_already_running(self) -> None:
@@ -1106,11 +1116,16 @@ class TestThePriorityBandComesFromTheCameraConfig:
                     CameraSpec("cam-x", "injected://again", priority=Priority.TRACKING_CRITICAL)
                 )
             assert until(lambda: queue.bands_since(mark, "cam-x")), queue.bands
+            # READ BEFORE THE STOP, and not for tidiness: `stop()` ends every placement, so
+            # a frame published before the join is banded at the fallback and lands after
+            # `mark` -- the runner shutting down, not the refusal re-banding. Reading after it
+            # made this intermittently `{NORMAL, BACKGROUND}`, in the full suite only.
+            after_refusal = queue.bands_since(mark, "cam-x")
         finally:
             runner.stop(timeout_s=5.0)
 
         assert runner.cameras == ()
-        assert queue.bands_since(mark, "cam-x") == {Priority.BACKGROUND}
+        assert after_refusal == {Priority.BACKGROUND}
 
     def test_a_refused_add_with_no_band_does_not_erase_the_running_bands(self) -> None:
         """The mirror case, and the one that ends in a ``201``.
@@ -1141,10 +1156,15 @@ class TestThePriorityBandComesFromTheCameraConfig:
             with pytest.raises(DuplicateCameraError, match="already running"):
                 runner.add_camera(CameraSpec("cam-x", "injected://again", priority=None))
             assert until(lambda: queue.bands_since(mark, "cam-x")), queue.bands
+            # Read before the stop, for the reason
+            # `test_a_refused_add_does_not_re_band_the_camera_that_is_already_running`
+            # spells out: `stop()` ends every placement, so a frame published before
+            # the join is admitted at the fallback band and lands after `mark`.
+            after = queue.bands_since(mark, "cam-x")
         finally:
             runner.stop(timeout_s=5.0)
 
-        assert queue.bands_since(mark, "cam-x") == {Priority.TRACKING_CRITICAL}
+        assert after == {Priority.TRACKING_CRITICAL}
 
 
 # -- the control plane's three methods -------------------------------------------------------
@@ -1647,6 +1667,47 @@ class TestHealthAndStatsCarryTheCameras:
 
 
 class TestStopReleasesTheCameras:
+    def test_the_placements_outlive_the_cameras_they_band(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`stop()` ends the placements AFTER the actors, and the order is the point.
+
+        A camera publishes until its thread is joined, so placements cleared first band its
+        last frames at the fallback -- an intermittent `{NORMAL, BACKGROUND} == {BACKGROUND}`
+        in the full suite, and what made four band tests here depend on stop ordering.
+        `drain()` already used this order and the stop path did not.
+
+        An ORDER rather than a queue reading: a test needing a frame inside the join window
+        is the flake it replaces.
+        """
+        from shipinfer.ingest.manager import IngestManager
+        from shipinfer.runners.bands import PriorityBands
+
+        order: list[str] = []
+        stop_cameras = IngestManager.stop
+        clear_bands = PriorityBands.clear_placements
+
+        def stop(self: IngestManager, timeout_s: float = 5.0) -> int:
+            order.append("cameras")
+            return stop_cameras(self, timeout_s=timeout_s)
+
+        def clear(self: PriorityBands) -> None:
+            order.append("placements")
+            clear_bands(self)
+
+        monkeypatch.setattr(IngestManager, "stop", stop)
+        monkeypatch.setattr(PriorityBands, "clear_placements", clear)
+
+        runner = InprocessRunner(load(), settings=settings(), source_factory=scripted(frames=8))
+        runner.start()
+        runner.add_camera(CameraSpec("cam-x", "injected://x", priority=Priority.BACKGROUND))
+        runner.stop(timeout_s=5.0)
+
+        assert order == ["cameras", "placements"], (
+            f"{order} -- the placements were cleared while the cameras were still publishing, "
+            "so their last frames are banded at the fallback"
+        )
+
     def test_no_actor_thread_outlives_the_stop(self) -> None:
         """A daemon thread left reading is a producer publishing into a closed queue.
 
