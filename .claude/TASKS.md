@@ -1688,7 +1688,13 @@ hook down, for when the operator asked to see something before it is executed.
       needs the gst image: `shipinfer.runtime.native` imports torch first, and torch's bundled
       libcudart satisfies `_C`'s link. Same mechanism, opposite outcome, one import apart.
 
-- [ ] **TWO-FOLLOW-UPS-FROM-#194's-APPROVE · one pre-existing hole, one comment (9 Sep).**
+- [~] **TWO-FOLLOW-UPS-FROM-#194's-APPROVE · PR #197 (9 Sep), both in it.** (a) is fixed
+      where it belongs -- `_blocked_word`, the door an inline `-c` body, a `subprocess`
+      argument list and an executed heredoc all reach -- and `_accelerate_starts_a_job` is now
+      the ONE reading that all three doors call, in the same commit. Four rows tighten, none
+      loosens. (b) is the sentence on `_marker_positions`' deliberate whole-argv scan. Suite
+      4088 passed.
+      ORIGINAL NOTE:
       Both are the reviewer's non-blocking notes, held out of #194 deliberately: it carries an
       APPROVE and a push would invalidate the reviewed commit for no gain. SEQUENCED behind
       #194's merge -- same file.
@@ -1721,8 +1727,8 @@ hook down, for when the operator asked to see something before it is executed.
       is added. The day tracking lands the page stops being TRUE rather than merely stale, and
       the suite says so. Suite 4070 passed.
 
-- [~] **CI-A-VENDOR-REPO-BLOCKS-EVERY-MERGE · PR #195, and THE INCIDENT CLEARED WHILE IT WAS
-      OPEN -- so this is hardening, not an unblock.** Google's index was good again by 18:09;
+- [x] **CI-A-VENDOR-REPO-BLOCKS-EVERY-MERGE · MERGED as #195 (9 Sep), APPROVE, and THE
+      INCIDENT CLEARED WHILE IT WAS OPEN -- so it landed as hardening, not an unblock.** Google's index was good again by 18:09;
       #194 and #196 both merged on a re-run. `main` was red for about half an hour and no PR
       could auto-merge in that window. Kept because a repository this project never installs
       from should not be able to stop every merge. The `automerge` label is on: the review job
