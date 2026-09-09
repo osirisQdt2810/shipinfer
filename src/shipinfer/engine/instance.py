@@ -22,6 +22,7 @@ from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.metrics import ServerMetrics
 from shipinfer.core.request import InferenceResponse
 from shipinfer.core.settings import SchedulerSettings
+from shipinfer.core.thread_name import instance_thread_label, start_thread
 from shipinfer.core.tracing import NullTraceSink, RequestTrace, TraceSink
 from shipinfer.core.types import Device
 from shipinfer.engine.statistics import ModelStatistics
@@ -150,10 +151,14 @@ class ModelInstance:
         if self._thread is not None:
             return
         self._running.set()
-        self._thread = threading.Thread(
-            target=self._run, name=f"shipinfer-{self.name}", daemon=True
+        # `kernel=` because `shipinfer-ship_detector_0_3` cut to the kernel's fifteen
+        # bytes is `shipinfer-ship_` for every model on every device -- and which DEVICE's
+        # instances are hot is the question per-thread accounting exists to answer.
+        self._thread = start_thread(
+            self._run,
+            name=f"shipinfer-{self.name}",
+            kernel=instance_thread_label(self.name),
         )
-        self._thread.start()
 
     def wait_ready(self, timeout: float = 120.0) -> bool:
         """Block until the worker is ready or has failed. True only if it is ready.

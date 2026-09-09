@@ -51,6 +51,7 @@ from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.request import InferenceRequest, ResponseFuture
 from shipinfer.core.settings import ServerSettings
 from shipinfer.core.settings.ingest import CameraConfig
+from shipinfer.core.thread_name import start_thread
 from shipinfer.core.types import Device
 from shipinfer.launch.control import CameraSpec
 from shipinfer.runners.bands import PriorityBands
@@ -785,13 +786,12 @@ class InprocessRunner(Runner):
         inflight: list[tuple[WorkItem, ...]] = [()] * self._wanted_workers
         self._inflight = inflight
         for index in range(self._wanted_workers):
-            thread = threading.Thread(
-                target=self._work,
-                args=(index, stopping, queue, inflight),
+            thread = start_thread(
+                self._work,
                 name=f"chain-worker-{self._shard_id}-{index}",
-                daemon=True,
+                kernel=f"ch{self._shard_id}.{index}",
+                args=(index, stopping, queue, inflight),
             )
-            thread.start()
             self._threads.append(thread)
         _LOG.info(
             "runner %s ready on shard %d: %s | %d worker(s) | queue=%s(%d) | head=%s",

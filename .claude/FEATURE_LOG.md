@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-09 — threads: both planes' names reach the kernel
+
+The other half of the entry below. `threading.Thread(name=...)` is a Python-level label --
+measured, `/proc/self/task/<tid>/comm` reads `python` -- so the Python plane's six names were
+as invisible to `top -H` and to per-thread accounting as the C++ plane's absent ones.
+`core/thread_name.py` mirrors the header: stdlib only (`core` is pure), `pthread_setname_np`
+through `ctypes` since `_thread.set_name` is 3.14 against this tree's 3.10, and
+`instance_thread_label` returns the SAME fifteen bytes as the C++ function for the same
+(model, device, index). `start_thread` is a factory because two of the six targets cannot name
+themselves from inside. THE PROTOTYPES ARE DECLARED: the first draft's undeclared
+`pthread_self()` returns `c_int`, truncating a pointer-sized handle, and it SEGFAULTED 282
+tests -- which no `try/except` catches, so the library resolves once at import.
+
+---
+
 ## 2026-09-09 — threads: the C++ plane says what each of its threads is
 
 Python named all six of its threads; `csrc/` named none of its seventeen, so `top -H` and

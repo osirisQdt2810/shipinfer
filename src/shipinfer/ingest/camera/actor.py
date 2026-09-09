@@ -36,6 +36,7 @@ from shipinfer.core.errors import (
 from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.redact import redact, redact_in
 from shipinfer.core.settings.ingest import CameraConfig, IngestSettings
+from shipinfer.core.thread_name import start_thread
 from shipinfer.ingest.base import FrameSource
 from shipinfer.ingest.camera.health import CameraHealth, CameraState
 from shipinfer.ingest.frame.frame import Frame
@@ -182,10 +183,9 @@ class CameraActor:
             )
         self._stop.clear()
         self._set_state(CameraState.CONNECTING)
-        self._thread = threading.Thread(
-            target=self._run, name=f"ingest-{self.camera_id}", daemon=True
+        self._thread = start_thread(
+            self._run, name=f"ingest-{self.camera_id}", kernel=f"cam-{self.camera_id}"
         )
-        self._thread.start()
 
     def request_stop(self) -> None:
         """Ask the actor to finish, without waiting for it.

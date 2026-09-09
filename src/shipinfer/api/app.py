@@ -10,6 +10,7 @@ from shipinfer.api.routes import build_router
 from shipinfer.api.streams import CameraController, build_streams_router
 from shipinfer.core.errors import ConfigurationError
 from shipinfer.core.logging import get_logger
+from shipinfer.core.thread_name import start_thread
 from shipinfer.engine.pool import InferenceServer
 
 __all__ = ["BackgroundHttpServer", "create_app", "require_server_extra", "serve_http"]
@@ -167,10 +168,7 @@ class BackgroundHttpServer:
         """
         if self._thread is not None:
             return self
-        self._thread = threading.Thread(
-            target=self._server.run, name="shipinfer-http", daemon=True
-        )
-        self._thread.start()
+        self._thread = start_thread(self._server.run, name="shipinfer-http", kernel="http")
         if not self._serving_within(self._bind_timeout_s):
             self._server.should_exit = True
             self._thread = None

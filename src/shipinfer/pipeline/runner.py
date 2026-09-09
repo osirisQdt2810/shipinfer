@@ -56,6 +56,7 @@ from shipinfer.core.errors import (
 from shipinfer.core.logging import get_logger, log_context
 from shipinfer.core.request import ResponseFuture
 from shipinfer.core.settings import ServerSettings
+from shipinfer.core.thread_name import start_thread
 from shipinfer.pipeline.graph import (
     FrameState,
     PipelineGraph,
@@ -318,15 +319,11 @@ class PipelineRunner:
         pipeline = self._settings.pipeline
         self._stopping.clear()
         for index in range(pipeline.workers):
-            worker = threading.Thread(
-                target=self._work, name=f"pipeline-worker-{index}", daemon=True
+            worker = start_thread(
+                self._work, name=f"pipeline-worker-{index}", kernel=f"pipe-{index}"
             )
-            worker.start()
             self._workers.append(worker)
-        self._sweeper = threading.Thread(
-            target=self._sweep, name="pipeline-sweeper", daemon=True
-        )
-        self._sweeper.start()
+        self._sweeper = start_thread(self._sweep, name="pipeline-sweeper", kernel="sweeper")
         self._started = True
 
         if self._producer_factory is not None:
