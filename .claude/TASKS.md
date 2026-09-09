@@ -1166,7 +1166,7 @@ hook down, for when the operator asked to see something before it is executed.
       three guards fails with its own regression restored (7/1/1). Suite 3772 passed, docs caps
       unchanged, matrix identical to `main` bar the six intended rows.
 
-- [~] **HOOK-FAILS-OPEN-ON-SPELLINGS-IT-DOES-NOT-MODEL · measured; three categories, not one.**
+- [~] **HOOK-FAILS-OPEN-ON-SPELLINGS-IT-DOES-NOT-MODEL · (a)+(c) built and held; (b) deferred.**
       Open on `main` and untouched by #174: `python -m shipinfer serve` (the subcommand list is
       only consulted when `base == "shipinfer"`), bare `torchrun`, and `uv run pytest -m gpu`.
       Each is a launcher the hook does not model, and each reaches no `containment.py`.
@@ -1177,7 +1177,16 @@ hook down, for when the operator asked to see something before it is executed.
       `torchrun`, `deepspeed`, `accelerate launch` -- which is #174's rule one command over;
       (c) `python -m shipinfer serve`, where `BLOCKED_SHIPINFER_SUBCOMMANDS` is consulted only
       when `base == "shipinfer"`. Category (a) has an existing seam to extend rather than a
-      mechanism to invent, which is where this starts.
+      mechanism to invent, which is where this started.
+      (a) AND (c) DONE on `fix/find-the-real-command`, held behind #176 (same file):
+      `WRAPPER_SUBCOMMANDS` steps over `uv run` and its eight siblings as a PAIR, so
+      `uv pip install …` still resolves to `uv`; `WRAPPER_VALUE_FLAGS` steps over a flag's
+      NAMED value, because `WRAPPER_OPERAND` only knew numbers and `conda run -n myenv pytest`
+      answered `myenv`; and the module branch consults the subcommand set when the module root
+      is `shipinfer`. Twelve rows closed, ZERO loosened, three guards each failing with its own
+      removed (7/1/4). (b) -- `torchrun`, `deepspeed`, `accelerate launch` -- stays open: it is
+      a different claim (an executable whose operand is a python program, #174's rule one
+      command over) and gets its own PR and its own list.
 
 - [x] **OCCUPANCY-INCLUDES-THE-WARMUP-WINDOW · MERGED AS #175 (9 Sep), first pass.**
       `compute_us` is cumulative and both readers divide by the full `--seconds`, while
