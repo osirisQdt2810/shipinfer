@@ -893,11 +893,34 @@ class TestADistributedLauncherIsDeviceWork:
         off -- the same reason `import torch; print(torch.__version__)` is allowed."""
         assert refused(f"accelerate {sub}") is None
 
-    def test_mentioning_a_launcher_is_not_running_one(self, tmp_path: Path) -> None:
-        """The false-positive half, which the rest of this file is about."""
-        assert refused("pip install torchrun") is None
-        assert refused("grep -rn torchrun docs/") is None
-        assert refused("python3 - <<'PY'\nprint(\"use torchrun for that\")\nPY") is None
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "pip install torchrun",
+            "pip show deepspeed",
+            "pip uninstall -y accelerate",
+            "grep -rn torchrun docs/",
+            "rg torchrun docs/",
+            "ls -l tools/torchrun-wrapper.sh",
+            "cat docs/torchrun.md",
+            "git log --oneline --grep torchrun",
+            "echo torchrun",
+            "sed -i s/torchrun/deepspeed/ docs/x.md",
+            "./tools/torchrun-wrapper.sh --help",
+            "python3 - <<'PY'\nprint(\"run it with torchrun --nproc_per_node=2\")\nPY",
+            "python3 - <<'PY'\nimport os\nos.path.exists(\"tools/torchrun-wrapper.sh\")\nPY",
+            "bash -s <<'SH'\ncat > notes.md <<MD\ntorchrun --nproc_per_node=2 probe.py\nMD\nSH",
+        ],
+    )
+    def test_mentioning_a_launcher_is_not_running_one(self, command: str) -> None:
+        """The false-positive half, which is the direction that gets a hook switched off.
+
+        Swept before opening rather than after a review round: fourteen shapes where the name
+        appears and nothing runs -- a package manager, a grep, a path whose BASENAME differs
+        (`torchrun-wrapper.sh`), a python body that prints it, an `os.path` call, and a nested
+        heredoc writing notes that quote the command. All allowed on `main` and here.
+        """
+        assert refused(command) is None
 
     def test_help_is_refused_the_way_trtexec_is(self) -> None:
         """Stated rather than discovered: `torchrun --help` IS refused, and so are
