@@ -1182,6 +1182,32 @@ hook down, for when the operator asked to see something before it is executed.
       it. The lesson is the cheap one: measure the reported bug on the branch before writing
       the ledger entry that defers it.
 
+- [~] **THE-RTSP-ARM-COULD-NOT-SAY-WHAT-ITS-GENERATORS-COST · PR #184.**
+      `NOT-GPU-BOUND-AT-FIVE-GPUS` left the RTSP penalty as "up to ~17%, split unknown between
+      the servers (ours to discount) and our own decode threads (ours to optimise)", and
+      proposed an external RTSP source -- infrastructure this box's networking prevents.
+      Attribution needs none of it: `os.wait4` hands back a child's rusage and
+      `/proc/<pid>/stat` holds every thread's `utime + stime`, so `scripts/host_cpu.py` bounds
+      the window exactly with no sampling. BOTH arms are wrapped, because the difference is the
+      point. Numbers in the item above; the units are vacuity-checked against three wrong
+      implementations.
+
+- [ ] **GSTREAMER-RTSP-CANNOT-FINISH-AT-THE-DESIGN-LOAD · found 9 Sep, and it is the mandated
+      route (V137/V156: gstreamer rtsp -> nv12 -> vram).** `SHIPINFER_BENCH_SOURCE=gstreamer` at
+      50x20x70 s exits **1** with `31 camera(s) abandoned past the stop deadline; exiting
+      without unwinding` and prints NO counter summary -- so the arm V156 names produces no
+      measurement at the design load. `nvdec` at the same load, same GPUs, same wrapper, exits 0
+      and reports in full (26 669 events), and `gstreamer` at 8x5x25 s exits 0 too, so it is
+      SCALE and not the source being broken.
+      **PRE-EXISTING, and checked rather than assumed:** re-run with the ORIGINAL scripts
+      restored from a backup copy, same load, same GPUs -- exit 1, 31 abandoned. #184's wrapper
+      is not the cause (37 vs 31 abandoned is run-to-run variance).
+      WHERE TO LOOK: `manager.stop(stop_deadline_ms)` (default 5000 in `cli/bench.cpp:94`)
+      reports "did not stop within 0ms", so the deadline is spent before the cameras are asked
+      -- the same shape `PY-SOURCE-HAS-NO-STOP-SIGNAL` describes on the other plane, but here
+      the C++ sources DO check a `StopSignal` (#163). So either the deadline is consumed
+      upstream of the ask, or 50 GStreamer pipelines take longer to tear down than 5 s.
+
 - [x] **THE-ENGINE-BUILD-DID-NOT-GATE-ITSELF · MERGED as #183 (4d8a6c2, 9 Sep). Last entry in the list.**
       CLAUDE.md's container list is "the GPU test tiers, every benchmark, `shipinfer
       bench|serve`, and any engine build". #182 closed the benchmarks; measuring the rest of
@@ -1425,11 +1451,22 @@ hook down, for when the operator asked to see something before it is executed.
         test_camera_uris         4 / 24         0 / 24
         test_ingest_parity       2 / 24         0 / 24
 
-- [!] **NOT-GPU-BOUND-AT-FIVE-GPUS · MEASURED OUT, 9 Sep. OPERATOR: the RTSP arm under-reports
-      us by up to ~17% because the harness generates its own load in-container, and fixing that
-      is an infrastructure change (an RTSP source reachable from outside a rootless container
-      with no NAT). Accept the under-report, or is that worth doing?** Everything measurable
-      without that is done and below. Opened 9 Sep, and it redirects where the next win is.
+- [x] **NOT-GPU-BOUND-AT-FIVE-GPUS · MEASURED OUT 9 Sep, and the last unknown in it is now a
+      NUMBER rather than a question. DECIDED (V154): accept the under-report -- the generators'
+      cost is measured per run, so a reader discounts it, and external RTSP would remove a cost
+      we can now subtract while leaving the part that is ours untouched. Say so if you disagree.**
+      THE SPLIT, from #184's accounting (`scripts/host_cpu.py`, 50x20x70 s on GPUs 1/3/4/6 idle,
+      two other tenants on the box):
+        arm             events    bench cores   generator cores   total cores (of 48)
+        nvdec (RTSP)    26 669       13.09           3.75              16.84
+        replay          46 809       16.90           0                 16.90
+      THE TWO ARMS USE THE SAME TOTAL HOST CPU and the RTSP arm converts less of it into events,
+      because 3.75 cores generate its own load: 293.5 CPU-s in 78 s, across two `rtsp_serve.py`
+      servers (140.8 + 152.7). That is the discountable half, and every run prints it now.
+      THE OTHER HALF IS OURS AND EXTERNAL RTSP WOULD NOT MOVE IT: 38.4 ms of bench CPU per
+      event on the RTSP arm against 28.0 ms on replay. So the next host-side win is there, not
+      in the harness's networking -- which is the whole reason to answer this rather than wait.
+      Everything measurable without that is done and below. Opened 9 Sep, and it redirects where the next win is.
       The route has been treated as GPU-limited all along and the two wins so far were GPU-side
       (the `output_stream` barrier, the intake's stream). `per_device_busy_pct` -- new, this
       item's enabler -- says that is no longer where the limit is. 50x20x70 s on FIVE IDLE GPUs
