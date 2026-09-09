@@ -1,5 +1,56 @@
 # Journal
 
+## 2026-09-09 (later) — seven merged, and one PR that took six rounds to teach one lesson
+
+Merged **#170, #171, #172, #173, #174, #175, #176**. **#177** is open, one branch is built and
+held behind it, and **#169** still needs the operator's click.
+
+**#176 is the story: six review rounds, and every single blocking finding was in the same two
+shared helpers** -- `_blocked_word` and `_command_words` -- rather than in the feature the PR
+was named for. That is not six slips, it is the shape of the change. The PR bundled a *new* AST
+body reader with edits to the helper that the old and new readers both call, so each fix to the
+reader moved the helper and the move broke a neighbouring caller: the heredoc scan, the `-c`
+scan, the operand list, the shell path. **When round N's finding is in the same function as
+round N-1's, the helper was the whole PR and the rest should have waited.** I said so in the PR
+and offered to close and re-open it helper-first; it converged instead, but the offer was the
+honest half.
+
+**What the reviewer kept finding, and it was always the direction I had not measured.** #174
+went all-args-scan -> an eight-name executor allowlist -> a `break` on a nested `-m`, each time
+patching the case in front of me. It took "the list is the defect" in someone else's words
+before I inverted to deny-by-default. Twice I introduced a bypass while fixing a false
+positive: an allowlist of executors let `python -m torch.distributed.run --nproc_per_node=2`
+through -- **two host CUDA contexts** -- and my own `os` module-root test then refused
+`os.path.exists("csrc/build/bench")`, which is a heredoc checking whether the baseline binary
+is built. The guard's two failure directions are not symmetric and I kept measuring one.
+
+**The fix for that is mechanical and I have adopted it: print the whole matrix, both
+directions, every round.** Four of five rounds found a row I had loosened without noticing,
+because my evidence table listed only the rows that improved.
+
+**Round 5's third finding is the one I am least proud of.** I reimplemented a quote-aware shell
+splitter as a regex, three hundred lines below `segments()` -- and the comment above `OPERATORS`
+in the same file says, in as many words, that a plain regex cuts `python -c "import torch;
+print(...)"` in half inside the quotes. The ponytail principle in reverse, with the reason
+already written down beside it.
+
+**Two process failures worth the ink.** A `pre-commit` piped into `grep | tail` exits with
+*grep's* status, so a `git push` on the next line is ungated -- that is how a ruff error went
+out in a PR about guards failing quietly. And a `cd` into a worktree persists for the rest of
+one `Bash` call, so a later `git add .claude/TASKS.md && git push origin main` committed the
+ledger onto a feature branch and pushed nothing, while echoing "main at d1ce1e1" because that
+was the *worktree's* HEAD. The confirmation line is the part that lied. Both in memory now.
+
+**And the one thing that went right by construction.** I filed a review note as a ledger item,
+then measured it on the branch before deferring -- and it was already fixed: `cat > pr.md
+<<'MD'` nested in a `bash -s` body is refused on `main` and allowed on #176, because using
+`segments` keeps a heredoc's content with the `cat` that consumes it. So the entry became a
+test instead of a backlog item. Same discipline at the end of the day: I swept 33 launcher
+spellings against the held branch rather than waiting for a reviewer, found `nsys profile`,
+`ncu`, `strace`, `taskset` and friends still open, and filed them with the design already
+settled -- they belong in `WRAPPERS`, not in `BLOCKED_COMMANDS`, because that makes
+`nsys --version` fall out allowed with no carve-out.
+
 ## 2026-09-09 — three reviews, and every finding was about the search rather than the code
 
 Merged **#171, #172, #173**; **#170** is on round 3 and **#174** is new. Started by carrying
