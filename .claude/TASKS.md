@@ -1711,8 +1711,24 @@ hook down, for when the operator asked to see something before it is executed.
       direction (a false refusal costs a sentence; a false allow costs a host CUDA context).
       Undocumented, it looks like the bug `_module_at` exists to prevent.
 
-- [~] **THE-CPP-PLANE-NAMED-NONE-OF-ITS-THREADS · PR #198 (9 Sep), and it is the
-      prerequisite for the measurement `NOT-GPU-BOUND-AT-FIVE-GPUS` left open.** Python names
+- [x] **THE-CPP-PLANE-NAMED-NONE-OF-ITS-THREADS · MERGED as #198 (9 Sep), APPROVE on round 3,
+      and it is the prerequisite for the measurement `NOT-GPU-BOUND-AT-FIVE-GPUS` left open.**
+      ROUND 2 CAUGHT THE PR'S OWN ARGUMENT TURNED AROUND, and it is worth keeping: I named the
+      model worker `thread_name("mdl", name_)` where `name_` is the COMPOSITE `bench.cpp`
+      builds (`model:device:index`), so head-truncation ate the device -- twenty instance
+      threads on five GPUs sharing four names, and "which device's instances are hot" is
+      exactly the question the accounting exists for. `instance_thread_label` puts the
+      discriminator in the head there (`m0.0-ship_detec`) and returns the label already cut to
+      the budget, so a caller and a test compare the string the kernel actually holds.
+      AND THE TEST THAT CLAIMED TO GUARD IT DID NOT: it truncated `f"mdl-{model}"`, a
+      plausible-looking string the runtime never builds, so it was green over four names while
+      the defect shipped. Now enumerated in C++ through the REAL function -- 4 models x 8
+      devices x 2 instances = 64 distinct labels -- with Python asserting the WIRING instead of
+      recomputing the truncation. `test_thread_name` is 151 checks.
+      ROUND 1 FAILED CI ON LINT, avoidably: I verified against `ci.yml`'s ruff/black/isort leg,
+      which never looks at `csrc/`, while the PR pipeline's leg is `pre-commit` with a pinned
+      `clang-format`. Two lint legs; I checked the wrong one for a PR adding a `.h` and a
+      `.cpp`. Memory updated. Python names
       all six of its threads; `csrc/` named none of its seventeen, so `top -H`, a backtrace and
       `/proc/<tid>/comm` showed fifty-odd rows called `bench` -- a sync-rule gap where the C++
       side owed a seam the Python side had. The reader that matters is per-thread accounting:
@@ -1754,7 +1770,7 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE IN THE SAME PR on purpose: `ctypes` into libc from the control plane is a
       decision about `core/`, not a rename, and the C++ half is the one that had NO name at all.
 
-- [ ] **TRACK-ELEMENT-SPLITS-ONE-IDENTITY-ABOUT-1-IN-100 · MEASURED 9 Sep, pre-existing, and
+- [~] **TRACK-ELEMENT-SPLITS-ONE-IDENTITY-ABOUT-1-IN-100 · MEASURED 9 Sep, pre-existing, and
       NOT mine.** `tests/topology/test_track_element.py::TestTrackOverTheRunner::
       test_every_frame_reaches_the_sink_with_its_tag_and_its_tracks` failed once in a
       full-suite run: `assert 2 == 1 ... where 2 = len({166, 167})` on "one stationary box
