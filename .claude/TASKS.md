@@ -1690,6 +1690,22 @@ hook down, for when the operator asked to see something before it is executed.
       needs the gst image: `shipinfer.runtime.native` imports torch first, and torch's bundled
       libcudart satisfies `_C`'s link. Same mechanism, opposite outcome, one import apart.
 
+- [~] **THE-MEASURED-COMPARISON-WAS-NOT-WRITTEN-DOWN · PR #196 (9 Sep).** The project's
+      headline claim has been measured on both arms four ways, and none of it was anywhere a
+      person reads: `benchmarks/README.md` is 207 lines about HOW to run the harness and
+      recorded no result, so the numbers, the method and the caveats lived only in this file,
+      five thousand lines into an agent-facing ledger. `benchmarks/RESULTS.md` is the answer on
+      one page -- the two arms, the like-for-like pair, the four ratios as four different
+      claims, the interleaving method and the ~15% noise floor that forces it, what is in NONE
+      of the numbers (tracking, the fused kernels, a baseline that can read video), and the
+      verdict including the half that does not flatter us: ~4x on the one like-for-like
+      denominator, target NOT met.
+      ITS CITATIONS ARE GUARDED RATHER THAN TRUSTED. A page's numbers cannot be re-derived
+      offline; its citations can, and the load-bearing claim is NEGATIVE -- so a test asserts
+      the C++ graph still builds no `track`/`mtmc` node, and it was verified to FAIL when one
+      is added. The day tracking lands the page stops being TRUE rather than merely stale, and
+      the suite says so. Suite 4070 passed.
+
 - [!] **CI-A-VENDOR-REPO-BLOCKS-EVERY-MERGE · OPERATOR: please merge #195 by hand** (it edits
       `.github/workflows/**`, the known permanent exception -- the review job cannot mint a
       token for a workflow change). **`main` is RED and no PR can auto-merge until this lands.**
