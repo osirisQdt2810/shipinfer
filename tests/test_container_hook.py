@@ -942,6 +942,29 @@ class TestADistributedLauncherIsDeviceWork:
     def test_the_accelerate_subcommands_that_start_a_job(self, sub: str) -> None:
         assert refused(f"accelerate {sub}") is not None
 
+    def test_accelerate_inside_a_body_that_runs_it(self) -> None:
+        """`accelerate` is not a `BLOCKED_COMMANDS` name -- `env` and `config` only read -- so
+        every door that judges a command needs the subcommand reading rather than inheriting
+        it from the list. The inline `-c`, `subprocess` and heredoc doors had none, while
+        `bash -c "accelerate launch t.py"` refused through `verdict`'s nested re-read: two
+        spellings of one command disagreeing, which is this file's own recurring defect.
+        """
+        for command in (
+            """python -c 'import os; os.system("accelerate launch t.py")'""",
+            """python -c 'import subprocess; subprocess.run(["accelerate", "launch", "t.py"])'""",
+            "python - <<'EOF'\nimport subprocess\nsubprocess.run(\"accelerate launch t.py\", shell=True)\nEOF",
+            'bash -c "accelerate launch t.py"',
+            """python -c 'import os; os.system("accelerate test")'""",
+        ):
+            assert refused(command) is not None, command
+
+        for command in (
+            """python -c 'import os; os.system("accelerate env")'""",
+            'bash -c "accelerate config"',
+            """python -c 'print("accelerate launch is how you start it")'""",
+        ):
+            assert refused(command) is None, command
+
     @pytest.mark.parametrize("sub", ["config", "env"])
     def test_the_accelerate_subcommands_that_only_read(self, sub: str) -> None:
         """`config` and `env` read and print. Refusing them would be friction with no

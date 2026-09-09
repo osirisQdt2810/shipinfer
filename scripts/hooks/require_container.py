@@ -253,9 +253,13 @@ def _device_marker(args: list[str]) -> str:
 def _marker_positions(args: list[str]) -> list[tuple[int, str]]:
     """Every ``-m`` value with the index of the token that FOLLOWS it, in either spelling.
 
-    The `(index of the next operand, name)` shape `_module_at` already uses, because a caller
-    that must read a subcommand needs to know where the value sat: `python -m accelerate
-    launch` is device work and `python -m accelerate env` is not.
+    The `(next operand, name)` shape `_module_at` uses, because a caller reading a subcommand
+    needs to know where the value sat: `-m accelerate launch` is device work, `env` is not.
+
+    THE WHOLE ARGV, unlike `_module_at`, which stops at the first non-option operand. That is
+    deliberate and costs a false refusal -- `python train.py -m deepspeed` reads the SCRIPT's
+    own `-m` as the interpreter's -- because a launcher hidden one module in (`python -m
+    coverage run -m deepspeed`) is the expensive direction to miss. Do not "fix" it back.
     """
     found: list[tuple[int, str]] = []
     for index, token in enumerate(args):
@@ -329,6 +333,21 @@ def _module_argument(args: list[str]) -> str | None:
     return None if found is None else found[1]
 
 
+def _accelerate_starts_a_job(args: list[str]) -> bool:
+    """Whether an `accelerate` argv runs a job rather than reading its own configuration.
+
+    `accelerate` is absent from `BLOCKED_COMMANDS` on purpose -- `env` and `config` read and
+    print -- so every door that judges a command must make this distinction instead of
+    inheriting it from the list. THREE did not: an inline `python -c` body, a heredoc, and a
+    `subprocess` argument list all reach `_blocked_word`, where the name was simply not on
+    the list, so `python -c 'import os; os.system("accelerate launch t.py")'` was allowed
+    while the `torchrun` spelling of the same body was refused.
+    """
+    return next((a for a in args if not a.startswith("-")), None) in (
+        BLOCKED_ACCELERATE_SUBCOMMANDS
+    )
+
+
 # doc: long the three readings this took, one per review finding
 def _launcher_module(args: list[str]) -> str | None:
     """The distributed launcher a `-m` names, or None.
@@ -349,8 +368,7 @@ def _launcher_module(args: list[str]) -> str | None:
             continue
         if module != "accelerate":
             return module
-        sub = next((a for a in args[after:] if not a.startswith("-")), None)
-        if sub in BLOCKED_ACCELERATE_SUBCOMMANDS:
+        if _accelerate_starts_a_job(args[after:]):
             return module
     return None
 
@@ -675,6 +693,12 @@ def _blocked_word(commands: list[list[str]]) -> str | None:
         if base in BLOCKED_COMMANDS:
             if base in _TEST_RUNNERS and not _selects_device_tier(rest):
                 continue
+            return base
+        # `accelerate` is not a `BLOCKED_COMMANDS` name, so the check above never sees it and
+        # THIS door had no reading of its own: an inline body or a heredoc naming
+        # `accelerate launch` walked past, while `bash -c "accelerate launch t.py"` refused
+        # through `verdict`'s nested re-read. Two spellings of one command disagreed again.
+        if base == "accelerate" and _accelerate_starts_a_job(rest):
             return base
         if any(script in exe for script in BLOCKED_SCRIPTS):
             return exe
@@ -1198,10 +1222,9 @@ def verdict(command: str, cwd: str | None = None) -> str | None:
             if sub in BLOCKED_SHIPINFER_SUBCOMMANDS:
                 return f"`shipinfer {sub}` runs the server or a benchmark."
 
-        if base == "accelerate" and args:
-            sub = next((a for a in args if not a.startswith("-")), None)
-            if sub in BLOCKED_ACCELERATE_SUBCOMMANDS:
-                return f"`accelerate {sub}` starts a job on the accelerators it finds."
+        if base == "accelerate" and _accelerate_starts_a_job(args):
+            sub = next(a for a in args if not a.startswith("-"))
+            return f"`accelerate {sub}` starts a job on the accelerators it finds."
 
         if PYTHON_RE.search(base) or base == "python":
             joined = " ".join(args)
