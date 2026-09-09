@@ -1215,7 +1215,12 @@ hook down, for when the operator asked to see something before it is executed.
       have cost. 25 rows closed, zero loosened, zero false positives, both directions measured
       on both revisions before opening. `flock <lockfile> <cmd>` is the one residue: a
       POSITIONAL path, which needs a per-wrapper count -- a third shape, so its own change, and
-      `test_flock_is_still_open_and_why` keeps the gap visible.
+      `test_flock_is_still_open_and_why` kept the gap visible. **THAT RESIDUE IS NOW BUILT** on
+      `fix/a-wrappers-positional-is-not-the-command`, held behind #179: `WRAPPER_POSITIONALS`
+      is a count per wrapper, so `flock`/`chroot`/`su`/`setarch` step over their own operand.
+      Seven rows closed and, re-measuring the whole profiler and wrapper matrices,
+      `flock /tmp/l pytest -m gpu` is the ONLY row that moved. The test that documented the gap
+      became the test that pins the fix, which is what a deferred residue should turn into.
 
 - [x] **HOOK-FAILS-OPEN-ON-SPELLINGS-IT-DOES-NOT-MODEL · all three MERGED (#177, #178).**
       Open on `main` and untouched by #174: `python -m shipinfer serve` (the subcommand list is
