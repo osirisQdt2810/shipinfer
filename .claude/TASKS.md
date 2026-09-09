@@ -1698,8 +1698,25 @@ hook down, for when the operator asked to see something before it is executed.
       is that the shape fooled TWO readers: my own round-1 evidence table and the round-5
       review both listed it as a regression. The hook's own launcher test pins the spelling
       against a path that DOES exist, which is the right shape and also why nobody noticed.
-      IF IT IS FIXED: a launcher with a script operand is device work whether or not the
-      operand resolves, because the launcher forks before it discovers the file is missing.
+      **ROOT-CAUSED 9 Sep, and it is BROADER and SIMPLER than the title says.** The item read
+      as "an absent script is not evidence"; measured, the real defect is that **the `-m`
+      spelling of a blocked command is not blocked by name at all**:
+        torchrun --nproc_per_node=2 train.py                        DENY  (`torchrun` by name)
+        python -m torch.distributed.run --nproc_per_node=2 train.py ALLOW <- same program
+        nsys profile python -mtorch.distributed.run ... train.py    ALLOW
+        python -m deepspeed --num_gpus 2 train.py                   ALLOW <- not about absence
+      `torchrun` IS in `BLOCKED_COMMANDS`; `torch.distributed.run` is in neither that set nor
+      `BLOCKED_MODULES`, so the refusal falls through to `script_touches_device` and then
+      depends on whether the operand happens to be readable and happens to import torch.
+      THE INCONSISTENCY IS INSIDE ONE FILE: `PASS_THROUGH_LAUNCHERS` already lists
+      `torch.distributed.run`/`.launch`, so the HELP rule knows these module names while the
+      BLOCK rule does not.
+      THE FIX, and it is four tokens plus tests: put the launcher modules in
+      `BLOCKED_MODULES` (`torch.distributed.run`, `torch.distributed.launch`, `deepspeed`,
+      `accelerate`), which already handles the attached `-mfoo` spelling through `_module_at`.
+      It is the same rule as rounds 1 and 5 -- resolve the program to one name before judging
+      it -- applied to a third place. A launcher with a script operand is device work whether
+      or not the operand resolves, because it forks before it discovers the file is missing.
       SEQUENCED behind #192, which owns `require_container.py` -- one file, one PR at a time.
 
 - [~] **A-HELP-QUERY-WAS-REFUSED-AS-A-RUN · PR #192, found by hitting it.**
