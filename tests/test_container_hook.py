@@ -883,6 +883,52 @@ class TestADistributedLauncherIsDeviceWork:
         assert refused("python3 - <<'PY'\n" + body + "\nPY") is not None
         assert refused(f"python -c 'import os; os.system(\"torchrun {probe}\")'") is not None
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python -m torch.distributed.run --nproc_per_node=2 train.py",
+            "python -mtorch.distributed.run --nproc_per_node=2 train.py",
+            "python -m torch.distributed.launch --nproc_per_node=8 train.py",
+            "python -m deepspeed --num_gpus 2 train.py",
+            "python -m accelerate launch train.py",
+            "nsys profile python -mtorch.distributed.run --nproc_per_node=2 train.py",
+            "python -m torch.distributed.run --nproc_per_node=2 train.py --help",
+            'bash -c "python -m deepspeed --num_gpus 2 train.py"',
+        ],
+    )
+    def test_the_module_spelling_is_the_same_program(self, command: str) -> None:
+        """`torchrun` IS `python -m torch.distributed.run`, and only the first was refused.
+
+        Every row was ALLOWED on `main`, including through a wrapper and inside a quoted body,
+        because the refusal fell through to `script_touches_device` and `train.py` does not
+        exist -- so absence of a readable file decided it. A launcher forks its workers before
+        it discovers the operand is missing, and it has no offline tier to exempt, which is why
+        this is not `BLOCKED_MODULES` (whose entries are refused only for a device marker).
+        """
+        assert refused(command) is not None, command
+
+    def test_the_module_spelling_inside_a_heredoc_too(self) -> None:
+        """The lesson from #192's rounds 5-7, applied in the commit that fixes the first site:
+        `_module_argument` has more than one consumer, so the quoted path gets it as well."""
+        body = 'import subprocess\nsubprocess.run("python -m deepspeed --num_gpus 2 t.py", shell=True)'
+        assert refused("python - <<'EOF'\n" + body + "\nEOF") is not None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python -m pytest tests/core",
+            "python -m black engine/model.py",
+            "python -m shipinfer repo ls",
+            "python -m pytest --help",
+            "python -m benchmarks.parity",
+        ],
+    )
+    def test_the_other_module_invocations_are_untouched(self, command: str) -> None:
+        """The set is four launcher names, so nothing else moved: the offline pytest tier
+        (ADR-001), a formatter reading a file that imports torch, a repository query, a help
+        query, and the parity harness carve-out."""
+        assert refused(command) is None, command
+
     @pytest.mark.parametrize("sub", ["launch", "test", "estimate-memory"])
     def test_the_accelerate_subcommands_that_start_a_job(self, sub: str) -> None:
         assert refused(f"accelerate {sub}") is not None
