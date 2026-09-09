@@ -1749,6 +1749,23 @@ hook down, for when the operator asked to see something before it is executed.
       contend with them and measure noise.
       Suite 4098 passed, C++ offline tier all green (18 binaries).
 
+- [~] **WHICH-THREADS-SPEND-THE-HOST-CPU · the question `NOT-GPU-BOUND-AT-FIVE-GPUS` left
+      open, and the reason #198 and #200 exist.** That item measured the wall as host CPU --
+      38.4 ms of bench CPU per event on the RTSP arm, GPUs at 68% of ceiling, a shed that
+      bursts rather than saturates -- and named its leading hypothesis without testing it:
+      "fifty camera actors plus two RTSP servers plus 69 pipeline workers share 48 cores, so
+      the worker pool stalls in bursts". Nobody has ever looked at where the CPU goes INSIDE
+      the process, because every thread was called `bench`.
+      Now that both planes name their threads, `/proc/<pid>/task/*/{comm,stat}` answers it
+      directly: utime+stime per thread, grouped by the name's class prefix (`cam-`, `pipe-`,
+      `mdl-`, `sweeper`, `sampler`). `scripts/host_cpu.py` already parses `/proc/<pid>/stat`
+      for the whole process, so this is a second reader over the same file family.
+      SELF-CHECKING BY CONSTRUCTION: a thread that starts and dies between samples is missed,
+      so the per-class sum is a LOWER bound on the exact `wait4` total the script already
+      reports -- and printing both makes the breakdown's own trustworthiness a number.
+      THE BOX IS FREE ENOUGH TO MEASURE, checked 9 Sep: GPUs 1/3/4/5/6 are at 15 MiB, which is
+      the same five-GPU set every figure in `benchmarks/RESULTS.md` was taken on.
+
 - [~] **PYTHON-THREADS-ARE-UNNAMED-TO-THE-KERNEL · PR #200 (9 Sep) closes the seam.**
       `core/thread_name.py` mirrors the header: stdlib only, `pthread_setname_np` through
       `ctypes`, and `instance_thread_label` returns the SAME fifteen bytes as the C++ function
