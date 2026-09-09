@@ -1,5 +1,53 @@
 # Journal
 
+## 2026-09-09 (late night) — four merged, and half an hour when nothing could merge
+
+**#192 landed on round 8, after seven rounds each finding a real `main=DENY → HEAD=ALLOW`
+row.** Rounds 5, 6 and 7 were the same sentence in three places -- *judge the program that
+RUNS, not a token in its argv* -- against `_module_at`'s three consumers, one per round.
+Round 7's was mine twice over: the branch shipped a regression test for the `.py`-in-argv
+spelling while reopening the identical hole with `-m`. The lesson is now written where it will
+be reread: **when a fix is "resolve X before judging it", grep every consumer of the resolver
+and fix them all in that commit.**
+
+**#194** applied that immediately -- `python -m torch.distributed.run` is `torchrun`, and only
+the console spelling was refused, so `python -m deepspeed --num_gpus 2 train.py` fell through
+to "does the operand happen to be a readable file that imports torch". Twelve rows tightened.
+Its own review then found the two mistakes underneath it, and the second is the reusable one:
+**`accelerate` is missing from `BLOCKED_COMMANDS` on purpose**, so my unconditional module
+deny made `python -m accelerate env` stricter than `accelerate env` -- a false positive this
+repo had already ruled against, arriving through the other door. And I had written "pure
+tightening" in the body from the rows I had thought to test. A tightening claim is only
+evidence if the table lists the rows that must stay ALLOWED.
+
+**#197** finished that thought: `accelerate` is judged by its subcommand at all three doors
+now, not two. The inline `python -c` body was the one with no reading of its own, so
+`os.system("accelerate launch t.py")` was allowed while `bash -c` refused the same command.
+
+**#196 wrote the comparison down.** The four ratios, both arms on the same five GPUs, the
+interleaving method and the ~15% noise floor that forces it, and the section that matters most
+-- what is in NONE of the numbers. It had all been measured and none of it was anywhere a
+person reads: `benchmarks/README.md` recorded no result at all, so the project's headline
+claim lived five thousand lines into an agent-facing ledger. The page states the verdict
+including the half that does not flatter us: ~4x on the one like-for-like denominator, target
+NOT met. Its negative claim is guarded by a test that fails the day tracking lands.
+
+**And for about half an hour, nothing in this repository could merge.** Google's chrome apt
+repo served a bad `Packages.gz`, `apt-get update` fails as a whole, and three CI jobs went red
+on a repository this project never installs from -- `main` included, with #194 sitting at
+`Auto-merge: skipping` behind an APPROVE. The index recovered on its own and both PRs merged
+on a re-run. #195 landed the hardening anyway, and its first version is the interesting part:
+it removed `google-chrome.list` **by name** and the fetch still happened, because the image
+does not configure it under that name. The fix greps for the vendor *hosts*, prints what it
+drops, and then asserts nothing enabled survived -- because a silent no-op reads exactly like
+the bug. Rehearsed on a fake `/etc/apt` rather than on CI, where the first draft of the
+assertion failed on the line it had just commented out.
+
+**The ledger is clear.** Thirteen `[!]` items remain and every one needs the operator or the
+peer lane; the two open PRs both need a manual merge. The operator's queue is now four lines
+at the top of `TASKS.md` instead of five thousand lines down, and the 5x question carries a
+default so silence is an answer.
+
 ## 2026-09-09 (night) — the round that deleted half a rule, and the 5x question gets a default
 
 **#192, round 6, and the answer was a deletion.** Round 4 had replaced "allow unless something
