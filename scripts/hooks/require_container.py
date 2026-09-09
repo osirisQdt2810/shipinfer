@@ -549,6 +549,16 @@ def _is_shelling_out(func: ast.expr, bound: dict[str, str]) -> bool:
 #: has no reason to be the place a short-flag collision is discovered.
 HELP_FLAGS = frozenset({"--help"})
 
+# doc: long why this is a positive list and what four review rounds cost to get here
+#: PROGRAMS KNOWN TO ANSWER `--help` THEMSELVES. Positive evidence, which is the whole
+#: correction of round 4: the first three drafts asked whether anything looked like a
+#: pass-through and allowed the rest, so each round found another shape that was neither
+#: excluded nor safe -- a launcher's REMAINDER, `-c`'s argv, a parser-less script, and finally
+#: a COMPILED binary, where the `.py`-only file check answered "nothing to distrust" and
+#: `csrc/build/bench --cameras 50 --help` went through five characters from a real 50-camera
+#: run. `int main()` in `test_pipeline.cpp` takes no argv at all.
+HELP_AWARE = frozenset({"pytest", "py.test", "trtexec", "polygraphy", "shipinfer"})
+
 # doc: long why these get no help carve-out, and it is a measured hole rather than caution
 #: LAUNCHERS THAT PASS THEIR TAIL THROUGH. `torchrun` and `deepspeed` declare the script's
 #: arguments as `nargs=argparse.REMAINDER`, so every token after the script operand -- `--help`
@@ -575,27 +585,19 @@ PASS_THROUGH_LAUNCHERS = frozenset(
 
 
 # doc: long the four bounds, each of which was a measured hole in an earlier draft
-def _is_help_query(program: str, args: list[str]) -> bool:
-    """Whether ``program`` with these arguments prints usage and exits.
+# doc: long the three ways a `--help` token can fail to be this program's own flag
+def _asks_for_help(program: str, args: list[str]) -> bool:
+    """Whether the flag is present AND belongs to ``program`` rather than to what it wraps.
 
-    `--help` short-circuits in argparse and typer/click, so nothing is measured -- the reading
-    `nsys --version` got in #179 and `--check` in #183.
-
-    Four bounds, each a measured hole in an earlier draft: no pass-through launcher, no inline
-    `-c` body, the flag before any `--`, an exact token. Resolve ``program`` to one name first
-    or this answers for `_indirection`, the one check argv must never answer for.
-
-    The asymmetry is the interesting part, and it is about EVIDENCE rather than category: a
-    program that shows an argv parser is trusted (`program_without_a_parser`, checked by the
-    caller, which has the `cwd`); an inline body is not, because there is nothing to show.
+    Three ways it does not: a pass-through launcher collects its tail as the script's
+    (`nargs=REMAINDER`); `python -c cmd [arg]...` assigns everything after the body to the
+    BODY's `sys.argv`; and everything after a `--` belongs to whatever is being wrapped. The
+    token is exact, so `--helpful` is a run. Resolve ``program`` to one name before calling
+    this, or it answers for `_indirection` -- the one check argv must never answer for.
     """
     if program in PASS_THROUGH_LAUNCHERS or any(a in PASS_THROUGH_LAUNCHERS for a in args):
         return False
     if _inline_source(args) is not None:
-        # `-c` is a pass-through in the same REMAINDER sense as `torchrun`, one level in:
-        # `python -c "import torch; torch.ones(1).cuda()" --help` OPENS A CUDA CONTEXT, and
-        # `runtime/containment.py` never sees it -- that gate lives in pytest's conftest and
-        # in `serve`/`bench`, so an ad-hoc snippet is gated by this hook and nothing else.
         return False
     own = args[: args.index("--")] if "--" in args else args
     return any(arg in HELP_FLAGS for arg in own)
@@ -615,7 +617,13 @@ def _blocked_word(commands: list[list[str]]) -> str | None:
             continue
         exe, rest = tokens[0], tokens[1:]
         base = exe.rsplit("/", 1)[-1]
-        if _is_help_query(base, rest):
+        if _asks_for_help(base, rest) and base in HELP_AWARE:
+            # doc: long why the quoted path gets the name half of the rule and not the file half
+            # THE NAME HALF ONLY, because this path has no `cwd` and therefore cannot read a
+            # file: threading one down through `_heredoc_runs_device` would buy a source check
+            # here, and a heredoc that runs `csrc/build/test_pipeline --help` must be refused
+            # either way. So the quoted path grants the carve-out only to a program KNOWN to
+            # answer for itself -- which is round 4's finding, stated where it applies.
             continue
         if base in BLOCKED_COMMANDS:
             if base in _TEST_RUNNERS and not _selects_device_tier(rest):
@@ -1038,24 +1046,27 @@ def _readable_programs(args: list[str], cwd: str | None) -> list[tuple[str, str]
     return found
 
 
-# doc: long why the trust is in evidence of a parser and not in "a script file"
-def program_without_a_parser(args: list[str], cwd: str | None) -> str | None:
-    """A program whose file shows no argv parser, so `--help` is just an argv token.
+# doc: long why this asks for evidence rather than for the absence of counter-evidence
+def shows_a_parser(program: str, args: list[str], cwd: str | None) -> bool:
+    """Whether something here is KNOWN to answer `--help`, by name or by its own source.
 
-    THE TRUST IS NOT IN "A SCRIPT FILE", IT IS IN EVIDENCE OF A PARSER -- which is round 3 of
-    this carve-out, and the sharpest of the three. `python x.py --help` short-circuits only if
-    `x.py` reads argv; an ad-hoc probe script is the one python shape that habitually has no
-    `argparse` at all, so `--help` is an unrecognised token nobody reads and the script RUNS.
-    Measured: `python /tmp/adhoc_probe.py --help` opened a host CUDA context.
+    POSITIVE, and that is round 4's correction. The earlier drafts asked whether anything
+    looked like a pass-through and trusted the rest, so every round found a shape that was
+    neither excluded nor safe -- ending with a compiled binary, where a `.py`-only file check
+    answered "nothing to distrust" about `csrc/build/bench`. Absence of counter-evidence is
+    not evidence.
 
-    Unreadable paths answer None, so `python train.py --help` for a file that is not there
-    stays allowed -- there is nothing to distrust, and `script_touches_device` reads the same
-    way about the same file.
+    Two sources, and no third: the program's name (or its `-m` module, since `python -m
+    shipinfer bench --help` is `shipinfer bench --help`), or a readable file that imports an
+    argv parser. A file that cannot be read is not evidence either, which costs
+    `python train.py --help` for an absent path -- a command that was going to fail anyway.
     """
-    for program, body in _readable_programs(args, cwd):
-        if not ARGV_PARSER.search(body):
-            return program
-    return None
+    if program in HELP_AWARE:
+        return True
+    found = _module_at(args)
+    if found is not None and found[1].split(".")[0] in HELP_AWARE:
+        return True
+    return any(ARGV_PARSER.search(body) for _program, body in _readable_programs(args, cwd))
 
 
 def _indirection(tokens: list[str]) -> str | None:
@@ -1128,15 +1139,16 @@ def verdict(command: str, cwd: str | None = None) -> str | None:
             continue
         base = exe.rsplit("/", 1)[-1]
 
-        if _is_help_query(base, args) and program_without_a_parser(args, cwd) is None:
+        if _asks_for_help(base, args) and shows_a_parser(base, args, cwd):
             # doc: long the two conditions, one per review round, and what each one caught
             # AFTER `_indirection` and after the nested re-read above, which is the whole of
             # what the first draft got wrong: applied to an unresolved argv, a `--help` token
             # answered for those two -- so `bash -c "pytest -m gpu" --help` and
             # `RUN=./gpu_all.sh; $RUN --help` were allowed. `exe` is one program name here.
             #
-            # AND the program must show a parser. A file with no `argparse` and no `sys.argv`
-            # does not short-circuit on `--help`; it runs, which is round 3's finding.
+            # AND something must be KNOWN to answer `--help` -- by name, by `-m` module, or by
+            # a readable file that imports a parser. Positive evidence, because three drafts of
+            # "nothing looks like a pass-through" each missed a shape that was neither.
             continue
 
         if base in BLOCKED_COMMANDS:

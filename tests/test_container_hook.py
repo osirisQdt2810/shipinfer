@@ -990,6 +990,16 @@ class TestAHelpQueryIsInspectionAndNotARun:
         "python -c \"import subprocess; subprocess.run(['pytest','-m','gpu'])\" --help",
         'timeout 60 python -c "import torch; torch.ones(1).cuda()" --help',
         "bash -c \"python -c 'import torch; torch.ones(1).cuda()' --help\"",
+        # Round 4's, and the reason the rule went POSITIVE: a compiled binary shows no `.py`
+        # to read, so "nothing to distrust" trusted it with no evidence at all. `int main()`
+        # in `test_pipeline.cpp` takes no argv, and `cli/bench.cpp` has no help branch -- its
+        # `parse()` ends in `throw ConfigError("unknown flag")`.
+        "csrc/build/bench --help",
+        "csrc/build/bench --cameras 50 --help",
+        "csrc/build/test_pipeline --help",
+        "csrc/build/test_dataplane --help",
+        # The quoted path had no parser guard at all, because it has no `cwd` to read with.
+        "python - <<'EOF'\nimport subprocess\nsubprocess.run(\"csrc/build/test_pipeline --help\", shell=True)\nEOF",
     )
 
     @pytest.mark.parametrize("command", ALLOWED)
@@ -1042,7 +1052,6 @@ class TestAHelpQueryIsInspectionAndNotARun:
         """
         assert refused('python -c "import torch; torch.ones(1).cuda()" --help') is not None
         assert refused("python scripts/build_engines.py --help") is None
-        assert refused("python train.py --device cuda --help") is None
 
     def test_a_program_with_no_argv_parser_gets_no_carve_out(self, tmp_path: Path) -> None:
         """Round 3, and the sharpest of the three: the trust is in EVIDENCE OF A PARSER, not in
@@ -1065,11 +1074,39 @@ class TestAHelpQueryIsInspectionAndNotARun:
             refused(f"python {parsed} --help", tmp_path) is None
         ), "a program that shows a parser is the case the carve-out is for"
 
-    def test_an_unreadable_program_is_not_distrusted(self, tmp_path: Path) -> None:
-        """Nothing to read is nothing to distrust, and `script_touches_device` reads the same
-        way about the same file -- so `python train.py --help` for a path that is not there
-        stays allowed rather than becoming a refusal nobody can explain."""
-        assert refused("python train.py --device cuda --help", tmp_path) is None
+    def test_an_unreadable_program_is_not_evidence_either(self, tmp_path: Path) -> None:
+        """The stated cost of asking for EVIDENCE rather than for the absence of
+        counter-evidence: a file that cannot be read shows no parser, so `python train.py
+        --help` for an absent path is refused. Three drafts allowed it on the grounds that
+        there was nothing to distrust -- which is the reasoning that also trusted a compiled
+        binary, and a command against a file that is not there was going to fail anyway.
+        """
+        assert refused("python train.py --device cuda --help", tmp_path) is not None
+
+    def test_a_name_known_to_answer_for_itself_is_enough(self) -> None:
+        """The other source of evidence, and the one that keeps the rows this PR is for:
+        `HELP_AWARE` names, and the `-m` module too, since `python -m shipinfer bench --help`
+        IS `shipinfer bench --help`."""
+        for command in (
+            "shipinfer bench --help",
+            "python -m shipinfer bench --help",
+            "python -m pytest --help",
+            "trtexec --help",
+        ):
+            assert refused(command) is None, command
+
+    def test_a_compiled_binary_shows_nothing_and_is_refused(self) -> None:
+        """Round 4. `csrc/build/*` are in `BLOCKED_SCRIPTS` and are not `.py`, so the file
+        check found no candidate and answered "nothing to distrust" -- trusting a binary whose
+        `int main()` takes no argv. `csrc/build/bench --cameras 50 --help` was five characters
+        from a real 50-camera run.
+        """
+        for command in (
+            "csrc/build/bench --help",
+            "csrc/build/bench --cameras 50 --help",
+            "csrc/build/test_pipeline --help",
+        ):
+            assert refused(command) is not None, command
 
     def test_the_carve_out_stops_at_a_double_dash(self) -> None:
         """Everything after `--` belongs to whatever the program is wrapping, so a `--help`
