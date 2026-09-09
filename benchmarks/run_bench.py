@@ -460,6 +460,8 @@ def _print_device_table(
     heading: Sequence[str],
     per_device: Mapping[str, Mapping[str, int]],
     per_device_rows: Mapping[str, Mapping[str, int]],
+    per_device_compute_us: Mapping[str, Mapping[str, float]] | None = None,
+    seconds: float = 0.0,
 ) -> None:
     """Print the per-device breakdown -- requests and rows -- for either caller.
 
@@ -472,7 +474,9 @@ def _print_device_table(
 
     Rows go on their own line and only when they DIFFER from requests: a detector gets one
     frame per request so the two are equal and a second identical line is noise, while an
-    embedder's gap IS the crop fan-out.
+    embedder's gap IS the crop fan-out. Occupancy goes on a third when the caller knows the
+    wall clock, because microseconds without it are unreadable and a reader who divides will
+    divide by the wrong thing.
     """
     if not per_device:
         return
@@ -487,6 +491,12 @@ def _print_device_table(
         if rows and rows != devices:
             spread = "  ".join(f"{d}={n}" for d, n in sorted(rows.items()))
             print(f"  {'  (rows)':<18} {spread}")
+        busy = (per_device_compute_us or {}).get(model, {})
+        if busy and seconds > 0:
+            spread = "  ".join(
+                f"{d}={us / (seconds * 1e6) * 100:.0f}%" for d, us in sorted(busy.items())
+            )
+            print(f"  {'  (busy)':<18} {spread}")
 
 
 def measure_shipinfer_in_full(
@@ -538,6 +548,8 @@ def measure_shipinfer_in_full(
         ["\nper-device execution (the balancing evidence):"],
         result.per_device,
         result.per_device_rows,
+        result.per_device_compute_us,
+        cfg.seconds,
     )
     offered = shipinfer.offered_rates(cfg, result)
     capacity = shipinfer.per_module_capacity(cfg, instances=result.instances)

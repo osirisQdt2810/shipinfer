@@ -151,6 +151,10 @@ class ShipInferResult:
     #: embedder's differ by the crop fan-out. Reporting only requests understates this plane
     #: against a one-model-per-image baseline by exactly that fan-out.
     per_device_rows: dict[str, dict[str, int]] = field(default_factory=dict)
+    #: model -> device -> execute MICROSECONDS, summed. Over the steady window this
+    #: is occupancy, and occupancy is the only counter that distinguishes "the models
+    #: are the limit" from "the models are idle and something upstream is short".
+    per_device_compute_us: dict[str, dict[str, float]] = field(default_factory=dict)
     instances: dict[str, int] = field(default_factory=dict)
     ops: str = ""
     stages: tuple[str, ...] = ()
@@ -436,16 +440,20 @@ def run_shipinfer(
         rejected = {n: metrics.requests_rejected.value(model=n) for n in handles}
         per_device: dict[str, dict[str, int]] = {}
         per_device_rows: dict[str, dict[str, int]] = {}
+        per_device_compute_us: dict[str, dict[str, float]] = {}
         for name, handle in handles.items():
             breakdown: dict[str, int] = {}
             rows: dict[str, int] = {}
+            busy: dict[str, float] = {}
             for instance in handle.instances:
                 stats = instance.stats()
                 device = str(stats["device"])
                 breakdown[device] = breakdown.get(device, 0) + int(stats["requests"])
                 rows[device] = rows.get(device, 0) + int(stats["rows"])
+                busy[device] = busy.get(device, 0.0) + float(stats["compute_us"])
             per_device[name] = breakdown
             per_device_rows[name] = rows
+            per_device_compute_us[name] = busy
 
         return ShipInferResult(
             log=log,
@@ -473,6 +481,7 @@ def run_shipinfer(
             requests_rejected=rejected,
             per_device=per_device,
             per_device_rows=per_device_rows,
+            per_device_compute_us=per_device_compute_us,
             instances={n: len(h.instances) for n, h in handles.items()},
             ops=str(runner.health()["ops"]),
             stages=stages,

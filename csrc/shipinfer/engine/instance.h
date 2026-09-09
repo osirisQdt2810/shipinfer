@@ -35,6 +35,12 @@ namespace shipinfer {
         uint64_t requests = 0;
         uint64_t failed_batches = 0;
         double ewma_latency_us = 0.0;
+        //: TOTAL execute time, summed rather than smoothed. `ewma_latency_us` answers "how
+        //: loaded is this instance now", which is what a placement policy wants and what a
+        //: profile cannot use: an EWMA times a batch count is not a total. Divided by the
+        //: run's wall time this is the instance's OCCUPANCY, which is the only thing that
+        //: says whether a stage is the bottleneck or merely the busiest-looking.
+        double compute_us = 0.0;
     };
 
     class ModelInstance : public Placeable {

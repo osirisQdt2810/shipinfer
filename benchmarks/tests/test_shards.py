@@ -324,3 +324,35 @@ class TestTheDeviceTableIsPrintedByOneFunction:
     def test_nothing_at_all_prints_no_heading(self, capsys) -> None:
         """The heading was inside the old `if`, so an empty table must stay silent."""
         assert self._printed(capsys, {}, {}) == []
+
+
+class TestOccupancyIsPrintedAsAPercentage:
+    """The third line of the device table, and the one that redirected an optimisation.
+
+    Requests and rows say what a model was ASKED to do; only time says whether it could.
+    Printing raw microseconds would be unreadable and a reader who divides them will divide
+    by the wrong thing, so the caller passes the wall clock and this prints a percentage.
+    """
+
+    def _printed(self, capsys, seconds, compute_us) -> list[str]:
+        from benchmarks import run_bench
+
+        run_bench._print_device_table(
+            ["HEAD"], {"m": {"cuda:0": 10}}, {"m": {"cuda:0": 10}}, compute_us, seconds
+        )
+        return capsys.readouterr().out.splitlines()
+
+    def test_a_busy_line_appears_with_the_percentage(self, capsys) -> None:
+        out = self._printed(capsys, 70.0, {"m": {"cuda:0": 49_000_000.0}})
+        assert any("(busy)" in line and "70%" in line for line in out), out
+
+    def test_no_wall_clock_means_no_busy_line(self, capsys) -> None:
+        """Rather than print microseconds nobody can read, or divide by a zero."""
+        out = self._printed(capsys, 0.0, {"m": {"cuda:0": 49_000_000.0}})
+        assert not any("(busy)" in line for line in out), out
+
+    def test_an_absent_table_is_fine(self, capsys) -> None:
+        """A shard child from before this counter sends none, and the parent must still print."""
+        out = self._printed(capsys, 70.0, None)
+        assert "cuda:0=10" in out[1]
+        assert not any("(busy)" in line for line in out), out
