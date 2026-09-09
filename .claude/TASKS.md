@@ -1144,7 +1144,7 @@ hook down, for when the operator asked to see something before it is executed.
       every post-emit metric instead (`Histogram.observe` too) -> four on `main`, no fifth, and
       the whole `tests/` tree clean on the branch. Stays open until #173 merges.
 
-- [~] **HOOK-REFUSES-A-HEREDOC-THAT-ONLY-QUOTES-A-WORD · fixed and verified; PR held behind #175.**
+- [~] **HOOK-REFUSES-A-HEREDOC-THAT-ONLY-QUOTES-A-WORD · PR #176, in review.**
       `python3 - <<PY` whose body merely mentions `pytest` inside a STRING LITERAL is refused
       as "a heredoc executed by an interpreter runs `pytest`" -- four times in one session, and
       each refusal ended the whole `Bash` call, so the edit chained ahead of it never ran. It
@@ -1166,14 +1166,20 @@ hook down, for when the operator asked to see something before it is executed.
       three guards fails with its own regression restored (7/1/1). Suite 3772 passed, docs caps
       unchanged, matrix identical to `main` bar the six intended rows.
 
-- [ ] **HOOK-FAILS-OPEN-ON-SPELLINGS-IT-DOES-NOT-MODEL · not #174's, but the same shape.**
+- [~] **HOOK-FAILS-OPEN-ON-SPELLINGS-IT-DOES-NOT-MODEL · measured; three categories, not one.**
       Open on `main` and untouched by #174: `python -m shipinfer serve` (the subcommand list is
       only consulted when `base == "shipinfer"`), bare `torchrun`, and `uv run pytest -m gpu`.
-      Each is a launcher the hook does not model, and each reaches no `containment.py`. Not a
-      hunk in a PR about `-m`: the fix is to decide what a launcher IS -- a command whose
-      operand is a program -- and there are at least three of them.
+      Each is a launcher the hook does not model, and each reaches no `containment.py`.
+      MEASURED, and it is three categories rather than one -- which is why it is not one hunk:
+      (a) wrappers whose operand is a COMMAND, where `timeout`/`env`/`nice`/`stdbuf`/`xargs`/
+      `nohup` are already handled and `uv run`, `poetry run`, `pipenv run`, `hatch run`,
+      `pdm run` and `mpirun -n N` are not; (b) launchers whose operand is a PROGRAM --
+      `torchrun`, `deepspeed`, `accelerate launch` -- which is #174's rule one command over;
+      (c) `python -m shipinfer serve`, where `BLOCKED_SHIPINFER_SUBCOMMANDS` is consulted only
+      when `base == "shipinfer"`. Category (a) has an existing seam to extend rather than a
+      mechanism to invent, which is where this starts.
 
-- [~] **OCCUPANCY-INCLUDES-THE-WARMUP-WINDOW · fixed and verified; PR held behind #174.**
+- [x] **OCCUPANCY-INCLUDES-THE-WARMUP-WINDOW · MERGED AS #175 (9 Sep), first pass.**
       `compute_us` is cumulative and both readers divide by the full `--seconds`, while
       `read`/`emitted`/`requests` are differenced against an at-warmup snapshot
       (`harness/shipinfer.py`'s `counters()`). Occupancy is lower while the pipeline ramps, so
