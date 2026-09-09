@@ -1085,6 +1085,88 @@ class TestTheCppTiersGatePullRequests:
         )
 
 
+class TestNoVendorRepoCanFailAJobThatNeverUsesIt:
+    """`apt-get update` fails as a WHOLE when any configured repository serves a bad index.
+
+    On 9 Sep a `Hash Sum mismatch` on Google's chrome repo -- which nothing here installs
+    from, and which the runner image configures, not us -- turned three jobs red at once and
+    blocked every merge, main included. So every job that reaches apt drops the image's vendor
+    lists first. This is the ratchet: the next apt job would otherwise inherit the fragility
+    silently, which is how it arrived.
+    """
+
+    #: The HOST, not a filename: the first fix removed `google-chrome.list` and the fetch
+    #: still happened, because the image does not configure it under that name. Escaped,
+    #: because the step greps it as a regex -- the plain spelling matched nothing and the
+    #: guard passed on zero jobs.
+    _DROP = r"dl\.google\.com"
+    #: Steps that reach apt, by their own text or by being an action that runs it for us.
+    _APT = ("apt-get update", "apt-get install", "Jimver/cuda-toolkit")
+
+    @property
+    def _workflows(self) -> Path:
+        return Path(__file__).resolve().parents[1] / ".github" / "workflows"
+
+    def _jobs(self):
+        import yaml
+
+        for path in sorted(self._workflows.glob("*.yml")):
+            for name, job in (yaml.safe_load(path.read_text())["jobs"] or {}).items():
+                yield f"{path.name}:{name}", job.get("steps") or []
+
+    @staticmethod
+    def _code(step: dict) -> str:
+        """A step's runnable text, with comment lines dropped.
+
+        A comment saying `apt-get update` is a MENTION, and this file has a whole class about
+        that distinction elsewhere: the drop step's own comment names the command it protects,
+        so counting it as a use made the step arrive after itself.
+        """
+        body = step.get("run") or ""
+        code = "\n".join(
+            line for line in body.splitlines() if not line.lstrip().startswith("#")
+        )
+        return f"{code}\n{step.get('uses') or ''}"
+
+    def test_every_job_that_reaches_apt_drops_them_first(self) -> None:
+        for where, steps in self._jobs():
+            texts = [self._code(step) for step in steps]
+            drops = [i for i, t in enumerate(texts) if self._DROP in t]
+            # The drop step is the GUARD, not a use: its own failure message names the
+            # command it protects, which counted it as arriving after itself.
+            reaching = [
+                i
+                for i, t in enumerate(texts)
+                if i not in drops and any(k in t for k in self._APT)
+            ]
+            if not reaching:
+                continue
+            dropped = drops[0] if drops else None
+            assert dropped is not None, f"{where} reaches apt and drops no vendor source"
+            assert dropped < min(reaching), (
+                f"{where} drops the vendor sources AFTER it has already used apt, so the "
+                f"first `apt-get update` still fails on a repo nothing here installs from"
+            )
+
+    def test_the_drop_says_so_when_it_finds_nothing_to_do(self) -> None:
+        """A silent no-op reads exactly like the bug, so the step prints what it dropped and
+        then ASSERTS that no enabled reference survived -- `rm -f`, so a tree with nothing to
+        drop is fine, and a grep that ignores commented lines, so a disabled source is not
+        mistaken for a live one (the first draft failed on the line it had just commented)."""
+        seen = 0
+        for where, steps in self._jobs():
+            for step in steps:
+                body = step.get("run") or ""
+                if self._DROP not in self._code(step):
+                    continue
+                seen += 1
+                assert "rm -f" in body, f"{where} removes a source without -f"
+                assert "dropping:" in body, f"{where} drops sources without saying which"
+                assert "^[^#]*" in body, f"{where} would match a commented-out source"
+                assert "exit 1" in body, f"{where} does not fail when a source survives"
+        assert seen == 3, f"expected three apt jobs to carry the drop, found {seen}"
+
+
 # doc: long the forward-only rule and its grandfathered counts have to be written down
 class TestTheProjectsMarkdownKeepsItsCaps:
     """A `FEATURE_LOG.md` entry is 15 lines and an ADR is 30 — **forward-only**.
