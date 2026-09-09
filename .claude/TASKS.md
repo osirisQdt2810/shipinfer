@@ -1236,6 +1236,31 @@ hook down, for when the operator asked to see something before it is executed.
           decode. The bench's default is `h264` and this run did use NVDEC -- but nothing
           stops an `auto` fleet from measuring libav.
 
+- [x] **WORKER-COUNT-IS-NOT-THE-LEVER, AND HERE IS THIS BOX'S NOISE FLOOR · measured 9 Sep,
+      a NEGATIVE result and the more useful half is the second clause.**
+      `NOT-GPU-BOUND-AT-FIVE-GPUS` ends on "the worker pool stalls in bursts": 115 workers
+      (`WORKERS_PER_GPU=23` x 5 GPUs, a default MEASURED on SEVEN GPUs) against 48 cores with
+      other tenants already at load ~28 is 5x oversubscription, so the worker count looked
+      like a free win. `SHIPINFER_BENCH_WORKERS` already exists, so this cost no code.
+      nvdec, 50x20x70 s, GPUs 1/3/4/5/6, events_complete:
+        workers   run 1    run 2    run 3    mean
+        48        29 263      --       --    29 263   clearly worst, and the only clear result
+        72        35 940   35 823   33 763   35 175
+        115       33 820   39 375   38 606   37 267   the default, and it wins on the mean
+      THE FIRST SWEEP SAID 72 BEAT 115 BY 6%. Interleaving the repeats (115, 72, 115, 72, so a
+      drift in the box's load cannot favour one arm) REVERSED it: 0.94x, 1.10x, 1.14x pairwise.
+      So the default is right and 23/GPU survives a device count it was not tuned for.
+      **AND THE NUMBER TO KEEP: four runs at IDENTICAL settings spread 26 669 to 39 375 --
+      36.7% of the mean.** Dropping the earliest (a differently loaded box) still leaves 14.9%.
+      SO: on this box, a single-run A/B cannot resolve anything under ~15%, and three of the
+      conclusions already in the ledger sit inside that -- the 4x-queue arm's +1.8% events, the
+      -12% `queue_rejected`, and the +16.6% of `replay` over `nvdec`. They are not refuted;
+      they are single runs of an effect smaller than the spread, so they should be quoted with
+      that caveat or re-run interleaved. C1's three ratios (0.60x / 1.87x / 7.22x) are far
+      outside it and are untouched by this.
+      METHOD, for whoever measures next: interleave the arms, three pairs minimum, and quote
+      the pairwise ratios rather than the means -- the means hid the reversal here.
+
 - [~] **GSTREAMER-RTSP-CANNOT-FINISH-AT-THE-DESIGN-LOAD · PR #185. CORRECTED: this is the
       HOST-DECODE arm, not the mandated route -- `sources/nvdec.h` says in its FIRST LINE that
       NVDEC into VRAM is V156's route, and `PHASE-D-NV12` is closed. I had it backwards in the
