@@ -1209,7 +1209,7 @@ hook down, for when the operator asked to see something before it is executed.
       to helpers several callers share, and (1) and (2) touch `WRAPPERS`/`WRAPPER_SUBCOMMANDS`
       that PR #177 is changing right now.
 
-- [~] **HOOK-FAILS-OPEN-ON-SPELLINGS-IT-DOES-NOT-MODEL · (a)+(c) is PR #177; (b) next.**
+- [~] **HOOK-FAILS-OPEN-ON-SPELLINGS-IT-DOES-NOT-MODEL · (a)+(c) MERGED AS #177; (b) is PR #178.**
       Open on `main` and untouched by #174: `python -m shipinfer serve` (the subcommand list is
       only consulted when `base == "shipinfer"`), bare `torchrun`, and `uv run pytest -m gpu`.
       Each is a launcher the hook does not model, and each reaches no `containment.py`.
@@ -1237,10 +1237,12 @@ hook down, for when the operator asked to see something before it is executed.
       `config`/`env` allowed -- refusing those is friction with no integrity gain). Ten rows
       closed (eleven, counted from the matrix rather than remembered), none loosened.
       `torchrun --help` IS refused, exactly as `trtexec --help` already is; asserted rather
-      than discovered. BOTH PR bodies are written and their test names grepped against their
-      own diffs, so they open the moment #176 merges -- they cannot open before it, because all
-      three branches edit `require_container.py` and a PR based on `main` would show #176's
-      diff too.
+      than discovered. #177's review found the one thing my own matrix had not covered: a
+      GLOBAL value-flag set, so `sudo -n`/`time -p`/`xargs -p` -- booleans -- ate the command
+      and `real_command` answered the marker name. Keyed by wrapper now; that falsified the
+      body's "none the other way" claim, which is why the table is regenerated every round.
+      For #178 I swept the false-positive direction MYSELF first: fourteen shapes where a
+      launcher's name appears and nothing runs, all allowed on both sides, zero introduced.
 
 - [x] **OCCUPANCY-INCLUDES-THE-WARMUP-WINDOW · MERGED AS #175 (9 Sep), first pass.**
       `compute_us` is cumulative and both readers divide by the full `--seconds`, while
