@@ -1062,6 +1062,57 @@ class TestAProfilerIsAWrapperAndNotABlockedName:
         """The offline tier through a lock or a mask, and the queries that run nothing."""
         assert refused(command) is None
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "gdb --args pytest -m gpu",
+            "gdb -batch -ex run --args pytest -m gpu",
+            "parallel pytest -m gpu",
+            "parallel -j2 pytest -m gpu",
+            "parallel -j 2 pytest -m gpu",
+            "screen -dm pytest -m gpu",
+        ],
+    )
+    def test_three_more_plain_wrappers(self, command: str) -> None:
+        """A debugger, a job runner and a detacher -- `<tool> [flags] <command>` in PLAIN
+        tokens, so one `WRAPPERS` entry each.
+
+        The ledger had filed all seven remaining spellings as "the command is one quoted token
+        or an argv template". Measuring my own claim showed that is true of only three
+        (`script -c`, `tmux new -d`, `find -exec`), and these were sitting in the hard pile
+        for no reason. Testing a backlog line beats re-reading it.
+        """
+        assert refused(command) is not None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "gdb --version",
+            "parallel --version",
+            "gdb --args python -c 'print(1)'",
+            "screen -dm pytest tests/core -q",
+        ],
+    )
+    def test_the_plain_wrappers_keep_their_allowed_half(self, command: str) -> None:
+        """Version queries run nothing, inline python that touches no device is inspection,
+        and the offline tier runs anywhere -- through a detacher as much as without one."""
+        assert refused(command) is None
+
+    def test_what_stays_open_and_which_reason_each_has(self) -> None:
+        """Two different reasons, and conflating them is what the ledger got wrong.
+
+        `script -c '<cmd>'`, `tmux new -d '<cmd>'` and `find -exec … {} +` put the command
+        inside one quoted token or an argv template, which a deny-list over command text
+        cannot read -- CLAUDE.md says so, and `containment.py` is the answer there.
+        `ssh <host> <cmd>` is different: it is plain tokens, and it stays out because it runs
+        on the REMOTE host, where the hook cannot tell a loopback from a GPU box that has the
+        container. Refusing it would be a false positive on a legitimate run.
+        """
+        assert refused("script -c 'pytest -m gpu' /dev/null") is None
+        assert refused("tmux new -d 'pytest -m gpu'") is None
+        assert refused("find . -name '*.py' -exec pytest -m gpu {} +") is None
+        assert refused("ssh localhost pytest -m gpu") is None
+
     def test_the_flagged_spelling_of_the_same_thing_is_also_closed(self) -> None:
         """`taskset -c 0-7` puts the mask behind a flag, which #179 already handled -- so both
         spellings of one tool now agree, which is the property the `watch -d` finding was
