@@ -68,6 +68,12 @@ BLOCKED_COMMANDS = {
     "py.test",
     "trtexec",
     "polygraphy",
+    # Distributed launchers, on the same ground as `trtexec`: they exist to START a torch job
+    # on accelerators, so `torchrun --nproc_per_node=2` on the host opens a CUDA context per
+    # process against an 11.5 nvcc and a 12.6 driver. Neither takes an innocent subcommand;
+    # `accelerate` does, so it is judged by `BLOCKED_ACCELERATE_SUBCOMMANDS` instead.
+    "torchrun",
+    "deepspeed",
 }
 
 # Scripts that run the suite or a benchmark, wherever they are invoked from.
@@ -92,6 +98,11 @@ BLOCKED_SCRIPTS = (
 
 # `shipinfer <subcommand>` -- only the ones that touch a device or serve.
 BLOCKED_SHIPINFER_SUBCOMMANDS = {"bench", "serve", "profile", "warmup"}
+
+# `accelerate <subcommand>` -- the same shape one tool over. `launch` and `test` start a job
+# on whatever accelerators they find; `config` and `env` read and print, and refusing those
+# would be friction with no integrity gain, which is how a hook gets switched off.
+BLOCKED_ACCELERATE_SUBCOMMANDS = {"launch", "test", "estimate-memory"}
 
 # Inline python (`-c`) or a module (`-m`) is blocked when it reaches for a
 # device.  A bare `import torch; print(torch.__version__)` is version
@@ -974,6 +985,11 @@ def verdict(command: str, cwd: str | None = None) -> str | None:
             sub = next((a for a in args if not a.startswith("-")), None)
             if sub in BLOCKED_SHIPINFER_SUBCOMMANDS:
                 return f"`shipinfer {sub}` runs the server or a benchmark."
+
+        if base == "accelerate" and args:
+            sub = next((a for a in args if not a.startswith("-")), None)
+            if sub in BLOCKED_ACCELERATE_SUBCOMMANDS:
+                return f"`accelerate {sub}` starts a job on the accelerators it finds."
 
         if PYTHON_RE.search(base) or base == "python":
             joined = " ".join(args)
