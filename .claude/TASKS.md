@@ -5591,6 +5591,19 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       and opencv-python-headless, with a DERIVED guard -- every `importorskip` target in the
       tree must come from what `.[dev,cli]` resolves, `shipvision` the single exemption and
       that exemption asserted to be the only one.
+      **AND #187's FIRST RUN TAUGHT THE ONE THING NEITHER OF US KNEW: `PYTHONPATH` HANDS OVER
+      THE SOURCE, NOT THE DEPENDENCIES.** The 189 went from SKIPPED to ERROR --
+      "shipvision.mot cannot be imported (No module named 'scipy')" -- because shipvision is a
+      pure setuptools package with dependencies of its own and `mot/association/solver.py`
+      needs `scipy` from its `solvers` extra. `pip install -e "3rdparty/shipvision[solvers]"`
+      is the fix, and it is what `topology/bridge.py`'s own message has been prescribing all
+      along. `deploy/rootless/_container.sh` gets away with PYTHONPATH only because the bench
+      IMAGE carries scipy; a plain runner carries nothing.
+      CHECKED AND NOT A DEFECT, so nobody re-opens it: `shipvision_available()` returning True
+      while `shipvision.mot` fails is DELIBERATE and the docstring says so -- "a checkout stale
+      enough to be missing `shipvision.reid` is a real state and reporting it as 'shipvision is
+      fine' would be worse than useless". Erroring loudly on an incomplete install is the
+      intent, and `_unavailable` already interpolates the real ImportError.
       THE REMAINING 189 ARE THE ORIGINAL DECISION and still need `.github/workflows/**`:
       check out shipvision's PYTHON half by name (the `kernels` job's own recipe -- https
       rewrite, `submodules: false`, never `--recursive`, because `benchmarks/baseline` is a
