@@ -563,7 +563,13 @@ class TestTrackLifecycle:
     def test_a_re_added_camera_is_accepted_at_frame_zero(self, element) -> None:
         """ADR-018 names remove + add as the one recovery for a lost camera, and a re-added
         camera's ingest actor mints a fresh ``FrameCounter``. Without the reset its frame 0 is
-        below the previous run's high-water mark and every frame is refused, forever."""
+        below the previous run's high-water mark and every frame is refused, forever.
+
+        The FIRST announcement is here because the runner sends one on every add, this one
+        included. Without it this sequence is a first add, and a first add resets nothing --
+        which is the whole of `camera_added`'s rule and was the bug when it had no rule.
+        """
+        element.camera_added("cam-a")
         for frame in range(6):
             element.process(item("cam-a", frame, detections=detections((0, 0, 40, 40))))
 
@@ -574,6 +580,7 @@ class TestTrackLifecycle:
         assert len(emitted.meta["tracks"]) == 1
 
     def test_a_re_added_camera_does_not_continue_its_old_identities(self, element) -> None:
+        element.camera_added("cam-a")
         before = track_ids(
             element.process(item("cam-a", 0, detections=detections((0, 0, 40, 40))))
         )
@@ -584,6 +591,47 @@ class TestTrackLifecycle:
         )
 
         assert set(before).isdisjoint(after), "the reset kept the tracks it was meant to forget"
+
+    def test_a_first_add_that_arrives_after_a_frame_keeps_the_identity(self, element) -> None:
+        """The 1%-of-runs flake, deterministic: the hook's own contract says a frame can reach
+        `process` first, and resetting regardless threw away the tracker that frame had just
+        built -- so the camera's SECOND frame started a second identity.
+
+        This is the order the instrumented runner printed on every failure: `process frame 0`,
+        `camera_added(cam-a)`, `reset_if_present(cam-a) -> True`, then a new id on frame 1.
+        """
+        box = detections((10, 10, 110, 110))
+        first = track_ids(element.process(item("cam-a", 0, detections=box)))
+
+        element.camera_added("cam-a")
+
+        rest = [
+            track_ids(element.process(item("cam-a", frame, detections=box)))
+            for frame in (1, 2, 3)
+        ]
+
+        # No literal id: this file's own rule, because `shipvision` counts process-wide and
+        # the value depends on how many tests ran first. The property is that there is ONE and
+        # that every later frame reports the same one.
+        assert len(first) == 1, first
+        assert rest == [first, first, first], (first, rest)
+
+    def test_a_remove_then_an_add_still_starts_a_new_identity(self, element) -> None:
+        """The announced recovery, and the other half of the rule: the id after a remove + add
+        must not continue, and it does not need the reset to do that -- `camera_removed` drops
+        the tracker outright, so the add builds a fresh one."""
+        element.camera_added("cam-a")
+        before = track_ids(
+            element.process(item("cam-a", 0, detections=detections((0, 0, 40, 40))))
+        )
+
+        element.camera_removed("cam-a")
+        element.camera_added("cam-a")
+        after = track_ids(
+            element.process(item("cam-a", 0, detections=detections((0, 0, 40, 40))))
+        )
+
+        assert set(before).isdisjoint(after), "a re-added camera continued its old identities"
 
     def test_camera_added_builds_no_tracker_for_a_camera_that_has_none(self, element) -> None:
         """It fires for every camera on the shard. Minting a Kalman filter for the forty-nine

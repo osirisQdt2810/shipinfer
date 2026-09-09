@@ -541,6 +541,12 @@ class ShipvisionTrack(Element):
             self.params.get("attribution_iou", DEFAULT_ATTRIBUTION_IOU)
         )
         self._shard: TrackerShard | None = None
+        # doc: long why a lifecycle hook needs a memory of its own, and why no lock
+        #: The cameras this element has been TOLD about. `camera_added` resets a tracker, and
+        #: it may only do that for a camera it has already seen added -- see that method. Only
+        #: the two lifecycle hooks touch this, and the runner serialises them under its
+        #: `_lifecycle`, so it needs no lock; the per-frame path never reads it.
+        self._added: set[str] = set()
         self._metrics = _TrackMetrics(None, name)
         # Bound once, next to the other resolve-once handles: `self._metrics.implicit_reset`
         # written at the call site mints a bound-method object on every frame, and this one is
@@ -624,21 +630,33 @@ class ShipvisionTrack(Element):
     def _do_close(self) -> None:
         # The trackers go with the element: their state is a camera's identity history and
         # keeping it across a close would mean a reopened chain continuing ids from before the
-        # gap it cannot see.
+        # gap it cannot see. `_added` goes with them, so a reopened chain's first announcement
+        # per camera is a first add again.
         self._shard = None
+        self._added.clear()
         self._Detection = None
         self._Detections = None
         self._FrameTag = None
         self._iou_matrix = None
         self._associate = None
 
+    # doc: long the window this hook is called inside, and what it cost to reset regardless
     def camera_added(self, camera_id: str) -> None:
-        """Restart this camera's tracker if it already had one.
+        """Restart this camera's tracker if it was **already** added and still has one.
 
         A re-added camera is one whose ingest actor minted a fresh ``FrameCounter``, so its next
         frame is ``frame_id = 0`` — below the high-water mark the previous run left, and refused
         forever without this. ADR-018 names remove + add as the recovery for a lost camera, so
         this state has to be one the chain can be in.
+
+        **Only for a camera this element has already been told about**, which is the whole of
+        the ``_added`` set. :meth:`Element.camera_added`'s own contract says this hook runs
+        *after* the ingest actor exists, so "on a camera that opens instantly a frame can reach
+        ``process`` before this hook does" — and resetting regardless took that frame's brand
+        new tracker and threw it away, so the camera's second frame started a **second**
+        identity. Measured: one stationary box across four frames came back as two ids in about
+        1% of runs, and 8 of 12 with the hooks instrumented. A first add has nothing to restart:
+        any tracker present is one an in-flight frame of *this* run just built.
 
         Never *builds* a tracker: this fires for every camera placed on the shard, and minting a
         Kalman filter for forty-nine cameras that are not on this element is work for nothing.
@@ -648,7 +666,9 @@ class ShipvisionTrack(Element):
         :meth:`TrackerShard.reset_if_present` for why that residual is accepted: a reset has to
         agree with the update it interrupts, and a drop does not.
         """
-        if self._shard is not None:
+        already_added = camera_id in self._added
+        self._added.add(camera_id)
+        if already_added and self._shard is not None:
             self._shard.reset_if_present(camera_id)
 
     def camera_removed(self, camera_id: str) -> None:
@@ -658,6 +678,7 @@ class ShipvisionTrack(Element):
         runs holding the runner's ``_lifecycle``, and every other lifecycle operation on the
         shard — including the ``stop`` that would end a wait — queues behind it.
         """
+        self._added.discard(camera_id)
         if self._shard is not None and self._shard.drop(camera_id):
             self._note_cameras()
 
