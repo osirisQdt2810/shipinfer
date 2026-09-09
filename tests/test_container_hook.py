@@ -968,6 +968,26 @@ class TestAProfilerIsAWrapperAndNotABlockedName:
             "unbuffer pytest -m gpu",
             "watch -n1 pytest -m gpu",
             "watch -n 1 pytest -m gpu",
+            "watch --interval 1 pytest -m gpu",
+            # `-d`/`--differences` takes NO argument. Listing it as value-taking made the
+            # pair-skip eat the command, so the short spelling allowed what the long one
+            # refused -- the two disagreeing is the tell.
+            "watch -d pytest -m gpu",
+            "watch --differences pytest -m gpu",
+            # NVIDIA's `--tool` is separated, not `=`, and selecting the tool is the whole
+            # reason to reach for these -- so the canonical invocation was the one getting
+            # through while the `=` form refused.
+            "compute-sanitizer --tool racecheck pytest -m gpu",
+            "compute-sanitizer --tool=racecheck pytest -m gpu",
+            "compute-sanitizer --log-file cs.log pytest -m gpu",
+            "cuda-memcheck --tool racecheck pytest -m gpu",
+            # Numeric flag values: `WRAPPER_OPERAND` steps over these, which is why they are
+            # NOT in `WRAPPER_VALUE_FLAGS` -- that table is for values that are NAMES, and
+            # listing a numeric one is what produced the `-d` mistake above.
+            "chrt -p 99 pytest -m gpu",
+            "strace -p 1234 pytest -m gpu",
+            "ncu --launch-count 5 pytest -m gpu",
+            "valgrind --tool memcheck pytest -m gpu",
         ],
     )
     def test_the_inner_command_is_what_is_judged(self, command: str) -> None:
@@ -1000,13 +1020,21 @@ class TestAProfilerIsAWrapperAndNotABlockedName:
         must never be refused."""
         assert refused(command) is None
 
-    def test_flock_is_still_open_and_why(self) -> None:
+    @pytest.mark.parametrize(
+        "command", ["flock /tmp/l pytest -m gpu", "taskset 0xff pytest -m gpu"]
+    )
+    def test_a_wrappers_positional_operand_is_still_open_and_why(self, command: str) -> None:
         """Scoped out on purpose, and asserted so the gap is visible rather than assumed
-        closed: `flock` takes a positional PATH before its command, which neither
-        `WRAPPER_OPERAND` (numbers) nor `WRAPPER_VALUE_FLAGS` (flags) can step over. It needs
-        a third shape -- a per-wrapper positional count -- and that is its own change. The
-        ledger item names it."""
-        assert refused("flock /tmp/l pytest -m gpu") is None
+        closed. Both take a positional operand before the command -- a lock file, a CPU mask
+        -- and `WRAPPER_OPERAND` matches only decimal digits while `WRAPPER_VALUE_FLAGS`
+        matches only flags, so the operand becomes the "executable". It needs a third shape,
+        a per-wrapper positional count, which is its own change. The ledger names both."""
+        assert refused(command) is None
+
+    def test_the_flagged_spelling_of_the_same_thing_is_not_open(self) -> None:
+        """`taskset -c 0-7` puts the mask behind a flag, which this PR does handle -- so the
+        gap above is about the POSITIONAL form specifically, not about `taskset`."""
+        assert refused("taskset -c 0-7 pytest -m gpu") is not None
 
     @pytest.mark.parametrize(
         "command",
