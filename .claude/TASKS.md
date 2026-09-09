@@ -1749,6 +1749,39 @@ hook down, for when the operator asked to see something before it is executed.
       contend with them and measure noise.
       Suite 4098 passed, C++ offline tier all green (18 binaries).
 
+- [ ] **THE-INSTANCE-THREADS-SPIN-ON-cudaStreamSynchronize · the next question, and the
+      copies are RULED OUT by measurement rather than by argument (9 Sep).**
+      `WHICH-THREADS-SPEND-THE-HOST-CPU` put the model-instance threads at 51.6% of the host
+      CPU, 16.5 CPU-s each, with the ten `ship_segmenter` instances at the top (21.6 each).
+      Three candidates inside `execute_batch`, and only one survives:
+      (1) THE SCATTER -- RULED OUT. `instance.cpp` copies every output row into a fresh
+      `std::vector<float>` per request, and the segmenter's outputs are 300x38 + 32x160x160 =
+      830 600 floats = **3.32 MB per row**, which looked like the answer. MEASURED the constant
+      instead of assuming it (a `-O2` microbenchmark of exactly that fresh-vector assign, in
+      the container): **212-239 us per row, 14-16 GB/s**. This run's 50 921 segmenter rows are
+      therefore ~11.5 CPU-s TOTAL across ten threads -- about **5%** of their 216. My own
+      estimate before measuring was 784 MB/s and it was wrong by 18x, which is the reason to
+      measure a constant even when the arithmetic "obviously" works out.
+      (2) THE INPUT ASSEMBLY -- SAME ORDER, also small: 640x640x3 floats = 4.9 MB per row,
+      ~18 CPU-s total across the ten.
+      (3) **THE SYNCHRONISE -- WHAT IS LEFT.** `TrtInstance::execute` ends in
+      `gpuStreamSynchronize(stream_)` (engine.cpp:233), and **neither plane sets
+      `cudaSetDeviceFlags` anywhere** (`grep -rn "cudaSetDeviceFlags|ScheduleBlockingSync|
+      ScheduleSpin|ScheduleYield" csrc/ src/` is empty), so CUDA's default
+      `cudaDeviceScheduleAuto` applies -- and its documented heuristic spins when the active
+      contexts do not outnumber the logical processors, which is this box (5 devices, 48
+      cores). The arithmetic fits: the segmenter is 117% busy over two instances per device,
+      so each is inside `execute()` ~58% of a 78 s run = ~45 s, and 21.6 CPU-s of spin inside
+      that is the right order.
+      THE EXPERIMENT, one call and a measured before/after: `cudaSetDeviceFlags(
+      cudaDeviceScheduleBlockingSync)` per device before any context exists, then re-run
+      50x20x70 s and compare `host cpu:` per thread class AND events_complete -- it trades
+      wake-up latency for host CPU, and the host is the wall at this load, so the trade is the
+      hypothesis. TWO PLANES: `runtime/device.py` sets no flag either, so the Python plane owes
+      the same change; a PR that does one says so and opens the other's item.
+      NOT DONE YET, and deliberately not guessed at: the flag is a device-wide scheduling
+      decision and it needs the before/after in the same sitting to mean anything.
+
 - [~] **WHICH-THREADS-SPEND-THE-HOST-CPU · ANSWERED, PR #201 (9 Sep), and the leading
       hypothesis was WRONG.** Measured in the container at the design load -- 50x20x70 s,
       RTSP -> NVDEC, GPUs 1/3/4/5/6 idle, 99.6% of the process's CPU accounted:
