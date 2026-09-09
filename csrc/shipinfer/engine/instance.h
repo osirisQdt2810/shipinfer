@@ -33,6 +33,9 @@ namespace shipinfer {
         uint64_t batches = 0;
         uint64_t rows = 0;
         uint64_t requests = 0;
+        //: A batch the backend threw on. NOT in `compute_us`: the throw returns before the
+        //: stats block below, so a run with many failures reports LESS occupancy than the
+        //: hardware spent -- check this before reading low occupancy as "the GPUs are idle".
         uint64_t failed_batches = 0;
         double ewma_latency_us = 0.0;
         //: TOTAL execute time, summed rather than smoothed. `ewma_latency_us` answers "how

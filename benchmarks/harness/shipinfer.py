@@ -166,6 +166,18 @@ class ShipInferResult:
         return {}
 
 
+#: Every per-device table on the result, by the name it carries here AND in a shard's
+#: `summary.json` -- deliberately the same string, so a table cannot reach the parent under a
+#: different name, and `_print_device_table` can be handed a whole aggregate. Adding a field
+#: and not listing it here is the omission #167 and #170 both made; a test now catches it.
+DEVICE_TABLES = ("per_device", "per_device_rows", "per_device_compute_us")
+
+
+def device_tables(result: ShipInferResult) -> dict[str, dict[str, dict[str, float]]]:
+    """One result's per-device tables, keyed as the printer and a shard's summary key them."""
+    return {name: getattr(result, name) for name in DEVICE_TABLES}
+
+
 def _cameras(config: BenchConfig) -> list[dict[str, Any]]:
     """The cameras this process drives: all of them, or — for a shard child — its slice.
 

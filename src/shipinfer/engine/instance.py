@@ -383,6 +383,9 @@ class ModelInstance:
             with timer.phase("compute_infer"):
                 outputs = self._backend.execute(batch.inputs, batch.size)
         except Exception as exc:
+            # Not charged to `compute_us`: this returns before `_observe`, so a run with many
+            # failures reports less occupancy than the hardware spent. `InstanceStats` in
+            # `csrc/shipinfer/engine/instance.h` says the same beside `failed_batches`.
             self._failed_batches += 1
             self._fail_batch(items, exc)
             return

@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from benchmarks.harness.config import BenchConfig
+from benchmarks.harness.shipinfer import DEVICE_TABLES
 
 __all__ = [
     "aggregate",
@@ -231,24 +232,25 @@ def aggregate(summaries: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         (s["throughput"]["binding_module"] for s in summaries if s["throughput"]["saturated"]),
         None,
     )
-    # Both tables, summed the same way: a shard's rows are as much its own as its requests,
-    # and dropping one of the pair here is what made the counter invisible in the only mode
-    # that can generate the design load (#167 review, note 1).
-    per_device: dict[str, dict[str, int]] = {}
-    per_device_rows: dict[str, dict[str, int]] = {}
+    # EVERY per-device table, summed the same way and driven off one list, because a shard's
+    # rows and its occupancy are as much its own as its requests. Dropping one of them here is
+    # what made a counter invisible in the only mode that can generate the design load --
+    # twice: #167 review note 1 for rows, then #170's own review for occupancy.
+    tables: dict[str, dict[str, dict[str, float]]] = {name: {} for name in DEVICE_TABLES}
     for summary in summaries:
-        for key, into in (("per_device", per_device), ("per_device_rows", per_device_rows)):
-            for model, devices in summary.get(key, {}).items():
+        for name, into in tables.items():
+            for model, devices in summary.get(name, {}).items():
                 bucket = into.setdefault(model, {})
                 for device, count in devices.items():
-                    bucket[device] = bucket.get(device, 0) + int(count)
+                    # No `int()`: requests and rows arrive as ints and stay ints, and
+                    # microseconds arrive as floats and must not be truncated per shard.
+                    bucket[device] = bucket.get(device, 0) + count
     return {
         "images_per_s": total,
         "verdict": worst,
         "saturated": saturated,
         "binding_module": binding,
-        "per_device": per_device,
-        "per_device_rows": per_device_rows,
+        **tables,
         "shards": [
             {
                 "shard": s["shard"],
@@ -268,19 +270,23 @@ def aggregate(summaries: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
 
 def _relabel(
-    per_device: Mapping[str, Mapping[str, int]], gpus: Sequence[int]
-) -> dict[str, dict[str, int]]:
-    """A child sees its GPUs as ``cuda:0..n-1``; the table reads in physical ordinals."""
-    out: dict[str, dict[str, int]] = {}
+    per_device: Mapping[str, Mapping[str, float]], gpus: Sequence[int]
+) -> dict[str, dict[str, float]]:
+    """A child sees its GPUs as ``cuda:0..n-1``; the table reads in physical ordinals.
+
+    Numeric type preserved rather than cast: this relabels counts AND microsecond sums, and
+    an `int()` here would have silently floored a table whose values are floats.
+    """
+    out: dict[str, dict[str, float]] = {}
     for model, devices in per_device.items():
-        row: dict[str, int] = {}
+        row: dict[str, float] = {}
         for device, count in devices.items():
             label = device
             if device.startswith("cuda:"):
                 index = int(device.split(":", 1)[1])
                 if index < len(gpus):
                     label = f"cuda:{gpus[index]}"
-            row[label] = row.get(label, 0) + int(count)
+            row[label] = row.get(label, 0) + count
         out[model] = row
     return out
 
@@ -329,8 +335,9 @@ def _child_main(argv: Sequence[str] | None = None) -> int:
         "log": str(result.log),
         "throughput": ours.as_dict(),
         "verdict": run.verdict,
-        "per_device": _relabel(result.per_device, gpus),
-        "per_device_rows": _relabel(result.per_device_rows, gpus),
+        # Every table `DEVICE_TABLES` names, under the name the result gives it, so the parent
+        # sums it without a second list to keep in step.
+        **{name: _relabel(table, gpus) for name, table in system.device_tables(result).items()},
         "requests_total": result.requests_total,
         "requests_rejected": result.requests_rejected,
         "frames_read": result.frames_read,

@@ -838,8 +838,12 @@ int main(int argc, char** argv) {
             for (const auto& [device, micros] : compute_by_device) {
                 const double pct =
                     options.seconds > 0.0 ? micros / (options.seconds * 1e6) * 100.0 : 0.0;
-                std::cout << " " << device << ":" << std::fixed << std::setprecision(1) << pct
-                          << std::defaultfloat;
+                // Formatted aside rather than on `std::cout`: `std::defaultfloat` restores
+                // the float FORMAT and not the precision, so `setprecision(1)` would leak
+                // onto the stream and cut the next double printed anywhere to one digit.
+                std::ostringstream cell;
+                cell << std::fixed << std::setprecision(1) << pct;
+                std::cout << " " << device << ":" << cell.str();
             }
             std::cout << "\n";
         }
