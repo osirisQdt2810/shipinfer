@@ -112,10 +112,16 @@ class ThreadSampler:
         self._thread.start()
 
     def stop(self) -> None:
-        """Take one last reading, then join. Last, because the child may still be alive."""
-        self._sample()
+        """Join, THEN take one last reading -- which still works while the child is alive.
+
+        In that order because `_sample` is a read-modify-write per tid: sampling from this
+        thread while the sampler is inside its own `_sample` can let a lower reading win and
+        break the "highest reading per tid" invariant this class documents. Bounded by one
+        tick, so it would not have shown up in a total -- and the invariant is the contract.
+        """
         self._stop.set()
         self._thread.join(timeout=self._interval_s * 5)
+        self._sample()
 
     def _run(self) -> None:
         while not self._stop.wait(self._interval_s):
@@ -139,16 +145,21 @@ class ThreadSampler:
             for name, value in sorted(totals.items(), key=lambda pair: -pair[1]["cpu_s"])
         }
 
-    def top(self, count: int = 12) -> dict[str, float]:
+    def top(self, count: int = 12) -> list[dict[str, object]]:
         """The heaviest individual threads, because a class can hide the answer.
 
-        Measured: at the design load the ten `m<device>.<ordinal>` classes are 58% of the
-        host CPU, and each holds FOUR threads -- one per model. The class says which device
-        and which instance; only the name says which model, and "which model costs the most
-        host CPU" is the next question after "which class".
+        A class is `m<device>.<ordinal>`, so it holds one thread per MODEL and only the name
+        says which model; the measurement is in `WHICH-THREADS-SPEND-THE-HOST-CPU`, because
+        numbers in a docstring drift.
+
+        ROWS AND NOT A MAPPING, keyed by tid: a name is NOT unique -- fifty cameras' GStreamer
+        jitterbuffer threads share one `comm` -- so a dict dropped every duplicate but the
+        LAST, the smallest of a collided set, and read as "few and cheap".
         """
-        ranked = sorted(self._seen.values(), key=lambda pair: -pair[1])[:count]
-        return {name: round(cpu, 2) for name, cpu in ranked}
+        ranked = sorted(self._seen.items(), key=lambda item: -item[1][1])[:count]
+        return [
+            {"tid": tid, "name": name, "cpu_s": round(cpu, 2)} for tid, (name, cpu) in ranked
+        ]
 
     def total(self) -> float:
         return sum(cpu for _name, cpu in self._seen.values())
@@ -243,6 +254,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also break the command's CPU down by thread class (`/proc/<pid>/task/`)",
     )
+    parser.add_argument(
+        "--threads-interval",
+        type=float,
+        default=0.2,
+        metavar="SECONDS",
+        help="how often to sample the threads. The instrument costs ~4 small /proc reads per "
+        "thread per second, and the host it measures is the one this is arguing is tight, so "
+        "a long run should ask for less: 0.5 at 70 s still catches every thread that lives "
+        "for the window.",
+    )
     parser.add_argument("--out", type=Path, help="also write the accounting here as JSON")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="-- then the command")
     args = parser.parse_args(argv)
@@ -264,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
         # After the spawn and before the wait: the sampler needs a pid, and every thread this
         # exists to measure outlives its first tick.
         if args.threads:
-            sampler = ThreadSampler(child[0])
+            sampler = ThreadSampler(child[0], interval_s=args.threads_interval)
             sampler.start()
         _, status, usage = os.wait4(child[0], 0)
     finally:

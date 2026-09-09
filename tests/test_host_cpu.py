@@ -201,6 +201,10 @@ class TestWhichThreadsSpentIt:
         code = host_cpu.main(
             [
                 "--threads",
+                # Explicit, so the class docstring's "a 20 ms sampler" is true rather than
+                # aspirational: the default is 200 ms and these threads live under a second.
+                "--threads-interval",
+                "0.02",
                 "--out",
                 str(out),
                 "--",
@@ -267,9 +271,32 @@ class TestWhichThreadsSpentIt:
         accounting = self._run(host_cpu, tmp_path)
 
         top = accounting["threads_top"]
-        assert "pipe-0" in top, top
-        assert list(top) == sorted(top, key=lambda name: -top[name]), top
-        assert max(top.values()) <= accounting["command_cpu_s"] + 0.05
+        names = [row["name"] for row in top]
+        assert "pipe-0" in names, top
+        assert [row["cpu_s"] for row in top] == sorted(
+            (row["cpu_s"] for row in top), reverse=True
+        ), top
+        assert max(row["cpu_s"] for row in top) <= accounting["command_cpu_s"] + 0.05
+        assert len({row["tid"] for row in top}) == len(top), top
+
+    def test_two_threads_with_one_name_are_two_rows(self, host_cpu: ModuleType) -> None:
+        """A name is not unique -- GStreamer gives all fifty cameras' jitterbuffer threads the
+        same `comm` -- and a mapping keyed by name dropped every duplicate but the last, i.e.
+        the SMALLEST of a collided set. The class row was right all along; only this one lied,
+        and it lied in the direction of "those threads are few and cheap".
+        """
+        sampler = host_cpu.ThreadSampler(os.getpid(), interval_s=0.01)
+        sampler._seen = {
+            11: ("rtpjitterbuffer", 0.9),
+            12: ("rtpjitterbuffer", 0.5),
+            13: ("rtpjitterbuffer", 0.1),
+        }
+
+        top = sampler.top()
+
+        assert [row["cpu_s"] for row in top] == [0.9, 0.5, 0.1], top
+        assert {row["tid"] for row in top} == {11, 12, 13}, top
+        assert sampler.by_class()["rtpjitterbuffer"] == {"cpu_s": 1.5, "threads": 3}
 
     def test_a_thread_that_exits_keeps_the_cpu_it_used(self, host_cpu: ModuleType) -> None:
         """A tid that vanishes between ticks must not fall out of the total: the highest

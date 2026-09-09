@@ -103,5 +103,5 @@ done
 #
 # `run_cpp_bench.sh` wraps the replay arm the same way with no `--pid`, so `command_cpu_s`
 # from the two arms is directly comparable and their difference is our own decode cost.
-exec python /work/scripts/host_cpu.py --threads --pid "$person_pid" --pid "$ship_pid" \
+exec python /work/scripts/host_cpu.py --threads --threads-interval 0.5 --pid "$person_pid" --pid "$ship_pid" \
   -- "$BINARY" --camera-uris "$URIS" "$@"
