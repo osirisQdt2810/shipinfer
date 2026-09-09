@@ -1144,6 +1144,15 @@ hook down, for when the operator asked to see something before it is executed.
       every post-emit metric instead (`Histogram.observe` too) -> four on `main`, no fifth, and
       the whole `tests/` tree clean on the branch. Stays open until #173 merges.
 
+- [ ] **HOOK-REFUSES-A-HEREDOC-THAT-ONLY-QUOTES-A-WORD · the same family, one branch over.**
+      `python3 - <<PY` whose body merely mentions `pytest` inside a STRING LITERAL is refused
+      as "a heredoc executed by an interpreter runs `pytest`" -- three times in one session,
+      and each refusal ended the whole `Bash` call, so the edit chained ahead of it never ran.
+      `test_an_executed_heredoc_merely_quoting_a_device_call_is_allowed` already exists for
+      device tokens; `BLOCKED_SCRIPTS` has no such carve-out. Deliberately left out of #174 to
+      keep that PR one change. Fix: judge a heredoc body the way a script file is judged --
+      what it RUNS, not what it names -- which is #174's rule applied one branch over.
+
 - [ ] **OCCUPANCY-INCLUDES-THE-WARMUP-WINDOW · the one reading here that is not conservative.**
       `compute_us` is cumulative and both readers divide by the full `--seconds`, while
       `read`/`emitted`/`requests` are differenced against an at-warmup snapshot
@@ -1156,7 +1165,7 @@ hook down, for when the operator asked to see something before it is executed.
       printer `steady_s` -- per shard, since each shard has its own. Model warm-up itself is
       already outside this: `instance.py`'s `backend.warmup()` never reaches `_observe`.
 
-- [~] **OCCUPANCY-DROPPED-AT-THE-SHARD-BOUNDARY · #170 round 2, the third time.**
+- [x] **OCCUPANCY-DROPPED-AT-THE-SHARD-BOUNDARY · fixed, MERGED AS #170 (9 Sep).**
       The review was right and my PR body's claim was wrong: a shared printer shares the
       FORMATTING, and three positional tables are still supplied one call site at a time, so
       occupancy went missing from the aggregate table -- the same drop as #167's rows. Fixed a
@@ -1188,7 +1197,14 @@ hook down, for when the operator asked to see something before it is executed.
       `python -m black <file>`. Six tests; three fail with the all-arguments scan restored and
       three hold the half that must not be lost. Demonstrated through the real entry point:
       both false refusals go silent, the device tier naming that same file still denies.
-      Branch `fix/hook-operands-are-data`.
+      **PR #174.** Its review found the fix as first written ADDED a bypass: `-m` ends
+      CPython's option processing but `cProfile`/`pdb`/`trace`/`runpy`/`coverage`/
+      `memory_profiler` `exec` their operand, so `python -m cProfile probe.py` -- refused on
+      `main` -- was allowed, with nothing behind it (`containment.py` is reached from
+      `conftest.py` and from `serve`/`bench`, neither of which a bare `-m cProfile` calls).
+      `_EXECUTOR_MODULES` carves them back out, scanning past the module by SUFFIX because an
+      executor's options may take a value. Closed one more while there: only the FIRST `-m`
+      value was read, so `python -m coverage run -m pytest -m gpu` walked through.
 
 - [x] **OFFLINE-TIER-HAS-A-FLAKY-GATE · FIXED, MERGED AS #171 (9 Sep).**
       #170's `cpp-offline` went red on `test_join_on_unwind`, which my diff CANNOT reach: that
