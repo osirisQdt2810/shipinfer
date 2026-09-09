@@ -63,6 +63,16 @@ SHIPINFER_PIPELINE__WORKERS="${SHIPINFER_BENCH_WORKERS:-$((WORKERS_PER_GPU * NGP
 # host build can run (its gstreamer lane needs `libgstreamer1.0-dev`, which only the bench
 # image has). `gstreamer` routes through `cpp_bench_over_rtsp.sh`, which starts the servers in
 # the SAME container and hands the bench one URI per camera.
+CAMERAS="${SHIPINFER_BENCH_CAMERAS:-50}"
+
+# THE FLEET'S STOP DEADLINE SCALES WITH THE FLEET, because `IngestManager::stop` spends ONE
+# deadline on all of them by design -- charging it per actor would turn one stuck decoder into
+# fifty consecutive waits. So the library's 5 s default is what fifty GStreamer pipelines have
+# to share, and MEASURED at 50x20x70 s it is not enough: 31 of 50 abandoned at 5 s against 1
+# of 50 at 30 s, and an abandoned fleet used to print no counters at all. Anything the caller
+# passes in `"$@"` wins, because the binary takes the last spelling of a flag.
+STOP_MS="${SHIPINFER_BENCH_STOP_DEADLINE_MS:-$((CAMERAS > 12 ? CAMERAS * 400 : 5000))}"
+
 SOURCE="${SHIPINFER_BENCH_SOURCE:-replay}"
 if [ "$SOURCE" = "replay" ]; then
   SOURCE_ARGS=(--source replay)
@@ -86,7 +96,8 @@ timeout "${SHIPINFER_BENCH_TIMEOUT:-900}" "$REPO/deploy/rootless/cpp.sh" \
   --plan          "/work/.artifacts/cpp/${LABEL}.plan" \
   --repository    /work/model_repository \
   --gpu-ids "$GPU_IDS" \
-  --cameras "${SHIPINFER_BENCH_CAMERAS:-50}" \
+  --cameras "$CAMERAS" \
+  --stop-deadline-ms "$STOP_MS" \
   --fps "${SHIPINFER_BENCH_FPS:-20}" \
   --seconds "${SHIPINFER_BENCH_SECONDS:-70}" \
   --log-jsonl "/work/.artifacts/cpp/${LABEL}.jsonl" \

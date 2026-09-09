@@ -722,6 +722,52 @@ int main(int argc, char** argv) {
         // Read before the fleet is torn down: `stop()` forgets its actors, as the Python
         // manager does, so a stopped manager has no per-camera numbers left to report.
         const std::map<std::string, CameraHealth> camera_health = manager.health();
+
+        // doc: long why one reporter serves both exits, and what the abandoned one cannot say
+        // PRINTED ON BOTH EXITS. A run that abandons one camera of fifty used to print no
+        // counters at all -- 70 s of work discarded by a shutdown detail. Measured: the
+        // `gstreamer` arm at 50x20x70 s abandons and reports nothing, while `nvdec` at the
+        // same load reports in full, so the arm V137/V156 mandate was the unmeasurable one.
+        // This half needs no drain: `camera_health` is already copied above, the rest are
+        // atomics and the queue's own counters, and a READ frees nothing. One lambda rather
+        // than a second copy of the prints, because a report that exists twice drifts.
+        const auto report_ingest_and_queue = [&] {
+            uint64_t read = 0, dropped = 0, published = 0;
+            for (const auto& [id, health] : camera_health) {
+                read += health.frames_read;
+                dropped += health.frames_dropped;
+                published += health.frames_published;
+            }
+            const auto stats = lanes.stats();
+
+            // Printed in the same shape the Python driver prints, so a human comparing two
+            // runs is comparing two identical reports.
+            std::cout << "startup_s " << startup_s << "\n";
+            std::cout << "frames_read " << read << "\n";
+            std::cout << "frames_published " << published << "\n";
+            std::cout << "frames_dropped " << dropped << "\n";
+            // Per camera, because 5 000 drops from one starved camera and 100 from each of
+            // fifty are the same total -- and telling them apart is what ADR-005 exists for.
+            for (const auto& [id, health] : camera_health) {
+                if (health.frames_dropped > 0) {
+                    std::cout << "frames_dropped_by_camera " << id << " "
+                              << health.frames_dropped << "\n";
+                }
+            }
+            std::cout << "frames_accepted " << accepted.load() << "\n";
+            std::cout << "frames_failed " << failed.load() << "\n";
+            for (const auto& [camera, count] : open_refused_by_camera) {
+                std::cout << "open_refused_by_camera " << camera << " " << count << "\n";
+            }
+            std::cout << "events_emitted " << emitted.load() << "\n";
+            std::cout << "queue_rejected " << stats.rejected << "\n";
+            std::cout << "queue_unread_at_stop " << unread_at_stop.load() << "\n";
+            for (const auto& [camera, count] : stats.rejected_by_camera) {
+                std::cout << "queue_rejected_by_camera " << camera << " " << count << "\n";
+            }
+            std::cout << "queue_evicted " << stats.evicted << "\n";
+        };
+
         const size_t abandoned =
             manager.stop(std::chrono::milliseconds(options.stop_deadline_ms));
         if (abandoned != 0) {
@@ -731,8 +777,17 @@ int main(int argc, char** argv) {
             // and leave without running destructors. Unreachable with `replay` (a replay read
             // cannot block), so this is armour for the sources PR2 adds.
             std::cerr << "bench: " << abandoned
-                      << " camera(s) abandoned past the stop deadline; exiting without "
-                         "unwinding so their threads keep valid references\n";
+                      << " camera(s) abandoned past the stop deadline; reporting the ingest "
+                         "and queue counters (the reassembly half needs a drain that would "
+                         "block on those very threads) and exiting without unwinding so "
+                         "their threads keep valid references\n";
+            report_ingest_and_queue();
+            // FLUSHED EXPLICITLY, because `_Exit` does not. It skips atexit and every stdio
+            // buffer, and a run's stdout is redirected to a log -- so fully buffered. The
+            // first version of this printed the whole report into a buffer that was then
+            // discarded: the run still said nothing, and only `std::cerr` (unbuffered) came
+            // through. Found by forcing the path with `--stop-deadline-ms 1`, not by reading.
+            std::cout << "\n" << std::flush;
             std::_Exit(1);
         }
         stopping.store(true);
@@ -746,40 +801,7 @@ int main(int argc, char** argv) {
         collector.drain();
         sampler.stop();
 
-        uint64_t read = 0, dropped = 0, published = 0;
-        for (const auto& [id, health] : camera_health) {
-            read += health.frames_read;
-            dropped += health.frames_dropped;
-            published += health.frames_published;
-        }
-        const auto stats = lanes.stats();
-
-        // Printed in the same shape the Python driver prints, so a human comparing two runs
-        // is comparing two identical reports.
-        std::cout << "startup_s " << startup_s << "\n";
-        std::cout << "frames_read " << read << "\n";
-        std::cout << "frames_published " << published << "\n";
-        std::cout << "frames_dropped " << dropped << "\n";
-        // Per camera, because 5 000 drops from one starved camera and 100 from each of fifty
-        // are the same total — and telling them apart is what ADR-005 exists for.
-        for (const auto& [id, health] : camera_health) {
-            if (health.frames_dropped > 0) {
-                std::cout << "frames_dropped_by_camera " << id << " " << health.frames_dropped
-                          << "\n";
-            }
-        }
-        std::cout << "frames_accepted " << accepted.load() << "\n";
-        std::cout << "frames_failed " << failed.load() << "\n";
-        for (const auto& [camera, count] : open_refused_by_camera) {
-            std::cout << "open_refused_by_camera " << camera << " " << count << "\n";
-        }
-        std::cout << "events_emitted " << emitted.load() << "\n";
-        std::cout << "queue_rejected " << stats.rejected << "\n";
-        std::cout << "queue_unread_at_stop " << unread_at_stop.load() << "\n";
-        for (const auto& [camera, count] : stats.rejected_by_camera) {
-            std::cout << "queue_rejected_by_camera " << camera << " " << count << "\n";
-        }
-        std::cout << "queue_evicted " << stats.evicted << "\n";
+        report_ingest_and_queue();
         std::cout << "collector_reported " << collector.reported() << "\n";
         std::cout << "collector_timeouts " << collector.timed_out() << "\n";
         std::cout << "collector_evicted " << collector.evicted() << "\n";
