@@ -5548,7 +5548,28 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       src change). OWED: a `-m native` container run before the parent adapts onto this
       path (native rows all skip in the unbuilt clone). Detection heads deliberately
       uncapped — max_detections wiring is a separate decision, not phase 1.
-- [~] **V124b · DECIDED 9 Sep under V154 -- (a), and it is now a small PR rather than an ack:**
+- [~] **V124b · DECIDED 9 Sep under V154, and MEASURING IT FOUND A LIVE HOLE rather than a
+      future one. PR #186 closes 42 of it; the other 189 need the submodule and your merge.**
+      COUNTED on ci.yml run 34344651408: the offline tier is **248 skipped** on CI against 9
+      locally. By reason: 189 shipvision (mot 102, mtmc 42, reid 41, misc 4), 26
+      `fastapi`/`uvicorn`, 16 `cv2`, 15 headers/shell-checks. So the KServe surface and the
+      replay fixture writer were covered on developers' machines and on NO machine that gates
+      a merge -- and `dev` already carried `httpx` "TestClient transport for the HTTP facade",
+      which cannot test a facade whose framework is absent.
+      #186 is pyproject-only and therefore auto-mergeable: `dev` gains fastapi, uvicorn, anyio
+      and opencv-python-headless, with a DERIVED guard -- every `importorskip` target in the
+      tree must come from what `.[dev,cli]` resolves, `shipvision` the single exemption and
+      that exemption asserted to be the only one.
+      THE REMAINING 189 ARE THE ORIGINAL DECISION and still need `.github/workflows/**`:
+      check out shipvision's PYTHON half by name (the `kernels` job's own recipe -- https
+      rewrite, `submodules: false`, never `--recursive`, because `benchmarks/baseline` is a
+      third-org SSH remote the runner cannot read).
+      **AND (a) AS LITERALLY WORDED WOULD BREAK A VERIFIED PROMISE, which is worth saying:**
+      ci.yml's `test` job says "Deliberately NO submodules: the offline tier must pass without
+      the fused kernels" -- that job IS the check on ADR-001's promise. So the shipvision
+      coverage belongs in a SECOND leg beside it, the way `kernels` is already separate, not by
+      adding a submodule to the job that exists to prove it can do without one.
+      ORIGINAL: shipinfer's offline tier
       CI checks out shipvision's PYTHON half only (no build; it is pure Python), which extends
       to the plain runner what `test.sh` already does inside the container. Not (b): a pip
       dependency would make the parent's offline tier depend on a published artefact, which
