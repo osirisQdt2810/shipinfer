@@ -297,6 +297,12 @@ def _relabel(
 
 
 def _child_main(argv: Sequence[str] | None = None) -> int:
+    from shipinfer.runtime import containment
+
+    # A measurement, so the container rule applies (CLAUDE.md), and per PROCESS: the parent
+    # gating is not enough for a child that is also a `python -m` entry point of its own.
+    containment.require_container("a shard of the system benchmark")
+
     parser = argparse.ArgumentParser(
         description="one shard of a sharded ShipInfer benchmark run"
     )

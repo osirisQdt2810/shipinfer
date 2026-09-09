@@ -789,6 +789,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    from shipinfer.runtime import containment
+
+    # A measurement, so the container rule applies (CLAUDE.md), and the gate lives in the
+    # process that would do the work -- a deny-list over command text cannot be made sound.
+    # AFTER the argv checks above and before any run: a malformed command line deserves its
+    # usage error, and the offline suite asserts those return 2 rather than raising.
+    containment.require_container("the system benchmark")
+
     label = args.label or time.strftime("%Y%m%d-%H%M%S")
     # The default lives on BenchConfig, so a run directory is derived from it rather than
     # from a second copy of the same path that could drift out of step with it.
