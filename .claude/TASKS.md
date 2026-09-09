@@ -1144,6 +1144,18 @@ hook down, for when the operator asked to see something before it is executed.
       every post-emit metric instead (`Histogram.observe` too) -> four on `main`, no fifth, and
       the whole `tests/` tree clean on the branch. Stays open until #173 merges.
 
+- [ ] **OCCUPANCY-INCLUDES-THE-WARMUP-WINDOW · the one reading here that is not conservative.**
+      `compute_us` is cumulative and both readers divide by the full `--seconds`, while
+      `read`/`emitted`/`requests` are differenced against an at-warmup snapshot
+      (`harness/shipinfer.py`'s `counters()`). Occupancy is lower while the pipeline ramps, so
+      the printed percentage UNDERSTATES the steady one: #170's review measured 10 s of 70 s at
+      half occupancy as `ship_detector` 156% -> ~169%, i.e. 78% -> 84% of the instance ceiling.
+      The NOT-GPU-BOUND conclusion survives that comfortably, which is why #170 states the
+      window in both planes' docstrings rather than changing the arithmetic mid-review. The fix
+      is to put `per_device_compute_us` in the warmup snapshot and subtract, and then hand the
+      printer `steady_s` -- per shard, since each shard has its own. Model warm-up itself is
+      already outside this: `instance.py`'s `backend.warmup()` never reaches `_observe`.
+
 - [~] **OCCUPANCY-DROPPED-AT-THE-SHARD-BOUNDARY · #170 round 2, the third time.**
       The review was right and my PR body's claim was wrong: a shared printer shares the
       FORMATTING, and three positional tables are still supplied one call site at a time, so
