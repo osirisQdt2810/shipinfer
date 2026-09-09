@@ -93,14 +93,18 @@ jobs:
         run: pip install --index-url https://download.pytorch.org/whl/cpu torch
       - name: Install the package and its dev tooling
         run: pip install -e ".[dev,cli]"
+      - name: Install the kernels' Python half
+        # `pip install -e`, NOT `PYTHONPATH`. shipvision is a pure setuptools package with
+        # dependencies of its own, and `mot/association/solver.py` needs `scipy` from its
+        # `solvers` extra -- `linear_sum_assignment`, which shipvision's own comment says it
+        # will not hand-roll. PYTHONPATH hands over the source without the dependencies, and
+        # the first run of this job proved it: those 189 tests went from SKIPPED to ERROR with
+        # "shipvision.mot cannot be imported (No module named 'scipy')". No build happens
+        # here -- no setup.py, no extension, `setuptools.build_meta` and one metadata step.
+        # `deploy/rootless/_container.sh` gets away with PYTHONPATH only because the bench
+        # IMAGE already carries scipy; a plain runner carries nothing.
+        run: pip install -e "3rdparty/shipvision[solvers]"
       - name: Run the offline test suite with the kernels importable
-        # `PYTHONPATH` rather than `pip install -e 3rdparty/shipvision`, matching what
-        # `deploy/rootless/_container.sh` already does for the container ("the submodule on
-        # PYTHONPATH when it is checked out, and an empty string when it is not"). pytest
-        # prepends the rootdir, so shipinfer's own `tests` package still wins over
-        # shipvision's top-level one -- the collapse `tests/__init__.py` was added for.
-        env:
-          PYTHONPATH: 3rdparty/shipvision
         run: bash scripts/run_tests.sh
 
   lint:
