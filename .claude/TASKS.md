@@ -1690,6 +1690,23 @@ hook down, for when the operator asked to see something before it is executed.
       needs the gst image: `shipinfer.runtime.native` imports torch first, and torch's bundled
       libcudart satisfies `_C`'s link. Same mechanism, opposite outcome, one import apart.
 
+- [ ] **TWO-FOLLOW-UPS-FROM-#194's-APPROVE · one pre-existing hole, one comment (9 Sep).**
+      Both are the reviewer's non-blocking notes, held out of #194 deliberately: it carries an
+      APPROVE and a push would invalidate the reviewed commit for no gain. SEQUENCED behind
+      #194's merge -- same file.
+      (a) **PRE-EXISTING, and the same "judged by nobody" shape one door over:**
+      `python -c 'import os; os.system("accelerate launch t.py")'` is ALLOWED, while the
+      `torchrun` spelling of the same body is refused -- verified on both revisions, so #194
+      did not introduce it. `_python_runs_blocked` reads `BLOCKED_COMMANDS`, and `accelerate`
+      is not in it (it is judged by its subcommand), so an inline body naming it walks past.
+      The fix is the same subcommand gate, in the inline reader.
+      (b) **ONE SENTENCE, so the next reader does not "fix" it back:** `_marker_positions`
+      scans the whole argv on purpose, unlike `_module_at` which stops at the first non-option
+      operand -- so `python train.py -m deepspeed` now REFUSES where main allowed it. That is
+      the #174 shape `_module_at`'s docstring warns about, taken deliberately in the strict
+      direction (a false refusal costs a sentence; a false allow costs a host CUDA context).
+      Undocumented, it looks like the bug `_module_at` exists to prevent.
+
 - [~] **THE-MEASURED-COMPARISON-WAS-NOT-WRITTEN-DOWN · PR #196 (9 Sep).** The project's
       headline claim has been measured on both arms four ways, and none of it was anywhere a
       person reads: `benchmarks/README.md` is 207 lines about HOW to run the harness and
