@@ -12,6 +12,7 @@ a fraction of a second, and nothing touches a device or the baseline binary.
 
 from __future__ import annotations
 
+import ast
 import subprocess
 import sys
 import time
@@ -126,23 +127,44 @@ class TestOurOwnArmIsChargedItsProcessAndItsChildren:
 
 class TestBothArmsAreActuallyWiredToIt:
     """The link the pure tests cannot reach, and the one that goes missing: a reading computed
-    and then not printed leaves the ratio needing two logs again. Weaker than the tests above
-    and says so."""
+    and then not printed leaves the ratio needing two logs again.
+
+    Read as CALLS through `ast`, not as substrings. The first draft asserted
+    `'host_cpu_line("shipinfer"' in body` and `black` then wrapped the call, putting a newline
+    between the paren and the argument -- so the guard failed on formatting rather than on
+    meaning. #182's derived test learned the same thing about text offsets.
+    """
+
+    @staticmethod
+    def _calls(function: str) -> list[ast.Call]:
+        """Every call inside the named top-level function of `run_bench.py`."""
+        tree = ast.parse((ROOT / "benchmarks" / "run_bench.py").read_text(encoding="utf-8"))
+        node = next(
+            n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == function
+        )
+        return [c for c in ast.walk(node) if isinstance(c, ast.Call)]
+
+    def _prints_for(self, function: str, system: str) -> bool:
+        return any(
+            ast.unparse(c.func) == "host_cpu_line"
+            and c.args
+            and isinstance(c.args[0], ast.Constant)
+            and c.args[0].value == system
+            for c in self._calls(function)
+        )
 
     def test_the_baseline_prints_it(self) -> None:
-        text = (ROOT / "benchmarks" / "run_bench.py").read_text(encoding="utf-8")
-
-        assert 'host_cpu_line("baseline"' in text
+        assert self._prints_for("measure_baseline", "baseline")
 
     def test_our_arm_prints_it_on_both_topologies(self) -> None:
         """Taken in `measure_shipinfer`, which is the ONE dispatch point for `single` and for
-        the sharded pair -- wrapping the two branches separately is how one of them would come
-        to be missed."""
-        text = (ROOT / "benchmarks" / "run_bench.py").read_text(encoding="utf-8")
-        body = text.split("def measure_shipinfer(")[1].split("\ndef ")[0]
+        the sharded pair -- wrapping the two branches separately is how one of them comes to
+        be missed."""
+        called = {ast.unparse(c.func) for c in self._calls("measure_shipinfer")}
 
-        assert "hostcpu.now()" in body
-        assert 'host_cpu_line("shipinfer"' in body
-        assert (
-            "hostcpu.since(before)" in body
-        ), "our arm is charged children-only, which reports nothing for a `single` run"
+        assert self._prints_for("measure_shipinfer", "shipinfer")
+        assert "hostcpu.now" in called
+        assert "hostcpu.since" in called, (
+            "our arm is charged children-only, which reports nothing for a `single` run -- "
+            f"the calls found were {sorted(called)}"
+        )
