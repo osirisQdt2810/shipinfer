@@ -1726,6 +1726,22 @@ hook down, for when the operator asked to see something before it is executed.
       NOT `BLOCKED_MODULES`: both of its consumers gate on `_selects_device_tier` because
       ADR-001 exempts pytest's offline tier, and a launcher has no offline tier, so the names
       there would have refused nothing. Suite 4079 passed.
+      **ROUND 2 (9 Sep) found two defects in the new rule, and one of them is a lesson worth
+      more than the fix.** (a) `_launcher_module` read `_module_argument`, the FIRST `-m` only,
+      so `python -m coverage run -m deepspeed --num_gpus 2 train.py` walked past -- the exact
+      hole the statement five lines above already documents in its own comment. I had applied
+      #192's lesson to the NUMBER of sites and not to what each site READS. `_marker_positions`
+      now returns `(index of the next operand, name)` the way `_module_at` does. (b) `accelerate`
+      is absent from `BLOCKED_COMMANDS` ON PURPOSE -- `env` and `config` only read, and a test
+      already asserted the allow -- so my unconditional module deny made `python -m accelerate
+      env` STRICTER than `accelerate env`, reaching a false positive this repo had already ruled
+      against through the other door. Gated on `BLOCKED_ACCELERATE_SUBCOMMANDS` now, both
+      spellings pinned. And my body said "pure tightening" from the rows I had thought to test:
+      a tightening claim is only evidence if the table lists the rows that must stay ALLOWED.
+      Twelve rows ALLOW -> DENY, thirteen pinned ALLOW, none wrong. Suite 4082 passed; `7acdce8`.
+      CI NOTE: two `cpp` jobs failed in their `apt-get` step (9 s and 29 s, "Install the
+      gstreamer and nvdec lanes' packages" / "Install the CUDA and TensorRT headers") -- package
+      mirror, not the diff, which touches `scripts/hooks/` and `tests/` only. Re-run queued.
 
 - [x] **A-HELP-QUERY-WAS-REFUSED-AS-A-RUN · MERGED as #192 (d1b808c, 9 Sep) after EIGHT
       review rounds, seven of which found a real `main=DENY -> HEAD=ALLOW` row.** APPROVE on
