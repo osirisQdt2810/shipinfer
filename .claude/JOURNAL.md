@@ -1,5 +1,60 @@
 # Journal
 
+## 2026-09-09 — three reviews, and every finding was about the search rather than the code
+
+Merged **#171, #172, #173**; **#170** is on round 3 and **#174** is new. Started by carrying
+#170's rebase: its only red was #171's flake, and the revert-check for the one Python failure
+it hit ran both trees' full suites *simultaneously* so they saw the same contention — main
+3690, branch 3695, both green, so the branch was clear and the flake was main's.
+
+**That flake was an ordering race, and finding it needed the right instrument.** `wait_for`
+gave 10 s for three frames, so I expected a stall; it was not one. `sink.failed` reached 3
+while `sink_failures` read **2.0** — a sink bumps its own counter INSIDE `emit`, the runner
+bumps the metric after `emit` returns, and the test waited on the first and asserted the
+second. 3 failures in 132 runs under 16-way contention, which is a rate that cannot
+demonstrate its own fix (40/40 taught that once). So: a plugin sleeping 50 ms inside
+`Counter.inc` made it deterministic — 0/5 before, 5/5 after, on three tests.
+
+**Then the review found a fourth, and why my sweep could not have.** The plugin slowed
+`sink_failures` and `frames_emitted` only, so `objects_total` — charged in `_record`, with the
+*widest* window of the four counters its test asserts — was outside the search **by
+construction**. The method rediscovered exactly what I had already guessed. Widened to every
+post-emit metric (`Histogram.observe` too): four on main, no fifth, and the whole `tests/` tree
+clean on the branch. **A search that can only confirm your hypothesis is not a search.**
+
+**#170's review caught the same shape one level up.** Occupancy was dropped at the shard
+boundary — the third time in this project (#167 rows, #168 round 1, now this) — and my PR body
+had claimed a shared printer made that impossible. It does not: a shared printer shares the
+*formatting*, and three positional tables are still supplied one call site at a time. Fixed by
+making the tables travel as one mapping keyed by `DEVICE_TABLES`, so the parent hands over its
+whole aggregate and there is no per-table argument to forget. **My first test for it called the
+printer directly and passed with the bug put back** — the identical vacuity the reviewer had
+just pointed at in a neighbouring test. It drives `measure_sharded` now.
+
+**Round 3 was the sharpest: the counter the PR is about had no behavioural test on either
+plane.** Deleting the `+=` any suite catches; corrupting it none did — and `latency_us` is
+already a `/1000` from nanoseconds, so a second one is the invited edit, turning 156% of an
+instance's ceiling into 0.2%. That is a roadmap decision made on an artefact rather than a red
+run. Both planes now pin the unit with a floor **and** a ceiling plus the `failed_batches`
+exclusion, and all four assertions were checked against the corruption they exist for.
+
+**The hook cost me two whole `Bash` calls, so it got its own PR (#174).**
+`script_touches_device` read every `.py` argument, so `python scripts/hooks/check_docs.py
+tests/pipeline/test_runner.py` was refused for the *input's* imports, and
+`python -m pytest tests/<one_file>.py` for the same reason — while the same run without the
+path, and with `::a_test_id` appended, both passed. That inconsistency is the tell. A
+`PreToolUse` deny ends the whole call, so an edit chained ahead of one never runs and the next
+command's green reads as confirming it; that has already happened here once. The fix is the
+rule `READ_ONLY_TOOL_MODULES` already states, one spelling over: a script's operands are data.
+
+Smaller things worth keeping: a bench run needs the `benchmarks/baseline` submodule, the
+engines in `models/` and the `.plan` files — none of which a fresh worktree has, which is four
+failures before the first number. `SHIPINFER_GPUS` renumbers the container's cards from 0, so
+`--gpus` takes the *container's* indices, not physical ones; `--gpus 1,3` against
+`SHIPINFER_GPUS=1,3` quietly put both shards on one device. And this box had another tenant at
+load ~35/48 all day, which is why the RTSP arm's generator delivered 58-72% of target and
+`check_offer` refused to publish it.
+
 ## 2026-09-08 (later) — four ratchets fired and four were right; every bug was a false green
 
 #162 merged (**main had been red since 7 Sep 13:27** -- `nvdec.cpp` was compiled by nothing in
