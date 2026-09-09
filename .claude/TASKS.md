@@ -1166,6 +1166,16 @@ hook down, for when the operator asked to see something before it is executed.
       three guards fails with its own regression restored (7/1/1). Suite 3772 passed, docs caps
       unchanged, matrix identical to `main` bar the six intended rows.
 
+- [ ] **HOOK-READS-A-NESTED-HEREDOC-AS-COMMANDS · the shell half of #176's class.**
+      #176 teaches a PYTHON heredoc body to be read as python, so a markdown table in it is
+      data. A SHELL body keeps the line scan, correctly -- but a heredoc NESTED inside one is
+      still read as commands, so `cat > pr.md <<'MD'` whose rows begin with `pytest` is refused
+      on `main` and on #176 alike (#176 review note N2). It is the same class one language
+      over, and writing a PR body from a shell heredoc is exactly how it gets hit. Fix:
+      `_split_heredocs` already finds the inner block and `_stdin_interpreter` already says
+      whether anything will execute it -- `cat` will not, so its body is data. Deliberately not
+      in #176: five rounds there came from bundling helpers, and this touches the same two.
+
 - [~] **HOOK-FAILS-OPEN-ON-SPELLINGS-IT-DOES-NOT-MODEL · all three categories built and held.**
       Open on `main` and untouched by #174: `python -m shipinfer serve` (the subcommand list is
       only consulted when `base == "shipinfer"`), bare `torchrun`, and `uv run pytest -m gpu`.
