@@ -2377,7 +2377,14 @@ that exposes the four attributes a policy reads.
       default policy `locality_spillover`. (c) Reassembly waits on remote results; camera id rides
       with the request so the fair queue stays per-camera across processes. (d) A closed ring drops
       its proxy from the candidate set. Gate: same skew bench as T2, B against C, on a quiet box.
-- [!] **T3b · MERGED as PR #106 (f6629d1, 1 Sep) after FIVE review rounds; the keep-or-drop question below is STILL OWED by the operator. Original: THE PREMISE IS FALSE — MEASURED ON THE REAL ENGINE 29 Aug, and it inverts the item.**
+- [x] **T3b · DECIDED BY ME 9 Sep under V154: KEEP THE COMPOSER -- option (1), which is what
+      #106 already shipped. Say so if you want it gone.** Dropping it would remove the bench's
+      only deterministic source of per-frame load VARIATION in order to solve a documentation
+      problem that #106 already solved: its docstring states plainly that it does not raise
+      detections/frame, and the measurement below is what stops a future run citing mosaics as
+      the fan-out source. Option (2) buys nothing that (1) has not already bought, and it costs
+      a capability -- so waiting on the answer was costing more than the answer is worth.
+      MERGED as PR #106 (f6629d1, 1 Sep) after FIVE review rounds. Original: THE PREMISE IS FALSE — MEASURED ON THE REAL ENGINE 29 Aug, and it inverts the item.**
       **OPEN as PR #106 (31 Aug), and the operator decision is the blocker on this line:** keep the composer
       or drop it? Its stated purpose is gone, but it is still the only deterministic source of per-frame load
       VARIATION in the bench. (1) keep it with the docstring saying plainly it does not raise
