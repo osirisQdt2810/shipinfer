@@ -171,6 +171,13 @@ WRAPPERS = {
     "chroot",
     "su",
     "setarch",
+    # A debugger, a job runner and a detacher: `<tool> [flags] <command>` in PLAIN tokens.
+    # The ledger had filed them as "the command is one quoted token"; measuring that claim
+    # showed only `script -c`, `tmux new -d` and `find -exec` are. `ssh <host> <cmd>` stays
+    # out on purpose -- it runs remotely, where refusing would be a false positive.
+    "gdb",
+    "parallel",
+    "screen",
 }
 
 #: Wrappers that put a SUBCOMMAND between themselves and the real command, so one token is
@@ -799,6 +806,8 @@ WRAPPER_VALUE_FLAGS = {
     "compute-sanitizer": {"--tool", "--log-file", "-o", "--destroy-on-device-error"},
     "cuda-memcheck": {"--tool", "--log-file", "-o"},
     "taskset": {"-c", "--cpu-list"},
+    "gdb": {"-ex", "--eval-command", "-x", "--command", "-cd", "--directory"},
+    "parallel": {"-j", "--jobs", "-S", "--sshlogin", "--results"},
 }
 
 #: Wrappers whose first POSITIONAL operand is not the command: a lock file, a root, a user, an
