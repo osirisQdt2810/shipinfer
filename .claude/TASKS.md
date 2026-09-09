@@ -5235,8 +5235,17 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       is what counts and the content is present; those worktrees are leftovers, not gaps. Do not audit
       squash-merged work with `--contains`.
       **TWO REAL GAPS FOUND (new items below).**
-- [!] **V146b · SURVEYED 4 Sep, and the survey found a PREREQUISITE that is the operator's
-      call. QUESTION: shipvision's `csrc/` has NO C++ tests at all (`grep -rl "int main"
+- [!] **V146b · THE PREREQUISITE IS ANSWERED, 9 Sep, and by something already built: #169's
+      OWN `shipvision` EXTERNAL LANE. So this is gated on the same click as the tracking chain
+      and is no longer a question.** `scripts/build_csrc.py` on `feat/csrc-track-stage` adds
+      `EXTERNAL["shipvision"]` with `include_root=3rdparty/shipvision/csrc` and four sources
+      (`mot/trackers/bytetrack/tracker.cpp`, `mot/association.cpp`, `mot/kalman.cpp`,
+      `mot/pool.cpp`), `packages=()`, compiled by `g++` alone -- and #169's `cpp-shipvision-lane`
+      runs its test binary in CI on a plain runner, green. So the offline-g++ arrangement this
+      item asked SHIPVISION to grow already exists IN THE PARENT, and extending it to the
+      CUDA-free `mtmc/` subtree is adding sources to that lane: a parent-side edit, not an
+      architecture change in a repository this session does not own.
+      ORIGINAL QUESTION, kept because the survey under it is the plan: shipvision's `csrc/` has NO C++ tests at all (`grep -rl "int main"
       csrc/` is empty) and its CMake REFUSES to configure without a device backend
       ("Enable exactly one of SHIPVISION_WITH_CUDA / SHIPVISION_WITH_HIP", CMakeLists:116).
       Its `mtmc/` subtree is CUDA-FREE -- no `.cu`, no cuda includes, pure linear algebra --
@@ -5479,8 +5488,18 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       not staged, so the stash was a no-op and both runs printed the same number. Redone with
       `git checkout origin/main -- deploy/rootless/test.sh`. A before/after that prints the same number
       twice is a measurement bug, not a null result.
-- [~] **A-JOINED-ACTOR-CAN-STILL-HAVE-A-FRAME-IN-FLIGHT · PR #188, and it is #186's own
-      consequence arriving one merge later.** #186 stopped `tests/api/` from skipping on CI,
+- [x] **A-JOINED-ACTOR-CAN-STILL-HAVE-A-FRAME-IN-FLIGHT · MERGED as #188 (9 Sep) after FOUR
+      review rounds, three of which found something I had wrong about WHICH SIGNAL to trust.
+      #186's own consequence, arriving one merge later.**
+      The landed shape: drain the pool on the MONOTONE counters (`walked == accepted`) and keep
+      the equality. Round 1 rejected a `<= 2` tolerance reasoned from one observation (the
+      residue is bounded by the lane, `queue_capacity=64, workers=1`). Round 2 rejected
+      `in_flight`: `_work` publishes its slot AFTER the dequeue, so between `get_batch`
+      returning and `inflight[slot] = batch` an item is in neither term and the gauge reads
+      ZERO with a frame in flight. Round 3 blocked on the PR BODY still arguing for the
+      abandoned patch -- because the review snapshots the body at PUSH time and I had edited it
+      after. Edit the title and body BEFORE pushing; with `automerge` on, a stale title becomes
+      main's subject line and inverts the diagnosis for the next reader. #186 stopped `tests/api/` from skipping on CI,
       and the FIRST plain runner to execute that file reddened main:
       `assert streamed.sink().emitted == settled` -> `assert 4 == 3`.
       The test read `clean=True` from the DELETE as covering both halves and said so in a
