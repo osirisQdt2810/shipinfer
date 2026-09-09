@@ -358,25 +358,34 @@ _INTERPRETERS = re.compile(r"^(?:python3?(?:\.\d+)?|bash|sh|zsh)$")
 _STDIN_FLAGS = frozenset({"-", "-s"})
 
 
-def _reads_program_from_stdin(opening_line: str) -> bool:
-    """Whether the command on this line will *execute* the heredoc that follows it.
+def _stdin_interpreter(opening_line: str) -> str | None:
+    """The interpreter that will *execute* the heredoc following this line, or None.
 
     Read as tokens rather than matched as a pattern. The regex this replaces had an
     optional-flags group that swallowed the very flag it then required, so `bash -s <<SH`
-    — a shell reading its script from the heredoc — was never recognised.
+    — a shell reading its script from the heredoc — was never recognised. WHICH interpreter
+    matters and not merely whether there is one: a python body and a shell body are different
+    languages, and the same text means different things in them.
     """
     try:
         tokens = shlex.split(opening_line.split("<<")[0], comments=False)
     except ValueError:
-        return False
+        return None
     for index, token in enumerate(tokens):
         base = token.rsplit("/", 1)[-1]
         if base in {"sudo", "env", "exec", "nohup", "time"}:
             continue
         if _INTERPRETERS.match(base):
-            return any(flag in _STDIN_FLAGS for flag in tokens[index + 1 :])
-        return False
-    return False
+            if any(flag in _STDIN_FLAGS for flag in tokens[index + 1 :]):
+                return base
+            return None
+        return None
+    return None
+
+
+def _reads_program_from_stdin(opening_line: str) -> bool:
+    """Whether the heredoc following this line will be executed at all."""
+    return _stdin_interpreter(opening_line) is not None
 
 
 #: Module roots whose import means device work.
@@ -413,6 +422,77 @@ def _imports_device_stack(source: str) -> bool:
     return False
 
 
+#: Call targets that hand a string to a shell or exec a program, so a blocked command named
+#: inside one really is invoked. Everything else in a python body is data.
+_SHELLING_OUT = re.compile(r"^(?:subprocess|os|pty|runpy)\.")
+
+
+def _blocked_word(words: list[str]) -> str | None:
+    """The first of ``words`` that is a blocked command, by its basename."""
+    for word in words:
+        base = word.rsplit("/", 1)[-1]
+        if base in BLOCKED_COMMANDS:
+            return base
+    return None
+
+
+def _first_words(call: ast.Call) -> list[str]:
+    """The command word of each string argument of ``call``, list literals included.
+
+    The FIRST word only, and the first element of a list only, because that is the command
+    position: `subprocess.run(["echo", "pytest"])` echoes a word, it does not run a suite.
+    """
+    out: list[str] = []
+    for arg in call.args:
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            out.extend(arg.value.split()[:1])
+        elif isinstance(arg, (ast.List, ast.Tuple)) and arg.elts:
+            head = arg.elts[0]
+            if isinstance(head, ast.Constant) and isinstance(head.value, str):
+                out.extend(head.value.split()[:1])
+        elif isinstance(arg, ast.JoinedStr):
+            for part in arg.values:
+                if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                    out.extend(part.value.split()[:1])
+                    break
+    return out
+
+
+def _text_runs_blocked(source: str) -> str | None:
+    """A blocked command in *command position* on some line, or None. For SHELL bodies."""
+    for line in source.splitlines():
+        found = _blocked_word(line.strip().split(" ")[:1])
+        if found is not None:
+            return found
+    return None
+
+
+def _python_runs_blocked(source: str) -> str | None:
+    """A blocked command this PYTHON body actually invokes, or None.
+
+    Parsed, for the same reason `_imports_device_stack` is: a name in a string literal is not
+    an invocation. The text scan refused a heredoc whose body was a markdown table with a row
+    beginning `pytest`, and refused the very comment reporting that -- four times in one
+    session, each time killing the whole `Bash` call and the edit chained ahead of it.
+
+    An unparseable body falls back to the text scan: half-typed python is not something to
+    reason about, and the conservative direction there is to refuse.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return _text_runs_blocked(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not _SHELLING_OUT.match(ast.unparse(node.func)):
+            continue
+        found = _blocked_word(_first_words(node))
+        if found is not None:
+            return found
+    return None
+
+
 def _heredoc_runs_device(command: str) -> str | None:
     """A refusal when a heredoc body that will be *executed* reaches for an accelerator.
 
@@ -421,7 +501,8 @@ def _heredoc_runs_device(command: str) -> str | None:
     running it, and treating it as such would make the hook unusable for ordinary editing.
     """
     for opener, body in _split_heredocs(command)[1]:
-        if not _reads_program_from_stdin(opener):
+        interpreter = _stdin_interpreter(opener)
+        if interpreter is None:
             continue
         # Parsed, not pattern-matched. The line-anchored regex fired on an import that
         # appeared inside a *string literal* — a heredoc whose python writes another file
@@ -432,10 +513,15 @@ def _heredoc_runs_device(command: str) -> str | None:
                 "a heredoc executed by an interpreter imports a device stack. The body is "
                 "the program, not a file being written."
             )
-        for line in body.splitlines():
-            exe = line.strip().split(" ")[0].rsplit("/", 1)[-1]
-            if exe in BLOCKED_COMMANDS:
-                return f"a heredoc executed by an interpreter runs `{exe}`."
+        # In a SHELL body a line's first word is a command; in a PYTHON body it is a name,
+        # and only a `subprocess`/`os.system` call makes it an invocation. Reading both the
+        # same way is the mistake the AST above was already introduced to fix, one loop down.
+        if interpreter.startswith("python"):
+            exe = _python_runs_blocked(body)
+        else:
+            exe = _text_runs_blocked(body)
+        if exe is not None:
+            return f"a heredoc executed by an interpreter runs `{exe}`."
     return None
 
 
@@ -723,7 +809,11 @@ def verdict(command: str, cwd: str | None = None) -> str | None:
                 )
                 if root in BLOCKED_MODULE_ROOTS and not carved_out:
                     return f"`python -m {module}` runs a benchmark on the host."
-            if any(script in joined for script in BLOCKED_SCRIPTS):
+            # The PROGRAM, not the text. `python scripts/hooks/check_docs.py
+            # benchmarks/run_bench.py` lints a runner; it does not run one, and refusing it
+            # for the name in its operand is the same defect as the heredoc's above.
+            programs = _script_programs(args)
+            if programs and any(script in programs[0] for script in BLOCKED_SCRIPTS):
                 return "this invokes a test or benchmark runner."
             if DEVICE_TOKENS.search(joined):
                 return "this python reaches for an accelerator on the host."

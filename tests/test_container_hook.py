@@ -481,6 +481,75 @@ class TestAModulesOperandIsAProgramUnlessTheModuleOnlyReads:
         assert refused(f"python -m coverage run -m black {target}") is None
 
 
+class TestANameIsNotAnInvocation:
+    """A blocked command *named* in a heredoc body is not a blocked command *run*.
+
+    The body-as-program check above was already an AST because the regex fired on an
+    `import torch` inside a string literal; the `BLOCKED_COMMANDS` loop under it stayed a
+    line-prefix match, so a python body whose text was a markdown table with a row beginning
+    `pytest` "ran the suite" -- four refusals in one session, one on a reviewer mid-review.
+    It cut both ways, which is the part worth keeping: a line-prefix scan cannot see
+    `subprocess.run(["pytest", ...])` either, since that line begins `subprocess.run(`.
+    """
+
+    PY = "python3 - <<'PY'\n{}\nPY"
+    SH = "bash -s <<'SH'\n{}\nSH"
+
+    def test_a_table_in_a_python_body_is_data(self) -> None:
+        """The failure, verbatim: a percentage table whose rows begin with a command name."""
+        body = 'print("""\nmain   now    command\npytest -m gpu  REFUSE REFUSE\n""")'
+        assert refused(self.PY.format(body)) is None
+
+    def test_a_string_mentioning_it_is_data(self) -> None:
+        assert refused(self.PY.format('print("pytest is not run here")')) is None
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            'import subprocess\nsubprocess.run(["pytest", "-m", "gpu"])',
+            'import subprocess\nsubprocess.run("pytest -m gpu", shell=True)',
+            'import subprocess\nsubprocess.check_call(["pytest"])',
+            'import os\nos.system("pytest")',
+            'import os\nargs = 1\nos.system(f"pytest {args}")',
+            'import os\nos.popen("trtexec --onnx=m.onnx")',
+        ],
+    )
+    def test_a_python_body_that_shells_out_is_refused(self, body: str) -> None:
+        """And these were ALLOWED before: a line-prefix scan cannot see a command inside a
+        `subprocess` call, so the fix closes four bypasses while removing two false refusals."""
+        assert refused(self.PY.format(body)) is not None
+
+    def test_the_command_position_is_what_counts(self) -> None:
+        """`subprocess.run(["echo", "pytest"])` echoes a word. The first element of the list
+        is the command; anything after it is that command's argument."""
+        assert (
+            refused(self.PY.format('import subprocess\nsubprocess.run(["echo", "pytest"])'))
+            is None
+        )
+
+    def test_a_shell_body_still_reads_line_by_line(self) -> None:
+        """In a shell body the first word of a line IS the command, so the text scan is
+        correct there and stays. The two languages are read as the two languages."""
+        assert refused(self.SH.format("cd /work\npytest -m gpu")) is not None
+        assert refused(self.SH.format('echo "pytest -m gpu"')) is None
+
+    def test_an_unparseable_python_body_falls_back_to_the_text_scan(self) -> None:
+        """Half-typed python is not something to reason about, and the conservative direction
+        there is to refuse. Stated rather than discovered."""
+        assert refused(self.PY.format("def broken(\npytest -m gpu")) is not None
+
+    def test_a_linter_over_a_runners_name_is_not_running_it(self) -> None:
+        """The same defect one branch over: `BLOCKED_SCRIPTS` was matched against the whole
+        command text, so handing a runner's PATH to a linter counted as invoking it."""
+        assert refused("python scripts/hooks/check_docs.py benchmarks/run_bench.py") is None
+
+    def test_the_runner_itself_is_still_refused_every_way(self) -> None:
+        """The half that must not be lost, in all three spellings."""
+        assert refused("python benchmarks/run_bench.py --systems shipinfer") is not None
+        assert refused("./benchmarks/run_bench.py --systems shipinfer") is not None
+        assert refused("csrc/build/bench --cameras 4") is not None
+
+
 class TestTheGuardCanFail:
     """Without this, a hook that always allowed would pass everything above."""
 
