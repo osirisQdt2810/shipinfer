@@ -1659,6 +1659,20 @@ hook down, for when the operator asked to see something before it is executed.
       From a worktree: main says "No module named pytest", the branch says 14 passed. Five of
       six new tests fail against main's script.
 
+- [ ] **A-LAUNCHER-POINTED-AT-AN-ABSENT-SCRIPT-IS-ALLOWED · found 9 Sep while checking a
+      review finding, and it is PRE-EXISTING on main.** `nsys profile python
+      -mtorch.distributed.run --nproc_per_node=2 train.py` is allowed, with and without a
+      `--help`, because `train.py` does not exist so nothing imports a device stack and the
+      launcher rule never fires. `python -m torch.distributed.run --nproc_per_node=2 train.py`
+      likewise. Measured on main and on #192's branch, identical.
+      NOT WORTH MUCH ON ITS OWN -- a launcher pointed at a file that is not there fails
+      immediately, so the CUDA context it would open never happens. What makes it worth a line
+      is that the shape fooled TWO readers: my own round-1 evidence table and the round-5
+      review both listed it as a regression. The hook's own launcher test pins the spelling
+      against a path that DOES exist, which is the right shape and also why nobody noticed.
+      IF IT IS FIXED: a launcher with a script operand is device work whether or not the
+      operand resolves, because the launcher forks before it discovers the file is missing.
+
 - [~] **A-HELP-QUERY-WAS-REFUSED-AS-A-RUN · PR #192, found by hitting it.**
       `python -m shipinfer bench --help` was refused while I was checking the CLI against
       CLAUDE.md's description of it -- which is how anyone finds out what the documented
