@@ -2,6 +2,10 @@
 
 ShipInfer against [`counting-simulation`](baseline/), head to head, under one load.
 
+**The numbers this harness produced are in [`RESULTS.md`](RESULTS.md)** — both arms on the
+same five GPUs, the four ratios and what each one claims, the method, and what is not in
+any of them. This file is how to run it; that one is what came back.
+
 ## What is compared
 
 Both systems are offered the same thing: **50 cameras x 20 fps = 1000 images/s**, from the
