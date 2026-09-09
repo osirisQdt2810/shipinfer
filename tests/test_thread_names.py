@@ -1,4 +1,4 @@
-"""Both planes name every thread they start, and the C++ one only just learned how.
+"""Both planes name every thread they start, and both names reach the kernel.
 
 CLAUDE.md's sync rule says a per-frame seam must be the same seam on both planes. Python
 named all six of its threads from the start; `csrc/` named none, so `top -H`, a backtrace and
@@ -6,20 +6,33 @@ named all six of its threads from the start; `csrc/` named none, so `top -H`, a 
 `NOT-GPU-BOUND-AT-FIVE-GPUS` measured the wall as host CPU and left "which threads spend it"
 open, and per-thread accounting reads names.
 
-One gap stays open and is recorded rather than asserted: `threading.Thread(name=...)` is a
-Python-level label and does NOT reach `/proc/<tid>/comm`, so the Python plane is still
-invisible to per-thread OS accounting. See `PYTHON-THREADS-ARE-UNNAMED-TO-THE-KERNEL`.
+`threading.Thread(name=...)` is a Python-level label and does NOT reach `/proc/<tid>/comm`
+(measured), which left the Python plane just as invisible; `core/thread_name.py` sets the OS
+name through `ctypes`, since `_thread.set_name` is CPython 3.14 and this tree pins 3.10.
 
-Scope: the Python half reads `Thread(` calls only, so a `ThreadPoolExecutor` is outside it.
+Scope: the Python half reads `Thread(`/`start_thread(` calls, so a `ThreadPoolExecutor` is
+outside it.
 """
 
 from __future__ import annotations
 
 import ast
+import ctypes
 import re
+import threading
 from pathlib import Path
 
 import pytest
+
+from shipinfer.core.thread_name import (
+    instance_thread_label,
+    kernel_name,
+    start_thread,
+)
+
+#: `SYS_gettid` on x86-64. `threading.get_native_id()` exists, but this file is about
+#: what the KERNEL holds, so it asks the kernel for the id as well as for the name.
+_SYS_GETTID = 186
 
 ROOT = Path(__file__).resolve().parents[1]
 CSRC = ROOT / "csrc" / "shipinfer"
@@ -96,23 +109,102 @@ def test_every_cpp_thread_names_itself_first() -> None:
     assert not wrong, f"thread bodies that do not name themselves first: {wrong}"
 
 
-def test_every_python_thread_carries_a_name() -> None:
-    """The property the Python plane already had, now a ratchet so it stays true."""
-    unnamed: list[str] = []
+def _thread_calls(name: str) -> list[tuple[Path, int, ast.Call]]:
+    """Every call to ``name`` under `src/shipinfer/`, with where it is."""
+    found: list[tuple[Path, int, ast.Call]] = []
     for path in sorted(SRC.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if not isinstance(node, ast.Call):
                 continue
             target = node.func
-            name = (
+            called = (
                 target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
             )
-            if name != "Thread":
-                continue
-            if not any(keyword.arg == "name" for keyword in node.keywords):
-                unnamed.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+            if called == name:
+                found.append((path, node.lineno, node))
+    return found
+
+
+def test_every_python_thread_goes_through_the_factory() -> None:
+    """`threading.Thread` directly would keep the Python name and lose the kernel one.
+
+    The factory exists because two of the six targets cannot name themselves from inside:
+    `pipeline.runner`'s worker takes no index and the HTTP thread's target is uvicorn's
+    `Server.run`. `core/thread_name.py` keeps its own `threading.Thread` -- it IS the factory.
+    """
+    factory = (SRC / "core" / "thread_name.py").resolve()
+    bare = [
+        f"{path.relative_to(ROOT)}:{line}"
+        for path, line, _ in _thread_calls("Thread")
+        if path.resolve() != factory
+    ]
+    assert not bare, f"threads started outside `start_thread`: {bare}"
+
+
+def test_every_started_thread_carries_a_name() -> None:
+    """The property the Python plane already had, now a ratchet on the factory."""
+    unnamed = [
+        f"{path.relative_to(ROOT)}:{line}"
+        for path, line, node in _thread_calls("start_thread")
+        if not any(keyword.arg == "name" for keyword in node.keywords)
+    ]
     assert not unnamed, f"threads started without a name: {unnamed}"
+
+
+def test_the_kernel_holds_the_name_the_factory_was_given() -> None:
+    """The whole point, asserted against `/proc` rather than against the helper.
+
+    `threading.Thread(name=...)` alone leaves `/proc/<tid>/comm` reading `python`, which is
+    what made six named threads invisible to `top -H` and to per-thread CPU accounting.
+    """
+    seen: dict[str, str] = {}
+
+    def body() -> None:
+        tid = ctypes.CDLL("libc.so.6").syscall(_SYS_GETTID)
+        seen["kernel"] = Path(f"/proc/self/task/{tid}/comm").read_text().strip()
+        seen["python"] = threading.current_thread().name
+
+    start_thread(body, name="shipinfer-ship_detector_0_3", kernel="m3.0-ship_detec").join()
+
+    assert seen["python"] == "shipinfer-ship_detector_0_3", seen
+    assert seen["kernel"] == "m3.0-ship_detec", seen
+
+
+def test_the_two_planes_agree_on_a_model_instances_label() -> None:
+    """Same (model, device, index) -> the same fifteen bytes on both planes, so one `top -H`
+    reads the same. The composite differs -- `model_ordinal_device` here,
+    `model:device:index` there -- and the label is where that stops mattering.
+    """
+    header = (CSRC / "core" / "thread_name.h").read_text(encoding="utf-8")
+    assert (
+        'return thread_name("m" + tail, name.substr(0, first))' in header
+    ), "the C++ label changed shape; the two planes' strings would diverge"
+    assert instance_thread_label("ship_detector_0_3") == "m3.0-ship_detec"
+    assert instance_thread_label("ship_segmenter_1_7") == "m7.1-ship_segme"
+
+
+def test_no_two_instances_share_a_kernel_name() -> None:
+    """The 15-byte budget's one real failure mode, over the format the runtime builds:
+    `engine/model.py` names an instance `{model}_{ordinal}_{device}`.
+    """
+    models = sorted(p.name for p in (ROOT / "model_repository").iterdir() if p.is_dir())
+    assert len(models) >= 4, models
+
+    labels = {
+        instance_thread_label(f"{model}_{ordinal}_{device}")
+        for model in models
+        for device in range(8)
+        for ordinal in range(2)
+    }
+    assert len(labels) == len(models) * 8 * 2, sorted(labels)
+    assert all(len(label) <= _BUDGET for label in labels), sorted(labels)
+
+
+def test_every_call_site_fits_without_truncation() -> None:
+    """A `kernel=` that still needed cutting would be a discriminator thrown away -- which is
+    what `pipeline-worker-12` -> `pipeline-worker` was, and why every site passes one."""
+    for name in ("pipe-127", "sweeper", "sampler", "cam-camera-0049", "http", "ch7.31"):
+        assert kernel_name(name) == name, name
 
 
 #: Linux caps a thread name at 16 bytes including the NUL, and `core/thread_name.h` keeps
