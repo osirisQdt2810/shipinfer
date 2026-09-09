@@ -1638,8 +1638,14 @@ hook down, for when the operator asked to see something before it is executed.
       reassembly -- which is why `events` is the softest of C1's three ratios and why the
       rows/pixels ones are the ones measuring model work.
 
-- [~] **RUN_TESTS.SH-FELL-THROUGH-FROM-A-WORKTREE · PR #193, and the script already carried
-      a comment about this exact misdiagnosis.** Its own words: falling through to whatever
+- [x] **RUN_TESTS.SH-FELL-THROUGH-FROM-A-WORKTREE · MERGED as #193 (9 Sep) after three review
+      rounds, the last of which blocked on the PR BODY and not the code. The script already
+      carried a comment about this exact misdiagnosis.**
+      THE LESSON THAT COST THE THIRD ROUND: round 2 rewrote the tests and I PATCHED the body
+      instead of rewriting it, so it named a class the diff no longer contained, contradicted
+      the paragraph above it, and pasted output no revision could produce. `.claude/WORKFLOW.md`
+      now carries both halves -- edit body and title BEFORE the push, and rewrite the Test Plan
+      from `git diff origin/main | grep '^+class'` when a revision rewrites the tests. Its own words: falling through to whatever
       `python` is on PATH "found the system interpreter and failed with `No module named
       pytest`, which reads like a broken test suite rather than a wrong interpreter". It
       recurred in the shape that fix did not cover -- **a git worktree has no `.venv` of its
