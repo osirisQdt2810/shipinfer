@@ -1127,7 +1127,7 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 6 · The final goal (V49)
 
-- [~] **PY-OFFLINE-FLAKE-SINK-DROP · found, and it is THREE tests, not one. PR open.**
+- [~] **PY-OFFLINE-FLAKE-SINK-DROP · found, and it is FOUR tests, not one. PR #173.**
       Not a stall: `wait_for(sink.failed == 3)` returned and the very next line read
       `sink_failures` at **2.0**. A sink bumps its own counter INSIDE `emit`; the runner bumps
       the `PipelineMetrics` counter after `emit` returns, so waiting on the first half and
@@ -1136,8 +1136,25 @@ hook down, for when the operator asked to see something before it is executed.
       prove a fix (40/40 taught that), made deterministic: a plugin sleeping 50 ms inside
       `Counter.inc` fails all three affected tests 5/5 before and passes all three 5/5 after.
       Two of the three had never been seen failing; the widened window is what found them.
-      Fix: wait on the counter the test asserts on. Branch
-      `fix/pipeline-tests-wait-on-the-metric`.
+      Fix: wait on the counter the test asserts on. **PR #173**, and its review found a
+      FOURTH -- `test_metrics_count_per_stage_and_per_camera`, whose `objects_total` is charged
+      in `_record` and so has the widest window of the four counters it asserts. The review's
+      real finding is the method: my plugin slowed two counters, so `objects_total` was outside
+      the search BY CONSTRUCTION and the sweep could only rediscover what I had guessed. Slowed
+      every post-emit metric instead (`Histogram.observe` too) -> four on `main`, no fifth, and
+      the whole `tests/` tree clean on the branch. Stays open until #173 merges.
+
+- [~] **OCCUPANCY-DROPPED-AT-THE-SHARD-BOUNDARY · #170 round 2, the third time.**
+      The review was right and my PR body's claim was wrong: a shared printer shares the
+      FORMATTING, and three positional tables are still supplied one call site at a time, so
+      occupancy went missing from the aggregate table -- the same drop as #167's rows. Fixed a
+      level up: the tables travel as ONE mapping keyed by `shipinfer.DEVICE_TABLES`, the child
+      writes all of them off that list, `aggregate` sums all of them in one loop, `_relabel`
+      keeps the numeric type, and the sharded parent hands the printer its WHOLE aggregate.
+      Five tests; four fail with the regressions put back. The first version of the parent test
+      called the printer directly and passed with the bug in -- the same vacuity the review
+      noted -- so it drives `measure_sharded` now. Both non-blocking notes in too. Evidence: a
+      sharded bench run whose aggregate table carries `(busy)` for every model.
 
 - [ ] **HOOK-REFUSES-A-LINTER-ON-A-TEST-FILE · a false refusal, twice in one session.**
       `require_container.py`'s `script_touches_device` scans EVERY `.py` argument of a
