@@ -47,10 +47,27 @@ namespace {
         });
     }
 
+    // doc: long the race this closes was in the TEST, and it failed 4 runs in 20
+    // Wait until the thread has been scheduled at least once. WITHOUT THIS the test races the
+    // very thing it tests: the guard can set `stopping` before the new thread is ever run, the
+    // loop then exits on its FIRST check having never incremented, and `ran > 0` -- the
+    // assertion that exists to prove the test is not vacuous -- fails. Measured on main at 4
+    // failures in 20 runs, which made every PR's offline tier a coin toss.
+    //
+    // Bounded rather than a bare spin, and a timeout is a REAL failure: a thread that never
+    // runs in a second is not a scheduling hiccup.
+    bool started(std::atomic<int>& ran) {
+        for (int i = 0; i < 1000 && ran.load() == 0; ++i) {
+            std::this_thread::sleep_for(1ms);
+        }
+        return ran.load() > 0;
+    }
+
     void a_throw_past_a_live_thread_joins_it_instead_of_aborting() {
         std::atomic<bool> stopping{false};
         std::atomic<int> ran{0};
         std::thread worker = spinning_on(stopping, ran);
+        check(started(ran), "the worker is scheduled before we unwind past it");
         bool propagated = false;
         try {
             JoinOnUnwind guard(stopping);
