@@ -1192,8 +1192,11 @@ hook down, for when the operator asked to see something before it is executed.
       point. Numbers in the item above; the units are vacuity-checked against three wrong
       implementations.
 
-- [ ] **GSTREAMER-ARM-READS-A-THIRD-AND-KEEPS-3% · opened 9 Sep by #185's first readable run,
-      and it is the mandated route's real problem.** 50x20x70 s on five idle GPUs, `gstreamer`
+- [-] **GSTREAMER-ARM-READS-A-THIRD-AND-KEEPS-3% · opened 9 Sep by #185's first readable run,
+      DIAGNOSED the same day, and then DROPPED as not worth doing -- it is the host-decode
+      FALLBACK, not the mandated route. `nvdec` is V156's route (`sources/nvdec.h`, first line)
+      and it is already at 94% of the replay route. My first framing called this "the mandated
+      route's real problem" and that was wrong.** 50x20x70 s on five idle GPUs, `gstreamer`
       against `nvdec`, same wrapper, same plan, same fixtures:
         source      offered   read     accepted   complete   queue_rejected
         gstreamer    70 000   21 247       699        316          20 584
@@ -1202,8 +1205,10 @@ hook down, for when the operator asked to see something before it is executed.
       (nvdec reads 92%), and then 97% of what it did read is refused at the pipeline queue
       (nvdec 59%). `pipeline_pool_size` ends at 0 against nvdec's 155, which is the first
       thing to look at -- a frame pool that never filled would explain the second loss.
-      Invisible until #185: the arm exited 1 with no counters, so every previous reading of
-      this route came from `nvdec` or from 8-camera smoke runs.
+      Invisible until #185: the arm exited 1 with no counters, so every previous reading came
+      from `nvdec` or from 8-camera smoke runs. Consistent with what was already recorded --
+      "the host-decode arm of OUR OWN plane completes ZERO events at this load where the NVDEC
+      arm completes 37 758" -- so this quantifies a known shape rather than finding a new one.
       **DIAGNOSED 9 Sep by reading the pipeline the run actually builds, and it is the V137
       mandate restated as a measurement.** With `codec: h264` (the default, so the explicit
       preference list rather than `decodebin`), the chain is:
@@ -1216,8 +1221,11 @@ hook down, for when the operator asked to see something before it is executed.
       (GStreamer 1.20.3; nvcodec ships only decoders plus cudaupload/cudadownload), so there
       is no GPU-side converter to prefer -- the converter probe list has nothing to find.
       So the arm is a HOST-BGR path by construction and cannot approach `nvdec`, which keeps
-      the frame on the device. THE FIX IS THE PHASE-D NV12-IN-VRAM PATH (see `C9`), not a
-      knob here; there is no cheap win, and that is worth knowing before looking for one.
+      the frame on the device. THERE IS NO CHEAP WIN AND NO WORK OWED: `nvdec` already carries
+      the device route, and closing this gap would mean either a GStreamer with a CUDA
+      converter (1.22's `cudaconvertscale`, or DeepStream's `nvvideoconvert` -- an IMAGE
+      decision, see `T4`) or teaching the host arm a device carrier it exists not to need.
+      Knowing that is the value here; looking for a knob would have been the waste.
       TWO SMALLER FACTS, both measured, neither the wall:
         * 50 `gst_gl_display_gbm_new: could not find or open DRM device` errors, exactly one
           per camera, over a ~7 s window. The `! video/x-raw` guard prevents the SEGFAULT its
@@ -1228,8 +1236,12 @@ hook down, for when the operator asked to see something before it is executed.
           decode. The bench's default is `h264` and this run did use NVDEC -- but nothing
           stops an `auto` fleet from measuring libav.
 
-- [~] **GSTREAMER-RTSP-CANNOT-FINISH-AT-THE-DESIGN-LOAD · PR #185, and it is the mandated
-      route (V137/V156: gstreamer rtsp -> nv12 -> vram).** `SHIPINFER_BENCH_SOURCE=gstreamer` at
+- [~] **GSTREAMER-RTSP-CANNOT-FINISH-AT-THE-DESIGN-LOAD · PR #185. CORRECTED: this is the
+      HOST-DECODE arm, not the mandated route -- `sources/nvdec.h` says in its FIRST LINE that
+      NVDEC into VRAM is V156's route, and `PHASE-D-NV12` is closed. I had it backwards in the
+      first draft of #185 and in this item; the fix's value is unchanged, because any camera
+      that hangs past the deadline discards the whole run on ANY arm.**
+      `SHIPINFER_BENCH_SOURCE=gstreamer` at
       50x20x70 s exits **1** with `31 camera(s) abandoned past the stop deadline; exiting
       without unwinding` and prints NO counter summary -- so the arm V156 names produces no
       measurement at the design load. `nvdec` at the same load, same GPUs, same wrapper, exits 0
