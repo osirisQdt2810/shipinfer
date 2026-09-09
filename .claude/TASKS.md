@@ -1711,6 +1711,28 @@ hook down, for when the operator asked to see something before it is executed.
       direction (a false refusal costs a sentence; a false allow costs a host CUDA context).
       Undocumented, it looks like the bug `_module_at` exists to prevent.
 
+- [~] **THE-CPP-PLANE-NAMED-NONE-OF-ITS-THREADS · PR #198 (9 Sep), and it is the
+      prerequisite for the measurement `NOT-GPU-BOUND-AT-FIVE-GPUS` left open.** Python names
+      all six of its threads; `csrc/` named none of its seventeen, so `top -H`, a backtrace and
+      `/proc/<tid>/comm` showed fifty-odd rows called `bench` -- a sync-rule gap where the C++
+      side owed a seam the Python side had. The reader that matters is per-thread accounting:
+      that item measured the wall as host CPU (38.4 ms of bench CPU per event, GPUs at 68% of
+      ceiling) and asked "which threads spend it", and `C1`'s gap to the >=5x target IS that
+      host cost.
+      `core/thread_name.h` is header-only so the offline lane can use it, and truncates from
+      the END -- with a short class prefix (`mdl-`, `cam-`, `pipe-`) the head distinguishes, so
+      `mdl-ship_detect` and `mdl-ship_segmen` stay two readable rows where keeping the tail
+      would give `-ship_detector` and drop the class. FIFTEEN BYTES IS THE KERNEL'S NUMBER, not
+      a guess: `pthread_setname_np` returns ERANGE at sixteen and then sets NOTHING, so a name
+      one byte over would silently not exist -- pinned by a test that calls libc directly.
+      PROVED AGAINST THE KERNEL, twice: the C++ test reads every name back through
+      `pthread_getname_np`, and `/proc/<pid>/task/*/comm` sampled while the CUDA-free
+      `csrc/build/test_ingest` ran shows `cam-cam0`..`cam-cam7` beside the main thread where
+      every row used to read `test_ingest`. A live `top -H` of the bench's fifty actors waits
+      for a container run: other tenants hold all eight GPUs, so a design-load run now would
+      contend with them and measure noise.
+      Suite 4098 passed, C++ offline tier all green (18 binaries).
+
 - [ ] **PYTHON-THREADS-ARE-UNNAMED-TO-THE-KERNEL · the other half of the thread-naming
       seam, opened by PR (csrc names its threads) under the sync rule.**
       MEASURED, not assumed: a `threading.Thread(target=..., name="pipeline-worker-7")` reports
