@@ -347,15 +347,22 @@ class TestDeletingAStream:
             assert response.status_code == 200
             assert response.json() == {"clean": True}
 
+            # doc: long why an equality here was wrong, and what the tolerance is measured from
+            # THE JOIN BOUNDS THE PRODUCER, NOT THE SINK'S COUNTER. `clean=True` above is the
+            # ingest manager saying it *joined* the actor thread -- but a frame the actor
+            # published just before that join is still crossing the runner's pool when the
+            # DELETE returns, so a count read in the same breath can tick once more. The
+            # original assertion here was an equality and read the join as covering both; it
+            # reddened main with `assert 4 == 3` the first time this file ran on CI, which was
+            # #186, because `tests/api/` had been skipping there for want of `fastapi`.
             settled = streamed.sink().emitted
-            # The sleep is not what makes this deterministic, and it should not be read as
-            # one: `clean=True` above is the ingest manager saying it *joined* the actor
-            # thread, so nothing can publish after it and the assertion holds with no pause at
-            # all. What the pause is for is the opposite case -- an implementation that
-            # signalled the decoder and returned without waiting would need somewhere to be
-            # caught, and a check taken in the same breath as the DELETE would not catch it.
             time.sleep(0.05)
-            assert streamed.sink().emitted == settled, "the decoder is still publishing"
+            # A decoder still running would add about 25 frames in that window -- `pause_s` is
+            # 0.002 and the source has 200 frames left -- so a residue of one or two is the
+            # in-flight frame and twenty-five is the defect this test exists for. The gap
+            # between those two numbers is what makes the tolerance safe rather than slack.
+            grew = streamed.sink().emitted - settled
+            assert grew <= 2, f"the decoder is still publishing: {grew} more frames in 50 ms"
             assert client.get("/streams").json() == {"streams": []}
         assert streamed.runner.cameras == ()
 
