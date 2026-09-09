@@ -764,6 +764,67 @@ class TestANameIsNotAnInvocation:
         assert refused("python -m pytest tests/ benchmarks/run_bench.py") is None
 
 
+class TestTheRealCommandIsNotAlwaysTheFirstWord:
+    """Two spellings the hook could not find the command in, so it judged nobody.
+
+    `WRAPPERS` already steps over `timeout`/`env`/`nice`/`stdbuf`/`xargs`/`nohup`, which is why
+    `timeout 900 pytest -m gpu` was refused all along. A wrapper with its own SUBCOMMAND is
+    two tokens, and stepping over one left `run` as the executable -- so `uv run pytest -m gpu`
+    walked through, and that is the ordinary modern spelling of it. Separately,
+    `BLOCKED_SHIPINFER_SUBCOMMANDS` is consulted only when the EXECUTABLE is `shipinfer`, so
+    the module spelling of the same command was judged by nobody.
+    """
+
+    @pytest.mark.parametrize("runner", ["uv", "poetry", "pipenv", "pdm", "hatch", "rye"])
+    def test_a_runner_wrapper_does_not_hide_the_device_tier(self, runner: str) -> None:
+        assert refused(f"{runner} run pytest -m gpu") is not None
+        assert refused(f"{runner} run python -m pytest -m multigpu") is not None
+
+    def test_a_runner_wrapper_does_not_hide_the_offline_tier_either(self) -> None:
+        """The other direction, which is the one that would get the fix reverted: the offline
+        tier runs anywhere, through a wrapper as much as without one."""
+        assert refused("uv run pytest tests/core -q") is None
+        assert refused("poetry run pytest -m 'not gpu' tests/") is None
+
+    def test_only_the_subcommands_that_mean_run_are_stepped_over(self) -> None:
+        """`uv pip install torch` is not a launch, and `uv` is not a blocked command -- so it
+        must resolve to `uv` rather than to `pip`, and be allowed."""
+        assert refused("uv pip install torch") is None
+        assert refused("uv venv") is None
+
+    def test_a_wrapper_flag_whose_value_is_a_name(self) -> None:
+        """`WRAPPER_OPERAND` steps over a NUMBER (`timeout 900`, `nice -n 5`). `conda run -n
+        myenv` puts a name there, and the name came out as the executable."""
+        assert refused("conda run -n myenv pytest -m gpu") is not None
+        assert refused("micromamba run -p /opt/env pytest -m multigpu") is not None
+        assert refused("env -u CUDA_VISIBLE_DEVICES pytest -m gpu") is not None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "mpirun -n 2 pytest -m gpu",
+            "srun --gres=gpu:1 pytest -m gpu",
+        ],
+    )
+    def test_a_job_launcher_does_not_hide_it(self, command: str) -> None:
+        assert refused(command) is not None
+
+    @pytest.mark.parametrize("sub", sorted(hook.BLOCKED_SHIPINFER_SUBCOMMANDS))
+    def test_the_module_spelling_of_a_blocked_subcommand_is_refused(self, sub: str) -> None:
+        """`python -m shipinfer serve` IS `shipinfer serve`; the executable happens to be
+        `python`, which is the only reason it was allowed."""
+        assert refused(f"shipinfer {sub}") is not None
+        assert refused(f"python -m shipinfer {sub}") is not None
+        assert refused(f"python -m shipinfer.cli {sub}") is not None
+
+    def test_the_module_spelling_of_an_ordinary_subcommand_is_allowed(self) -> None:
+        """The half that must not be lost: `repo ls` reads the repository on the host, which
+        is what the CLI is for, and `--help` is not a subcommand at all."""
+        assert refused("python -m shipinfer repo ls") is None
+        assert refused("python -m shipinfer --help") is None
+        assert refused("shipinfer repo show ship_detector") is None
+
+
 class TestTheGuardCanFail:
     """Without this, a hook that always allowed would pass everything above."""
 

@@ -135,6 +135,26 @@ WRAPPERS = {
     "bash",
     "sh",
     "-c",
+    # Job launchers whose own operands are flags and counts: `mpirun -n 2 …`, `srun
+    # --gres=gpu:1 …`. Flags and numbers are already stepped over, so no special case.
+    "mpirun",
+    "srun",
+}
+
+#: Wrappers that put a SUBCOMMAND between themselves and the real command, so one token is
+#: not enough: `uv run pytest -m gpu` stopped at `run`, which is not a blocked command, so the
+#: device tier walked through the ordinary modern spelling of it. Valued by the subcommands
+#: that mean "then run this" -- `uv pip install …` is not one, so `uv` still resolves to `uv`.
+WRAPPER_SUBCOMMANDS = {
+    "uv": {"run", "tool"},
+    "poetry": {"run"},
+    "pipenv": {"run"},
+    "pdm": {"run"},
+    "hatch": {"run"},
+    "conda": {"run"},
+    "micromamba": {"run"},
+    "rye": {"run"},
+    "nox": {"run"},
 }
 
 PYTHON_RE = re.compile(r"(?:^|/)(python|python3|python3\.\d+)$")
@@ -717,6 +737,12 @@ ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # actually leaked a CUDA context here.
 WRAPPER_OPERAND = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
 
+#: Wrapper flags whose value is a NAME rather than a number, so `WRAPPER_OPERAND` cannot step
+#: over it and the value came out as the executable: `conda run -n myenv pytest -m gpu`
+#: answered `myenv`. Only consulted before the real command is found, so a `-p` belonging to
+#: the command itself (`pytest -p no:cacheprovider`) is never reached.
+WRAPPER_VALUE_FLAGS = frozenset({"-n", "--name", "-p", "--prefix", "-u", "--chdir", "--cwd"})
+
 
 def real_command(tokens: list[str]) -> tuple[str | None, list[str]]:
     """Strip env assignments and wrappers; return (executable, remaining args)."""
@@ -724,6 +750,15 @@ def real_command(tokens: list[str]) -> tuple[str | None, list[str]]:
     while i < len(tokens):
         tok = tokens[i]
         base = tok.rsplit("/", 1)[-1]
+        # `uv run pytest`: two tokens, and only together. Checked before the plain wrapper
+        # test so `uv pip install …` still resolves to `uv` rather than to `pip`.
+        following = tokens[i + 1] if i + 1 < len(tokens) else ""
+        if following in WRAPPER_SUBCOMMANDS.get(base, frozenset()):
+            i += 2
+            continue
+        if tok in WRAPPER_VALUE_FLAGS:
+            i += 2
+            continue
         skip = (
             (ENV_ASSIGN.match(tok) and not tok.startswith("-"))
             or base in WRAPPERS
@@ -944,6 +979,17 @@ def verdict(command: str, cwd: str | None = None) -> str | None:
                 )
                 if runner is not None and _selects_device_tier(args):
                     return f"`python -m {runner} {_device_marker(args)}` runs the device tier."
+                # `python -m shipinfer serve` is `shipinfer serve`. The check above it only
+                # ever fires when the EXECUTABLE is `shipinfer`, so the module spelling of the
+                # same command -- what `python -m shipinfer` exists for -- was judged by
+                # nobody, on the two subcommands that serve and measure.
+                if root == "shipinfer":
+                    sub = next(
+                        (a for a in args[_module_at(args)[0] :] if not a.startswith("-")),
+                        None,
+                    )
+                    if sub in BLOCKED_SHIPINFER_SUBCOMMANDS:
+                        return f"`python -m {module} {sub}` runs the server or a benchmark."
                 carved_out = any(
                     module == prefix or module.startswith(prefix + ".")
                     for prefix in ALLOWED_MODULE_PREFIXES
