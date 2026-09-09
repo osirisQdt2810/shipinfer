@@ -707,9 +707,14 @@ class TestANameIsNotAnInvocation:
         assert hook._inline_source(["-cprint(1)"]) == "print(1)"
 
     def test_a_reader_collecting_a_runners_file_is_not_running_it(self) -> None:
-        """A decision rather than a side effect: `pytest` is a reader, the offline tier runs
-        anywhere (ADR-001), and pytest COLLECTS that file rather than running it as a
-        benchmark. `main` refused it for the name in the argv."""
+        """A decision rather than a side effect, and the reason has to be the accurate one.
+
+        `pytest` is a reader and the offline tier runs anywhere (ADR-001) -- but pytest
+        IMPORTS what it collects, and `benchmarks/run_bench.py:103` imports
+        `benchmarks.harness.shipinfer` at module scope. What makes it safe is the
+        `if __name__ == "__main__"` guard at `run_bench.py:901`: importing that module runs no
+        benchmark. "Collects rather than runs" was the shorter reason and the weaker one.
+        """
         assert refused("python -m pytest tests/ benchmarks/run_bench.py") is None
 
 
