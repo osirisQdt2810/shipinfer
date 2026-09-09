@@ -145,26 +145,44 @@ class TestItSaysWhichProblemItIs:
         assert "has no pytest" not in done.stderr
 
 
-class TestAnActivatedVenvOutranksTheSearch:
+class TestAnActivatedVenvOutranksEverySearch:
     """A caller who activated one has said which interpreter they mean nearly as plainly as
-    `PYTHON=`. Without this a *stale* `.venv` in the primary checkout silently wins from a
-    linked worktree."""
+    `PYTHON=` -- so it outranks `$REPO_ROOT/.venv` too, not only the worktree search.
 
-    def test_virtual_env_beats_the_main_checkouts_venv(self, tmp_path: Path) -> None:
-        _main, linked, main_stub = _worktree(tmp_path)
-        active = tmp_path / "active"
-        _stub(active / "bin" / "python", WORKS)
+    `deploy/docker/Dockerfile` exports `VIRTUAL_ENV=/opt/venv`, so the weaker ordering would
+    let a HOST `.venv`, bind-mounted in, win over the container's -- the contamination
+    `deploy/rootless/test.sh`'s own header says the container exists to prevent.
+    """
 
-        done = subprocess.run(
+    @staticmethod
+    def _run_with_active(cwd: Path, active: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
             ["bash", "scripts/run_tests.sh", "-q"],
             capture_output=True,
             text=True,
-            cwd=str(linked),
+            cwd=str(cwd),
             env={"PATH": "/usr/bin:/bin", "VIRTUAL_ENV": str(active)},
         )
 
-        assert f"CHOSE {active / 'bin' / 'python'}" in done.stderr, done.stderr
+    def test_it_beats_the_main_checkouts_venv(self, tmp_path: Path) -> None:
+        _main, linked, main_stub = _worktree(tmp_path)
+        active = _stub(tmp_path / "active" / "bin" / "python", WORKS)
+
+        done = self._run_with_active(linked, tmp_path / "active")
+
+        assert f"CHOSE {active}" in done.stderr, done.stderr
         assert str(main_stub) not in done.stderr
+
+    def test_it_beats_the_checkouts_own_venv(self, tmp_path: Path) -> None:
+        """The half the first ordering got wrong: from the PRIMARY checkout, a stale `.venv`
+        used to win over the venv someone had activated."""
+        main, _linked, own_stub = _worktree(tmp_path)
+        active = _stub(tmp_path / "active" / "bin" / "python", WORKS)
+
+        done = self._run_with_active(main, tmp_path / "active")
+
+        assert f"CHOSE {active}" in done.stderr, done.stderr
+        assert str(own_stub) not in done.stderr
 
 
 class TestTheFallthroughSurvives:

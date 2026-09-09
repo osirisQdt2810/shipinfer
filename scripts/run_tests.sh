@@ -19,14 +19,16 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SEARCHED=0
 if [ -n "${PYTHON:-}" ]; then
   :
+elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
+  # AN ACTIVATED VENV OUTRANKS EVERY SEARCH, INCLUDING `$REPO_ROOT/.venv`. A caller who
+  # activated one has said which interpreter they mean nearly as plainly as `PYTHON=`, and
+  # `deploy/docker/Dockerfile` exports `VIRTUAL_ENV=/opt/venv` -- so ranking it below the
+  # checkout's `.venv` would let a HOST venv, bind-mounted in, win over the container's,
+  # which is the contamination `deploy/rootless/test.sh`'s header says it exists to prevent.
+  PYTHON="$VIRTUAL_ENV/bin/python"
+  SEARCHED=1
 elif [ -x "$REPO_ROOT/.venv/bin/python" ]; then
   PYTHON="$REPO_ROOT/.venv/bin/python"
-  SEARCHED=1
-elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
-  # An ACTIVATED venv outranks the search below: a caller who activated one has said which
-  # interpreter they mean nearly as plainly as `PYTHON=`, and without this a stale `.venv` in
-  # the primary checkout silently wins over it from a linked worktree.
-  PYTHON="$VIRTUAL_ENV/bin/python"
   SEARCHED=1
 else
   SEARCHED=1
@@ -34,6 +36,8 @@ else
   # from one, this fell through to the system interpreter and said "No module named pytest".
   # The main worktree's venv is the one with the dependencies in it, and `--git-common-dir`
   # is how you find it from any linked worktree (it points at the primary `.git`).
+  # `--path-format=absolute` needs git >= 2.31; older git errors, `|| true` catches it, and
+  # the run degrades to the PATH fallthrough with the message below rather than to silence.
   MAIN_ROOT="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
   MAIN_ROOT="${MAIN_ROOT%/.git}"
   if [ -n "$MAIN_ROOT" ] && [ -x "$MAIN_ROOT/.venv/bin/python" ]; then
