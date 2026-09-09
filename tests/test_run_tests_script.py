@@ -15,6 +15,7 @@ relies on `setup-python`, which is why the fallback stays.
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,8 +53,17 @@ class TestItSaysWhichProblemItIs:
         assert "PYTHON=/path/to/python" in done.stderr
 
     def test_a_named_interpreter_that_works_is_used(self) -> None:
-        """`PYTHON` wins over every search, which is how CI and a container name theirs."""
-        done = _run("-q", "--collect-only", "tests/runtime/test_containment.py")
+        """`PYTHON` wins over every search, which is how CI and a container name theirs.
+
+        NAMED, and the first draft did not name it -- it relied on the search finding one with
+        `PATH` stripped to `/usr/bin:/bin`, which is the developer's box and not a runner's.
+        On CI that leaves `/usr/bin/python` (no pytest) and removes the interpreter
+        `setup-python` put on the real PATH, so the test asserted the failure it was written to
+        rule out. It reddened this PR's own `Tests (py3.10)` and `(py3.12)`.
+        """
+        done = _run(
+            "-q", "--collect-only", "tests/runtime/test_containment.py", python=sys.executable
+        )
 
         assert done.returncode == 0, done.stderr[-2000:]
         assert "has no pytest" not in done.stderr
