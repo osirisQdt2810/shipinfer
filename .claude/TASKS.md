@@ -1127,6 +1127,28 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 6 · The final goal (V49)
 
+- [ ] **OFFLINE-TIER-HAS-A-FLAKY-GATE · found 9 Sep by not believing a red, fix open as #171.**
+      #170's `cpp-offline` went red on `test_join_on_unwind`, which my diff CANNOT reach: that
+      unit's entire include closure is `join_on_unwind.h` and itself, checked rather than
+      assumed. So it was pre-existing -- and on `main`, serially, on a loaded box: **4 failures
+      in 20 runs**. A 20% flake on a gate makes every PR's offline tier a coin toss, and it is
+      worse than a broken gate because it teaches you to re-run instead of to read.
+      THE RACE IS IN THE TEST, not in `JoinOnUnwind`. `a_throw_past_a_live_thread_joins_it...`
+      spawns a worker and immediately unwinds; the guard can set `stopping` BEFORE the new
+      thread is ever scheduled, so its `while (!stopping.load())` is false on the first check,
+      it never increments, and `ran > 0` -- the assertion that exists to prove the test is not
+      vacuous -- fails. The anti-vacuity check was racing the very thing it tested.
+      FIXED by waiting, bounded, for the thread to be scheduled before unwinding past it, with
+      a timeout that is a REAL failure (a thread that never runs in a second is not a hiccup).
+      PROVEN, and the first attempt at proving it FAILED honestly: serially the flake would not
+      reproduce (40/40 either way), because the box had quietened since. Under parallel
+      contention, 24 at a time, same binary path and same batches:
+        without the wait   28 failures / 120
+        with the wait       0 failures / 120
+      THE LESSON WORTH KEEPING: a red on a PR is not evidence about that PR. Checking whether
+      the diff could even reach the failing unit took one command and saved chasing it into
+      code that was innocent -- and it turned a nuisance into a real find.
+
 - [!] **NOT-GPU-BOUND-AT-FIVE-GPUS · MEASURED OUT, 9 Sep. OPERATOR: the RTSP arm under-reports
       us by up to ~17% because the harness generates its own load in-container, and fixing that
       is an infrastructure change (an RTSP source reachable from outside a rootless container
