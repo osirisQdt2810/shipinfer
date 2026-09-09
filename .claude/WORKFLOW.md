@@ -95,6 +95,45 @@ shipinfer serve --http --port 8000       # then curl /v2/health, /v2/statistics,
 the others. Fair queueing keeps `per-camera served min` proportional to submission; without
 it, quiet cameras trend to zero.
 
+## Comparing two systems (RULE — measured 9 Sep, and it is not a preference)
+
+**One run against one run decides nothing on this box.** Four runs of the same arm at
+*identical* settings spread 26 669 to 39 375 events — 36.7% of the mean; dropping the
+earliest still leaves 14.9%. So a single-run A/B cannot resolve anything under ~15%, and
+three conclusions in `TASKS.md` sit inside that (the 4x-queue arm's +1.8%, the -12%
+`queue_rejected`, and `replay`'s +16.6% over `nvdec`).
+
+**Interleave the arms and quote the pairwise ratios, not the means.** A worker-count sweep
+said 72 beat the default 115 by 6% on its first pass and lost on both repeats; the means hid
+the reversal. Three pairs minimum, alternating, so a drift in the box's load cannot favour
+one side:
+
+```bash
+for pass in a b c; do
+  deploy/rootless/bench.sh --systems baseline --cameras 50 --fps 20 --seconds 40 --gpus 1,3,4,5,6
+  SHIPINFER_BENCH_SOURCE=nvdec SHIPINFER_BENCH_GPUS=1,3,4,5,6 \
+    SHIPINFER_BENCH_SECONDS=40 scripts/run_cpp_bench.sh "ratio-$pass"
+done
+```
+
+**And it is not a choice: a simultaneous pair aborts.** `--systems baseline,shipinfer` starves
+our in-process generator below the offer gate, and at a load small enough to avoid that the
+baseline logs too few samples to bound a growth rate. `--topology fleet` at 50x20 fails every
+shard the same way. The harness says it in its own words — "run one at a time to keep the GPUs
+uncontended".
+
+**Both arms print their host CPU**, so the like-for-like denominator is a grep:
+
+```
+baseline  host cpu: 510.8 CPU-s over 44.3 s = 11.53 cores, 12.12 ms CPU/image
+shipinfer host cpu: 126.3 CPU-s over 38.2 s = 3.31 cores,  75.14 ms CPU/image
+```
+
+Divide by the *rows* `cli/bench` prints rather than by events: a baseline image passes through
+one model, one of our frames through four. Watch the box's own load line in the header — the
+baseline's throughput is asserted from its configuration, so CPU starvation lowers its
+CPU-seconds and not its images, which flatters it.
+
 ## Pre-commit
 
 Runs on staged files at every `git commit`:
