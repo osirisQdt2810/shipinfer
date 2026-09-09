@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "shipinfer/core/redact.h"
+#include "shipinfer/core/thread_name.h"
 #include "shipinfer/core/types.h"
 
 namespace shipinfer {
@@ -100,7 +101,10 @@ namespace shipinfer {
             // and an unsynchronised read against this write is the race, not just the
             // join/detach below it.
             std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
-            thread_ = std::thread([this] { run(); });
+            thread_ = std::thread([this] {
+                name_this_thread(thread_name("cam", config_.camera_id));
+                run();
+            });
         }
     }
 

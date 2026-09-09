@@ -4,6 +4,7 @@
 #include <cstring>
 #include <utility>
 
+#include "shipinfer/core/thread_name.h"
 #include "shipinfer/core/types.h"
 
 namespace shipinfer {
@@ -61,7 +62,10 @@ namespace shipinfer {
         if (started_once_) return;
         started_once_ = true;
         running_.store(true);
-        thread_ = std::thread([this] { run(); });
+        thread_ = std::thread([this] {
+            name_this_thread(instance_thread_label(name_));
+            run();
+        });
     }
 
     bool ModelInstance::wait_ready(std::chrono::milliseconds timeout) {
