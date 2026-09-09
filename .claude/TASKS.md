@@ -8,13 +8,16 @@ line names the ledger item that holds the detail, and the exact action.
 | # | Action | Item |
 |---|---|---|
 | 1 | **Answer which comparison the >=5x is against** — four measured ratios: 0.60x events, 1.87x pixels, 7.22x rows, ~3.94x rows per host CPU-second. **Saying nothing accepts my default: the last one, target NOT MET.** | `C1-WHAT-IS-THE-5x-AGAINST?` |
+| 0 | **Merge #195 by hand FIRST — `main` is RED and nothing can auto-merge.** Google's chrome apt repo started serving a bad index at 17:40 on 9 Sep; `apt-get update` fails as a whole, so three CI jobs went red on a repository nothing here installs from. #194 is at `Auto-merge: skipping` with an APPROVE review and every other check green. #195 drops the image's vendor apt lists before any apt call, with an order-checking ratchet. Same manual-merge reason as the two below. | `CI-A-VENDOR-REPO-BLOCKS-EVERY-MERGE` |
 | 2 | **Merge #169 by hand** (it edits `.github/workflows/**`, so the review job cannot mint a token). It unblocks the C++ tracking chain, which is a third of the system and is in NO number measured so far. | `CSRC-GRAPH-HAS-NO-TRACKING`, `V146b` |
 | 3 | **Merge #187 by hand** (same reason; its own new CI leg is green). | `V124b`, `V124a-PHASE3` |
 | 4 | **Pull `nvcr.io/nvidia/deepstream` (~6 GB)** onto this box, or say no — the fourth topology's running half needs it; the design half is done. | `T4` |
 | 5 | **shipvision has no LICENSE file at all**, and **where does the NV12 work live?** (the claimed 1021 uncommitted lines are in no checkout I can see). | `SV-LICENSE`, `C9` |
 
-Items 2 and 3 are one click each. Item 1 is the only one that needs thought, and it is a
-choice between measured numbers rather than a request for work.
+Items 0, 2 and 3 are one click each, and **item 0 is the one that is blocking everything
+else** — including #194, which is approved and green apart from it. Item 1 is the only one
+that needs thought, and it is a choice between measured numbers rather than a request for
+work.
 
 
 > **COLLISION 28 Aug ~07:0x UTC — SETTLED ~07:1x: shipinfer-7f (pid 173802, a restart fork of session 2dec01d2…
@@ -1686,6 +1689,26 @@ hook down, for when the operator asked to see something before it is executed.
       WORTH KNOWING WHY IT WORKS HERE and not for shipvision's own `-m native` tier, which
       needs the gst image: `shipinfer.runtime.native` imports torch first, and torch's bundled
       libcudart satisfies `_C`'s link. Same mechanism, opposite outcome, one import apart.
+
+- [!] **CI-A-VENDOR-REPO-BLOCKS-EVERY-MERGE · OPERATOR: please merge #195 by hand** (it edits
+      `.github/workflows/**`, the known permanent exception -- the review job cannot mint a
+      token for a workflow change). **`main` is RED and no PR can auto-merge until this lands.**
+      At 17:40 on 9 Sep Google's chrome apt repo began returning `Hash Sum mismatch` for
+      `dists/stable/main/binary-amd64/Packages.gz`. `apt-get update` fails as a WHOLE when any
+      configured repo serves a bad index, so three jobs went red at once on a repository
+      nothing here installs from: `cpp-syntax` and `cpp-gst-lane` on their own apt steps, and
+      ci.yml's `kernels` job inside `Jimver/cuda-toolkit`, which runs apt for us. #194 sits at
+      `Auto-merge: skipping` with an APPROVE review and every other check green, because
+      `merge` gates on the C++ tiers.
+      THE FIX: every job that reaches apt drops the image's own vendor lists first (`rm -f`,
+      so a future image that stops shipping one does not fail the job protecting itself from
+      it), placed BEFORE the `Jimver/cuda-toolkit` action because that action runs apt itself.
+      `TestNoVendorRepoCanFailAJobThatNeverUsesIt` checks the ORDER as well as the presence --
+      a drop after the first apt call would read correctly and fix nothing -- and was verified
+      to FAIL when either drop is removed. Suite 4067 passed.
+      NOT WAITED OUT ON PURPOSE: a mirror hash mismatch may clear on its own, but "a vendor
+      repo we never install from can block every merge" is a fragility worth removing whether
+      or not this instance clears.
 
 - [~] **A-LAUNCHER-POINTED-AT-AN-ABSENT-SCRIPT-IS-ALLOWED · found 9 Sep while checking a
       review finding, and it is PRE-EXISTING on main.** `nsys profile python
