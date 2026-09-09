@@ -5,6 +5,44 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-09 — occupancy: the counter that says whether the GPUs are the limit (#170, #175)
+
+A per-frame counter on both planes plus a change to what the bench's per-device table means, so
+a seam change rather than a fix. `InstanceStats::compute_us` and `_executed_compute_us` sum the
+wall time around `execute()`, next to where `rows` and `requests` are already summed and under
+the same lock. Requests and rows say what a model was ASKED to do; only time says whether it
+could, and the three prior counters could not distinguish "the GPUs are full" from "the GPUs are
+idle and something upstream is short". That distinction is what redirected the next optimisation
+away from the GPU (`NOT-GPU-BOUND-AT-FIVE-GPUS`): 68% of the instance ceiling, and four times
+the queue bought 1.8% more events with FLAT occupancy.
+
+**Read it as an upper bound, and the docstrings say so on both planes.** It is wall time around
+`execute()`, not GPU time, so a descheduled worker on a contended box inflates it without the
+GPU doing anything -- measured, at 16.6% more events with 11.5 points LESS occupancy over
+`replay` instead of RTSP. A thrown batch is not charged either, which under-reports a failing
+run; that caveat is now asserted rather than only written.
+
+**#175 fixed the divisor, which #170 had only caveated.** The counter is cumulative and both
+readers divided it by `--seconds` -- which contains `warmup_s`, while every other counter the
+analysis rates is differenced against an at-warmup snapshot. So the printed percentage charged
+the ramp's idle time to the busy window and UNDERSTATED the steady one by ~7 points at 10 s of
+70 s. `busy_pct(at_end, at_warmup, steady_s)` is pure because the arithmetic is where a
+benchmark lies, and `per_device_compute_us` became `per_device_busy_pct` -- so the table carries
+a percentage and the printer needs no divisor at all. That also settles the question the printer
+could not answer: a sharded run has one steady window PER SHARD, so each shard divides by its
+own and `aggregate` unions them, which is sound because a shard IS a GPU.
+
+The C++ CLI is deliberately untouched: it has no warm-up, so its whole run is the measurement
+and `options.seconds` is the right divisor there. A tripwire fails the day a `--warmup` lands.
+
+**Three review rounds, and the third was the one that mattered:** the counter this work is about
+had no behavioural test on either plane. Deleting the `+=` any suite catches; corrupting it none
+did -- and `latency_us` is already a `/1000` from nanoseconds, so a second one is the invited
+edit, turning 156% of an instance's ceiling into 0.2%. That is a roadmap decision made on an
+artefact rather than a red run. Both planes pin the unit with a floor AND a ceiling now, plus
+the failed-batch exclusion, and all four assertions were checked against the corruption they
+exist for. **A counter's test has to fail on a wrong VALUE, not only on a missing line.**
+
 ## 2026-09-08 — a run reports what it did and what it did NOT do (#167, #168)
 
 Two schema changes a consumer sees. A model instance now reports `rows` beside `requests` on
