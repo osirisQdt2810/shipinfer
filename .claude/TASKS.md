@@ -1201,7 +1201,7 @@ hook down, for when the operator asked to see something before it is executed.
       `failed_batches` exclusion, and all four assertions checked against the corruption they
       exist for. All five non-blocking notes in as well.
 
-- [~] **HOOK-REFUSES-A-LINTER-ON-A-TEST-FILE · fixed, PR open. Two false refusals, one cause.**
+- [x] **HOOK-REFUSES-A-LINTER-ON-A-TEST-FILE · MERGED AS #174 (9 Sep), after four rounds.**
       `require_container.py`'s `script_touches_device` scans EVERY `.py` argument of a
       `python` invocation, so `python scripts/hooks/check_docs.py tests/pipeline/test_runner.py`
       is refused because the *data* file imports torch. The linter touches no accelerator. It
