@@ -125,10 +125,31 @@ def _thread_calls(name: str) -> list[tuple[Path, int, ast.Call]]:
     return found
 
 
+def _thread_subclasses() -> list[tuple[Path, int, ast.ClassDef]]:
+    """Every `threading.Thread` SUBCLASS under `src/shipinfer/`.
+
+    A `ClassDef` is not a `Call`, so the scan above cannot see one -- and review found two
+    live threads (`ResultReader`, `RingIngress`) that the ratchet was reporting as covered.
+    A subclass cannot use the factory at all: it names itself in `run`.
+    """
+    found: list[tuple[Path, int, ast.ClassDef]] = []
+    for path in sorted(SRC.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for base in node.bases:
+                named = (
+                    base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "")
+                )
+                if named == "Thread":
+                    found.append((path, node.lineno, node))
+    return found
+
+
 def test_every_python_thread_goes_through_the_factory() -> None:
     """`threading.Thread` directly would keep the Python name and lose the kernel one.
 
-    The factory exists because two of the six targets cannot name themselves from inside:
+    The factory exists because two of the targets cannot name themselves from inside:
     `pipeline.runner`'s worker takes no index and the HTTP thread's target is uvicorn's
     `Server.run`. `core/thread_name.py` keeps its own `threading.Thread` -- it IS the factory.
     """
@@ -139,6 +160,40 @@ def test_every_python_thread_goes_through_the_factory() -> None:
         if path.resolve() != factory
     ]
     assert not bare, f"threads started outside `start_thread`: {bare}"
+
+
+def test_every_thread_subclass_names_itself_in_run() -> None:
+    """The hole the first draft of this file had, and it was worse than missing coverage.
+
+    `_thread_calls` matches `ast.Call`, so a class whose BASE is `threading.Thread` was
+    invisible: `ResultReader` and `RingIngress` (ADR-016's control channel, started by
+    `spill/mesh.py`) both reported `python` to the kernel while the test above passed and its
+    docstring claimed otherwise. A ratchet that keeps passing for a whole spelling records the
+    property as enforced when it is not.
+    """
+    missing: list[str] = []
+    for path, line, node in _thread_subclasses():
+        run = next(
+            (n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "run"), None
+        )
+        first = run.body[0] if run and run.body else None
+        called = (
+            getattr(first.value.func, "id", "")
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Call)
+            else ""
+        )
+        if called != "name_this_thread":
+            missing.append(
+                f"{path.relative_to(ROOT)}:{line} {node.name} starts with {called!r}"
+            )
+    assert not missing, f"`Thread` subclasses that do not name themselves first: {missing}"
+
+
+def test_the_subclass_scan_finds_the_two_that_exist() -> None:
+    """Guards the scan the way the C++ half guards its regexes: a rule that silently matches
+    nothing passes on everything."""
+    found = {node.name for _path, _line, node in _thread_subclasses()}
+    assert {"ResultReader", "RingIngress"} <= found, found
 
 
 def test_every_started_thread_carries_a_name() -> None:

@@ -56,6 +56,7 @@ from shipinfer.core.errors import (
 )
 from shipinfer.core.logging import get_logger
 from shipinfer.core.request import InferenceRequest, InferenceResponse
+from shipinfer.core.thread_name import name_this_thread
 from shipinfer.core.types import Device
 from shipinfer.engine.spill import wire
 from shipinfer.runtime.memory.shared_ring import SharedRing
@@ -262,6 +263,9 @@ class ResultReader(threading.Thread):
         self._stopping.set()
 
     def run(self) -> None:
+        # A `Thread` SUBCLASS, so `start_thread` cannot name it: the naming has to be the
+        # first statement of `run` instead, which is where the C++ plane puts it too.
+        name_this_thread("results")
         try:
             idle = 0
             last_bookkeeping = 0
@@ -488,6 +492,10 @@ class RingIngress(threading.Thread):
         self._stopping.set()
 
     def run(self) -> None:
+        # See `ResultReader.run`: a subclass names itself. This is the thread
+        # `NOT-GPU-BOUND-AT-FIVE-GPUS` most wants attributed -- a round-robin sweep over every
+        # inbound lane with a zero timeout is host CPU by construction.
+        name_this_thread("ring-in")
         try:
             self._stamp(force=True)
             idle = 0
