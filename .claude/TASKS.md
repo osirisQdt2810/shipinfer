@@ -1638,6 +1638,21 @@ hook down, for when the operator asked to see something before it is executed.
       reassembly -- which is why `events` is the softest of C1's three ratios and why the
       rows/pixels ones are the ones measuring model work.
 
+- [~] **RUN_TESTS.SH-FELL-THROUGH-FROM-A-WORKTREE · PR #193, and the script already carried
+      a comment about this exact misdiagnosis.** Its own words: falling through to whatever
+      `python` is on PATH "found the system interpreter and failed with `No module named
+      pytest`, which reads like a broken test suite rather than a wrong interpreter". It
+      recurred in the shape that fix did not cover -- **a git worktree has no `.venv` of its
+      own**, and this session ran the tier from six of them.
+      Two halves: `git rev-parse --path-format=absolute --git-common-dir` finds the MAIN
+      worktree's venv from any linked one (and `--path-format=absolute` is load-bearing --
+      without it the answer is `.git` relative to the caller's cwd); and when nothing has
+      pytest it names the interpreter, where it looked and both fixes, instead of failing with
+      pytest's import error. The PATH fallthrough stays, because CI has no `.venv` at all --
+      a test asserts that too.
+      From a worktree: main says "No module named pytest", the branch says 14 passed. Five of
+      six new tests fail against main's script.
+
 - [~] **A-HELP-QUERY-WAS-REFUSED-AS-A-RUN · PR #192, found by hitting it.**
       `python -m shipinfer bench --help` was refused while I was checking the CLI against
       CLAUDE.md's description of it -- which is how anyone finds out what the documented
