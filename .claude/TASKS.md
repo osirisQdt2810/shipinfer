@@ -1182,45 +1182,33 @@ hook down, for when the operator asked to see something before it is executed.
       it. The lesson is the cheap one: measure the reported bug on the branch before writing
       the ledger entry that defers it.
 
-- [~] **HOOK-MISSES-THE-PROFILER-AND-TRACER-WRAPPERS · groups 1 and 2 are PR #179.**
-      Swept 33 spellings against the (b) branch rather than waiting for a reviewer to find
-      them, which is what six rounds on #176 taught. Two groups are still open on `main`:
+- [~] **HOOK-MISSES-A-WRAPPERS-POSITIONAL-OPERAND · what is left of the profiler sweep.**
+      Groups (1) and (2) of the sweep are **PR #179** -- the NVIDIA tooling and the tracers,
+      as WRAPPERS rather than blocked names, which is what lets `nsys --version`, `nsys
+      status`, `taskset -c 0-7 pytest tests/core -q` and `deploy/rootless/run.sh nsys profile
+      …` fall out allowed with no carve-out. 25 rows closed, zero loosened, zero false
+      positives, both directions measured on both revisions before opening. Its review then
+      found two more of my own: `watch -d` takes NO argument, so listing it as value-taking
+      ate the command (and the long `--differences` refused, which is the tell), and
+      `compute-sanitizer --tool racecheck` -- the canonical invocation -- had no row at all.
+      Both fixed, plus the structural point: a flag whose value is a NUMBER belongs to
+      `WRAPPER_OPERAND`, not to a table whose scope is names.
 
-      (1) NVIDIA tooling, device work by purpose the way `trtexec` is:
-      `nsys profile pytest -m gpu`, `nsys profile python probe.py`, `ncu pytest -m gpu`,
-      `ncu --set full python probe.py`, `nvprof`, `compute-sanitizer`, `cuda-memcheck`. The
-      DESIGN is already settled by the sweep: treat them as WRAPPERS, not as blocked names --
-      `nsys` needs `WRAPPER_SUBCOMMANDS = {profile, launch, start, stats}` while `ncu`,
-      `nvprof`, `compute-sanitizer` and `cuda-memcheck` take a bare command, so `WRAPPERS`
-      alone does it. That makes `nsys --version` fall out ALLOWED with no carve-out, which a
-      blocked name would not.
+      WHAT IS LEFT is one shape: a wrapper's own POSITIONAL operand. `flock /tmp/l <cmd>`,
+      `taskset 0xff <cmd>`, `chroot <dir>`, `su <user>`, `setarch <arch>` -- `WRAPPER_OPERAND`
+      matches only decimal digits and `WRAPPER_VALUE_FLAGS` only flags, so the operand becomes
+      the executable. BUILT on `fix/a-wrappers-positional-is-not-the-command`, held behind
+      #179: `WRAPPER_POSITIONALS` is a count per wrapper. Seven rows closed and, re-measuring
+      the whole profiler and wrapper matrices, `flock /tmp/l pytest -m gpu` is the ONLY row
+      that moved. `taskset 0xff` needs one more thing -- `WRAPPER_OPERAND` widened to a hex
+      mask, since that is a number in another base -- and both are named in
+      `test_a_wrappers_positional_operand_is_still_open_and_why` until they land.
 
-      (2) Generic process wrappers, cheap: `strace`, `ltrace`, `valgrind`, `setsid`, `chrt`,
-      `taskset`, `unbuffer`, `watch -n1` -> `WRAPPERS`; `flock /tmp/l <cmd>` needs its lockfile
-      PATH skipped, which is `WRAPPER_VALUE_FLAGS`'s problem shape one operand over.
-
-      (3) Genuinely hard, and NOT worth a deny-list entry: `ssh localhost <cmd>` (remote host,
-      where the rule does not even apply the same way), `tmux new -d '<cmd>'`, `screen -dm`,
-      `script -c '<cmd>'`, `gdb --args`, `parallel`, `find -exec` -- the command is one quoted
-      token or an argv template. `containment.py` is the answer for those, and CLAUDE.md
-      already says a deny-list over command text cannot be sound.
-
-      Deliberately a separate item from (b): #176 took six rounds because one PR bundled edits
-      to helpers several callers share, and (1) and (2) touch `WRAPPERS`/`WRAPPER_SUBCOMMANDS`
-      that PR #177 was changing at the time.
-      **(1) AND (2) ARE PR #179**, and the design held: WRAPPERS rather than
-      `BLOCKED_COMMANDS`, which is what lets `nsys --version`, `nsys status`,
-      `taskset -c 0-7 pytest tests/core -q` and `deploy/rootless/run.sh nsys profile …` fall out
-      allowed with no carve-out -- all asserted, because that is the half a blocked name would
-      have cost. 25 rows closed, zero loosened, zero false positives, both directions measured
-      on both revisions before opening. `flock <lockfile> <cmd>` is the one residue: a
-      POSITIONAL path, which needs a per-wrapper count -- a third shape, so its own change, and
-      `test_flock_is_still_open_and_why` kept the gap visible. **THAT RESIDUE IS NOW BUILT** on
-      `fix/a-wrappers-positional-is-not-the-command`, held behind #179: `WRAPPER_POSITIONALS`
-      is a count per wrapper, so `flock`/`chroot`/`su`/`setarch` step over their own operand.
-      Seven rows closed and, re-measuring the whole profiler and wrapper matrices,
-      `flock /tmp/l pytest -m gpu` is the ONLY row that moved. The test that documented the gap
-      became the test that pins the fix, which is what a deferred residue should turn into.
+      Group (3) stays out, and is not worth a deny-list entry: `ssh localhost <cmd>`,
+      `tmux new -d '<cmd>'`, `screen -dm`, `script -c '<cmd>'`, `gdb --args`, `parallel`,
+      `find -exec` -- the command is one quoted token or an argv template, and CLAUDE.md
+      already says a deny-list over command text cannot be sound. `containment.py` is the
+      answer there.
 
 - [x] **HOOK-FAILS-OPEN-ON-SPELLINGS-IT-DOES-NOT-MODEL · all three MERGED (#177, #178).**
       Open on `main` and untouched by #174: `python -m shipinfer serve` (the subcommand list is
