@@ -1144,7 +1144,7 @@ hook down, for when the operator asked to see something before it is executed.
       every post-emit metric instead (`Histogram.observe` too) -> four on `main`, no fifth, and
       the whole `tests/` tree clean on the branch. Stays open until #173 merges.
 
-- [~] **HOOK-REFUSES-A-HEREDOC-THAT-ONLY-QUOTES-A-WORD · PR #176, in review.**
+- [x] **HOOK-REFUSES-A-HEREDOC-THAT-ONLY-QUOTES-A-WORD · MERGED AS #176 (9 Sep), six rounds.**
       `python3 - <<PY` whose body merely mentions `pytest` inside a STRING LITERAL is refused
       as "a heredoc executed by an interpreter runs `pytest`" -- four times in one session, and
       each refusal ended the whole `Bash` call, so the edit chained ahead of it never ran. It
@@ -1182,7 +1182,7 @@ hook down, for when the operator asked to see something before it is executed.
       it. The lesson is the cheap one: measure the reported bug on the branch before writing
       the ledger entry that defers it.
 
-- [~] **HOOK-FAILS-OPEN-ON-SPELLINGS-IT-DOES-NOT-MODEL · all three categories built and held.**
+- [~] **HOOK-FAILS-OPEN-ON-SPELLINGS-IT-DOES-NOT-MODEL · (a)+(c) is PR #177; (b) next.**
       Open on `main` and untouched by #174: `python -m shipinfer serve` (the subcommand list is
       only consulted when `base == "shipinfer"`), bare `torchrun`, and `uv run pytest -m gpu`.
       Each is a launcher the hook does not model, and each reaches no `containment.py`.
