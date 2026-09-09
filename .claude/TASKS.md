@@ -1163,7 +1163,7 @@ hook down, for when the operator asked to see something before it is executed.
       hunk in a PR about `-m`: the fix is to decide what a launcher IS -- a command whose
       operand is a program -- and there are at least three of them.
 
-- [ ] **OCCUPANCY-INCLUDES-THE-WARMUP-WINDOW · the one reading here that is not conservative.**
+- [~] **OCCUPANCY-INCLUDES-THE-WARMUP-WINDOW · fixed and verified; PR held behind #174.**
       `compute_us` is cumulative and both readers divide by the full `--seconds`, while
       `read`/`emitted`/`requests` are differenced against an at-warmup snapshot
       (`harness/shipinfer.py`'s `counters()`). Occupancy is lower while the pipeline ramps, so
@@ -1174,6 +1174,14 @@ hook down, for when the operator asked to see something before it is executed.
       is to put `per_device_compute_us` in the warmup snapshot and subtract, and then hand the
       printer `steady_s` -- per shard, since each shard has its own. Model warm-up itself is
       already outside this: `instance.py`'s `backend.warmup()` never reaches `_observe`.
+      DONE on `perf/occupancy-over-its-own-window`: `busy_pct(at_end, at_warmup, steady_s)` is
+      pure and tested (the boundary subtraction reverted fails 2 of 9), `counters()` carries
+      the snapshot, and `per_device_compute_us` becomes `per_device_busy_pct` so the printer
+      needs no divisor -- which also settles the divisor question the sharded parent could not
+      answer, since each shard divides by its OWN window and `aggregate` unions them (a shard
+      is a GPU, so no device is in two tables). The C++ CLI is deliberately untouched: it has
+      no warm-up, so its whole run IS the window, and a tripwire fails if `--warmup` lands
+      there. Suite 3711 passed, docs cap unchanged. Held only because #174 is open.
 
 - [x] **OCCUPANCY-DROPPED-AT-THE-SHARD-BOUNDARY · fixed, MERGED AS #170 (9 Sep).**
       The review was right and my PR body's claim was wrong: a shared printer shares the
