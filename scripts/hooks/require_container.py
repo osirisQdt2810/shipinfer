@@ -227,15 +227,26 @@ def _selects_device_tier(args: list[str]) -> bool:
 def _module_at(args: list[str]) -> tuple[int, str] | None:
     """``(index of the module's first operand, module name)``, or None.
 
-    Both spellings, because only the detached form was checked and `python -mpytest tests/`
-    went straight through. The index is what `_script_program` needs: an EXECUTOR module runs
-    what follows it, so the scan has to continue from there rather than stop at the `-m`.
+    The one place that models CPython's option grammar, and it stops where CPython stops: at
+    the FIRST non-option operand. Scanning the whole argv read a *script's* own `-m` as the
+    interpreter's, so `python probe.py -m yolov8n` -- an ordinary shape for a probe -- looked
+    like a module invocation and its program was never inspected (#174 review).
     """
+    skip = False
     for index, token in enumerate(args):
+        if skip:
+            skip = False
+            continue
         if token == "-m":
             return index + 2, (args[index + 1] if index + 1 < len(args) else "")
         if token.startswith("-m") and len(token) > 2 and not token.startswith("--"):
             return index + 1, token[2:]
+        if token in _PYTHON_VALUE_FLAGS:
+            # `-W ignore -m pytest -m gpu`: the value is not the operand that ends options.
+            skip = True
+            continue
+        if not token.startswith("-"):
+            return None
     return None
 
 
@@ -525,68 +536,74 @@ _EXECUTOR_MODULES = frozenset(
 )
 
 
-def _script_program(args: list[str]) -> str | None:
-    """The ``.py`` file this command would RUN, or None.
+def _script_programs(args: list[str]) -> list[str]:
+    """The ``.py`` file this command would RUN, as a candidate list.
 
-    No module: the first non-flag operand and nothing after it, since what follows is that
-    program's own argv -- a script's operands are DATA, the argument `READ_ONLY_TOOL_MODULES`
-    already makes for `python -m black <file>`. A first operand that is not a `.py` ends the
-    scan (a `.venv/bin/` console script IS the program, and is not readable as source). With
-    an executor the operand is a program, so the scan continues past the module name -- by
-    suffix, because the executor's own options may precede the script and may take values.
+    No module: the first non-flag operand, and nothing after it, since what follows is that
+    program's own argv -- a script's operands are DATA, which is what
+    `READ_ONLY_TOOL_MODULES` says for `python -m black <file>`. With an executor the operand
+    IS a program, so the scan goes past the module name skipping the executor's own options.
+    SEVERAL candidates there, because a bare `.py` option value looks exactly like a program
+    (`-o out.py probe.py`); the caller takes the first that is a readable file.
     """
+    candidates: list[str] = []
     module = _module_at(args)
     if module is not None:
         start, name = module
         if name.split(".")[0] not in _EXECUTOR_MODULES:
-            return None
+            return []
         for token in args[start:]:
-            # `coverage run -m pytest ...`: a second module, and the module branch above is
-            # where a module is judged. Nothing here is the program.
-            if token == "-c" or token == "-m" or (token.startswith("-m") and len(token) > 2):
-                return None
+            # `coverage run -m pytest ...` defers to the module branch. NOT `-c`: `-m` has
+            # already ended option processing, so a `-c` here is the executor's own
+            # (`pdb -c continue`, `trace -c`) and bailing on it dropped the program.
+            if token == "-m" or (token.startswith("-m") and len(token) > 2):
+                break
+            # Before the suffix test, or an option's VALUE wins: `coverage run
+            # --include=probe.py probe.py` answered `--include=probe.py`, which is not a
+            # readable file, so the real program went unread.
+            if token.startswith("-"):
+                continue
             if token.endswith(".py"):
-                return token
-        return None
+                candidates.append(token)
+        return candidates
     skip = False
     for token in args:
         if skip:
             skip = False
             continue
         if token == "-c":
-            return None
+            return []
         if token in _PYTHON_VALUE_FLAGS:
             skip = True
             continue
         if token.startswith("-"):
             continue
-        return token if token.endswith(".py") else None
-    return None
+        return [token] if token.endswith(".py") else []
+    return []
 
 
 def script_touches_device(args: list[str], cwd: str | None) -> str | None:
     """If a python invocation RUNS a local script that imports a device stack, name it.
 
-    Unreadable or missing targets return None -- the hook never blocks on a file it could not
-    inspect. Only the PROGRAM is inspected: scanning every `.py` argument refused
+    The first candidate that is a readable file, and nothing after it. Only the PROGRAM is
+    judged: scanning every `.py` argument refused
     `python scripts/hooks/check_docs.py tests/pipeline/test_runner.py` for the *input* file's
     imports, and an offline `python -m pytest tests/<file>.py` for the same reason. Both are
     allowed by the rule -- one is a linter, the other is the tier ADR-001 says runs anywhere --
     and a refusal kills the whole `Bash` call, so an edit chained before one never ran.
     """
-    program = _script_program(args)
-    if program is None:
-        return None
     root = Path(cwd) if cwd else Path.cwd()
-    candidate = Path(program)
-    path = candidate if candidate.is_absolute() else root / candidate
-    try:
-        if not path.is_file():
-            return None
-        body = path.read_text(errors="replace")[:SCRIPT_READ_LIMIT]
-    except OSError:
-        return None
-    return program if DEVICE_IMPORT.search(body) else None
+    for program in _script_programs(args):
+        candidate = Path(program)
+        path = candidate if candidate.is_absolute() else root / candidate
+        try:
+            if not path.is_file():
+                continue  # `-o out.py probe.py`: an option's value, not the program
+            body = path.read_text(errors="replace")[:SCRIPT_READ_LIMIT]
+        except OSError:
+            continue
+        return program if DEVICE_IMPORT.search(body) else None
+    return None
 
 
 def _indirection(tokens: list[str]) -> str | None:

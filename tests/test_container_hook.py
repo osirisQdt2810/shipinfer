@@ -318,6 +318,26 @@ class TestAScriptsOperandsAreData:
     def test_the_device_tier_naming_that_same_file_is_still_refused(self) -> None:
         assert refused("python -m pytest tests/pipeline/test_runner.py -m gpu") is not None
 
+    def test_a_scripts_own_dash_m_flag_does_not_hide_it(self, tmp_path: Path) -> None:
+        """`-m` after the program is the PROGRAM's flag: CPython ends option processing at the
+        first operand. Reading the whole argv made `python probe.py -m yolov8n` -- ordinary
+        shape for a probe -- look like a module invocation, so its program went unread."""
+        probe = tmp_path / "probe.py"
+        probe.write_text("import torch\ntorch.cuda.init()\n")
+        assert refused(f"python {probe} -m yolov8n") is not None
+        assert refused(f"python {probe} -mfoo") is not None
+        assert refused(f"python {probe} -m gpu") is not None
+        # Stricter than `main`, which reached the read-only carve-out with a module name that
+        # was never the interpreter's.
+        assert refused(f"python {probe} -m black") is not None
+
+    def test_an_interpreter_value_flag_before_a_module_still_finds_it(self) -> None:
+        """The half that fix could have broken: `-W ignore` puts a bare word before `-m`, and
+        it must not be mistaken for the operand that ends option processing."""
+        assert refused("python -W ignore -m pytest -m gpu") is not None
+        assert refused("python -X importtime -m pytest -m multigpu") is not None
+        assert refused("python -W ignore -m pytest tests/core -q") is None
+
     def test_a_module_still_hides_no_program_behind_it(self, tmp_path: Path) -> None:
         """`pytest`'s operands are pytest's: the TIER decides, above, not the file's imports.
         Its executor siblings are the opposite case and are pinned right below."""
@@ -361,6 +381,33 @@ class TestAnExecutorModulesOperandIsAProgram:
         target = tmp_path / "model.py"
         target.write_text("import torch\n")
         assert refused(f"python -m black --check {target}") is None
+
+    def test_the_executors_own_dash_c_is_not_the_interpreters(self, tmp_path: Path) -> None:
+        """`-m` already ended option processing, so a `-c` after the module name is always the
+        executor's: `pdb -c continue` is the documented non-interactive spelling and
+        `trace -c` is `--count`. Bailing on it dropped the program."""
+        probe = tmp_path / "probe.py"
+        probe.write_text("import torch\ntorch.cuda.init()\n")
+        assert refused(f"python -m pdb -c continue {probe}") is not None
+        assert refused(f"python -m trace -c {probe}") is not None
+
+    def test_an_options_value_is_not_the_program(self, tmp_path: Path) -> None:
+        """Two shapes. `--include=probe.py` is an option and must be skipped before the suffix
+        test; `-o out.py` is a bare value that looks exactly like a program, so the candidate
+        that is not a readable FILE is passed over rather than ending the scan."""
+        probe = tmp_path / "probe.py"
+        probe.write_text("import torch\ntorch.cuda.init()\n")
+        assert refused(f"python -m coverage run --include={probe} {probe}") is not None
+        assert refused(f"python -m cProfile -o {tmp_path / 'out.py'} {probe}") is not None
+
+    def test_option_tokens_never_become_candidates(self) -> None:
+        """`_script_programs` directly, and deliberately: skipping option tokens is not
+        observable through `verdict()` any more, because an unreadable candidate is now passed
+        over anyway and `--include=probe.py` is unreadable as a path. The candidate list is
+        still where "what is a program" is decided, so that is where it is asserted."""
+        argv = ["-m", "coverage", "run", "--include=probe.py", "-o", "out.py", "probe.py"]
+
+        assert hook._script_programs(argv) == ["out.py", "probe.py"]
 
     def test_an_executor_running_a_module_leaves_the_decision_to_the_module(self) -> None:
         """`coverage run -m pytest` reaches a second `-m`, so nothing after it is a program
