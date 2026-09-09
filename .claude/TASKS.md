@@ -9,8 +9,8 @@ line names the ledger item that holds the detail, and the exact action.
 |---|---|---|
 | 1 | **Answer which comparison the >=5x is against** — four measured ratios: 0.60x events, 1.87x pixels, 7.22x rows, ~3.94x rows per host CPU-second. **Saying nothing accepts my default: the last one, target NOT MET.** | `C1-WHAT-IS-THE-5x-AGAINST?` |
 | 0 | **Nothing — resolved itself.** A vendor apt repo served a bad index for ~30 min on 9 Sep and `main` went red on a repository this project never installs from; it cleared, and #194 and #196 merged on a re-run. #195 hardens against the next one and carries `automerge`. | `CI-A-VENDOR-REPO-BLOCKS-EVERY-MERGE` |
-| 2 | **Merge #169 by hand** (it edits `.github/workflows/**`, so the review job cannot mint a token). It unblocks the C++ tracking chain, which is a third of the system and is in NO number measured so far. | `CSRC-GRAPH-HAS-NO-TRACKING`, `V146b` |
-| 3 | **Merge #187 by hand** (same reason; its own new CI leg is green). | `V124b`, `V124a-PHASE3` |
+| 2 | **Merge #169 by hand** (it edits `.github/workflows/**`, so the review job cannot mint a token). It unblocks the C++ tracking chain, which is a third of the system and is in NO number measured so far. 115 commits behind main but **conflict-free** (`git merge-tree`, 0 hunks, measured 9 Sep); NOT rebased, see its item. | `CSRC-GRAPH-HAS-NO-TRACKING`, `V146b` |
+| 3 | **Merge #187 by hand** (same reason; its own new CI leg is green). REBASED onto current main 9 Sep and re-run, so its CI reflects today's tree rather than a 39-commit-old one. | `V124b`, `V124a-PHASE3` |
 | 4 | **Pull `nvcr.io/nvidia/deepstream` (~6 GB)** onto this box, or say no — the fourth topology's running half needs it; the design half is done. | `T4` |
 | 5 | **shipvision has no LICENSE file at all**, and **where does the NV12 work live?** (the claimed 1021 uncommitted lines are in no checkout I can see). | `SV-LICENSE`, `C9` |
 
@@ -2165,6 +2165,14 @@ hook down, for when the operator asked to see something before it is executed.
       is why it waits on this question rather than the other way round.
 
 - [!] **CSRC-GRAPH-HAS-NO-TRACKING · OPERATOR: please merge #169 (PR 1 of 3) -- it adds a
+      **STILL MERGEABLE, CHECKED 9 Sep, and NOT rebased on purpose.** 115 commits behind main
+      and `git merge-tree` reports 0 conflict hunks, so the operator's click will work. A
+      rebase was attempted for the better reason -- its CI would then run against today's tree
+      -- and ABORTED: the first pick paused in a state whose cause I could not establish (HEAD
+      back at main's tip, tree clean, and the commit's three files demonstrably NOT on main),
+      and guessing at a half-finished rebase of someone's pending merge is worse than leaving
+      it exactly as reviewed. `git rebase --abort` restored `daeaf03` byte for byte, local and
+      origin agree, nothing was pushed. #187 rebased cleanly and was pushed.
       **A SPLIT WAS TRIED AND MEASURED OUT, 9 Sep -- do not re-attempt it.** The idea was to
       take the 8 non-workflow paths onto main so PRs 2 and 3 stop waiting, leaving #169 as
       `cpp.yml` alone. It cannot be done, and the reason is a guard working: with main's
