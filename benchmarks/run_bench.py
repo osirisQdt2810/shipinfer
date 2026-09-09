@@ -100,7 +100,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from benchmarks.harness import analysis, baseline, rtsp, shipinfer
+from benchmarks.harness import analysis, baseline, hostcpu, rtsp, shipinfer
 from benchmarks.harness.analysis import SATURATED, RunAnalysis
 from benchmarks.harness.config import BenchConfig
 
@@ -474,9 +474,22 @@ def measure_shipinfer(
     shard through the real launcher (:mod:`benchmarks.harness.shards`), and then the analysis
     is one entry per shard — a shard is a GPU, so that *is* the per-device table.
     """
+    # doc: long why our arm is charged self AND children, where the baseline is children only
+    # THE SAME HOST-CPU READING THE BASELINE GETS, so one run prints both sides of the ratio
+    # `C1` could not have. `hostcpu.since` and not `children_since`: `single` runs the plane in
+    # THIS process while the sharded topologies run it in children and the parent serves RTSP,
+    # and both of those are ours.
+    before = hostcpu.now()
+    started = time.monotonic()
     if cfg.topology != "single":
-        return measure_sharded(cfg, out_dir)
-    run, ours, _result, _offered, _capacity = measure_shipinfer_in_full(cfg, out_dir)
+        run, ours = measure_sharded(cfg, out_dir)
+    else:
+        run, ours, _result, _offered, _capacity = measure_shipinfer_in_full(cfg, out_dir)
+    print(
+        host_cpu_line(
+            "shipinfer", hostcpu.since(before), time.monotonic() - started, ours.images_per_s
+        )
+    )
     return run, ours
 
 
