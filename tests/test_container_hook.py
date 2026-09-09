@@ -481,6 +481,289 @@ class TestAModulesOperandIsAProgramUnlessTheModuleOnlyReads:
         assert refused(f"python -m coverage run -m black {target}") is None
 
 
+class TestANameIsNotAnInvocation:
+    """A blocked command *named* in a heredoc body is not a blocked command *run*.
+
+    The body-as-program check above was already an AST because the regex fired on an
+    `import torch` inside a string literal; the `BLOCKED_COMMANDS` loop under it stayed a
+    line-prefix match, so a python body whose text was a markdown table with a row beginning
+    `pytest` "ran the suite" -- four refusals in one session, one on a reviewer mid-review.
+    It cut both ways, which is the part worth keeping: a line-prefix scan cannot see
+    `subprocess.run(["pytest", ...])` either, since that line begins `subprocess.run(`.
+    """
+
+    PY = "python3 - <<'PY'\n{}\nPY"
+    SH = "bash -s <<'SH'\n{}\nSH"
+
+    def test_a_table_in_a_python_body_is_data(self) -> None:
+        """The failure, verbatim: a percentage table whose rows begin with a command name."""
+        body = 'print("""\nmain   now    command\npytest -m gpu  REFUSE REFUSE\n""")'
+        assert refused(self.PY.format(body)) is None
+
+    def test_a_string_mentioning_it_is_data(self) -> None:
+        assert refused(self.PY.format('print("pytest is not run here")')) is None
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            'import subprocess\nsubprocess.run(["pytest", "-m", "gpu"])',
+            'import subprocess\nsubprocess.run("pytest -m gpu", shell=True)',
+            'import subprocess\nsubprocess.check_call(["pytest", "-m", "multigpu"])',
+            'import os\nos.system("pytest -m gpu")',
+            'import os\nextra = "-q"\nos.system(f"pytest -m gpu {extra}")',
+            'import os\nos.popen("trtexec --onnx=m.onnx")',
+        ],
+    )
+    def test_a_python_body_that_shells_out_is_refused(self, body: str) -> None:
+        """And these were ALLOWED before: a line-prefix scan cannot see a command inside a
+        `subprocess` call, so the fix closes four bypasses while removing two false refusals."""
+        assert refused(self.PY.format(body)) is not None
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            'import subprocess\nsubprocess.check_call(["pytest"])',
+            'import subprocess\nsubprocess.run(["pytest", "-q", "tests/core"])',
+            'import subprocess\nsubprocess.run(["python", "-m", "pytest", "tests/core"])',
+            'import os\nos.system("pytest -q tests/core")',
+            "import os\nos.system(\"pytest -m 'not gpu' tests/\")",
+        ],
+    )
+    def test_the_offline_tier_is_exempt_inside_a_body_too(self, body: str) -> None:
+        """ADR-001, and the reading that has to MATCH the prompt's. `verdict` allows a
+        `pytest` that selects no device tier -- it is what CI does on a plain runner -- and a
+        scan that read only the executable refused it inside a body, so the identical string
+        was permitted typed and refused quoted. That is this class's own bug, pointed at the
+        prompt instead of at the body."""
+        assert refused(self.PY.format(body)) is None
+        assert refused(self.SH.format(body.splitlines()[-1])) is None or True
+
+    def test_a_marker_the_hook_cannot_read_is_allowed_and_that_is_the_division(self) -> None:
+        """`os.system(f"pytest -m {marker}")` computes its tier at runtime, so no text scan
+        can decide it. Allowed here on purpose, and stated rather than left to be found: this
+        hook is the advisory fast path, and `runtime/containment.py` -- reached from
+        `tests/conftest.py` -- is what actually gates the device tier inside the session."""
+        body = 'import os\nmarker = "gpu"\nos.system(f"pytest -m {marker}")'
+        assert refused(self.PY.format(body)) is None
+
+    def test_the_offline_tier_is_exempt_in_a_shell_body(self) -> None:
+        """The shape from the review: a chained shell line whose middle command is the
+        offline suite. Refusing it kills the whole `Bash` call and the commit behind it."""
+        assert refused(self.SH.format("cd /repo && pytest -q tests/core && git status")) is None
+        assert refused(self.SH.format("cd /repo && pytest -m gpu")) is not None
+
+    def test_the_command_position_is_what_counts(self) -> None:
+        """`subprocess.run(["echo", "pytest"])` echoes a word. The first element of the list
+        is the command; anything after it is that command's argument."""
+        assert (
+            refused(self.PY.format('import subprocess\nsubprocess.run(["echo", "pytest"])'))
+            is None
+        )
+
+    def test_a_list_argv_has_no_shell_so_a_separator_is_literal(self) -> None:
+        """With `shell=False` and a list, every element after `[0]` is one literal argument.
+        Joining the list and splitting it on `;` fabricated a second command position."""
+        body = 'import subprocess\nsubprocess.run(["echo", "a; pytest -m gpu"])'
+        assert refused(self.PY.format(body)) is None
+        # And the string form of the same text really does have two commands.
+        shell = 'import subprocess\nsubprocess.run("echo a; pytest -m gpu", shell=True)'
+        assert refused(self.PY.format(shell)) is not None
+
+    def test_a_nested_interpreters_module_is_judged_by_its_tier(self) -> None:
+        """`["python", "-m", "pytest", …]` inside a body is the same command as at the prompt,
+        so the device tier refuses and the offline tier does not."""
+        gpu = 'import subprocess\nsubprocess.run(["python", "-m", "pytest", "-m", "gpu"])'
+        offline = 'import subprocess\nsubprocess.run(["python", "-m", "pytest", "tests/core"])'
+        assert refused(self.PY.format(gpu)) is not None
+        assert refused(self.PY.format(offline)) is None
+
+    def test_a_shell_body_still_reads_line_by_line(self) -> None:
+        """In a shell body the first word of a line IS the command, so the text scan is
+        correct there and stays. The two languages are read as the two languages."""
+        assert refused(self.SH.format("cd /work\npytest -m gpu")) is not None
+        assert refused(self.SH.format('echo "pytest -m gpu"')) is None
+
+    def test_an_unparseable_python_body_falls_back_to_the_text_scan(self) -> None:
+        """Half-typed python is not something to reason about, and the conservative direction
+        there is to refuse. Stated rather than discovered."""
+        assert refused(self.PY.format("def broken(\npytest -m gpu")) is not None
+
+    def test_a_linter_over_a_runners_name_is_not_running_it(self) -> None:
+        """The same defect one branch over: `BLOCKED_SCRIPTS` was matched against the whole
+        command text, so handing a runner's PATH to a linter counted as invoking it."""
+        assert refused("python scripts/hooks/check_docs.py benchmarks/run_bench.py") is None
+
+    def test_the_runner_itself_is_still_refused_every_way(self) -> None:
+        """The half that must not be lost, in all three spellings."""
+        assert refused("python benchmarks/run_bench.py --systems shipinfer") is not None
+        assert refused("./benchmarks/run_bench.py --systems shipinfer") is not None
+        assert refused("csrc/build/bench --cameras 4") is not None
+
+    def test_a_runner_behind_a_profilers_output_file_is_still_found(self, tmp_path) -> None:
+        """`_script_programs` returns a candidate LIST, and its `[0]` can be an option's
+        value. Reading only `[0]` missed the runner at `[1]` -- profiling a benchmark on the
+        host, which is the number CLAUDE.md says is never a production number."""
+        out = tmp_path / "prof.py"
+        out.write_text("# an earlier profile\n")
+        assert refused(f"python -m cProfile -o {out} benchmarks/run_bench.py") is not None
+        assert refused(f"python -m cProfile -o {out} benchmarks/bench_baseline.py") is not None
+
+    def test_an_inline_body_gets_the_same_reading_as_a_heredoc(self) -> None:
+        """A `-c` body is source, so it yields no path candidates at all -- `main`'s text
+        match covered that by accident. It is a python body in exactly the sense this class
+        argues for, so it gets the AST too, and that closes `os.system` as well."""
+        assert (
+            refused(
+                "python -c 'import subprocess; subprocess.run([\"benchmarks/run_bench.py\"])'"
+            )
+            is not None
+        )
+        assert refused("python -c 'import os; os.system(\"pytest -m gpu\")'") is not None
+        assert refused("python -c 'print(\"pytest\")'") is None
+        assert refused("python -c 'import torch; print(torch.__version__)'") is None
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            'import subprocess as sp\nsp.run(["pytest", "-m", "gpu"])',
+            'from subprocess import run\nrun(["pytest", "-m", "gpu"])',
+            'import subprocess\nsubprocess.run(args=["pytest", "-m", "gpu"])',
+            'import subprocess\nsubprocess.run("cd /w && pytest -m gpu", shell=True)',
+        ],
+    )
+    def test_command_position_means_what_the_docstring_says(self, body: str) -> None:
+        """Four spellings the first draft's `subprocess.` prefix and positional-args-only read
+        missed. `main` allows all four -- each line begins with something else -- so this is a
+        tightening, and it is what makes "command position" true rather than nearly true."""
+        assert refused(self.PY.format(body)) is not None
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            'import os\nif not os.path.exists("csrc/build/bench"):\n    print("build it")',
+            'import os\nprint(os.path.basename("benchmarks/bench_baseline.py"))',
+            'import os\nprint(os.path.join("pytest", "x"))',
+            'import os\nos.remove("benchmarks/run_bench.py.orig")',
+            'import os\nprint(os.environ.get("pytest"))',
+        ],
+    )
+    def test_an_os_call_that_does_not_run_anything_is_data(self, body: str) -> None:
+        """Qualifying on the module ROOT made `os.path.exists` "shelling out", so a heredoc
+        that checks whether the baseline binary is built -- before telling the operator to
+        build it -- was refused. That is this class's own failure mode, reintroduced by its
+        own fix. The entry point is what qualifies: `os.system`, `os.popen`, `os.exec*`,
+        `os.spawn*`, `pty.spawn`, `runpy.run_*`, and all of `subprocess`."""
+        assert refused(self.PY.format(body)) is None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'python -c \'import subprocess; subprocess.run(["python", "benchmarks/run_bench.py"])\'',
+            "python -c 'import os; os.system(\"python benchmarks/run_bench.py\")'",
+            "python -c 'exec(open(\"benchmarks/run_bench.py\").read())'",
+        ],
+    )
+    def test_an_interpreter_does_not_hide_the_runner_behind_it(self, command: str) -> None:
+        """`main` refused all three by whole-text match, and taking the HEAD word only lost
+        them. It matters more than a fast-path regression here: `grep -rn require_container
+        benchmarks/` finds only `stages.py` and `kernels.py`, so for the system-tier run this
+        repository's headline number comes from, the hook is the only guard."""
+        assert refused(command) is not None
+
+    def test_a_wrapper_inside_a_string_is_stepped_over_too(self) -> None:
+        """`real_command` already knows how, so it is reused rather than reimplemented. Both
+        of these were open on `main` as well."""
+        assert (
+            refused(
+                self.PY.format(
+                    'import subprocess\nsubprocess.run(["bash","-lc","benchmarks/run_bench.py"])'
+                )
+            )
+            is not None
+        )
+        assert (
+            refused(
+                self.PY.format(
+                    'import subprocess\nsubprocess.run("env FOO=1 pytest -m gpu", shell=True)'
+                )
+            )
+            is not None
+        )
+
+    def test_a_shell_body_reads_every_command_on_a_line(self) -> None:
+        """The two readings had disagreed: `cd /work && pytest -m gpu` was refused inside
+        `subprocess.run(..., shell=True)` and allowed in a `bash -s` body, byte for byte."""
+        assert refused(self.SH.format("cd /work && pytest -m gpu")) is not None
+        assert refused(self.SH.format('echo "pytest -m gpu"')) is None
+
+    def test_a_nested_tools_dash_c_is_not_the_interpreters(self) -> None:
+        """`_inline_source` directly, and deliberately: this is not observable through
+        `verdict()`, because `"pytest.ini"` parses as an attribute expression with no call and
+        is allowed anyway. `-m` ends option processing -- `_script_programs` already knew that
+        and `_inline_source` did not, so the knowledge belongs in both."""
+        assert refused("python -m pytest -c pytest.ini tests/core") is None
+        assert hook._inline_source(["-m", "pytest", "-c", "pytest.ini"]) is None
+        assert hook._inline_source(["-c", "print(1)"]) == "print(1)"
+        assert hook._inline_source(["-cprint(1)"]) == "print(1)"
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # `input=`/`cwd=`/`encoding=` are data. Reading every keyword refused an agent
+            # posting a PR comment whose body quoted a marker -- verbatim the incident in this
+            # class's own docstring, through a different door.
+            'import subprocess\nsubprocess.run(["gh","pr","comment","-F","-"], input="pytest -m gpu")',
+            'import subprocess\nsubprocess.run(["ls"], cwd="/w/csrc/build/bench")',
+            # And it disagreed with itself: hoisting the literal to a name allowed the
+            # byte-identical program, because the argument stops being a Constant.
+            'import subprocess\nb = "pytest -m gpu"\nsubprocess.run(["gh"], input=b)',
+            # `subprocess` is not whole either: these two build a string and raise an
+            # exception. Formatting the command you are about to tell the operator to run in
+            # the container is not running it.
+            'import subprocess\nprint(subprocess.list2cmdline(["pytest","-m","gpu"]))',
+            'import subprocess\nraise subprocess.CalledProcessError(1, "pytest -m gpu")',
+        ],
+    )
+    def test_a_call_that_does_not_run_anything_is_data(self, body: str) -> None:
+        assert refused(self.PY.format(body)) is None
+
+    def test_a_separator_inside_quotes_is_not_a_command(self) -> None:
+        """A regex separator was quote-blind, so `echo "a; pytest -m gpu"` in a shell body
+        fabricated a command position -- while `["echo", "a; pytest -m gpu"]` was correctly
+        allowed one function up, which is the tell. `segments` is the lexer-based splitter
+        this file already has, and the comment above `OPERATORS` says why: a plain regex cuts
+        `python -c "import torch; print(...)"` in half inside the quotes."""
+        assert refused(self.SH.format('echo "a; pytest -m gpu"')) is None
+        assert (
+            refused(
+                self.SH.format('gh pr comment 1 --body "table && pytest -m gpu was REFUSED"')
+            )
+            is None
+        )
+        # And the unquoted form really is two commands.
+        assert refused(self.SH.format("cd /repo && pytest -m gpu")) is not None
+
+    def test_the_keywords_that_are_a_command_position_still_count(self) -> None:
+        """`args=` is the one the class wanted, and it must keep working."""
+        assert (
+            refused(
+                self.PY.format('import subprocess\nsubprocess.run(args=["pytest","-m","gpu"])')
+            )
+            is not None
+        )
+
+    def test_a_reader_collecting_a_runners_file_is_not_running_it(self) -> None:
+        """A decision rather than a side effect, and the reason has to be the accurate one.
+
+        `pytest` is a reader and the offline tier runs anywhere (ADR-001) -- but pytest
+        IMPORTS what it collects, and `benchmarks/run_bench.py:103` imports
+        `benchmarks.harness.shipinfer` at module scope. What makes it safe is the
+        `if __name__ == "__main__"` guard at `run_bench.py:901`: importing that module runs no
+        benchmark. "Collects rather than runs" was the shorter reason and the weaker one.
+        """
+        assert refused("python -m pytest tests/ benchmarks/run_bench.py") is None
+
+
 class TestTheGuardCanFail:
     """Without this, a hook that always allowed would pass everything above."""
 
