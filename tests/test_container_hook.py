@@ -706,6 +706,52 @@ class TestANameIsNotAnInvocation:
         assert hook._inline_source(["-c", "print(1)"]) == "print(1)"
         assert hook._inline_source(["-cprint(1)"]) == "print(1)"
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # `input=`/`cwd=`/`encoding=` are data. Reading every keyword refused an agent
+            # posting a PR comment whose body quoted a marker -- verbatim the incident in this
+            # class's own docstring, through a different door.
+            'import subprocess\nsubprocess.run(["gh","pr","comment","-F","-"], input="pytest -m gpu")',
+            'import subprocess\nsubprocess.run(["ls"], cwd="/w/csrc/build/bench")',
+            # And it disagreed with itself: hoisting the literal to a name allowed the
+            # byte-identical program, because the argument stops being a Constant.
+            'import subprocess\nb = "pytest -m gpu"\nsubprocess.run(["gh"], input=b)',
+            # `subprocess` is not whole either: these two build a string and raise an
+            # exception. Formatting the command you are about to tell the operator to run in
+            # the container is not running it.
+            'import subprocess\nprint(subprocess.list2cmdline(["pytest","-m","gpu"]))',
+            'import subprocess\nraise subprocess.CalledProcessError(1, "pytest -m gpu")',
+        ],
+    )
+    def test_a_call_that_does_not_run_anything_is_data(self, body: str) -> None:
+        assert refused(self.PY.format(body)) is None
+
+    def test_a_separator_inside_quotes_is_not_a_command(self) -> None:
+        """A regex separator was quote-blind, so `echo "a; pytest -m gpu"` in a shell body
+        fabricated a command position -- while `["echo", "a; pytest -m gpu"]` was correctly
+        allowed one function up, which is the tell. `segments` is the lexer-based splitter
+        this file already has, and the comment above `OPERATORS` says why: a plain regex cuts
+        `python -c "import torch; print(...)"` in half inside the quotes."""
+        assert refused(self.SH.format('echo "a; pytest -m gpu"')) is None
+        assert (
+            refused(
+                self.SH.format('gh pr comment 1 --body "table && pytest -m gpu was REFUSED"')
+            )
+            is None
+        )
+        # And the unquoted form really is two commands.
+        assert refused(self.SH.format("cd /repo && pytest -m gpu")) is not None
+
+    def test_the_keywords_that_are_a_command_position_still_count(self) -> None:
+        """`args=` is the one the class wanted, and it must keep working."""
+        assert (
+            refused(
+                self.PY.format('import subprocess\nsubprocess.run(args=["pytest","-m","gpu"])')
+            )
+            is not None
+        )
+
     def test_a_reader_collecting_a_runners_file_is_not_running_it(self) -> None:
         """A decision rather than a side effect, and the reason has to be the accurate one.
 

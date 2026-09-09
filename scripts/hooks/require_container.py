@@ -423,8 +423,9 @@ def _imports_device_stack(source: str) -> bool:
 
 
 #: Modules whose names a body may bind, so an alias can be resolved back to the canonical
-#: dotted path before it is matched. `subprocess` is whole because everything callable in it
-#: execs; `os`, `pty` and `runpy` are not -- see `_SHELLING_OUT_CALL`.
+#: dotted path before it is matched. Which of their members actually run something is
+#: `_SHELLING_OUT_CALL`'s question -- `subprocess.list2cmdline` builds a string and
+#: `subprocess.CalledProcessError` is an exception, so not even `subprocess` is whole.
 _SHELLING_OUT_MODULES = frozenset({"subprocess", "os", "pty", "runpy"})
 
 #: The ENTRY POINTS that hand a string to a shell or exec a program. Qualifying on the module
@@ -432,13 +433,20 @@ _SHELLING_OUT_MODULES = frozenset({"subprocess", "os", "pty", "runpy"})
 #: checks whether the baseline binary is built before telling the operator to build it was
 #: refused -- the false-positive direction this whole change exists to repair.
 _SHELLING_OUT_CALL = re.compile(
-    r"^(?:subprocess\.|os\.(?:system|popen|exec|spawn|posix_spawn)"
+    r"^(?:subprocess\.(?:run|call|check_call|check_output|Popen|getoutput|getstatusoutput)"
+    r"|os\.(?:system|popen|exec|spawn|posix_spawn)"
     r"|pty\.(?:spawn|fork)|runpy\.run_)"
 )
 
 #: Builtins that run source they are handed. Their payload is nested rather than positional
 #: (`exec(open(P).read())`), so `_first_words` walks a call to one of these.
 _SOURCE_BUILTINS = frozenset({"exec", "eval"})
+
+#: The KEYWORDS that are a command position. Reading every keyword made `input=`, `cwd=` and
+#: `encoding=` into commands, so posting a PR comment through `gh pr comment --body-file -`
+#: from a python heredoc was refused for quoting `pytest -m gpu` -- verbatim the incident this
+#: change exists to fix, through a different door. Everything else in a signature is data.
+_COMMAND_KEYWORDS = frozenset({"args", "cmd", "executable", "path", "mod_name"})
 
 
 def _bound_names(tree: ast.Module) -> dict[str, str]:
@@ -502,11 +510,6 @@ def _blocked_word(commands: list[list[str]]) -> str | None:
     return None
 
 
-#: What separates one command from the next inside a shell string, so
-#: `subprocess.run("cd /w && pytest -m gpu", shell=True)` has two command positions and not one.
-_SHELL_SEPARATOR = re.compile(r"&&|\|\||[;|&]")
-
-
 def _one_command(tokens: list[str]) -> list[list[str]]:
     """One argv, with wrappers stepped over, as the commands it really runs.
 
@@ -528,13 +531,15 @@ def _one_command(tokens: list[str]) -> list[list[str]]:
 
 
 def _shell_commands(text: str) -> list[list[str]]:
-    """Every command in a SHELL string, split on the operators that separate them."""
+    """Every command in a SHELL string, split by the LEXER rather than by a regex.
+
+    `segments` is the quote-aware splitter this file already has, and the comment above
+    `OPERATORS` says exactly why a regex is wrong: it cuts at a separator inside quotes.
+    Reproducing that here refused `echo "a; pytest -m gpu"` in a shell body -- while the list
+    form of the same argument was correctly allowed one function up, which is the tell.
+    """
     out: list[list[str]] = []
-    for part in _SHELL_SEPARATOR.split(text):
-        try:
-            tokens = shlex.split(part, comments=False)
-        except ValueError:
-            tokens = part.split()
+    for tokens in segments(text):
         if tokens:
             out.extend(_one_command(tokens))
     return out
@@ -557,7 +562,8 @@ def _first_words(call: ast.Call) -> list[list[str]]:
             for command in _shell_commands(node.value)
         ]
     out: list[list[str]] = []
-    for arg in [*call.args, *(kw.value for kw in call.keywords)]:
+    keywords = [kw.value for kw in call.keywords if kw.arg in _COMMAND_KEYWORDS]
+    for arg in [*call.args, *keywords]:
         if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
             out.extend(_shell_commands(arg.value))
         elif isinstance(arg, (ast.List, ast.Tuple)) and arg.elts:
@@ -580,15 +586,13 @@ def _first_words(call: ast.Call) -> list[list[str]]:
 
 
 def _text_runs_blocked(source: str) -> str | None:
-    """A blocked command in *command position* on some line, or None. For SHELL bodies."""
-    for line in source.splitlines():
-        # A shell line, so `cd /work && pytest -m gpu` is two commands here as well -- the
-        # byte-identical string inside `subprocess.run(..., shell=True)` was already read that
-        # way, and the two readings disagreeing is the bug in miniature.
-        found = _blocked_word(_shell_commands(line))
-        if found is not None:
-            return found
-    return None
+    """A blocked command in *command position* anywhere in a SHELL body, or None.
+
+    One call, because `segments` splits by line as well as by operator -- and the whole body
+    is read the way the same string inside `subprocess.run(..., shell=True)` is, since the two
+    readings disagreeing is the bug in miniature.
+    """
+    return _blocked_word(_shell_commands(source))
 
 
 def _python_runs_blocked(source: str) -> str | None:
