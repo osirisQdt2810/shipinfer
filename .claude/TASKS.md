@@ -1525,8 +1525,19 @@ hook down, for when the operator asked to see something before it is executed.
       because 3.75 cores generate its own load: 293.5 CPU-s in 78 s, across two `rtsp_serve.py`
       servers (140.8 + 152.7). That is the discountable half, and every run prints it now.
       THE OTHER HALF IS OURS AND EXTERNAL RTSP WOULD NOT MOVE IT: 38.4 ms of bench CPU per
-      event on the RTSP arm against 28.0 ms on replay. So the next host-side win is there, not
-      in the harness's networking -- which is the whole reason to answer this rather than wait.
+      event on the RTSP arm against 28.0 ms on replay, or 26% fewer events per busy core.
+      **BUT DO NOT READ THAT AS A WIN WAITING TO BE TAKEN -- I did at first, and checked.**
+      `sources/replay.cpp` decodes each fixture ONCE into a page-locked library
+      (`library_cache()`, `gpuHostRegister`, ~62 MB) so its per-frame host cost is a pinned
+      memcpy and nothing else; the RTSP arm pays RTP receive, depay, `h264parse` and the NVDEC
+      feed, for 50 streams. Both fixtures are 1920x1080 -- checked, the RTSP servers serve
+      those very files -- so the frame size is like for like, but the WORK is not: most of the
+      10.4 ms gap is the cost of being a real camera, which a deployment pays too. The part
+      that is purely the harness is `generator_cpu_s`, and that is the 3.75 cores above.
+      A CHECKED-AND-WRONG HYPOTHESIS, recorded so it is not re-run: `nvdec.cpp`'s read loop
+      looked like the busy spin `sources/gstreamer.cpp` documents fixing on its own side. It
+      is not -- `gst_app_sink_try_pull_sample` BLOCKS for its slice, and the loop returns on
+      `left <= 0` before it can ask for a zero-length pull.
       Everything measurable without that is done and below. Opened 9 Sep, and it redirects where the next win is.
       The route has been treated as GPU-limited all along and the two wins so far were GPU-side
       (the `output_stream` barrier, the intake's stream). `per_device_busy_pct` -- new, this
