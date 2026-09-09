@@ -1749,8 +1749,34 @@ hook down, for when the operator asked to see something before it is executed.
       contend with them and measure noise.
       Suite 4098 passed, C++ offline tier all green (18 binaries).
 
-- [ ] **THE-INSTANCE-THREADS-SPIN-ON-cudaStreamSynchronize · the next question, and the
-      copies are RULED OUT by measurement rather than by argument (9 Sep).**
+- [~] **THE-INSTANCE-THREADS-SPIN-ON-cudaStreamSynchronize · CONFIRMED AND FIXED, and the
+      hypothesis predicted the mechanism (9 Sep). PR pending.** Two interleaved pairs,
+      50x20x70 s, GPUs 1/3/4/5/6, one binary and one env var so nothing else differs:
+        run          flag     events   host cpu-s   cores   mdl threads   pipe threads
+        spinA        off      38 129       1139.7   14.68        630.8          208.8
+        spinB        ON       44 975        871.9   11.14        292.3          275.8
+        spinA2       off      35 992       1103.3   14.21        633.4          177.6
+        spinB2       ON       40 393        823.4   10.55        266.1          235.2
+      **THE MODEL-INSTANCE THREADS' CPU HALVES** -- 632 -> 279 CPU-s, -56% -- which is exactly
+      the class the spin hypothesis named, so this is a confirmed mechanism and not a
+      correlation. Total host CPU -24% (3.6 fewer cores busy), and the freed CPU goes where it
+      was needed: the PIPELINE workers get 32% MORE (193 -> 256), because they were being
+      starved by the spin.
+      EVENTS: +18.0% and +12.2% pairwise, ~+15%. Interleaved because this box's single-run
+      noise floor on events is ~15% -- both pairs move the same way, which is what the pairwise
+      method exists to establish.
+      WHAT IT IMPLIES FOR `C1`, stated as an implication and not a re-measurement: events per
+      host CPU-second go 33.5 -> 51.6 and 32.6 -> 49.1, i.e. **~1.5x**. The C1 default
+      (~3.94x on rows per host CPU-second, target NOT met) would move to ~5.9x -- PAST the >=5x
+      -- but that number needs the interleaved BASELINE runs beside it before it is claimed.
+      THE KNOB: off by default, because it trades wake-up latency for host CPU and the host is
+      only the wall at this load. `blocking_sync_requested()` reads
+      `SHIPINFER_CUDA_BLOCKING_SYNC`, `bench.cpp` applies it per device BEFORE any context
+      exists (the driver refuses it after), and `deploy/rootless/cpp.sh` forwards it.
+      TWO PLANES: `runtime/device.py` sets no flag either, so the Python plane owes the same
+      knob; the PR says so and opens the item.
+      HOW THE COPIES WERE RULED OUT, kept because the arithmetic was wrong before it was
+      measured:
       `WHICH-THREADS-SPEND-THE-HOST-CPU` put the model-instance threads at 51.6% of the host
       CPU, 16.5 CPU-s each, with the ten `ship_segmenter` instances at the top (21.6 each).
       Three candidates inside `execute_batch`, and only one survives:
