@@ -923,19 +923,21 @@ class TestADistributedLauncherIsDeviceWork:
         """
         assert refused(command) is None
 
-    def test_help_is_a_question_and_not_a_run(self) -> None:
-        """THIS TEST ASSERTED THE OPPOSITE, and the change is deliberate.
+    def test_a_launcher_keeps_its_refusal_even_for_help(self) -> None:
+        """This test read "`BLOCKED_COMMANDS` has no inspection carve-out" and now there IS
+        one (`TestAHelpQueryIsInspectionAndNotARun`) -- but a launcher is excluded from it, and
+        the ORIGINAL sentence turns out to have been right for the right reason.
 
-        It used to read "`BLOCKED_COMMANDS` has no inspection carve-out" -- a statement of the
-        status quo rather than an argument, and its one argument ("a distributed launcher has
-        no offline tier") is about `torchrun <script>` and not about `torchrun --help`, which
-        prints usage and exits. The hook already reads a query as inspection twice: `nsys
-        --version` (#179) and `build_engines.py --check` (#183).
+        `torchrun` and `deepspeed` declare the script's arguments as `nargs=REMAINDER`, so a
+        `--help` after the operand is the SCRIPT's and the launcher forks anyway. The first
+        draft of the carve-out allowed `torchrun --nproc_per_node=2 train.py --help`, five
+        characters from the command asserted below.
         """
-        assert refused("torchrun --help") is None
-        assert refused("trtexec --help") is None
-        assert refused("pytest --help") is None
+        assert refused("torchrun --help") is not None
+        assert refused("torchrun --nproc_per_node=2 train.py --help") is not None
         assert refused("torchrun --nproc_per_node=2 tests/runtime/test_native.py") is not None
+        assert refused("trtexec --help") is None, "not a launcher; its own parser sees it"
+        assert refused("pytest --help") is None
 
 
 class TestAHelpQueryIsInspectionAndNotARun:
@@ -957,7 +959,6 @@ class TestAHelpQueryIsInspectionAndNotARun:
         "pytest -m gpu --help",
         "shipinfer serve --http --port 8000 --help",
         "timeout 60 shipinfer bench --help",
-        "torchrun --help",
         "trtexec --help",
     )
 
@@ -971,6 +972,16 @@ class TestAHelpQueryIsInspectionAndNotARun:
         "python scripts/build_engines.py --force",
         "pytest -m gpu",
         "torchrun --nproc_per_node=2 tests/runtime/test_native.py",
+        # The seven rows the first draft of this carve-out let through, and the reason each
+        # one is a hole rather than a nuisance: every one of them RUNS.
+        "torchrun --nproc_per_node=2 train.py --help",
+        "deepspeed --num_gpus 2 train.py --help",
+        "python -m torch.distributed.run --nproc_per_node=2 tests/runtime/test_native.py --help",
+        'bash -c "pytest -m gpu" --help',
+        'sh -c "shipinfer bench m --cameras 50" --help',
+        'xargs -I{} bash -c "pytest -m gpu" --help',
+        "RUN=./scripts/gpu_all.sh; $RUN --help",
+        "pytest -m gpu -- --help",
     )
 
     @pytest.mark.parametrize("command", ALLOWED)
@@ -995,6 +1006,27 @@ class TestAHelpQueryIsInspectionAndNotARun:
         query in ONE segment excuse a run in another -- the mention-versus-invocation error
         this file exists for, on the permissive side."""
         assert refused(command) is not None, command
+
+    def test_a_pass_through_launcher_gets_no_carve_out(self) -> None:
+        """`torchrun` and `deepspeed` collect everything after the script operand as the
+        SCRIPT's arguments (`nargs=argparse.REMAINDER`), so `--help` never reaches their own
+        parser and they fork their workers anyway -- one host CUDA context each.
+
+        BLUNT ON PURPOSE, and the precise version was measured: excusing only a launcher with
+        no script operand would keep `torchrun --help` working, but `_script_programs` returns
+        `[]` for `deepspeed --num_gpus 2 train.py --help`, whose operand sits behind a
+        separate-token value. So the refinement reopens the hole for one of the two launchers
+        it exists for, and the cost of the blunt rule is `torchrun --help` on a tool nothing
+        here invokes.
+        """
+        assert refused("torchrun --help") is not None
+        assert refused("deepspeed --help") is not None
+        assert refused("trtexec --help") is None, "not a launcher; its own parser sees the flag"
+
+    def test_the_carve_out_stops_at_a_double_dash(self) -> None:
+        """Everything after `--` belongs to whatever the program is wrapping, so a `--help`
+        there is not the program's own flag."""
+        assert refused("pytest -m gpu -- --help") is not None
 
     def test_only_the_long_form(self) -> None:
         """`-h` is `--host` to some tools. This carve-out has no reason to be the place that

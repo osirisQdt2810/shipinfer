@@ -549,19 +549,46 @@ def _is_shelling_out(func: ast.expr, bound: dict[str, str]) -> bool:
 #: has no reason to be the place a short-flag collision is discovered.
 HELP_FLAGS = frozenset({"--help"})
 
+# doc: long why these get no help carve-out, and it is a measured hole rather than caution
+#: LAUNCHERS THAT PASS THEIR TAIL THROUGH. `torchrun` and `deepspeed` declare the script's
+#: arguments as `nargs=argparse.REMAINDER`, so every token after the script operand -- `--help`
+#: included -- is collected as the SCRIPT's and never reaches the launcher's own parser. The
+#: launcher then forks its workers, one host CUDA context each, which is what its
+#: `BLOCKED_COMMANDS` entry exists to stop. `accelerate launch` has the same shape. Measured:
+#: the first version of this carve-out allowed `torchrun --nproc_per_node=2 train.py --help`,
+#: five characters from a command its own test keeps refused.
+#:
+#: BLUNT ON PURPOSE, and the precise version was tried: excusing only a launcher WITHOUT a
+#: script operand would keep `torchrun --help` working, but `_script_programs` returns []
+#: for `deepspeed --num_gpus 2 train.py --help` -- the operand is behind a separate-token
+#: value -- so the refinement reopens the hole for one of the two launchers it is for. The
+#: cost of the blunt rule is `torchrun --help`, on a tool nothing here invokes.
+PASS_THROUGH_LAUNCHERS = frozenset(
+    {
+        "torchrun",
+        "deepspeed",
+        "accelerate",
+        "torch.distributed.run",
+        "torch.distributed.launch",
+    }
+)
 
-def _is_help_query(args: list[str]) -> bool:
-    """Whether these arguments make the command print usage and exit.
 
-    `--help` short-circuits in argparse, typer/click and every runner in `BLOCKED_COMMANDS`,
-    so nothing is measured and no device is touched -- the same reading `nsys --version` got
-    in #179 and `build_engines.py --check` in #183: a question ABOUT a command is not a run
-    of it. Five ordinary spellings were refused without this, `shipinfer bench --help` among
-    them, which is how anyone finds out what the flag is called.
+def _is_help_query(program: str, args: list[str]) -> bool:
+    """Whether ``program`` with these arguments prints usage and exits.
 
-    An EXACT token, never a prefix: `--help-me-run-this --cameras 50` is a run.
+    `--help` short-circuits in argparse and typer/click, so nothing is measured -- the reading
+    `nsys --version` got in #179 and `--check` in #183.
+
+    Three bounds, each a measured hole in an earlier draft: no pass-through launcher, the flag
+    before any `--`, and an exact token. The caller must resolve ``program`` to one name
+    first, or this answers for `_indirection` -- the one check a token in argv must never
+    answer for.
     """
-    return any(arg in HELP_FLAGS for arg in args)
+    if program in PASS_THROUGH_LAUNCHERS or any(a in PASS_THROUGH_LAUNCHERS for a in args):
+        return False
+    own = args[: args.index("--")] if "--" in args else args
+    return any(arg in HELP_FLAGS for arg in own)
 
 
 def _blocked_word(commands: list[list[str]]) -> str | None:
@@ -577,9 +604,9 @@ def _blocked_word(commands: list[list[str]]) -> str | None:
         if not tokens:
             continue
         exe, rest = tokens[0], tokens[1:]
-        if _is_help_query(rest):
-            continue
         base = exe.rsplit("/", 1)[-1]
+        if _is_help_query(base, rest):
+            continue
         if base in BLOCKED_COMMANDS:
             if base in _TEST_RUNNERS and not _selects_device_tier(rest):
                 continue
@@ -1035,11 +1062,6 @@ def verdict(command: str, cwd: str | None = None) -> str | None:
         exe, args = real_command(tokens)
         if exe is None:
             continue
-        if _is_help_query(args):
-            # Before every check below it, because the refusals are spread over the executable,
-            # the subcommand, the `-m` module and the script's own imports -- and a help query
-            # is none of those things whichever branch would have caught it.
-            continue
         indirect = _indirection(tokens)
         if indirect is not None:
             return indirect
@@ -1052,6 +1074,13 @@ def verdict(command: str, cwd: str | None = None) -> str | None:
                 return nested
             continue
         base = exe.rsplit("/", 1)[-1]
+
+        if _is_help_query(base, args):
+            # AFTER `_indirection` and after the nested re-read above, which is the whole of
+            # what the first draft got wrong: applied to an unresolved argv, a `--help` token
+            # answered for those two -- so `bash -c "pytest -m gpu" --help` and
+            # `RUN=./gpu_all.sh; $RUN --help` were allowed. `exe` is one program name here.
+            continue
 
         if base in BLOCKED_COMMANDS:
             if base in _TEST_RUNNERS and not _selects_device_tier(args):
