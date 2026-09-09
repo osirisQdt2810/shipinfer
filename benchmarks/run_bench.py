@@ -459,7 +459,6 @@ def measure_shipinfer(
 def _print_device_table(
     heading: Sequence[str],
     tables: Mapping[str, Mapping[str, Mapping[str, float]]],
-    seconds: float = 0.0,
 ) -> None:
     """Print the per-device breakdown -- requests, rows and occupancy -- for either caller.
 
@@ -481,9 +480,9 @@ def _print_device_table(
 
     Rows go on their own line and only when they DIFFER from requests: a detector gets one
     frame per request so the two are equal and a second identical line is noise, while an
-    embedder's gap IS the crop fan-out. Occupancy goes on a third when the caller knows the
-    wall clock, because microseconds without it are unreadable and a reader who divides will
-    divide by the wrong thing.
+    embedder's gap IS the crop fan-out. Occupancy goes on a third, already a percentage: it
+    arrives divided by the window it was measured over, because a sharded run has one such
+    window per shard and this printer has no way to tell which device belongs to which.
     """
     per_device = tables.get("per_device", {})
     if not per_device:
@@ -499,14 +498,14 @@ def _print_device_table(
         if rows and rows != devices:
             spread = "  ".join(f"{d}={n}" for d, n in sorted(rows.items()))
             print(f"  {'  (rows)':<18} {spread}")
-        busy = tables.get("per_device_compute_us", {}).get(model, {})
-        if busy and seconds > 0:
+        busy = tables.get("per_device_busy_pct", {}).get(model, {})
+        if busy:
             spread = "  ".join(
                 # One decimal, matching `cli/bench.cpp`'s `setprecision(1)`: at `:.0f` a
                 # light-load run's 3.5/3.6/3.7% came out as three identical cells and
                 # anything under 0.5% read as "idle" rather than "lightly loaded".
-                f"{d}={us / (seconds * 1e6) * 100:.1f}%"
-                for d, us in sorted(busy.items())
+                f"{d}={pct:.1f}%"
+                for d, pct in sorted(busy.items())
             )
             print(f"  {'  (busy)':<18} {spread}")
 
@@ -559,7 +558,6 @@ def measure_shipinfer_in_full(
     _print_device_table(
         ["\nper-device execution (the balancing evidence):"],
         shipinfer.device_tables(result),
-        cfg.seconds,
     )
     offered = shipinfer.offered_rates(cfg, result)
     capacity = shipinfer.per_module_capacity(cfg, instances=result.instances)
@@ -613,7 +611,6 @@ def measure_sharded(
             "left its shard is counted where it ran):",
         ],
         shipinfer.device_tables_of(agg),
-        cfg.seconds,
     )
     detail = "; ".join(
         f"shard {r['shard']} gpu{r['gpus']}: "
