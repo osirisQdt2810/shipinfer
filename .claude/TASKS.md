@@ -1749,8 +1749,21 @@ hook down, for when the operator asked to see something before it is executed.
       contend with them and measure noise.
       Suite 4098 passed, C++ offline tier all green (18 binaries).
 
-- [ ] **PYTHON-THREADS-ARE-UNNAMED-TO-THE-KERNEL · the other half of the thread-naming
-      seam, opened by PR (csrc names its threads) under the sync rule.**
+- [~] **PYTHON-THREADS-ARE-UNNAMED-TO-THE-KERNEL · PR #200 (9 Sep) closes the seam.**
+      `core/thread_name.py` mirrors the header: stdlib only, `pthread_setname_np` through
+      `ctypes`, and `instance_thread_label` returns the SAME fifteen bytes as the C++ function
+      for the same (model, device, index), so one `top -H` reads alike on both planes. Six call
+      sites move to a `start_thread` factory -- two of the targets cannot name themselves from
+      inside (`pipeline.runner`'s worker takes no index, the HTTP thread's target is uvicorn's)
+      -- and each passes `kernel=` explicitly, because cutting the Python name to fifteen bytes
+      turns `pipeline-worker-12` into `pipeline-worker`: #198's round-2 collision on the other
+      plane, avoided on the first try here.
+      **AND THE FIRST DRAFT SEGFAULTED 282 TESTS.** An undeclared `ctypes` function returns
+      `c_int`, `pthread_t` is pointer-sized, and the truncated handle went into the next call --
+      which no `try/except` can catch, so the "never raises" docstring was true and worthless.
+      Prototypes declared and resolved once at import; a missing symbol is now a `None` to
+      branch on. Suite 4106 passed.
+      ORIGINAL:
       MEASURED, not assumed: a `threading.Thread(target=..., name="pipeline-worker-7")` reports
       `pipeline-worker-7` to `threading.current_thread().name` and **`python`** to
       `/proc/self/task/<tid>/comm`. So all six Python names are a Python-level label only, and
@@ -1770,8 +1783,20 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE IN THE SAME PR on purpose: `ctypes` into libc from the control plane is a
       decision about `core/`, not a rename, and the C++ half is the one that had NO name at all.
 
-- [~] **TRACK-ELEMENT-SPLITS-ONE-IDENTITY-ABOUT-1-IN-100 · ROOT-CAUSED AND FIXED, PR #199
-      (9 Sep). It was a real defect, not a flaky assertion.** `Element.camera_added`'s own
+- [x] **TRACK-ELEMENT-SPLITS-ONE-IDENTITY-ABOUT-1-IN-100 · MERGED as #199 (3b95cae, 9 Sep),
+      APPROVE on round 3. It was a real defect, not a flaky assertion.**
+      ROUND 2 CAUGHT A WORSE BUG IN MY FIX, and it is the one worth remembering: gating the
+      reset on "already added" made it UNREACHABLE through a runner --
+      `IngestManager.add_camera` raises `DuplicateCameraError` for a live id, so a second
+      announcement needs the camera to have left the manager, and every exit announces
+      `camera_removed`, which discarded the id. With the reset dead, ADR-018's announced
+      recovery fell back to the `regression_reset` heuristic its own docstring calls "the floor
+      ... not a substitute", and with `regression_reset: 0` the camera is refused for the life
+      of the process. So the gate is a DROP, not an announcement count: a shard can only be
+      stale if something dropped it and a late frame rebuilt it, which
+      `Element.camera_removed`'s contract says to expect. The suite now fails in BOTH
+      directions -- reset on every add fails the race test, never resetting fails three
+      recovery tests -- measured by reverting the source, not argued. `Element.camera_added`'s own
       contract says the hook runs AFTER the ingest actor exists, so "on a camera that opens
       instantly a frame can reach `process` before this hook does" -- and the track element
       reset the tracker regardless, throwing away the one that frame had just built, so the
