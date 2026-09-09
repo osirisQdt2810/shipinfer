@@ -53,12 +53,11 @@ namespace shipinfer {
         //: `execute()` returned sooner. Read it as "not the bottleneck" with confidence and
         //: as "this much GPU" only with that caveat.
         //:
-        //: OVER THE WHOLE WINDOW INCLUDING WARM-UP, unlike the throughput printed beside it:
-        //: this is cumulative and the readers divide by `--seconds`, while `read`/`emitted`/
-        //: `requests` are differenced against an at-warmup snapshot. Occupancy is lower while
-        //: the pipeline ramps, so the printed percentage UNDERSTATES the steady one -- the
-        //: only direction here that is not conservative. Ledger:
-        //: `OCCUPANCY-INCLUDES-THE-WARMUP-WINDOW`.
+        //: CUMULATIVE, so a reader has to say which window it is dividing by. This binary has
+        //: no warm-up, so its whole run is the window; the Python harness has one and rates
+        //: this over the steady window only (`busy_pct` in `benchmarks/harness/shipinfer.py`),
+        //: because charging the ramp's idle time to the busy window understated it by ~7
+        //: points at 10 s of 70 s.
         double compute_us = 0.0;
     };
 

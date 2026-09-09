@@ -234,18 +234,21 @@ def aggregate(summaries: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         (s["throughput"]["binding_module"] for s in summaries if s["throughput"]["saturated"]),
         None,
     )
-    # EVERY per-device table, summed the same way and driven off one list, because a shard's
-    # rows and its occupancy are as much its own as its requests. Dropping one of them here is
-    # what made a counter invisible in the only mode that can generate the design load --
-    # twice: #167 review note 1 for rows, then #170's own review for occupancy.
+    # EVERY per-device table, summed the same way and driven off one list: a shard's rows and
+    # its occupancy are as much its own as its requests, and dropping one here is what made a
+    # counter invisible in the only mode that can generate the design load -- twice, #167 note
+    # 1 for rows and then #170's own review for occupancy.
     tables: dict[str, dict[str, dict[str, float]]] = {name: {} for name in DEVICE_TABLES}
+    # Summing `per_device_busy_pct` is a UNION rather than an addition, and not by luck: a
+    # shard is a GPU, so no device is in two tables. It also has to happen here -- each shard
+    # divided by its own steady window, so the parent has no single divisor for the printer.
     for summary in summaries:
         for name, into in tables.items():
             for model, devices in summary.get(name, {}).items():
                 bucket = into.setdefault(model, {})
                 for device, count in devices.items():
-                    # No `int()`: requests and rows arrive as ints and stay ints, and
-                    # microseconds arrive as floats and must not be truncated per shard.
+                    # No `int()`: requests and rows arrive as ints and stay ints, while a
+                    # percentage is a float and must not be truncated per shard.
                     bucket[device] = bucket.get(device, 0) + count
     return {
         "images_per_s": total,
