@@ -908,13 +908,21 @@ class InprocessRunner(Runner):
         no-op costing one attribute read.
         """
         manager, self._ingest_manager = self._ingest_manager, None
-        # For :meth:`drain`'s reason, and one more: the next cycle rebuilds the manager and
-        # therefore re-reads the configured bands from settings, so one left here from the
-        # last cycle would outrank the operator's table on a runner that holds no cameras.
-        self._bands.clear_placements()
         if manager is None:
+            # Nothing is publishing, so there is no order to get right -- and the placements
+            # still have to go, for the reason below.
+            self._bands.clear_placements()
             return 0
         abandoned = manager.stop(timeout_s=timeout_s)
+        # doc: long the ordering and the reason the placements are cleared at all
+        # AFTER the manager, the order :meth:`drain` already used and this path did not: a
+        # camera publishes until its thread is joined, so clearing first bands its last frames
+        # at the fallback. Nothing is misplaced (the queue is draining) and the record names a
+        # lane nobody granted -- an intermittent band assertion is how it surfaced.
+        #
+        # Cleared at all for :meth:`drain`'s reason, and one more: the next cycle re-reads the
+        # configured bands, so one left here would outrank the operator's table.
+        self._bands.clear_placements()
         if abandoned:
             _LOG.warning(
                 "%d camera thread(s) did not stop within %.1fs; they still hold this "
