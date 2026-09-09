@@ -1182,7 +1182,7 @@ hook down, for when the operator asked to see something before it is executed.
       it. The lesson is the cheap one: measure the reported bug on the branch before writing
       the ledger entry that defers it.
 
-- [~] **THE-RTSP-ARM-COULD-NOT-SAY-WHAT-ITS-GENERATORS-COST · PR #184.**
+- [x] **THE-RTSP-ARM-COULD-NOT-SAY-WHAT-ITS-GENERATORS-COST · MERGED as #184 (881c743, 9 Sep).**
       `NOT-GPU-BOUND-AT-FIVE-GPUS` left the RTSP penalty as "up to ~17%, split unknown between
       the servers (ours to discount) and our own decode threads (ours to optimise)", and
       proposed an external RTSP source -- infrastructure this box's networking prevents.
@@ -1192,7 +1192,22 @@ hook down, for when the operator asked to see something before it is executed.
       point. Numbers in the item above; the units are vacuity-checked against three wrong
       implementations.
 
-- [ ] **GSTREAMER-RTSP-CANNOT-FINISH-AT-THE-DESIGN-LOAD · found 9 Sep, and it is the mandated
+- [ ] **GSTREAMER-ARM-READS-A-THIRD-AND-KEEPS-3% · opened 9 Sep by #185's first readable run,
+      and it is the mandated route's real problem.** 50x20x70 s on five idle GPUs, `gstreamer`
+      against `nvdec`, same wrapper, same plan, same fixtures:
+        source      offered   read     accepted   complete   queue_rejected
+        gstreamer    70 000   21 247       699        316          20 584
+        nvdec        70 000   64 677    26 778     26 669          37 932
+      TWO SEPARATE LOSSES, and they compound: gstreamer READS only 30% of what is offered
+      (nvdec reads 92%), and then 97% of what it did read is refused at the pipeline queue
+      (nvdec 59%). `pipeline_pool_size` ends at 0 against nvdec's 155, which is the first
+      thing to look at -- a frame pool that never filled would explain the second loss.
+      NOT YET DIAGNOSED. Recorded now because it was invisible until #185: the arm exited 1
+      with no counters, so every previous reading of this route came from `nvdec` or from
+      8-camera smoke runs. V137/V156 name gstreamer -> NV12 -> VRAM as the route, so this is
+      on the critical path for the >=5x rather than beside it.
+
+- [~] **GSTREAMER-RTSP-CANNOT-FINISH-AT-THE-DESIGN-LOAD · PR #185, and it is the mandated
       route (V137/V156: gstreamer rtsp -> nv12 -> vram).** `SHIPINFER_BENCH_SOURCE=gstreamer` at
       50x20x70 s exits **1** with `31 camera(s) abandoned past the stop deadline; exiting
       without unwinding` and prints NO counter summary -- so the arm V156 names produces no
@@ -1207,6 +1222,19 @@ hook down, for when the operator asked to see something before it is executed.
       -- the same shape `PY-SOURCE-HAS-NO-STOP-SIGNAL` describes on the other plane, but here
       the C++ sources DO check a `StopSignal` (#163). So either the deadline is consumed
       upstream of the ask, or 50 GStreamer pipelines take longer to tear down than 5 s.
+      **ANSWERED, and it was the second: 50 pipelines do not fit in 5 s.** 31 of 50 abandoned
+      at 5 s, 1 of 50 at 30 s, 0 of 50 at the scaled 20 s -- so `run_cpp_bench.sh` scales the
+      fleet deadline with the fleet (#185), the way it already scales workers with GPUs.
+      #185's OTHER half is the one that matters more, because it is not a knob: `bench.cpp`
+      `_Exit`s on abandonment BEFORE printing, so one hung camera of fifty discarded a 70 s
+      run. It now reports the ingest and queue counters first, from ONE lambda both exits
+      call, with the reassembly half absent rather than zeroed (the drain would block on the
+      threads that did not stop). Its first draft printed into a buffer `_Exit` discards --
+      only `std::cerr` is unbuffered -- found by forcing the path, not by reading it.
+      AND THE ARM NOW REPORTS, WHICH IS BAD NEWS AND THE POINT: 50x20x70 s gstreamer on five
+      idle GPUs reads 21 247 of 70 000 offered, and refuses 20 584 of them at the pipeline
+      queue -- 699 accepted, 316 events complete. `nvdec` at the same load, same GPUs, same
+      wrapper: 64 677 read, 26 778 accepted, 26 669 complete. That gap is the next item.
 
 - [x] **THE-ENGINE-BUILD-DID-NOT-GATE-ITSELF · MERGED as #183 (4d8a6c2, 9 Sep). Last entry in the list.**
       CLAUDE.md's container list is "the GPU test tiers, every benchmark, `shipinfer
