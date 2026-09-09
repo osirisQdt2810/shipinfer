@@ -792,6 +792,30 @@ class TestTheRealCommandIsNotAlwaysTheFirstWord:
         assert refused("uv pip install torch") is None
         assert refused("uv venv") is None
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "sudo -n pytest -m gpu",  # -n is --non-interactive, a BOOLEAN
+            "time -p pytest -m gpu",  # -p is POSIX output format
+            "xargs -p pytest -m gpu",  # -p is --interactive
+            "time -p shipinfer bench person_embedder",
+            "xargs -p shipinfer serve",
+        ],
+    )
+    def test_a_boolean_wrapper_flag_does_not_eat_the_command(self, command: str) -> None:
+        """The value-flag set has to be keyed BY WRAPPER, because the same letters are
+        booleans elsewhere. One global set consumed the command itself and then skipped `-m`
+        as a flag, so `real_command` answered the MARKER NAME as the executable -- `('gpu', [])`
+        -- and `time -p shipinfer bench …` has no second gate on that path."""
+        assert refused(command) is not None
+
+    def test_a_value_flag_is_honoured_only_for_the_wrapper_that_has_it(self) -> None:
+        """The other side of the same key: `sudo -u root` and `env -C /w` really do take a
+        value, and their commands must still be found behind it."""
+        assert refused("sudo -u root pytest -m gpu") is not None
+        assert refused("env -C /w pytest -m gpu") is not None
+        assert refused("env --chdir /w pytest -m gpu") is not None
+
     def test_a_wrapper_flag_whose_value_is_a_name(self) -> None:
         """`WRAPPER_OPERAND` steps over a NUMBER (`timeout 900`, `nice -n 5`). `conda run -n
         myenv` puts a name there, and the name came out as the executable."""
