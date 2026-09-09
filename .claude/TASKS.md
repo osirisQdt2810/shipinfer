@@ -5515,8 +5515,12 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       before the next release: an intermittent failure in the tier CLAUDE.md calls "must stay
       green" trains everyone to re-run rather than to read.
 
-- [ ] **V124a-PHASE3 · thin `runtime/ops` to an adapter over shipvision, on the frame-clamp
-      convention decided above.** What STAYS (system, per V50): the `ImageOps` ABC, the
+- [!] **V124a-PHASE3 · READY TO BUILD, GATED ON YOUR MERGE OF #187 (V124b's half). Thin
+      `runtime/ops` to an adapter over shipvision, on the frame-clamp convention decided
+      above.** The gate is mine and deliberate: without #187 the moved implementations' tests
+      SKIP on CI, so the PR would look green having proved nothing about the code it moved --
+      189 tests' worth of exactly that is what #186/#187 exist to fix. Build it the moment
+      #187 lands; nothing else waits on it.** What STAYS (system, per V50): the `ImageOps` ABC, the
       registry/factory/thread-local binding, `native_ops.py` as the adapter, and the #31 pinned
       staging -- the adapter asks shipvision for device-out (`letterbox_into`/`crop_batch_into`
       on a `DeviceBuffer`) and stages the copy home itself. What MOVES: `torch_ops.py` and
