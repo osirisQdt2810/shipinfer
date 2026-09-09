@@ -1688,7 +1688,7 @@ hook down, for when the operator asked to see something before it is executed.
       needs the gst image: `shipinfer.runtime.native` imports torch first, and torch's bundled
       libcudart satisfies `_C`'s link. Same mechanism, opposite outcome, one import apart.
 
-- [~] **TWO-FOLLOW-UPS-FROM-#194's-APPROVE · PR #197 (9 Sep), both in it.** (a) is fixed
+- [x] **TWO-FOLLOW-UPS-FROM-#194's-APPROVE · MERGED as #197 (8bc3bee, 9 Sep), APPROVE, both in it.** (a) is fixed
       where it belongs -- `_blocked_word`, the door an inline `-c` body, a `subprocess`
       argument list and an executed heredoc all reach -- and `_accelerate_starts_a_job` is now
       the ONE reading that all three doors call, in the same commit. Four rows tighten, none
