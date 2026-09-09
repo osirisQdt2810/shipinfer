@@ -14,12 +14,16 @@ device. Only writing the bytes does, and that is not what is under test.
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
 
 import pytest
 import yaml
+
+from shipinfer.runtime import containment
+from tests.support.subprocess_env import checkout_env
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "build_engines.py"
@@ -177,3 +181,89 @@ class TestAgainstTheRealRepository:
         flat_only = [t for t in build_engines.TARGETS if t.version_dir is None]
 
         assert [t.name for t in flat_only] == ["reid"]
+
+
+class TestABuildIsGatedAndInspectionIsNot:
+    """CLAUDE.md's list of what must run in a container names "any engine build".
+
+    This was the one entry in that list with no in-process gate, so the advisory `PreToolUse`
+    hook was the only guard -- and a deny-list over command text cannot be sound, which the
+    same document says. Patching `containment.require_container` itself is the assertion: a
+    private copy of the check inside this script would not be intercepted and the log below
+    would come back without its `gate` entry.
+    """
+
+    def _log(self, monkeypatch: pytest.MonkeyPatch, build_engines: ModuleType) -> list[str]:
+        """Record the calls that decide this, in the order they happen."""
+        seen: list[str] = []
+
+        def gate(what: str) -> None:
+            seen.append(f"gate:{what}")
+
+        def report(fp16: bool) -> int:
+            seen.append("report")
+            return 0
+
+        def build(targets: tuple[object, ...], *, fp16: bool, force: bool) -> int:
+            seen.append("build")
+            return 0
+
+        monkeypatch.setattr(containment, "require_container", gate)
+        monkeypatch.setattr(build_engines, "report", report)
+        monkeypatch.setattr(build_engines, "build", build)
+        return seen
+
+    def test_a_build_asks_the_gate_before_it_builds(
+        self, monkeypatch: pytest.MonkeyPatch, build_engines: ModuleType
+    ) -> None:
+        seen = self._log(monkeypatch, build_engines)
+
+        assert build_engines.main(["--only", "ship_detector"]) == 0
+        assert seen == ["gate:an engine build", "build"]
+
+    def test_check_reports_and_is_not_gated(
+        self, monkeypatch: pytest.MonkeyPatch, build_engines: ModuleType
+    ) -> None:
+        """`--check` builds nothing, so it is inspection -- allowed on the host on purpose,
+        the way `shipinfer repo ls` is. Gating it would make the one command that tells you
+        what is missing unusable exactly where you ask that question."""
+        seen = self._log(monkeypatch, build_engines)
+
+        assert build_engines.main(["--check"]) == 0
+        assert seen == ["report"]
+
+    def test_an_unknown_model_keeps_its_usage_code(
+        self, monkeypatch: pytest.MonkeyPatch, build_engines: ModuleType
+    ) -> None:
+        """A malformed command line deserves its usage error rather than a container one.
+        #182 gated `run_bench.main` on line one and turned three exit-2 assertions into
+        container failures; the gate belongs below argv validation, above the work."""
+        seen = self._log(monkeypatch, build_engines)
+
+        assert build_engines.main(["--only", "no_such_model"]) == 2
+        assert seen == []
+
+    @pytest.mark.skipif(
+        containment.detect().in_container,
+        reason="the gate is silent in a container, which is what it is for",
+    )
+    def test_the_refusal_reaches_a_real_invocation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end through `__main__`, because the tests above patch out both calls and
+        would still pass if nothing wired `main` to the command line.
+
+        The override is dropped rather than tolerated: it is per-command by design, so a run
+        that happens to have it set must not turn this into a silent pass. `checkout_env` then
+        makes the spawned interpreter resolve `shipinfer` from THIS tree.
+        """
+        monkeypatch.delenv(containment.ALLOW_HOST_RUN_ENV, raising=False)
+        done = subprocess.run(
+            [sys.executable, str(SCRIPT), "--only", "ship_detector"],
+            capture_output=True,
+            text=True,
+            env=checkout_env(),
+        )
+
+        assert done.returncode != 0, done.stdout
+        assert "an engine build must run inside a container" in done.stderr

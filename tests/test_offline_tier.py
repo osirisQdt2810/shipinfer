@@ -189,6 +189,61 @@ class TestEveryBenchmarkEntryPointGatesItself:
             )
 
 
+class TestEveryScriptThatBuildsForADeviceGatesItself:
+    """The same rule one directory over, because the rule is one rule.
+
+    CLAUDE.md's list of what must run in a container is "the GPU test tiers, every benchmark,
+    `shipinfer bench|serve`, and any engine build". #182 gave the benchmarks their gate; the
+    engine build was the last entry without one, and its own docstring already claimed "this
+    refuses to run without a device". Derived from the imports rather than from a list of file
+    names, so the next script that reaches for TensorRT is covered by this and not by memory.
+    """
+
+    #: A top-level import of any of these means the script cannot do its job without a device,
+    #: whatever it calls itself. `shipvision` is the fused-kernel library, so it counts.
+    DEVICE_STACKS = frozenset({"torch", "tensorrt", "onnxruntime", "pycuda", "shipvision"})
+
+    def _device_scripts(self) -> list[Path]:
+        root = Path(__file__).resolve().parents[1] / "scripts"
+        found = []
+        for path in sorted(root.rglob("*.py")):
+            source = path.read_text(encoding="utf-8")
+            if 'if __name__ == "__main__"' not in source:
+                continue
+            if self.DEVICE_STACKS & self._imports(ast.parse(source)):
+                found.append(path)
+        return found
+
+    @staticmethod
+    def _imports(tree: ast.AST) -> set[str]:
+        """Every module imported anywhere, function bodies included -- a device import is
+        usually lazy precisely because the script has to start without one."""
+        names: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names |= {alias.name.split(".")[0] for alias in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names.add(node.module.split(".")[0])
+        return names
+
+    def test_the_sweep_finds_the_engine_build(self) -> None:
+        """Names the one member there is today, so a predicate that silently matches nothing
+        fails here instead of passing the assertion below."""
+        assert [p.name for p in self._device_scripts()] == ["build_engines.py"]
+
+    def test_each_one_calls_the_gate(self) -> None:
+        ungated = [
+            path.name
+            for path in self._device_scripts()
+            if "require_container" not in path.read_text(encoding="utf-8")
+        ]
+        assert not ungated, (
+            f"{ungated} reaches for a device stack and can be run directly, without asking "
+            "`runtime.containment`. Host nvcc here is 11.5 against a 12.6 driver, so what a "
+            "host build produces is the wrong artefact rather than a slow one."
+        )
+
+
 class TestEveryDeviceTierTestSitsUnderTheGate:
     """A `mark.gpu` module in a directory whose conftest chain lacks the guards runs the
     device tier with no container gate and no no-device skip.
