@@ -743,6 +743,20 @@ class TestANameIsNotAnInvocation:
         # And the unquoted form really is two commands.
         assert refused(self.SH.format("cd /repo && pytest -m gpu")) is not None
 
+    def test_a_heredoc_nested_in_a_shell_body_is_data_too(self) -> None:
+        """Review note N2, and it turned out to be already fixed rather than deferred.
+
+        `cat > pr.md <<'MD'` inside a `bash -s` body is refused on `main`, because the line
+        scan read the block's rows as commands -- writing a PR body from a shell heredoc hits
+        it, which is how it was found. Using `segments` for the shell path closed it for free:
+        the lexer keeps a heredoc's content with the `cat` that consumes it. Asserted here so
+        it stays closed, since a fix nothing pins is a fix that regresses.
+        """
+        table = "cat > pr.md <<'MD'\nmain now\npytest -m gpu  REFUSE\nMD\necho done"
+        assert refused(self.SH.format(table)) is None
+        # And the shell body that really runs it is untouched.
+        assert refused(self.SH.format("pytest -m gpu")) is not None
+
     def test_the_keywords_that_are_a_command_position_still_count(self) -> None:
         """`args=` is the one the class wanted, and it must keep working."""
         assert (
