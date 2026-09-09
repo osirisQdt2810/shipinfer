@@ -5622,6 +5622,10 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       enough to be missing `shipvision.reid` is a real state and reporting it as 'shipvision is
       fine' would be worse than useless". Erroring loudly on an incomplete install is the
       intent, and `_unavailable` already interpolates the real ImportError.
+      **#187 IS GREEN AND WAITING ON THE CLICK: `Tests (with the kernels' Python half) pass
+      4m55s`, and every other check passes too. The ONLY failing check is `Claude review`,
+      which is the documented permanent exception for a workflow-touching PR.** So the leg
+      works on a plain runner with the install fix -- that is measured, not predicted.
       THE REMAINING 189 ARE THE ORIGINAL DECISION and still need `.github/workflows/**`:
       check out shipvision's PYTHON half by name (the `kernels` job's own recipe -- https
       rewrite, `submodules: false`, never `--recursive`, because `benchmarks/baseline` is a
