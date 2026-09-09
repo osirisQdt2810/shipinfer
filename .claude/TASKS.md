@@ -2013,8 +2013,11 @@ hook down, for when the operator asked to see something before it is executed.
       target -- rows count a 256x128 crop as one 640x640 frame, and picking the measure because
       it passes is the failure this item has refused twice. What would close the ~4x -> 5x gap
       is our own arm's host cost, which is where the headroom is (3.19 ms CPU/row against the
-      baseline's 12.12 ms/image, and our arm was host-bound while theirs was saturated):
-      `NOT-GPU-BOUND` is the item that owns it.
+      baseline's 12.12 ms/image, and our arm was host-bound while theirs was saturated). The
+      accounting for that is `NOT-GPU-BOUND-AT-FIVE-GPUS`, which is CLOSED -- 38.4 ms of bench
+      CPU per event is ours and external RTSP would not move it -- so there is currently NO
+      open item aimed at the ~4x -> 5x gap. Opening one is a decision about the target, which
+      is why it waits on this question rather than the other way round.
 
 - [!] **CSRC-GRAPH-HAS-NO-TRACKING · OPERATOR: please merge #169 (PR 1 of 3) -- it adds a
       **A SPLIT WAS TRIED AND MEASURED OUT, 9 Sep -- do not re-attempt it.** The idea was to
