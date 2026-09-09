@@ -1638,7 +1638,30 @@ hook down, for when the operator asked to see something before it is executed.
       reassembly -- which is why `events` is the softest of C1's three ratios and why the
       rows/pixels ones are the ones measuring model work.
 
-- [~] **OUR-ARM-HAD-NO-HOST-CPU-LINE · PR #191, the owed half of the item below.** Both arms
+- [~] **A-HELP-QUERY-WAS-REFUSED-AS-A-RUN · PR #192, found by hitting it.**
+      `python -m shipinfer bench --help` was refused while I was checking the CLI against
+      CLAUDE.md's description of it -- which is how anyone finds out what the documented
+      `--skew` flag is called. **A guard that blocks CHECKING the documentation works against
+      the discipline it exists to serve**, and twice this week the documentation was wrong,
+      both times found by running a command.
+      FIVE SPELLINGS refused before and allowed after: `shipinfer bench|serve --help`, the two
+      `python -m` forms, and `python scripts/build_engines.py --help`. `pytest --help` was
+      already allowed, but only by accident of `_TEST_RUNNERS`' offline carve-out.
+      Same reading as `nsys --version` (#179) and `build_engines.py --check` (#183).
+      **IT REVERSES A TEST THAT ASSERTED THE OPPOSITE**, and that is stated rather than
+      slipped in: `test_help_is_refused_the_way_trtexec_is` read "`BLOCKED_COMMANDS` has no
+      inspection carve-out" -- the status quo, not an argument -- and its one argument ("a
+      distributed launcher has no offline tier") is about `torchrun <script>`, not
+      `torchrun --help`.
+      Bounded and each bound tested: an EXACT token (`--helpful` is still a run), per SEGMENT
+      (a help query cannot excuse a run beside it), long form only (`-h` is `--host` to some
+      tools). 17 spellings measured in both directions.
+      ONE EXPECTATION OF MINE WAS WRONG and it is worth keeping: I expected
+      `python -m torch.distributed.run --nproc_per_node=2 train.py` to refuse; BOTH main and
+      the branch allow it, because `train.py` does not exist so nothing imports a device
+      stack. The hook's own test pins that spelling against a path that DOES. Not a hole.
+
+- [x] **OUR-ARM-HAD-NO-HOST-CPU-LINE · MERGED as #191 (91c2fb6, 9 Sep), the owed half of the item below.** Both arms
       print the same line now, from a shared `harness/hostcpu.py` with two readings:
       `children_since` for the baseline (a child the harness supervises) and `since` -- self
       AND children -- for ours, because `single` runs the plane in this process while the
