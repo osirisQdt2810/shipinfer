@@ -256,6 +256,7 @@ namespace shipinfer {
         ++stats_.batches;
         stats_.rows += offset;
         stats_.requests += items.size();
+        stats_.compute_us += latency_us;
     }
 
 }  // namespace shipinfer

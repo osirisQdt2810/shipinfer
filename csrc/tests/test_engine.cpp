@@ -57,11 +57,14 @@ namespace {
         void execute(int rows) override {
             ++executes;
             last_rows = rows;
+            // The sleep is BEFORE the throw, so a failing execute really spends its latency.
+            // Without that, "a thrown batch adds nothing to `compute_us`" would pass because
+            // no time was spent rather than because the counter excludes it.
+            if (latency_.count() > 0) std::this_thread::sleep_for(latency_);
             if (fail_next) {
                 fail_next = false;
                 throw BackendError("injected engine failure");
             }
-            if (latency_.count() > 0) std::this_thread::sleep_for(latency_);
             std::memcpy(output_.data(), input_.data(),
                         static_cast<size_t>(rows) * width_ * sizeof(float));
         }
@@ -275,6 +278,52 @@ namespace {
               "and the stats keep them apart: 2 requests, 4 rows, got " +
                   std::to_string(instance.stats().requests) + " and " +
                   std::to_string(instance.stats().rows));
+        instance.stop();
+    }
+
+    // check: OCCUPANCY IS SUMMED MICROSECONDS, AND A THROWN BATCH IS NOT CHARGED.
+    // The counter itself had no behavioural test on either plane: deleting the `+=` is caught
+    // by anything, corrupting it by nothing. `latency_us` is already a /1000 from nanoseconds,
+    // so a second /1000 is the edit invited here -- hence a floor and a ceiling, not `> 0`.
+    void test_occupancy_is_summed_microseconds_and_a_thrown_batch_is_not_charged() {
+        constexpr auto kLatency = 40ms;
+        auto engine_ptr = std::make_unique<IdentityEngine>(Device::cuda(0), 4, 1, kLatency);
+        IdentityEngine* engine = engine_ptr.get();
+        ModelInstance instance("m:0", std::move(engine_ptr), BatchWindow(4, 0), 16);
+        instance.start();
+        instance.wait_ready(2s);
+        std::vector<float> one{1.f};
+        for (int frame = 0; frame < 2; ++frame) {
+            WorkItem item(a_request("a", frame, one, 1));
+            auto future = item.future();
+            instance.enqueue(std::move(item));
+            future.get();  // one at a time, so the two are two batches rather than one
+        }
+        const double floor_us = 2.0 * static_cast<double>(kLatency.count()) * 1000.0;
+        check(instance.stats().batches == 2, "two serialised requests are two batches");
+        check(instance.stats().compute_us >= floor_us * 0.95,
+              "compute_us is microseconds really spent, got " +
+                  std::to_string(instance.stats().compute_us) +
+                  ", want >= " + std::to_string(floor_us * 0.95));
+        check(instance.stats().compute_us < floor_us * 20.0,
+              "and not a coarser unit than microseconds, got " +
+                  std::to_string(instance.stats().compute_us));
+
+        const double before = instance.stats().compute_us;
+        engine->fail_next = true;
+        WorkItem doomed(a_request("a", 9, one, 1));
+        auto fd = doomed.future();
+        instance.enqueue(std::move(doomed));
+        bool failed = false;
+        try {
+            fd.get();
+        } catch (const BackendError&) {
+            failed = true;
+        }
+        check(failed, "the doomed batch's caller hears the engine's error");
+        check(instance.stats().failed_batches == 1, "the failed batch is counted");
+        check(instance.stats().compute_us == before,
+              "and it adds nothing to compute_us, though the engine slept before throwing");
         instance.stop();
     }
 
@@ -547,6 +596,7 @@ int main() {
     test_an_instance_answers_with_the_rows_it_was_given();
     test_every_output_is_scattered_and_named();
     test_two_requests_are_batched_and_scattered_to_their_own_callers();
+    test_occupancy_is_summed_microseconds_and_a_thrown_batch_is_not_charged();
     test_a_failing_engine_fails_the_batch_and_the_instance_serves_the_next();
     test_a_request_wider_than_the_engine_is_refused_not_misread();
     test_an_engine_whose_width_and_shape_disagree_is_refused_at_construction();

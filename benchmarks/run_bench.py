@@ -458,10 +458,19 @@ def measure_shipinfer(
 # doc: long why the pair is printed by ONE function, which is #168's review round 2
 def _print_device_table(
     heading: Sequence[str],
-    per_device: Mapping[str, Mapping[str, int]],
-    per_device_rows: Mapping[str, Mapping[str, int]],
+    tables: Mapping[str, Mapping[str, Mapping[str, float]]],
+    seconds: float = 0.0,
 ) -> None:
-    """Print the per-device breakdown -- requests and rows -- for either caller.
+    """Print the per-device breakdown -- requests, rows and occupancy -- for either caller.
+
+    ONE MAPPING and not one parameter per table, which is round 3 of the same last mile. Round
+    1 added rows to the child's table only; round 2 shared this function so the formatting
+    could not diverge -- and round 3 still dropped occupancy, because a shared printer with
+    three positional tables is still supplied one call site at a time. Now the caller hands
+    over one bag keyed by `DEVICE_TABLES` -- `device_tables(result)` from a single process and
+    `device_tables_of(agg)` from the sharded parent, both built by walking that tuple rather
+    than by naming keys, so a fourth table reaches both outputs without either call site
+    changing.
 
     ONE function and not two, because there are two of these tables (a shard child's own and
     the sharded parent's aggregate) and round 1 of this change added rows to the child's
@@ -472,8 +481,11 @@ def _print_device_table(
 
     Rows go on their own line and only when they DIFFER from requests: a detector gets one
     frame per request so the two are equal and a second identical line is noise, while an
-    embedder's gap IS the crop fan-out.
+    embedder's gap IS the crop fan-out. Occupancy goes on a third when the caller knows the
+    wall clock, because microseconds without it are unreadable and a reader who divides will
+    divide by the wrong thing.
     """
+    per_device = tables.get("per_device", {})
     if not per_device:
         return
     for line in heading:
@@ -483,10 +495,20 @@ def _print_device_table(
         # child's logical ordinal; the parent's table relabels to physical GPUs.
         spread = "  ".join(f"{d}={n}" for d, n in sorted(devices.items()))
         print(f"  {model:<18} {spread}")
-        rows = per_device_rows.get(model, {})
+        rows = tables.get("per_device_rows", {}).get(model, {})
         if rows and rows != devices:
             spread = "  ".join(f"{d}={n}" for d, n in sorted(rows.items()))
             print(f"  {'  (rows)':<18} {spread}")
+        busy = tables.get("per_device_compute_us", {}).get(model, {})
+        if busy and seconds > 0:
+            spread = "  ".join(
+                # One decimal, matching `cli/bench.cpp`'s `setprecision(1)`: at `:.0f` a
+                # light-load run's 3.5/3.6/3.7% came out as three identical cells and
+                # anything under 0.5% read as "idle" rather than "lightly loaded".
+                f"{d}={us / (seconds * 1e6) * 100:.1f}%"
+                for d, us in sorted(busy.items())
+            )
+            print(f"  {'  (busy)':<18} {spread}")
 
 
 def measure_shipinfer_in_full(
@@ -536,8 +558,8 @@ def measure_shipinfer_in_full(
         shipinfer.reconcile(result, ours.images_per_s)
     _print_device_table(
         ["\nper-device execution (the balancing evidence):"],
-        result.per_device,
-        result.per_device_rows,
+        shipinfer.device_tables(result),
+        cfg.seconds,
     )
     offered = shipinfer.offered_rates(cfg, result)
     capacity = shipinfer.per_module_capacity(cfg, instances=result.instances)
@@ -590,8 +612,8 @@ def measure_sharded(
             "\nper-device execution (the balancing evidence; under `service` a request that",
             "left its shard is counted where it ran):",
         ],
-        agg["per_device"],
-        agg.get("per_device_rows", {}),
+        shipinfer.device_tables_of(agg),
+        cfg.seconds,
     )
     detail = "; ".join(
         f"shard {r['shard']} gpu{r['gpus']}: "
