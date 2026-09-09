@@ -1757,6 +1757,23 @@ hook down, for when the operator asked to see something before it is executed.
       parse first. I did NOT take the reviewer's suggested column-0 device check: a top-level
       `configure()` whose body touches a device carries no device token on its own line, so it
       would have been round 7. Suite 4060 passed; `a6d1fef`.
+      **ROUND 7 (9 Sep) WAS THE SAME SENTENCE IN A THIRD PLACE, and it dates to round 4 rather
+      than to round 6.** `answers_for_itself` resolved `-m` for ANY program, so a token in a
+      compiled binary's argv named the allow-list entry: `csrc/build/bench -m pytest --cameras
+      50 --help` was allowed while `int main()` in `test_pipeline.cpp` takes no argv to read it
+      with. Four spellings including the attached `-mshipinfer`; `main` refuses all four. So the
+      branch shipped `test_a_py_file_in_argv_does_not_vouch_for_the_binary` and reopened the
+      same hole one token over. Fixed by putting the interpreter guard ABOVE the `-m`
+      resolution -- the guard the file's other two `_module_at` consumers already carried.
+      DECLINED, with the measurement: the reviewer's non-blocking symmetry suggestion for
+      `_asks_for_help`'s own `_module_at`, which only EXCLUDES launchers and so errs strict --
+      the three `csrc/build/* -m <launcher> --help` spellings refuse either way, and adding it
+      moves a check in the loosening direction for no gain.
+      STATED ON THE THREAD: if round 8 finds a FOURTH place that same sentence belongs, I close
+      the PR rather than patch again. Suite 4065 passed; `3ae0489`.
+      THE LESSON FOR THE NEXT TIME A RESOLVER IS ADDED: `_module_at` has three consumers and
+      the rule "judge the program that RUNS" was applied to them one review round at a time.
+      Grep every consumer of a resolver in the SAME commit that fixes one of them.
 
 - [x] **OUR-ARM-HAD-NO-HOST-CPU-LINE · MERGED as #191 (91c2fb6, 9 Sep), the owed half of the item below.** Both arms
       print the same line now, from a shared `harness/hostcpu.py` with two readings:
