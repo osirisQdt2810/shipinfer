@@ -1127,6 +1127,60 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 6 · The final goal (V49)
 
+- [ ] **NOT-GPU-BOUND-AT-FIVE-GPUS · opened 9 Sep, and it redirects where the next win is.**
+      The route has been treated as GPU-limited all along and the two wins so far were GPU-side
+      (the `output_stream` barrier, the intake's stream). `per_device_busy_pct` -- new, this
+      item's enabler -- says that is no longer where the limit is. 50x20x70 s on FIVE IDLE GPUs
+      (1/2/3/4/6), occupancy as a percentage of each model's instance ceiling:
+        model             busy%   inst   ceiling   of capacity
+        ship_detector     156.1      2       200       78%
+        person_embedder   139.6      2       200       70%
+        ship_segmenter    130.2      2       200       65%
+        ship_embedder      49.7      1       100       50%
+        TOTAL             475.6      7       700       68%
+      NOTHING IS NEAR ITS CEILING, and the balance across devices is 1-2%. So the bottleneck is
+      not a model's instance count and not one slow device.
+      AND THE SHED CONTRADICTS SATURATION, which is the part that names the shape:
+      `queue_rejected` 25 998 -- 26k frames refused at the pipeline queue -- while
+      `pipeline_buffer_size` ENDS AT 18 of 155 and every model queue is shallow (0/9/25/5).
+      A full queue that sheds and then empties is shedding in BURSTS, not because average
+      capacity is short.
+      THE SCALING SAYS THE SAME THING: 141 events/s per GPU on THREE idle GPUs (30 cameras, ten
+      per GPU) against 119 on FIVE idle GPUs (50 cameras, ten per GPU). Same per-GPU camera
+      load, MORE total cameras, LOWER per-GPU throughput -- so the limit scales with cameras
+      rather than with GPUs.
+      LEADING HYPOTHESIS, stated as one because the cause is not measured yet: host CPU. Fifty
+      camera actors plus two RTSP servers plus 69 pipeline workers share 48 cores in one
+      container, so the worker pool stalls in bursts, the queue fills momentarily and sheds
+      while the GPUs idle at 68%.
+      **AND THE DECISIVE TEST IS DONE, same session: it is the host, not the queue.** Raised
+      `pipeline_queue` 256 -> 1024 (confirmed applied in the plan) and re-ran, same five idle
+      GPUs, everything else identical:
+                              queue 256   queue 1024   change
+        queue_rejected           25 998       22 891     -12%
+        events_complete          41 811       42 569    +1.8%
+        collector_timeouts           17           32     +88%
+        occupancy total %         475.6        477.1     +1.5
+      FOUR TIMES THE QUEUE BOUGHT 1.8% OF EVENTS, with GPU occupancy FLAT and reassembly
+      timeouts DOUBLED. So the rejected frames were never going to be served: the queue was
+      not the constraint, and a deeper one only converts the shortfall into latency -- which is
+      exactly what `PipelineSettings.queue_capacity`'s own docstring warns ("small on purpose:
+      a deep queue in front of the pipeline converts a throughput problem into a latency one
+      and then hides it"). That note is now measured rather than asserted.
+      SO THE EASY KNOB IS RULED OUT and the wall is host-side. What is NOT yet measured is
+      which host cost: the fifty camera actors, the two in-container RTSP servers, the 69
+      pipeline workers, or the reassembly. The cheap next cut is to drop the RTSP servers out
+      of the equation -- `--source replay` reads frames from disk with no server and no
+      per-camera GStreamer pipeline -- and compare occupancy at the same camera count. If
+      occupancy rises there, the servers and the decode threads are the cost; if it does not,
+      it is the workers or reassembly.
+      NOT A GPU PROBLEM, which is the redirection this item exists for: two wins in a row came
+      from GPU-side fixes and a third one would be looking where the time is not.
+      WHY IT MATTERS FOR `C1`: our events figure is depressed by host work the baseline does
+      not do -- it is one binary reading JPEGs with no RTSP servers, no fifty actors and no
+      reassembly -- which is why `events` is the softest of C1's three ratios and why the
+      rows/pixels ones are the ones measuring model work.
+
 - [!] **C1-WHAT-IS-THE-5x-AGAINST? · OPERATOR, and it is one question with three measured
       answers. THE CURRENT NUMBERS ARE HERE; everything below this block is the chronology of
       how they were arrived at, and its early figures are SUPERSEDED by these.**
