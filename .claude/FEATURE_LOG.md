@@ -5,6 +5,21 @@ edits, typo fixes and pure docs.
 
 ---
 
+## 2026-09-09 — threads: the C++ plane says what each of its threads is
+
+Python named all six of its threads; `csrc/` named none of its seventeen, so `top -H` and
+`/proc/<tid>/comm` showed fifty-odd rows called `bench`. The reader that matters is per-thread
+accounting: `NOT-GPU-BOUND-AT-FIVE-GPUS` measured the wall as host CPU and left "which threads
+spend it" open, and `C1`'s gap to the >=5x target IS that host cost. `core/thread_name.h` is
+header-only for the offline lane and truncates from the END, because with a short class prefix
+the head is what distinguishes; fifteen bytes is the kernel's number, since `pthread_setname_np`
+returns ERANGE at sixteen and then sets nothing. Proved against `pthread_getname_np` and a real
+CUDA-free binary's `/proc`, where eight camera actors read `cam-cam0`..`cam-cam7`. ONE PLANE
+ONLY: Python's `Thread(name=)` never reaches `/proc` (measured) and `_thread.set_name` is 3.14
+against this tree's 3.10, so `PYTHON-THREADS-ARE-UNNAMED-TO-THE-KERNEL` carries that route.
+
+---
+
 ## 2026-09-09 — occupancy: the counter that says whether the GPUs are the limit (#170, #175)
 
 `compute_us` sums the wall time around `execute()` on BOTH planes, under the lock that already
