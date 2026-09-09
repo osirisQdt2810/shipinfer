@@ -1044,6 +1044,33 @@ class TestAHelpQueryIsInspectionAndNotARun:
         assert refused("python scripts/build_engines.py --help") is None
         assert refused("python train.py --device cuda --help") is None
 
+    def test_a_program_with_no_argv_parser_gets_no_carve_out(self, tmp_path: Path) -> None:
+        """Round 3, and the sharpest of the three: the trust is in EVIDENCE OF A PARSER, not in
+        "a script file". `python x.py --help` short-circuits only if `x.py` reads argv -- and an
+        ad-hoc probe script is the one python shape that habitually has no `argparse`, so
+        `--help` is an unrecognised token nobody reads and the script RUNS. Measured: it opened
+        a host CUDA context.
+        """
+        bare = tmp_path / "adhoc_probe.py"
+        bare.write_text("import torch\nprint(torch.ones(1).cuda())\n", encoding="utf-8")
+        parsed = tmp_path / "tool.py"
+        parsed.write_text(
+            "import argparse\nimport torch\nargparse.ArgumentParser().parse_args()\n",
+            encoding="utf-8",
+        )
+
+        assert refused(f"python {bare} --help", tmp_path) is not None
+        assert refused(f"python {bare} --device cuda --help", tmp_path) is not None
+        assert (
+            refused(f"python {parsed} --help", tmp_path) is None
+        ), "a program that shows a parser is the case the carve-out is for"
+
+    def test_an_unreadable_program_is_not_distrusted(self, tmp_path: Path) -> None:
+        """Nothing to read is nothing to distrust, and `script_touches_device` reads the same
+        way about the same file -- so `python train.py --help` for a path that is not there
+        stays allowed rather than becoming a refusal nobody can explain."""
+        assert refused("python train.py --device cuda --help", tmp_path) is None
+
     def test_the_carve_out_stops_at_a_double_dash(self) -> None:
         """Everything after `--` belongs to whatever the program is wrapping, so a `--help`
         there is not the program's own flag."""

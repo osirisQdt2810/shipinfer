@@ -585,8 +585,9 @@ def _is_help_query(program: str, args: list[str]) -> bool:
     `-c` body, the flag before any `--`, an exact token. Resolve ``program`` to one name first
     or this answers for `_indirection`, the one check argv must never answer for.
 
-    The asymmetry is the interesting part: a script FILE's parser is trusted, an inline body's
-    is not, because there is none.
+    The asymmetry is the interesting part, and it is about EVIDENCE rather than category: a
+    program that shows an argv parser is trusted (`program_without_a_parser`, checked by the
+    caller, which has the `cwd`); an inline body is not, because there is nothing to show.
     """
     if program in PASS_THROUGH_LAUNCHERS or any(a in PASS_THROUGH_LAUNCHERS for a in args):
         return False
@@ -999,17 +1000,60 @@ def script_touches_device(args: list[str], cwd: str | None) -> str | None:
     for the same reason. Both are allowed by the rule, and a refusal kills the whole `Bash`
     call, so an edit chained before one never ran.
     """
+    for program, body in _readable_programs(args, cwd):
+        if DEVICE_IMPORT.search(body):
+            return program
+    return None
+
+
+#: Evidence that a program reads its own argv, which is what `--help` needs in order to
+#: short-circuit. A NAME, not a behaviour, and that is the honest bound: a file importing
+#: `argparse` might still ignore `--help`, but one that imports none of these and never touches
+#: `sys.argv` certainly does -- and an ad-hoc probe script is exactly that shape.
+ARGV_PARSER = re.compile(
+    r"^\s*(?:import|from)\s+(?:argparse|click|typer|absl|fire|docopt)\b|sys\.argv",
+    re.MULTILINE,
+)
+
+
+def _readable_programs(args: list[str], cwd: str | None) -> list[tuple[str, str]]:
+    """Each program in ``args`` that is a readable file, with its source.
+
+    One walk for the two readers below it. `script_touches_device` asks whether the body
+    imports a device stack; `program_without_a_parser` asks whether it reads its own argv.
+    Both were doing the same `is_file` / `read_text` dance and the second one grew out of the
+    first, so they share it rather than drifting.
+    """
     root = Path(cwd) if cwd else Path.cwd()
+    found: list[tuple[str, str]] = []
     for program in _script_programs(args):
         candidate = Path(program)
         path = candidate if candidate.is_absolute() else root / candidate
         try:
             if not path.is_file():
                 continue  # `-o out.py probe.py`: an option's value, not the program
-            body = path.read_text(errors="replace")[:SCRIPT_READ_LIMIT]
+            found.append((program, path.read_text(errors="replace")[:SCRIPT_READ_LIMIT]))
         except OSError:
             continue
-        if DEVICE_IMPORT.search(body):
+    return found
+
+
+# doc: long why the trust is in evidence of a parser and not in "a script file"
+def program_without_a_parser(args: list[str], cwd: str | None) -> str | None:
+    """A program whose file shows no argv parser, so `--help` is just an argv token.
+
+    THE TRUST IS NOT IN "A SCRIPT FILE", IT IS IN EVIDENCE OF A PARSER -- which is round 3 of
+    this carve-out, and the sharpest of the three. `python x.py --help` short-circuits only if
+    `x.py` reads argv; an ad-hoc probe script is the one python shape that habitually has no
+    `argparse` at all, so `--help` is an unrecognised token nobody reads and the script RUNS.
+    Measured: `python /tmp/adhoc_probe.py --help` opened a host CUDA context.
+
+    Unreadable paths answer None, so `python train.py --help` for a file that is not there
+    stays allowed -- there is nothing to distrust, and `script_touches_device` reads the same
+    way about the same file.
+    """
+    for program, body in _readable_programs(args, cwd):
+        if not ARGV_PARSER.search(body):
             return program
     return None
 
@@ -1084,11 +1128,15 @@ def verdict(command: str, cwd: str | None = None) -> str | None:
             continue
         base = exe.rsplit("/", 1)[-1]
 
-        if _is_help_query(base, args):
+        if _is_help_query(base, args) and program_without_a_parser(args, cwd) is None:
+            # doc: long the two conditions, one per review round, and what each one caught
             # AFTER `_indirection` and after the nested re-read above, which is the whole of
             # what the first draft got wrong: applied to an unresolved argv, a `--help` token
             # answered for those two -- so `bash -c "pytest -m gpu" --help` and
             # `RUN=./gpu_all.sh; $RUN --help` were allowed. `exe` is one program name here.
+            #
+            # AND the program must show a parser. A file with no `argparse` and no `sys.argv`
+            # does not short-circuit on `--help`; it runs, which is round 3's finding.
             continue
 
         if base in BLOCKED_COMMANDS:
