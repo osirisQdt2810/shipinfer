@@ -103,6 +103,9 @@ class ModelInstance:
         self._settled = threading.Event()
         self._start_error: BaseException | None = None
         self._ewma_latency_us = 0.0
+        # Summed, not smoothed: an EWMA cannot be turned back into a total, and the
+        # total over wall time is the occupancy. Its C++ twin is `InstanceStats`.
+        self._executed_compute_us = 0.0
         self._executed_batches = 0
         self._executed_requests = 0
         # Rows, not requests: one request may carry many crops, so these differ by
@@ -380,6 +383,9 @@ class ModelInstance:
             with timer.phase("compute_infer"):
                 outputs = self._backend.execute(batch.inputs, batch.size)
         except Exception as exc:
+            # Not charged to `compute_us`: this returns before `_observe`, so a run with many
+            # failures reports less occupancy than the hardware spent. `InstanceStats` in
+            # `csrc/shipinfer/engine/instance.h` says the same beside `failed_batches`.
             self._failed_batches += 1
             self._fail_batch(items, exc)
             return
@@ -452,6 +458,7 @@ class ModelInstance:
         self._executed_rows += batch.size
         # EWMA rather than a running mean: the placement policies want "how loaded is this
         # instance *now*", and a lifetime average stops responding after an hour of uptime.
+        self._executed_compute_us += compute_us
         self._ewma_latency_us = (
             compute_us
             if self._ewma_latency_us == 0.0
@@ -522,6 +529,11 @@ class ModelInstance:
             # limiter that is shaping a burst from one that is configured and never reached.
             "rate_limit_waits": self._rate_limit_waits,
             "ewma_latency_us": round(self._ewma_latency_us, 1),
+            # Cumulative over the WHOLE run, warm-up included, while the throughput printed
+            # beside it is differenced against an at-warmup snapshot. So a percentage built
+            # from this understates the steady one -- `InstanceStats` in
+            # `csrc/shipinfer/engine/instance.h` carries the size of that and the ledger item.
+            "compute_us": round(self._executed_compute_us, 1),
             "backend": self._backend.stats(),
         }
 

@@ -185,6 +185,7 @@ def _summary(
     binding=None,
     per_device=None,
     per_device_rows=None,
+    per_device_compute_us=None,
 ) -> dict:
     return {
         "shard": shard,
@@ -200,6 +201,7 @@ def _summary(
         },
         "per_device": per_device or {},
         "per_device_rows": per_device_rows or {},
+        "per_device_compute_us": per_device_compute_us or {},
     }
 
 
@@ -256,6 +258,35 @@ class TestTheSumTheParentReports:
             "requests bucket is exactly the bug this guards"
         )
 
+    def test_occupancy_adds_up_across_shards_too_and_is_not_truncated(self) -> None:
+        """The same last mile, one table further along. #170 round 1 populated
+        `per_device_compute_us` on the result and the parent's aggregate dropped it, exactly as
+        `per_device_rows` was dropped in #167 -- and microseconds are floats, so the `int()`
+        the old accumulator used would have floored each shard's share as well."""
+        agg = shards.aggregate(
+            [
+                _summary(
+                    0,
+                    3,
+                    1.0,
+                    "SUSTAINED",
+                    per_device={"m": {"cuda:3": 40}},
+                    per_device_compute_us={"m": {"cuda:3": 49_000_000.5}},
+                ),
+                _summary(
+                    1,
+                    4,
+                    1.0,
+                    "SUSTAINED",
+                    per_device={"m": {"cuda:4": 10}},
+                    per_device_compute_us={"m": {"cuda:4": 12_500_000.25}},
+                ),
+            ]
+        )
+        assert agg["per_device_compute_us"] == {
+            "m": {"cuda:3": 49_000_000.5, "cuda:4": 12_500_000.25}
+        }
+
     def test_per_device_counts_add_up_across_shards_where_the_work_ran(self) -> None:
         agg = shards.aggregate(
             [
@@ -278,6 +309,10 @@ class TestTheSumTheParentReports:
             "m": {"cuda:4": 7, "cpu": 1}
         }
 
+    def test_relabelling_does_not_truncate_a_microsecond_sum(self) -> None:
+        """It relabels counts AND occupancy now, and `int()` on the latter loses the run."""
+        assert shards._relabel({"m": {"cuda:0": 1.5}}, gpus=(4,)) == {"m": {"cuda:4": 1.5}}
+
 
 class TestTheDeviceTableIsPrintedByOneFunction:
     """Both tables come out of `_print_device_table`, and rows appear only when they differ.
@@ -292,7 +327,9 @@ class TestTheDeviceTableIsPrintedByOneFunction:
     def _printed(self, capsys, per_device, per_device_rows) -> list[str]:
         from benchmarks import run_bench
 
-        run_bench._print_device_table(["HEAD"], per_device, per_device_rows)
+        run_bench._print_device_table(
+            ["HEAD"], {"per_device": per_device, "per_device_rows": per_device_rows}
+        )
         return capsys.readouterr().out.splitlines()
 
     def test_rows_are_shown_when_they_differ_from_requests(self, capsys) -> None:
@@ -324,3 +361,101 @@ class TestTheDeviceTableIsPrintedByOneFunction:
     def test_nothing_at_all_prints_no_heading(self, capsys) -> None:
         """The heading was inside the old `if`, so an empty table must stay silent."""
         assert self._printed(capsys, {}, {}) == []
+
+
+class TestEveryPerDeviceTableCrossesTheShardBoundary:
+    """`DEVICE_TABLES` is the list every hop drives off, and this is what keeps it complete.
+
+    Twice a per-device table was added to `ShipInferResult` and not to the shard boundary --
+    #167 for rows, #170 for occupancy -- so the only mode that can generate the design load
+    printed the table it already had. The child's `summary.json`, `aggregate` and the printer
+    now all read the same tuple, which leaves exactly one way to make that mistake again:
+    adding the field and not listing it. That is what fails here.
+    """
+
+    def test_the_tuple_names_every_per_device_field_of_the_result(self) -> None:
+        from dataclasses import fields
+
+        from benchmarks.harness.shipinfer import DEVICE_TABLES, ShipInferResult
+
+        on_the_result = {
+            f.name for f in fields(ShipInferResult) if f.name.startswith("per_device")
+        }
+        assert on_the_result == set(DEVICE_TABLES)
+
+    def test_the_aggregate_returns_every_one_of_them(self) -> None:
+        from benchmarks.harness.shipinfer import DEVICE_TABLES
+
+        agg = shards.aggregate([_summary(0, 3, 1.0, "SUSTAINED")])
+        assert set(DEVICE_TABLES) <= set(agg)
+
+    def test_the_parent_prints_occupancy_through_measure_sharded(self, capsys, monkeypatch):
+        """Through `measure_sharded`, not through the printer.
+
+        Calling `_print_device_table` directly proves only that the printer works -- I wrote
+        that test first and it passed with the bug put back. The bug WAS the call site
+        choosing keys, so the test has to be the one that does not choose them either.
+        """
+        import contextlib
+
+        from benchmarks import run_bench
+        from benchmarks.harness import rtsp
+
+        summary = dict(
+            _summary(
+                0,
+                3,
+                1.0,
+                "SUSTAINED",
+                per_device={"m": {"cuda:3": 40}},
+                per_device_compute_us={"m": {"cuda:3": 35_000_000.0}},
+            ),
+            log="/dev/null",
+            offered={},
+            capacity={},
+        )
+        monkeypatch.setattr(rtsp, "serving", lambda _cfg: contextlib.nullcontext())
+        monkeypatch.setattr(shards, "run_sharded", lambda _cfg, _out: [summary])
+        monkeypatch.setattr(run_bench, "_analyse", lambda *_a, **_k: None)
+
+        run_bench.measure_sharded(_config(seconds=70.0), Path("/nonexistent"))
+
+        out = capsys.readouterr().out
+        assert "(busy)" in out and "cuda:3=50.0%" in out, out
+
+
+class TestOccupancyIsPrintedAsAPercentage:
+    """The third line of the device table, and the one that redirected an optimisation.
+
+    Requests and rows say what a model was ASKED to do; only time says whether it could.
+    Printing raw microseconds would be unreadable and a reader who divides them will divide
+    by the wrong thing, so the caller passes the wall clock and this prints a percentage.
+    """
+
+    def _printed(self, capsys, seconds, compute_us) -> list[str]:
+        from benchmarks import run_bench
+
+        # `None` means the KEY is absent, which is what an older shard child actually sends --
+        # an empty dict under the right name would be a different, easier case.
+        tables = {"per_device": {"m": {"cuda:0": 10}}, "per_device_rows": {"m": {"cuda:0": 10}}}
+        if compute_us is not None:
+            tables["per_device_compute_us"] = compute_us
+        run_bench._print_device_table(["HEAD"], tables, seconds)
+        return capsys.readouterr().out.splitlines()
+
+    def test_a_busy_line_appears_with_the_percentage(self, capsys) -> None:
+        out = self._printed(capsys, 70.0, {"m": {"cuda:0": 49_000_000.0}})
+        # One decimal, matching `cli/bench.cpp`: at `:.0f` a light-load run's 3.5/3.6/3.7%
+        # printed as three identical cells and anything under 0.5% read as "idle".
+        assert any("(busy)" in line and "70.0%" in line for line in out), out
+
+    def test_no_wall_clock_means_no_busy_line(self, capsys) -> None:
+        """Rather than print microseconds nobody can read, or divide by a zero."""
+        out = self._printed(capsys, 0.0, {"m": {"cuda:0": 49_000_000.0}})
+        assert not any("(busy)" in line for line in out), out
+
+    def test_an_absent_table_is_fine(self, capsys) -> None:
+        """A shard child from before this counter sends none, and the parent must still print."""
+        out = self._printed(capsys, 70.0, None)
+        assert "cuda:0=10" in out[1]
+        assert not any("(busy)" in line for line in out), out

@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -810,9 +811,11 @@ int main(int argc, char** argv) {
         for (const auto& [name, model] : models) {
             std::map<int, uint64_t> by_device;
             std::map<int, uint64_t> rows_by_device;
+            std::map<int, double> compute_by_device;
             for (const auto& instance : model->instances()) {
                 by_device[instance->device().index] += instance->stats().requests;
                 rows_by_device[instance->device().index] += instance->stats().rows;
+                compute_by_device[instance->device().index] += instance->stats().compute_us;
             }
             std::cout << "per_device " << name;
             for (const auto& [device, count] : by_device)
@@ -821,6 +824,27 @@ int main(int argc, char** argv) {
             std::cout << "per_device_rows " << name;
             for (const auto& [device, count] : rows_by_device)
                 std::cout << " " << device << ":" << count;
+            std::cout << "\n";
+            // doc: long why this is a percentage and not the microseconds it is made of
+            // OCCUPANCY, not raw time. A microsecond total is unreadable without the wall
+            // clock beside it, and a reader who has to divide will divide by the wrong thing
+            // -- the run is `--seconds` long but an instance only exists for the serving
+            // window. `compute_us / (seconds * 1e6)` per instance, summed per device and
+            // printed as a percentage: 100% means that device's instances of this model were
+            // executing the whole run, so the model is the bottleneck rather than merely the
+            // busiest-looking. Above 100% is legitimate and means several instances per
+            // device, which is what `instances_per_device` says it configured.
+            std::cout << "per_device_busy_pct " << name;
+            for (const auto& [device, micros] : compute_by_device) {
+                const double pct =
+                    options.seconds > 0.0 ? micros / (options.seconds * 1e6) * 100.0 : 0.0;
+                // Formatted aside rather than on `std::cout`: `std::defaultfloat` restores
+                // the float FORMAT and not the precision, so `setprecision(1)` would leak
+                // onto the stream and cut the next double printed anywhere to one digit.
+                std::ostringstream cell;
+                cell << std::fixed << std::setprecision(1) << pct;
+                std::cout << " " << device << ":" << cell.str();
+            }
             std::cout << "\n";
         }
         std::cout << "\n";

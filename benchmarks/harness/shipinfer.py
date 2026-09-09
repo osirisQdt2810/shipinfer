@@ -151,6 +151,10 @@ class ShipInferResult:
     #: embedder's differ by the crop fan-out. Reporting only requests understates this plane
     #: against a one-model-per-image baseline by exactly that fan-out.
     per_device_rows: dict[str, dict[str, int]] = field(default_factory=dict)
+    #: model -> device -> execute MICROSECONDS, summed. Over the steady window this
+    #: is occupancy, and occupancy is the only counter that distinguishes "the models
+    #: are the limit" from "the models are idle and something upstream is short".
+    per_device_compute_us: dict[str, dict[str, float]] = field(default_factory=dict)
     instances: dict[str, int] = field(default_factory=dict)
     ops: str = ""
     stages: tuple[str, ...] = ()
@@ -160,6 +164,28 @@ class ShipInferResult:
     def offered(self) -> dict[str, float | None]:
         """Offered rate per module, for the analysis. Filled by the driver."""
         return {}
+
+
+#: Every per-device table on the result, by the name it carries here AND in a shard's
+#: `summary.json` -- deliberately the same string, so a table cannot reach the parent under a
+#: different name, and `_print_device_table` can be handed a whole aggregate. Adding a field
+#: and not listing it here is the omission #167 and #170 both made; a test now catches it.
+DEVICE_TABLES = ("per_device", "per_device_rows", "per_device_compute_us")
+
+
+def device_tables(result: ShipInferResult) -> dict[str, dict[str, dict[str, float]]]:
+    """One result's per-device tables, keyed as the printer and a shard's summary key them."""
+    return {name: getattr(result, name) for name in DEVICE_TABLES}
+
+
+def device_tables_of(mapping: Mapping[str, Any]) -> dict[str, dict[str, dict[str, float]]]:
+    """The same tables out of a shard aggregate, which carries other keys beside them.
+
+    Driven off `DEVICE_TABLES` and not spelled out, so this is not the key-picking the printer
+    stopped doing -- a fourth table arrives here without an edit. What it buys is an honest
+    signature at the call site: the printer's parameter really is only these tables.
+    """
+    return {name: mapping.get(name, {}) for name in DEVICE_TABLES}
 
 
 def _cameras(config: BenchConfig) -> list[dict[str, Any]]:
@@ -436,16 +462,20 @@ def run_shipinfer(
         rejected = {n: metrics.requests_rejected.value(model=n) for n in handles}
         per_device: dict[str, dict[str, int]] = {}
         per_device_rows: dict[str, dict[str, int]] = {}
+        per_device_compute_us: dict[str, dict[str, float]] = {}
         for name, handle in handles.items():
             breakdown: dict[str, int] = {}
             rows: dict[str, int] = {}
+            busy: dict[str, float] = {}
             for instance in handle.instances:
                 stats = instance.stats()
                 device = str(stats["device"])
                 breakdown[device] = breakdown.get(device, 0) + int(stats["requests"])
                 rows[device] = rows.get(device, 0) + int(stats["rows"])
+                busy[device] = busy.get(device, 0.0) + float(stats["compute_us"])
             per_device[name] = breakdown
             per_device_rows[name] = rows
+            per_device_compute_us[name] = busy
 
         return ShipInferResult(
             log=log,
@@ -473,6 +503,7 @@ def run_shipinfer(
             requests_rejected=rejected,
             per_device=per_device,
             per_device_rows=per_device_rows,
+            per_device_compute_us=per_device_compute_us,
             instances={n: len(h.instances) for n, h in handles.items()},
             ops=str(runner.health()["ops"]),
             stages=stages,

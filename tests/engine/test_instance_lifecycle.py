@@ -34,10 +34,18 @@ OUTPUTS = (TensorSpec("y", DataType.FP32, (4,)),)
 class SpyBackend:
     """A backend that can be made to block, and that records its own teardown."""
 
-    def __init__(self, *, block: threading.Event | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        block: threading.Event | None = None,
+        delay_s: float = 0.0,
+        error: Exception | None = None,
+    ) -> None:
         self.finalized = 0
         self.initialized = 0
         self._block = block
+        self._delay_s = delay_s
+        self._error = error
         self.device = Device.cpu()
         self.context = _Ctx()
 
@@ -55,6 +63,12 @@ class SpyBackend:
             # Blocks until the test releases it, standing in for a batch still inside a
             # TensorRT enqueue when shutdown begins.
             self._block.wait(timeout=30)
+        if self._delay_s:
+            time.sleep(self._delay_s)
+        # AFTER the delay, so a failing batch has really spent time inside `execute` -- which
+        # is what makes "and it is still not charged" mean something.
+        if self._error is not None:
+            raise self._error
         return {"y": Tensor.from_numpy(np.zeros((batch_size, 4), dtype=np.float32))}
 
     def stats(self) -> dict:
@@ -148,6 +162,60 @@ class TestStatsSeparateRowsFromRequests:
             assert stats["rows"] == stats["requests"] == 3, stats
         finally:
             instance.stop()
+
+
+class TestOccupancyIsSummedTimeAndOnlyForWorkThatRan:
+    """`compute_us` is the counter the "are we GPU-bound?" reading is built on.
+
+    Deleting the `+=` any suite catches; CORRUPTING it none did. `latency_us` is itself a
+    `/1000.0` from nanoseconds, so a second `/1000.0` is the edit that line invites, and it
+    turns 156% of an instance's ceiling into 0.2% -- "the GPUs are idle", which is a roadmap
+    decision rather than a red run. So the unit is pinned with a floor AND a ceiling.
+    """
+
+    #: Long enough that the floor cannot be met by scheduling noise, short enough that two of
+    #: them stay well inside the futures' own patience.
+    DELAY_S = 0.05
+
+    def test_the_sum_is_microseconds_of_time_really_spent(self) -> None:
+        backend = SpyBackend(delay_s=self.DELAY_S)
+        instance = _instance(backend)
+        instance.start()
+        try:
+            for _ in range(2):
+                item = _item()
+                instance.enqueue(item)
+                item.future.result(timeout=5.0)  # one at a time, so two batches not one
+            stats = instance.stats()
+        finally:
+            instance.stop()
+        floor_us = 2 * self.DELAY_S * 1e6
+        assert stats["batches"] == 2, stats
+        # 0.95 is for clock granularity, not tolerance: a unit slip is three orders of
+        # magnitude away in either direction, so neither bound is close to the truth.
+        assert stats["compute_us"] >= floor_us * 0.95, stats
+        assert stats["compute_us"] < floor_us * 20, stats
+
+    def test_a_batch_the_backend_threw_on_is_not_charged(self) -> None:
+        """The caveat `failed_batches` documents on both planes, asserted nowhere until now.
+        A run with many failures under-reports occupancy, which is exactly the reading that
+        would mislead someone chasing "the GPUs look idle"."""
+        backend = SpyBackend(delay_s=self.DELAY_S, error=RuntimeError("engine died"))
+        instance = _instance(backend)
+        instance.start()
+        try:
+            item = _item()
+            instance.enqueue(item)
+            # The instance re-raises the backend's own error to the caller (`_fail_batch`
+            # calls `item.fail(error)`), so this names it rather than catching anything.
+            with pytest.raises(RuntimeError, match="engine died"):
+                item.future.result(timeout=5.0)
+            stats = instance.stats()
+        finally:
+            instance.stop()
+        assert stats["failed_batches"] == 1, stats
+        assert stats["batches"] == 0, stats
+        assert stats["compute_us"] == 0.0, stats
 
 
 class TestBackendTeardownOnStop:

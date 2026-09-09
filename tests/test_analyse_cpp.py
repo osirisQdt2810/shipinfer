@@ -107,6 +107,36 @@ class TestTheCeilingEachModuleIsScoredAgainst:
         assert found["something_new"] == 12
 
 
+class TestTheBinaryReportsOccupancyAndNotRawMicroseconds:
+    """`per_device_busy_pct` is the one number that says whether a stage is the bottleneck.
+
+    Requests and rows say how much a model was ASKED to do; only time says whether it could.
+    The three prior counters could not distinguish "the GPUs are full" from "the GPUs are
+    idle and something upstream is short", and that distinction is what redirected the next
+    optimisation away from the GPU (`NOT-GPU-BOUND-AT-FIVE-GPUS`).
+    """
+
+    def test_the_binary_prints_a_percentage_keyed_per_device(self) -> None:
+        body = BENCH.read_text("utf-8")
+
+        assert "per_device_busy_pct" in body, "the occupancy line is gone"
+        assert "compute_us" in body, "and it has to be built from the summed time, not the EWMA"
+        assert "ewma_latency_us" not in body.split("per_device_busy_pct")[1][:400], (
+            "occupancy must not be derived from the EWMA: an exponential average times a "
+            "batch count is not a total, which is the whole reason `compute_us` was added"
+        )
+
+    def test_the_summed_time_exists_on_both_planes(self) -> None:
+        """The sync rule (V88/V89): a per-frame counter on one plane and not the other is the
+        gap that made the crop fan-out invisible for months."""
+        cpp = (ROOT / "csrc" / "shipinfer" / "engine" / "instance.cpp").read_text("utf-8")
+        py = (ROOT / "src" / "shipinfer" / "engine" / "instance.py").read_text("utf-8")
+
+        assert "stats_.compute_us +=" in cpp, "C++ does not sum execute time"
+        assert "_executed_compute_us +=" in py, "Python does not sum execute time"
+        assert '"compute_us"' in py, "and Python's stats() does not report it"
+
+
 class TestTheDriverDoesNotHideTheChainLine:
     """The standard driver's summary must show which slots did NOT run.
 
