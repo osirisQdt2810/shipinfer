@@ -40,6 +40,14 @@ namespace shipinfer {
         //: profile cannot use: an EWMA times a batch count is not a total. Divided by the
         //: run's wall time this is the instance's OCCUPANCY, which is the only thing that
         //: says whether a stage is the bottleneck or merely the busiest-looking.
+        //:
+        //: WALL TIME AROUND `execute()`, NOT GPU TIME, and the difference is load-bearing: a
+        //: host stall inside that span -- a descheduled worker thread on a contended box --
+        //: inflates this without the GPU doing anything. So occupancy is an UPPER BOUND on
+        //: GPU utilisation. Measured: the same load over `replay` instead of RTSP completed
+        //: 16.6% MORE events with 11.5 points LESS occupancy, because the host was freer and
+        //: `execute()` returned sooner. Read it as "not the bottleneck" with confidence and
+        //: as "this much GPU" only with that caveat.
         double compute_us = 0.0;
     };
 
