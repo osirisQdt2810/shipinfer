@@ -587,6 +587,75 @@ class TestANameIsNotAnInvocation:
         tightening, and it is what makes "command position" true rather than nearly true."""
         assert refused(self.PY.format(body)) is not None
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            'import os\nif not os.path.exists("csrc/build/bench"):\n    print("build it")',
+            'import os\nprint(os.path.basename("benchmarks/bench_baseline.py"))',
+            'import os\nprint(os.path.join("pytest", "x"))',
+            'import os\nos.remove("benchmarks/run_bench.py.orig")',
+            'import os\nprint(os.environ.get("pytest"))',
+        ],
+    )
+    def test_an_os_call_that_does_not_run_anything_is_data(self, body: str) -> None:
+        """Qualifying on the module ROOT made `os.path.exists` "shelling out", so a heredoc
+        that checks whether the baseline binary is built -- before telling the operator to
+        build it -- was refused. That is this class's own failure mode, reintroduced by its
+        own fix. The entry point is what qualifies: `os.system`, `os.popen`, `os.exec*`,
+        `os.spawn*`, `pty.spawn`, `runpy.run_*`, and all of `subprocess`."""
+        assert refused(self.PY.format(body)) is None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'python -c \'import subprocess; subprocess.run(["python", "benchmarks/run_bench.py"])\'',
+            "python -c 'import os; os.system(\"python benchmarks/run_bench.py\")'",
+            "python -c 'exec(open(\"benchmarks/run_bench.py\").read())'",
+        ],
+    )
+    def test_an_interpreter_does_not_hide_the_runner_behind_it(self, command: str) -> None:
+        """`main` refused all three by whole-text match, and taking the HEAD word only lost
+        them. It matters more than a fast-path regression here: `grep -rn require_container
+        benchmarks/` finds only `stages.py` and `kernels.py`, so for the system-tier run this
+        repository's headline number comes from, the hook is the only guard."""
+        assert refused(command) is not None
+
+    def test_a_wrapper_inside_a_string_is_stepped_over_too(self) -> None:
+        """`real_command` already knows how, so it is reused rather than reimplemented. Both
+        of these were open on `main` as well."""
+        assert (
+            refused(
+                self.PY.format(
+                    'import subprocess\nsubprocess.run(["bash","-lc","benchmarks/run_bench.py"])'
+                )
+            )
+            is not None
+        )
+        assert (
+            refused(
+                self.PY.format(
+                    'import subprocess\nsubprocess.run("env FOO=1 pytest -m gpu", shell=True)'
+                )
+            )
+            is not None
+        )
+
+    def test_a_shell_body_reads_every_command_on_a_line(self) -> None:
+        """The two readings had disagreed: `cd /work && pytest -m gpu` was refused inside
+        `subprocess.run(..., shell=True)` and allowed in a `bash -s` body, byte for byte."""
+        assert refused(self.SH.format("cd /work && pytest -m gpu")) is not None
+        assert refused(self.SH.format('echo "pytest -m gpu"')) is None
+
+    def test_a_nested_tools_dash_c_is_not_the_interpreters(self) -> None:
+        """`_inline_source` directly, and deliberately: this is not observable through
+        `verdict()`, because `"pytest.ini"` parses as an attribute expression with no call and
+        is allowed anyway. `-m` ends option processing -- `_script_programs` already knew that
+        and `_inline_source` did not, so the knowledge belongs in both."""
+        assert refused("python -m pytest -c pytest.ini tests/core") is None
+        assert hook._inline_source(["-m", "pytest", "-c", "pytest.ini"]) is None
+        assert hook._inline_source(["-c", "print(1)"]) == "print(1)"
+        assert hook._inline_source(["-cprint(1)"]) == "print(1)"
+
     def test_a_reader_collecting_a_runners_file_is_not_running_it(self) -> None:
         """A decision rather than a side effect: `pytest` is a reader, the offline tier runs
         anywhere (ADR-001), and pytest COLLECTS that file rather than running it as a

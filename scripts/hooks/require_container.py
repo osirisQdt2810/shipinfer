@@ -422,39 +422,55 @@ def _imports_device_stack(source: str) -> bool:
     return False
 
 
-#: Modules whose functions hand a string to a shell or exec a program, so a blocked command
-#: named in one of their calls really is invoked. Everything else in a python body is data.
-_SHELLING_OUT = frozenset({"subprocess", "os", "pty", "runpy"})
+#: Modules whose names a body may bind, so an alias can be resolved back to the canonical
+#: dotted path before it is matched. `subprocess` is whole because everything callable in it
+#: execs; `os`, `pty` and `runpy` are not -- see `_SHELLING_OUT_CALL`.
+_SHELLING_OUT_MODULES = frozenset({"subprocess", "os", "pty", "runpy"})
+
+#: The ENTRY POINTS that hand a string to a shell or exec a program. Qualifying on the module
+#: ROOT instead made `os.path.exists("csrc/build/bench")` "shelling out", so a heredoc that
+#: checks whether the baseline binary is built before telling the operator to build it was
+#: refused -- the false-positive direction this whole change exists to repair.
+_SHELLING_OUT_CALL = re.compile(
+    r"^(?:subprocess\.|os\.(?:system|popen|exec|spawn|posix_spawn)"
+    r"|pty\.(?:spawn|fork)|runpy\.run_)"
+)
+
+#: Builtins that run source they are handed. Their payload is nested rather than positional
+#: (`exec(open(P).read())`), so `_first_words` walks a call to one of these.
+_SOURCE_BUILTINS = frozenset({"exec", "eval"})
 
 
-def _shelling_out_names(tree: ast.Module) -> set[str]:
-    """The names in *this body* that reach `_SHELLING_OUT`, aliases included.
+def _bound_names(tree: ast.Module) -> dict[str, str]:
+    """Name bound in *this body* -> the canonical dotted path it stands for.
 
-    Matching the unparsed callee against a literal `subprocess.` prefix missed
-    `import subprocess as sp` and `from subprocess import run` -- both of which `main` also
-    allowed, so not a regression, but the docstring claimed command position was handled and
-    it was handled for one spelling of it.
+    `import subprocess as sp` binds `sp` to `subprocess`; `from subprocess import run` binds
+    `run` to `subprocess.run`. Without this, matching the unparsed callee missed both, and
+    both are ordinary.
     """
-    names: set[str] = set()
+    bound: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name.split(".")[0] in _SHELLING_OUT:
-                    names.add(alias.asname or alias.name)
-        elif (
-            isinstance(node, ast.ImportFrom)
-            and (node.module or "").split(".")[0] in _SHELLING_OUT
+                if alias.name.split(".")[0] in _SHELLING_OUT_MODULES:
+                    bound[alias.asname or alias.name.split(".")[0]] = alias.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom) and (node.module or "") in (
+            _SHELLING_OUT_MODULES
         ):
             for alias in node.names:
-                names.add(alias.asname or alias.name)
-    return names
+                bound[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return bound
 
 
-def _is_shelling_out(func: ast.expr, names: set[str]) -> bool:
-    """Whether this callee is one of the names that shells out."""
+def _is_shelling_out(func: ast.expr, bound: dict[str, str]) -> bool:
+    """Whether this callee actually runs something, after resolving the body's own aliases."""
     target = ast.unparse(func)
-    root = target.split(".")[0]
-    return root in _SHELLING_OUT or root in names or target in names
+    if target in _SOURCE_BUILTINS:
+        return True
+    head, _, rest = target.partition(".")
+    if head in bound:
+        target = bound[head] + ("." + rest if rest else "")
+    return bool(_SHELLING_OUT_CALL.match(target))
 
 
 def _blocked_word(words: list[str]) -> str | None:
@@ -478,8 +494,30 @@ _SHELL_SEPARATOR = re.compile(r"&&|\|\||[;|&]")
 
 
 def _command_words(text: str) -> list[str]:
-    """The first word of each command in a shell string."""
-    return [part.split()[0] for part in _SHELL_SEPARATOR.split(text) if part.split()]
+    """Every command position in a shell string: one per command, plus what it launches.
+
+    The head word alone was not enough. `os.system("python benchmarks/run_bench.py")` puts an
+    INTERPRETER at the head and the runner behind it, and `main`'s whole-text match had been
+    covering that -- for the one path where the hook is the only guard, since
+    `benchmarks/run_bench.py` and `benchmarks/harness/` call `runtime.containment` nowhere.
+    `real_command` already knows how to step over wrappers, so it is reused here.
+    """
+    out: list[str] = []
+    for part in _SHELL_SEPARATOR.split(text):
+        try:
+            tokens = shlex.split(part, comments=False)
+        except ValueError:
+            tokens = part.split()
+        if not tokens:
+            continue
+        exe, rest = real_command(tokens)
+        if exe is None:
+            continue
+        out.append(exe)
+        # `python <program>`: the operand is a program, which is #174's rule inside a string.
+        if PYTHON_RE.search(exe.rsplit("/", 1)[-1]) or exe.rsplit("/", 1)[-1] == "python":
+            out.extend([t for t in rest if not t.startswith("-")][:1])
+    return out
 
 
 def _first_words(call: ast.Call) -> list[str]:
@@ -490,14 +528,29 @@ def _first_words(call: ast.Call) -> list[str]:
     than running a suite. Keywords as well as positional args, because `run(args=[...])` is
     the same call.
     """
+    if isinstance(call.func, ast.Name) and call.func.id in _SOURCE_BUILTINS:
+        # `exec(open("benchmarks/run_bench.py").read())`: the payload is nested, not an
+        # argument, so every string inside the call is a candidate program.
+        return [
+            word
+            for node in ast.walk(call)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            for word in _command_words(node.value)
+        ]
     out: list[str] = []
     for arg in [*call.args, *(kw.value for kw in call.keywords)]:
         if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
             out.extend(_command_words(arg.value))
         elif isinstance(arg, (ast.List, ast.Tuple)) and arg.elts:
-            head = arg.elts[0]
-            if isinstance(head, ast.Constant) and isinstance(head.value, str):
-                out.extend(_command_words(head.value))
+            # The whole list, joined: `["python", "run_bench.py"]` is one command line, and
+            # only the first element was read -- the same head-word-only miss as above.
+            words = [
+                e.value
+                for e in arg.elts
+                if isinstance(e, ast.Constant) and isinstance(e.value, str)
+            ]
+            if words:
+                out.extend(_command_words(" ".join(words)))
         elif isinstance(arg, ast.JoinedStr):
             for part in arg.values:
                 if isinstance(part, ast.Constant) and isinstance(part.value, str):
@@ -509,7 +562,10 @@ def _first_words(call: ast.Call) -> list[str]:
 def _text_runs_blocked(source: str) -> str | None:
     """A blocked command in *command position* on some line, or None. For SHELL bodies."""
     for line in source.splitlines():
-        found = _blocked_word(line.strip().split(" ")[:1])
+        # `_command_words`, so `cd /work && pytest -m gpu` is two commands here as well --
+        # the byte-identical string inside `subprocess.run(..., shell=True)` was already read
+        # that way, and the two readings disagreeing is the bug in miniature.
+        found = _blocked_word(_command_words(line))
         if found is not None:
             return found
     return None
@@ -530,11 +586,11 @@ def _python_runs_blocked(source: str) -> str | None:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
         return _text_runs_blocked(source)
-    names = _shelling_out_names(tree)
+    bound = _bound_names(tree)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        if not _is_shelling_out(node.func, names):
+        if not _is_shelling_out(node.func, bound):
             continue
         found = _blocked_word(_first_words(node))
         if found is not None:
@@ -672,6 +728,8 @@ _READER_MODULES = READ_ONLY_TOOL_MODULES | {"pytest", "py.test", "py_compile", "
 def _inline_source(args: list[str]) -> str | None:
     """The source after `-c`, in either spelling, or None."""
     for index, token in enumerate(args):
+        if token == "-m" or (token.startswith("-m") and len(token) > 2):
+            return None  # `-m` ended option processing; a later `-c` is the module's
         if token == "-c":
             return args[index + 1] if index + 1 < len(args) else ""
         if token.startswith("-c") and len(token) > 2 and not token.startswith("--"):
