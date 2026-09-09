@@ -23,6 +23,7 @@
 #include "tests/parity_files.h"
 #include "tests/parity_trace.h"
 #include "tests/queue_scenario.h"
+#include "tests/temp_path.h"
 
 namespace {
 
@@ -202,7 +203,7 @@ namespace {
     // has, so both parsers are held to the same refusals -- see
     // `test_parity_queues.py::TestScenarioFormat`.
     void test_a_malformed_scenario_is_refused_naming_the_line() {
-        const std::string path = "/tmp/shipinfer_queue_parity_probe.scn";
+        const std::string path = tests::temp_path("queue-parity-probe");
         {
             std::ofstream out(path);
             out << "scenario bad\nqueue fair\ncapacity 2\noverflow reject\n"

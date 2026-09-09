@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "shipinfer/ingest/camera_uris.h"
+#include "tests/temp_path.h"
 
 namespace {
 
@@ -29,10 +30,10 @@ namespace {
     }
 
     std::string a_file(const std::string& body) {
-        // `tmpnam` is deprecated for a good reason but this is a test binary with no attacker;
-        // what matters is that the path is distinct per call so two cases cannot collide.
+        // Distinct per CALL so two cases cannot collide, and per PROCESS so two runs
+        // cannot -- the counter alone was the first half only (`tests/temp_path.h`).
         static int counter = 0;
-        const std::string path = "/tmp/shipinfer-uris-" + std::to_string(++counter) + ".txt";
+        const std::string path = tests::temp_path("uris-" + std::to_string(++counter));
         std::ofstream out(path, std::ios::trunc);
         out << body;
         return path;
@@ -96,8 +97,9 @@ namespace {
     void a_missing_file_is_refused_by_name() {
         std::string message;
 
-        check(refused("/tmp/shipinfer-uris-nonexistent", 1, message), "no file, no run");
-        check(message.find("/tmp/shipinfer-uris-nonexistent") != std::string::npos,
+        const std::string absent = tests::temp_path("uris-absent");
+        check(refused(absent, 1, message), "no file, no run");
+        check(message.find(absent) != std::string::npos,
               "and the path is in the message: " + message);
     }
 
