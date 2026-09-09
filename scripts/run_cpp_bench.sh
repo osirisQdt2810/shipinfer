@@ -66,6 +66,10 @@ SHIPINFER_PIPELINE__WORKERS="${SHIPINFER_BENCH_WORKERS:-$((WORKERS_PER_GPU * NGP
 SOURCE="${SHIPINFER_BENCH_SOURCE:-replay}"
 if [ "$SOURCE" = "replay" ]; then
   SOURCE_ARGS=(--source replay)
+  # BOTH arms report `command_cpu_s`, because that is the only way the RTSP arm's penalty can
+  # be attributed: `generator_cpu_s` (the servers, RTSP arm only) is cost no deployment pays,
+  # and the difference in `command_cpu_s` between the arms is our own decode threads.
+  export SHIPINFER_CPP_COMMAND="python /work/scripts/host_cpu.py -- /work/csrc/build/${SHIPINFER_CPP_BINARY:-bench}"
 else
   SOURCE_ARGS=(--source "$SOURCE")
   # The wrapper reads `--cameras`/`--fps` off the argv below rather than from the environment,
@@ -93,7 +97,7 @@ echo "exit=$status"
 # in none of these summaries, because this alternation is anchored on counter names -- so a
 # reader of THIS output, which is the documented one, could quote a throughput number from a
 # run whose chain was missing `track` and `mtmc` without ever seeing that. That happened.
-grep -E '^(chain |startup_s|frames_read|frames_dropped|frames_accepted|frames_failed|events_emitted|events_complete|events_incomplete|queue_rejected|collector_)' \
+grep -E '^(chain |host cpu:|startup_s|frames_read|frames_dropped|frames_accepted|frames_failed|events_emitted|events_complete|events_incomplete|queue_rejected|collector_)' \
   "$REPO/.artifacts/cpp/${LABEL}.log" || true
 echo "--- final occupancy ---"
 tail -1 "$REPO/.artifacts/cpp/${LABEL}.jsonl"
