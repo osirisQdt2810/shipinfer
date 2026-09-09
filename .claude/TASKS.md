@@ -1146,12 +1146,22 @@ hook down, for when the operator asked to see something before it is executed.
 
 - [ ] **HOOK-REFUSES-A-HEREDOC-THAT-ONLY-QUOTES-A-WORD · the same family, one branch over.**
       `python3 - <<PY` whose body merely mentions `pytest` inside a STRING LITERAL is refused
-      as "a heredoc executed by an interpreter runs `pytest`" -- three times in one session,
-      and each refusal ended the whole `Bash` call, so the edit chained ahead of it never ran.
-      `test_an_executed_heredoc_merely_quoting_a_device_call_is_allowed` already exists for
-      device tokens; `BLOCKED_SCRIPTS` has no such carve-out. Deliberately left out of #174 to
-      keep that PR one change. Fix: judge a heredoc body the way a script file is judged --
-      what it RUNS, not what it names -- which is #174's rule applied one branch over.
+      as "a heredoc executed by an interpreter runs `pytest`" -- four times in one session, and
+      each refusal ended the whole `Bash` call, so the edit chained ahead of it never ran. It
+      also refused #174's own reviewer while they were posting the review, and it refuses
+      `python scripts/hooks/check_docs.py benchmarks/run_bench.py` because the joined args
+      MENTION a blocked script. WHERE, exactly (the reviewer found this): the body-as-program
+      check was already upgraded to an AST for this reason, while the `BLOCKED_COMMANDS` loop
+      right under it still matches `line.strip().split(" ")[0]`, so a markdown table row
+      starting with the word `pytest` "runs the suite". Fix: the same upgrade, one loop down --
+      judge what a body RUNS, not what it names, which is #174's rule verbatim.
+
+- [ ] **HOOK-FAILS-OPEN-ON-SPELLINGS-IT-DOES-NOT-MODEL · not #174's, but the same shape.**
+      Open on `main` and untouched by #174: `python -m shipinfer serve` (the subcommand list is
+      only consulted when `base == "shipinfer"`), bare `torchrun`, and `uv run pytest -m gpu`.
+      Each is a launcher the hook does not model, and each reaches no `containment.py`. Not a
+      hunk in a PR about `-m`: the fix is to decide what a launcher IS -- a command whose
+      operand is a program -- and there are at least three of them.
 
 - [ ] **OCCUPANCY-INCLUDES-THE-WARMUP-WINDOW · the one reading here that is not conservative.**
       `compute_us` is cumulative and both readers divide by the full `--seconds`, while
@@ -1213,6 +1223,16 @@ hook down, for when the operator asked to see something before it is executed.
       `script_touches_device` walks the executor region's candidates taking the first that is
       a readable FILE -- which also closes the `-o out.py probe.py` residue. The lesson is the
       same one twice: **a rule about a grammar has to model the grammar, not a token.**
+      **Round 3 was the real one: the LIST was the defect.** Carving out eight executors fixed
+      eight instances and left every other module failing OPEN -- `-m unittest`, `-m nose2`,
+      `-m IPython`, `-m line_profiler`, `-m torchrun`, and `-m torch.distributed.run
+      --nproc_per_node=2` which starts TWO host CUDA contexts. Ten rows `main` refused.
+      Inverted to `_READER_MODULES` (deny by default, carve out the readers): shorter than the
+      allowlist, and the whole matrix is now identical to `main` bar five rows. Also fixed the
+      candidate walk stopping at the first READABLE file, which let an earlier run's own
+      output decide -- refused once, allowed the next time. I fixed instances of a class twice
+      after writing the argument against doing that; the reviewer had to say "the list is the
+      defect" before I saw it.
 
 - [x] **OFFLINE-TIER-HAS-A-FLAKY-GATE · FIXED, MERGED AS #171 (9 Sep).**
       #170's `cpp-offline` went red on `test_join_on_unwind`, which my diff CANNOT reach: that
