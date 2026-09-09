@@ -5472,7 +5472,36 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       not staged, so the stash was a no-op and both runs printed the same number. Redone with
       `git checkout origin/main -- deploy/rootless/test.sh`. A before/after that prints the same number
       twice is a measurement bug, not a null result.
-- [!] **V124a · OPERATOR DECISION OWED (phase 2) before phase 3 can build — the crop-sampling convention.**
+- [ ] **V124a-PHASE3 · thin `runtime/ops` to an adapter over shipvision, on the frame-clamp
+      convention decided above.** What STAYS (system, per V50): the `ImageOps` ABC, the
+      registry/factory/thread-local binding, `native_ops.py` as the adapter, and the #31 pinned
+      staging -- the adapter asks shipvision for device-out (`letterbox_into`/`crop_batch_into`
+      on a `DeviceBuffer`) and stages the copy home itself. What MOVES: `torch_ops.py` and
+      `numpy_ops.py` implementations. Pixel deltas re-baselined in the tests; submodule bump in
+      its own commit (ADR-010). GATED ON `V124b` landing first, so this one can auto-merge.
+      NOT on the >=5x path -- `C1a-kernel` measured the fused kernels at 1.07-1.12x, not 50x --
+      so this is duplication debt, sequenced after anything the system still needs.
+
+- [x] **V124a · DECIDED BY ME 9 Sep under V154, not owed any longer: ADOPT SHIPVISION'S
+      FRAME-CLAMP.** The recommendation was already written here with its reasons and I am
+      taking it rather than holding the lane for an opinion: frame-clamp is what shipvision's
+      numpy ORACLE, its parity suite AND its native kernels all implement, while patch-clamp
+      exists only in shipinfer's torch path -- whose own numpy oracle is not pixel-comparable
+      anyway. It changes pixels at every box edge, so **say so if you want patch-clamp** and
+      phase 3 changes direction; nothing is built on this yet.
+      **THE OWED PREREQUISITE IS NOW EVIDENCE, 9 Sep: shipvision `-m native` is 386 passed, 1
+      skipped** (optuna, an optional extra) in the bench container. So the native rows this
+      lane adapts onto are real rather than skipped, which is what the note asked for.
+      HOW TO RUN IT, because the obvious way is a silent no-op and cost me a run: the default
+      `deploy/rootless/run.sh` image has no `/usr/local/cuda*`, so `import shipvision._C`
+      raises `ImportError: libcudart.so.12` and ALL 387 native tests SKIP -- "387 skipped" reads
+      like a pass and proves nothing. It needs `SHIPINFER_TEST_IMAGE=shipinfer-gst:jammy` and
+      `LD_LIBRARY_PATH=/usr/local/cuda-12.6/lib64`, and importing `torch` first also works
+      (it loads its own libcudart with RTLD_GLOBAL).
+      A GUARD WORTH HAVING, and it is shipvision's to add (peer's lane): "built but unloadable"
+      is not "not built". A conftest that finds `_C.*.so` ON DISK and cannot import it should
+      FAIL, naming the loader error, instead of skipping 387 tests.
+      ORIGINAL QUESTION (kept for the reasoning): the crop-sampling convention.
       Question for the operator: crops at box edges — adopt shipvision's frame-clamp convention (recommended: its
       oracle, parity suite AND native kernels all implement it) or keep shipinfer #30's patch-clamp (exists only in
       shipinfer's torch path)? Phase 3 (thinning runtime/ops to an adapter) starts on the answer. Original item:
@@ -5519,7 +5548,16 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       src change). OWED: a `-m native` container run before the parent adapts onto this
       path (native rows all skip in the unbuilt clone). Detection heads deliberately
       uncapped — max_detections wiring is a separate decision, not phase 1.
-- [!] **V124b · RECOMMENDED (a), awaiting operator ack — the CI consequence, decided before V124a lands:** shipinfer's offline tier
+- [~] **V124b · DECIDED 9 Sep under V154 -- (a), and it is now a small PR rather than an ack:**
+      CI checks out shipvision's PYTHON half only (no build; it is pure Python), which extends
+      to the plain runner what `test.sh` already does inside the container. Not (b): a pip
+      dependency would make the parent's offline tier depend on a published artefact, which
+      ADR-010's pinned-commit rule exists to avoid.
+      SEQUENCED FIRST ON PURPOSE. It edits `.github/workflows/**`, so the review job cannot
+      mint a token and it needs YOUR manual merge (the known permanent exception) -- and #169
+      is the lesson about what happens when that lands in the SAME PR as the code: phase 3
+      then cannot auto-merge either. Small PR now, phase 3 as an ordinary one after.
+      ORIGINAL: shipinfer's offline tier
       deliberately checks out no submodule (ADR-001), so after the move the ops tests
       need one of: (a) CI checks out the submodule's PYTHON half (no build — pure python;
       test.sh already PYTHONPATHs it in the container, so this extends the same move to
