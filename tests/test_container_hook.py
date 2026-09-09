@@ -276,6 +276,211 @@ class TestReadOnlyToolsAreNotExecutionVectors:
         assert refused(command, cwd=tmp_path) is not None
 
 
+class TestAScriptsOperandsAreData:
+    """A script's arguments are its input, not a second program.
+
+    `script_touches_device` scanned EVERY `.py` argument, so a linter was refused for its
+    INPUT file's imports and an offline `python -m pytest tests/<one_file>.py` for the same
+    reason -- while the identical run without the path, and the same path with `::a_test_id`
+    after it, both passed. That inconsistency is the tell. It cost more than a retry: a
+    refusal ends the whole `Bash` call, so an edit chained before one never ran.
+
+    Same argument as `READ_ONLY_TOOL_MODULES`, one spelling over.
+    """
+
+    def test_a_linter_over_a_device_importing_file_is_allowed(self, tmp_path: Path) -> None:
+        linter = tmp_path / "check_docs.py"
+        linter.write_text("import ast\nimport sys\n")
+        target = tmp_path / "model.py"
+        target.write_text("import torch\n")
+        assert refused(f"python {linter} {target}") is None
+
+    def test_the_program_itself_is_still_judged_by_its_contents(self, tmp_path: Path) -> None:
+        """The half that must not be lost: the FIRST operand is still read and still refused."""
+        program = tmp_path / "probe.py"
+        program.write_text("import torch\n")
+        data = tmp_path / "data.py"
+        data.write_text("VALUE = 1\n")
+        assert refused(f"python {program} {data}") is not None
+
+    def test_a_flag_value_is_not_mistaken_for_the_program(self, tmp_path: Path) -> None:
+        """`-X importtime` puts a bare word before the script; the script is still the script."""
+        program = tmp_path / "probe.py"
+        program.write_text("import tensorrt\n")
+        assert refused(f"python -X importtime {program}") is not None
+
+    def test_an_offline_pytest_naming_one_file_is_allowed(self) -> None:
+        """ADR-001: the offline tier runs anywhere, and naming one of its files does not
+        change that. `pytest tests/pipeline/test_runner.py` was already allowed; the module
+        form of the identical run was not."""
+        assert refused("python -m pytest tests/pipeline/test_runner.py -q") is None
+
+    def test_the_device_tier_naming_that_same_file_is_still_refused(self) -> None:
+        assert refused("python -m pytest tests/pipeline/test_runner.py -m gpu") is not None
+
+    def test_a_scripts_own_dash_m_flag_does_not_hide_it(self, tmp_path: Path) -> None:
+        """`-m` after the program is the PROGRAM's flag: CPython ends option processing at the
+        first operand. Reading the whole argv made `python probe.py -m yolov8n` -- ordinary
+        shape for a probe -- look like a module invocation, so its program went unread."""
+        probe = tmp_path / "probe.py"
+        probe.write_text("import torch\ntorch.cuda.init()\n")
+        assert refused(f"python {probe} -m yolov8n") is not None
+        assert refused(f"python {probe} -mfoo") is not None
+        assert refused(f"python {probe} -m gpu") is not None
+        # Stricter than `main`, which reached the read-only carve-out with a module name that
+        # was never the interpreter's.
+        assert refused(f"python {probe} -m black") is not None
+
+    def test_an_interpreter_value_flag_before_a_module_still_finds_it(self) -> None:
+        """The half that fix could have broken: `-W ignore` puts a bare word before `-m`, and
+        it must not be mistaken for the operand that ends option processing."""
+        assert refused("python -W ignore -m pytest -m gpu") is not None
+        assert refused("python -X importtime -m pytest -m multigpu") is not None
+        assert refused("python -W ignore -m pytest tests/core -q") is None
+
+    def test_a_module_still_hides_no_program_behind_it(self, tmp_path: Path) -> None:
+        """`pytest`'s operands are pytest's: the TIER decides, above, not the file's imports.
+        Its executor siblings are the opposite case and are pinned right below."""
+        target = tmp_path / "model.py"
+        target.write_text("import torch\n")
+        assert refused(f"python -m pytest {target} -q") is None
+        assert refused(f"python -m pytest {target} -m multigpu") is not None
+
+
+class TestAModulesOperandIsAProgramUnlessTheModuleOnlyReads:
+    """`-m` ends CPython's option processing; it does not end EXECUTION.
+
+    Two rounds of getting the DIRECTION wrong. First every module's operands were data, which
+    allowed `python -m cProfile probe.py`. Then eight executors were carved out, which still
+    failed OPEN for every module not on the list -- `-m unittest`, `-m torch.distributed.run`,
+    `-m IPython`, ten rows `main` refused. An allowlist of executors fixes instances; denying
+    by default and carving out the readers fixes the class, and is shorter.
+    """
+
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "python -m cProfile {p}",
+            "python -m cProfile -o /tmp/out.prof {p}",  # options, with a value, before it
+            "python -mcProfile {p}",  # the attached spelling
+            "python -m pdb {p}",
+            "python -m trace --trace {p}",
+            "python -m runpy {p}",
+            "python -m coverage run {p}",  # a subcommand before it
+            "python -m memory_profiler {p}",
+            # Not on any list, and that is the point: these are the rows an allowlist of
+            # executors let through, and the worst of them starts TWO host CUDA contexts.
+            "python -m torch.distributed.run --nproc_per_node=2 {p}",
+            "python -m torchrun {p}",
+            "python -m unittest {p}",
+            "python -m unittest -v {p}",
+            "python -m nose2 {p}",
+            "python -m IPython {p}",
+            "python -m ipdb {p}",
+            "python -m line_profiler {p}",
+            "python -m yappi {p}",
+        ],
+    )
+    def test_a_module_that_runs_its_operand_is_refused(self, template: str, tmp_path: Path):
+        probe = tmp_path / "probe.py"
+        probe.write_text("import torch\ntorch.cuda.init()\n")
+        assert refused(template.format(p=probe)) is not None
+
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "python -m black --check {p}",
+            "python -m isort --check {p}",
+            "python -m ruff check {p}",
+            "python -m py_compile {p}",
+            "python -m json.tool {p}",  # the dotted name, which the root alone would miss
+        ],
+    )
+    def test_a_module_that_reads_its_operand_is_allowed(self, template: str, tmp_path: Path):
+        """The other half, pinned against the one above, because it is the same rule: what
+        RUNS is judged, what is merely READ is data. This list is the whole carve-out, so a
+        module missing from it fails closed -- which is the direction two rounds got wrong."""
+        target = tmp_path / "model.py"
+        target.write_text("import torch\n")
+        assert refused(template.format(p=target)) is None
+
+    def test_the_executors_own_dash_c_is_not_the_interpreters(self, tmp_path: Path) -> None:
+        """`-m` already ended option processing, so a `-c` after the module name is always the
+        executor's: `pdb -c continue` is the documented non-interactive spelling and
+        `trace -c` is `--count`. Bailing on it dropped the program."""
+        probe = tmp_path / "probe.py"
+        probe.write_text("import torch\ntorch.cuda.init()\n")
+        assert refused(f"python -m pdb -c continue {probe}") is not None
+        assert refused(f"python -m trace -c {probe}") is not None
+
+    def test_an_options_value_is_not_the_program(self, tmp_path: Path) -> None:
+        """Three shapes. `--include=probe.py` is an option, skipped before the suffix test.
+        `-o out.py` is a bare value that looks exactly like a program. And the same command
+        run TWICE: the first run creates `out.py`, so a scan that stopped at the first
+        *readable* candidate allowed the second -- a guard that changes its mind is worse than
+        one that is merely strict."""
+        probe = tmp_path / "probe.py"
+        probe.write_text("import torch\ntorch.cuda.init()\n")
+        out = tmp_path / "out.py"
+        assert refused(f"python -m coverage run --include={probe} {probe}") is not None
+        assert refused(f"python -m cProfile -o {out} {probe}") is not None
+        out.write_text("# written by the run above\n")
+        assert refused(f"python -m cProfile -o {out} {probe}") is not None
+
+    def test_option_tokens_never_become_candidates(self) -> None:
+        """`_script_programs` directly, and deliberately: skipping option tokens is not
+        observable through `verdict()` any more, because an unreadable candidate is now passed
+        over anyway and `--include=probe.py` is unreadable as a path. The candidate list is
+        still where "what is a program" is decided, so that is where it is asserted."""
+        argv = ["-m", "coverage", "run", "--include=probe.py", "-o", "out.py", "probe.py"]
+
+        assert hook._script_programs(argv) == ["out.py", "probe.py"]
+
+    def test_an_executor_running_a_module_leaves_the_decision_to_the_module(self) -> None:
+        """`coverage run -m pytest` reaches a second `-m`, so the INNER module decides. The
+        offline spelling is allowed and the device tier is not."""
+        assert refused("python -m coverage run -m pytest tests/core -q") is None
+        assert refused("python -m coverage run -m pytest -m gpu") is not None
+
+    @pytest.mark.parametrize(
+        "outer", ["coverage run", "cProfile", "pdb", "memory_profiler", "runpy"]
+    )
+    @pytest.mark.parametrize(
+        "inner", ["unittest", "cProfile", "runpy", "torch.distributed.run"]
+    )
+    def test_a_nested_module_gets_the_same_decision_as_the_outer_one(
+        self, outer: str, inner: str, tmp_path: Path
+    ) -> None:
+        """The cross product, which is where this class hid. Breaking out of the scan on a
+        second `-m` deferred to the module branch -- and that branch judges only
+        `BLOCKED_MODULES`, so `coverage run -m unittest probe.py` was judged by nobody. The
+        inner module now gets the same reader/executor question the outer one got."""
+        probe = tmp_path / "probe.py"
+        probe.write_text("import torch\ntorch.ones(1)\n")
+        assert refused(f"python -m {outer} -m {inner} {probe}") is not None
+
+    def test_an_attached_nested_module_is_no_different(self, tmp_path: Path) -> None:
+        probe = tmp_path / "probe.py"
+        probe.write_text("import torch\ntorch.ones(1)\n")
+        assert refused(f"python -m coverage run -mrunpy {probe}") is not None
+
+    def test_an_option_that_looks_like_a_module_does_not_drop_the_program(
+        self, tmp_path: Path
+    ) -> None:
+        """The same bug from the other side: an executor's own `-m` OPTION is not a nested
+        module invocation, and either way the program must still be read."""
+        probe = tmp_path / "probe.py"
+        probe.write_text("import torch\ntorch.ones(1)\n")
+        assert refused(f"python -m mymodule -m gpu {probe}") is not None
+
+    def test_a_nested_reader_still_reads(self, tmp_path: Path) -> None:
+        """The other half: `coverage run -m black model.py` runs a READER on that file, so
+        the file is data. Looser than `main`, and it is the same rule as `-m black` alone."""
+        target = tmp_path / "model.py"
+        target.write_text("import torch\n")
+        assert refused(f"python -m coverage run -m black {target}") is None
+
+
 class TestTheGuardCanFail:
     """Without this, a hook that always allowed would pass everything above."""
 
