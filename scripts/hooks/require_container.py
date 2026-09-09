@@ -422,38 +422,86 @@ def _imports_device_stack(source: str) -> bool:
     return False
 
 
-#: Call targets that hand a string to a shell or exec a program, so a blocked command named
-#: inside one really is invoked. Everything else in a python body is data.
-_SHELLING_OUT = re.compile(r"^(?:subprocess|os|pty|runpy)\.")
+#: Modules whose functions hand a string to a shell or exec a program, so a blocked command
+#: named in one of their calls really is invoked. Everything else in a python body is data.
+_SHELLING_OUT = frozenset({"subprocess", "os", "pty", "runpy"})
+
+
+def _shelling_out_names(tree: ast.Module) -> set[str]:
+    """The names in *this body* that reach `_SHELLING_OUT`, aliases included.
+
+    Matching the unparsed callee against a literal `subprocess.` prefix missed
+    `import subprocess as sp` and `from subprocess import run` -- both of which `main` also
+    allowed, so not a regression, but the docstring claimed command position was handled and
+    it was handled for one spelling of it.
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] in _SHELLING_OUT:
+                    names.add(alias.asname or alias.name)
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and (node.module or "").split(".")[0] in _SHELLING_OUT
+        ):
+            for alias in node.names:
+                names.add(alias.asname or alias.name)
+    return names
+
+
+def _is_shelling_out(func: ast.expr, names: set[str]) -> bool:
+    """Whether this callee is one of the names that shells out."""
+    target = ast.unparse(func)
+    root = target.split(".")[0]
+    return root in _SHELLING_OUT or root in names or target in names
 
 
 def _blocked_word(words: list[str]) -> str | None:
-    """The first of ``words`` that is a blocked command, by its basename."""
+    """The first of ``words`` that names a blocked command or a runner script.
+
+    Both vocabularies, so one scan serves a heredoc body, a `-c` body and an operand list.
+    `BLOCKED_COMMANDS` matches a basename (`pytest`, `/usr/bin/pytest`); `BLOCKED_SCRIPTS`
+    matches as a substring of one token, which is how the executable check already reads it.
+    """
     for word in words:
-        base = word.rsplit("/", 1)[-1]
-        if base in BLOCKED_COMMANDS:
-            return base
+        if word.rsplit("/", 1)[-1] in BLOCKED_COMMANDS:
+            return word.rsplit("/", 1)[-1]
+        if any(script in word for script in BLOCKED_SCRIPTS):
+            return word
     return None
 
 
-def _first_words(call: ast.Call) -> list[str]:
-    """The command word of each string argument of ``call``, list literals included.
+#: What separates one command from the next inside a shell string, so
+#: `subprocess.run("cd /w && pytest -m gpu", shell=True)` has two command positions and not one.
+_SHELL_SEPARATOR = re.compile(r"&&|\|\||[;|&]")
 
-    The FIRST word only, and the first element of a list only, because that is the command
-    position: `subprocess.run(["echo", "pytest"])` echoes a word, it does not run a suite.
+
+def _command_words(text: str) -> list[str]:
+    """The first word of each command in a shell string."""
+    return [part.split()[0] for part in _SHELL_SEPARATOR.split(text) if part.split()]
+
+
+def _first_words(call: ast.Call) -> list[str]:
+    """Every command word of ``call``'s string arguments, keywords included.
+
+    COMMAND POSITION, not every word: the first word of each command in a string, and the
+    first element of a list -- so `subprocess.run(["echo", "pytest"])` echoes a word rather
+    than running a suite. Keywords as well as positional args, because `run(args=[...])` is
+    the same call.
     """
     out: list[str] = []
-    for arg in call.args:
+    for arg in [*call.args, *(kw.value for kw in call.keywords)]:
         if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-            out.extend(arg.value.split()[:1])
+            out.extend(_command_words(arg.value))
         elif isinstance(arg, (ast.List, ast.Tuple)) and arg.elts:
             head = arg.elts[0]
             if isinstance(head, ast.Constant) and isinstance(head.value, str):
-                out.extend(head.value.split()[:1])
+                out.extend(_command_words(head.value))
         elif isinstance(arg, ast.JoinedStr):
             for part in arg.values:
                 if isinstance(part, ast.Constant) and isinstance(part.value, str):
-                    out.extend(part.value.split()[:1])
+                    out.extend(_command_words(part.value)[:1])
                     break
     return out
 
@@ -482,10 +530,11 @@ def _python_runs_blocked(source: str) -> str | None:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
         return _text_runs_blocked(source)
+    names = _shelling_out_names(tree)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        if not _SHELLING_OUT.match(ast.unparse(node.func)):
+        if not _is_shelling_out(node.func, names):
             continue
         found = _blocked_word(_first_words(node))
         if found is not None:
@@ -618,6 +667,16 @@ _PYTHON_VALUE_FLAGS = frozenset({"-W", "-X", "--check-hash-based-pycs"})
 #: one that cost this file `-m cProfile`, then `-m unittest` and `-m torch.distributed.run`
 #: at once. An allowlist of executors fixes instances; this fixes the class (#174 review).
 _READER_MODULES = READ_ONLY_TOOL_MODULES | {"pytest", "py.test", "py_compile", "json.tool"}
+
+
+def _inline_source(args: list[str]) -> str | None:
+    """The source after `-c`, in either spelling, or None."""
+    for index, token in enumerate(args):
+        if token == "-c":
+            return args[index + 1] if index + 1 < len(args) else ""
+        if token.startswith("-c") and len(token) > 2 and not token.startswith("--"):
+            return token[2:]
+    return None
 
 
 def _script_programs(args: list[str]) -> list[str]:
@@ -810,11 +869,20 @@ def verdict(command: str, cwd: str | None = None) -> str | None:
                 if root in BLOCKED_MODULE_ROOTS and not carved_out:
                     return f"`python -m {module}` runs a benchmark on the host."
             # The PROGRAM, not the text. `python scripts/hooks/check_docs.py
-            # benchmarks/run_bench.py` lints a runner; it does not run one, and refusing it
-            # for the name in its operand is the same defect as the heredoc's above.
+            # benchmarks/run_bench.py` lints a runner; it does not run one. EVERY candidate,
+            # which is the list's own contract: `-m cProfile -o prof.py run_bench.py` puts the
+            # profiler's output file at [0], so reading only that missed the runner behind it.
             programs = _script_programs(args)
-            if programs and any(script in programs[0] for script in BLOCKED_SCRIPTS):
+            if any(script in program for program in programs for script in BLOCKED_SCRIPTS):
                 return "this invokes a test or benchmark runner."
+            # A `-c` body is source, so it yields no candidates -- and `main`'s text match
+            # covered it by accident. It is a python body in exactly the sense the heredoc
+            # scan argues for, so it gets the same reading.
+            inline = _inline_source(args)
+            if inline is not None:
+                ran = _python_runs_blocked(inline)
+                if ran is not None:
+                    return f"this inline python runs `{ran}`."
             if DEVICE_TOKENS.search(joined):
                 return "this python reaches for an accelerator on the host."
             script = script_touches_device(args, cwd)

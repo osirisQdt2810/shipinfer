@@ -549,6 +549,50 @@ class TestANameIsNotAnInvocation:
         assert refused("./benchmarks/run_bench.py --systems shipinfer") is not None
         assert refused("csrc/build/bench --cameras 4") is not None
 
+    def test_a_runner_behind_a_profilers_output_file_is_still_found(self, tmp_path) -> None:
+        """`_script_programs` returns a candidate LIST, and its `[0]` can be an option's
+        value. Reading only `[0]` missed the runner at `[1]` -- profiling a benchmark on the
+        host, which is the number CLAUDE.md says is never a production number."""
+        out = tmp_path / "prof.py"
+        out.write_text("# an earlier profile\n")
+        assert refused(f"python -m cProfile -o {out} benchmarks/run_bench.py") is not None
+        assert refused(f"python -m cProfile -o {out} benchmarks/bench_baseline.py") is not None
+
+    def test_an_inline_body_gets_the_same_reading_as_a_heredoc(self) -> None:
+        """A `-c` body is source, so it yields no path candidates at all -- `main`'s text
+        match covered that by accident. It is a python body in exactly the sense this class
+        argues for, so it gets the AST too, and that closes `os.system` as well."""
+        assert (
+            refused(
+                "python -c 'import subprocess; subprocess.run([\"benchmarks/run_bench.py\"])'"
+            )
+            is not None
+        )
+        assert refused("python -c 'import os; os.system(\"pytest -m gpu\")'") is not None
+        assert refused("python -c 'print(\"pytest\")'") is None
+        assert refused("python -c 'import torch; print(torch.__version__)'") is None
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            'import subprocess as sp\nsp.run(["pytest", "-m", "gpu"])',
+            'from subprocess import run\nrun(["pytest", "-m", "gpu"])',
+            'import subprocess\nsubprocess.run(args=["pytest", "-m", "gpu"])',
+            'import subprocess\nsubprocess.run("cd /w && pytest -m gpu", shell=True)',
+        ],
+    )
+    def test_command_position_means_what_the_docstring_says(self, body: str) -> None:
+        """Four spellings the first draft's `subprocess.` prefix and positional-args-only read
+        missed. `main` allows all four -- each line begins with something else -- so this is a
+        tightening, and it is what makes "command position" true rather than nearly true."""
+        assert refused(self.PY.format(body)) is not None
+
+    def test_a_reader_collecting_a_runners_file_is_not_running_it(self) -> None:
+        """A decision rather than a side effect: `pytest` is a reader, the offline tier runs
+        anywhere (ADR-001), and pytest COLLECTS that file rather than running it as a
+        benchmark. `main` refused it for the name in the argv."""
+        assert refused("python -m pytest tests/ benchmarks/run_bench.py") is None
+
 
 class TestTheGuardCanFail:
     """Without this, a hook that always allowed would pass everything above."""
