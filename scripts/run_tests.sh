@@ -16,11 +16,20 @@ set -euo pipefail
 # runner's `python` (setup-python provides it), then `python3` on a distro without the
 # unversioned name.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SEARCHED=0
 if [ -n "${PYTHON:-}" ]; then
   :
 elif [ -x "$REPO_ROOT/.venv/bin/python" ]; then
   PYTHON="$REPO_ROOT/.venv/bin/python"
+  SEARCHED=1
+elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
+  # An ACTIVATED venv outranks the search below: a caller who activated one has said which
+  # interpreter they mean nearly as plainly as `PYTHON=`, and without this a stale `.venv` in
+  # the primary checkout silently wins over it from a linked worktree.
+  PYTHON="$VIRTUAL_ENV/bin/python"
+  SEARCHED=1
 else
+  SEARCHED=1
   # A GIT WORKTREE HAS NO `.venv` OF ITS OWN, and that is the failure above recurring: run
   # from one, this fell through to the system interpreter and said "No module named pytest".
   # The main worktree's venv is the one with the dependencies in it, and `--git-common-dir`
@@ -30,7 +39,9 @@ else
   if [ -n "$MAIN_ROOT" ] && [ -x "$MAIN_ROOT/.venv/bin/python" ]; then
     PYTHON="$MAIN_ROOT/.venv/bin/python"
   else
-    PYTHON="$(command -v python || command -v python3)"
+    # `|| true`, because `set -e` on a failed substitution aborts with ZERO output -- and
+    # silence is the whole thing this block exists to remove. The check below speaks instead.
+    PYTHON="$(command -v python || command -v python3 || true)"
   fi
 fi
 
@@ -38,10 +49,21 @@ fi
 # so falling through is legitimate there -- what is not legitimate is the message it used to
 # fail with, because "No module named pytest" reads like a broken suite rather than a wrong
 # interpreter. This is the whole reason the search above exists, so it is asserted.
+if [ -z "${PYTHON:-}" ]; then
+  echo "run_tests.sh: found no python interpreter at all." >&2
+  echo "  Looked for a venv at $REPO_ROOT/.venv, an activated VIRTUAL_ENV, the main" >&2
+  echo "  worktree's venv, and \`python\`/\`python3\` on PATH." >&2
+  exit 1
+fi
 if ! "$PYTHON" -c "import pytest" >/dev/null 2>&1; then
   echo "run_tests.sh: $PYTHON has no pytest." >&2
-  echo "  Looked for a venv at $REPO_ROOT/.venv and, from a worktree, at the main" >&2
-  echo "  checkout's. Install the dev extra (\`pip install -e '.[dev,cli]'\`) or name an" >&2
+  if [ "$SEARCHED" = "1" ]; then
+    # Only when a search actually happened. Printing where it looked after the caller named
+    # the interpreter with `PYTHON=` describes work nobody did.
+    echo "  Looked for a venv at $REPO_ROOT/.venv, an activated VIRTUAL_ENV, and, from a" >&2
+    echo "  worktree, the main checkout's." >&2
+  fi
+  echo "  Install the dev extra (\`pip install -e '.[dev,cli]'\`) or name an" >&2
   echo "  interpreter: PYTHON=/path/to/python bash scripts/run_tests.sh" >&2
   exit 1
 fi
