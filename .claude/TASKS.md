@@ -1717,7 +1717,15 @@ hook down, for when the operator asked to see something before it is executed.
       It is the same rule as rounds 1 and 5 -- resolve the program to one name before judging
       it -- applied to a third place. A launcher with a script operand is device work whether
       or not the operand resolves, because it forks before it discovers the file is missing.
-      UNBLOCKED 9 Sep: #192 merged (d1b808c), so `require_container.py` is free.
+      **PR #194 OPEN 9 Sep, and it is a PURE TIGHTENING: nine rows ALLOW -> DENY, none the
+      other way.** `_launcher_module` reads `_module_argument` against the launcher set, and
+      BOTH consumers got it in the same commit rather than one per review round -- #192 spent
+      rounds 5, 6 and 7 on exactly that mistake, so the lesson is applied rather than
+      re-learned. `PASS_THROUGH_LAUNCHERS` -> `DISTRIBUTED_LAUNCHERS`, since the set now
+      serves the block rule and the help rule and both follow from what a launcher is.
+      NOT `BLOCKED_MODULES`: both of its consumers gate on `_selects_device_tier` because
+      ADR-001 exempts pytest's offline tier, and a launcher has no offline tier, so the names
+      there would have refused nothing. Suite 4079 passed.
 
 - [x] **A-HELP-QUERY-WAS-REFUSED-AS-A-RUN · MERGED as #192 (d1b808c, 9 Sep) after EIGHT
       review rounds, seven of which found a real `main=DENY -> HEAD=ALLOW` row.** APPROVE on
