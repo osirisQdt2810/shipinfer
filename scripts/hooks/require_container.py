@@ -150,6 +150,22 @@ WRAPPERS = {
     # --gres=gpu:1 …`. Flags and numbers are already stepped over, so no special case.
     "mpirun",
     "srun",
+    # NVIDIA tooling. WRAPPERS and not `BLOCKED_COMMANDS`, deliberately: each one runs a
+    # command, so what gets judged is the command -- which makes `nsys --version` fall out
+    # allowed with no carve-out, where a blocked name would have needed one.
+    "ncu",
+    "nvprof",
+    "compute-sanitizer",
+    "cuda-memcheck",
+    # Tracers and schedulers, all of the form `<tool> [flags] <command>`.
+    "strace",
+    "ltrace",
+    "valgrind",
+    "setsid",
+    "chrt",
+    "taskset",
+    "unbuffer",
+    "watch",
 }
 
 #: Wrappers that put a SUBCOMMAND between themselves and the real command, so one token is
@@ -168,6 +184,8 @@ WRAPPER_SUBCOMMANDS = {
     "conda": {"run"},
     "micromamba": {"run"},
     "rye": {"run"},
+    # `nsys profile pytest -m gpu`: the subcommand sits where a command would.
+    "nsys": {"profile", "launch", "start", "stats", "sessions"},
 }
 
 PYTHON_RE = re.compile(r"(?:^|/)(python|python3|python3\.\d+)$")
@@ -761,6 +779,15 @@ WRAPPER_VALUE_FLAGS = {
     "sudo": {"-u", "--user", "-g", "--group"},
     "srun": {"-n", "--ntasks", "-p", "--partition", "--gres"},
     "mpirun": {"-n", "-np", "--host", "--hostfile"},
+    "nsys": {"-o", "--output", "-t", "--trace", "-s", "--sample", "-c", "--capture-range"},
+    "ncu": {"-o", "--set", "--metrics", "-k", "--kernel-name", "--launch-count"},
+    "nvprof": {"-o", "--output-profile", "--metrics", "--events"},
+    "strace": {"-o", "-e", "-p"},
+    "ltrace": {"-o", "-e"},
+    "valgrind": {"--log-file", "--tool", "--suppressions"},
+    "taskset": {"-c", "--cpu-list"},
+    "chrt": {"-p"},
+    "watch": {"-n", "--interval", "-d"},
 }
 
 

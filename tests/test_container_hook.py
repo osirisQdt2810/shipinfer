@@ -932,6 +932,104 @@ class TestADistributedLauncherIsDeviceWork:
         assert refused("pytest --help") is None
 
 
+class TestAProfilerIsAWrapperAndNotABlockedName:
+    """`nsys profile <cmd>`, `ncu <cmd>`, `strace <cmd>`: each RUNS a command.
+
+    Found by sweeping 33 spellings after the launcher work rather than by waiting for a
+    review round. They belong in `WRAPPERS` and not in `BLOCKED_COMMANDS`, and the reason is
+    testable: judging the inner command makes `nsys --version` and `nsys status` fall out
+    allowed with no carve-out, where a blocked name would have needed one -- and `trtexec
+    --help` shows what that costs.
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "nsys profile pytest -m gpu",
+            "nsys profile -o out.qdrep pytest -m gpu",
+            "nsys profile -t cuda pytest -m gpu",
+            "nsys profile shipinfer bench person_embedder",
+            "ncu pytest -m gpu",
+            "ncu -o rep pytest -m gpu",
+            "ncu shipinfer serve",
+            "nvprof pytest -m gpu",
+            "nvprof -o p.nvvp pytest -m gpu",
+            "compute-sanitizer pytest -m gpu",
+            "cuda-memcheck pytest -m gpu",
+            "strace pytest -m gpu",
+            "strace -o t.log pytest -m gpu",
+            "strace -e trace=openat pytest -m gpu",
+            "ltrace pytest -m gpu",
+            "valgrind pytest -m gpu",
+            "valgrind --tool=memcheck pytest -m gpu",
+            "setsid pytest -m gpu",
+            "chrt -f 99 pytest -m gpu",
+            "taskset -c 0-7 pytest -m gpu",
+            "unbuffer pytest -m gpu",
+            "watch -n1 pytest -m gpu",
+            "watch -n 1 pytest -m gpu",
+        ],
+    )
+    def test_the_inner_command_is_what_is_judged(self, command: str) -> None:
+        assert refused(command) is not None
+
+    def test_a_launched_python_program_is_read_through_the_profiler(self, tmp_path) -> None:
+        probe = tmp_path / "probe.py"
+        probe.write_text("import torch\ntorch.ones(1)\n")
+        assert refused(f"nsys profile python {probe}") is not None
+        assert refused(f"ncu --set full python {probe}") is not None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "nsys --version",
+            "ncu --version",
+            "nvprof --help",
+            "nsys status",
+            "taskset -c 0-7 pytest tests/core -q",
+            "strace -o t.log pytest tests/core -q",
+            "setsid pytest -m 'not gpu' tests/",
+            "watch -n1 nvidia-smi",
+            "deploy/rootless/run.sh nsys profile pytest -m gpu",
+        ],
+    )
+    def test_what_the_wrapper_reading_buys(self, command: str) -> None:
+        """The half a blocked NAME would have cost. Version and status queries run nothing;
+        the offline tier runs anywhere through a profiler as much as without one; `nvidia-smi`
+        is not a measurement; and profiling INSIDE the container is the sanctioned route and
+        must never be refused."""
+        assert refused(command) is None
+
+    def test_flock_is_still_open_and_why(self) -> None:
+        """Scoped out on purpose, and asserted so the gap is visible rather than assumed
+        closed: `flock` takes a positional PATH before its command, which neither
+        `WRAPPER_OPERAND` (numbers) nor `WRAPPER_VALUE_FLAGS` (flags) can step over. It needs
+        a third shape -- a per-wrapper positional count -- and that is its own change. The
+        ledger item names it."""
+        assert refused("flock /tmp/l pytest -m gpu") is None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "pip install nvitop",
+            "which nsys",
+            "ls -l /usr/local/cuda/bin/ncu",
+            "grep -rn taskset docs/",
+            "cat docs/profiling.md",
+            "echo strace",
+            "git log --grep valgrind",
+            "sed -i s/nsys/ncu/ docs/x.md",
+            "python3 - <<'PY'\nprint(\"profile it with nsys profile deploy/rootless/bench.sh\")\nPY",
+            "python3 - <<'PY'\nimport os\nos.path.exists(\"/usr/local/cuda/bin/ncu\")\nPY",
+            "bash -s <<'SH'\ncat > notes.md <<MD\nnsys profile pytest -m gpu\nMD\nSH",
+        ],
+    )
+    def test_mentioning_a_profiler_is_not_running_one(self, command: str) -> None:
+        """Swept before opening, like the launcher PR: eleven shapes where the name appears
+        and nothing runs. Zero false positives introduced, measured on both revisions."""
+        assert refused(command) is None
+
+
 class TestTheGuardCanFail:
     """Without this, a hook that always allowed would pass everything above."""
 
