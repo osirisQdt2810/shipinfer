@@ -5487,8 +5487,8 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       merge. So a PR that un-skips tests should STRESS them, not just run them once -- 12 runs
       of `tests/api/` found no other race, and that sweep is what should have been in #186.
 
-- [~] **A-REFUSED-ADD-RE-BANDS-A-CAMERA, INTERMITTENTLY · ROOT-CAUSED, and the refusal was
-      innocent. PR #189.** `_stop_ingest` cleared the placements BEFORE `manager.stop()`, and a
+- [x] **A-REFUSED-ADD-RE-BANDS-A-CAMERA · MERGED as #189 (9 Sep). ROOT-CAUSED, and the
+      refusal was innocent.** `_stop_ingest` cleared the placements BEFORE `manager.stop()`, and a
       camera publishes until its thread is joined -- so its last frames found no placement and
       were admitted at the FALLBACK band, landing after the test's `mark`. `drain()` already
       stopped the manager first and cleared after; the stop path did the opposite, so two paths
