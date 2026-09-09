@@ -356,16 +356,20 @@ class TestDeletingAStream:
             # this reddened main the first time the file ran on CI (#186 stopped `tests/api/`
             # skipping there for want of `fastapi`).
             #
-            # SO THE POOL IS DRAINED FIRST, and the equality is kept. The residue is bounded
-            # by the lane, not by what one run happened to show: this fixture is
-            # `queue_capacity=64, workers=1`, so a tolerance picked from an observation would
-            # be a bet on how long a shared runner stalls. `items["in_flight"]` is
-            # queue depth plus the workers' slots -- `tests/runners/test_inprocess.py`'s own
-            # `settled` helper polls the same gauge for the same reason, and its docstring is
-            # the argument: "polling for zero rather than sleeping keeps the exact-dictionary
-            # assertions below both meaningful and non-flaky". Not imported from there, to
-            # keep two test modules from depending on each other; `until` is already here.
-            assert until(lambda: streamed.runner.stats()["items"]["in_flight"] == 0)
+            # SO THE POOL IS DRAINED FIRST, and the equality is kept. A tolerance would not
+            # do: the residue is bounded by the lane -- `queue_capacity=64, workers=1` here --
+            # so a number taken from one run is a bet on how long a shared runner stalls.
+            #
+            # ON THE MONOTONE COUNTERS AND NOT ON `in_flight`. That gauge is queue depth plus
+            # the workers' slots, and `_work` publishes its slot AFTER the dequeue: between
+            # `get_batch` returning and `inflight[slot] = batch` an item is in neither term
+            # and the gauge reads zero with a frame genuinely in flight. `walked` rises after
+            # the output element publishes and `accepted` is already final (the actor is
+            # joined), so their equality has no window that reads true early. The runner's
+            # own metrics docstring names this pair: "accepted 6, walked 6".
+            assert until(
+                lambda: (it := streamed.runner.stats()["items"])["walked"] == it["accepted"]
+            ), streamed.runner.stats()["items"]
             settled = streamed.sink().emitted
             # The pause still earns its place, and it is the ORIGINAL reason: an
             # implementation that signalled the decoder and returned without waiting has to
