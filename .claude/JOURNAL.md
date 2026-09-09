@@ -1,5 +1,60 @@
 # Journal
 
+## 2026-09-09 (later still) — the container rule's last two doors, and two flakes that were bugs
+
+Merged **#182, #183, #184, #185, #186, #189**. **#188** is in review (two rounds, both right).
+**#187** needs the operator's click, and **#169** still does.
+
+**Testing a claim beats re-reading it, twice over.** CLAUDE.md answers the hook's unsoundness
+with "`runtime/containment.py` is the gate, because it runs in the process that would do the
+work". I had repeated that sentence for a day. Measuring it found **three of six benchmark
+entry points never called it** (#182) and then the engine build -- the one remaining item in
+that document's own list -- never called it either (#183), while its docstring already claimed
+"this refuses to run without a device". Both are now derived tests rather than lists: an
+entry point that can measure must gate, and a `scripts/` file that imports a device stack must
+gate, so the next one is covered by a test and not by memory.
+
+**The number the RTSP arm was missing (#184).** `NOT-GPU-BOUND-AT-FIVE-GPUS` left the penalty
+as "up to ~17%, split unknown between the servers -- ours to discount -- and our own decode
+threads". It needed no infrastructure: `os.wait4` hands back a child's rusage and
+`/proc/<pid>/stat` holds every thread's `utime + stime`. At the design load the two arms use
+**the same total host CPU** -- 16.84 against 16.90 cores of 48 -- and the RTSP arm converts
+less of it into events because **3.75 of those cores generate its own load**. I then wrote that
+the remaining gap was "the next host-side win", and had to take it back: `sources/replay.cpp`
+decodes its fixtures once into a page-locked library, so its per-frame host cost is a pinned
+memcpy. Most of the 10 ms gap is the cost of being a camera, which a deployment pays too.
+
+**And the number that says what any of today's single runs are worth.** Six interleaved runs
+of a worker sweep: 72 workers beat the default 115 by 6% on the first pass and lost on both
+repeats. Four runs at *identical* settings spread 26 669 to 39 375 events -- **36.7% of the
+mean**. So a single-run A/B on this box cannot resolve anything under ~15%, which puts three
+conclusions already in the ledger inside the noise. The negative result is the smaller half of
+that item; the spread is the useful half.
+
+**I called the wrong source "V156's route" in two ledger items, a commit and a PR body.**
+`sources/nvdec.h` says in its **first line** that NVDEC into VRAM is V156's route; `gstreamer`
+is the portable host-decode arm. I matched the operator's first token to a component name
+instead of asking which component implements the property, and five things needed correcting.
+A sentence claiming something is on the critical path now needs a quotation next to it.
+
+**Two intermittent failures today, and neither was noise.** #185's abandoned-shutdown fix made
+the gstreamer arm readable at the design load for the first time -- one hung camera of fifty
+used to discard a 70 s run, and its own first draft printed the whole report into a buffer
+`_Exit` discards, which only forcing the path revealed. Then #186 stopped `tests/api/` skipping
+on CI and the first plain runner to run it reddened main: the test read `clean=True` as
+covering both halves, but **the join bounds the producer, not the sink's counter**. And the
+other one, `{NORMAL, BACKGROUND} == {BACKGROUND}`, passed 60/60 in isolation -- because
+`_stop_ingest` cleared the placements *before* `manager.stop()` while `drain()` had it the
+right way round (#189). Reading the two paths against each other is what found it; a `-k` loop
+would have "proved" it fine.
+
+**The offline tier was skipping 248 tests on CI against 9 locally, and nobody had counted.**
+189 the submodule, 26 `fastapi`/`uvicorn`, 16 `cv2`. The middle two were pip-installable, which
+`pyproject.toml` already argues for twice in its own words -- so #186 closed them and CI went
+to 206 skips and 144 more tests running. **Un-skipping a test is a change to the code under
+test**, not only to a count: #186's own run passed and the race showed up on the merge, so a
+PR that enables tests should stress them. Twenty runs of `tests/api/` is what that looks like.
+
 ## 2026-09-09 (later) — seven merged, and one PR that took six rounds to teach one lesson
 
 Merged **#170, #171, #172, #173, #174, #175, #176**. **#177** is open, one branch is built and
