@@ -69,6 +69,17 @@ jobs:
       # behind a `| tee`, reported success: the job could never fail for the reason it exists.
       - name: Install pytest
         run: pip install pytest
+      # doc: long why a vendor repo the image ships can fail a build that never uses it
+      - name: Drop the runner image's own vendor apt sources
+        # `apt-get update` fails as a WHOLE when any configured repository serves a bad
+        # index, so on 9 Sep a `Hash Sum mismatch` on Google's chrome repo -- which nothing
+        # in this project installs from -- turned three jobs red at once and blocked every
+        # merge, main included. The image ships these lists; we do not need them, and
+        # `rm -f` is a no-op when a future image drops one. Ubuntu's own repos and the
+        # NVIDIA repo the next step adds are the only ones any of this builds from.
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/microsoft-prod.list
       # `cli/bench.cpp` reaches `core/platform.h`, so `--offline` refuses it and NOTHING here
       # compiled it -- the hole that let a `std::mutex` be used in its sink without being
       # declared, found by a reviewer rather than by a build. Eight implementation units are
@@ -146,6 +157,17 @@ jobs:
       # python that can see apt's python3-gi/gir typelibs. ModuleNotFoundError: 'gi', the
       # pixel skips, and the grep gate goes red exactly as designed. The system python3 on
       # ubuntu-latest runs build_csrc.py fine.
+      # doc: long why a vendor repo the image ships can fail a build that never uses it
+      - name: Drop the runner image's own vendor apt sources
+        # `apt-get update` fails as a WHOLE when any configured repository serves a bad
+        # index, so on 9 Sep a `Hash Sum mismatch` on Google's chrome repo -- which nothing
+        # in this project installs from -- turned three jobs red at once and blocked every
+        # merge, main included. The image ships these lists; we do not need them, and
+        # `rm -f` is a no-op when a future image drops one. Ubuntu's own repos and the
+        # NVIDIA repo the next step adds are the only ones any of this builds from.
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/microsoft-prod.list
       - name: Install the gstreamer and nvdec lanes' packages
         # The dev pair is what `--with-external gstreamer` pkg-configs and
         # `libffmpeg-nvenc-dev` (nv-codec-headers) is what `--with-external nvdec` adds; the

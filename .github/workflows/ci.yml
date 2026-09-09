@@ -118,6 +118,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # doc: long why a vendor repo the image ships can fail a build that never uses it
+      - name: Drop the runner image's own vendor apt sources
+        # `apt-get update` fails as a WHOLE when any configured repository serves a bad
+        # index, so on 9 Sep a `Hash Sum mismatch` on Google's chrome repo -- which nothing
+        # in this project installs from -- turned three jobs red at once and blocked every
+        # merge, main included. The image ships these lists; we do not need them, and
+        # `rm -f` is a no-op when a future image drops one. Ubuntu's own repos and the
+        # NVIDIA repo the next step adds are the only ones any of this builds from.
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/microsoft-prod.list
       - name: Install the CUDA toolkit
         uses: Jimver/cuda-toolkit@v0.2.19
         with:
