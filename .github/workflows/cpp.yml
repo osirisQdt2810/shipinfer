@@ -69,17 +69,34 @@ jobs:
       # behind a `| tee`, reported success: the job could never fail for the reason it exists.
       - name: Install pytest
         run: pip install pytest
-      # doc: long why a vendor repo the image ships can fail a build that never uses it
       - name: Drop the runner image's own vendor apt sources
         # `apt-get update` fails as a WHOLE when any configured repository serves a bad
         # index, so on 9 Sep a `Hash Sum mismatch` on Google's chrome repo -- which nothing
-        # in this project installs from -- turned three jobs red at once and blocked every
-        # merge, main included. The image ships these lists; we do not need them, and
-        # `rm -f` is a no-op when a future image drops one. Ubuntu's own repos and the
-        # NVIDIA repo the next step adds are the only ones any of this builds from.
+        # here installs from -- turned three jobs red at once and blocked every merge, main
+        # included. BY CONTENT, not by filename: the first attempt removed
+        # `google-chrome.list` and the fetch still happened, because the image does not
+        # configure it under that name. So this greps every source for the two vendor HOSTS,
+        # in either the one-line or the deb822 format, prints what it drops, and then asserts
+        # that no ENABLED reference survived -- a silent no-op here reads exactly like the
+        # bug, and a commented-out line is already harmless (the first draft failed on the
+        # line it had just commented out, found by rehearsing the step on a fake tree).
         run: |
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
-                     /etc/apt/sources.list.d/microsoft-prod.list
+          set -uo pipefail
+          mapfile -t drop < <(
+            sudo grep -rlIE '^[^#]*(dl\.google\.com|packages\.microsoft\.com)' \
+              /etc/apt/sources.list.d 2>/dev/null || true
+          )
+          printf 'dropping: %s\n' "${drop[@]:-<none found>}"
+          [ ${#drop[@]} -eq 0 ] || sudo rm -f "${drop[@]}"
+          if [ -f /etc/apt/sources.list ]; then
+            sudo sed -i -E '/dl\.google\.com|packages\.microsoft\.com/s/^[^#]/# &/' \
+              /etc/apt/sources.list
+          fi
+          if sudo grep -rqIE '^[^#]*(dl\.google\.com|packages\.microsoft\.com)' \
+               /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+            echo 'a vendor apt source survived the drop; apt-get update will still fail' >&2
+            exit 1
+          fi
       # `cli/bench.cpp` reaches `core/platform.h`, so `--offline` refuses it and NOTHING here
       # compiled it -- the hole that let a `std::mutex` be used in its sink without being
       # declared, found by a reviewer rather than by a build. Eight implementation units are
@@ -157,17 +174,34 @@ jobs:
       # python that can see apt's python3-gi/gir typelibs. ModuleNotFoundError: 'gi', the
       # pixel skips, and the grep gate goes red exactly as designed. The system python3 on
       # ubuntu-latest runs build_csrc.py fine.
-      # doc: long why a vendor repo the image ships can fail a build that never uses it
       - name: Drop the runner image's own vendor apt sources
         # `apt-get update` fails as a WHOLE when any configured repository serves a bad
         # index, so on 9 Sep a `Hash Sum mismatch` on Google's chrome repo -- which nothing
-        # in this project installs from -- turned three jobs red at once and blocked every
-        # merge, main included. The image ships these lists; we do not need them, and
-        # `rm -f` is a no-op when a future image drops one. Ubuntu's own repos and the
-        # NVIDIA repo the next step adds are the only ones any of this builds from.
+        # here installs from -- turned three jobs red at once and blocked every merge, main
+        # included. BY CONTENT, not by filename: the first attempt removed
+        # `google-chrome.list` and the fetch still happened, because the image does not
+        # configure it under that name. So this greps every source for the two vendor HOSTS,
+        # in either the one-line or the deb822 format, prints what it drops, and then asserts
+        # that no ENABLED reference survived -- a silent no-op here reads exactly like the
+        # bug, and a commented-out line is already harmless (the first draft failed on the
+        # line it had just commented out, found by rehearsing the step on a fake tree).
         run: |
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
-                     /etc/apt/sources.list.d/microsoft-prod.list
+          set -uo pipefail
+          mapfile -t drop < <(
+            sudo grep -rlIE '^[^#]*(dl\.google\.com|packages\.microsoft\.com)' \
+              /etc/apt/sources.list.d 2>/dev/null || true
+          )
+          printf 'dropping: %s\n' "${drop[@]:-<none found>}"
+          [ ${#drop[@]} -eq 0 ] || sudo rm -f "${drop[@]}"
+          if [ -f /etc/apt/sources.list ]; then
+            sudo sed -i -E '/dl\.google\.com|packages\.microsoft\.com/s/^[^#]/# &/' \
+              /etc/apt/sources.list
+          fi
+          if sudo grep -rqIE '^[^#]*(dl\.google\.com|packages\.microsoft\.com)' \
+               /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+            echo 'a vendor apt source survived the drop; apt-get update will still fail' >&2
+            exit 1
+          fi
       - name: Install the gstreamer and nvdec lanes' packages
         # The dev pair is what `--with-external gstreamer` pkg-configs and
         # `libffmpeg-nvenc-dev` (nv-codec-headers) is what `--with-external nvdec` adds; the
