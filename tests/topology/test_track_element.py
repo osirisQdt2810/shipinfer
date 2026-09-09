@@ -565,18 +565,29 @@ class TestTrackLifecycle:
         camera's ingest actor mints a fresh ``FrameCounter``. Without the reset its frame 0 is
         below the previous run's high-water mark and every frame is refused, forever.
 
-        The FIRST announcement is here because the runner sends one on every add, this one
-        included. Without it this sequence is a first add, and a first add resets nothing --
-        which is the whole of `camera_added`'s rule and was the bug when it had no rule.
+        Driven the way a runner drives it, which is the correction this test needed: add,
+        frames, REMOVE, a frame still in the lane, then the add. A doubled `camera_added` with
+        no removal between is a sequence no runner can produce -- `IngestManager.add_camera`
+        raises `DuplicateCameraError` for a live id, so a second announcement needs the camera
+        to have left the manager, and every exit announces `camera_removed`.
         """
         element.camera_added("cam-a")
         for frame in range(6):
             element.process(item("cam-a", frame, detections=detections((0, 0, 40, 40))))
 
+        element.camera_removed("cam-a")
+        # `Element.camera_removed`'s own contract: "state this drops can be rebuilt by a frame
+        # already in the lane". That rebuild banks frame 6 again, and it is what makes the
+        # next add's shard stale.
+        element.process(item("cam-a", 6, detections=detections((0, 0, 40, 40))))
+
         element.camera_added("cam-a")
         emitted = element.process(item("cam-a", 0, detections=detections((0, 0, 40, 40))))
 
-        assert "missing_stages" not in emitted.meta
+        assert "missing_stages" not in emitted.meta, (
+            "the new stream's frame 0 was refused: the add did not clear the high-water mark "
+            "a late frame rebuilt"
+        )
         assert len(emitted.meta["tracks"]) == 1
 
     def test_a_re_added_camera_does_not_continue_its_old_identities(self, element) -> None:
@@ -584,6 +595,9 @@ class TestTrackLifecycle:
         before = track_ids(
             element.process(item("cam-a", 0, detections=detections((0, 0, 40, 40))))
         )
+
+        element.camera_removed("cam-a")
+        element.process(item("cam-a", 1, detections=detections((0, 0, 40, 40))))
 
         element.camera_added("cam-a")
         after = track_ids(
@@ -616,10 +630,11 @@ class TestTrackLifecycle:
         assert len(first) == 1, first
         assert rest == [first, first, first], (first, rest)
 
-    def test_a_remove_then_an_add_still_starts_a_new_identity(self, element) -> None:
-        """The announced recovery, and the other half of the rule: the id after a remove + add
-        must not continue, and it does not need the reset to do that -- `camera_removed` drops
-        the tracker outright, so the add builds a fresh one."""
+    def test_a_remove_then_an_add_with_no_late_frame_between(self, element) -> None:
+        """The quiet case, where the drop is enough on its own: nothing arrives between the
+        remove and the add, so the add finds no shard to reset and the next frame builds a
+        fresh tracker. Kept beside the one above so the pair states both halves -- the reset is
+        for a shard a LATE FRAME rebuilt, not for the removal itself."""
         element.camera_added("cam-a")
         before = track_ids(
             element.process(item("cam-a", 0, detections=detections((0, 0, 40, 40))))
@@ -632,6 +647,38 @@ class TestTrackLifecycle:
         )
 
         assert set(before).isdisjoint(after), "a re-added camera continued its old identities"
+
+    def test_a_late_frame_after_a_remove_does_not_strand_the_next_stream(self) -> None:
+        """The regression a first draft of this fix introduced, and why the reset is gated on a
+        DROP rather than on an add.
+
+        With `regression_reset: 0` there is nothing behind the announced recovery: if the add
+        does not clear the mark a late frame rebuilt, every frame of the new stream is refused
+        for the life of the process -- and the operator has already sent the one thing ADR-018
+        asks of them. On the default 64 it is absorbed instead and counted as an *unannounced*
+        restart, which reports an operator doing the right thing as one who is not.
+        """
+        strict = opened({"regression_reset": 0})
+        try:
+            box = detections((0, 0, 40, 40))
+            strict.camera_added("cam-a")
+            for frame in range(41):
+                strict.process(item("cam-a", frame, detections=box))
+
+            strict.camera_removed("cam-a")
+            strict.process(item("cam-a", 41, detections=box))  # still in the lane
+            strict.camera_added("cam-a")
+
+            emitted = strict.process(item("cam-a", 0, detections=box))
+
+            assert "missing_stages" not in emitted.meta, emitted.meta
+            assert len(emitted.meta["tracks"]) == 1
+            assert strict._shard.stats()["out_of_order"] == 0
+            assert (
+                strict._shard.stats()["implicit_resets"] == 0
+            ), "an announced remove + add reported itself as an unannounced restart"
+        finally:
+            strict.close()
 
     def test_camera_added_builds_no_tracker_for_a_camera_that_has_none(self, element) -> None:
         """It fires for every camera on the shard. Minting a Kalman filter for the forty-nine
