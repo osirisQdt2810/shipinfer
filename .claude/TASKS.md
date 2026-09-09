@@ -1182,7 +1182,25 @@ hook down, for when the operator asked to see something before it is executed.
       it. The lesson is the cheap one: measure the reported bug on the branch before writing
       the ledger entry that defers it.
 
-- [~] **THE-SYSTEM-TIER-DID-NOT-GATE-ITSELF · PR #182, and it is the other half of the rule.**
+- [~] **THE-ENGINE-BUILD-DID-NOT-GATE-ITSELF · PR #183, and it is the LAST entry in the list.**
+      CLAUDE.md's container list is "the GPU test tiers, every benchmark, `shipinfer
+      bench|serve`, and any engine build". #182 closed the benchmarks; measuring the rest of
+      the list found `scripts/build_engines.py` calling the gate NOWHERE, while its own
+      docstring already claimed "this refuses to run without a device". A host build is the
+      WRONG artefact rather than a slower one -- a plan is valid only for the architecture and
+      TensorRT version it was built on -- and it lands in `models/` AND in each model's
+      version directory, where the next start-up loads it.
+      The gate sits below the argv validation and above the work (#182's placement). `--check`
+      stays ungated on purpose: it reports and builds nothing, so it is inspection.
+      Two tests, and both directions measured: patching `containment.require_container` itself
+      is the assertion (a private copy would not be intercepted), and a derived sweep over
+      `scripts/**.py` keyed on the IMPORTS covers the next such script rather than this file.
+      3 of the 6 fail against main's script; the 3 that pass in both are the ones that must
+      not change. `tests/test_architecture.py`'s own guard caught the first draft's subprocess
+      for omitting `checkout_env()` -- it would have resolved `shipinfer` from the primary
+      checkout instead of this tree.
+
+- [x] **THE-SYSTEM-TIER-DID-NOT-GATE-ITSELF · MERGED as #182 (c97998f, 9 Sep).**
       CLAUDE.md answers the hook's unsoundness with "`runtime/containment.py` is the gate,
       because it runs in the process that would do the work". I repeated that sentence all day;
       #176's reviewer checked it and found `benchmarks/run_bench.py` calls it NOWHERE. Checking
