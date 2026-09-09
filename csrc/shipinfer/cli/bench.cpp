@@ -22,6 +22,7 @@
 #include "shipinfer/core/buffers.h"
 #include "shipinfer/core/join_on_unwind.h"
 #include "shipinfer/core/platform.h"
+#include "shipinfer/core/thread_name.h"
 #include "shipinfer/engine/model.h"
 #include "shipinfer/ingest/camera_uris.h"
 #include "shipinfer/ingest/manager.h"
@@ -548,7 +549,8 @@ int main(int argc, char** argv) {
             // `PipelineLanes` was built from that same list in that order, which is what makes
             // the two agree without a lookup.
             const size_t lane_index = device_lanes ? slot : 0;
-            workers.emplace_back([&, device, lane_index]() {
+            workers.emplace_back([&, w, device, lane_index]() {
+                name_this_thread(thread_name("pipe", std::to_string(w)));
                 try {
                     GPU_CHECK(gpuSetDevice(device));
                     WorkerScratch scratch(Device::cuda(device));
@@ -639,6 +641,7 @@ int main(int argc, char** argv) {
 
         // -- the sweeper ------------------------------------------------------------------
         std::thread sweeper([&]() {
+            name_this_thread("sweeper");
             while (!stopping.load()) {
                 std::this_thread::sleep_for(
                     std::chrono::milliseconds(tuning.reassembly_sweep_ms));

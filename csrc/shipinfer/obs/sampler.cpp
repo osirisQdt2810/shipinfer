@@ -4,6 +4,7 @@
 #include <iostream>
 #include <sstream>
 
+#include "shipinfer/core/thread_name.h"
 #include "shipinfer/core/types.h"
 
 namespace shipinfer {
@@ -26,7 +27,10 @@ namespace shipinfer {
         out_ << meta_json_ << "\n";
         out_.flush();
         started_ = std::chrono::steady_clock::now();
-        thread_ = std::thread([this] { run(); });
+        thread_ = std::thread([this] {
+            name_this_thread("sampler");
+            run();
+        });
     }
 
     void OccupancySampler::stop() {
