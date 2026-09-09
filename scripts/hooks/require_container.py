@@ -552,15 +552,16 @@ def _script_programs(args: list[str]) -> list[str]:
         # runs, and only the full name tells them apart.
         if name in _READER_MODULES or name.split(".")[0] in _READER_MODULES:
             return []
-        for token in args[start:]:
-            # `coverage run -m pytest ...` defers to the module branch. NOT `-c`: `-m` has
-            # already ended option processing, so a `-c` here is the executor's own
-            # (`pdb -c continue`, `trace -c`) and bailing on it dropped the program.
+        for offset, token in enumerate(args[start:]):
+            # A nested `-m` gets the SAME reader/executor decision the outer one got.
+            # `break`ing here deferred to the module branch, which judges only
+            # `BLOCKED_MODULES`, so `coverage run -m unittest probe.py` was judged by nobody.
             if token == "-m" or (token.startswith("-m") and len(token) > 2):
-                break
-            # Before the suffix test, or an option's VALUE wins: `coverage run
-            # --include=probe.py probe.py` answered `--include=probe.py`, which is not a
-            # readable file, so the real program went unread.
+                return _script_programs(args[start + offset :])
+            # Before the suffix test, or an option's VALUE wins: `--include=probe.py`
+            # answered as the program, and it is not a readable file. `-c` is deliberately not
+            # bailed on here -- the interpreter's cannot appear after `-m`, so a `-c` is the
+            # executor's own (`pdb -c continue`, `trace -c`).
             if token.startswith("-"):
                 continue
             if token.endswith(".py"):

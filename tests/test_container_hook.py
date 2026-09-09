@@ -437,11 +437,48 @@ class TestAModulesOperandIsAProgramUnlessTheModuleOnlyReads:
         assert hook._script_programs(argv) == ["out.py", "probe.py"]
 
     def test_an_executor_running_a_module_leaves_the_decision_to_the_module(self) -> None:
-        """`coverage run -m pytest` reaches a second `-m`, so nothing after it is a program
-        and the tier decides. The offline spelling is allowed and the device tier is not --
-        by the module branch, which is where a module belongs."""
+        """`coverage run -m pytest` reaches a second `-m`, so the INNER module decides. The
+        offline spelling is allowed and the device tier is not."""
         assert refused("python -m coverage run -m pytest tests/core -q") is None
         assert refused("python -m coverage run -m pytest -m gpu") is not None
+
+    @pytest.mark.parametrize(
+        "outer", ["coverage run", "cProfile", "pdb", "memory_profiler", "runpy"]
+    )
+    @pytest.mark.parametrize(
+        "inner", ["unittest", "cProfile", "runpy", "torch.distributed.run"]
+    )
+    def test_a_nested_module_gets_the_same_decision_as_the_outer_one(
+        self, outer: str, inner: str, tmp_path: Path
+    ) -> None:
+        """The cross product, which is where this class hid. Breaking out of the scan on a
+        second `-m` deferred to the module branch -- and that branch judges only
+        `BLOCKED_MODULES`, so `coverage run -m unittest probe.py` was judged by nobody. The
+        inner module now gets the same reader/executor question the outer one got."""
+        probe = tmp_path / "probe.py"
+        probe.write_text("import torch\ntorch.ones(1)\n")
+        assert refused(f"python -m {outer} -m {inner} {probe}") is not None
+
+    def test_an_attached_nested_module_is_no_different(self, tmp_path: Path) -> None:
+        probe = tmp_path / "probe.py"
+        probe.write_text("import torch\ntorch.ones(1)\n")
+        assert refused(f"python -m coverage run -mrunpy {probe}") is not None
+
+    def test_an_option_that_looks_like_a_module_does_not_drop_the_program(
+        self, tmp_path: Path
+    ) -> None:
+        """The same bug from the other side: an executor's own `-m` OPTION is not a nested
+        module invocation, and either way the program must still be read."""
+        probe = tmp_path / "probe.py"
+        probe.write_text("import torch\ntorch.ones(1)\n")
+        assert refused(f"python -m mymodule -m gpu {probe}") is not None
+
+    def test_a_nested_reader_still_reads(self, tmp_path: Path) -> None:
+        """The other half: `coverage run -m black model.py` runs a READER on that file, so
+        the file is data. Looser than `main`, and it is the same rule as `-m black` alone."""
+        target = tmp_path / "model.py"
+        target.write_text("import torch\n")
+        assert refused(f"python -m coverage run -m black {target}") is None
 
 
 class TestTheGuardCanFail:
