@@ -1215,7 +1215,14 @@ hook down, for when the operator asked to see something before it is executed.
       `ssh <host> pytest -m gpu` is a fourth case and stays out for a REASON rather than for
       difficulty: it runs on the remote host, and the hook cannot tell a loopback from a GPU
       box that has the container, so refusing it would be a false positive on a legitimate
-      run. That distinction is worth keeping in the file.
+      run. That distinction is worth keeping in the file, so it is a TEST beside the three
+      quoted cases rather than a comment -- conflating the two reasons is what this line got
+      wrong. The three plain ones are BUILT on `fix/three-more-plain-wrappers`, held behind
+      #180: one `WRAPPERS` entry each plus value-flag rows for `gdb -ex`/`-x`/`-cd` and
+      `parallel -j`/`-S`/`--results`, since `gdb -batch -ex run --args pytest -m gpu` is what
+      someone actually types. Six rows closed, nothing loosened, and the allowed halves
+      asserted: `gdb --version`, `parallel --version`, `gdb --args python -c 'print(1)'` and
+      `screen -dm pytest tests/core -q`.
 
 - [x] **HOOK-FAILS-OPEN-ON-SPELLINGS-IT-DOES-NOT-MODEL · all three MERGED (#177, #178).**
       Open on `main` and untouched by #174: `python -m shipinfer serve` (the subcommand list is
