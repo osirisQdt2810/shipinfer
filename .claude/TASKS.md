@@ -1202,10 +1202,31 @@ hook down, for when the operator asked to see something before it is executed.
       (nvdec reads 92%), and then 97% of what it did read is refused at the pipeline queue
       (nvdec 59%). `pipeline_pool_size` ends at 0 against nvdec's 155, which is the first
       thing to look at -- a frame pool that never filled would explain the second loss.
-      NOT YET DIAGNOSED. Recorded now because it was invisible until #185: the arm exited 1
-      with no counters, so every previous reading of this route came from `nvdec` or from
-      8-camera smoke runs. V137/V156 name gstreamer -> NV12 -> VRAM as the route, so this is
-      on the critical path for the >=5x rather than beside it.
+      Invisible until #185: the arm exited 1 with no counters, so every previous reading of
+      this route came from `nvdec` or from 8-camera smoke runs.
+      **DIAGNOSED 9 Sep by reading the pipeline the run actually builds, and it is the V137
+      mandate restated as a measurement.** With `codec: h264` (the default, so the explicit
+      preference list rather than `decodebin`), the chain is:
+        rtspsrc ! rtph264depay ! h264parse ! nvh264dec ! video/x-raw ! videoconvert
+                ! video/x-raw,format=BGR ! appsink drop=true max-buffers=2
+      NVDEC decodes ON THE GPU and then `! video/x-raw` -- with no memory feature, which is
+      the guard against nvcodec negotiating GL memory -- DOWNLOADS it, and `videoconvert`
+      does NV12 -> BGR ON THE CPU at 1920x1080, per camera, 50 of them. Checked in the image:
+      `nvv4l2decoder`, `nvvideoconvert`, `nvvidconv` and `cudaconvertscale` are all ABSENT
+      (GStreamer 1.20.3; nvcodec ships only decoders plus cudaupload/cudadownload), so there
+      is no GPU-side converter to prefer -- the converter probe list has nothing to find.
+      So the arm is a HOST-BGR path by construction and cannot approach `nvdec`, which keeps
+      the frame on the device. THE FIX IS THE PHASE-D NV12-IN-VRAM PATH (see `C9`), not a
+      knob here; there is no cheap win, and that is worth knowing before looking for one.
+      TWO SMALLER FACTS, both measured, neither the wall:
+        * 50 `gst_gl_display_gbm_new: could not find or open DRM device` errors, exactly one
+          per camera, over a ~7 s window. The `! video/x-raw` guard prevents the SEGFAULT its
+          comment describes but not the attempt, so each camera still pays a failed GL-display
+          probe at bring-up.
+        * `nvh264dec` and `avdec_h264` BOTH rank primary(256), so a camera configured
+          `codec: auto` (which is `decodebin`, picking by rank) can silently take software
+          decode. The bench's default is `h264` and this run did use NVDEC -- but nothing
+          stops an `auto` fleet from measuring libav.
 
 - [~] **GSTREAMER-RTSP-CANNOT-FINISH-AT-THE-DESIGN-LOAD · PR #185, and it is the mandated
       route (V137/V156: gstreamer rtsp -> nv12 -> vram).** `SHIPINFER_BENCH_SOURCE=gstreamer` at
