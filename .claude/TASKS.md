@@ -1708,6 +1708,22 @@ hook down, for when the operator asked to see something before it is executed.
       `python -m torch.distributed.run --nproc_per_node=2 train.py` to refuse; BOTH main and
       the branch allow it, because `train.py` does not exist so nothing imports a device
       stack. The hook's own test pins that spelling against a path that DOES. Not a hole.
+      **ROUND 6 (9 Sep) DELETED HALF THE RULE INSTEAD OF PATCHING IT, and the PR now gives up
+      the row it was opened for.** Round 4's positive-evidence rule had two sources: the
+      program's NAME, or its SOURCE importing an argv parser. The second rests on a proxy one
+      level in -- an import of a parser is not evidence that the parser RUNS FIRST. `import
+      argparse` above a module-scope `torch.cuda.set_device(0)` answers `--help` never, and the
+      `sys.argv` alternative vouched for every script that does `path = sys.argv[1]`; both are
+      `main=DENY -> round5=ALLOW`, verified across three revisions. Deciding "does the parser
+      run before any device work" is REACHABILITY over arbitrary Python, so `ARGV_PARSER` and
+      `_readable_programs` are gone, `script_touches_device` is back to main's shape, and one
+      predicate (`answers_for_itself`) serves both decision sites. THE ALLOW DELTA IS NOW
+      EIGHT ROWS, every one a `HELP_AWARE` name or its `-m` module -- auditable by reading five
+      strings. COST, pinned in `STILL_REFUSED` rather than written in a paragraph: `python
+      scripts/build_engines.py --help` refuses again, and so does a script that genuinely does
+      parse first. I did NOT take the reviewer's suggested column-0 device check: a top-level
+      `configure()` whose body touches a device carries no device token on its own line, so it
+      would have been round 7. Suite 4060 passed; `a6d1fef`.
 
 - [x] **OUR-ARM-HAD-NO-HOST-CPU-LINE · MERGED as #191 (91c2fb6, 9 Sep), the owed half of the item below.** Both arms
       print the same line now, from a shared `harness/hostcpu.py` with two readings:
