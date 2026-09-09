@@ -544,6 +544,77 @@ def _is_shelling_out(func: ast.expr, bound: dict[str, str]) -> bool:
     return bool(_SHELLING_OUT_CALL.match(target))
 
 
+#: The one token that turns a blocked command into a question about it. Only the long form:
+#: `-h` is `--host` to some tools. NOT always short-circuiting either: click pops an option's
+#: value unconditionally, so `shipinfer serve --host --help` binds `host="--help"` and RUNS --
+#: covered by `require_container` being that command body's first statement, not by this hook.
+HELP_FLAGS = frozenset({"--help"})
+
+# doc: long why this list IS the rule, and what six review rounds cost to get here
+#: PROGRAMS KNOWN TO ANSWER `--help` THEMSELVES, and the whole of the carve-out. Positive
+#: evidence, which was round 4's correction: the first three drafts asked whether anything
+#: looked like a pass-through and allowed the rest, so each round found another shape that was
+#: neither excluded nor safe -- a launcher's REMAINDER, `-c`'s argv, a parser-less script, and
+#: a COMPILED binary, where the `.py`-only file check answered "nothing to distrust" and
+#: `csrc/build/bench --cameras 50 --help` went through five characters from a real 50-camera
+#: run. `int main()` in `test_pipeline.cpp` takes no argv at all.
+#:
+#: THEN ROUND 6 TOOK THE SECOND SOURCE AWAY, and that is why this is a list of names: reading
+#: the file for a parser import proved a parser EXISTS, not that it runs before the module
+#: body. Five names are auditable by reading them; a source heuristic was not.
+HELP_AWARE = frozenset({"pytest", "py.test", "trtexec", "polygraphy", "shipinfer"})
+
+# doc: long why these get no help carve-out, and it is a measured hole rather than caution
+#: LAUNCHERS THAT PASS THEIR TAIL THROUGH. `torchrun` and `deepspeed` declare the script's
+#: arguments as `nargs=argparse.REMAINDER`, so every token after the script operand -- `--help`
+#: included -- is collected as the SCRIPT's and never reaches the launcher's own parser. The
+#: launcher then forks its workers, one host CUDA context each, which is what its
+#: `BLOCKED_COMMANDS` entry exists to stop. `accelerate launch` has the same shape. Measured:
+#: the first version of this carve-out allowed `torchrun --nproc_per_node=2 train.py --help`,
+#: five characters from a command its own test keeps refused.
+#:
+#: BLUNT ON PURPOSE, and the precise version was tried: excusing only a launcher WITHOUT a
+#: script operand would keep `torchrun --help` working, but `_script_programs` returns []
+#: for `deepspeed --num_gpus 2 train.py --help` -- the operand is behind a separate-token
+#: value -- so the refinement reopens the hole for one of the two launchers it is for. The
+#: cost of the blunt rule is `torchrun --help`, on a tool nothing here invokes.
+PASS_THROUGH_LAUNCHERS = frozenset(
+    {
+        "torchrun",
+        "deepspeed",
+        "accelerate",
+        "torch.distributed.run",
+        "torch.distributed.launch",
+    }
+)
+
+
+# doc: long the four bounds, each of which was a measured hole in an earlier draft
+# doc: long the three ways a `--help` token can fail to be this program's own flag
+def _asks_for_help(program: str, args: list[str]) -> bool:
+    """Whether the flag is present AND belongs to ``program`` rather than to what it wraps.
+
+    Three ways it does not: a pass-through launcher collects its tail as the script's
+    (`nargs=REMAINDER`); `python -c cmd [arg]...` assigns everything after the body to the
+    BODY's `sys.argv`; and everything after a `--` belongs to whatever is being wrapped. The
+    token is exact, so `--helpful` is a run. Resolve ``program`` to one name before calling
+    this, or it answers for `_indirection` -- the one check argv must never answer for.
+    """
+    if program in PASS_THROUGH_LAUNCHERS:
+        return False
+    # THE MODULE, RESOLVED, and not a scan for the name among the tokens: CPython takes
+    # `-mtorch.distributed.run` as ONE token, so the scan never saw the launcher and the
+    # attached spelling walked past what the spaced one hits. Stricter too -- the scan matched
+    # the name anywhere in argv, including as an option's value.
+    module = _module_at(args)
+    if module is not None and module[1] in PASS_THROUGH_LAUNCHERS:
+        return False
+    if _inline_source(args) is not None:
+        return False
+    own = args[: args.index("--")] if "--" in args else args
+    return any(arg in HELP_FLAGS for arg in own)
+
+
 def _blocked_word(commands: list[list[str]]) -> str | None:
     """The first of ``commands`` that runs something blocked, or None.
 
@@ -558,6 +629,8 @@ def _blocked_word(commands: list[list[str]]) -> str | None:
             continue
         exe, rest = tokens[0], tokens[1:]
         base = exe.rsplit("/", 1)[-1]
+        if _asks_for_help(base, rest) and answers_for_itself(base, rest):
+            continue
         if base in BLOCKED_COMMANDS:
             if base in _TEST_RUNNERS and not _selects_device_tier(rest):
                 continue
@@ -956,6 +1029,32 @@ def script_touches_device(args: list[str], cwd: str | None) -> str | None:
     return None
 
 
+# doc: long why the carve-out is a list of five names and reads no source at all
+def answers_for_itself(program: str, args: list[str]) -> bool:
+    """Whether ``program`` is KNOWN to answer `--help` without reaching a device.
+
+    A NAME, and deliberately no second source. A draft also accepted "the file imports an
+    argv parser", and review found the level error: an import of a parser is not evidence
+    that the parser runs FIRST. `import argparse` above `torch.cuda.set_device(0)` at module
+    scope answers `--help` never -- the body has already taken a host CUDA context -- and the
+    `sys.argv` alternative matched every script that does `path = sys.argv[1]`. Deciding
+    "does the parser run before any device work" is reachability over arbitrary Python, so
+    the honest carve-out is the part that is decidable by reading five names.
+
+    The `-m` module counts as the name, since `python -m shipinfer serve --help` IS `shipinfer
+    serve --help` -- but only when the program IS an interpreter: `-m` is python's grammar, and
+    in any other argv it is data the program never interprets. Unguarded, `csrc/build/bench -m
+    pytest --cameras 50 --help` let a token vouch for a binary whose `int main()` takes no
+    argv. The cost of dropping the source half is `python scripts/build_engines.py --help`.
+    """
+    if program in HELP_AWARE:
+        return True
+    if not (PYTHON_RE.search(program) or program == "python"):
+        return False
+    module = _module_at(args)
+    return module is not None and module[1].split(".")[0] in HELP_AWARE
+
+
 def _indirection(tokens: list[str]) -> str | None:
     """Refuse a segment whose real command is hidden behind a substitution or a variable.
 
@@ -1025,6 +1124,14 @@ def verdict(command: str, cwd: str | None = None) -> str | None:
                 return nested
             continue
         base = exe.rsplit("/", 1)[-1]
+
+        if _asks_for_help(base, args) and answers_for_itself(base, args):
+            # doc: long the two conditions, one per review round, and what each one caught
+            # AFTER `_indirection` and after the nested re-read above, which is the whole of
+            # what the first draft got wrong: applied to an unresolved argv, a `--help` token
+            # answered for those two -- so `bash -c "pytest -m gpu" --help` and
+            # `RUN=./gpu_all.sh; $RUN --help` were allowed. `exe` is one program name here.
+            continue
 
         if base in BLOCKED_COMMANDS:
             if base in _TEST_RUNNERS and not _selects_device_tier(args):
