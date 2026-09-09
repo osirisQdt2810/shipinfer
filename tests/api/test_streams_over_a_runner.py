@@ -347,22 +347,31 @@ class TestDeletingAStream:
             assert response.status_code == 200
             assert response.json() == {"clean": True}
 
-            # doc: long why an equality here was wrong, and what the tolerance is measured from
+            # doc: long why the count is read after the pool drains and not after the DELETE
             # THE JOIN BOUNDS THE PRODUCER, NOT THE SINK'S COUNTER. `clean=True` above is the
-            # ingest manager saying it *joined* the actor thread -- but a frame the actor
-            # published just before that join is still crossing the runner's pool when the
-            # DELETE returns, so a count read in the same breath can tick once more. The
-            # original assertion here was an equality and read the join as covering both; it
-            # reddened main with `assert 4 == 3` the first time this file ran on CI, which was
-            # #186, because `tests/api/` had been skipping there for want of `fastapi`.
+            # ingest manager saying it *joined* the actor thread -- but the actor publishes
+            # synchronously into the fair lane, and `emitted` only ticks when a worker
+            # finishes the walk, so whatever is queued when the DELETE returns is still to
+            # come. A count read in the same breath ticks again: `assert 4 == 3`, which is how
+            # this reddened main the first time the file ran on CI (#186 stopped `tests/api/`
+            # skipping there for want of `fastapi`).
+            #
+            # SO THE POOL IS DRAINED FIRST, and the equality is kept. The residue is bounded
+            # by the lane, not by what one run happened to show: this fixture is
+            # `queue_capacity=64, workers=1`, so a tolerance picked from an observation would
+            # be a bet on how long a shared runner stalls. `items["in_flight"]` is
+            # queue depth plus the workers' slots -- `tests/runners/test_inprocess.py`'s own
+            # `settled` helper polls the same gauge for the same reason, and its docstring is
+            # the argument: "polling for zero rather than sleeping keeps the exact-dictionary
+            # assertions below both meaningful and non-flaky". Not imported from there, to
+            # keep two test modules from depending on each other; `until` is already here.
+            assert until(lambda: streamed.runner.stats()["items"]["in_flight"] == 0)
             settled = streamed.sink().emitted
+            # The pause still earns its place, and it is the ORIGINAL reason: an
+            # implementation that signalled the decoder and returned without waiting has to
+            # have somewhere to be caught, and a live decoder adds ~25 frames here.
             time.sleep(0.05)
-            # A decoder still running would add about 25 frames in that window -- `pause_s` is
-            # 0.002 and the source has 200 frames left -- so a residue of one or two is the
-            # in-flight frame and twenty-five is the defect this test exists for. The gap
-            # between those two numbers is what makes the tolerance safe rather than slack.
-            grew = streamed.sink().emitted - settled
-            assert grew <= 2, f"the decoder is still publishing: {grew} more frames in 50 ms"
+            assert streamed.sink().emitted == settled, "the decoder is still publishing"
             assert client.get("/streams").json() == {"streams": []}
         assert streamed.runner.cameras == ()
 
