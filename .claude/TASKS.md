@@ -1127,7 +1127,7 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 6 · The final goal (V49)
 
-- [~] **PY-OFFLINE-FLAKE-SINK-DROP · found, and it is FOUR tests, not one. PR #173.**
+- [x] **PY-OFFLINE-FLAKE-SINK-DROP · FOUR tests, not one. MERGED AS #173 (9 Sep).**
       Not a stall: `wait_for(sink.failed == 3)` returned and the very next line read
       `sink_failures` at **2.0**. A sink bumps its own counter INSIDE `emit`; the runner bumps
       the `PipelineMetrics` counter after `emit` returns, so waiting on the first half and
@@ -1156,14 +1156,21 @@ hook down, for when the operator asked to see something before it is executed.
       noted -- so it drives `measure_sharded` now. Both non-blocking notes in too. Evidence: a
       sharded bench run whose aggregate table carries `(busy)` for every model.
 
-- [ ] **HOOK-REFUSES-A-LINTER-ON-A-TEST-FILE · a false refusal, twice in one session.**
+- [~] **HOOK-REFUSES-A-LINTER-ON-A-TEST-FILE · fixed, PR open. Two false refusals, one cause.**
       `require_container.py`'s `script_touches_device` scans EVERY `.py` argument of a
       `python` invocation, so `python scripts/hooks/check_docs.py tests/pipeline/test_runner.py`
       is refused because the *data* file imports torch. The linter touches no accelerator. It
       costs more than a retry: a refusal kills the whole `Bash` call, so the edits chained
       before it never run -- which is how a heredoc edit was silently lost once already.
-      Fix: inspect only the program argument (the first non-flag `.py`, or `-m`'s module),
-      not the operands. Keep the deny-list's real teeth; this is over-blocking, not a bypass.
+      It is wider than the linter: `python -m pytest tests/<one_file>.py -q` was refused too,
+      while the same run without the path and the same path with `::a_test_id` after it both
+      passed -- and the offline tier runs anywhere by ADR-001. Fixed by inspecting only the
+      PROGRAM (the first non-flag operand; a module ends option processing so its operands are
+      never promoted), which is what `READ_ONLY_TOOL_MODULES` already says for
+      `python -m black <file>`. Six tests; three fail with the all-arguments scan restored and
+      three hold the half that must not be lost. Demonstrated through the real entry point:
+      both false refusals go silent, the device tier naming that same file still denies.
+      Branch `fix/hook-operands-are-data`.
 
 - [x] **OFFLINE-TIER-HAS-A-FLAKY-GATE · FIXED, MERGED AS #171 (9 Sep).**
       #170's `cpp-offline` went red on `test_join_on_unwind`, which my diff CANNOT reach: that
