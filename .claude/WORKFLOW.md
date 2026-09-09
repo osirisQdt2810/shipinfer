@@ -197,6 +197,14 @@ claims that were already deleted. And the title matters most: with `automerge` o
 for whoever bisects that code next. When a revision changes what the PR does — a reversed
 approach, a new mechanism — the order is: rewrite body, retitle, then `git push`.
 
+**And when a revision rewrites the TESTS, rewrite the Test Plan from the diff — do not patch
+it.** #193 round 3 blocked on a body I *had* edited: I added the new sections and left the old
+bullets, so it named a class the diff no longer contains, contradicted its own paragraph, and
+pasted output no revision could produce. A patched body keeps its stale claims and reads as
+current. The check is mechanical and CLAUDE.md already asks for it:
+`git diff origin/main | grep '^+class'`, and every `Test*` the body names must be in that
+list.
+
 **Keep the label on.** Removing it turns the loop into a handoff that waits for a human. The
 only reason to remove it is a PR that edits `.github/workflows/**`, which cannot pass the
 review job at all (a GitHub App restriction, not a bug) and needs a manual merge.
