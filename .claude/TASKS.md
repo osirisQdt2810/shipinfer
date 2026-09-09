@@ -1144,7 +1144,7 @@ hook down, for when the operator asked to see something before it is executed.
       every post-emit metric instead (`Histogram.observe` too) -> four on `main`, no fifth, and
       the whole `tests/` tree clean on the branch. Stays open until #173 merges.
 
-- [ ] **HOOK-REFUSES-A-HEREDOC-THAT-ONLY-QUOTES-A-WORD · the same family, one branch over.**
+- [~] **HOOK-REFUSES-A-HEREDOC-THAT-ONLY-QUOTES-A-WORD · fixed and verified; PR held behind #175.**
       `python3 - <<PY` whose body merely mentions `pytest` inside a STRING LITERAL is refused
       as "a heredoc executed by an interpreter runs `pytest`" -- four times in one session, and
       each refusal ended the whole `Bash` call, so the edit chained ahead of it never ran. It
@@ -1155,6 +1155,16 @@ hook down, for when the operator asked to see something before it is executed.
       right under it still matches `line.strip().split(" ")[0]`, so a markdown table row
       starting with the word `pytest` "runs the suite". Fix: the same upgrade, one loop down --
       judge what a body RUNS, not what it names, which is #174's rule verbatim.
+      DONE on `fix/a-name-is-not-an-invocation`, and it cut BOTH ways: a line-prefix scan
+      cannot see `subprocess.run(["pytest", ...])` either, so `main` refused a markdown table
+      and ALLOWED four real invocations (a list, a shell string, `os.system`, an f-string).
+      A python body is now read as python -- command position of a `subprocess`/`os`/`pty`/
+      `runpy` call -- while a SHELL body keeps the line scan, because there the first word of a
+      line really is the command. `_stdin_interpreter` is what tells the two apart. The sibling
+      went in too: `BLOCKED_SCRIPTS` matched the whole command text, so a linter handed a
+      runner's path counted as invoking it; it tests the PROGRAM now. Nine tests, each of the
+      three guards fails with its own regression restored (7/1/1). Suite 3772 passed, docs caps
+      unchanged, matrix identical to `main` bar the six intended rows.
 
 - [ ] **HOOK-FAILS-OPEN-ON-SPELLINGS-IT-DOES-NOT-MODEL · not #174's, but the same shape.**
       Open on `main` and untouched by #174: `python -m shipinfer serve` (the subcommand list is
