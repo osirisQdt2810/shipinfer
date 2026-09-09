@@ -150,6 +150,22 @@ WRAPPERS = {
     # --gres=gpu:1 …`. Flags and numbers are already stepped over, so no special case.
     "mpirun",
     "srun",
+    # NVIDIA tooling. WRAPPERS and not `BLOCKED_COMMANDS`, deliberately: each one runs a
+    # command, so what gets judged is the command -- which makes `nsys --version` fall out
+    # allowed with no carve-out, where a blocked name would have needed one.
+    "ncu",
+    "nvprof",
+    "compute-sanitizer",
+    "cuda-memcheck",
+    # Tracers and schedulers, all of the form `<tool> [flags] <command>`.
+    "strace",
+    "ltrace",
+    "valgrind",
+    "setsid",
+    "chrt",
+    "taskset",
+    "unbuffer",
+    "watch",
 }
 
 #: Wrappers that put a SUBCOMMAND between themselves and the real command, so one token is
@@ -168,6 +184,8 @@ WRAPPER_SUBCOMMANDS = {
     "conda": {"run"},
     "micromamba": {"run"},
     "rye": {"run"},
+    # `nsys profile pytest -m gpu`: the subcommand sits where a command would.
+    "nsys": {"profile", "launch", "start", "stats", "sessions"},
 }
 
 PYTHON_RE = re.compile(r"(?:^|/)(python|python3|python3\.\d+)$")
@@ -761,6 +779,21 @@ WRAPPER_VALUE_FLAGS = {
     "sudo": {"-u", "--user", "-g", "--group"},
     "srun": {"-n", "--ntasks", "-p", "--partition", "--gres"},
     "mpirun": {"-n", "-np", "--host", "--hostfile"},
+    # NAMES only, which is this table's whole scope: a flag whose value is a NUMBER is
+    # already stepped over by `WRAPPER_OPERAND`, and listing one anyway is what produced the
+    # `watch -d` miss below -- `-d`/`--differences` takes no argument at all, so the pair-skip
+    # ate the command while `--differences` (not listed) reached it (#179 review).
+    "nsys": {"-o", "--output", "-t", "--trace", "-s", "--sample", "-c", "--capture-range"},
+    "ncu": {"-o", "--set", "--metrics", "-k", "--kernel-name"},
+    "nvprof": {"-o", "--output-profile", "--metrics", "--events"},
+    "strace": {"-o", "-e"},
+    "ltrace": {"-o", "-e"},
+    "valgrind": {"--log-file", "--tool", "--suppressions"},
+    # Selecting the tool is the whole reason to reach for these, and NVIDIA's spelling is
+    # separated rather than `=`, so the canonical invocation was the one getting through.
+    "compute-sanitizer": {"--tool", "--log-file", "-o", "--destroy-on-device-error"},
+    "cuda-memcheck": {"--tool", "--log-file", "-o"},
+    "taskset": {"-c", "--cpu-list"},
 }
 
 
