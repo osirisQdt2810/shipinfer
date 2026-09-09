@@ -1127,6 +1127,15 @@ hook down, for when the operator asked to see something before it is executed.
 
 ## Phase 6 · The final goal (V49)
 
+- [ ] **PY-OFFLINE-FLAKE-SINK-DROP · one failure in one full-suite run, not yet explained.**
+      `tests/pipeline/test_runner.py::TestADroppedEventIsNotAPublishedOne::test_the_failure_reaches_the_metric_and_the_caller`
+      failed once while running the offline suite on #170's rebase. It is NOT #170's doing --
+      the revert-check ran both trees' full suites simultaneously and both were green (main
+      3690 passed, branch 3695 passed), and the test passed 5/5 alone. What makes it worth a
+      line rather than a shrug is the number: `wait_for` gives 10 s for three frames, so a
+      timeout is a stall, not slowness. Reproduce it under parallel contention the way #171's
+      flake was reproduced (that is the method that worked), then fix the stall or the test.
+
 - [x] **OFFLINE-TIER-HAS-A-FLAKY-GATE · FIXED, MERGED AS #171 (9 Sep).**
       #170's `cpp-offline` went red on `test_join_on_unwind`, which my diff CANNOT reach: that
       unit's entire include closure is `join_on_unwind.h` and itself, checked rather than
