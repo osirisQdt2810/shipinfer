@@ -1167,6 +1167,12 @@ hook down, for when the operator asked to see something before it is executed.
       called the printer directly and passed with the bug in -- the same vacuity the review
       noted -- so it drives `measure_sharded` now. Both non-blocking notes in too. Evidence: a
       sharded bench run whose aggregate table carries `(busy)` for every model.
+      **Round 3:** the counter itself had no behavioural test on either plane -- deleting the
+      `+=` any suite catches, corrupting it none did, and `latency_us` is already a /1000 from
+      nanoseconds so a second one is the invited edit (156% of ceiling -> 0.2%, i.e. a roadmap
+      decision on an artefact). Now pinned with a floor AND a ceiling on both planes, plus the
+      `failed_batches` exclusion, and all four assertions checked against the corruption they
+      exist for. All five non-blocking notes in as well.
 
 - [~] **HOOK-REFUSES-A-LINTER-ON-A-TEST-FILE · fixed, PR open. Two false refusals, one cause.**
       `require_container.py`'s `script_touches_device` scans EVERY `.py` argument of a
