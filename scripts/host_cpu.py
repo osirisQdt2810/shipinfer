@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""Run a command and report the host CPU it used, apart from its load generators.
+
+The RTSP arm starts its two `rtsp_serve.py` servers *inside* the bench container, because the
+rootless daemon has no NAT and a second container cannot be reached. So the run pays to
+generate its own load, and its events figure is depressed by work no deployment does.
+`NOT-GPU-BOUND-AT-FIVE-GPUS` measured that penalty at up to ~17% and recorded the split as
+"unknown, between the servers (ours to discount) and our own decode threads (ours to
+optimise)". This is what makes it a number.
+
+    python scripts/host_cpu.py --pid 41 --pid 42 -- ./bench --cameras 50
+
+Exact rather than sampled, on both sides: `os.wait4` hands back the child's own rusage, and
+`utime + stime` in `/proc/<pid>/stat` is the kernel's total across every thread of a process,
+so one read before and one after bound the window with nothing to miss.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+TICKS_PER_SECOND = os.sysconf("SC_CLK_TCK")
+
+
+def ticks_from_stat(line: str) -> float:
+    """The `utime + stime` ticks in one `/proc/<pid>/stat` line.
+
+    Parsed from the LAST `)` rather than by splitting on spaces: field 2 is the executable
+    name in parentheses, and it can contain both -- `python (old)` is a legal `comm`, and so
+    is anything a process writes to `/proc/self/comm`. Splitting naively shifts every field
+    after it and reports another process's numbers as this one's.
+    """
+    fields = line[line.rindex(")") + 2 :].split()
+    # `stat` field 14 is utime and 15 is stime, 1-indexed; field 3 is the first after `comm`.
+    return float(fields[11]) + float(fields[12])
+
+
+def cpu_seconds(pid: int) -> float | None:
+    """CPU-seconds this process has used, or ``None`` if it is gone.
+
+    ``None`` and not ``0.0``: a server that exited early used its CPU and then vanished, and
+    reporting that as zero would silently discount the very cost this measures.
+    """
+    try:
+        line = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return ticks_from_stat(line) / TICKS_PER_SECOND
+
+
+def window(before: dict[int, float | None], after: dict[int, float | None]) -> dict[str, float]:
+    """Per-pid CPU-seconds spent *during* the window, keyed by pid as a string.
+
+    A delta, because a server is started before the command and has already burned CPU on its
+    fixture cache and its first clients by the time the run begins. Charging its lifetime
+    total to the run overstates the penalty; charging zero when it died understates it, so a
+    pid that vanished is reported as the deficit it is rather than dropped.
+    """
+    out: dict[str, float] = {}
+    for pid, start in before.items():
+        end = after.get(pid)
+        if start is None or end is None:
+            out[str(pid)] = float("nan")
+        else:
+            out[str(pid)] = max(0.0, end - start)
+    return out
+
+
+def _relay_signals_to(child: list[int]) -> list[tuple[int, object]]:
+    """Pass SIGTERM and SIGINT on, so `docker stop` still reaches the bench.
+
+    Installed BEFORE the spawn and reading a one-element list, because a handler installed
+    after it has a window in which a signal kills this wrapper and leaves the bench running
+    with its GPU contexts held -- the leak GPU hygiene exists to prevent. The previous
+    handlers come back, so calling `main` from a test leaves the caller's own intact.
+    """
+
+    def relay(number: int, _frame: object) -> None:
+        if child:
+            os.kill(child[0], number)
+        else:
+            raise SystemExit(128 + number)
+
+    return [
+        (number, signal.signal(number, relay)) for number in (signal.SIGTERM, signal.SIGINT)
+    ]
+
+
+def report(command_cpu_s: float, generators: dict[str, float], wall_s: float) -> dict:
+    """The accounting, as one flat mapping — every field a reader needs to divide.
+
+    `cores` is here because CPU-seconds alone cannot say whether a host was saturated: 300
+    CPU-seconds over 70 s is four busy cores on this 48-core box and an impossibility on a
+    two-core one.
+    """
+    generator_cpu_s = sum(value for value in generators.values() if value == value)
+    return {
+        "command_cpu_s": round(command_cpu_s, 2),
+        "generator_cpu_s": round(generator_cpu_s, 2),
+        "generators": {pid: round(value, 2) for pid, value in generators.items()},
+        "wall_s": round(wall_s, 2),
+        "cores": os.cpu_count() or 0,
+        "command_cores_busy": round(command_cpu_s / wall_s, 2) if wall_s > 0 else 0.0,
+        "generator_cores_busy": round(generator_cpu_s / wall_s, 2) if wall_s > 0 else 0.0,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--pid",
+        type=int,
+        action="append",
+        default=[],
+        help="a load generator to account for separately (repeatable)",
+    )
+    parser.add_argument("--out", type=Path, help="also write the accounting here as JSON")
+    parser.add_argument("command", nargs=argparse.REMAINDER, help="-- then the command")
+    args = parser.parse_args(argv)
+
+    command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    if not command:
+        print("no command given; usage: host_cpu.py [--pid N] -- <command>", file=sys.stderr)
+        return 2
+
+    before = {pid: cpu_seconds(pid) for pid in args.pid}
+    started = time.monotonic()
+    child: list[int] = []
+    restore = _relay_signals_to(child)
+    try:
+        # `posix_spawnp` rather than `subprocess`: `os.wait4` is the only stdlib call that
+        # hands back a child's rusage, and `Popen` would then reap the same pid twice.
+        child.append(os.posix_spawnp(command[0], command, os.environ))
+        _, status, usage = os.wait4(child[0], 0)
+    finally:
+        for number, previous in restore:
+            signal.signal(number, previous)
+    wall_s = time.monotonic() - started
+    after = {pid: cpu_seconds(pid) for pid in args.pid}
+
+    accounting = report(usage.ru_utime + usage.ru_stime, window(before, after), wall_s)
+    print("host cpu: " + json.dumps(accounting), file=sys.stderr)
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps(accounting, indent=2) + "\n", encoding="utf-8")
+
+    # The command's own outcome, not this wrapper's: a signalled bench must not look like a
+    # clean exit to whatever reads the run's status.
+    if os.WIFSIGNALED(status):
+        return 128 + os.WTERMSIG(status)
+    return os.WEXITSTATUS(status)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
