@@ -224,18 +224,25 @@ def _selects_device_tier(args: list[str]) -> bool:
     return False
 
 
-def _module_argument(args: list[str]) -> str | None:
-    """The module in `-m pytest` or `-mpytest`, or None.
+def _module_at(args: list[str]) -> tuple[int, str] | None:
+    """``(index of the module's first operand, module name)``, or None.
 
     Both spellings, because only the detached form was checked and `python -mpytest tests/`
-    went straight through.
+    went straight through. The index is what `_script_program` needs: an EXECUTOR module runs
+    what follows it, so the scan has to continue from there rather than stop at the `-m`.
     """
     for index, token in enumerate(args):
         if token == "-m":
-            return args[index + 1] if index + 1 < len(args) else ""
+            return index + 2, (args[index + 1] if index + 1 < len(args) else "")
         if token.startswith("-m") and len(token) > 2 and not token.startswith("--"):
-            return token[2:]
+            return index + 1, token[2:]
     return None
+
+
+def _module_argument(args: list[str]) -> str | None:
+    """The module in `-m pytest` or `-mpytest`, or None."""
+    found = _module_at(args)
+    return None if found is None else found[1]
 
 
 def _is_containerised(tokens: list[str]) -> bool:
@@ -504,25 +511,82 @@ def real_command(tokens: list[str]) -> tuple[str | None, list[str]]:
     return None, []
 
 
-def script_touches_device(args: list[str], cwd: str | None) -> str | None:
-    """If a python invocation targets a local script that imports a device stack,
-    name that script.  Unreadable or missing targets return None -- the hook
-    never blocks on a file it could not inspect."""
-    root = Path(cwd) if cwd else Path.cwd()
-    for arg in args:
-        if arg.startswith("-") or not arg.endswith(".py"):
+#: Interpreter options that take a SEPARATE value, so the token after one is not the program.
+#: `-c` is absent because it ends option processing and its code is read by `DEVICE_TOKENS`;
+#: `-m` is absent because `_module_at` decides it, and the decision is not one-sided.
+_PYTHON_VALUE_FLAGS = frozenset({"-W", "-X", "--check-hash-based-pycs"})
+
+#: Modules that RUN their operand rather than reading it: option processing ends at `-m`, but
+#: these `exec` what follows, so the operand is a PROGRAM. Treating every module's operands as
+#: data allowed `python -m cProfile probe.py`, a host measurement `main` refused -- and nothing
+#: stands behind it: a bare `python -m cProfile` reaches no `containment.py` (#174 review).
+_EXECUTOR_MODULES = frozenset(
+    {"cProfile", "profile", "pdb", "trace", "runpy", "coverage", "memory_profiler", "scalene"}
+)
+
+
+def _script_program(args: list[str]) -> str | None:
+    """The ``.py`` file this command would RUN, or None.
+
+    No module: the first non-flag operand and nothing after it, since what follows is that
+    program's own argv -- a script's operands are DATA, the argument `READ_ONLY_TOOL_MODULES`
+    already makes for `python -m black <file>`. A first operand that is not a `.py` ends the
+    scan (a `.venv/bin/` console script IS the program, and is not readable as source). With
+    an executor the operand is a program, so the scan continues past the module name -- by
+    suffix, because the executor's own options may precede the script and may take values.
+    """
+    module = _module_at(args)
+    if module is not None:
+        start, name = module
+        if name.split(".")[0] not in _EXECUTOR_MODULES:
+            return None
+        for token in args[start:]:
+            # `coverage run -m pytest ...`: a second module, and the module branch above is
+            # where a module is judged. Nothing here is the program.
+            if token == "-c" or token == "-m" or (token.startswith("-m") and len(token) > 2):
+                return None
+            if token.endswith(".py"):
+                return token
+        return None
+    skip = False
+    for token in args:
+        if skip:
+            skip = False
             continue
-        candidate = Path(arg)
-        path = candidate if candidate.is_absolute() else root / candidate
-        try:
-            if not path.is_file():
-                continue
-            body = path.read_text(errors="replace")[:SCRIPT_READ_LIMIT]
-        except OSError:
+        if token == "-c":
+            return None
+        if token in _PYTHON_VALUE_FLAGS:
+            skip = True
             continue
-        if DEVICE_IMPORT.search(body):
-            return arg
+        if token.startswith("-"):
+            continue
+        return token if token.endswith(".py") else None
     return None
+
+
+def script_touches_device(args: list[str], cwd: str | None) -> str | None:
+    """If a python invocation RUNS a local script that imports a device stack, name it.
+
+    Unreadable or missing targets return None -- the hook never blocks on a file it could not
+    inspect. Only the PROGRAM is inspected: scanning every `.py` argument refused
+    `python scripts/hooks/check_docs.py tests/pipeline/test_runner.py` for the *input* file's
+    imports, and an offline `python -m pytest tests/<file>.py` for the same reason. Both are
+    allowed by the rule -- one is a linter, the other is the tier ADR-001 says runs anywhere --
+    and a refusal kills the whole `Bash` call, so an edit chained before one never ran.
+    """
+    program = _script_program(args)
+    if program is None:
+        return None
+    root = Path(cwd) if cwd else Path.cwd()
+    candidate = Path(program)
+    path = candidate if candidate.is_absolute() else root / candidate
+    try:
+        if not path.is_file():
+            return None
+        body = path.read_text(errors="replace")[:SCRIPT_READ_LIMIT]
+    except OSError:
+        return None
+    return program if DEVICE_IMPORT.search(body) else None
 
 
 def _indirection(tokens: list[str]) -> str | None:
@@ -625,8 +689,15 @@ def verdict(command: str, cwd: str | None = None) -> str | None:
                     # runs. Without this, `python -m black engine/model.py` was refused
                     # because the FILE imports torch (the false positive of 28 Aug).
                     continue
-                if module in BLOCKED_MODULES and _selects_device_tier(args):
-                    return f"`python -m {module} {_device_marker(args)}` runs the device tier."
+                # ANY `-m` value, not just the first. `python -m coverage run -m pytest
+                # -m gpu` names `coverage` first, so reading one module let the device tier
+                # straight through -- and this branch is already the place that judges a
+                # module, so it is the place the second one belongs.
+                runner = next(
+                    (m for m in _marker_expressions(args) if m in BLOCKED_MODULES), None
+                )
+                if runner is not None and _selects_device_tier(args):
+                    return f"`python -m {runner} {_device_marker(args)}` runs the device tier."
                 carved_out = any(
                     module == prefix or module.startswith(prefix + ".")
                     for prefix in ALLOWED_MODULE_PREFIXES

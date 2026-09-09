@@ -276,6 +276,100 @@ class TestReadOnlyToolsAreNotExecutionVectors:
         assert refused(command, cwd=tmp_path) is not None
 
 
+class TestAScriptsOperandsAreData:
+    """A script's arguments are its input, not a second program.
+
+    `script_touches_device` scanned EVERY `.py` argument, so a linter was refused for its
+    INPUT file's imports and an offline `python -m pytest tests/<one_file>.py` for the same
+    reason -- while the identical run without the path, and the same path with `::a_test_id`
+    after it, both passed. That inconsistency is the tell. It cost more than a retry: a
+    refusal ends the whole `Bash` call, so an edit chained before one never ran.
+
+    Same argument as `READ_ONLY_TOOL_MODULES`, one spelling over.
+    """
+
+    def test_a_linter_over_a_device_importing_file_is_allowed(self, tmp_path: Path) -> None:
+        linter = tmp_path / "check_docs.py"
+        linter.write_text("import ast\nimport sys\n")
+        target = tmp_path / "model.py"
+        target.write_text("import torch\n")
+        assert refused(f"python {linter} {target}") is None
+
+    def test_the_program_itself_is_still_judged_by_its_contents(self, tmp_path: Path) -> None:
+        """The half that must not be lost: the FIRST operand is still read and still refused."""
+        program = tmp_path / "probe.py"
+        program.write_text("import torch\n")
+        data = tmp_path / "data.py"
+        data.write_text("VALUE = 1\n")
+        assert refused(f"python {program} {data}") is not None
+
+    def test_a_flag_value_is_not_mistaken_for_the_program(self, tmp_path: Path) -> None:
+        """`-X importtime` puts a bare word before the script; the script is still the script."""
+        program = tmp_path / "probe.py"
+        program.write_text("import tensorrt\n")
+        assert refused(f"python -X importtime {program}") is not None
+
+    def test_an_offline_pytest_naming_one_file_is_allowed(self) -> None:
+        """ADR-001: the offline tier runs anywhere, and naming one of its files does not
+        change that. `pytest tests/pipeline/test_runner.py` was already allowed; the module
+        form of the identical run was not."""
+        assert refused("python -m pytest tests/pipeline/test_runner.py -q") is None
+
+    def test_the_device_tier_naming_that_same_file_is_still_refused(self) -> None:
+        assert refused("python -m pytest tests/pipeline/test_runner.py -m gpu") is not None
+
+    def test_a_module_still_hides_no_program_behind_it(self, tmp_path: Path) -> None:
+        """`pytest`'s operands are pytest's: the TIER decides, above, not the file's imports.
+        Its executor siblings are the opposite case and are pinned right below."""
+        target = tmp_path / "model.py"
+        target.write_text("import torch\n")
+        assert refused(f"python -m pytest {target} -q") is None
+        assert refused(f"python -m pytest {target} -m multigpu") is not None
+
+
+class TestAnExecutorModulesOperandIsAProgram:
+    """`-m` ends CPython's option processing; it does not end EXECUTION.
+
+    The first version of this fix treated every module's operands as data, and so allowed
+    `python -m cProfile probe.py` -- a host measurement that leaves a CUDA context, which
+    `main` refused. A bypass this change would have ADDED, and one with nothing behind it:
+    `containment.py` is reached from `conftest.py` and from `serve`/`bench`, and a bare
+    `python -m cProfile probe.py` calls none of them (#174 review).
+    """
+
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "python -m cProfile {p}",
+            "python -m cProfile -o /tmp/out.prof {p}",  # options, with a value, before it
+            "python -mcProfile {p}",  # the attached spelling
+            "python -m pdb {p}",
+            "python -m trace --trace {p}",
+            "python -m runpy {p}",
+            "python -m coverage run {p}",  # a subcommand before it
+            "python -m memory_profiler {p}",
+        ],
+    )
+    def test_a_module_that_runs_its_operand_is_refused(self, template: str, tmp_path: Path):
+        probe = tmp_path / "probe.py"
+        probe.write_text("import torch\ntorch.cuda.init()\n")
+        assert refused(template.format(p=probe)) is not None
+
+    def test_a_module_that_reads_its_operand_is_still_allowed(self, tmp_path: Path) -> None:
+        """The other half, pinned against the one above, because it is the same rule: what
+        RUNS is judged, what is merely READ is data."""
+        target = tmp_path / "model.py"
+        target.write_text("import torch\n")
+        assert refused(f"python -m black --check {target}") is None
+
+    def test_an_executor_running_a_module_leaves_the_decision_to_the_module(self) -> None:
+        """`coverage run -m pytest` reaches a second `-m`, so nothing after it is a program
+        and the tier decides. The offline spelling is allowed and the device tier is not --
+        by the module branch, which is where a module belongs."""
+        assert refused("python -m coverage run -m pytest tests/core -q") is None
+        assert refused("python -m coverage run -m pytest -m gpu") is not None
+
+
 class TestTheGuardCanFail:
     """Without this, a hook that always allowed would pass everything above."""
 
