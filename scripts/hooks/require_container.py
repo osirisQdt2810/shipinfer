@@ -166,6 +166,11 @@ WRAPPERS = {
     "taskset",
     "unbuffer",
     "watch",
+    # Wrappers with a positional operand of their own -- see `WRAPPER_POSITIONALS`.
+    "flock",
+    "chroot",
+    "su",
+    "setarch",
 }
 
 #: Wrappers that put a SUBCOMMAND between themselves and the real command, so one token is
@@ -762,11 +767,11 @@ def segments(command: str) -> list[list[str]]:
 
 
 ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-# `timeout 900`, `nice -n 5`, `stdbuf -oL`: a wrapper's own operands must be
-# stepped over too, or the "executable" comes out as `900` and the real command
-# behind it is never examined.  That was the miss on the one process that had
-# actually leaked a CUDA context here.
-WRAPPER_OPERAND = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
+# `timeout 900`, `nice -n 5`, `taskset 0xff`: a wrapper's own operands must be stepped over,
+# or the "executable" comes out as `900` and the real command is never examined -- the miss on
+# the one process that had actually leaked a CUDA context here. A hex mask is a number in
+# another base, so it belongs in THIS pattern rather than in a positional count.
+WRAPPER_OPERAND = re.compile(r"^(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?[smhd]?)$")
 
 #: Wrapper flags whose value is a NAME, which `WRAPPER_OPERAND` cannot step over: `conda run
 #: -n myenv pytest` answered `myenv`. Keyed BY WRAPPER -- the same letters are booleans
@@ -796,13 +801,20 @@ WRAPPER_VALUE_FLAGS = {
     "taskset": {"-c", "--cpu-list"},
 }
 
+#: Wrappers whose first POSITIONAL operand is not the command: a lock file, a root, a user, an
+#: architecture. `WRAPPER_OPERAND` steps over a number and `WRAPPER_VALUE_FLAGS` over a flag's
+#: value; neither can step over a bare path, so `flock /tmp/l pytest -m gpu` answered `/tmp/l`
+#: and the device tier walked through. The count is per wrapper because that is what varies.
+WRAPPER_POSITIONALS = {"flock": 1, "chroot": 1, "su": 1, "setarch": 1, "unshare": 0}
+
 
 def real_command(tokens: list[str]) -> tuple[str | None, list[str]]:
     """Strip env assignments and wrappers; return (executable, remaining args)."""
     i = 0
     #: The wrapper whose own flags we are currently inside, so a value-taking flag is only
-    #: honoured for the wrapper that has it.
+    #: honoured for the wrapper that has it, and how many of its positionals are still owed.
     owner = ""
+    owed = 0
     while i < len(tokens):
         tok = tokens[i]
         base = tok.rsplit("/", 1)[-1]
@@ -816,6 +828,11 @@ def real_command(tokens: list[str]) -> tuple[str | None, list[str]]:
         if tok in WRAPPER_VALUE_FLAGS.get(owner, frozenset()):
             i += 2
             continue
+        if owed and not tok.startswith("-"):
+            # `flock /tmp/l …`, `su <user> …`: the wrapper's own operand, not the command.
+            owed -= 1
+            i += 1
+            continue
         skip = (
             (ENV_ASSIGN.match(tok) and not tok.startswith("-"))
             or base in WRAPPERS
@@ -825,6 +842,7 @@ def real_command(tokens: list[str]) -> tuple[str | None, list[str]]:
         if skip:
             if base in WRAPPERS:
                 owner = base
+                owed = WRAPPER_POSITIONALS.get(base, 0)
             i += 1
             continue
         return tok, tokens[i + 1 :]
