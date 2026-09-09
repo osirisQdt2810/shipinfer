@@ -1638,6 +1638,36 @@ hook down, for when the operator asked to see something before it is executed.
       reassembly -- which is why `events` is the softest of C1's three ratios and why the
       rows/pixels ones are the ones measuring model work.
 
+- [~] **THE-BASELINE-HAD-NO-DENOMINATOR · PR #190, and it gives `C1` a FOURTH ratio -- the
+      first one on a like-for-like denominator.** `C1` records in its own words that the honest
+      comparison was unavailable: "GPU-seconds is the honest measure ... but `sim_pipeline_v2`
+      reports no counterpart, so there is nothing to divide by". The binary reports none and is
+      run unchanged on purpose. THE KERNEL REPORTS ONE, so `run_baseline` now reads
+      `RUSAGE_CHILDREN` around the run window -- not `os.wait4`, because `_terminate` reaps the
+      process itself on the ordinary path, and not at the top of the function, because
+      `build_binary` and the `pkg-config` probes fork and their CPU is the harness's.
+      MEASURED 9 Sep, 50x20x40 s on five idle GPUs:
+        baseline host cpu: 510.8 CPU-s over 44.3 s = 11.53 cores, 12.12 ms CPU/image
+        baseline TOTAL 951.5 img/s SATURATED   (against 959.8 and 960.2 already here, so the
+                                                arm reproduces itself inside 1%)
+      WITH #184's `command_cpu_s` AND THE ROW COUNTS `cli/bench` ALREADY PRINTS:
+        system                     rows/images   host CPU-s   per row   rows per CPU-s
+        ShipInfer (C++, nvdec)         321 018       1023.6   3.19 ms          313.6
+        baseline                        42 151        510.8  12.12 ms           82.5
+      **3.80x in our favour on rows per host-CPU-second.** Our rows are MEASURED (summed from
+      `per_device_rows`), and 12.0 rows per event corroborates this file's own "12.7 of our rows
+      per request ARE crops".
+      THREE CAVEATS, and they belong on the number: (1) it inherits the rows ratio's weighting,
+      a 640x640 detector row and a 256x128 crop counting alike; (2) it answers a DIFFERENT
+      question from the throughput ratios -- the baseline was SATURATED (GPU-bound) and our run
+      was host-bound, so "per second" and "per CPU-second" are not the same claim; (3) two runs
+      rather than one sitting, n=1 each, on a box with other tenants and a measured 36.7% spread
+      on events, so re-run interleaved before quoting a third digit.
+      OWED NEXT, and it is small: our PYTHON arm has no `command_cpu_s` -- #184 wrapped the C++
+      one and the system tier runs our plane in-process, so its own accounting is
+      `RUSAGE_SELF` plus `RUSAGE_CHILDREN` minus the baseline's. Then `compare()` can print the
+      CPU column for both systems instead of a reader assembling it from two logs.
+
 - [!] **C1-WHAT-IS-THE-5x-AGAINST? · OPERATOR, and it is one question with three measured
       answers. THE CURRENT NUMBERS ARE HERE; everything below this block is the chronology of
       how they were arrived at, and its early figures are SUPERSEDED by these.**
