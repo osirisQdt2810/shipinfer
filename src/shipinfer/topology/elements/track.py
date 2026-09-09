@@ -541,6 +541,12 @@ class ShipvisionTrack(Element):
             self.params.get("attribution_iou", DEFAULT_ATTRIBUTION_IOU)
         )
         self._shard: TrackerShard | None = None
+        # doc: long why a lifecycle hook needs a memory of its own, and why no lock
+        #: Cameras dropped since their last announcement. `camera_added` resets a tracker only
+        #: for one of these, because only there can the shard be STALE -- see that method.
+        #: Only the two lifecycle hooks touch this, and the runner serialises them under its
+        #: `_lifecycle`, so it needs no lock; the per-frame path never reads it.
+        self._dropped: set[str] = set()
         self._metrics = _TrackMetrics(None, name)
         # Bound once, next to the other resolve-once handles: `self._metrics.implicit_reset`
         # written at the call site mints a bound-method object on every frame, and this one is
@@ -624,21 +630,38 @@ class ShipvisionTrack(Element):
     def _do_close(self) -> None:
         # The trackers go with the element: their state is a camera's identity history and
         # keeping it across a close would mean a reopened chain continuing ids from before the
-        # gap it cannot see.
+        # gap it cannot see. The dropped set goes with them: there is no shard left to call
+        # stale, so a reopened chain's first announcement per camera resets nothing.
         self._shard = None
+        self._dropped.clear()
         self._Detection = None
         self._Detections = None
         self._FrameTag = None
         self._iou_matrix = None
         self._associate = None
 
+    # doc: long the two populations this hook sees and why only one of them is stale
     def camera_added(self, camera_id: str) -> None:
-        """Restart this camera's tracker if it already had one.
+        """Restart this camera's tracker only if it was **dropped** since its last add.
 
-        A re-added camera is one whose ingest actor minted a fresh ``FrameCounter``, so its next
-        frame is ``frame_id = 0`` — below the high-water mark the previous run left, and refused
-        forever without this. ADR-018 names remove + add as the recovery for a lost camera, so
-        this state has to be one the chain can be in.
+        Two populations reach this hook, and only one of them has state worth forgetting.
+
+        **A camera that was removed and is coming back** — ADR-018's announced recovery. Its
+        ingest actor mints a fresh ``FrameCounter``, so its next frame is ``frame_id = 0``, and
+        :meth:`camera_removed`'s drop is *not* enough on its own: that method's own contract
+        says "state this drops can be rebuilt by a frame already in the lane", and a frame that
+        arrives after the drop does rebuild the shard and bank its old high-water mark. Frame 0
+        of the new stream is then below it and refused — forever with
+        ``regression_reset: 0``, and absorbed as an *unannounced* restart otherwise, which
+        reports an operator doing exactly the right thing as one who is not. So this resets.
+
+        **A camera being added for the first time**, where the reset would be the bug.
+        :meth:`Element.camera_added`'s contract says this hook runs *after* the ingest actor
+        exists, so "on a camera that opens instantly a frame can reach ``process`` before this
+        hook does" — and resetting regardless threw away the tracker that frame had just built,
+        so the camera's SECOND frame started a second identity. Measured at about 1% of runs,
+        and 8 of 12 with the hooks instrumented. Nothing here is stale: there is no drop behind
+        it.
 
         Never *builds* a tracker: this fires for every camera placed on the shard, and minting a
         Kalman filter for forty-nine cameras that are not on this element is work for nothing.
@@ -648,7 +671,9 @@ class ShipvisionTrack(Element):
         :meth:`TrackerShard.reset_if_present` for why that residual is accepted: a reset has to
         agree with the update it interrupts, and a drop does not.
         """
-        if self._shard is not None:
+        was_dropped = camera_id in self._dropped
+        self._dropped.discard(camera_id)
+        if was_dropped and self._shard is not None:
             self._shard.reset_if_present(camera_id)
 
     def camera_removed(self, camera_id: str) -> None:
@@ -658,6 +683,10 @@ class ShipvisionTrack(Element):
         runs holding the runner's ``_lifecycle``, and every other lifecycle operation on the
         shard — including the ``stop`` that would end a wait — queues behind it.
         """
+        # Marked BEFORE the drop, because what makes the next add's shard stale is that a
+        # frame still in the lane can rebuild it -- which can happen the moment the drop
+        # returns, and `Element.camera_removed`'s contract says to expect it.
+        self._dropped.add(camera_id)
         if self._shard is not None and self._shard.drop(camera_id):
             self._note_cameras()
 
