@@ -227,6 +227,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.check:
+        # Reports what exists and builds nothing, so it is inspection rather than a build --
+        # allowed on the host on purpose, the way `shipinfer repo ls` and a `--version` query
+        # are. The gate belongs below it, not above.
         return report(args.fp16)
 
     selected = TARGETS
@@ -237,6 +240,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"unknown model(s): {sorted(unknown)}", file=sys.stderr)
             return 2
         selected = tuple(t for t in TARGETS if t.name in wanted)
+
+    from shipinfer.runtime import containment
+
+    # CLAUDE.md's list of what must run in a container names "any engine build", and this was
+    # the one entry in that list with no gate. A plan is valid only for the architecture and
+    # TensorRT version it was built on -- host `nvcc` here is 11.5 against a 12.6 driver -- so
+    # a host-built engine is the WRONG artefact rather than a slower one.
+    containment.require_container("an engine build")
 
     return build(selected, fp16=args.fp16, force=args.force)
 
