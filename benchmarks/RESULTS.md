@@ -15,7 +15,7 @@ number and date it.
 | binary | `benchmarks/baseline` (`sim_pipeline_v2`), unmodified | `csrc/build/bench`, `--source nvdec` |
 | input | a folder of JPEGs, `cv::imread` per frame | RTSP → NVDEC → NV12 in VRAM |
 | chain | two disjoint one-model pipelines (`det`, `seg`) | detect → conditional segment → embed person → embed ship → reassembly → JSON events |
-| models per frame | 1 | 2.66 measured |
+| models per frame | 1 | 2.65 measured (106 294 requests / 40 148 frames, below) |
 | what it reports | images/s, **asserted** from its configuration minus buffer growth | events/s and rows/s, **counted** |
 
 The asymmetry is not hidden: one baseline image passes through one model, one ShipInfer frame
@@ -78,7 +78,8 @@ starves it of CPU its CPU-seconds fall and its images do not, which **inflates**
 exactly when the box is busy. Pass b, the busiest, is both the baseline's best and the ratio's
 worst.
 
-Per-unit host cost, from the same accounting:
+Per-unit host cost, from the **first (non-interleaved) sitting** — 50×20×40 s on five idle
+GPUs, which is where the 313.6-against-82.5 rows-per-CPU-second figure comes from:
 
 | | host CPU per unit |
 |---|---|
