@@ -1148,6 +1148,26 @@ hook down, for when the operator asked to see something before it is executed.
       THE LESSON WORTH KEEPING: a red on a PR is not evidence about that PR. Checking whether
       the diff could even reach the failing unit took one command and saved chasing it into
       code that was innocent -- and it turned a nuisance into a real find.
+      CONFIRMED BOTH WAYS: #170's red is this flake VERBATIM ("FAIL: and the thread really ran,
+      so this is not a no-op passing", 14 checks 1 failure), and #171's own `cpp-offline`
+      PASSES. So #170 is not broken and unblocks when #171 merges.
+      **THEN I SWEPT THE WHOLE TIER FOR MORE, AND MY OWN SWEEP WAS WRONG -- worth recording
+      because the wrong answer was the alarming one.** Running each offline binary 24 times
+      under parallel contention reported FIVE flaky gates:
+        test_event_parity 11/24   test_queue_parity 9/24   test_camera_uris 4/24 (core dumps)
+        test_ingest_parity 2/24   test_join_on_unwind 0/24 (fixed)
+      Four of those are MY METHODOLOGY, not flakes. They write FIXED `/tmp` paths --
+      `shipinfer_queue_parity_probe.scn`, `shipinfer_event_parity_probe.scn`,
+      `shipinfer_parity_endless.scn`, `shipinfer-uris-*` -- so twelve concurrent copies of one
+      binary corrupt each other's fixture. CI runs the binaries SEQUENTIALLY (`for candidate in
+      csrc/build/test_*`), so it never sees this. Serially, at load 30, all five pass 20/20.
+      So the tier has ONE demonstrated flake and it is fixed. `test_join_on_unwind` was the
+      real one precisely because it touches no files: its contention is pure thread scheduling,
+      which is why it also failed 4/20 SERIALLY on main.
+      A SMALLER REAL HAZARD FALLS OUT, recorded not fixed: those fixed `/tmp` paths mean two
+      concurrent runs of the same binary on this SHARED box -- CI plus a local run, or a peer's
+      session -- corrupt each other for real. Not what CI sees today, and the fix is a
+      per-process temp path, which is a separate small change.
 
 - [!] **NOT-GPU-BOUND-AT-FIVE-GPUS · MEASURED OUT, 9 Sep. OPERATOR: the RTSP arm under-reports
       us by up to ~17% because the harness generates its own load in-container, and fixing that
