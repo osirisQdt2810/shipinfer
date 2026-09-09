@@ -1,5 +1,21 @@
 # Open work
 
+## WHAT NEEDS THE OPERATOR (9 Sep, night) — five actions, nothing else is blocked
+
+Everything I own is done or in review; these are the only things I cannot do myself. Each
+line names the ledger item that holds the detail, and the exact action.
+
+| # | Action | Item |
+|---|---|---|
+| 1 | **Answer which comparison the >=5x is against** — four measured ratios: 0.60x events, 1.87x pixels, 7.22x rows, ~3.94x rows per host CPU-second. **Saying nothing accepts my default: the last one, target NOT MET.** | `C1-WHAT-IS-THE-5x-AGAINST?` |
+| 2 | **Merge #169 by hand** (it edits `.github/workflows/**`, so the review job cannot mint a token). It unblocks the C++ tracking chain, which is a third of the system and is in NO number measured so far. | `CSRC-GRAPH-HAS-NO-TRACKING`, `V146b` |
+| 3 | **Merge #187 by hand** (same reason; its own new CI leg is green). | `V124b`, `V124a-PHASE3` |
+| 4 | **Pull `nvcr.io/nvidia/deepstream` (~6 GB)** onto this box, or say no — the fourth topology's running half needs it; the design half is done. | `T4` |
+| 5 | **shipvision has no LICENSE file at all**, and **where does the NV12 work live?** (the claimed 1021 uncommitted lines are in no checkout I can see). | `SV-LICENSE`, `C9` |
+
+Items 2 and 3 are one click each. Item 1 is the only one that needs thought, and it is a
+choice between measured numbers rather than a request for work.
+
 
 > **COLLISION 28 Aug ~07:0x UTC — SETTLED ~07:1x: shipinfer-7f (pid 173802, a restart fork of session 2dec01d2…
 > started ~06:5x, the OPERATOR-FACING window — V143/V144 arrived there) resumed cf's three coders into cf's worktrees
