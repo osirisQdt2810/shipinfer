@@ -51,10 +51,11 @@ def wait_for(predicate, timeout_s: float = 10.0, poll_s: float = 0.01) -> bool:
     """Poll until ``predicate`` holds. **Wait on the counter the test asserts on.**
 
     A sink bumps its own ``emitted``/``failed``/``drained_total`` *inside* ``emit``; the
-    runner bumps the matching :class:`PipelineMetrics` counter only after ``emit`` returns.
-    Waiting on the sink and then asserting the metric reads that pair mid-update. Rare in
-    the wild -- 3 failures in 132 runs of this file under 16-way contention -- and every
-    time with a 50 ms sleep inside ``Counter.inc`` for those two counters.
+    runner bumps ``sink_failures`` and everything ``_record`` touches only after ``emit``
+    returns. Waiting on the sink and asserting one of those reads the pair mid-update. Rare
+    in the wild -- 3 failures in 132 runs under 16-way contention -- and every time with a
+    50 ms sleep in ``Counter.inc``/``Histogram.observe`` for every post-emit metric, which is
+    the search that found all four instances (a narrower one found three).
     """
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -638,7 +639,12 @@ class TestObservability:
     def test_metrics_count_per_stage_and_per_camera(self, runner_for):
         runner = runner_for([SHIP, PERSON]).start()
         publish(runner, 3)
-        assert wait_for(lambda: runner.sink.emitted == 3)
+        # `objects_total` is charged in `_record`, so its window is the WIDEST of the four
+        # asserted here -- wait on both of its classes and none of the others can be short.
+        assert wait_for(
+            lambda: runner.metrics.objects_total.value(camera="cam0", object_class="ship") == 3
+            and runner.metrics.objects_total.value(camera="cam0", object_class="person") == 3
+        ), runner.health()
 
         metrics = runner.metrics
         assert metrics.frames_accepted.value(camera="cam0") == 3
