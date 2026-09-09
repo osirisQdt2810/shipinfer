@@ -1182,6 +1182,33 @@ hook down, for when the operator asked to see something before it is executed.
       it. The lesson is the cheap one: measure the reported bug on the branch before writing
       the ledger entry that defers it.
 
+- [ ] **HOOK-MISSES-THE-PROFILER-AND-TRACER-WRAPPERS · found by sweeping, not by review.**
+      Swept 33 spellings against the (b) branch rather than waiting for a reviewer to find
+      them, which is what six rounds on #176 taught. Two groups are still open on `main`:
+
+      (1) NVIDIA tooling, device work by purpose the way `trtexec` is:
+      `nsys profile pytest -m gpu`, `nsys profile python probe.py`, `ncu pytest -m gpu`,
+      `ncu --set full python probe.py`, `nvprof`, `compute-sanitizer`, `cuda-memcheck`. The
+      DESIGN is already settled by the sweep: treat them as WRAPPERS, not as blocked names --
+      `nsys` needs `WRAPPER_SUBCOMMANDS = {profile, launch, start, stats}` while `ncu`,
+      `nvprof`, `compute-sanitizer` and `cuda-memcheck` take a bare command, so `WRAPPERS`
+      alone does it. That makes `nsys --version` fall out ALLOWED with no carve-out, which a
+      blocked name would not.
+
+      (2) Generic process wrappers, cheap: `strace`, `ltrace`, `valgrind`, `setsid`, `chrt`,
+      `taskset`, `unbuffer`, `watch -n1` -> `WRAPPERS`; `flock /tmp/l <cmd>` needs its lockfile
+      PATH skipped, which is `WRAPPER_VALUE_FLAGS`'s problem shape one operand over.
+
+      (3) Genuinely hard, and NOT worth a deny-list entry: `ssh localhost <cmd>` (remote host,
+      where the rule does not even apply the same way), `tmux new -d '<cmd>'`, `screen -dm`,
+      `script -c '<cmd>'`, `gdb --args`, `parallel`, `find -exec` -- the command is one quoted
+      token or an argv template. `containment.py` is the answer for those, and CLAUDE.md
+      already says a deny-list over command text cannot be sound.
+
+      Deliberately a separate item from (b): #176 took six rounds because one PR bundled edits
+      to helpers several callers share, and (1) and (2) touch `WRAPPERS`/`WRAPPER_SUBCOMMANDS`
+      that PR #177 is changing right now.
+
 - [~] **HOOK-FAILS-OPEN-ON-SPELLINGS-IT-DOES-NOT-MODEL · (a)+(c) is PR #177; (b) next.**
       Open on `main` and untouched by #174: `python -m shipinfer serve` (the subcommand list is
       only consulted when `base == "shipinfer"`), bare `torchrun`, and `uv run pytest -m gpu`.
