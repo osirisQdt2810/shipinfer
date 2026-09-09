@@ -1770,8 +1770,25 @@ hook down, for when the operator asked to see something before it is executed.
       NOT DONE IN THE SAME PR on purpose: `ctypes` into libc from the control plane is a
       decision about `core/`, not a rename, and the C++ half is the one that had NO name at all.
 
-- [~] **TRACK-ELEMENT-SPLITS-ONE-IDENTITY-ABOUT-1-IN-100 · MEASURED 9 Sep, pre-existing, and
-      NOT mine.** `tests/topology/test_track_element.py::TestTrackOverTheRunner::
+- [~] **TRACK-ELEMENT-SPLITS-ONE-IDENTITY-ABOUT-1-IN-100 · ROOT-CAUSED AND FIXED, PR #199
+      (9 Sep). It was a real defect, not a flaky assertion.** `Element.camera_added`'s own
+      contract says the hook runs AFTER the ingest actor exists, so "on a camera that opens
+      instantly a frame can reach `process` before this hook does" -- and the track element
+      reset the tracker regardless, throwing away the one that frame had just built, so the
+      camera's SECOND frame started a SECOND identity. Instrumenting the hooks took it from
+      ~1% to 8 of 12 runs and printed the order every time: `process frame 0` ->
+      `camera_added(cam-a)` -> `reset_if_present(cam-a) -> True` -> a new id on frame 1.
+      THE FIX: the element remembers which cameras it has been told about and resets only for
+      one already added -- a first add has nothing to restart. `camera_removed` forgets the id,
+      and it already gave the "a re-added camera starts fresh" property by DROPPING the
+      tracker, so the reset was never what provided it.
+      TWO EXISTING TESTS WERE ENCODING THE SHAPE THAT HID IT: both modelled a re-add as frames
+      then `camera_added`, with no FIRST announcement -- which is not what the runner sends.
+      With the first announcement added they assert the same properties and pass.
+      CHECKED, not assumed: `mtmc.py` and `barrier.py` are the other two `camera_added`
+      implementors and both only ADD to a live set, so both are already idempotent under this
+      window. 40/40 clean runs of the previously flaky file; suite 4100 passed.
+      ORIGINAL REPORT: `tests/topology/test_track_element.py::TestTrackOverTheRunner::
       test_every_frame_reaches_the_sink_with_its_tag_and_its_tracks` failed once in a
       full-suite run: `assert 2 == 1 ... where 2 = len({166, 167})` on "one stationary box
       across four frames is one identity". Two CONSECUTIVE ids, so the tracker started a
@@ -2246,6 +2263,13 @@ hook down, for when the operator asked to see something before it is executed.
       is why it waits on this question rather than the other way round.
 
 - [!] **CSRC-GRAPH-HAS-NO-TRACKING · OPERATOR: please merge #169 (PR 1 of 3) -- it adds a
+      **A RULE FOR THE PORT, from #199 (9 Sep): a FIRST `camera_added` resets nothing.** The
+      Python element reset a camera's tracker on every announcement, and because the runner
+      announces AFTER the ingest actor exists, a frame that arrived first had its brand new
+      tracker thrown away -- the camera's second frame started a second identity, ~1% of runs.
+      The C++ tracking stage must remember which cameras it has been told about and reset only
+      for one already added; a remove already drops the tracker, so that is what makes a
+      re-added camera start fresh.
       **STILL MERGEABLE, CHECKED 9 Sep, and NOT rebased on purpose.** 115 commits behind main
       and `git merge-tree` reports 0 conflict hunks, so the operator's click will work. A
       rebase was attempted for the better reason -- its CI would then run against today's tree
