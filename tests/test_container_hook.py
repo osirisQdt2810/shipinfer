@@ -982,6 +982,14 @@ class TestAHelpQueryIsInspectionAndNotARun:
         'xargs -I{} bash -c "pytest -m gpu" --help',
         "RUN=./scripts/gpu_all.sh; $RUN --help",
         "pytest -m gpu -- --help",
+        # Round 2's five, and the same REMAINDER shape one level in: `python -c cmd [arg]...`
+        # assigns everything after the body to the BODY's `sys.argv`, so it runs and the
+        # interpreter's parser never sees the flag. The first of these opens a CUDA context.
+        'python -c "import torch; torch.ones(1).cuda()" --help',
+        'python -c "import torch; print(torch.cuda.is_available())" --help',
+        "python -c \"import subprocess; subprocess.run(['pytest','-m','gpu'])\" --help",
+        'timeout 60 python -c "import torch; torch.ones(1).cuda()" --help',
+        "bash -c \"python -c 'import torch; torch.ones(1).cuda()' --help\"",
     )
 
     @pytest.mark.parametrize("command", ALLOWED)
@@ -1022,6 +1030,19 @@ class TestAHelpQueryIsInspectionAndNotARun:
         assert refused("torchrun --help") is not None
         assert refused("deepspeed --help") is not None
         assert refused("trtexec --help") is None, "not a launcher; its own parser sees the flag"
+
+    def test_an_inline_body_gets_no_carve_out_but_a_script_file_does(self) -> None:
+        """The asymmetry, stated because it is the interesting part.
+
+        `python x.py --help` short-circuits in the SCRIPT's own argparse before `main` runs, so
+        its parser is trusted. `python -c "..." --help` has no parser to trust: `-c` assigns
+        everything after the body to `sys.argv` and runs it. `runtime/containment.py` does not
+        cover the difference -- that gate lives in pytest's conftest and in `serve`/`bench`, so
+        an ad-hoc snippet is gated by this hook and nothing else.
+        """
+        assert refused('python -c "import torch; torch.ones(1).cuda()" --help') is not None
+        assert refused("python scripts/build_engines.py --help") is None
+        assert refused("python train.py --device cuda --help") is None
 
     def test_the_carve_out_stops_at_a_double_dash(self) -> None:
         """Everything after `--` belongs to whatever the program is wrapping, so a `--help`

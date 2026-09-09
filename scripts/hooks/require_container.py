@@ -574,18 +574,27 @@ PASS_THROUGH_LAUNCHERS = frozenset(
 )
 
 
+# doc: long the four bounds, each of which was a measured hole in an earlier draft
 def _is_help_query(program: str, args: list[str]) -> bool:
     """Whether ``program`` with these arguments prints usage and exits.
 
     `--help` short-circuits in argparse and typer/click, so nothing is measured -- the reading
     `nsys --version` got in #179 and `--check` in #183.
 
-    Three bounds, each a measured hole in an earlier draft: no pass-through launcher, the flag
-    before any `--`, and an exact token. The caller must resolve ``program`` to one name
-    first, or this answers for `_indirection` -- the one check a token in argv must never
-    answer for.
+    Four bounds, each a measured hole in an earlier draft: no pass-through launcher, no inline
+    `-c` body, the flag before any `--`, an exact token. Resolve ``program`` to one name first
+    or this answers for `_indirection`, the one check argv must never answer for.
+
+    The asymmetry is the interesting part: a script FILE's parser is trusted, an inline body's
+    is not, because there is none.
     """
     if program in PASS_THROUGH_LAUNCHERS or any(a in PASS_THROUGH_LAUNCHERS for a in args):
+        return False
+    if _inline_source(args) is not None:
+        # `-c` is a pass-through in the same REMAINDER sense as `torchrun`, one level in:
+        # `python -c "import torch; torch.ones(1).cuda()" --help` OPENS A CUDA CONTEXT, and
+        # `runtime/containment.py` never sees it -- that gate lives in pytest's conftest and
+        # in `serve`/`bench`, so an ad-hoc snippet is gated by this hook and nothing else.
         return False
     own = args[: args.index("--")] if "--" in args else args
     return any(arg in HELP_FLAGS for arg in own)
