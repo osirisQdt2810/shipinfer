@@ -1787,7 +1787,7 @@ hook down, for when the operator asked to see something before it is executed.
       tenants throughout (the harness prints its own caveat):
         baseline `sim_pipeline_v2`  960.2 img/s SATURATED (det 485.8 + seg 474.4) -- a capacity
         C++ plane `--source nvdec`  573 events/s complete (40 131 in 70 s), 0 failed
-      THE THREE RATIOS, and they are three different claims rather than three estimates of one:
+      THE FOUR RATIOS, and they are four different claims rather than four estimates of one:
         frames end to end      0.60x   -- the softest: a CPU-bound stage moves it, and the box
                                           was loaded 25/48 on both runs
         pixels into a model     1.87x   -- an AREA proxy, not work: it treats a 640x640
@@ -1795,12 +1795,24 @@ hook down, for when the operator asked to see something before it is executed.
                                           that their FLOPs per pixel differ too
         rows into a model       7.22x   -- counts a crop and a frame alike, and 12.7 of our rows
                                           per request ARE crops
+        rows per host CPU-s    ~3.94x   -- ADDED 9 Sep by #190/#191 and the only one with a
+                                          LIKE-FOR-LIKE denominator: the same kernel counter
+                                          on both arms. Mean of THREE INTERLEAVED pairs
+                                          (4.11/3.36/4.36), and a FLOOR -- the baseline's
+                                          throughput is asserted from its configuration while
+                                          its CPU-seconds are measured, so starving it of CPU
+                                          flatters it. Details in `THE-BASELINE-HAD-NO-
+                                          DENOMINATOR` above; it inherits the rows weighting.
       CORROBORATED on a second five-GPU set (2/3/6 earlier gave 7.7x / 2.03x), and the baseline
       is GPU-set insensitive at saturation (959.8 on 2-6 against 960.2 here, 0.04% apart), so
       the SPREAD between the weightings is a property of the workload, not of one run.
-      NO BETTER RATIO IS AVAILABLE, checked: GPU-seconds is the honest measure,
-      `InstanceStats::ewma_latency_us` holds ours and the bench does not print it -- but
-      `sim_pipeline_v2` reports no counterpart, so there is nothing to divide by.
+      GPU-SECONDS IS STILL THE MEASURE NOBODY CAN TAKE, and that is now the only gap:
+      `InstanceStats::ewma_latency_us` holds ours and the bench does not print it, but
+      `sim_pipeline_v2` reports no counterpart, so there is nothing to divide by. HOST
+      CPU-seconds turned out to be the reachable substitute -- the kernel reports it for any
+      process, so the unmodified binary needs no cooperation -- which is where the fourth
+      ratio came from. The chronology below still says "no better ratio is on offer"; that
+      sentence was true when written and #190 falsified it.
       ALL THREE ARE MEASURED ON A CHAIN WITHOUT `track`/`mtmc` (see
       `CSRC-GRAPH-HAS-NO-TRACKING`), so adding that seam moves them in our favour.
       CANDIDATE (b) IS OUT on evidence -- not runnable here, details below; it needs artefacts
@@ -1947,9 +1959,10 @@ hook down, for when the operator asked to see something before it is executed.
             exactly that on our side and `cli/bench.cpp` does not emit it -- fixable in an
             afternoon -- but `sim_pipeline_v2` reports no GPU-time counterpart at all, so there
             would be nothing to divide by. A ratio needs both halves, and only one exists.
-            SO THE THREE NUMBERS ARE THE THREE THAT CAN BE HAD: 0.60x (frames end to end),
-            1.87x (pixels through a model, an area proxy), 7.22x (rows through a model, which
-            counts a crop and a frame alike). Pick the one that matches what the >=5x is meant
+            SO THE NUMBERS ARE THE ONES THAT CAN BE HAD: 0.60x (frames end to end), 1.87x
+            (pixels through a model, an area proxy), 7.22x (rows through a model, which counts
+            a crop and a frame alike), and since 9 Sep ~3.94x (rows per host CPU-second, the
+            one like-for-like denominator). Pick the one that matches what the >=5x is meant
             to promise; none of them is the same claim.
             **AND A CAVEAT THAT QUALIFIES EVERY NUMBER IN THIS ITEM, which I have been getting
             wrong in my own reports all day.** I have been calling this "the whole chain" and
@@ -1975,6 +1988,17 @@ hook down, for when the operator asked to see something before it is executed.
       So the arithmetic on (a) has moved: 637 against the baseline's 959.8 is 66%, not 56%.
       AND THE CHOICE IS NOW BETWEEN TWO, not three: (b) is eliminated on evidence above. If you
       want (b) anyway, what I need from you is the images or the weights, not a decision.
+      **MY DEFAULT, so this is a decision you can make by saying nothing (V154).** Absent an
+      answer I will report the >=5x against **rows per host CPU-second**, and therefore report
+      the target as **NOT MET: ~4x against 5x**. Reasons, in order: it is the only ratio whose
+      denominator is measured the same way on both arms; it is a resource, so "5x" means "a
+      fifth of the machine for the same work" rather than a proxy; and it is a floor that errs
+      in the baseline's favour. I am deliberately NOT defaulting to 7.22x, which clears the
+      target -- rows count a 256x128 crop as one 640x640 frame, and picking the measure because
+      it passes is the failure this item has refused twice. What would close the ~4x -> 5x gap
+      is our own arm's host cost, which is where the headroom is (3.19 ms CPU/row against the
+      baseline's 12.12 ms/image, and our arm was host-bound while theirs was saturated):
+      `NOT-GPU-BOUND` is the item that owns it.
 
 - [!] **CSRC-GRAPH-HAS-NO-TRACKING · OPERATOR: please merge #169 (PR 1 of 3) -- it adds a
       **A SPLIT WAS TRIED AND MEASURED OUT, 9 Sep -- do not re-attempt it.** The idea was to
