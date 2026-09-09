@@ -5472,6 +5472,35 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       not staged, so the stash was a no-op and both runs printed the same number. Redone with
       `git checkout origin/main -- deploy/rootless/test.sh`. A before/after that prints the same number
       twice is a measurement bug, not a null result.
+- [~] **A-JOINED-ACTOR-CAN-STILL-HAVE-A-FRAME-IN-FLIGHT · PR #188, and it is #186's own
+      consequence arriving one merge later.** #186 stopped `tests/api/` from skipping on CI,
+      and the FIRST plain runner to execute that file reddened main:
+      `assert streamed.sink().emitted == settled` -> `assert 4 == 3`.
+      The test read `clean=True` from the DELETE as covering both halves and said so in a
+      comment -- "the ingest manager saying it joined the actor thread, so nothing can publish
+      after it". THE JOIN BOUNDS THE PRODUCER: a frame the actor published just before it is
+      still crossing the runner's pool when the DELETE returns. Architecture working, equality
+      wrong. The bound is measured (`pause_s=0.002`, 200 frames left => ~25 per 50 ms window,
+      tolerance 2) and VERIFIED by removing the DELETE: "24 more frames in 50 ms".
+      THE LESSON, and it is the one worth keeping: enabling a skipped test is a change to the
+      code under test, not only to the count. #186's own run passed; the race showed up on the
+      merge. So a PR that un-skips tests should STRESS them, not just run them once -- 12 runs
+      of `tests/api/` found no other race, and that sweep is what should have been in #186.
+
+- [ ] **A-REFUSED-ADD-RE-BANDS-A-CAMERA, INTERMITTENTLY · seen once 9 Sep, in the full suite
+      only, and not caused by anything in flight.**
+      `tests/runners/test_camera_lifecycle.py::TestThePriorityBandComesFromTheCameraConfig::
+      test_a_refused_add_does_not_re_band_the_camera_that_is_already_running` failed with
+      `assert {<Priority.NORMAL: 2>, <Priority.BACKGROUND: 3>} == {<Priority.BACKGROUND: 3>}`
+      -- an extra band, i.e. the refused add DID re-band, or a camera leaked in from another
+      test. That class passes 5/5 in isolation and the whole suite passed on the next run, so
+      it is order- or state-dependent rather than a plain race.
+      WHERE TO LOOK FIRST: something process-wide that another test leaves behind. `-p
+      no:randomly` is not in use here, so the order is stable -- which means a REPEATABLE
+      trigger exists and `--lf` plus the preceding file is the way to find it. Worth doing
+      before the next release: an intermittent failure in the tier CLAUDE.md calls "must stay
+      green" trains everyone to re-run rather than to read.
+
 - [ ] **V124a-PHASE3 · thin `runtime/ops` to an adapter over shipvision, on the frame-clamp
       convention decided above.** What STAYS (system, per V50): the `ImageOps` ABC, the
       registry/factory/thread-local binding, `native_ops.py` as the adapter, and the #31 pinned
@@ -5548,8 +5577,10 @@ Python (ADR-014). From now on a Python data-plane change is not done until the C
       src change). OWED: a `-m native` container run before the parent adapts onto this
       path (native rows all skip in the unbuilt clone). Detection heads deliberately
       uncapped — max_detections wiring is a separate decision, not phase 1.
-- [~] **V124b · DECIDED 9 Sep under V154, and MEASURING IT FOUND A LIVE HOLE rather than a
-      future one. PR #186 closes 42 of it; the other 189 need the submodule and your merge.**
+- [!] **V124b · #186 MERGED (52e61af) and it DID what it claimed -- CI went from `3646 passed,
+      248 skipped` to `3790 passed, 206 skipped`, so 42 fewer skips and 144 more tests actually
+      running. OPERATOR: the other 189 need your manual merge of #187, which edits
+      `.github/workflows/**` and therefore cannot mint a review token (the known exception).**
       COUNTED on ci.yml run 34344651408: the offline tier is **248 skipped** on CI against 9
       locally. By reason: 189 shipvision (mot 102, mtmc 42, reid 41, misc 4), 26
       `fastapi`/`uvicorn`, 16 `cv2`, 15 headers/shell-checks. So the KServe surface and the
