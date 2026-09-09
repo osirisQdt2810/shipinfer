@@ -1,4 +1,4 @@
-"""The baseline reports the CPU it used, so a ratio has a like-for-like denominator.
+"""Both arms report the CPU they used, so a ratio has a like-for-like denominator.
 
 `C1-WHAT-IS-THE-5x-AGAINST?` recorded that none existed: "GPU-seconds is the honest measure,
 `InstanceStats::ewma_latency_us` holds ours and the bench does not print it -- but
@@ -12,16 +12,18 @@ a fraction of a second, and nothing touches a device or the baseline binary.
 
 from __future__ import annotations
 
-import resource
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
-from benchmarks.harness.baseline import children_cpu_since
+from benchmarks.harness.hostcpu import children_since, now, since
 from benchmarks.run_bench import host_cpu_line
 from tests.support.subprocess_env import checkout_env
+
+ROOT = Path(__file__).resolve().parents[2]
 
 SPIN_S = 0.35
 
@@ -40,13 +42,13 @@ class TestTheChildsCpuIsMeasuredExactly:
     """
 
     def test_a_spinning_child_is_charged_what_it_burned(self) -> None:
-        before = resource.getrusage(resource.RUSAGE_CHILDREN)
+        before = now()
         child = subprocess.Popen(
             [sys.executable, "-c", _SPIN.format(seconds=SPIN_S)], env=checkout_env()
         )
         child.wait()
 
-        assert children_cpu_since(before) == pytest.approx(SPIN_S, abs=SPIN_S)
+        assert children_since(before) == pytest.approx(SPIN_S, abs=SPIN_S)
 
     def test_a_child_reaped_before_the_window_is_not_charged_to_it(self) -> None:
         """The reason the reading is taken after `command_line` and not at the top of
@@ -57,10 +59,10 @@ class TestTheChildsCpuIsMeasuredExactly:
         )
         earlier.wait()
 
-        before = resource.getrusage(resource.RUSAGE_CHILDREN)
+        before = now()
         time.sleep(0.05)
 
-        assert children_cpu_since(before) == pytest.approx(0.0, abs=0.02)
+        assert children_since(before) == pytest.approx(0.0, abs=0.02)
 
 
 class TestTheLineSaysWhatTheNumbersSpan:
@@ -91,3 +93,56 @@ class TestTheLineSaysWhatTheNumbersSpan:
 
         assert "0.00 cores" in line
         assert "CPU/image" not in line
+
+
+class TestOurOwnArmIsChargedItsProcessAndItsChildren:
+    """`single` runs the plane in the harness process; the sharded topologies run it in
+    children while the parent serves RTSP. Both are ours, so `since` counts both terms --
+    `children_since` alone would report ~0 for a `single` run and miss the parent's RTSP
+    serving in a sharded one.
+    """
+
+    def test_work_in_this_process_is_counted(self) -> None:
+        before = now()
+        end = time.monotonic() + SPIN_S
+        while time.monotonic() < end:
+            pass
+
+        assert since(before) == pytest.approx(SPIN_S, abs=SPIN_S)
+        assert children_since(before) == pytest.approx(0.0, abs=0.02), (
+            "children-only would have reported nothing for a `single` run, which is the whole "
+            "reason the two readings are different functions"
+        )
+
+    def test_work_in_a_child_is_counted_too(self) -> None:
+        before = now()
+        child = subprocess.Popen(
+            [sys.executable, "-c", _SPIN.format(seconds=SPIN_S)], env=checkout_env()
+        )
+        child.wait()
+
+        assert since(before) == pytest.approx(SPIN_S, abs=SPIN_S)
+
+
+class TestBothArmsAreActuallyWiredToIt:
+    """The link the pure tests cannot reach, and the one that goes missing: a reading computed
+    and then not printed leaves the ratio needing two logs again. Weaker than the tests above
+    and says so."""
+
+    def test_the_baseline_prints_it(self) -> None:
+        text = (ROOT / "benchmarks" / "run_bench.py").read_text(encoding="utf-8")
+
+        assert 'host_cpu_line("baseline"' in text
+
+    def test_our_arm_prints_it_on_both_topologies(self) -> None:
+        """Taken in `measure_shipinfer`, which is the ONE dispatch point for `single` and for
+        the sharded pair -- wrapping the two branches separately is how one of them would come
+        to be missed."""
+        text = (ROOT / "benchmarks" / "run_bench.py").read_text(encoding="utf-8")
+        body = text.split("def measure_shipinfer(")[1].split("\ndef ")[0]
+
+        assert "hostcpu.now()" in body
+        assert 'host_cpu_line("shipinfer"' in body
+        assert (
+            "hostcpu.since(before)" in body
+        ), "our arm is charged children-only, which reports nothing for a `single` run"
