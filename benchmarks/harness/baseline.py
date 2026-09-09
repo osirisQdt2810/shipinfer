@@ -37,6 +37,7 @@ rather than letting a truncated log look like a completed experiment.
 from __future__ import annotations
 
 import os
+import resource
 import shutil
 import signal
 import subprocess
@@ -93,6 +94,11 @@ class BaselineResult:
     exit_code: int
     aborted: bool
     elapsed_s: float
+    #: CPU-seconds the binary itself used, so the two systems have a like-for-like
+    #: denominator. `C1-WHAT-IS-THE-5x-AGAINST?` recorded that there was none -- "GPU-seconds
+    #: is the honest measure ... but `sim_pipeline_v2` reports no counterpart, so there is
+    #: nothing to divide by". The kernel keeps one, and this is it.
+    cpu_s: float
 
     @property
     def ok(self) -> bool:
@@ -302,6 +308,19 @@ def command_line(config: BenchConfig, log: Path) -> list[str]:
     ]
 
 
+def children_cpu_since(before: resource.struct_rusage) -> float:
+    """CPU-seconds this process's REAPED children have used since ``before``.
+
+    Exact rather than sampled, and it needs no `/proc`: the kernel accumulates a child's
+    `utime + stime` into `RUSAGE_CHILDREN` when it is waited for. So a delta taken around a
+    window in which exactly one child is spawned AND reaped is that child's total, shutdown
+    included -- which `os.wait4` could not give here, because `_terminate` reaps the process
+    itself on the ordinary path.
+    """
+    after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return (after.ru_utime - before.ru_utime) + (after.ru_stime - before.ru_stime)
+
+
 def run_baseline(config: BenchConfig, out_dir: Path | None = None) -> BaselineResult:
     """Run the baseline for ``config.seconds`` and return where its log landed.
 
@@ -336,6 +355,10 @@ def run_baseline(config: BenchConfig, out_dir: Path | None = None) -> BaselineRe
         env["OMP_NUM_THREADS"] = str(config.omp_threads)
 
     argv = command_line(config, log)
+    # TAKEN HERE AND NOT AT THE TOP OF THE FUNCTION: `build_binary`, `stage_runtime_libs` and
+    # the `pkg-config` probes above all fork, and their CPU is the harness's rather than the
+    # measurement's. Between this line and the reading below, the only child is the binary.
+    children_before = resource.getrusage(resource.RUSAGE_CHILDREN)
     started = time.monotonic()
     with console.open("w", encoding="utf-8") as sink:
         sink.write(" ".join(argv) + "\n\n")
@@ -355,6 +378,7 @@ def run_baseline(config: BenchConfig, out_dir: Path | None = None) -> BaselineRe
             _terminate(process)
         exit_code = process.wait()
     elapsed = time.monotonic() - started
+    cpu_s = children_cpu_since(children_before)
 
     text = console.read_text(encoding="utf-8", errors="ignore")
     aborted = "terminate called" in text or "Error:" in text
@@ -364,6 +388,7 @@ def run_baseline(config: BenchConfig, out_dir: Path | None = None) -> BaselineRe
         exit_code=exit_code,
         aborted=aborted,
         elapsed_s=elapsed,
+        cpu_s=cpu_s,
     )
 
 
