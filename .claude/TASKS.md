@@ -8,16 +8,14 @@ line names the ledger item that holds the detail, and the exact action.
 | # | Action | Item |
 |---|---|---|
 | 1 | **Answer which comparison the >=5x is against** — four measured ratios: 0.60x events, 1.87x pixels, 7.22x rows, ~3.94x rows per host CPU-second. **Saying nothing accepts my default: the last one, target NOT MET.** | `C1-WHAT-IS-THE-5x-AGAINST?` |
-| 0 | **Merge #195 by hand FIRST — `main` is RED and nothing can auto-merge.** Google's chrome apt repo started serving a bad index at 17:40 on 9 Sep; `apt-get update` fails as a whole, so three CI jobs went red on a repository nothing here installs from. #194 is at `Auto-merge: skipping` with an APPROVE review and every other check green. #195 drops the image's vendor apt lists before any apt call, with an order-checking ratchet. Same manual-merge reason as the two below. | `CI-A-VENDOR-REPO-BLOCKS-EVERY-MERGE` |
+| 0 | **Nothing — resolved itself.** A vendor apt repo served a bad index for ~30 min on 9 Sep and `main` went red on a repository this project never installs from; it cleared, and #194 and #196 merged on a re-run. #195 hardens against the next one and carries `automerge`. | `CI-A-VENDOR-REPO-BLOCKS-EVERY-MERGE` |
 | 2 | **Merge #169 by hand** (it edits `.github/workflows/**`, so the review job cannot mint a token). It unblocks the C++ tracking chain, which is a third of the system and is in NO number measured so far. | `CSRC-GRAPH-HAS-NO-TRACKING`, `V146b` |
 | 3 | **Merge #187 by hand** (same reason; its own new CI leg is green). | `V124b`, `V124a-PHASE3` |
 | 4 | **Pull `nvcr.io/nvidia/deepstream` (~6 GB)** onto this box, or say no — the fourth topology's running half needs it; the design half is done. | `T4` |
 | 5 | **shipvision has no LICENSE file at all**, and **where does the NV12 work live?** (the claimed 1021 uncommitted lines are in no checkout I can see). | `SV-LICENSE`, `C9` |
 
-Items 0, 2 and 3 are one click each, and **item 0 is the one that is blocking everything
-else** — including #194, which is approved and green apart from it. Item 1 is the only one
-that needs thought, and it is a choice between measured numbers rather than a request for
-work.
+Items 2 and 3 are one click each. Item 1 is the only one that needs thought, and it is a
+choice between measured numbers rather than a request for work.
 
 
 > **COLLISION 28 Aug ~07:0x UTC — SETTLED ~07:1x: shipinfer-7f (pid 173802, a restart fork of session 2dec01d2…
@@ -1707,7 +1705,7 @@ hook down, for when the operator asked to see something before it is executed.
       direction (a false refusal costs a sentence; a false allow costs a host CUDA context).
       Undocumented, it looks like the bug `_module_at` exists to prevent.
 
-- [~] **THE-MEASURED-COMPARISON-WAS-NOT-WRITTEN-DOWN · PR #196 (9 Sep).** The project's
+- [x] **THE-MEASURED-COMPARISON-WAS-NOT-WRITTEN-DOWN · MERGED as #196 (9 Sep), APPROVE.** The project's
       headline claim has been measured on both arms four ways, and none of it was anywhere a
       person reads: `benchmarks/README.md` is 207 lines about HOW to run the harness and
       recorded no result, so the numbers, the method and the caveats lived only in this file,
@@ -1723,9 +1721,13 @@ hook down, for when the operator asked to see something before it is executed.
       is added. The day tracking lands the page stops being TRUE rather than merely stale, and
       the suite says so. Suite 4070 passed.
 
-- [!] **CI-A-VENDOR-REPO-BLOCKS-EVERY-MERGE · OPERATOR: please merge #195 by hand** (it edits
-      `.github/workflows/**`, the known permanent exception -- the review job cannot mint a
-      token for a workflow change). **`main` is RED and no PR can auto-merge until this lands.**
+- [~] **CI-A-VENDOR-REPO-BLOCKS-EVERY-MERGE · PR #195, and THE INCIDENT CLEARED WHILE IT WAS
+      OPEN -- so this is hardening, not an unblock.** Google's index was good again by 18:09;
+      #194 and #196 both merged on a re-run. `main` was red for about half an hour and no PR
+      could auto-merge in that window. Kept because a repository this project never installs
+      from should not be able to stop every merge. The `automerge` label is on: the review job
+      DID pass on this PR's first push despite the workflow edit, which the CLAUDE.md note
+      says it cannot -- if a later push cannot, it needs the operator's click after all.
       At 17:40 on 9 Sep Google's chrome apt repo began returning `Hash Sum mismatch` for
       `dists/stable/main/binary-amd64/Packages.gz`. `apt-get update` fails as a WHOLE when any
       configured repo serves a bad index, so three jobs went red at once on a repository
@@ -1743,7 +1745,7 @@ hook down, for when the operator asked to see something before it is executed.
       repo we never install from can block every merge" is a fragility worth removing whether
       or not this instance clears.
 
-- [~] **A-LAUNCHER-POINTED-AT-AN-ABSENT-SCRIPT-IS-ALLOWED · found 9 Sep while checking a
+- [x] **A-LAUNCHER-POINTED-AT-AN-ABSENT-SCRIPT-IS-ALLOWED · MERGED as #194 (9 Sep), APPROVE on round 2. Found 9 Sep while checking a
       review finding, and it is PRE-EXISTING on main.** `nsys profile python
       -mtorch.distributed.run --nproc_per_node=2 train.py` is allowed, with and without a
       `--help`, because `train.py` does not exist so nothing imports a device stack and the
