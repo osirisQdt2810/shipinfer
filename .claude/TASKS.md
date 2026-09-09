@@ -1182,7 +1182,7 @@ hook down, for when the operator asked to see something before it is executed.
       it. The lesson is the cheap one: measure the reported bug on the branch before writing
       the ledger entry that defers it.
 
-- [~] **HOOK-MISSES-A-WRAPPERS-POSITIONAL-OPERAND · what is left of the profiler sweep.**
+- [~] **HOOK-MISSES-A-WRAPPERS-POSITIONAL-OPERAND · PR #180; groups 1-2 MERGED AS #179.**
       Groups (1) and (2) of the sweep are **PR #179** -- the NVIDIA tooling and the tracers,
       as WRAPPERS rather than blocked names, which is what lets `nsys --version`, `nsys
       status`, `taskset -c 0-7 pytest tests/core -q` and `deploy/rootless/run.sh nsys profile
@@ -1198,11 +1198,13 @@ hook down, for when the operator asked to see something before it is executed.
       `taskset 0xff <cmd>`, `chroot <dir>`, `su <user>`, `setarch <arch>` -- `WRAPPER_OPERAND`
       matches only decimal digits and `WRAPPER_VALUE_FLAGS` only flags, so the operand becomes
       the executable. BUILT on `fix/a-wrappers-positional-is-not-the-command`, held behind
-      #179: `WRAPPER_POSITIONALS` is a count per wrapper. Seven rows closed and, re-measuring
-      the whole profiler and wrapper matrices, `flock /tmp/l pytest -m gpu` is the ONLY row
-      that moved. `taskset 0xff` needs one more thing -- `WRAPPER_OPERAND` widened to a hex
-      mask, since that is a number in another base -- and both are named in
-      `test_a_wrappers_positional_operand_is_still_open_and_why` until they land.
+      #179 and now **PR #180**: `WRAPPER_POSITIONALS` is a count per wrapper for `flock`,
+      `chroot`, `su` and `setarch`, and `taskset 0xff` got the OTHER half -- `WRAPPER_OPERAND`
+      widened to a hex mask, because a CPU mask is a number in another base and belongs in the
+      pattern that already steps over numbers rather than in a second table. Nine rows closed;
+      re-measuring #177's wrapper matrix and #179's profiler matrix, `flock /tmp/l pytest -m
+      gpu` and `taskset 0xff pytest -m gpu` are the ONLY rows that moved. The test that
+      documented the gap became the test that pins the fix.
 
       Group (3) stays out, and is not worth a deny-list entry: `ssh localhost <cmd>`,
       `tmux new -d '<cmd>'`, `screen -dm`, `script -c '<cmd>'`, `gdb --args`, `parallel`,
