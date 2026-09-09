@@ -1166,7 +1166,7 @@ hook down, for when the operator asked to see something before it is executed.
       three guards fails with its own regression restored (7/1/1). Suite 3772 passed, docs caps
       unchanged, matrix identical to `main` bar the six intended rows.
 
-- [ ] **HOOK-READS-A-NESTED-HEREDOC-AS-COMMANDS · the shell half of #176's class.**
+- [x] **HOOK-READS-A-NESTED-HEREDOC-AS-COMMANDS · already fixed by #176; now pinned.**
       #176 teaches a PYTHON heredoc body to be read as python, so a markdown table in it is
       data. A SHELL body keeps the line scan, correctly -- but a heredoc NESTED inside one is
       still read as commands, so `cat > pr.md <<'MD'` whose rows begin with `pytest` is refused
@@ -1175,6 +1175,12 @@ hook down, for when the operator asked to see something before it is executed.
       `_split_heredocs` already finds the inner block and `_stdin_interpreter` already says
       whether anything will execute it -- `cat` will not, so its body is data. Deliberately not
       in #176: five rounds there came from bundling helpers, and this touches the same two.
+      MEASURED BEFORE FILING FURTHER, and it was already closed: `cat > pr.md <<'MD'` inside a
+      `bash -s` body is REFUSED on `main` and ALLOWED on #176, because using `segments` for the
+      shell path keeps a heredoc's content with the `cat` that consumes it. So the item was a
+      fix with nothing asserting it -- a test now does, and the regex splitter put back fails
+      it. The lesson is the cheap one: measure the reported bug on the branch before writing
+      the ledger entry that defers it.
 
 - [~] **HOOK-FAILS-OPEN-ON-SPELLINGS-IT-DOES-NOT-MODEL · all three categories built and held.**
       Open on `main` and untouched by #174: `python -m shipinfer serve` (the subcommand list is
