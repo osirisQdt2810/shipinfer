@@ -189,6 +189,14 @@ push
 what is not broken is worse than arguing: it makes the next reviewer's map of the code wrong.
 Say which it is, with the command that shows it.
 
+**Edit the title and body BEFORE the push, not after (RULE — cost two blocking rounds on
+9 Sep).** The review snapshots them when the job starts, so a body edited afterwards is
+reviewed against the *previous* revision's argument. #188 round 3 blocked entirely on four
+claims that were already deleted. And the title matters most: with `automerge` on it becomes
+`main`'s subject line, so one left describing an approach you abandoned inverts the diagnosis
+for whoever bisects that code next. When a revision changes what the PR does — a reversed
+approach, a new mechanism — the order is: rewrite body, retitle, then `git push`.
+
 **Keep the label on.** Removing it turns the loop into a handoff that waits for a human. The
 only reason to remove it is a PR that edits `.github/workflows/**`, which cannot pass the
 review job at all (a GitHub App restriction, not a bug) and needs a manual merge.
