@@ -947,9 +947,9 @@ class TestAHelpQueryIsInspectionAndNotARun:
     documented `--skew` flag is actually called. A guard that blocks CHECKING the
     documentation works against the discipline it exists to serve.
 
-    THE CARVE-OUT IS FIVE NAMES AND READS NO SOURCE (round 6): an import of a parser is not
-    evidence that the parser runs FIRST, so the allow set is `HELP_AWARE` and nothing else --
-    `python scripts/build_engines.py --help`, the row this opened for, keeps its refusal.
+    THE CARVE-OUT IS FIVE NAMES AND READS NO SOURCE (round 6), taken from the program that
+    RUNS -- its own name, or its `-m` module when it is an interpreter (round 7). So `python
+    scripts/build_engines.py --help`, the row this opened for, keeps its refusal.
     """
 
     ALLOWED: ClassVar[tuple[str, ...]] = (
@@ -1014,6 +1014,14 @@ class TestAHelpQueryIsInspectionAndNotARun:
         "python benchmarks/run_bench.py --help",
         "python scripts/build_engines.py --help",
         "python -m benchmarks.run_bench --help",
+        # Round 7's, and dated to round 4: `-m` was resolved for ANY program, so a token in a
+        # compiled binary's argv named the allow-list entry. `int main()` in
+        # `test_pipeline.cpp` takes no argv and ignores it; `-m` is the interpreter's grammar
+        # and anywhere else it is data. Both spellings, since `-mfoo` is one token.
+        "csrc/build/test_pipeline -m pytest --help",
+        "csrc/build/bench -m pytest --cameras 50 --help",
+        "csrc/build/bench -mshipinfer --cameras 50 --help",
+        "./benchmarks/run_bench.py -m shipinfer --help",
     )
 
     @pytest.mark.parametrize("command", ALLOWED)
@@ -1114,9 +1122,9 @@ class TestAHelpQueryIsInspectionAndNotARun:
         assert hook.answers_for_itself("python", ["train.py", "--help"]) is False
 
     def test_a_name_known_to_answer_for_itself_is_enough(self) -> None:
-        """The other source of evidence, and the one that keeps the rows this PR is for:
-        `HELP_AWARE` names, and the `-m` module too, since `python -m shipinfer bench --help`
-        IS `shipinfer bench --help`."""
+        """The only source of evidence, and what keeps the rows this PR is for: `HELP_AWARE`
+        names, and the `-m` module too, since `python -m shipinfer bench --help` IS `shipinfer
+        bench --help`."""
         for command in (
             "shipinfer bench --help",
             "python -m shipinfer bench --help",
@@ -1149,6 +1157,21 @@ class TestAHelpQueryIsInspectionAndNotARun:
 
         assert refused(f"csrc/build/bench --config {cfg} --help") is not None
         assert refused(f"csrc/build/bench --config {cfg} --cameras 50 --help") is not None
+
+    def test_nor_does_a_module_token_in_that_binarys_argv(self) -> None:
+        """Round 7, and the same defect in a third spelling: `-m` was resolved for ANY program,
+        so `pytest` sitting in a compiled binary's argv named the allow-list entry. `-m` is the
+        interpreter's grammar; anywhere else it is data the program never reads, and
+        `test_pipeline.cpp`'s `int main()` takes no argv at all.
+        """
+        for command in (
+            "csrc/build/test_pipeline -m pytest --help",
+            "csrc/build/bench -m pytest --cameras 50 --help",
+            "csrc/build/bench -mshipinfer --cameras 50 --help",
+            "./benchmarks/run_bench.py -m shipinfer --help",
+        ):
+            assert refused(command) is not None, command
+        assert refused("python -m pytest --help") is None, "the interpreter's own grammar"
 
     def test_the_attached_module_spelling_is_resolved(self) -> None:
         """`python -mfoo` is one token, and this file already models that grammar in

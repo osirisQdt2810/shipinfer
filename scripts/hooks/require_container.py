@@ -1042,11 +1042,15 @@ def answers_for_itself(program: str, args: list[str]) -> bool:
     the honest carve-out is the part that is decidable by reading five names.
 
     The `-m` module counts as the name, since `python -m shipinfer serve --help` IS `shipinfer
-    serve --help`; the cost of dropping the rest is `python scripts/build_engines.py --help`,
-    which refuses again.
+    serve --help` -- but only when the program IS an interpreter: `-m` is python's grammar, and
+    in any other argv it is data the program never interprets. Unguarded, `csrc/build/bench -m
+    pytest --cameras 50 --help` let a token vouch for a binary whose `int main()` takes no
+    argv. The cost of dropping the source half is `python scripts/build_engines.py --help`.
     """
     if program in HELP_AWARE:
         return True
+    if not (PYTHON_RE.search(program) or program == "python"):
+        return False
     module = _module_at(args)
     return module is not None and module[1].split(".")[0] in HELP_AWARE
 
