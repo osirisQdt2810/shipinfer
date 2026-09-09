@@ -1021,19 +1021,51 @@ class TestAProfilerIsAWrapperAndNotABlockedName:
         assert refused(command) is None
 
     @pytest.mark.parametrize(
-        "command", ["flock /tmp/l pytest -m gpu", "taskset 0xff pytest -m gpu"]
+        "command",
+        [
+            "flock /tmp/l pytest -m gpu",
+            "flock -x /tmp/l pytest -m gpu",
+            "flock /tmp/l -c 'pytest -m gpu'",
+            "flock /tmp/l shipinfer bench person_embedder",
+            "chroot /mnt/root pytest -m gpu",
+            "su dungha15 -c 'pytest -m gpu'",
+            "setarch x86_64 pytest -m gpu",
+            # A CPU mask is a NUMBER in another base, so it belongs to `WRAPPER_OPERAND`
+            # rather than to the positional count -- which is why both spellings close here.
+            "taskset 0xff pytest -m gpu",
+            "taskset 0XFF pytest -m gpu",
+        ],
     )
-    def test_a_wrappers_positional_operand_is_still_open_and_why(self, command: str) -> None:
-        """Scoped out on purpose, and asserted so the gap is visible rather than assumed
-        closed. Both take a positional operand before the command -- a lock file, a CPU mask
-        -- and `WRAPPER_OPERAND` matches only decimal digits while `WRAPPER_VALUE_FLAGS`
-        matches only flags, so the operand becomes the "executable". It needs a third shape,
-        a per-wrapper positional count, which is its own change. The ledger names both."""
+    def test_a_wrappers_own_positional_is_not_the_command(self, command: str) -> None:
+        """The residue the profiler change left open, now closed with the shapes it needed.
+
+        `WRAPPER_OPERAND` stepped over a decimal number and `WRAPPER_VALUE_FLAGS` over a
+        flag's value; neither could step over a bare PATH, so `flock /tmp/l pytest -m gpu`
+        answered `/tmp/l` as the executable. `WRAPPER_POSITIONALS` is a count per wrapper --
+        a lock file, a root, a user and an architecture are one operand each. `taskset 0xff`
+        needed the other half: a hex mask widened into `WRAPPER_OPERAND`.
+        """
+        assert refused(command) is not None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "flock /tmp/l pytest tests/core -q",
+            "taskset 0xff pytest tests/core -q",
+            "taskset 0xff nvidia-smi",
+            "flock --help",
+            "chroot --version",
+            "su --help",
+        ],
+    )
+    def test_the_positional_wrappers_keep_their_allowed_half(self, command: str) -> None:
+        """The offline tier through a lock or a mask, and the queries that run nothing."""
         assert refused(command) is None
 
-    def test_the_flagged_spelling_of_the_same_thing_is_not_open(self) -> None:
-        """`taskset -c 0-7` puts the mask behind a flag, which this PR does handle -- so the
-        gap above is about the POSITIONAL form specifically, not about `taskset`."""
+    def test_the_flagged_spelling_of_the_same_thing_is_also_closed(self) -> None:
+        """`taskset -c 0-7` puts the mask behind a flag, which #179 already handled -- so both
+        spellings of one tool now agree, which is the property the `watch -d` finding was
+        about."""
         assert refused("taskset -c 0-7 pytest -m gpu") is not None
 
     @pytest.mark.parametrize(
