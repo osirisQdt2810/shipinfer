@@ -1,5 +1,47 @@
 # Journal
 
+## 2026-09-09 (night) — the round that deleted half a rule, and the 5x question gets a default
+
+**#192, round 6, and the answer was a deletion.** Round 4 had replaced "allow unless something
+looks like a pass-through" with positive evidence, and gave it two sources: the program's NAME,
+or its SOURCE importing an argv parser. Round 6 found the level error in the second one -- **an
+import of a parser is not evidence that the parser runs FIRST.** `import argparse` above a
+module-scope `torch.cuda.set_device(0)` answers `--help` never; the body has already taken a
+host CUDA context. The `sys.argv` alternative was worse: it vouched for every script that does
+`path = sys.argv[1]`.
+
+I had said publicly, in round 5's reply, that a sixth finding of another *shape* would mean
+closing the PR and keeping the false refusal. This is a shape -- so the honest resolution was
+neither closing nor a sixth patch: **delete the half whose evidence is a proxy for something
+undecidable.** "Does the parser run before any device work" is reachability over arbitrary
+Python. What survives is decidable by reading five names, the allow delta against main is
+exactly eight rows, and every one of them is a `HELP_AWARE` name or its `-m` module. The cost
+is pinned in `STILL_REFUSED` rather than written in a paragraph: `python
+scripts/build_engines.py --help` -- the row the PR was opened for -- refuses again.
+
+I did not take the reviewer's suggested column-0 device check. It asks whether a top-level
+*line* carries a device token, so a top-level `configure()` whose body calls
+`torch.cuda.set_device` walks past it. That would have been round 7, and saying so was cheaper
+than proving it in another round.
+
+**The lesson went into CLAUDE.md, because CLAUDE.md is what misled me.** Its own paragraph calls
+this hook "advisory", which is what made me read a false refusal as pure cost when I opened the
+PR. It now also says that loosening is not the cheap direction and why: `containment.py` covers
+the tiers it sees -- pytest's conftest, `serve`, `bench` -- and **nothing** covers an ad-hoc
+`python -c "import torch; ..."`, a parser-less probe script, or `csrc/build/bench --cameras 50`.
+A false refusal costs a sentence in a report; a false allow costs a host CUDA context on a box
+with four other tenants.
+
+**And the operator's 5x question now carries a default (V154).** That block listed three ratios
+and the sentence "no better ratio is available" -- both stale since #190/#191 added rows per
+host CPU-second. It lists four now, says GPU-seconds is the one measure still missing on both
+arms, and states what I will report absent an answer: **~4x on rows per host CPU-second, target
+NOT MET.** Deliberately not the 7.22x rows ratio that clears it -- rows count a 256x128 crop as
+one 640x640 frame, and picking the measure because it passes is the failure that item has
+refused twice already. The gap to 5x is our own arm's host cost (3.19 ms CPU per row against the
+baseline's 12.12 ms per image, and our arm was host-bound while theirs was saturated), which is
+`NOT-GPU-BOUND`'s to own.
+
 ## 2026-09-09 (evening) — C1 gets a denominator, and four rounds on one guard
 
 Merged **#190, #191, #193**. **#192** is in its fifth review round. **#187** and **#169** still
