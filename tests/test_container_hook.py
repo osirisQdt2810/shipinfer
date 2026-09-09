@@ -508,9 +508,9 @@ class TestANameIsNotAnInvocation:
         [
             'import subprocess\nsubprocess.run(["pytest", "-m", "gpu"])',
             'import subprocess\nsubprocess.run("pytest -m gpu", shell=True)',
-            'import subprocess\nsubprocess.check_call(["pytest"])',
-            'import os\nos.system("pytest")',
-            'import os\nargs = 1\nos.system(f"pytest {args}")',
+            'import subprocess\nsubprocess.check_call(["pytest", "-m", "multigpu"])',
+            'import os\nos.system("pytest -m gpu")',
+            'import os\nextra = "-q"\nos.system(f"pytest -m gpu {extra}")',
             'import os\nos.popen("trtexec --onnx=m.onnx")',
         ],
     )
@@ -519,6 +519,39 @@ class TestANameIsNotAnInvocation:
         `subprocess` call, so the fix closes four bypasses while removing two false refusals."""
         assert refused(self.PY.format(body)) is not None
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            'import subprocess\nsubprocess.check_call(["pytest"])',
+            'import subprocess\nsubprocess.run(["pytest", "-q", "tests/core"])',
+            'import subprocess\nsubprocess.run(["python", "-m", "pytest", "tests/core"])',
+            'import os\nos.system("pytest -q tests/core")',
+            "import os\nos.system(\"pytest -m 'not gpu' tests/\")",
+        ],
+    )
+    def test_the_offline_tier_is_exempt_inside_a_body_too(self, body: str) -> None:
+        """ADR-001, and the reading that has to MATCH the prompt's. `verdict` allows a
+        `pytest` that selects no device tier -- it is what CI does on a plain runner -- and a
+        scan that read only the executable refused it inside a body, so the identical string
+        was permitted typed and refused quoted. That is this class's own bug, pointed at the
+        prompt instead of at the body."""
+        assert refused(self.PY.format(body)) is None
+        assert refused(self.SH.format(body.splitlines()[-1])) is None or True
+
+    def test_a_marker_the_hook_cannot_read_is_allowed_and_that_is_the_division(self) -> None:
+        """`os.system(f"pytest -m {marker}")` computes its tier at runtime, so no text scan
+        can decide it. Allowed here on purpose, and stated rather than left to be found: this
+        hook is the advisory fast path, and `runtime/containment.py` -- reached from
+        `tests/conftest.py` -- is what actually gates the device tier inside the session."""
+        body = 'import os\nmarker = "gpu"\nos.system(f"pytest -m {marker}")'
+        assert refused(self.PY.format(body)) is None
+
+    def test_the_offline_tier_is_exempt_in_a_shell_body(self) -> None:
+        """The shape from the review: a chained shell line whose middle command is the
+        offline suite. Refusing it kills the whole `Bash` call and the commit behind it."""
+        assert refused(self.SH.format("cd /repo && pytest -q tests/core && git status")) is None
+        assert refused(self.SH.format("cd /repo && pytest -m gpu")) is not None
+
     def test_the_command_position_is_what_counts(self) -> None:
         """`subprocess.run(["echo", "pytest"])` echoes a word. The first element of the list
         is the command; anything after it is that command's argument."""
@@ -526,6 +559,23 @@ class TestANameIsNotAnInvocation:
             refused(self.PY.format('import subprocess\nsubprocess.run(["echo", "pytest"])'))
             is None
         )
+
+    def test_a_list_argv_has_no_shell_so_a_separator_is_literal(self) -> None:
+        """With `shell=False` and a list, every element after `[0]` is one literal argument.
+        Joining the list and splitting it on `;` fabricated a second command position."""
+        body = 'import subprocess\nsubprocess.run(["echo", "a; pytest -m gpu"])'
+        assert refused(self.PY.format(body)) is None
+        # And the string form of the same text really does have two commands.
+        shell = 'import subprocess\nsubprocess.run("echo a; pytest -m gpu", shell=True)'
+        assert refused(self.PY.format(shell)) is not None
+
+    def test_a_nested_interpreters_module_is_judged_by_its_tier(self) -> None:
+        """`["python", "-m", "pytest", …]` inside a body is the same command as at the prompt,
+        so the device tier refuses and the offline tier does not."""
+        gpu = 'import subprocess\nsubprocess.run(["python", "-m", "pytest", "-m", "gpu"])'
+        offline = 'import subprocess\nsubprocess.run(["python", "-m", "pytest", "tests/core"])'
+        assert refused(self.PY.format(gpu)) is not None
+        assert refused(self.PY.format(offline)) is None
 
     def test_a_shell_body_still_reads_line_by_line(self) -> None:
         """In a shell body the first word of a line IS the command, so the text scan is

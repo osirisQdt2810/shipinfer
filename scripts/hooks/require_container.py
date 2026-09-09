@@ -473,18 +473,32 @@ def _is_shelling_out(func: ast.expr, bound: dict[str, str]) -> bool:
     return bool(_SHELLING_OUT_CALL.match(target))
 
 
-def _blocked_word(words: list[str]) -> str | None:
-    """The first of ``words`` that names a blocked command or a runner script.
+def _blocked_word(commands: list[list[str]]) -> str | None:
+    """The first of ``commands`` that runs something blocked, or None.
 
-    Both vocabularies, so one scan serves a heredoc body, a `-c` body and an operand list.
-    `BLOCKED_COMMANDS` matches a basename (`pytest`, `/usr/bin/pytest`); `BLOCKED_SCRIPTS`
-    matches as a substring of one token, which is how the executable check already reads it.
+    COMMANDS and not words, because the offline-tier carve-out needs a command's own
+    arguments: `verdict` allows a `pytest` that selects no device tier (ADR-001, what CI does
+    on a plain runner), and reading only the executable dropped that -- so the identical
+    string was allowed typed and refused quoted, which is this change's own bug. Basename for
+    `BLOCKED_COMMANDS`, substring for `BLOCKED_SCRIPTS`, as the executable check reads them.
     """
-    for word in words:
-        if word.rsplit("/", 1)[-1] in BLOCKED_COMMANDS:
-            return word.rsplit("/", 1)[-1]
-        if any(script in word for script in BLOCKED_SCRIPTS):
-            return word
+    for tokens in commands:
+        if not tokens:
+            continue
+        exe, rest = tokens[0], tokens[1:]
+        base = exe.rsplit("/", 1)[-1]
+        if base in BLOCKED_COMMANDS:
+            if base in _TEST_RUNNERS and not _selects_device_tier(rest):
+                continue
+            return base
+        if any(script in exe for script in BLOCKED_SCRIPTS):
+            return exe
+        # `python -m pytest -m gpu` inside a body is the device tier just as much as at the
+        # prompt, and `python -m pytest tests/core` is the tier ADR-001 exempts.
+        if (PYTHON_RE.search(base) or base == "python") and _selects_device_tier(rest):
+            module = _module_argument(rest)
+            if module in BLOCKED_MODULES:
+                return module
     return None
 
 
@@ -493,68 +507,74 @@ def _blocked_word(words: list[str]) -> str | None:
 _SHELL_SEPARATOR = re.compile(r"&&|\|\||[;|&]")
 
 
-def _command_words(text: str) -> list[str]:
-    """Every command position in a shell string: one per command, plus what it launches.
+def _one_command(tokens: list[str]) -> list[list[str]]:
+    """One argv, with wrappers stepped over, as the commands it really runs.
 
-    The head word alone was not enough. `os.system("python benchmarks/run_bench.py")` puts an
-    INTERPRETER at the head and the runner behind it, and `main`'s whole-text match had been
-    covering that -- for the one path where the hook is the only guard, since
-    `benchmarks/run_bench.py` and `benchmarks/harness/` call `runtime.containment` nowhere.
-    `real_command` already knows how to step over wrappers, so it is reused here.
+    A `python <program>` head yields the interpreter's command AND the program's -- #174's
+    rule, inside a string. That matters for the one path where the hook is the only guard:
+    `grep -rn require_container benchmarks/` finds `stages.py` and `kernels.py` only, so
+    `run_bench.py` and `harness/` reach `containment` nowhere.
     """
-    out: list[str] = []
+    exe, rest = real_command(tokens)
+    if exe is None:
+        return []
+    out = [[exe, *rest]]
+    base = exe.rsplit("/", 1)[-1]
+    if (PYTHON_RE.search(base) or base == "python") and _module_at(rest) is None:
+        program = next((t for t in rest if not t.startswith("-")), None)
+        if program is not None:
+            out.append([program])
+    return out
+
+
+def _shell_commands(text: str) -> list[list[str]]:
+    """Every command in a SHELL string, split on the operators that separate them."""
+    out: list[list[str]] = []
     for part in _SHELL_SEPARATOR.split(text):
         try:
             tokens = shlex.split(part, comments=False)
         except ValueError:
             tokens = part.split()
-        if not tokens:
-            continue
-        exe, rest = real_command(tokens)
-        if exe is None:
-            continue
-        out.append(exe)
-        # `python <program>`: the operand is a program, which is #174's rule inside a string.
-        if PYTHON_RE.search(exe.rsplit("/", 1)[-1]) or exe.rsplit("/", 1)[-1] == "python":
-            out.extend([t for t in rest if not t.startswith("-")][:1])
+        if tokens:
+            out.extend(_one_command(tokens))
     return out
 
 
-def _first_words(call: ast.Call) -> list[str]:
-    """Every command word of ``call``'s string arguments, keywords included.
+def _first_words(call: ast.Call) -> list[list[str]]:
+    """Every command ``call`` would run, from its string arguments and its keywords.
 
-    COMMAND POSITION, not every word: the first word of each command in a string, and the
-    first element of a list -- so `subprocess.run(["echo", "pytest"])` echoes a word rather
-    than running a suite. Keywords as well as positional args, because `run(args=[...])` is
-    the same call.
+    COMMAND POSITION, not every word: `subprocess.run(["echo", "pytest"])` echoes a word. A
+    STRING argument is a shell line and splits on `;`/`&&`; a LIST argv is one command with no
+    shell, so it does not.
     """
     if isinstance(call.func, ast.Name) and call.func.id in _SOURCE_BUILTINS:
         # `exec(open("benchmarks/run_bench.py").read())`: the payload is nested, not an
         # argument, so every string inside the call is a candidate program.
         return [
-            word
+            command
             for node in ast.walk(call)
             if isinstance(node, ast.Constant) and isinstance(node.value, str)
-            for word in _command_words(node.value)
+            for command in _shell_commands(node.value)
         ]
-    out: list[str] = []
+    out: list[list[str]] = []
     for arg in [*call.args, *(kw.value for kw in call.keywords)]:
         if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-            out.extend(_command_words(arg.value))
+            out.extend(_shell_commands(arg.value))
         elif isinstance(arg, (ast.List, ast.Tuple)) and arg.elts:
-            # The whole list, joined: `["python", "run_bench.py"]` is one command line, and
-            # only the first element was read -- the same head-word-only miss as above.
+            # A LIST argv is one command and there is no shell, so every element after the
+            # first is a literal argument -- splitting it on `;` fabricated a command position
+            # and refused `subprocess.run(["echo", "a; pytest -m gpu"])`.
             words = [
                 e.value
                 for e in arg.elts
                 if isinstance(e, ast.Constant) and isinstance(e.value, str)
             ]
             if words:
-                out.extend(_command_words(" ".join(words)))
+                out.extend(_one_command(words))
         elif isinstance(arg, ast.JoinedStr):
             for part in arg.values:
                 if isinstance(part, ast.Constant) and isinstance(part.value, str):
-                    out.extend(_command_words(part.value)[:1])
+                    out.extend(_shell_commands(part.value)[:1])
                     break
     return out
 
@@ -562,10 +582,10 @@ def _first_words(call: ast.Call) -> list[str]:
 def _text_runs_blocked(source: str) -> str | None:
     """A blocked command in *command position* on some line, or None. For SHELL bodies."""
     for line in source.splitlines():
-        # `_command_words`, so `cd /work && pytest -m gpu` is two commands here as well --
-        # the byte-identical string inside `subprocess.run(..., shell=True)` was already read
-        # that way, and the two readings disagreeing is the bug in miniature.
-        found = _blocked_word(_command_words(line))
+        # A shell line, so `cd /work && pytest -m gpu` is two commands here as well -- the
+        # byte-identical string inside `subprocess.run(..., shell=True)` was already read that
+        # way, and the two readings disagreeing is the bug in miniature.
+        found = _blocked_word(_shell_commands(line))
         if found is not None:
             return found
     return None
