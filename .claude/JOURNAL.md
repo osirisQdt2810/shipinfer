@@ -1,5 +1,61 @@
 # Journal
 
+## 2026-09-09 (evening) — C1 gets a denominator, and four rounds on one guard
+
+Merged **#190, #191, #193**. **#192** is in its fifth review round. **#187** and **#169** still
+need the operator's click.
+
+**`C1` has a fourth ratio, and it is the first one on a like-for-like denominator.** That item
+had recorded the comparison as impossible in its own words -- "GPU-seconds is the honest
+measure ... but `sim_pipeline_v2` reports no counterpart, so there is nothing to divide by".
+The binary reports none; **the kernel does**, for any process. `RUSAGE_CHILDREN` around the run
+window (not `os.wait4` -- `_terminate` reaps the child itself), read after `command_line` so the
+build and the `pkg-config` probes stay the harness's. Then #191 gave our arm the same line from
+a shared `hostcpu.py`, with *two* readings because the arms are shaped differently: children-only
+for a supervised child, self-and-children for ours, since `single` runs in-process and the
+sharded topologies run in children. **313.6 rows per host-CPU-second against 82.5 -- about 4x**,
+measured over three interleaved pairs (3.36x, 4.11x, 4.36x). And it is a **floor**: the spread is
+all on the baseline's side, 34% against our 5.8%, because its throughput is asserted from its
+configuration while its CPU-seconds are not, so a busy box flatters it.
+
+**A simultaneous pair in one log is not achievable here, and three of the harness's own guards
+say so.** At 12x10 and 8x5 the baseline's concurrent load starved our in-process generator below
+the offer gate; at a load small enough to avoid that, the baseline logs too few samples to bound
+a growth rate; `--topology fleet` at 50x20 failed all five shards the same way. So interleaving
+is not a convenience on this box -- it is the only method, which is now in `WORKFLOW.md` beside
+the noise floor rather than five thousand lines down in the ledger.
+
+**#192 took four review rounds and every one found a real hole I had opened.** The change was
+small -- `shipinfer bench --help` was refused, which is how you check the CLI against its own
+documentation. The rounds: a `torchrun` REMAINDER tail (`--help` after the operand is the
+*script's*, and the launcher forks anyway); `bash -c "..." --help`, where the token answered for
+`_indirection`, whose whole argument is that the hook cannot see what runs; `python -c`'s argv;
+and a **compiled binary**, where a `.py`-only file check answered "nothing to distrust" about
+`csrc/build/bench` -- five characters from a real 50-camera run, with `int main()` taking no
+argv at all.
+
+**The fix was not a fifth exclusion.** Round 4's reviewer put it in one sentence: *absence of
+counter-evidence is not evidence*. Every draft had asked "does anything here look like a
+pass-through?" and allowed the rest, so the allow set was everything nobody had thought of yet
+and review was the only thing enumerating it. It asks the positive question now -- a name known
+to answer for itself, or a readable file that imports a parser -- and the cost is stated:
+`python train.py --help` for a file that does not exist. I had written in round 3's reply that a
+fourth shape would mean narrowing rather than patching, and saying it in advance is what made
+round 4 a design change instead of another patch.
+
+**Two process rules earned the hard way, both now in `WORKFLOW.md`.** The review snapshots the
+PR body at push time, so a body edited afterwards is reviewed against the previous revision's
+argument -- #188 round 3 blocked on four claims already deleted. And the half I got wrong
+*again*: when a revision rewrites the tests, the Test Plan has to be **rewritten from the diff**,
+not patched. #193 round 3 blocked on a body I had edited, because I added the new sections and
+left the old bullets naming a class the diff no longer contained.
+
+**Two of today's bugs were in the tooling that measures, which is the thing to notice.**
+`run_tests.sh` fell through to the system python from a worktree -- and its own comment described
+that misdiagnosis, fixed once for a shape that did not include worktrees, in a session that ran
+the tier from six of them. Its first test half then asserted *substrings of the script*, which
+the reviewer broke with a one-character mutation that reintroduced the bug with every test green.
+
 ## 2026-09-09 (later still) — the container rule's last two doors, and two flakes that were bugs
 
 Merged **#182, #183, #184, #185, #186, #189**. **#188** is in review (two rounds, both right).
