@@ -1205,6 +1205,14 @@ hook down, for when the operator asked to see something before it is executed.
       `_EXECUTOR_MODULES` carves them back out, scanning past the module by SUFFIX because an
       executor's options may take a value. Closed one more while there: only the FIRST `-m`
       value was read, so `python -m coverage run -m pytest -m gpu` walked through.
+      **Round 2 found three more, all mine:** `_module_at` scanned the whole argv so a
+      SCRIPT's own `-m` read as the interpreter's (`python probe.py -m yolov8n` went unread);
+      the executor region bailed on `-c`, which after `-m` is always the executor's
+      (`pdb -c continue`, `trace -c`); and the suffix test ran before any option test, so
+      `--include=probe.py` won. `_module_at` now stops where CPython stops, and
+      `script_touches_device` walks the executor region's candidates taking the first that is
+      a readable FILE -- which also closes the `-o out.py probe.py` residue. The lesson is the
+      same one twice: **a rule about a grammar has to model the grammar, not a token.**
 
 - [x] **OFFLINE-TIER-HAS-A-FLAKY-GATE · FIXED, MERGED AS #171 (9 Sep).**
       #170's `cpp-offline` went red on `test_join_on_unwind`, which my diff CANNOT reach: that
