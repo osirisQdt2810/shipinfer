@@ -941,13 +941,15 @@ class TestADistributedLauncherIsDeviceWork:
 
 
 class TestAHelpQueryIsInspectionAndNotARun:
-    """`--help` short-circuits in argparse, typer/click and every runner on the list, so it
-    prints usage and exits: nothing measured, no device touched.
+    """`--help` short-circuits in argparse and typer/click: usage is printed, nothing runs.
 
-    Five ordinary spellings were refused before this, and the one that mattered is
-    `shipinfer bench --help` -- which is how anyone finds out what the documented `--skew`
-    flag is actually called. A guard that blocks CHECKING the documentation is working against
-    the discipline it exists to serve.
+    The row that mattered is `shipinfer bench --help` -- how anyone finds out what the
+    documented `--skew` flag is actually called. A guard that blocks CHECKING the
+    documentation works against the discipline it exists to serve.
+
+    THE CARVE-OUT IS FIVE NAMES AND READS NO SOURCE (round 6): an import of a parser is not
+    evidence that the parser runs FIRST, so the allow set is `HELP_AWARE` and nothing else --
+    `python scripts/build_engines.py --help`, the row this opened for, keeps its refusal.
     """
 
     ALLOWED: ClassVar[tuple[str, ...]] = (
@@ -955,7 +957,7 @@ class TestAHelpQueryIsInspectionAndNotARun:
         "shipinfer serve --help",
         "python -m shipinfer bench --help",
         "python -m shipinfer serve --help",
-        "python scripts/build_engines.py --help",
+        "python -m pytest --help",
         "pytest -m gpu --help",
         "shipinfer serve --http --port 8000 --help",
         "timeout 60 shipinfer bench --help",
@@ -1005,6 +1007,13 @@ class TestAHelpQueryIsInspectionAndNotARun:
         # which made two spellings of one command disagree.
         "python -mtorch.distributed.run --nproc_per_node=2 scripts/build_engines.py --help",
         "python -mtorch.distributed.launch --nproc_per_node=8 scripts/build_engines.py --help",
+        # Round 6's: `import argparse` proves a parser EXISTS, not that it runs before the
+        # module body. No source is consulted now, so these refuse for having no name on the
+        # list -- `run_bench.py` is the one that matters, because `BLOCKED_SCRIPTS` blocks it
+        # "wherever it is invoked from" and it reaches `containment` nowhere.
+        "python benchmarks/run_bench.py --help",
+        "python scripts/build_engines.py --help",
+        "python -m benchmarks.run_bench --help",
     )
 
     @pytest.mark.parametrize("command", ALLOWED)
@@ -1046,47 +1055,63 @@ class TestAHelpQueryIsInspectionAndNotARun:
         assert refused("deepspeed --help") is not None
         assert refused("trtexec --help") is None, "not a launcher; its own parser sees the flag"
 
-    def test_an_inline_body_gets_no_carve_out_but_a_script_file_does(self) -> None:
-        """The asymmetry, stated because it is the interesting part.
-
-        `python x.py --help` short-circuits in the SCRIPT's own argparse before `main` runs, so
-        its parser is trusted. `python -c "..." --help` has no parser to trust: `-c` assigns
-        everything after the body to `sys.argv` and runs it. `runtime/containment.py` does not
-        cover the difference -- that gate lives in pytest's conftest and in `serve`/`bench`, so
-        an ad-hoc snippet is gated by this hook and nothing else.
+    def test_neither_an_inline_body_nor_a_script_file_gets_a_carve_out(self) -> None:
+        """`python -c "..." --help` has no parser to trust: `-c` assigns everything after the
+        body to `sys.argv` and runs it. A script FILE is no longer trusted either -- round 6 --
+        so the two shapes that reach a device with no compensating control both refuse.
+        `runtime/containment.py` covers pytest's conftest and `serve`/`bench`; an ad-hoc
+        snippet or probe script is gated by this hook and nothing else.
         """
         assert refused('python -c "import torch; torch.ones(1).cuda()" --help') is not None
-        assert refused("python scripts/build_engines.py --help") is None
+        assert refused("python scripts/build_engines.py --help") is not None
 
-    def test_a_program_with_no_argv_parser_gets_no_carve_out(self, tmp_path: Path) -> None:
-        """Round 3, and the sharpest of the three: the trust is in EVIDENCE OF A PARSER, not in
-        "a script file". `python x.py --help` short-circuits only if `x.py` reads argv -- and an
-        ad-hoc probe script is the one python shape that habitually has no `argparse`, so
-        `--help` is an unrecognised token nobody reads and the script RUNS. Measured: it opened
-        a host CUDA context.
+    def test_a_source_file_is_not_evidence_of_anything(self, tmp_path: Path) -> None:
+        """Rounds 3 and 6, and the second one is why the file check is gone rather than fixed.
+
+        Round 3: a probe script with no `argparse` never reads `--help`, so it RUNS. Round 6:
+        neither does one that imports `argparse` and calls it from `main()` -- `torch.cuda`
+        at module scope has already taken a host CUDA context by then -- and the `sys.argv`
+        alternative matched every script that does `path = sys.argv[1]`. Deciding "does the
+        parser run before any device work" is reachability over arbitrary Python, so no file
+        is read at all and the four rows below refuse for one reason.
         """
         bare = tmp_path / "adhoc_probe.py"
         bare.write_text("import torch\nprint(torch.ones(1).cuda())\n", encoding="utf-8")
-        parsed = tmp_path / "tool.py"
-        parsed.write_text(
-            "import argparse\nimport torch\nargparse.ArgumentParser().parse_args()\n",
+        deferred = tmp_path / "tool.py"
+        deferred.write_text(
+            "import argparse\nimport torch\n\ntorch.cuda.set_device(0)\n"
+            "_x = torch.ones(1).cuda()\n\n\ndef main():\n"
+            "    argparse.ArgumentParser().parse_args()\n",
+            encoding="utf-8",
+        )
+        late = tmp_path / "late.py"
+        late.write_text(
+            "import sys\nimport torch\n\nprint(torch.ones(1).cuda())\n"
+            'if "--help" in sys.argv:\n    print("usage")\n',
             encoding="utf-8",
         )
 
         assert refused(f"python {bare} --help", tmp_path) is not None
         assert refused(f"python {bare} --device cuda --help", tmp_path) is not None
-        assert (
-            refused(f"python {parsed} --help", tmp_path) is None
-        ), "a program that shows a parser is the case the carve-out is for"
+        assert refused(f"python {deferred} --help", tmp_path) is not None, "parses inside main"
+        assert refused(f"python {late} --help", tmp_path) is not None, "device work runs first"
 
-    def test_an_unreadable_program_is_not_evidence_either(self, tmp_path: Path) -> None:
-        """The stated cost of asking for EVIDENCE rather than for the absence of
-        counter-evidence: a file that cannot be read shows no parser, so `python train.py
-        --help` for an absent path is refused. Three drafts allowed it on the grounds that
-        there was nothing to distrust -- which is the reasoning that also trusted a compiled
-        binary, and a command against a file that is not there was going to fail anyway.
+    def test_no_file_is_opened_and_one_row_pays_for_it(self, tmp_path: Path) -> None:
+        """`answers_for_itself` takes no `cwd`, so the allow set is five names rather than a
+        property of a source tree -- and the first row below is a REAL false refusal, kept
+        here so the cost is a test and not a paragraph. That file does parse before it reaches
+        a device; nothing decidable tells it apart from `tool.py` above, which does not.
         """
+        honest = tmp_path / "parses_first.py"
+        honest.write_text(
+            "import argparse\nimport torch\nargparse.ArgumentParser().parse_args()\n",
+            encoding="utf-8",
+        )
+
+        assert refused(f"python {honest} --help", tmp_path) is not None, "the accepted cost"
         assert refused("python train.py --device cuda --help", tmp_path) is not None
+        assert hook.answers_for_itself("shipinfer", ["bench", "--help"]) is True
+        assert hook.answers_for_itself("python", ["train.py", "--help"]) is False
 
     def test_a_name_known_to_answer_for_itself_is_enough(self) -> None:
         """The other source of evidence, and the one that keeps the rows this PR is for:
@@ -1113,12 +1138,11 @@ class TestAHelpQueryIsInspectionAndNotARun:
         ):
             assert refused(command) is not None, command
 
-    def test_the_evidence_belongs_to_the_program_that_runs(self, tmp_path: Path) -> None:
-        """Round 5. `_script_programs` is generous by contract -- "a bare `.py` option value
-        looks exactly like a program" -- which is safe for `script_touches_device`, a
-        fail-STRICT reader where a spurious candidate can only add a refusal. Here the polarity
-        inverts, so a `.py` sitting in argv as DATA vouched for the binary that runs and
-        reopened round 4's case with one extra operand.
+    def test_a_py_file_in_argv_does_not_vouch_for_the_binary(self, tmp_path: Path) -> None:
+        """Round 5's rows, kept after round 6 removed the mechanism they were about: a `.py`
+        sitting in argv as DATA once vouched for the compiled program that runs. Nothing reads
+        a file now, so these refuse for the simpler reason -- but the rows stay, because a
+        future carve-out that reads argv again must trip over them.
         """
         cfg = tmp_path / "cfg.py"
         cfg.write_text("import argparse\n", encoding="utf-8")
