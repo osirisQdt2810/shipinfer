@@ -2700,7 +2700,10 @@ hook down, for when the operator asked to see something before it is executed.
       is not a convenience here, it is the only method that works, and `compare()`'s CPU column
       would have nothing to fill both halves of in one run.
 
-- [~] **FPS-ON-FOUR-GPUS · MEASURED 10 Sep, and it is 0.58x -- 8.6x short of the target.**
+- [~] **FPS-ON-FOUR-GPUS · MEASURED 10 Sep. The absolute numbers hold; every RATIO in this
+      item was wrong because the baseline is OFFER-BOUND and does no inference (0-8% GPU,
+      9 815 img/s on ONE gpu against 9 953 on four). Instrument open as #216; the page's
+      false 'capacity, not a floor' claim and the comparand question are what remain.**
       GPUs 2/3/4/6 (1 and 5 have tenants), 50 x 20 x 40 s, `--seconds 40` so the divisor is
       exactly 40 (`frames_read` 39 998 confirms 1000/s offered):
       | arm | images/s | vs baseline |
