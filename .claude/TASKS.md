@@ -3288,7 +3288,35 @@ hook down, for when the operator asked to see something before it is executed.
       somebody's open work.
 
 - [~] **CSRC-GRAPH-HAS-NO-TRACKING · PR 2 of 3 MERGED 10 Sep as #215 (squash `d71af8c`), APPROVE on round 4 after three BLOCKING rounds. PR 3 (`mtmc`) is what remains.** #169 was merged by the operator (`a9867e3`), so
-      PR 2 of 3 is mine to build and needs no stacking.** What #169 landed: the in-tree
+      PR 2 of 3 is mine to build and needs no stacking.**
+      **PR 3 (`mtmc`) SCOPED BY READING THE SUBMODULE, 10 Sep, and it is THREE PRs rather than
+      one.** `3rdparty/shipvision/csrc/shipvision/mtmc/frames.h` states the split in its own
+      header: "`TrackKey`, the `Track` itself and the embedding do not cross. An identity map
+      keyed on (camera, track) is **Python's to own -- it is the stateful half**". So the C++
+      library gives the STATELESS (n, n) passes only -- `spatial_similarity`, `spatial_gate`,
+      `veto`, `to_distance`, `AgglomerativeClusterer::fit_predict`, the appearance/spatial/gated
+      matchers -- and `ClusterMTMCTracker` (233 lines of `shipvision/mtmc/tracker.py`, an RLock
+      around `track(cluster) -> list[GlobalTrack]`) has NO C++ twin. A C++ `mtmc` stage is
+      therefore not a wrapper the way `track` was; the stateful global-id assignment has to be
+      ported too. Hence:
+        * **3a -- the instant barrier. BUILT AND GREEN** on `feat/the-cpp-plane-syncs-instants`:
+          `csrc/shipinfer/pipeline/mtmc/barrier.{h,cpp}` + `csrc/tests/test_mtmc_barrier.cpp`,
+          83 checks, five clean runs, ASan/UBSan clean, and it compiles in the OFFLINE tier
+          (pure, no lane, no CUDA) exactly as `topology/barrier.py` is pure. One deliberate
+          departure from the Python line, stated at the member: `buckets_` holds `shared_ptr`
+          because a bucket leaves the map before its association runs and again when evicted or
+          shut down, and a waiter may still be asleep holding it -- Python's refcount does that
+          for free and a `unique_ptr` would free it under them. Every TSan report on it has BOTH
+          accesses holding the mutex, and a 40-line control program in the same
+          `condition_variable::wait_for` shape reproduces them, so they are the toolchain's
+          modelling rather than this code.
+        * **3b -- the stateful tracker twin**: global-id assignment over the existing (n, n)
+          passes, lane-side. Not started.
+        * **3c -- `MtmcStage` + the plan's `mtmc` node**, gluing 3a and 3b into the graph.
+      UNTIL 3c LANDS, "decode -> mtmc track" cannot be measured on the C++ plane at all, which
+      is what V165/V167's target is defined over -- so this is on the critical path for the
+      target and not a side quest.
+      What #169 landed: the in-tree
       external lane and `TrackerShard` behind it. WHAT PR 2 IS: a `track` stage in the C++
       perception graph that fills `ObjectRecord::track_id` -- an `optional<int64_t>` in
       `core/events/schema.h` that is emitted today and always null, with
