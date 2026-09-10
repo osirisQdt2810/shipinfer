@@ -419,6 +419,27 @@ generator.wait()
 """
 
 
+def _fake_tree(children: dict[int, list[int]]):
+    """A `process_tree` stand-in that respects parentage AND `skip`.
+
+    Both matter now: `_sample` asks for a *generator's* subtree as well as the bench's, so a
+    fake that answered with the whole map would sweep the bench's own pid into the exclusion.
+    """
+
+    def walk(pid: int, skip: object = frozenset()) -> list[int]:
+        found: list[int] = []
+        pending = [pid]
+        while pending:
+            current = pending.pop()
+            if current in found or current in skip:  # type: ignore[operator]
+                continue
+            found.append(current)
+            pending.extend(children.get(current, []))
+        return found
+
+    return walk
+
+
 class TestAGeneratorTheBenchSpawnedIsNotTheBench:
     """The RTSP arm starts its two `rtsp_serve.py` servers INSIDE the bench container, because
     the rootless daemon has no NAT. So they are children of the bench and their CPU is already
@@ -528,11 +549,7 @@ class TestAGeneratorTheBenchSpawnedIsNotTheBench:
         box = tmp_path / "generators.pids"
         box.write_text("", encoding="utf-8")
         tree = {os.getpid(): {1: ("pipe-0", 1.0)}, 100: {2: ("gen-0", 5.0)}}
-        monkeypatch.setattr(
-            host_cpu,
-            "process_tree",
-            lambda pid, skip=frozenset(): [p for p in tree if p not in skip],
-        )
+        monkeypatch.setattr(host_cpu, "process_tree", _fake_tree({os.getpid(): [100]}))
         monkeypatch.setattr(host_cpu, "thread_cpu", lambda pid: tree[pid])
         monkeypatch.setattr(host_cpu, "cpu_seconds", lambda pid: 5.0)
         sampler = host_cpu.ThreadSampler(os.getpid(), interval_s=10.0, generators=box)
@@ -545,6 +562,61 @@ class TestAGeneratorTheBenchSpawnedIsNotTheBench:
 
         assert "gen" not in sampler.by_class(), sampler.by_class()
         assert sampler.generator_cpu() == {100: 5.0}
+        assert sampler.total() == pytest.approx(1.0)
+
+    def test_an_unreadable_tick_cannot_undo_a_declaration(
+        self, host_cpu: ModuleType, tmp_path: Path, monkeypatch
+    ) -> None:
+        """`_generator_pids` answers with an empty set on `OSError`, so an unreadable tick
+        says "no generators" — and the pids that were declared are remembered rather than
+        re-admitted. Three ticks: undeclared, declared, unreadable.
+        """
+        box = tmp_path / "generators.pids"
+        tree = {os.getpid(): {1: ("pipe-0", 1.0)}, 100: {2: ("gen-0", 5.0)}}
+        monkeypatch.setattr(host_cpu, "process_tree", _fake_tree({os.getpid(): [100]}))
+        monkeypatch.setattr(host_cpu, "thread_cpu", lambda pid: tree[pid])
+        monkeypatch.setattr(host_cpu, "cpu_seconds", lambda pid: 5.0)
+        sampler = host_cpu.ThreadSampler(os.getpid(), interval_s=10.0, generators=box)
+
+        sampler._sample()
+        assert "gen" in sampler.by_class(), "the pre-condition: undeclared, so it is sampled"
+        box.write_text("100\n", encoding="utf-8")
+        sampler._sample()
+        assert "gen" not in sampler.by_class(), sampler.by_class()
+        box.unlink()
+        sampler._sample()
+
+        assert "gen" not in sampler.by_class(), sampler.by_class()
+        assert sampler.total() == pytest.approx(1.0)
+
+    def test_a_generators_own_child_is_purged_with_it(
+        self, host_cpu: ModuleType, tmp_path: Path, monkeypatch
+    ) -> None:
+        """`cutime` charges a reaped `ffmpeg` to the server that waited for it, so leaving the
+        child's THREADS in the breakdown counts that CPU twice -- once in `threads_cpu_s` and
+        once out of `bench_cpu_s`. The first tick here is the unreadable one, which is the only
+        way the subtree gets in: the walk does not descend into a declared generator.
+        """
+        box = tmp_path / "generators.pids"
+        tree = {
+            os.getpid(): {1: ("pipe-0", 1.0)},
+            100: {2: ("gen-0", 5.0)},
+            200: {3: ("ffmpeg", 9.0)},
+        }
+        monkeypatch.setattr(
+            host_cpu, "process_tree", _fake_tree({os.getpid(): [100], 100: [200], 200: []})
+        )
+        monkeypatch.setattr(host_cpu, "thread_cpu", lambda pid: tree[pid])
+        monkeypatch.setattr(host_cpu, "cpu_seconds", lambda pid: 14.0)
+        sampler = host_cpu.ThreadSampler(os.getpid(), interval_s=10.0, generators=box)
+
+        sampler._sample()
+        assert {"gen", "ffmpeg"} <= set(sampler.by_class()), sampler.by_class()
+
+        box.write_text("100\n", encoding="utf-8")
+        sampler._sample()
+
+        assert set(sampler.by_class()) == {"pipe"}, sampler.by_class()
         assert sampler.total() == pytest.approx(1.0)
 
     def test_declaring_is_a_no_op_when_nobody_is_measuring(
@@ -575,6 +647,99 @@ class TestAGeneratorTheBenchSpawnedIsNotTheBench:
         loop = text.split("for content, port, streams, directory in _servers(config):")[1]
 
         assert "declare_generator(process.pid)" in loop.split("deadline =")[0]
+
+
+#: A generator whose real cost is a child: `scripts/rtsp_serve.py` shells out to `ffmpeg` over
+#: the whole JPEG set whenever the `.h264` fixture is cold. The burner is reaped, so the
+#: kernel folds it into the generator's `cutime`.
+_GENERATOR_WITH_A_CHILD = """
+import subprocess, sys, time
+
+subprocess.run([sys.executable, '-c', {inner!r}], check=True)
+end = time.thread_time() + {own}
+while time.thread_time() < end:
+    pass
+"""
+
+
+class TestAGeneratorsOwnChildrenAreDiscountedToo:
+    """`cpu_seconds` read `utime + stime` and never `cutime + cstime`, so the largest single
+    piece of a cold-fixture run -- the `ffmpeg` encode -- stayed in the bench's column. `wait4`
+    charges the command WITH its reaped children, so a generator measured without them is
+    measured on a different rule from the total it is subtracted from.
+    """
+
+    def test_the_stat_parse_can_include_the_children(self, host_cpu: ModuleType) -> None:
+        """Fields 16 and 17, past a `comm` chosen to break a naive split. The list below is
+        the fields AFTER `comm`, so index 11 is field 14 -- which is what the parse slices."""
+        after_comm = ["S", *(str(n) for n in range(4, 55))]
+        after_comm[11], after_comm[12] = "10", "10"  # utime, stime
+        after_comm[13], after_comm[14] = "30", "20"  # cutime, cstime
+        line = "7 (py (thread) 1) " + " ".join(after_comm)
+
+        assert host_cpu.ticks_from_stat(line) == 20.0
+        assert host_cpu.ticks_from_stat(line, with_children=True) == 70.0
+
+    def test_a_live_generator_reads_higher_with_its_children(
+        self, host_cpu: ModuleType
+    ) -> None:
+        """The kernel folds a REAPED child into `cutime`, so this reads the generator while it
+        is still alive -- a dead pid answers `None`, which is the documented behaviour and not
+        what is being measured here."""
+        script = (
+            "import subprocess, sys, time\n"
+            f"subprocess.run([sys.executable, '-c', {_SPIN.format(seconds=SPIN_S)!r}])\n"
+            "time.sleep(12)\n"
+        )
+        child = subprocess.Popen([sys.executable, "-c", script], env=checkout_env())
+        own = with_children = 0.0
+        try:
+            deadline = time.monotonic() + 8.0
+            while time.monotonic() < deadline:
+                try:
+                    line = Path(f"/proc/{child.pid}/stat").read_text(encoding="utf-8")
+                except OSError:  # pragma: no cover - the child outlives this loop
+                    break
+                own = host_cpu.ticks_from_stat(line) / host_cpu.TICKS_PER_SECOND
+                with_children = host_cpu.cpu_seconds(child.pid) or 0.0
+                if with_children > SPIN_S * 0.7:
+                    break
+                time.sleep(0.05)
+        finally:
+            child.terminate()
+            child.wait()
+
+        assert with_children > SPIN_S * 0.7, (own, with_children)
+        assert with_children > own * 2, (own, with_children)
+
+    def test_the_whole_child_tree_leaves_the_benchs_column(
+        self, host_cpu: ModuleType, tmp_path: Path
+    ) -> None:
+        """End to end: the generator burns a quarter of what its child does, and both are out
+        of `bench_cpu_s`."""
+        out = tmp_path / "cpu.json"
+        inner = _GENERATOR_WITH_A_CHILD.format(
+            inner=_SPIN.format(seconds=SPIN_S), own=SPIN_S / 4
+        )
+        code = host_cpu.main(
+            [
+                "--threads",
+                "--threads-interval",
+                "0.02",
+                "--out",
+                str(out),
+                "--",
+                sys.executable,
+                "-c",
+                _WITH_GENERATOR.format(inner=inner, own=SPIN_S),
+            ]
+        )
+        assert code == 0
+
+        accounting = json.loads(out.read_text(encoding="utf-8"))
+        # The child alone burns SPIN_S; charging only the generator's own time would report
+        # about a quarter of that.
+        assert accounting["spawned_generator_cpu_s"] > SPIN_S, accounting
 
 
 class TestTheSamplerCanBeTurnedOff:
