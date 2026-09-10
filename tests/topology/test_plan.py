@@ -42,6 +42,10 @@ CHAINS = {
     "branching": SCENARIOS / "branching.yaml",
     "defaults": SCENARIOS / "defaults.yaml",
     "ship_person_cpu": ROOT / "topology" / "ship_person_cpu.yaml",
+    #: The one-model chain the C++ measurement uses. Listed here for the same reason as its
+    #: four-model sibling: the plan is the artefact that crosses the plane boundary, so a
+    #: chain nothing byte-compares is a chain the two writers can disagree about.
+    "detect_only": ROOT / "topology" / "detect_only.yaml",
 }
 
 

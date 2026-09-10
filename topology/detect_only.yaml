@@ -1,0 +1,38 @@
+# ONE MODEL PER IMAGE — the chain that isolates the detector, for measurement.
+#
+# `ship_person_cpu.yaml` is the deployable chain and runs four models per frame. This one runs
+# ONE, which is the shape the counting-simulation baseline has, so a throughput number taken
+# here and one taken there are comparable in what they compute. Nothing deploys it.
+#
+# It is a file rather than a `--only detect` flag because a chain is what both planes read: the
+# plan is written from it (`shipinfer plan -t`), and a flag would have to be honoured by the
+# writer, the C++ reader and the model list separately.
+name: detect_only
+elements:
+  # bgr@cpu, from a file or a frame folder. `--inputs` names them.
+  decode:
+    impl: replay
+
+  # The one element that letterboxes a whole frame, so it is the one that has to undo exactly
+  # that transform. `decode:` here is the *output* decode -- how the engine's rows become
+  # source-pixel boxes -- and has nothing to do with the video decoder above it.
+  detect:
+    impl: pool
+    model: ship_detector
+    params:
+      decode:
+        # 0.25, the same threshold `ship_person_cpu.yaml` uses, so this chain's detector does
+        # the SAME work per frame as that one's -- which is the whole point of the file. (The
+        # reason 0.25 is right there is about the tracker's track_threshold; there is no
+        # tracker here, so the reason here is comparability and nothing else.)
+        class_labels: {0: person, 8: ship}
+        score_threshold: 0.25
+        max_detections: 300
+
+  # Events out, so the chain is observable with no broker. A bench run reads `--log-jsonl`
+  # instead; this path is for a hand run of `shipinfer run`.
+  output:
+    impl: jsonlines
+    params:
+      path: var/events.jsonl
+      flush_every: 64

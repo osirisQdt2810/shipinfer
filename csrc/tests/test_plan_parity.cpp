@@ -40,7 +40,7 @@ namespace {
     // that disappears has to fail this gate, and a directory walk would call that "nothing
     // to check" and pass.
     const std::vector<std::string> kGoldens = {"minimal", "branching", "defaults",
-                                               "ship_person_cpu"};
+                                               "ship_person_cpu", "detect_only"};
 
     std::string read_text(const std::string& path) {
         std::string text;
