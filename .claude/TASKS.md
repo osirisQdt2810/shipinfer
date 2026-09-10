@@ -2756,6 +2756,17 @@ hook down, for when the operator asked to see something before it is executed.
       global id carries two tracks from one camera and the second is a ghost no instant can
       displace.
 
+- [ ] MTMC-TWO-SLOT-CACHED-REGISTRIES · `pipeline/mtmc/cluster.cpp` is
+      `pipeline/tracking/associator.cpp` transcribed: `add`/`has`/`names`/`create`, `made_lock`,
+      `made`, `made_*`, the (impl, slot) cache and the lane-before-unknown refusal, ~60
+      near-identical lines. Named by #220's review, and defensible at TWO: the mirroring is
+      what makes the two seams read the same way, and a template would have to carry the
+      lane-name string and the noun in every message ("video source", "tracker",
+      "cross-camera tracker"). THE TRIGGER IS A THIRD: at that point a
+      `SlotCachedRegistry<T>` -- interface, registrar, per-(impl, slot) cache, one refusal that
+      takes the noun and the lane -- is cheaper than a third copy, and until then the two can
+      drift independently, which is the real cost. Whoever adds the third writes the template.
+
 - [ ] WHOSE-LIBCUDART-DOES-THE-PYTHON-FLAG-SET · MEASURE whether this plane's blocking-sync
       flag reaches torch's streams at all. #214's review predicted that a second
       `DeviceManager` in one process gets `cudaErrorSetOnActiveProcess` on every device, and
